@@ -68,6 +68,9 @@
     <label class="slider" data-k="width">Width <input type="range" min="0.75" max="1.4" step="0.01" value="0.93"><output></output></label>
     <label class="slider" data-k="taper">Taper <input type="range" min="0" max="0.8" step="0.01" value="0"><output></output></label>
     <label class="slider" data-k="height">Height <input type="range" min="0.75" max="1.4" step="0.01" value="0.75"><output></output></label>
+    <label class="slider" data-k="circleR">Circle <input type="range" min="0.4" max="1.2" step="0.01" value="0.7"><output></output></label>
+    <label class="slider" data-k="circleY">Circle Y <input type="range" min="-0.4" max="0.6" step="0.01" value="0.12"><output></output></label>
+    <label class="slider" data-k="circleTone">Tone <input type="range" min="0.05" max="0.7" step="0.01" value="0.29"><output></output></label>
     <button class="chip auto" id="reset">Reset</button>
   </div>
 </div>
@@ -406,7 +409,9 @@ function roundedCube(size = 1, radius = 0.13, seg = 40) {
 }
 
 const BASE_Y = -0.12;
-const CIRCLE = { y: -0.24, r: 0.78 };  // world units, centred on the resting body
+// world units. The body sits low: the circle's bottom edge cuts off its base,
+// so the circle reads as a frame it rises out of, not a disc behind it.
+const CIRCLE = { y: 0.12, r: 0.7 };
 const rig = new THREE.Group(); scene.add(rig);
 let bodyRadius = 0.15, taperBase = 0;
 const body = new THREE.Mesh(roundedCube(1, bodyRadius), fillMat(true));
@@ -1363,7 +1368,18 @@ sizeInput.addEventListener('input', () => setSize(parseFloat(sizeInput.value)));
 
 // Shape: corner roundness rebuilds the body; width/height/taper feed the deform
 // (taper > 0 makes the bottom narrower than the top).
+// circle position/size in framebuffer px (origin bottom-left), from world units
+function updateCircle() {
+  const w = innerWidth, h = innerHeight, dprR = renderer.getPixelRatio();
+  camera.updateMatrixWorld();
+  const c = new THREE.Vector3(0, CIRCLE.y, 0).project(camera), e = new THREE.Vector3(CIRCLE.r, CIRCLE.y, 0).project(camera);
+  compositeMat.uniforms.uCircle.value.set((c.x * 0.5 + 0.5) * w * dprR, (c.y * 0.5 + 0.5) * h * dprR, (e.x - c.x) * 0.5 * w * dprR);
+}
+
 const SHAPE = {
+  circleR: (v) => { CIRCLE.r = v; updateCircle(); },
+  circleY: (v) => { CIRCLE.y = v; updateCircle(); },
+  circleTone: (v) => { compositeMat.uniforms.uCircleCol.value.setRGB(v, v, v * 1.02, THREE.LinearSRGBColorSpace); },
   taper: (v) => { taperBase = v; },
   round: (v) => { bodyRadius = v; body.geometry.dispose(); body.geometry = roundedCube(1, v); },
   width: (v) => { U.uW.value = v; },
@@ -1381,7 +1397,8 @@ for (const [k, apply] of Object.entries(SHAPE)) {
   const set = (v) => {
     apply(v);
     out.textContent = k === 'round' ? Math.round((v - 0.04) / 0.42 * 100) + '%'
-      : k === 'taper' ? Math.round(v * 100) + '%' : v.toFixed(2) + '×';
+      : k === 'taper' || k === 'circleTone' ? Math.round(v * 100) + '%'
+      : k === 'circleY' ? (v >= 0 ? '+' : '') + v.toFixed(2) : v.toFixed(2) + '×';
     try { localStorage.setItem('cube.' + k, v); } catch {}
   };
   let saved = NaN;
@@ -1415,11 +1432,7 @@ function resize() {
   camera.lookAt(0, -shift, 0);
   camera.updateProjectionMatrix();
   unitPx = h / needH;
-  // backdrop circle around the resting body, in framebuffer px (origin bottom-left)
-  camera.updateMatrixWorld();
-  const c = new THREE.Vector3(0, CIRCLE.y, 0).project(camera), e = new THREE.Vector3(CIRCLE.r, CIRCLE.y, 0).project(camera);
-  const dprR = renderer.getPixelRatio();
-  compositeMat.uniforms.uCircle.value.set((c.x * 0.5 + 0.5) * w * dprR, (c.y * 0.5 + 0.5) * h * dprR, (e.x - c.x) * 0.5 * w * dprR);
+  updateCircle();
 }
 addEventListener('resize', resize);
 setSize(size);
