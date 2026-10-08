@@ -263,6 +263,9 @@ precision highp float;
 uniform sampler2D tFill, tId;
 uniform vec2 uRes; uniform float uSeed, uPx, uLineScale;
 uniform float uPencil;   // 1 = wobbly grainy pencil, 0 = clean crisp line
+uniform vec3 uCircle;    // backdrop circle: centre x, y and radius in framebuffer px
+uniform float uCircleOn;
+uniform vec3 uCircleCol;
 uniform vec3 uFillCol, uInkCol, uLineCol, uSilCol;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -336,6 +339,18 @@ void main() {
   // outside the shape only the silhouette stroke exists
   col = mix(uSilCol, col, fill);
   float alpha = max(fill, e.y);
+
+  // static grey circle behind the mascot. Anything above its middle or out to
+  // the sides may peek past the edge; anything dropping below it is clipped,
+  // as if the mascot sits in a round window.
+  if (uCircleOn > 0.5) {
+    float d = length(px0 - uCircle.xy);
+    float inC = 1.0 - smoothstep(uCircle.z - uPx, uCircle.z + uPx, d);
+    float below = smoothstep(uCircle.y + uPx, uCircle.y - uPx, px0.y);
+    alpha *= mix(1.0, inC, below);
+    gl_FragColor = vec4(col * alpha + uCircleCol * inC * (1.0 - alpha), alpha + inC * (1.0 - alpha));
+    return;
+  }
   gl_FragColor = vec4(col * alpha, alpha);
 }`;
 
@@ -351,6 +366,7 @@ const compositeMat = new THREE.ShaderMaterial({
   uniforms: {
     tFill: { value: fillRT.texture }, tId: { value: idRT.texture },
     uRes: { value: new THREE.Vector2(1, 1) }, uSeed: { value: 0 }, uPx: { value: 1 }, uLineScale: { value: 1 }, uPencil: { value: 0 },
+    uCircle: { value: new THREE.Vector3() }, uCircleOn: { value: 1 }, uCircleCol: { value: new THREE.Color().setHex(0x4a4a4f, THREE.LinearSRGBColorSpace) },
     uFillCol: { value: new THREE.Color() }, uInkCol: { value: new THREE.Color() },
     uLineCol: { value: new THREE.Color() }, uSilCol: { value: new THREE.Color() },
   },
@@ -390,6 +406,7 @@ function roundedCube(size = 1, radius = 0.13, seg = 40) {
 }
 
 const BASE_Y = -0.12;
+const CIRCLE = { y: -0.24, r: 0.78 };  // world units, centred on the resting body
 const rig = new THREE.Group(); scene.add(rig);
 let bodyRadius = 0.15, taperBase = 0;
 const body = new THREE.Mesh(roundedCube(1, bodyRadius), fillMat(true));
@@ -485,9 +502,10 @@ for (let i = 0; i < PUFFS + 1; i++) {
   tail.add(m);
 }
 let tailPhase = 0;
-const show = { ears: false, limbs: false, tail: false, nose: false, mouth: false };  // part toggles in the chip bar
+const show = { ears: false, limbs: false, tail: false, nose: false, mouth: false, circle: true };  // part toggles in the chip bar
 function updateTail(time) {
   tail.visible = show.tail;
+  compositeMat.uniforms.uCircleOn.value = show.circle ? 1 : 0;
   tailPuffs.forEach((m, k) => {
     const breathe = 1 + 0.06 * Math.sin(time * 2.3 + k * 1.7);
     m.position.copy(m.userData.dir).multiplyScalar(0.62 * breathe);
@@ -1306,7 +1324,7 @@ pencilBtn.onclick = () => {
   pencilBtn.classList.toggle('on', on);
 };
 chips.appendChild(pencilBtn);
-for (const [key, name] of [['ears', 'Ears'], ['limbs', 'Limbs'], ['tail', 'Tail'], ['nose', 'Nose'], ['mouth', 'Mouth']]) {
+for (const [key, name] of [['ears', 'Ears'], ['limbs', 'Limbs'], ['tail', 'Tail'], ['nose', 'Nose'], ['mouth', 'Mouth'], ['circle', 'Circle']]) {
   try { const saved = localStorage.getItem('cube.show.' + key); if (saved !== null) show[key] = saved === '1'; } catch {}
   const b = document.createElement('button');
   b.className = 'chip auto toggle' + (show[key] ? ' on' : ''); b.textContent = name;
@@ -1397,6 +1415,11 @@ function resize() {
   camera.lookAt(0, -shift, 0);
   camera.updateProjectionMatrix();
   unitPx = h / needH;
+  // backdrop circle around the resting body, in framebuffer px (origin bottom-left)
+  camera.updateMatrixWorld();
+  const c = new THREE.Vector3(0, CIRCLE.y, 0).project(camera), e = new THREE.Vector3(CIRCLE.r, CIRCLE.y, 0).project(camera);
+  const dprR = renderer.getPixelRatio();
+  compositeMat.uniforms.uCircle.value.set((c.x * 0.5 + 0.5) * w * dprR, (c.y * 0.5 + 0.5) * h * dprR, (e.x - c.x) * 0.5 * w * dprR);
 }
 addEventListener('resize', resize);
 setSize(size);
