@@ -44,6 +44,7 @@
   .chip.on { background: var(--chip-on); color: #000; }
   .chip.auto { border: 1px solid #333; background: transparent; }
   .chip.auto.on { background: transparent; color: var(--ink); border-color: #777; }
+  .chip.toggle:not(.on) { color: var(--muted); text-decoration: line-through; }
   @media (max-width: 520px) {
     #chips { max-width: 360px; gap: 4px; }
     .chip { padding: 3px 8px; font-size: 11px; }
@@ -62,11 +63,11 @@
   <div id="label">idle</div>
   <div id="chips"></div>
   <div id="sliders">
-    <label class="slider" data-k="size">Size <input type="range" min="0.25" max="1" step="0.01" value="1"><output>100%</output></label>
-    <label class="slider" data-k="round">Round <input type="range" min="0.04" max="0.46" step="0.01" value="0.19"><output></output></label>
-    <label class="slider" data-k="width">Width <input type="range" min="0.75" max="1.4" step="0.01" value="1"><output></output></label>
+    <label class="slider" data-k="size">Size <input type="range" min="0.25" max="1" step="0.01" value="0.37"><output>37%</output></label>
+    <label class="slider" data-k="round">Round <input type="range" min="0.04" max="0.46" step="0.01" value="0.15"><output></output></label>
+    <label class="slider" data-k="width">Width <input type="range" min="0.75" max="1.4" step="0.01" value="0.93"><output></output></label>
     <label class="slider" data-k="taper">Taper <input type="range" min="0" max="0.8" step="0.01" value="0"><output></output></label>
-    <label class="slider" data-k="height">Height <input type="range" min="0.75" max="1.4" step="0.01" value="1"><output></output></label>
+    <label class="slider" data-k="height">Height <input type="range" min="0.75" max="1.4" step="0.01" value="0.75"><output></output></label>
     <button class="chip auto" id="reset">Reset</button>
   </div>
 </div>
@@ -359,7 +360,7 @@ const compositeMat = new THREE.ShaderMaterial({
   fragmentShader: COMPOSITE_FRAG,
   depthTest: false, depthWrite: false,
 });
-let style = 'line';
+let style = 'solid';
 function setStyle(name) {
   style = name;
   const s = STYLES[name], u = compositeMat.uniforms;
@@ -369,7 +370,7 @@ function setStyle(name) {
   u.uLineCol.value.setHex(s.line, THREE.LinearSRGBColorSpace);
   u.uSilCol.value.setHex(s.sil, THREE.LinearSRGBColorSpace);
 }
-setStyle('line');
+setStyle('solid');
 const quadScene = new THREE.Scene();
 const quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 quadScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), compositeMat));
@@ -392,7 +393,7 @@ function roundedCube(size = 1, radius = 0.13, seg = 40) {
 
 const BASE_Y = -0.12;
 const rig = new THREE.Group(); scene.add(rig);
-let bodyRadius = 0.19, taperBase = 0;
+let bodyRadius = 0.15, taperBase = 0;
 const body = new THREE.Mesh(roundedCube(1, bodyRadius), fillMat(true));
 body.userData = { fill: body.material, id: idMat(1, true) };
 rig.add(body);
@@ -486,7 +487,9 @@ for (let i = 0; i < PUFFS + 1; i++) {
   tail.add(m);
 }
 let tailPhase = 0;
+const show = { ears: false, limbs: false, tail: false, nose: false, mouth: false };  // part toggles in the chip bar
 function updateTail(time) {
+  tail.visible = show.tail;
   tailPuffs.forEach((m, k) => {
     const breathe = 1 + 0.06 * Math.sin(time * 2.3 + k * 1.7);
     m.position.copy(m.userData.dir).multiplyScalar(0.62 * breathe);
@@ -503,6 +506,7 @@ function updateTail(time) {
 }
 function updateEar(side) {
   const s = side === 'L' ? -1 : 1, mesh = ears[side];
+  mesh.visible = show.ears;
   const inset = Math.max(0, bodyRadius - 0.19) * 0.6;
   const root = deformJS({ x: s * (0.4 - inset), y: 0.4 - inset, z: 0.06 });
   const a = 0.65 + V('ear' + side + 'a'), bend = V('ear' + side + 'b');
@@ -543,7 +547,7 @@ function updateArm(side) {
   const s = side === 'L' ? -1 : 1, pre = 'a' + side;
   const out = V(pre + 'o'), { tube, hand, pad, toes } = arms[side];
   const visible = out > 0.015;
-  tube.visible = hand.visible = visible;
+  tube.visible = hand.visible = visible && show.limbs;
   if (!visible) return;
   const inner = deformJS({ x: s * 0.3, y: -0.06, z: 0 });
   const surf = deformJS({ x: s * 0.5, y: -0.06, z: 0 });
@@ -635,6 +639,14 @@ function drawEye(side, time) {
     g.beginPath(); g.arc(0, h / 2 + rr - hp * h * 0.78, rr, 0, Math.PI * 2); g.fill();
     g.globalCompositeOperation = 'source-over';
   }
+  // catchlight: a small reflection dot in the upper corner of an open eye
+  const shine = THREE.MathUtils.clamp((h - 30) / 40, 0, 1) * (1 - THREE.MathUtils.clamp(V('happy'), 0, 1)) * (1 - calm);
+  if (shine > 0.02) {
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'destination-out';
+    g.beginPath(); g.arc(w * 0.16, -h * 0.2, Math.min(w, h) * 0.2 * shine, 0, Math.PI * 2); g.fill();
+  }
+
   // calm: eyes closed into a soft ‿, like a content or unwilling dog
   g.globalCompositeOperation = 'source-over';
   g.globalAlpha = THREE.MathUtils.clamp((calm - 0.2) / 0.5, 0, 1);
@@ -708,14 +720,17 @@ function drawMouth(ctx) {
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
 
   const ny = 40;
-  ctx.beginPath();
-  ctx.moveTo(-25, ny - 15);
-  ctx.quadraticCurveTo(0, ny - 21, 25, ny - 15);
-  ctx.quadraticCurveTo(25, ny + 5, 0, ny + 17);
-  ctx.quadraticCurveTo(-25, ny + 5, -25, ny - 15);
-  ctx.closePath();
-  ctx.lineWidth = 6;
-  ctx.fill(); ctx.stroke();
+  if (show.nose) {
+    ctx.beginPath();
+    ctx.moveTo(-25, ny - 15);
+    ctx.quadraticCurveTo(0, ny - 21, 25, ny - 15);
+    ctx.quadraticCurveTo(25, ny + 5, 0, ny + 17);
+    ctx.quadraticCurveTo(-25, ny + 5, -25, ny - 15);
+    ctx.closePath();
+    ctx.lineWidth = 6;
+    ctx.fill(); ctx.stroke();
+  }
+  if (!show.mouth) { ctx.restore(); return; }
 
   // confused: a short line down from the nose into a lopsided upside-down
   // curve (left side droops, right side runs flat)
@@ -1320,7 +1335,7 @@ autoBtn.className = 'chip auto on'; autoBtn.textContent = 'Auto';
 autoBtn.onclick = () => setAuto(!auto);
 chips.appendChild(autoBtn);
 const styleBtn = document.createElement('button');
-styleBtn.className = 'chip auto'; styleBtn.textContent = 'Solid';
+styleBtn.className = 'chip auto'; styleBtn.textContent = 'Line';
 styleBtn.onclick = () => { setStyle(style === 'line' ? 'solid' : 'line'); styleBtn.textContent = style === 'line' ? 'Solid' : 'Line'; };
 chips.appendChild(styleBtn);
 const mouthBtn = document.createElement('button');
@@ -1338,6 +1353,17 @@ pencilBtn.onclick = () => {
   pencilBtn.classList.toggle('on', on);
 };
 chips.appendChild(pencilBtn);
+for (const [key, name] of [['ears', 'Ears'], ['limbs', 'Limbs'], ['tail', 'Tail'], ['nose', 'Nose'], ['mouth', 'Mouth']]) {
+  try { const saved = localStorage.getItem('cube.show.' + key); if (saved !== null) show[key] = saved === '1'; } catch {}
+  const b = document.createElement('button');
+  b.className = 'chip auto toggle' + (show[key] ? ' on' : ''); b.textContent = name;
+  b.onclick = () => {
+    show[key] = !show[key];
+    b.classList.toggle('on', show[key]);
+    try { localStorage.setItem('cube.show.' + key, show[key] ? '1' : '0'); } catch {}
+  };
+  chips.appendChild(b);
+}
 function setAuto(on) { auto = on; autoBtn.classList.toggle('on', on); if (on && cur === IDLE) idleUntil = clock + 0.4; }
 
 addEventListener('keydown', (e) => {
@@ -1351,9 +1377,9 @@ addEventListener('pointermove', (e) => {
 document.addEventListener('pointerleave', () => { pointer.active = false; });
 
 // Size: shrinks the mascot inside the view; lines thin out a little with it.
-let size = 1;
+let size = 0.37;
 const sizeInput = document.querySelector('[data-k=size] input'), sizeOut = document.querySelector('[data-k=size] output');
-try { size = Math.min(1, Math.max(0.25, parseFloat(localStorage.getItem('cube.size')) || 1)); } catch {}
+try { size = Math.min(1, Math.max(0.25, parseFloat(localStorage.getItem('cube.size')) || 0.37)); } catch {}
 sizeInput.value = size;
 function setSize(v) {
   size = v;

@@ -74,46 +74,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // Menu bar icon: the cube with floppy ears, eyes and nose (no mouth).
+    // Menu bar icon: matches the default mascot, a wide soft block (0.93 x 0.75)
+    // with just the two eyes.
     static func cubeIcon(eyesOpen: Bool) -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
             guard let ctx = NSGraphicsContext.current else { return false }
             NSColor.black.setFill()
-            NSColor.black.setStroke()
+            NSBezierPath(roundedRect: NSRect(x: 1.5, y: 3, width: 15, height: 12.1), xRadius: 3.4, yRadius: 3.4).fill()
 
-            // ears hang from the top corners, tilted outward
-            for side: CGFloat in [-1, 1] {
-                let ear = NSBezierPath(ovalIn: NSRect(x: -1.6, y: -3.6, width: 3.2, height: 7.2))
-                var t = AffineTransform(translationByX: 9 + side * 6.3, byY: 9.6)
-                t.rotate(byDegrees: side * 22)
-                ear.transform(using: t)
-                ear.fill()
-            }
-
-            // body, with a clear gap around it so the ears read as separate
-            let body = NSBezierPath(roundedRect: NSRect(x: 3.6, y: 2, width: 10.8, height: 11.6), xRadius: 3, yRadius: 3)
+            // eyes are cut out of the body
             ctx.compositingOperation = .clear
-            body.lineWidth = 1.6
-            body.stroke()
-            ctx.compositingOperation = .sourceOver
-            body.fill()
-
-            // eyes and nose are cut out of the body
-            ctx.compositingOperation = .clear
-            let eyeH: CGFloat = eyesOpen ? 3.4 : 0.9
-            let eyeY: CGFloat = eyesOpen ? 7.9 : 9.1
-            for x in [6.1, 10.3] {
-                NSBezierPath(roundedRect: NSRect(x: x, y: eyeY, width: 1.6, height: eyeH), xRadius: 0.8, yRadius: min(0.8, eyeH / 2)).fill()
+            let eyeH: CGFloat = eyesOpen ? 3.8 : 0.9
+            let eyeY: CGFloat = eyesOpen ? 8.0 : 9.45
+            for x in [4.9, 11.1] {
+                NSBezierPath(roundedRect: NSRect(x: x, y: eyeY, width: 2.0, height: eyeH), xRadius: 1.0, yRadius: min(1.0, eyeH / 2)).fill()
             }
-            let nose = NSBezierPath()
-            nose.move(to: NSPoint(x: 7.75, y: 6.8))
-            nose.line(to: NSPoint(x: 10.25, y: 6.8))
-            nose.line(to: NSPoint(x: 9, y: 5.0))
-            nose.close()
-            nose.lineJoinStyle = .round
-            nose.lineWidth = 0.6
-            nose.fill()
-            nose.stroke()
             return true
         }
         image.isTemplate = true
