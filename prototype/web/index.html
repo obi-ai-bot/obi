@@ -108,7 +108,7 @@ const DEFAULTS = {
   eyeSep: [96, 'face'], eyeY: [-34, 'face'], eyeW: [64, 'face'], eyeH: [112, 'face'], eyeR: [0.92, 'face'],
   eL: [1, 'face'], eR: [1, 'face'], close: [0, 'face'], blink: [0, 'blink'],
   lidT: [0, 'face'], lidA: [0, 'face'], happy: [0, 'face'], calm: [0, 'face'],
-  mW: [0, 'mouth'], mC: [0, 'mouth'], mO: [0, 'mouth'], mRound: [0, 'mouth'], mGrin: [0, 'pop'], mReveal: [0, 'face'], mArch: [0, 'face'], tongue: [0, 'pop'],
+  mW: [0, 'mouth'], mC: [0, 'mouth'], mO: [0, 'mouth'], mRound: [0, 'mouth'], mReveal: [0, 'face'], mArch: [0, 'face'],
   mY: [92, 'mouth'], mT: [15, 'mouth'], mTilt: [0, 'mouth'],
   // arms: out (0..1), hand target (cube-local), elbow bend
   aLo: [0, 'arm'], aLx: [-0.86, 'arm'], aLy: [-0.22, 'arm'], aLz: [0.05, 'arm'], aLbx: [0, 'arm'], aLby: [-0.12, 'arm'],
@@ -263,7 +263,7 @@ precision highp float;
 uniform sampler2D tFill, tId;
 uniform vec2 uRes; uniform float uSeed, uPx, uLineScale;
 uniform float uPencil;   // 1 = wobbly grainy pencil, 0 = clean crisp line
-uniform vec3 uFillCol, uInkCol, uLineCol, uSilCol, uTongueCol;
+uniform vec3 uFillCol, uInkCol, uLineCol, uSilCol;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float noise(vec2 p) {
@@ -301,7 +301,7 @@ float cleanOverlap(vec2 px, float r) {
   }
   return smoothstep(0.06, 0.28, n / 24.);
 }
-float fillAt(vec2 px) { vec4 f = texture2D(tFill, px / uRes); return clamp(f.r + f.g + f.b, 0., 1.); }
+float fillAt(vec2 px) { vec4 f = texture2D(tFill, px / uRes); return clamp(f.r + f.g, 0., 1.); }
 // clean silhouette: a smooth band where the blurred coverage crosses 0.5
 float cleanSil(vec2 px, float r) {
   float a = fillAt(px);
@@ -320,8 +320,8 @@ void main() {
   float grain = mix(1.0, 0.55 + 0.45 * hash(floor(px0 / (1.0 * uPx)) + uSeed), uPencil);
 
   vec4 f = texture2D(tFill, px / uRes);
-  float fill = clamp(f.r + f.g + f.b, 0., 1.);
-  float ink = f.g, tongue = f.b;
+  float fill = clamp(f.r + f.g, 0., 1.);
+  float ink = f.g;
 
   float r = uPx * uLineScale * mix(3.0, 2.7 + 0.7 * noise(px0 / (38.0 * uPx) + uSeed), uPencil);
   vec2 e1 = edges(px, r);
@@ -331,7 +331,6 @@ void main() {
 
   vec3 col = uFillCol;
   col = mix(col, uInkCol, ink * (0.88 + 0.12 * grain));
-  col = mix(col, uTongueCol, tongue);
   col = mix(col, uLineCol, e.x);
   col = mix(col, uSilCol, e.y);
   // outside the shape only the silhouette stroke exists
@@ -353,7 +352,6 @@ const compositeMat = new THREE.ShaderMaterial({
     tFill: { value: fillRT.texture }, tId: { value: idRT.texture },
     uRes: { value: new THREE.Vector2(1, 1) }, uSeed: { value: 0 }, uPx: { value: 1 }, uLineScale: { value: 1 }, uPencil: { value: 0 },
     uFillCol: { value: new THREE.Color() }, uInkCol: { value: new THREE.Color() },
-    uTongueCol: { value: new THREE.Color().setHex(0xee5a52, THREE.LinearSRGBColorSpace) },
     uLineCol: { value: new THREE.Color() }, uSilCol: { value: new THREE.Color() },
   },
   vertexShader: 'void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }',
@@ -594,7 +592,6 @@ function updateArm(side) {
    Face drawing (black ink on transparent, 512-unit space centred at 0,0)
 --------------------------------------------------------------------------- */
 const INK = '#00ff00';     // face ink lands in the G channel of the fill pass
-const TONGUE = '#0000ff';  // tongue lands in B and is coloured in the composite
 const eyeBuf = document.createElement('canvas'); eyeBuf.width = eyeBuf.height = 512;
 const eb = eyeBuf.getContext('2d');
 
@@ -747,11 +744,8 @@ function drawMouth(ctx) {
     return;
   }
 
-  // big U smile across the lower face.
-  // Happy (mGrin) pops it in at full shape and lets a tongue flop out.
-  // Grin (mReveal) shows it at once, widening from the centre outward, hung
-  // from the nose by a line.
-  const grin = THREE.MathUtils.clamp(V('mGrin'), 0, 1.3);
+  // grin: a big U smile across the lower face that appears at once and widens
+  // from the centre outward, hung from the nose by a line
   const reveal = THREE.MathUtils.clamp(V('mReveal'), 0, 1);
   if (reveal > 0.02) {
     const gw = 150, gy = ny + 5, gd = 70;
@@ -768,30 +762,6 @@ function drawMouth(ctx) {
     ctx.restore();
     return;
   }
-  if (grin > 0.02) {
-    const gw = 150 * grin, gy = ny + 5, gd = 70 * grin;
-    const tg = THREE.MathUtils.clamp(V('tongue'), 0, 1.3);
-    if (tg > 0.02) {
-      const tx = 32 * grin, top = gy + gd - 8, tw = 38, tl = Math.max(tw, 80 * tg);
-      ctx.save();
-      ctx.fillStyle = TONGUE;
-      ctx.translate(tx, top); ctx.rotate(-0.12);
-      ctx.beginPath();
-      ctx.moveTo(-tw, 0); ctx.lineTo(-tw, tl - tw);
-      ctx.arc(0, tl - tw, tw, Math.PI, 0, true);
-      ctx.lineTo(tw, 0); ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-    }
-    ctx.lineWidth = lw * 0.9;
-    ctx.beginPath();
-    ctx.moveTo(-gw, gy);
-    ctx.quadraticCurveTo(0, gy + gd * 2, gw, gy);
-    ctx.stroke();
-  }
-  ctx.globalAlpha = 1 - THREE.MathUtils.clamp(grin, 0, 1);
-  if (ctx.globalAlpha < 0.02) { ctx.restore(); return; }
-
   if (mouthStyle === 'separate') {
     drawSeparateMouth(ctx, ny, mW, c, o, round, lw, solid);
     ctx.restore();
@@ -1015,21 +985,6 @@ const EXPRESSIONS = [
     end() { P.ry.v -= TAU; },
   },
   {
-    name: 'Happy', dur: 3.0,
-    keys: [
-      [0, { sq: 0.8, y: -0.03, happy: 0.6, eyeH: 90 }, 'fast'],
-      [0.17, { sq: 1.2, y: 0.34, happy: 1, eyeH: 80, eyeW: 80, mGrin: 1, tongue: 1, aLo: 1, aRo: 1, aLx: -0.7, aLy: 0.12, aLz: 0.2, aRx: 0.7, aRy: 0.12, aRz: 0.2, aLbx: 0, aRbx: 0, aLby: -0.1, aRby: -0.1, fx: 'sparkle' }],
-      [0.45, { y: 0, sq: 1.02 }],
-      [0.62, { sq: 0.84 }],
-      [0.8, { sq: 1 }],
-      [2.3, { aLo: 0, aRo: 0, happy: 0, eyeH: 112, eyeW: 64, mGrin: 0, tongue: 0 }],
-    ],
-    proc(t, add) {
-      add('rz', Math.sin(t * 7) * 0.04 * env(t, 0.9, 2.3));
-      add('tongue', Math.sin(t * 14) * 0.12 * env(t, 0.5, 2.2));  // panting
-    },
-  },
-  {
     // a big closed U grin, nose line dropping into it, with a little chuckle
     name: 'Grin', dur: 3.0,
     keys: [
@@ -1188,7 +1143,6 @@ const EAR_KEYS = {
   Listening: [[0, { earRa: 2.1, earRb: 0.4 }], [0.2, { earLa: 0.55, earLb: 0.3 }], [3.0, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
   Thinking:  [[0, { earLa: 1.5, earLb: 0.8 }], [1.5, { earLa: 0.2, earLb: 0.2, earRa: 1.5, earRb: 0.8 }], [3.3, { earLa: 0, earRa: 0, earRb: 0.2 }]],
   Working:   [[0.28, { earLa: 0.9, earRa: 0.9 }], [2.4, { earLa: 0, earRa: 0 }]],
-  Happy:     [[0, { earLa: -0.2, earRa: -0.2 }], [0.17, { earLa: 2.1, earRa: 2.1, earLb: 0.45, earRb: 0.45 }], [2.3, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
   Wink:      [[0.15, { earRa: 1.4, earRb: 0.6 }], [1.5, { earRa: 0, earRb: 0.2 }]],
   Laugh:     [[0, { earLa: 1.2, earRa: 1.2 }], [2.3, { earLa: 0, earRa: 0 }]],
   Surprised: [[0, { earLa: -0.1, earRa: -0.1 }], [0.13, { earLa: 2.9, earRa: 2.9, earLb: 0.15, earRb: 0.15 }], [2.0, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
@@ -1206,7 +1160,6 @@ const TAIL_KEYS = {
   Hello:     [[0.14, { tw: 0.9 }], [2.6, { tw: 0 }]],
   Listening: [[0, { tw: 0.25 }], [2.9, { tw: 0 }]],
   Working:   [[0.28, { tw: 0.3 }], [2.4, { tw: 0 }]],
-  Happy:     [[0.17, { tw: 1 }], [2.3, { tw: 0 }]],
   Wink:      [[0.15, { tw: 0.5 }], [1.5, { tw: 0 }]],
   Laugh:     [[0, { tw: 0.7 }], [2.3, { tw: 0 }]],
   Surprised: [[0.13, { ts: 1.35, ty: 0.08 }], [2.0, { ts: 1, ty: 0 }]],
