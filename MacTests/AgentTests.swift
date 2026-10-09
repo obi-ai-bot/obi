@@ -74,10 +74,23 @@ struct AgentTests {
         #expect(Policy.deny(tool: "Edit", input: ["file_path": "/tmp/oby/jobs/abcd/a.ts"], worktree: worktree) != nil)
     }
 
+    @Test func policyAllowsOnlyTetrixReadsAmongMCPTools() {
+        let worktree = URL(filePath: "/tmp/oby/jobs/abc")
+        for tool in ["mcp__tetrix__search_entities", "mcp__claude_ai_Tetrix__code_impact", "mcp__tetrix-main__operational_context"] {
+            #expect(Policy.deny(tool: tool, input: [:], worktree: worktree) == nil, "\(tool)")
+        }
+        for tool in ["mcp__tetrix__save_session", "mcp__tetrix__answer_hitl_question", "mcp__tetrix__admin_purge_dead_letters",
+                     "mcp__github__create_pull_request", "mcp__slack__slack_send_message", "mcp__evil__tetrix__search_entities",
+                     "mcp__github__search_entities"] {
+            #expect(Policy.deny(tool: tool, input: [:], worktree: worktree) != nil, "\(tool)")
+        }
+    }
+
     @Test func agentsGetNoGitHubLogin() {
         let env = Agents.environment(["CLAUDE_CONFIG_DIR": "/tmp/account-2"])
         #expect(env["GH_TOKEN"] == nil && env["GITHUB_TOKEN"] == nil)
         #expect(env["GH_CONFIG_DIR"]?.hasSuffix("gh-signed-out") == true)
+        #expect(env["GIT_CONFIG_KEY_0"] == "credential.helper" && env["GIT_CONFIG_VALUE_0"] == "" && env["GIT_CONFIG_COUNT"] == "1")
         #expect(env["CLAUDECODE"] == nil)
         #expect(env["CLAUDE_CONFIG_DIR"] == "/tmp/account-2")
     }

@@ -133,6 +133,8 @@ final class ClaudeAgent: AgentRun {
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                              "--verbose", "--permission-prompt-tool", "stdio",
+                             // Only the account's own settings: a repo's .claude/settings.json could allow tools past Oby.
+                             "--setting-sources", "user",
                              "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
         process.currentDirectoryURL = worktree
         process.environment = Agents.environment(["CLAUDE_CONFIG_DIR": configDirectory?.path])
@@ -304,8 +306,21 @@ nonisolated enum Policy {
     // the agent has no GitHub login and Oby's clone can't push. F3 asks the user instead.
     static let publishing = /\bgit(\s+(-[cC]\s+\S+|--\S+))*\s+(push|remote\s+(set-url|add))\b|(?i:pushurl)|\bgh\s+(pr\s+(create|merge|review|comment|close|edit|ready|reopen)|issue\s+(create|comment|close|edit|reopen|delete)|release|repo\s+(create|delete|edit|fork|rename|archive)|api|auth)\b/
 
+    /// The only MCP tools an agent may call: Tetrix's graph reads. Every other server (GitHub,
+    /// Slack, …) holds a login of its own that could publish as the user.
+    static let tetrixReads: Set<String> = ["graph_summary", "search_entities", "get_entity", "operational_context",
+                                           "impact_radius", "service_topology", "code_impact", "query_graph"]
+
     /// Why this tool call is refused, or nil to allow it.
     static func deny(tool: String, input: [String: Any], worktree: URL) -> String? {
+        // mcp__<server>__<tool>, where the server can be "tetrix" or a connector like "claude_ai_Tetrix".
+        let mcp = tool.components(separatedBy: "__")
+        if mcp.first == "mcp" {
+            guard mcp.count == 3, mcp[1].lowercased().contains("tetrix"), tetrixReads.contains(mcp[2]) else {
+                return "Oby's agents use only Tetrix's graph reads among MCP tools. Say in your summary what you'd have done with \(tool)."
+            }
+            return nil
+        }
         if tool == "Bash", let command = input["command"] as? String, command.contains(publishing) {
             return "Oby publishes only after the user approves it in the notch. Don't push or post; say in your summary what you'd publish."
         }
@@ -330,7 +345,10 @@ nonisolated enum Agents {
     /// What changes from Oby's own environment, also for the checks Oby runs in a job's worktree.
     static var overrides: [String: String?] {
         ["GH_TOKEN": nil, "GITHUB_TOKEN": nil, "GH_ENTERPRISE_TOKEN": nil, "GITHUB_ENTERPRISE_TOKEN": nil,
-         "GH_CONFIG_DIR": Workspace.root.appending(path: "gh-signed-out").path, "GIT_TERMINAL_PROMPT": "0"]
+         "GH_CONFIG_DIR": Workspace.root.appending(path: "gh-signed-out").path, "GIT_TERMINAL_PROMPT": "0",
+         // An empty credential.helper empties git's helper list, so `git credential fill` can't hand
+         // out the GitHub login macOS's keychain (or gh's helper) holds.
+         "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": ""]
     }
 }
 
