@@ -111,7 +111,7 @@ const DEFAULTS = {
   gx: [0, 'gaze'], gy: [0, 'gaze'],
   eyeSep: [96, 'face'], eyeY: [-34, 'face'], eyeW: [64, 'face'], eyeH: [112, 'face'], eyeR: [0.92, 'face'],
   eL: [1, 'face'], eR: [1, 'face'], close: [0, 'face'], blink: [0, 'blink'],
-  lidT: [0, 'face'], lidA: [0, 'face'], happy: [0, 'face'], calm: [0, 'face'],
+  lidT: [0, 'face'], lidA: [0, 'face'], happy: [0, 'face'], calm: [0, 'face'], peek: [0, 'face'],
   mW: [0, 'mouth'], mC: [0, 'mouth'], mO: [0, 'mouth'], mRound: [0, 'mouth'], mReveal: [0, 'face'], mArch: [0, 'face'],
   book: [0, 'pop'],  // open book held in front (Reading)
   mY: [92, 'mouth'], mT: [15, 'mouth'], mTilt: [0, 'mouth'],
@@ -703,7 +703,7 @@ function drawEye(side, time) {
   const per = side < 0 ? V('eL') : V('eR');
   const H0 = Math.max(V('eyeH'), 1);
   const hBase = H0 * per;
-  const calm = THREE.MathUtils.clamp(V('calm'), 0, 1);
+  const calm = THREE.MathUtils.clamp(V('calm') - (side > 0 ? V('peek') : 0), 0, 1);  // peek opens the right eye
   const shut = Math.min(1, Math.max(V('close'), V('blink'), calm));
   const h = Math.max(hBase * (1 - shut), 11);
   const squashed = THREE.MathUtils.clamp(1 - h / H0, 0, 1);
@@ -1338,12 +1338,34 @@ const POKE_ANGRY = {
     add('x', Math.sin(t * 61) * 0.004 * e); add('rz', Math.sin(t * 47) * 0.005 * e);
   },
 };
+// Ignoring: turns away with eyes shut. Left alone, it cracks the right eye open
+// to check on you, then shakes it off like a wet dog and is back to normal.
+const SHAKE_AT = 3.0;
 const POKE_IGNORE = {
-  name: 'Ignoring you', dur: 3.5,
+  name: 'Ignoring you', dur: 5.1,
   keys: [
     [0, { ry: -0.75, rx: -0.18, rz: 0.06, calm: 1, mW: 18, mC: -0.25, mTilt: -4, earLa: -0.2, earRa: 0.35, fx: 'huff' }, 'body'],
-    [2.9, { ry: 0, rx: 0, rz: 0, calm: 0, mW: 0, mC: 0, mTilt: 0, earLa: 0, earRa: 0 }],
+    [1.8, { peek: 1, gx: 26, lidT: 0.25, ry: -0.6 }],
+    [SHAKE_AT, { ry: 0, rx: 0, rz: 0, x: 0, twist: 0, calm: 0, peek: 0, gx: 0, lidT: 0, close: 1, mW: 0, mC: 0, mTilt: 0, earLa: 0, earRa: 0 }, 'snap'],
+    [SHAKE_AT + 1.25, { close: 0, sq: 1.04 }, 'face'],
+    [SHAKE_AT + 1.55, { sq: 1 }, 'body'],
   ],
+  proc(t, add) {
+    // shake: fast side-to-side turns that die down, with the body twisting a beat behind
+    const k = t - SHAKE_AT;
+    if (k > 0 && k < 1.2) {
+      const decay = Math.pow(1 - k / 1.2, 1.5);
+      // about 4.5 shakes a second; the springs soften these to roughly ±26° turn
+      // and ±10° roll at the peak
+      const w = k * 28;
+      add('ry', Math.sin(w) * 0.9 * decay);
+      add('rz', Math.sin(w + 0.4) * 0.35 * decay);
+      add('twist', Math.sin(w - 0.9) * 0.8 * decay);
+      add('x', Math.sin(w + 0.4) * 0.08 * decay);
+      add('y', Math.abs(Math.sin(w)) * 0.03 * decay);
+    }
+    if (t > SHAKE_AT + 1.8) pokes = 0;  // shaken off: start fresh
+  },
 };
 let pokes = 0, lastPoke = -99;
 const pixel = new Uint8Array(4);
@@ -1357,12 +1379,10 @@ function poke() {
   if (clock - lastPoke > 6) pokes = 0;
   pokes++; lastPoke = clock;
   if (pokes >= 6) {
-    if (cur === POKE_IGNORE) {
-      // already ignoring: just a small twitch, and keep ignoring a bit longer
-      P.sq.vel -= 0.8; P.rz.vel += 0.4; curT = Math.min(curT, 0.6);
-      return;
-    }
+    // poked again while ignoring (even mid-peek): back to ignoring, small twitch
+    const again = cur === POKE_IGNORE;
     play(POKE_IGNORE);
+    if (again) { P.sq.vel -= 0.8; P.rz.vel += 0.4; }
   } else if (pokes >= 4) {
     play(POKE_ANGRY);
   } else {
