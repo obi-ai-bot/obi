@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(OSLog)
 import OSLog
+#endif
 
 /// OpenAI's Codex CLI through `codex app-server` (proven 2026-10-09). It works in Codex's own
 /// sandbox, which lets it write only in the worktree; anything more comes to Oby as an approval.
@@ -23,7 +25,7 @@ final class CodexAgent: AgentRun {
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
         self.onEvent = onEvent
         let log = worktree.appending(path: ".oby/agent.log")
-        FileManager.default.createFile(atPath: log.path, contents: nil)
+        _ = FileManager.default.createFile(atPath: log.path, contents: nil)
         let server = try CodexServer(home: home, in: worktree, log: log)
         self.server = server
         server.onMessage = { [weak self] in self?.handle($0) }

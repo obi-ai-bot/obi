@@ -302,7 +302,7 @@ private struct OpenIsland: View {
                 field
             default:
                 ForEach(visibleJobs) { job in
-                    JobRow(job: job, onStop: { desk.stop(job.id) }, onPublish: { try await desk.publish(job.id) })
+                    JobRow(job: job, onStop: { desk.stop(job.id) }, onPublish: { try await desk.publish(job.id, approve: Publish.touchID) })
                 }
                 field
             }

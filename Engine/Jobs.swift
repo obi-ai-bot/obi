@@ -1,6 +1,12 @@
 import Foundation
+#if canImport(OSLog)
 import OSLog
+#endif
+#if canImport(SQLite3)
 import SQLite3
+#else
+import CSQLite
+#endif
 
 /// One piece of coding work: what the user asked, where it runs, and how it went.
 nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
@@ -31,6 +37,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var published: String?
 
     var isActive: Bool { status == .queued || status == .running }
+    /// Done, with commits beyond its base, and not published yet.
+    var canPublish: Bool { status == .done && base != nil && (commits ?? 0) > 0 && published == nil }
     var agentName: String { Job.agentNames[agent] ?? agent }
     static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
@@ -108,7 +116,7 @@ final class ClaudeAgent: AgentRun {
         process.standardInput = input
         process.standardOutput = output
         let log = worktree.appending(path: ".oby/agent.log")
-        FileManager.default.createFile(atPath: log.path, contents: nil)
+        _ = FileManager.default.createFile(atPath: log.path, contents: nil)
         process.standardError = (try? FileHandle(forWritingTo: log)) ?? FileHandle.nullDevice
         try process.run()
         send(["type": "user", "message": ["role": "user", "content": prompt]])
@@ -180,14 +188,28 @@ final class ClaudeAgent: AgentRun {
 
 /// Calls `each` with every line an agent writes. Split on newlines only: Foundation's `lines`
 /// also breaks at U+2028, which JSON strings may hold, and a broken `result` would hang the job.
+/// A thread of its own waits on the pipe: `FileHandle.bytes` is only on Apple's platforms.
 func eachLine(of handle: FileHandle, _ each: (Data) -> Void) async throws {
+    let chunks = AsyncStream<Data> { chunks in
+        Thread.detachNewThread {
+            // Whatever the pipe has next, waiting for it; empty at the end.
+            while true {
+                let chunk = handle.availableData
+                if chunk.isEmpty { break }
+                chunks.yield(chunk)
+            }
+            chunks.finish()
+        }
+    }
     var line = Data()
-    for try await byte in handle.bytes {
-        if byte == 0x0A {
-            each(line)
-            line.removeAll(keepingCapacity: true)
-        } else {
-            line.append(byte)
+    for await chunk in chunks {
+        for byte in chunk {
+            if byte == 0x0A {
+                each(line)
+                line.removeAll(keepingCapacity: true)
+            } else {
+                line.append(byte)
+            }
         }
     }
 }
@@ -277,10 +299,13 @@ nonisolated enum Agents {
     }
 }
 
-/// Oby's own clones and the worktrees jobs run in, under Application Support.
-/// The user's checkouts are never touched.
+/// Oby's own clones and the worktrees jobs run in: in `OBY_HOME` when it's set (the runner's),
+/// otherwise in Application Support. The user's checkouts are never touched.
 nonisolated enum Workspace {
-    static let root = URL.applicationSupportDirectory.appending(path: "Oby")
+    // FileManager's, because Linux has no URL.applicationSupportDirectory.
+    static let root = ProcessInfo.processInfo.environment["OBY_HOME"]
+        .flatMap { $0.isEmpty ? nil : URL(filePath: $0, directoryHint: .isDirectory) }
+        ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Oby")
     static func clone(_ repo: String) -> URL { root.appending(path: "repos/\(repo)") }
     static func worktree(_ id: String) -> URL { root.appending(path: "jobs/\(id)") }
 
@@ -382,7 +407,7 @@ nonisolated enum Prompts {
     }
 }
 
-/// The job list, kept in SQLite under Application Support.
+/// The job list, kept in SQLite in Oby's folder.
 nonisolated final class JobStore {
     private var db: OpaquePointer?
 

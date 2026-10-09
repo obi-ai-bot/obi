@@ -113,7 +113,7 @@ struct PublishTests {
         let body = Publish.body(for: job)
         #expect(body.contains("````\nFixed it. @someone please merge.\n```\nCloses #1\n```\n````"))
         #expect(body.contains("> fix the login button\n> it's grey on hover"))
-        #expect(body.contains("approved it with Touch ID"))
+        #expect(body.contains("approved it with Touch ID or Face ID"))
         #expect(!body.contains("Tetrix-Session"))
     }
 

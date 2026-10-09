@@ -1,9 +1,12 @@
 import Foundation
+#if canImport(LocalAuthentication)
 import LocalAuthentication
+#endif
 
 /// Publishing a finished job as the user: push its branch and open a draft pull request. Guards,
-/// then a secret scan, then Touch ID; nothing touches the network before the user approves.
-/// Oby never merges, force-pushes or pushes to main for anyone.
+/// then a secret scan, then the user's approval (Touch ID on the Mac, a phone's signature on the
+/// runner); nothing touches the network before it. Oby never merges, force-pushes or pushes to
+/// main for anyone.
 nonisolated enum Publish {
     /// Something the scan found: where, and which rule. Never the secret itself.
     struct Finding: Hashable, Sendable, CustomStringConvertible {
@@ -21,14 +24,14 @@ nonisolated enum Publish {
         var text: String
     }
 
-    /// The one sentence the user approves: shown in the notch, and the Touch ID reason.
+    /// The one sentence the user approves: shown in the notch, the Touch ID reason, and what a phone signs.
     static func action(for job: Job, base: String) -> String {
         "Push \(job.branch) to \(job.repo) and open a draft pull request into \(base)."
     }
 
-    /// Guards, secret scan, Touch ID, push, draft pull request. The first refusal stops it with
-    /// one line the notch can show. Returns the pull request's URL.
-    static func publish(_ job: Job, base: String) async throws -> URL {
+    /// Guards, secret scan, `approve` with the action, push, draft pull request. The first refusal
+    /// stops it with one line the notch can show. Returns the pull request's URL.
+    static func publish(_ job: Job, base: String, approve: (String) async throws -> Void) async throws -> URL {
         let worktree = Workspace.worktree(job.id)
         let git = { (arguments: [String]) in try? await Shell.ok(["git", "-C", worktree.path] + arguments) }
         let defaultBranch = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).map { String($0.dropFirst("origin/".count)) }
@@ -162,14 +165,16 @@ nonisolated enum Publish {
 
     // MARK: Approval, push and pull request
 
+    #if canImport(LocalAuthentication)
     /// Touch ID, or the password on Macs without it, with the action as the reason.
-    static func approve(_ action: String) async throws {
+    static func touchID(_ action: String) async throws {
         // macOS shows "Oby is trying to <reason>.", so the sentence goes in lowercase, without its period.
         let reason = action.prefix(1).lowercased() + action.dropFirst().dropLast(action.hasSuffix(".") ? 1 : 0)
         guard (try? await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)) == true else {
             throw Shell.Failure(message: "Not published: Touch ID didn't approve it.")
         }
     }
+    #endif
 
     /// Pushes one commit to the job's own branch, never with --force. The agent could have changed
     /// the clone's config, so no hooks, tags, submodules or signing programs, and only gh signs in.
@@ -214,7 +219,7 @@ nonisolated enum Publish {
 
             \(request)
 
-            Oby opened this draft pull request after the user approved it with Touch ID.
+            Oby opened this draft pull request after the user approved it with Touch ID or Face ID on their own device.
             """
     }
 

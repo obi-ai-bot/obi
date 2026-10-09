@@ -1,0 +1,15 @@
+# Oby's runner, as a systemd user service. Runner/README.md says how to install it:
+# OWNER_LOGIN becomes the owner's Tailscale login.
+[Unit]
+Description=Oby's runner
+
+[Service]
+ExecStart=%h/.local/bin/oby-runner
+Environment=OBY_HOME=/srv/nvme/oby
+Environment=OBY_OWNER=OWNER_LOGIN
+Environment=OBY_PORT=7777
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

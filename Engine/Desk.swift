@@ -1,5 +1,5 @@
 import Foundation
-import OSLog
+import Observation
 
 /// Oby's desk: the conversation that turns words into a plan, and the jobs it dispatched.
 @Observable
@@ -28,15 +28,20 @@ final class Desk {
     let accounts: AccountStore
     /// Called when a job ends, for the notch's one line.
     var onFinish: (Job) -> Void = { _ in }
+    /// Called with every job that's added or changes, for the runner's event stream.
+    var onJobChange: (Job) -> Void = { _ in }
 
-    private let store = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))
+    private let store: JobStore
     private var repos: [String] = []
+    /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
+    private var drafts: [Draft] = []
     private var agents: [String: any AgentRun] = [:]
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
 
-    init(accounts: AccountStore = AccountStore()) {
+    init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))) {
         self.accounts = accounts
+        self.store = store
         jobs = store.recent()
         // Running when Oby last quit (or crashed): it didn't finish.
         for index in jobs.indices where jobs[index].isActive {
@@ -70,62 +75,79 @@ final class Desk {
         guard !said.isEmpty else { return }
         talk = .thinking(said)
         Task {
-            if repos.isEmpty { await refresh() }
-            // The brain thinks with the least busy Claude account too, so a busy one doesn't slow it.
-            let brain = ClaudeBrain(home: AccountStore.route(accounts.accounts, agent: "claude")?.home)
-            let result = await Planner(adapters: [brain]).plan(said, context: brainContext)
+            let result = await plan(said)
             // Cancelled or replaced while the brain was thinking.
             guard talk == .thinking(said) else { return }
-            show(result, said: said)
+            talk = result
         }
+    }
+
+    /// What the brain makes of the user's words: a plan, a question or a reply. Takes 3–20 seconds.
+    func plan(_ said: String) async -> Talk {
+        if repos.isEmpty { await refresh() }
+        // The brain thinks with the least busy Claude account too, so a busy one doesn't slow it.
+        let brain = ClaudeBrain(home: AccountStore.route(accounts.accounts, agent: "claude")?.home)
+        let talk = card(for: await Planner(adapters: [brain]).plan(said, context: brainContext), said: said)
+        if case .plan(let draft) = talk {
+            // ponytail: the last 20 plans, in memory; a plan made before a restart is made again.
+            drafts.append(draft)
+            if drafts.count > 20 { drafts.removeFirst() }
+        }
+        return talk
     }
 
     /// The user picked one of the brain's options: plan again with the answer.
     func answer(_ option: String, said: String, question: String) {
-        ask("\(said)\n\n(Oby asked: \(question) The user answered: \(option))")
+        ask(Self.answered(said, question: question, option: option))
+    }
+
+    /// The user's words with the brain's question and the option they picked, to plan again.
+    nonisolated static func answered(_ said: String, question: String, option: String) -> String {
+        "\(said)\n\n(Oby asked: \(question) The user answered: \(option))"
     }
 
     func cancel() { talk = .none }
 
-    private func show(_ result: Planner.Result, said: String) {
+    private func card(for result: Planner.Result, said: String) -> Talk {
         let plan = result.plan
         switch plan.action {
         case .dispatch:
-            guard let dispatch = plan.dispatch else { talk = .none; return }
+            guard let dispatch = plan.dispatch else { return .none }
             let agent = dispatch.agent == "auto" ? nil : dispatch.agent
             let named = accounts.accounts.first { $0.signedIn && $0.account.name == dispatch.account && (agent == nil || $0.account.agent == agent) }
             if dispatch.account != "auto", named == nil {
-                talk = .reply("\(dispatch.account) isn't signed in. Sign in from Settings › Accounts.")
-                return
+                return .reply("\(dispatch.account) isn't signed in. Sign in from Settings › Accounts.")
             }
             guard let account = named?.account ?? AccountStore.route(accounts.accounts, agent: agent) else {
                 let tool = agent.map { Job.agentNames[$0] ?? $0 } ?? "coding tool"
-                talk = .reply("No \(tool) account is signed in with room to spare. Check Settings › Accounts.")
-                return
+                return .reply("No \(tool) account is signed in with room to spare. Check Settings › Accounts.")
             }
             let id = String(UUID().uuidString.prefix(8)).lowercased()
             let job = Job(id: id, request: said, agent: account.agent, account: account.id, repo: dispatch.repo,
                           branch: Job.branch(kind: dispatch.kind, pr: dispatch.pr, id: id), base: dispatch.baseBranch,
                           pr: dispatch.pr, kind: dispatch.kind, task: dispatch.task)
             let reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
-            talk = .plan(Draft(said: said, reply: reply, job: job, guessed: result.by == "rules"))
+            return .plan(Draft(said: said, reply: reply, job: job, guessed: result.by == "rules"))
         case .askUser:
-            talk = plan.question.map { .question(said: said, $0) } ?? .reply(plan.reply)
+            return plan.question.map { .question(said: said, $0) } ?? .reply(plan.reply)
         case .replyOnly, .stopAgent:
-            talk = .reply(plan.reply.isEmpty ? "Stop a job with the × next to it." : plan.reply)
+            return .reply(plan.reply.isEmpty ? "Stop a job with the × next to it." : plan.reply)
         case .ignore:
-            talk = plan.reply.isEmpty ? .none : .reply(plan.reply)
+            return plan.reply.isEmpty ? .none : .reply(plan.reply)
         }
     }
 
     // MARK: Jobs
 
-    func dispatch(_ draft: Draft) {
+    @discardableResult
+    func dispatch(_ draft: Draft) -> Job {
         talk = .none
+        drafts.removeAll { $0.job.id == draft.job.id }
         var job = draft.job
         job.step = "Getting \(job.repoName) ready"
         jobs.insert(job, at: 0)
         store.save(job)
+        onJobChange(job)
 
         let previous = setups[job.repo]
         let ready = Task { () async throws -> Job in
@@ -143,16 +165,41 @@ final class Desk {
                 finish(job.id, .failed, "Couldn't get \(job.repoName) ready: \(error.localizedDescription)")
             }
         }
+        return job
     }
 
-    /// Pushes the job's branch and opens a draft pull request, after the user's Touch ID. Never a merge.
-    func publish(_ id: String) async throws {
-        guard let job = job(id), job.status == .done, let base = job.base else { return }
-        let url = try await Publish.publish(job, base: base)
+    /// Dispatches one of the latest plans, by its job's id, with the user's changes (the runner's API).
+    func dispatch(_ id: String, branch: String, account: String) throws -> Job {
+        guard var draft = drafts.first(where: { $0.job.id == id }) else {
+            throw Shell.Failure(message: "Oby doesn't have that plan any more. Ask again.")
+        }
+        draft.job = try Self.edit(draft.job, branch: branch, account: accounts.state(account))
+        return dispatch(draft)
+    }
+
+    /// A plan's job with the only changes the user may make: a branch name Oby can create, and a
+    /// signed-in account, whose tool the job then runs with.
+    nonisolated static func edit(_ job: Job, branch: String, account: AccountState?) throws -> Job {
+        guard Plan.isBranchName(branch) else { throw Shell.Failure(message: "That isn't a branch name Oby can create.") }
+        guard let account, account.signedIn else { throw Shell.Failure(message: "That account isn't signed in.") }
+        var job = job
+        job.branch = branch
+        job.account = account.account.id
+        job.agent = account.account.agent
+        return job
+    }
+
+    /// Pushes the job's branch and opens a draft pull request once `approve` lets the action
+    /// through: Touch ID on the Mac, a phone's signature on the runner. Never a merge.
+    @discardableResult
+    func publish(_ id: String, approve: (String) async throws -> Void) async throws -> URL {
+        guard let job = job(id), job.canPublish, let base = job.base else { throw Shell.Failure(message: "Nothing to publish.") }
+        let url = try await Publish.publish(job, base: base, approve: approve)
         if var job = self.job(id) {
             job.published = url.absoluteString
             replace(job)
         }
+        return url
     }
 
     func stop(_ id: String) {
@@ -231,5 +278,6 @@ final class Desk {
         guard let index = jobs.firstIndex(where: { $0.id == job.id }) else { return }
         jobs[index] = job
         if save { store.save(job) }
+        onJobChange(job)
     }
 }
