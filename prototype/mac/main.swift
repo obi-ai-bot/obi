@@ -4,7 +4,7 @@ import WebKit
 // Menu bar host for the cube mascot: a status item with a tiny blinking cube,
 // and a popover that runs the web prototype (../web/index.html, bundled).
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, WKNavigationDelegate {
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
     private var webView: WKWebView!
@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
         webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 380, height: 470), configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
+        webView.navigationDelegate = self
         if let page = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "web") {
             webView.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
         }
@@ -33,9 +34,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentSize = NSSize(width: 380, height: 470)
         popover.behavior = .transient
         popover.appearance = NSAppearance(named: .darkAqua)
+        popover.delegate = self
 
         scheduleBlink()
     }
+
+    // The page only animates while the popover is open; closed, it draws nothing.
+    private func setPaused(_ paused: Bool) {
+        webView.evaluateJavaScript("window.__setPaused && window.__setPaused(\(paused))")
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { setPaused(!popover.isShown) }
+    func popoverWillShow(_ notification: Notification) { setPaused(false) }
+    func popoverDidClose(_ notification: Notification) { setPaused(true) }
 
     @objc private func handleClick(_ sender: NSStatusBarButton) {
         if NSApp.currentEvent?.type == .rightMouseUp {

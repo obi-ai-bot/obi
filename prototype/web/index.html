@@ -288,7 +288,9 @@ void main() {
   gl_FragColor = vec4(premul, alpha);
 }`;
 
-const fillRT = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: true, samples: Math.min(8, renderer.capabilities.maxSamples) });
+// no MSAA: the fill's edge hides under a same-coloured outline whose own edge
+// comes from blurred coverage, so multisampling would cost power for nothing
+const fillRT = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: true });
 
 // colours go straight to the framebuffer, so keep them in sRGB
 const srgb = (hex) => new THREE.Color().setHex(hex, THREE.LinearSRGBColorSpace);
@@ -334,7 +336,7 @@ const body = new THREE.Mesh(roundedCube(1, bodyRadius), fillMat(true));
 rig.add(body);
 
 // Face: a 2D canvas redrawn every frame, laid on the front face and deformed with it.
-const FACE_PX = 1024, FACE_UNITS = 0.8;
+const FACE_PX = 512, FACE_UNITS = 0.8;
 const faceCanvas = document.createElement('canvas');
 faceCanvas.width = faceCanvas.height = FACE_PX;
 const fc = faceCanvas.getContext('2d');
@@ -438,7 +440,15 @@ function drawMouth(ctx) {
   ctx.restore();
 }
 
+// Everything the face drawing reads. When none of it moved by a visible amount,
+// the canvas and its GPU upload are skipped.
+const FACE_KEYS = ['gx', 'gy', 'eLx', 'eRx', 'eyeSep', 'eyeY', 'eyeW', 'eyeH', 'eyeR', 'eL', 'eR', 'close', 'blink',
+  'lidT', 'lidA', 'happy', 'calm', 'peek', 'shX', 'shY', 'shS', 'mouthOn', 'mW', 'mO', 'mY', 'mT'];
+let faceSig = '';
 function drawFace(time) {
+  const sig = FACE_KEYS.map((k) => Math.round(V(k) * 50)).join() + U.uW.value + U.uH.value;
+  if (sig === faceSig) return;
+  faceSig = sig;
   fc.setTransform(1, 0, 0, 1, 0, 0);
   fc.clearRect(0, 0, FACE_PX, FACE_PX);
   const s = FACE_PX / 512 * 1.28;
@@ -482,8 +492,11 @@ function flyAt(t) {
 FX.fly = () => spawn('fly', { life: 3.6, path: flyAt });
 const easeOutBack = (t) => 1 + 2.7 * Math.pow(t - 1, 3) + 1.7 * Math.pow(t - 1, 2);
 
+let fxDirty = false;
 function drawFX(unitPx) {
   const dpr = renderer.getPixelRatio();
+  if (!particles.length && !fxDirty) return;
+  fxDirty = particles.length > 0;
   fx.setTransform(1, 0, 0, 1, 0, 0);
   fx.clearRect(0, 0, fxCanvas.width, fxCanvas.height);
   fx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -899,7 +912,7 @@ let clock = 0, cur = IDLE, curT = 0, auto = true, idleUntil = 1.2, nextIdx = 0;
 let nextBlink = 1.5, blinkEnd = -1, nextSaccade = 0.5;
 let nextGlance = 5, glanceEnd = -1;
 const faceC = new THREE.Vector3(), faceE = new THREE.Vector3();  // idle: now and then looks back to the front, waiting
-const pointer = { x: 0, y: 0, active: false };
+const pointer = { x: 0, y: 0, active: false, t: 0 };
 
 function applyKey(k) {
   const [, vals, preset] = k;
@@ -983,6 +996,8 @@ const pixel = new Uint8Array(4);
 function onMascot(clientX, clientY) {
   const dpr = renderer.getPixelRatio();
   const x = Math.floor(clientX * dpr), y = Math.floor((innerHeight - clientY) * dpr);
+  // only inside the drawn box: the fill pass leaves stale pixels outside it
+  if (x < box.x0 || x > box.x1 || y < box.y0 || y > box.y1) return false;
   renderer.readRenderTargetPixels(fillRT, x, y, 1, 1, pixel);
   return pixel[0] > 0;
 }
@@ -1123,6 +1138,7 @@ addEventListener('keydown', (e) => {
 addEventListener('pointermove', (e) => {
   pointer.x = (e.clientX / innerWidth) * 2 - 1; pointer.y = -((e.clientY / innerHeight) * 2 - 1);
   pointer.active = true;
+  pointer.t = performance.now();
 });
 document.addEventListener('pointerleave', () => { pointer.active = false; });
 
@@ -1217,24 +1233,73 @@ function resize() {
 addEventListener('resize', resize);
 setSize(size);
 
-let last = performance.now();
+// Only the box around the cube (plus the circle, when on) is drawn; the rest of
+// the canvas stays transparent. The fill pass covers a wider box than the
+// composite, so the outline never samples stale pixels.
+const corner = new THREE.Vector3(), box = { x0: 0, y0: 0, x1: 0, y1: 0 };
+function cubeBox() {
+  const bw = fillRT.width, bh = fillRT.height;
+  const hx = 0.5 * U.uW.value * 1.3 + 0.12, top = -0.5 + U.uH.value * 1.35;
+  rig.updateMatrixWorld();
+  box.x0 = box.y0 = Infinity; box.x1 = box.y1 = -Infinity;
+  for (const x of [-hx, hx]) for (const y of [-0.62, top]) for (const z of [-0.65, 0.65]) {
+    corner.set(x, y, z).applyMatrix4(rig.matrixWorld).project(camera);
+    const px = (corner.x * 0.5 + 0.5) * bw, py = (corner.y * 0.5 + 0.5) * bh;
+    box.x0 = Math.min(box.x0, px); box.x1 = Math.max(box.x1, px);
+    box.y0 = Math.min(box.y0, py); box.y1 = Math.max(box.y1, py);
+  }
+  if (show.circle) {
+    const c = compositeMat.uniforms.uCircle.value;
+    box.x0 = Math.min(box.x0, c.x - c.z); box.x1 = Math.max(box.x1, c.x + c.z);
+    box.y0 = Math.min(box.y0, c.y - c.z); box.y1 = Math.max(box.y1, c.y + c.z);
+  }
+}
+function scissor(target, m) {
+  const bw = fillRT.width, bh = fillRT.height;
+  const x0 = Math.max(0, Math.floor(box.x0 - m)), y0 = Math.max(0, Math.floor(box.y0 - m));
+  const x1 = Math.min(bw, Math.ceil(box.x1 + m)), y1 = Math.min(bh, Math.ceil(box.y1 + m));
+  if (target) target.scissor.set(x0, y0, Math.max(0, x1 - x0), Math.max(0, y1 - y0));
+  else { const r = renderer.getPixelRatio(); renderer.setScissor(x0 / r, y0 / r, Math.max(0, x1 - x0) / r, Math.max(0, y1 - y0) / r); }
+}
+fillRT.scissorTest = true;
+renderer.setScissorTest(true);
 function render() {
+  cubeBox();
+  const r = compositeMat.uniforms.uPx.value * compositeMat.uniforms.uLineScale.value * 3.75;
+  scissor(fillRT, 2 * r + 8);
   renderer.setRenderTarget(fillRT); renderer.clear(); renderer.render(scene, camera);
-  renderer.setRenderTarget(null); renderer.clear(); renderer.render(quadScene, quadCam);
+  renderer.setRenderTarget(null);
+  // the whole canvas is cleared once, then only the box is redrawn
+  renderer.setScissor(0, 0, innerWidth, innerHeight); renderer.clear();
+  scissor(null, r + 4);
+  renderer.render(quadScene, quadCam);
 }
 
+// 60fps while something is happening (an expression, effects, the pointer
+// moving), 30fps when it's just idling, and nothing at all while hidden.
+let last = performance.now(), rafId = 0, paused = false;
 function frame(now) {
-  const dt = Math.min(1 / 30, (now - last) / 1000); last = now;
+  rafId = requestAnimationFrame(frame);
+  const busy = cur !== IDLE || particles.length > 0 || now - pointer.t < 1500;
+  if (now - last < (busy ? 1000 / 60 : 1000 / 30) - 2) return;
+  const dt = Math.min(1 / 20, (now - last) / 1000); last = now;
   clock += dt;
   update(dt);
   applyToScene();
   drawFace(clock);
   render();
   drawFX(unitPx);
-  requestAnimationFrame(frame);
 }
+function setPaused(p) {
+  if (p === paused) return;
+  paused = p;
+  cancelAnimationFrame(rafId);
+  if (!p) { last = performance.now(); rafId = requestAnimationFrame(frame); }
+}
+window.__setPaused = setPaused;  // the menu bar app pauses it while the popover is closed
+document.addEventListener('visibilitychange', () => setPaused(document.hidden));
 goIdle(1.2);
-requestAnimationFrame(frame);
+rafId = requestAnimationFrame(frame);
 
 // debug hooks for screenshots
 window.__cube = { play: (n) => play(EXPRESSIONS.find((e) => e.name === n)), setAuto, P, EXPRESSIONS, pointer, rig, camera };
