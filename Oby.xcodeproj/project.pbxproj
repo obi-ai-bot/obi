@@ -6,6 +6,11 @@
 	objectVersion = 110;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		0B1E0C0A000000000000E2 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 0B1E0C0A000000000000E1 /* AppIcon.icon */; };
+		0B1E0C0A000000000000E3 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 0B1E0C0A000000000000E1 /* AppIcon.icon */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		0B1E0C0A00000000000000A7 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -28,6 +33,7 @@
 		0B1E0C0A00000000000000A1 /* MacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		0B1E0C0A000000000000CD /* Oby.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Oby.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0B1E0C0A000000000000D5 /* iOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0B1E0C0A000000000000E1 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; name = AppIcon.icon; path = Icon/AppIcon.icon; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -103,6 +109,7 @@
 		FB61F80230795FDE00A9523D = {
 			isa = PBXGroup;
 			children = (
+				0B1E0C0A000000000000E1 /* AppIcon.icon */,
 				FB61F80D30795FDE00A9523D /* Mac */,
 				0B1E0C0A00000000000000B1 /* Engine */,
 				0B1E0C0A000000000000C1 /* Shared */,
@@ -264,6 +271,7 @@
 		FB61F80930795FDE00A9523D /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
+				0B1E0C0A000000000000E2 /* AppIcon.icon in Resources */,
 			);
 		};
 		0B1E0C0A00000000000000A6 /* Resources */ = {
@@ -274,6 +282,7 @@
 		0B1E0C0A000000000000C8 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
+				0B1E0C0A000000000000E3 /* AppIcon.icon in Resources */,
 			);
 		};
 		0B1E0C0A000000000000D4 /* Resources */ = {
