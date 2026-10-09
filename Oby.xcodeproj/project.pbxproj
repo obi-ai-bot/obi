@@ -6,6 +6,11 @@
 	objectVersion = 110;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		0B1E0C0A000000000000E2 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 0B1E0C0A000000000000E1 /* AppIcon.icon */; };
+		0B1E0C0A000000000000E3 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 0B1E0C0A000000000000E1 /* AppIcon.icon */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		0B1E0C0A00000000000000A7 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -14,12 +19,32 @@
 			remoteGlobalIDString = FB61F80A30795FDE00A9523D;
 			remoteInfo = Oby;
 		};
+		0B1E0C0A000000000000D6 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FB61F80330795FDE00A9523D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0B1E0C0A000000000000C5;
+			remoteInfo = ObyPhone;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		FB61F80B30795FDE00A9523D /* Oby.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Oby.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0B1E0C0A00000000000000A1 /* MacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0B1E0C0A000000000000CD /* Oby.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Oby.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0B1E0C0A000000000000D5 /* iOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0B1E0C0A000000000000E1 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; name = AppIcon.icon; path = Icon/AppIcon.icon; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		0B1E0C0A000000000000C4 /* Exceptions for "iOS" folder in "ObyPhone" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				README.md,
+			);
+			target = 0B1E0C0A000000000000C5 /* ObyPhone */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		FB61F80D30795FDE00A9523D /* Mac */ = {
@@ -37,6 +62,24 @@
 			path = Engine;
 			sourceTree = "<group>";
 		};
+		0B1E0C0A000000000000C1 /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		0B1E0C0A000000000000C2 /* iOS */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				0B1E0C0A000000000000C4 /* Exceptions for "iOS" folder in "ObyPhone" target */,
+			);
+			path = iOS;
+			sourceTree = "<group>";
+		};
+		0B1E0C0A000000000000C3 /* iOSTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = iOSTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -50,15 +93,29 @@
 			files = (
 			);
 		};
+		0B1E0C0A000000000000C7 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
+		0B1E0C0A000000000000D3 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		FB61F80230795FDE00A9523D = {
 			isa = PBXGroup;
 			children = (
+				0B1E0C0A000000000000E1 /* AppIcon.icon */,
 				FB61F80D30795FDE00A9523D /* Mac */,
 				0B1E0C0A00000000000000B1 /* Engine */,
+				0B1E0C0A000000000000C1 /* Shared */,
 				0B1E0C0A00000000000000A2 /* MacTests */,
+				0B1E0C0A000000000000C2 /* iOS */,
+				0B1E0C0A000000000000C3 /* iOSTests */,
 				FB61F80C30795FDE00A9523D /* Products */,
 			);
 			sourceTree = "<group>";
@@ -68,6 +125,8 @@
 			children = (
 				FB61F80B30795FDE00A9523D /* Oby.app */,
 				0B1E0C0A00000000000000A1 /* MacTests.xctest */,
+				0B1E0C0A000000000000CD /* Oby.app */,
+				0B1E0C0A000000000000D5 /* iOSTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -89,6 +148,7 @@
 			fileSystemSynchronizedGroups = (
 				FB61F80D30795FDE00A9523D /* Mac */,
 				0B1E0C0A00000000000000B1 /* Engine */,
+				0B1E0C0A000000000000C1 /* Shared */,
 			);
 			name = Oby;
 			productName = Oby;
@@ -116,6 +176,49 @@
 			productReference = 0B1E0C0A00000000000000A1 /* MacTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		0B1E0C0A000000000000C5 /* ObyPhone */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0B1E0C0A000000000000CA /* Build configuration list for PBXNativeTarget "ObyPhone" */;
+			buildPhases = (
+				0B1E0C0A000000000000C6 /* Sources */,
+				0B1E0C0A000000000000C7 /* Frameworks */,
+				0B1E0C0A000000000000C8 /* Resources */,
+				0B1E0C0A000000000000C9 /* Bundle the character */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				0B1E0C0A000000000000C2 /* iOS */,
+				0B1E0C0A000000000000C1 /* Shared */,
+			);
+			name = ObyPhone;
+			productName = Oby;
+			productReference = 0B1E0C0A000000000000CD /* Oby.app */;
+			productType = "com.apple.product-type.application";
+		};
+		0B1E0C0A000000000000D1 /* iOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0B1E0C0A000000000000D8 /* Build configuration list for PBXNativeTarget "iOSTests" */;
+			buildPhases = (
+				0B1E0C0A000000000000D2 /* Sources */,
+				0B1E0C0A000000000000D3 /* Frameworks */,
+				0B1E0C0A000000000000D4 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0B1E0C0A000000000000D7 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				0B1E0C0A000000000000C3 /* iOSTests */,
+			);
+			name = iOSTests;
+			productName = iOSTests;
+			productReference = 0B1E0C0A000000000000D5 /* iOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -128,6 +231,13 @@
 				TargetAttributes = {
 					FB61F80A30795FDE00A9523D = {
 						CreatedOnToolsVersion = 27.0;
+					};
+					0B1E0C0A000000000000C5 = {
+						CreatedOnToolsVersion = 27.0;
+					};
+					0B1E0C0A000000000000D1 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = 0B1E0C0A000000000000C5;
 					};
 					0B1E0C0A00000000000000A3 = {
 						CreatedOnToolsVersion = 27.0;
@@ -151,6 +261,8 @@
 			targets = (
 				FB61F80A30795FDE00A9523D /* Oby */,
 				0B1E0C0A00000000000000A3 /* MacTests */,
+				0B1E0C0A000000000000C5 /* ObyPhone */,
+				0B1E0C0A000000000000D1 /* iOSTests */,
 			);
 		};
 /* End PBXProject section */
@@ -159,9 +271,21 @@
 		FB61F80930795FDE00A9523D /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
+				0B1E0C0A000000000000E2 /* AppIcon.icon in Resources */,
 			);
 		};
 		0B1E0C0A00000000000000A6 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+			);
+		};
+		0B1E0C0A000000000000C8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+				0B1E0C0A000000000000E3 /* AppIcon.icon in Resources */,
+			);
+		};
+		0B1E0C0A000000000000D4 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
 			);
@@ -170,6 +294,25 @@
 
 /* Begin PBXShellScriptBuildPhase section */
 		0B1E0C0A00000000000000F1 /* Bundle the character */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Bundle the character";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/zsh;
+			shellScript = "set -e\n# Build the clean copy of the character (no playground) and bundle it as Resources/Character.\nzsh \"$SRCROOT/Character/package/build.sh\" > /dev/null\ndest=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/Character\"\nrm -rf \"$dest\"\nmkdir -p \"$dest/vendor\"\ncp \"$SRCROOT/dist/oby/oby.html\" \"$dest/\"\ncp \"$SRCROOT/dist/oby/vendor/three.module.js\" \"$dest/vendor/\"\n";
+		};
+		0B1E0C0A000000000000C9 /* Bundle the character */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -201,6 +344,16 @@
 			files = (
 			);
 		};
+		0B1E0C0A000000000000C6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
+		};
+		0B1E0C0A000000000000D2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -208,6 +361,11 @@
 			isa = PBXTargetDependency;
 			target = FB61F80A30795FDE00A9523D /* Oby */;
 			targetProxy = 0B1E0C0A00000000000000A7 /* PBXContainerItemProxy */;
+		};
+		0B1E0C0A000000000000D7 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0B1E0C0A000000000000C5 /* ObyPhone */;
+			targetProxy = 0B1E0C0A000000000000D6 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -436,6 +594,126 @@
 			};
 			name = Release;
 		};
+		0B1E0C0A000000000000CB /* Debug configuration for PBXNativeTarget "ObyPhone" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PQKAL8E36D;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Oby;
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Oby asks for Face ID before it publishes anything for you.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UIUserInterfaceStyle = Dark;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.deskree.oby;
+				PRODUCT_NAME = Oby;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		0B1E0C0A000000000000CC /* Release configuration for PBXNativeTarget "ObyPhone" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PQKAL8E36D;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Oby;
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Oby asks for Face ID before it publishes anything for you.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UIUserInterfaceStyle = Dark;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.deskree.oby;
+				PRODUCT_NAME = Oby;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		0B1E0C0A000000000000D9 /* Debug configuration for PBXNativeTarget "iOSTests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PQKAL8E36D;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.deskree.oby.tests.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Oby.app/Oby";
+			};
+			name = Debug;
+		};
+		0B1E0C0A000000000000DA /* Release configuration for PBXNativeTarget "iOSTests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PQKAL8E36D;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.deskree.oby.tests.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Oby.app/Oby";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -460,6 +738,22 @@
 			buildConfigurations = (
 				0B1E0C0A00000000000000AA /* Debug configuration for PBXNativeTarget "MacTests" */,
 				0B1E0C0A00000000000000AB /* Release configuration for PBXNativeTarget "MacTests" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		0B1E0C0A000000000000CA /* Build configuration list for PBXNativeTarget "ObyPhone" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0B1E0C0A000000000000CB /* Debug configuration for PBXNativeTarget "ObyPhone" */,
+				0B1E0C0A000000000000CC /* Release configuration for PBXNativeTarget "ObyPhone" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		0B1E0C0A000000000000D8 /* Build configuration list for PBXNativeTarget "iOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0B1E0C0A000000000000D9 /* Debug configuration for PBXNativeTarget "iOSTests" */,
+				0B1E0C0A000000000000DA /* Release configuration for PBXNativeTarget "iOSTests" */,
 			);
 			defaultConfigurationName = Release;
 		};
