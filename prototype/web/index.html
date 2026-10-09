@@ -63,8 +63,8 @@
   <div id="label">idle</div>
   <div id="chips"></div>
   <div id="sliders">
-    <label class="slider" data-k="size">Size <input type="range" min="0.25" max="1" step="0.01" value="0.37"><output>37%</output></label>
-    <label class="slider" data-k="round">Round <input type="range" min="0.04" max="0.46" step="0.01" value="0.15"><output></output></label>
+    <label class="slider" data-k="size">Size <input type="range" min="0.25" max="1" step="0.01" value="0.56"><output>56%</output></label>
+    <label class="slider" data-k="round">Round <input type="range" min="0.04" max="0.46" step="0.01" value="0.23"><output></output></label>
     <label class="slider" data-k="width">Width <input type="range" min="0.75" max="1.4" step="0.01" value="0.93"><output></output></label>
     <label class="slider" data-k="taper">Taper <input type="range" min="0" max="0.8" step="0.01" value="0"><output></output></label>
     <label class="slider" data-k="height">Height <input type="range" min="0.75" max="1.4" step="0.01" value="0.75"><output></output></label>
@@ -437,7 +437,7 @@ const BASE_Y = -0.12;
 // so the circle reads as a frame it rises out of, not a disc behind it.
 const CIRCLE = { x: 0, y: 0.12, r: 0.7 };
 const rig = new THREE.Group(); scene.add(rig);
-let bodyRadius = 0.15, taperBase = 0;
+let bodyRadius = 0.23, taperBase = 0;
 const body = new THREE.Mesh(roundedCube(1, bodyRadius), fillMat(true));
 body.userData = { fill: body.material, id: idMat(1, true) };
 rig.add(body);
@@ -601,7 +601,15 @@ function updateBook() {
 }
 
 let tailPhase = 0;
-const show = { hair: true, ears: false, limbs: false, tail: false, nose: false, mouth: false, circle: true };  // part toggles in the chip bar
+// bump when the defaults change, so saved settings from older builds are dropped once
+const SETTINGS_VERSION = '2';
+try {
+  if (localStorage.getItem('cube.v') !== SETTINGS_VERSION) {
+    Object.keys(localStorage).filter((k) => k.startsWith('cube.')).forEach((k) => localStorage.removeItem(k));
+    localStorage.setItem('cube.v', SETTINGS_VERSION);
+  }
+} catch {}
+const show = { hair: false, ears: false, limbs: false, tail: false, nose: false, mouth: false, circle: false };  // part toggles in the chip bar
 function updateTail(time) {
   tail.visible = show.tail;
   compositeMat.uniforms.uCircleOn.value = show.circle ? 1 : 0;
@@ -1689,9 +1697,9 @@ addEventListener('pointermove', (e) => {
 document.addEventListener('pointerleave', () => { pointer.active = false; });
 
 // Size: shrinks the mascot inside the view; lines thin out a little with it.
-let size = 0.37;
+let size = 0.56;
 const sizeInput = document.querySelector('[data-k=size] input'), sizeOut = document.querySelector('[data-k=size] output');
-try { size = Math.min(1, Math.max(0.25, parseFloat(localStorage.getItem('cube.size')) || 0.37)); } catch {}
+try { size = Math.min(1, Math.max(0.25, parseFloat(localStorage.getItem('cube.size')) || 0.56)); } catch {}
 sizeInput.value = size;
 function setSize(v) {
   size = v;
