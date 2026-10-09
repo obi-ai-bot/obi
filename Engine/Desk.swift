@@ -39,6 +39,8 @@ final class Desk {
     /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
     private var drafts: [Draft] = []
     private var agents: [String: any AgentRun] = [:]
+    /// Jobs whose one turn ended: their agent is finishing and takes no more words.
+    private var ending: Set<String> = []
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
 
@@ -265,6 +267,46 @@ final class Desk {
         agent?.stop()
     }
 
+    /// The user talks to a job. A running one hears it now; a finished one picks its session up
+    /// again in the same worktree, for one more round.
+    func message(_ id: String, _ text: String) throws {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Tell the agent something of 1 to 2,000 characters.") }
+        guard let job = job(id) else { throw Shell.Failure(message: "There's no job \(id).") }
+        if job.isActive {
+            guard let agent = agents[id], !ending.contains(id) else {
+                throw Shell.Failure(message: job.status == .queued ? "\(job.agentName) hasn't started yet. Tell it again in a moment."
+                                    : "\(job.agentName) is wrapping up. Tell it again once it's done.")
+            }
+            replace(Self.heard(job, text))
+            agent.send(text)
+        } else {
+            guard let session = job.session else { throw Shell.Failure(message: "This job never started, so there's no session to pick up.") }
+            let resumed = Self.resumed(job, text)
+            replace(resumed)
+            run(resumed, prompt: text, resume: session)
+        }
+    }
+
+    /// The job with the user's words saved, and shown as its step until the agent moves on.
+    nonisolated static func heard(_ job: Job, _ text: String) -> Job {
+        var job = job
+        job.notes = (job.notes ?? []) + [text]
+        job.step = "You: \(text)"
+        return job
+    }
+
+    /// A finished job running again for the user's words: same id and branch, a new round, and
+    /// one more round on a loop's limit so the limit still holds.
+    nonisolated static func resumed(_ job: Job, _ text: String) -> Job {
+        var job = heard(job, text)
+        job.status = .running
+        job.finished = nil
+        job.round = job.currentRound + 1
+        if let rounds = job.rounds { job.rounds = rounds + 1 }
+        return job
+    }
+
     /// Oby is quitting: agents end now, and their jobs show as interrupted next time.
     func quit() {
         for (id, agent) in agents {
@@ -281,22 +323,31 @@ final class Desk {
         job.started = .now
         job.step = "Starting \(job.agentName)"
         replace(job)
+        run(job, prompt: Prompts.agent(job))
+    }
+
+    /// Starts the job's agent in its worktree: a new session, or the job's own picked up again.
+    private func run(_ job: Job, prompt: String, resume: String? = nil) {
         let home = accounts.state(job.account)?.account.home.map { URL(filePath: $0) }
         let agent: any AgentRun
         switch job.agent {
         case "claude":
-            let claude = ClaudeAgent(worktree: Workspace.worktree(job.id), configDirectory: home)
+            let claude = ClaudeAgent(worktree: Workspace.worktree(job.id), configDirectory: home, resume: resume)
             claude.model = job.model
             agent = claude
         case "codex":
-            let codex = CodexAgent(worktree: Workspace.worktree(job.id), home: home)
+            let codex = CodexAgent(worktree: Workspace.worktree(job.id), home: home, resume: resume)
             codex.model = job.model
             agent = codex
         default: finish(job.id, .failed, "\(job.agentName) can't run jobs yet."); return
         }
         agents[job.id] = agent
         do {
-            try agent.start(prompt: Prompts.agent(job)) { [weak self] event in self?.handle(event, job: job.id) }
+            // Only the job's current agent speaks for it: one that was stopped or ended may still report.
+            try agent.start(prompt: prompt) { [weak self, weak agent] event in
+                guard let self, let agent, self.agents[job.id] === agent else { return }
+                self.handle(event, job: job.id)
+            }
         } catch {
             finish(job.id, .failed, "\(job.agentName) didn't start: \(error.localizedDescription)")
         }
@@ -315,15 +366,21 @@ final class Desk {
             accounts.record(event, for: job.account)
         case .turnEnded(let summary, let failed):
             // One turn and no check: the job ends when the agent does, after any background work.
-            guard job.loops else { agents[id]?.end(); return }
-            Task { await afterTurn(id, summary: summary, failed: failed) }
+            guard job.loops else {
+                ending.insert(id)
+                agents[id]?.end()
+                return
+            }
+            let heard = job.notes?.count ?? 0
+            Task { await afterTurn(id, summary: summary, failed: failed, heard: heard) }
         case .finished(let summary, let failed):
             finish(id, failed ? .failed : .done, summary)
         }
     }
 
     /// Runs the job's check, if it has one, then ends the job or sends the agent another round.
-    private func afterTurn(_ id: String, summary: String, failed: Bool) async {
+    /// `heard` is how many of the user's words the turn had taken in.
+    private func afterTurn(_ id: String, summary: String, failed: Bool, heard: Int) async {
         guard var job = job(id), job.isActive, let agent = agents[id] else { return }
         var check: Rounds.Check?
         if let command = job.check, !failed {
@@ -336,6 +393,8 @@ final class Desk {
             guard let latest = self.job(id), latest.isActive else { return }
             job = latest
         }
+        // The user spoke since the turn ended: the agent took it up, and that turn decides.
+        guard (job.notes?.count ?? 0) == heard else { return }
         switch Rounds.next(job, summary: summary, failed: failed, check: check) {
         case let .finish(status, text):
             agent.end()
@@ -356,6 +415,7 @@ final class Desk {
         job.finished = .now
         replace(job)
         agents[id] = nil
+        ending.remove(id)
         onFinish(job)
         guard status == .done, let base = job.base else { return }
         Task {

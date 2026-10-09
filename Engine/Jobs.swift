@@ -44,6 +44,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var check: String?
     /// A model for this job instead of Settings › Models: the stronger one the card offered.
     var model: String?
+    /// What the user told the agent along the way, oldest first.
+    var notes: [String]?
 
     var maxRounds: Int { rounds ?? 1 }
     var currentRound: Int { round ?? 1 }
@@ -121,10 +123,18 @@ final class ClaudeAgent: AgentRun {
     private var finished = false
     /// The latest turn's result. The job ends when Claude Code exits, not when a turn ends.
     private var result: (summary: String, failed: Bool)?
+    /// The session to pick up again, or nil for a new one.
+    private let resume: String?
+    /// User messages written, and the ones Claude Code took in (it echoes each). A message written
+    /// mid-turn joins that turn or queues a turn of its own, so only a result after the last one
+    /// ends the turn.
+    private var sent = 0
+    private var heard = 0
 
-    init(worktree: URL, configDirectory: URL? = nil) {
+    init(worktree: URL, configDirectory: URL? = nil, resume: String? = nil) {
         self.worktree = worktree
         self.configDirectory = configDirectory
+        self.resume = resume
     }
 
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
@@ -132,10 +142,11 @@ final class ClaudeAgent: AgentRun {
         // Never --bare: it skips the user's own login.
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-                             "--verbose", "--permission-prompt-tool", "stdio",
+                             "--verbose", "--replay-user-messages", "--permission-prompt-tool", "stdio",
                              // Only the account's own settings: a repo's .claude/settings.json could allow tools past Oby.
                              "--setting-sources", "user",
                              "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
+                            + (resume.map { ["--resume", $0] } ?? [])
         process.currentDirectoryURL = worktree
         process.environment = Agents.environment(["CLAUDE_CONFIG_DIR": configDirectory?.path])
         process.standardInput = input
@@ -144,7 +155,7 @@ final class ClaudeAgent: AgentRun {
         _ = FileManager.default.createFile(atPath: log.path, contents: nil)
         process.standardError = (try? FileHandle(forWritingTo: log)) ?? FileHandle.nullDevice
         try process.run()
-        send(["type": "user", "message": ["role": "user", "content": prompt]])
+        send(prompt)
 
         Task {
             do {
@@ -157,6 +168,7 @@ final class ClaudeAgent: AgentRun {
     }
 
     func send(_ text: String) {
+        sent += 1
         send(["type": "user", "message": ["role": "user", "content": text]])
     }
 
@@ -181,6 +193,10 @@ final class ClaudeAgent: AgentRun {
 
     private func handle(_ line: Data) {
         guard let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
+        if message["type"] as? String == "user", message["isReplay"] as? Bool == true {
+            heard += 1
+            return
+        }
         if let (id, tool, toolInput) = StreamJSON.permission(message) {
             if let reason = Policy.deny(tool: tool, input: toolInput, worktree: worktree) {
                 Logger.jobs.notice("denied \(tool, privacy: .public): \(reason, privacy: .public)")
@@ -196,7 +212,9 @@ final class ClaudeAgent: AgentRun {
                 // the process does.
                 result = (summary, failed)
                 onEvent(.step(summary.split(separator: "\n").first.map(String.init) ?? "Finishing"))
-                onEvent(.turnEnded(summary: summary, failed: failed))
+                // ponytail: nothing echoed at all means this Claude Code doesn't replay messages, so
+                // every result ends a turn, as before.
+                if heard >= sent || heard == 0 { onEvent(.turnEnded(summary: summary, failed: failed)) }
             } else {
                 onEvent(event)
             }

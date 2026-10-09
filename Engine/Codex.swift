@@ -11,7 +11,10 @@ final class CodexAgent: AgentRun {
     private let home: URL?
     private var server: CodexServer?
     private var thread: String?
+    /// The turn under way, or nil between turns.
     private var turn: String?
+    /// The thread to pick up again, or nil for a new one.
+    private let resume: String?
     /// The files each file change writes: Codex's approval request names only the change.
     private var files: [String: [String]] = [:]
     private var onEvent: (AgentEvent) -> Void = { _ in }
@@ -21,9 +24,10 @@ final class CodexAgent: AgentRun {
     /// This job's model, or nil for Settings › Models.
     var model: String?
 
-    init(worktree: URL, home: URL?) {
+    init(worktree: URL, home: URL?, resume: String? = nil) {
         self.worktree = worktree
         self.home = home
+        self.resume = resume
     }
 
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
@@ -41,7 +45,11 @@ final class CodexAgent: AgentRun {
             do {
                 try await server.initialize()
                 let git = await Self.gitDirectory(worktree)
-                let started = try await server.call("thread/start", CodexRPC.threadStart(worktree: worktree, git: git))
+                let started = if let resume {
+                    try await server.call("thread/resume", CodexRPC.threadResume(thread: resume, worktree: worktree, git: git))
+                } else {
+                    try await server.call("thread/start", CodexRPC.threadStart(worktree: worktree, git: git))
+                }
                 guard let thread = (started["thread"] as? [String: Any])?["id"] as? String else {
                     throw Shell.Failure(message: "Codex didn't start a thread.")
                 }
@@ -58,9 +66,13 @@ final class CodexAgent: AgentRun {
         }
     }
 
+    /// While a turn runs, the words join it; between turns they start the next one.
+    // ponytail: a steer that crosses its turn's end falls back to a new turn, but the ended turn
+    // has already reported; count steers in flight if that window ever bites.
     func send(_ text: String) {
         guard let server, let thread else { return }
         Task {
+            if let turn, (try? await server.call("turn/steer", CodexRPC.steer(thread: thread, turn: turn, text: text))) != nil { return }
             let turn = try? await server.call("turn/start", CodexRPC.turnStart(thread: thread, prompt: text,
                                                                              model: model ?? AgentModels.value("codex", "model"),
                                                                              effort: AgentModels.value("codex", "effort")))
@@ -98,6 +110,7 @@ final class CodexAgent: AgentRun {
             if case let .finished(summary, failed) = event {
                 // The turn's result. Desk decides whether another round follows.
                 result = (summary, failed)
+                turn = nil
                 onEvent(.turnEnded(summary: summary, failed: failed))
             } else {
                 onEvent(event)
@@ -116,8 +129,7 @@ final class CodexAgent: AgentRun {
             // The decision has no room for a reason, so it reaches Codex as a word from Oby.
             let params = request["params"] as? [String: Any] ?? [:]
             if let thread = params["threadId"] as? String, let turn = params["turnId"] as? String {
-                let input = [CodexRPC.text("Oby declined that: \(reason)")]
-                Task { _ = try? await server.call("turn/steer", ["threadId": thread, "expectedTurnId": turn, "input": input]) }
+                Task { _ = try? await server.call("turn/steer", CodexRPC.steer(thread: thread, turn: turn, text: "Oby declined that: \(reason)")) }
             }
         case nil:
             // Questions, forms and logins are the user's to answer, not Oby's.
@@ -268,6 +280,16 @@ nonisolated enum CodexRPC {
             params["config"] = ["sandbox_workspace_write": ["writable_roots": [git], "network_access": false]]
         }
         return params
+    }
+
+    /// A thread Codex already has, in the same sandbox: Oby picks it up again to talk to a finished job.
+    static func threadResume(thread: String, worktree: URL, git: String?) -> [String: Any] {
+        threadStart(worktree: worktree, git: git).merging(["threadId": thread]) { $1 }
+    }
+
+    /// Words for the turn under way; Codex refuses them once that turn has ended.
+    static func steer(thread: String, turn: String, text: String) -> [String: Any] {
+        ["threadId": thread, "expectedTurnId": turn, "input": [Self.text(text)]]
     }
 
     /// The task, with the model and effort chosen in Settings › Models (empty means Codex's own default).

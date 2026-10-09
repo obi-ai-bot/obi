@@ -108,6 +108,30 @@ struct LoopsTests {
         #expect(throws: Shell.Failure.self) { try Desk.edit(job(), branch: "oby/fix-42", account: account, check: "a\nb") }
     }
 
+    @Test func talkingToAFinishedJobGivesItANewRound() {
+        var loop = job(rounds: 5, round: 5, check: "swift test")
+        loop.status = .failed
+        loop.finished = .now
+        let resumed = Desk.resumed(loop, "rename the function")
+        #expect(resumed.id == loop.id && resumed.branch == loop.branch && resumed.status == .running && resumed.finished == nil)
+        #expect(resumed.currentRound == 6 && resumed.maxRounds == 6 && resumed.loops)
+        #expect(resumed.notes == ["rename the function"] && resumed.step == "You: rename the function")
+        let once = Desk.resumed(Desk.heard(job(), "also add a test"), "rename it")
+        #expect(once.currentRound == 2 && once.rounds == nil && !once.loops)
+        #expect(once.notes == ["also add a test", "rename it"])
+    }
+
+    @Test func codexResumesInTheSameSandboxAndSteersTheTurnUnderWay() {
+        let worktree = URL(filePath: "/tmp/oby/jobs/abc")
+        let resume = CodexRPC.threadResume(thread: "01a1228b", worktree: worktree, git: "/tmp/oby/repos/deskree-inc/oby/.git")
+        #expect(resume["threadId"] as? String == "01a1228b" && resume["cwd"] as? String == worktree.path)
+        #expect(resume["sandbox"] as? String == "workspace-write" && resume["approvalsReviewer"] as? String == "user")
+        #expect(resume["config"] != nil)
+        let steer = CodexRPC.steer(thread: "01a1228b", turn: "01a1228b-a5fb", text: "also add a test")
+        #expect(steer["expectedTurnId"] as? String == "01a1228b-a5fb")
+        #expect((steer["input"] as? [[String: Any]])?.first?["text"] as? String == "also add a test")
+    }
+
     @Test func publishingAnIssueClosesIt() {
         var finished = job()
         finished.summary = "Fixed the login."

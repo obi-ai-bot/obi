@@ -250,11 +250,52 @@ final class APITests {
         let json = String(decoding: try API.encode(JobJSON(job: job)), as: UTF8.self)
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
-        for key in ["base", "session", "finished", "commits", "published", "issue", "check", "model"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
+        for key in ["base", "session", "finished", "commits", "published", "issue", "check", "model", "notes"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 24)
+        #expect(decoded.count == 25)
         #expect(decoded["rounds"] as? Int == 1 && decoded["round"] as? Int == 1)
         #expect(decoded["kind"] as? String == "review" && decoded["pr"] as? Int == 33 && decoded["status"] as? String == "queued")
+    }
+
+    /// Talking to a job: 404 for an unknown one, 422 for bad words or a job that can't take them,
+    /// and a finished one with a session runs again under the same id.
+    @Test func messagesReachOnlyJobsThatCanTakeThem() async throws {
+        let store = JobStore(url: folder.appending(path: "talk.sqlite"))
+        var never = job
+        never.id = "neverran"
+        never.status = .failed
+        // Gemini can't run jobs yet, so the resumed job fails at once, without starting a process.
+        var finished = job
+        finished.id = "finished"
+        finished.agent = "gemini"
+        finished.status = .done
+        finished.session = "e6a24229"
+        finished.rounds = 3
+        finished.round = 2
+        store.save(never)
+        store.save(finished)
+        let api = API(desk: Desk(accounts: AccountStore(root: folder), store: store), devices: Devices(file: folder.appending(path: "devices.json")))
+        let app = Application(router: api.router(owner: "well@example.com"))
+        try await app.test(.router) { [owner] client in
+            func post(_ id: String, _ body: String) async throws -> (HTTPResponse.Status, [String: Any]) {
+                try await client.execute(uri: "/v1/jobs/\(id)/messages", method: .post, headers: owner, body: ByteBuffer(string: body)) { response in
+                    (response.status, object(Data(response.body.readableBytesView)))
+                }
+            }
+            #expect(try await post("nowhere", #"{"text": "hi"}"#).0 == .notFound)
+            #expect(try await post("finished", #"{"words": "hi"}"#).0 == .badRequest)
+            #expect(try await post("finished", #"{"text": " \n "}"#).0 == .unprocessableContent)
+            #expect(try await post("finished", #"{"text": "\#(String(repeating: "x", count: 2001))"}"#).0 == .unprocessableContent)
+            let (status, refusal) = try await post("neverran", #"{"text": "hi"}"#)
+            #expect(status == .unprocessableContent && (refusal["error"] as? String)?.contains("never started") == true)
+
+            let (resumed, again) = try await post("finished", #"{"text": "rename notes.txt to hello.txt"}"#)
+            #expect(resumed == .ok)
+            #expect(again["id"] as? String == "finished" && again["branch"] as? String == "oby/review-33")
+            #expect(again["notes"] as? [String] == ["rename notes.txt to hello.txt"])
+            #expect(again["round"] as? Int == 3 && again["rounds"] as? Int == 4)
+            #expect(again["status"] as? String == "failed" && again["summary"] as? String == "gemini can't run jobs yet.")
+        }
     }
 
     /// A result whose text holds U+2028 must arrive as one line, or the job never finishes.
