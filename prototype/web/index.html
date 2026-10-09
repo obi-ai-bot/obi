@@ -346,11 +346,14 @@ void main() {
   vec2 e2 = edges(px0 + boil(px0, uSeed + 3.7, 1.6) + vec2(0.6) * uPx, uPx * 1.6) * 0.35 * uPencil;
   vec2 e = max(e1, e2) * grain;
   if (uPencil < 0.5) { e.y = cleanSil(px, r * 1.25); e.x = cleanOverlap(px, r * 1.1); }
-  e *= 1.0 - smoothstep(0.0, 0.3, bookNear(px, r * 1.6));  // the book is a plain dark shape, never outlined
+  e *= 1.0 - smoothstep(0.0, 0.3, bookNear(px, r * 2.6));  // the book is a plain dark shape, never outlined
 
   vec3 col = uFillCol;
   col = mix(col, uInkCol, ink * (0.88 + 0.12 * grain));
   col = mix(col, uInkCol, clamp(bookInk / max(fill, 1e-3), 0., 1.));
+  // parts drawn with lower alpha in the fill pass (the grey paw) get a light shade
+  float shade = clamp(1.0 - f.a / max(fill, 1e-3), 0., 1.);
+  col = mix(col, uInkCol, shade * 0.3);
   col = mix(col, uLineCol, e.x);
   col = mix(col, uSilCol, e.y);
   // premultiplied: the shape keeps its own colour right to its anti-aliased
@@ -523,38 +526,30 @@ for (let i = 0; i < PUFFS + 1; i++) {
   tail.add(m);
 }
 
-// Book: a thick closed book held up in front of the face so the eyes peek over
-// it. Front cover, a light page block and the back cover are stacked with a
-// small offset, so the pages show as a light strip along the top and right
-// edge. Two plain blob paws hold it: a teardrop on the front at the left, an
-// oval peeking out at the right. Covers render into the B channel so the
-// composite fills them dark with no outline.
+// Book: one dark slab with a thin light border, held up in front of the face so
+// the eyes peek over it. A grey paw peeks out from behind the left edge and an
+// oval paw sits over the right edge. Covers render into the B channel (filled
+// dark, never outlined); the grey paw writes a lower alpha, which the
+// composite turns into a light grey shade.
 const book = new THREE.Group();
 rig.add(book);
 const bookFill = fillMat(false);
 const coverFill = new THREE.MeshBasicMaterial({ color: 0x0000ff, toneMapped: false });
+const greyFill = new THREE.MeshBasicMaterial({ color: 0xff0000, opacity: 0.5, toneMapped: false });
 const bookPart = (geo, fill = bookFill) => {
   const m = new THREE.Mesh(geo, fill);
   m.userData = { fill, id: idMat(1, false) };
   return m;
 };
-const BOOK_W = 0.7, BOOK_H = 0.5;
-book.add(bookPart(new THREE.BoxGeometry(BOOK_W, BOOK_H, 0.02).translate(0.036, 0.036, -0.05), coverFill));
-book.add(bookPart(new THREE.BoxGeometry(BOOK_W - 0.01, BOOK_H - 0.01, 0.02).translate(0.02, 0.02, -0.025)));
-book.add(bookPart(new THREE.BoxGeometry(BOOK_W, BOOK_H, 0.02), coverFill));
-// teardrop: round at the bottom, pointed at the top
-const tearProfile = [];
-for (let i = 0; i <= 24; i++) {
-  const t = (i / 24) * Math.PI;
-  tearProfile.push(new THREE.Vector2(Math.sin(t) * Math.sin(t / 2), -Math.cos(t)));
-}
-const leftPaw = bookPart(new THREE.LatheGeometry(tearProfile, 24));
-leftPaw.scale.set(0.075, 0.11, 0.03);
-leftPaw.rotation.z = 0.5;
-leftPaw.position.set(-BOOK_W / 2 + 0.12, -0.04, 0.03);
+const BOOK_W = 0.64, BOOK_H = 0.46, BORDER = 0.022;
+book.add(bookPart(new THREE.BoxGeometry(BOOK_W, BOOK_H, 0.004), coverFill));
+book.add(bookPart(new THREE.BoxGeometry(BOOK_W + BORDER * 2, BOOK_H + BORDER * 2, 0.004).translate(0, 0, -0.005)));
+const leftPaw = bookPart(new THREE.SphereGeometry(1, 24, 16), greyFill);
+leftPaw.scale.set(0.085, 0.1, 0.03);
+leftPaw.position.set(-BOOK_W / 2 - 0.02, -0.02, -0.05);
 const rightPaw = bookPart(new THREE.SphereGeometry(1, 24, 16));
-rightPaw.scale.set(0.11, 0.06, 0.03);
-rightPaw.position.set(BOOK_W / 2 + 0.03, -0.07, 0.03);
+rightPaw.scale.set(0.1, 0.055, 0.03);
+rightPaw.position.set(BOOK_W / 2 + 0.01, -0.03, 0.03);
 book.add(leftPaw, rightPaw);
 const bookMeshes = [];
 book.traverse((o) => { if (o.isMesh) bookMeshes.push(o); });
@@ -562,8 +557,8 @@ function updateBook() {
   const k = V('book');
   book.visible = k > 0.01;
   if (!book.visible) return;
-  book.position.set(-0.04, -0.37 - (1 - Math.min(1, k)) * 0.75, 0.74);
-  book.rotation.z = -0.1;
+  book.position.set(-0.06, -0.36 - (1 - Math.min(1, k)) * 0.75, 0.74);
+  book.rotation.z = 0;  // parallel to the face, so it follows the head's turn and tilt
   book.scale.setScalar(Math.max(0.01, Math.min(1.1, k)));
 }
 
