@@ -1,4 +1,3 @@
-import ServiceManagement
 import SwiftUI
 
 @main
@@ -51,32 +50,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         island.desk.quit()
-    }
-}
-
-struct SettingsView: View {
-    @State private var openAtLogin = SMAppService.mainApp.status == .enabled
-    @State private var problem: String?
-
-    var body: some View {
-        Form {
-            Toggle("Open at login", isOn: $openAtLogin)
-                .onChange(of: openAtLogin) { _, on in
-                    do {
-                        if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-                        problem = nil
-                    } catch {
-                        problem = error.localizedDescription
-                        openAtLogin = SMAppService.mainApp.status == .enabled
-                    }
-                }
-            if let problem {
-                Text(problem).font(.caption).foregroundStyle(.red)
-            }
-        }
-        .formStyle(.grouped)
-        .frame(width: 380)
-        .onAppear { NSApp.activate() }
     }
 }
 
