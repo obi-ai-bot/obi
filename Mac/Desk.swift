@@ -30,7 +30,6 @@ final class Desk {
     var onFinish: (Job) -> Void = { _ in }
 
     private let store = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))
-    private let planner = Planner()
     private var repos: [String] = []
     private var agents: [String: any AgentRun] = [:]
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
@@ -72,7 +71,9 @@ final class Desk {
         talk = .thinking(said)
         Task {
             if repos.isEmpty { await refresh() }
-            let result = await planner.plan(said, context: brainContext)
+            // The brain thinks with the least busy Claude account too, so a busy one doesn't slow it.
+            let brain = ClaudeBrain(home: AccountStore.route(accounts.accounts, agent: "claude")?.home)
+            let result = await Planner(adapters: [brain]).plan(said, context: brainContext)
             // Cancelled or replaced while the brain was thinking.
             guard talk == .thinking(said) else { return }
             show(result, said: said)
@@ -216,6 +217,14 @@ final class Desk {
         replace(job)
         agents[id] = nil
         onFinish(job)
+        guard status == .done, let base = job.base else { return }
+        Task {
+            let count = try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-list", "--count", "refs/remotes/origin/\(base)..HEAD"])
+            if var job = self.job(id) {
+                job.commits = count.flatMap { Int($0) }
+                replace(job)
+            }
+        }
     }
 
     private func replace(_ job: Job, save: Bool = true) {

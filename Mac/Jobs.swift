@@ -25,6 +25,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var created = Date.now
     var started: Date?
     var finished: Date?
+    /// Commits the job made beyond its base: something to publish.
+    var commits: Int?
     /// The draft pull request Oby opened for it, once the user approved.
     var published: String?
 
@@ -86,6 +88,8 @@ final class ClaudeAgent: AgentRun {
     private let configDirectory: URL?
     private var onEvent: (AgentEvent) -> Void = { _ in }
     private var finished = false
+    /// The latest turn's result. The job ends when Claude Code exits, not when a turn ends.
+    private var result: (summary: String, failed: Bool)?
 
     init(worktree: URL, configDirectory: URL? = nil) {
         self.worktree = worktree
@@ -114,7 +118,7 @@ final class ClaudeAgent: AgentRun {
             } catch {
                 Logger.jobs.error("reading Claude Code failed: \(error.localizedDescription, privacy: .public)")
             }
-            if !finished { finish(summary: "Claude Code stopped without finishing.", failed: true) }
+            finish(summary: result?.summary ?? "Claude Code stopped without finishing.", failed: result?.failed ?? true)
         }
     }
 
@@ -143,9 +147,13 @@ final class ClaudeAgent: AgentRun {
         }
         for event in StreamJSON.events(message) {
             if case let .finished(summary, failed) = event {
-                // One task per job for now: the process ends with the turn.
+                // One task per job: no more input, so Claude Code exits once it's idle. It may still
+                // be waiting on work it started in the background, and goes on by itself when that
+                // ends, with another turn and another result.
+                // ponytail: no idle timeout; Stop ends a session whose background work never ends.
+                result = (summary, failed)
                 try? input.fileHandleForWriting.close()
-                finish(summary: summary, failed: failed)
+                onEvent(.step(summary.split(separator: "\n").first.map(String.init) ?? "Finishing"))
             } else {
                 onEvent(event)
             }

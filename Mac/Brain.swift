@@ -129,6 +129,8 @@ nonisolated protocol BrainAdapter: Sendable {
 /// The user's own Claude Code, with no tools, no settings and no MCP: it only fills the schema.
 nonisolated struct ClaudeBrain: BrainAdapter {
     let name = "claude"
+    /// The Claude account to think with (its `CLAUDE_CONFIG_DIR`), or nil for the default login.
+    var home: String?
 
     func complete(system: String, user: String, schema: Data, timeout: TimeInterval) async throws -> Data {
         // An empty working directory, and no GitHub token in its environment.
@@ -139,7 +141,7 @@ nonisolated struct ClaudeBrain: BrainAdapter {
             ["claude", "-p", "--model", "haiku", "--tools", "", "--strict-mcp-config", "--setting-sources", "",
              "--no-session-persistence", "--output-format", "json", "--system-prompt", system,
              "--json-schema", String(decoding: schema, as: UTF8.self)],
-            in: directory, input: Data(user.utf8), env: ["GH_TOKEN": nil, "GITHUB_TOKEN": nil], timeout: timeout)
+            in: directory, input: Data(user.utf8), env: ["GH_TOKEN": nil, "GITHUB_TOKEN": nil, "CLAUDE_CONFIG_DIR": home], timeout: timeout)
         // It can report success without structured_output, so the field is what counts.
         guard let reply = try? JSONSerialization.jsonObject(with: result.out) as? [String: Any],
               let plan = reply["structured_output"] as? [String: Any] else {

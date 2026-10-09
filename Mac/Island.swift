@@ -497,7 +497,7 @@ private struct JobRow: View {
                 }
                 Spacer(minLength: 8)
                 status
-                if job.status == .done {
+                if job.status == .done, (job.commits ?? 0) > 0 {
                     if let link = job.published.flatMap(URL.init(string:)) {
                         Link(destination: link) { pill("Draft PR") }
                     } else if !confirming {
@@ -571,7 +571,7 @@ private struct JobRow: View {
     private var subtitle: String {
         switch job.status {
         case .queued, .running: job.step
-        case .done: job.doneLine
+        case .done: (job.commits ?? 0) > 0 ? "\(job.commits ?? 0) commit\(job.commits == 1 ? "" : "s") on \(job.branch) · \(job.doneLine)" : job.doneLine
         case .failed, .stopped, .interrupted: job.summary.split(separator: "\n").first.map(String.init) ?? ""
         }
     }
