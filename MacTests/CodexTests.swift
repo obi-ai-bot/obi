@@ -11,6 +11,18 @@ struct CodexTests {
         (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
     }
 
+    @Test func threadStartKeepsCommitsInTheSandbox() {
+        let params = CodexRPC.threadStart(worktree: worktree, git: "/tmp/oby/repos/deskree-inc/oby/.git")
+        #expect(params["cwd"] as? String == "/tmp/oby/jobs/abc")
+        #expect(params["sandbox"] as? String == "workspace-write")
+        #expect(params["approvalPolicy"] as? String == "on-request" && params["approvalsReviewer"] as? String == "user")
+        let sandbox = (params["config"] as? [String: Any])?["sandbox_workspace_write"] as? [String: Any]
+        #expect(sandbox?["writable_roots"] as? [String] == ["/tmp/oby/repos/deskree-inc/oby/.git"])
+        #expect(sandbox?["network_access"] as? Bool == false)
+        let plain = CodexRPC.threadStart(worktree: worktree, git: nil)
+        #expect(plain["config"] == nil && plain["sandbox"] as? String == "workspace-write")
+    }
+
     @Test func commandSteps() {
         let cat = message(#"{"method":"item/started","params":{"item":{"type":"commandExecution","id":"exec-c7d8352a","command":"/bin/zsh -lc 'cat hello.txt'","cwd":"/tmp/oby/jobs/abc","status":"inProgress","commandActions":[{"type":"read","command":"cat hello.txt","name":"hello.txt","path":"/tmp/oby/jobs/abc/hello.txt"}]},"threadId":"01a1228b-a556","turnId":"01a1228b-a5fb"}}"#)
         #expect(CodexRPC.events(cat) == [.step("Reading hello.txt")])

@@ -32,10 +32,8 @@ final class CodexAgent: AgentRun {
         Task {
             do {
                 try await server.initialize()
-                // workspace-write keeps writes in the worktree; on-request sends escalations to the
-                // user, which is Oby, rather than to Codex's own reviewer agent.
-                let started = try await server.call("thread/start", ["cwd": worktree.path, "sandbox": "workspace-write",
-                                                                     "approvalPolicy": "on-request", "approvalsReviewer": "user"])
+                let git = await Self.gitDirectory(worktree)
+                let started = try await server.call("thread/start", CodexRPC.threadStart(worktree: worktree, git: git))
                 guard let thread = (started["thread"] as? [String: Any])?["id"] as? String else {
                     throw Shell.Failure(message: "Codex didn't start a thread.")
                 }
@@ -106,6 +104,11 @@ final class CodexAgent: AgentRun {
         guard !finished else { return }
         finished = true
         onEvent(.finished(summary: summary, failed: failed))
+    }
+
+    /// Where the worktree's git data lives: in Oby's clone, outside the worktree.
+    static func gitDirectory(_ worktree: URL) async -> String? {
+        try? await Shell.ok(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], in: worktree)
     }
 
     /// The account's label, like "Plus · name@example.com", or nil when it's signed out.
@@ -217,6 +220,18 @@ final class CodexServer {
 /// Reads what `codex app-server` sends.
 nonisolated enum CodexRPC {
     enum Answer: Equatable { case accept, decline(String) }
+
+    /// Codex's own sandbox, workspace-write: it writes only in the worktree and in the clone's git
+    /// data (so commits stay sandboxed), with no network. Escalations go to the user, which is Oby,
+    /// rather than to Codex's reviewer agent. Without the git directory, plain workspace-write.
+    static func threadStart(worktree: URL, git: String?) -> [String: Any] {
+        var params: [String: Any] = ["cwd": worktree.path, "sandbox": "workspace-write",
+                                     "approvalPolicy": "on-request", "approvalsReviewer": "user"]
+        if let git {
+            params["config"] = ["sandbox_workspace_write": ["writable_roots": [git], "network_access": false]]
+        }
+        return params
+    }
 
     static func text(_ text: String) -> [String: Any] {
         ["type": "text", "text": text, "text_elements": [Any]()]
