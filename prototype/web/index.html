@@ -1107,20 +1107,23 @@ const EXPRESSIONS = [
     },
   },
   {
-    // eye roll: turns away slightly while the eyes keep looking at you, blinks,
-    // opens with the pupils pushed right up (half cut off by the top edge),
-    // holds, looks back down normally, blinks, and turns back to face you
+    // eye roll: the head turns away while the pupils stay on you (pressed into
+    // the near corner, half cut off), blink, open with the pupils pushed right
+    // up (half cut off by the top edge), hold, look back at you, blink, and
+    // turn back to face you
     name: 'Eye roll', dur: 3.0,
     keys: [
-      [0, { ry: -0.3, rz: 0.04, gx: 18 }, 'body'],
+      [0, { ry: -0.45, rz: 0.05 }, 'body'],
+      [0, { shX: 0.68, shY: 0.3, shS: 0.6 }, 'gaze'],
       [0.6, { close: 1 }, 'snap'],
-      [0.7, { shX: -0.32, shY: -0.6, shS: 0.6, gx: 0 }, 'snap'],
+      [0.7, { shX: -0.32, shY: -0.6 }, 'snap'],
       [0.8, { close: 0 }, 'snap'],
       [0.8, { rx: -0.05, mTilt: 4, mC: -0.15, fx: 'huff' }, 'body'],
-      [1.9, { shX: 0, shY: 0, shS: 0, gx: 18, rx: 0 }, 'gaze'],
+      [1.9, { shX: 0.68, shY: 0.3, rx: 0 }, 'gaze'],
       [2.3, { close: 1 }, 'snap'],
-      [2.42, { close: 0, ry: 0, rz: 0, gx: 0, mTilt: 0, mC: 0 }, 'body'],
+      [2.36, { shX: 0, shY: 0, shS: 0 }, 'snap'],
       [2.42, { close: 0 }, 'snap'],
+      [2.42, { ry: 0, rz: 0, mTilt: 0, mC: 0 }, 'body'],
     ],
   },
   {
