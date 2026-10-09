@@ -112,7 +112,7 @@ const DEFAULTS = {
   eyeSep: [96, 'face'], eyeY: [-34, 'face'], eyeW: [64, 'face'], eyeH: [112, 'face'], eyeR: [0.92, 'face'],
   eL: [1, 'face'], eR: [1, 'face'], close: [0, 'face'], blink: [0, 'blink'],
   lidT: [0, 'face'], lidA: [0, 'face'], happy: [0, 'face'], calm: [0, 'face'], peek: [0, 'face'],
-  shX: [0, 'gaze'], shY: [0, 'gaze'],  // catchlight offset inside the eye (eye roll)
+  shX: [0, 'gaze'], shY: [0, 'gaze'], shS: [0, 'face'],  // catchlight offset and extra size (eye roll)
   mW: [0, 'mouth'], mC: [0, 'mouth'], mO: [0, 'mouth'], mRound: [0, 'mouth'], mReveal: [0, 'face'], mArch: [0, 'face'],
   book: [0, 'pop'],  // open book held in front (Reading)
   mY: [92, 'mouth'], mT: [15, 'mouth'], mTilt: [0, 'mouth'],
@@ -735,7 +735,7 @@ function drawEye(side, time) {
   if (shine > 0.02) {
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'destination-out';
-    g.beginPath(); g.arc(w * (0.16 + V('shX') * 0.5), h * (-0.2 + V('shY') * 0.5), Math.min(w, h) * 0.2 * shine, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.arc(w * (0.16 + V('shX') * 0.5), h * (-0.2 + V('shY') * 0.5), Math.min(w, h) * 0.2 * (1 + V('shS')) * shine, 0, Math.PI * 2); g.fill();
   }
 
   // calm: eyes closed into a soft ‿, like a content or unwilling dog
@@ -1107,22 +1107,34 @@ const EXPRESSIONS = [
     },
   },
   {
-    // eye roll: the eyes stay put and the light dot inside them travels up and
-    // over in an arc; the head tips back a touch, then a little huff
-    name: 'Eye roll', dur: 2.6,
+    // eye roll: the eyes stay put and the (enlarged) light dot does the rolling:
+    // drifts left, rises, sweeps slowly over the top with a slight hang, drops
+    // back. The head tips back as the eyes go up and leans with the sweep; it
+    // ends unimpressed with lowered lids, a slow blink and a huff.
+    name: 'Eye roll', dur: 2.4,
     keys: [
-      [0, { mTilt: 5, mW: 26, mC: -0.15 }, 'face'],
-      [0.25, { rx: -0.08, rz: 0.04 }, 'body'],
-      [1.4, { rx: 0, rz: -0.02, fx: 'huff' }, 'body'],
-      [2.0, { mTilt: 0, mW: 0, mC: 0, rz: 0 }],
+      [0, { shS: 0.6 }, 'face'],
+      [1.15, { lidT: 0.22, mTilt: 4, mC: -0.15, fx: 'huff' }, 'face'],
+      [1.35, { blink: 1 }, 'slow'],
+      [1.6, { blink: 0 }, 'face'],
+      [1.9, { shS: 0, lidT: 0, mTilt: 0, mC: 0 }],
     ],
     proc(t, add) {
-      // dot path: lower left -> over the top -> lower right, relative to its rest spot
-      const p = THREE.MathUtils.smoothstep(t, 0.2, 1.3);
-      const fade = THREE.MathUtils.smoothstep(t, 0.05, 0.25) * (1 - THREE.MathUtils.smoothstep(t, 1.4, 1.9));
-      const a = Math.PI * (1.15 - 1.3 * p);
-      add('shX', (Math.cos(a) * 0.44 - 0.32) * fade);
-      add('shY', (0.4 - Math.sin(a) * 0.52) * fade);
+      // dot path inside the eye (fractions of eye width/height from its centre)
+      const R = [0.16, -0.2];
+      const path = [R, [-0.17, -0.06], [-0.14, -0.27], [0, -0.31], [0.14, -0.27], R];
+      // ease along the path, lingering a little over the top
+      const u = THREE.MathUtils.smoothstep(t, 0.15, 1.15);
+      const q = u < 0.5 ? 0.5 * Math.pow(u * 2, 0.8) : 1 - 0.5 * Math.pow((1 - u) * 2, 1.25);
+      const f = q * (path.length - 1), i = Math.min(path.length - 2, Math.floor(f)), k = f - i;
+      const x = THREE.MathUtils.lerp(path[i][0], path[i + 1][0], k);
+      const y = THREE.MathUtils.lerp(path[i][1], path[i + 1][1], k);
+      add('shX', (x - R[0]) / 0.5);
+      add('shY', (y - R[1]) / 0.5);
+      // head follows the eyes: tips back while they are up, leans with the sweep
+      const up = Math.max(0, -(y + 0.06)) / 0.25;
+      add('rx', -0.08 * up);
+      add('rz', -x * 0.12 * env(t, 0.15, 1.3, 0.2));
     },
   },
   {
