@@ -8,6 +8,8 @@ What it does today:
 - Type a task, check the plan card (agent, model, account, repository, branch), and Dispatch.
 - Publish a finished job: Oby shows the exact action, and Face ID signs it with a key that lives in the iPhone's Secure Enclave. Nothing is published without it, and Oby never merges.
 - Settings: the runner's address, its accounts, and each tool's model and effort.
+- Clear done: hides finished jobs from Home. The runner keeps every job.
+- A Live Activity while agents work: Oby, the job, its step and a clock, on the Lock Screen and in the Dynamic Island, ending with how the last job finished. The app updates it while it's open (the `ObyActivity` extension in `LiveActivity/` draws it). Once the app is in the background, the step stays where it was (the clock keeps ticking), and after a minute it says "Open Oby for the latest".
 
 ## Run it
 
@@ -23,5 +25,5 @@ What it does today:
 
 ## Coming next
 
-- A Live Activity and notifications, once the Oby platform can push (F11).
+- Live Activity updates in the background, and notifications, once the Oby platform can push (F11, spike #27). Push needs an APNs key from a paid Apple Developer team, so it waits for Deskree's team.
 - Talking to Oby, and the Apple Watch app (`Watch/`).

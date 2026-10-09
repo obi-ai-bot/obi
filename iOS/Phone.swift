@@ -29,7 +29,9 @@ final class Phone {
     var talk: Talk = .none
     private(set) var connection: Connection = .connecting
     private(set) var host = ""
-    private(set) var jobs: [Job] = []
+    private(set) var jobs: [Job] = [] {
+        didSet { JobsActivity.sync(jobs) }
+    }
     private(set) var accounts: [Account] = []
     private(set) var models: ModelSettings?
     private var loop: Task<Void, Never>?
@@ -81,6 +83,7 @@ final class Phone {
         loop?.cancel()
         loop = nil
         if connection == .live { connection = .connecting }
+        JobsActivity.markStale()
     }
 
     private func apply(_ event: RunnerEvent) {
