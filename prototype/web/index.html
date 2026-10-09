@@ -296,29 +296,26 @@ vec2 edges(vec2 px, float r) {
   return clamp(e / 3.0, 0., 1.);
 }
 
+bool isBook(float id) { return abs(id - 12.0) < 0.5; }
 // clean overlap line: share of nearby samples that belong to a different part
 float cleanOverlap(vec2 px, float r) {
   float c = idAt(px);
-  if (c < 0.5) return 0.;
+  if (c < 0.5 || isBook(c)) return 0.;
   float n = 0.;
   for (int i = 0; i < 12; i++) {
     float t = float(i) * 0.5236;
     vec2 d = vec2(cos(t), sin(t));
     float a = idAt(px + d * r), b = idAt(px + d * r * 0.5);
-    n += (a > 0.5 && abs(a - c) > 0.5 ? 1. : 0.) + (b > 0.5 && abs(b - c) > 0.5 ? 1. : 0.);
+    n += (a > 0.5 && !isBook(a) && abs(a - c) > 0.5 ? 1. : 0.) + (b > 0.5 && !isBook(b) && abs(b - c) > 0.5 ? 1. : 0.);
   }
   return smoothstep(0.06, 0.28, n / 24.);
 }
-float fillAt(vec2 px) { vec4 f = texture2D(tFill, px / uRes); return clamp(f.r + f.g + f.b, 0., 1.); }
-// how much book is around a pixel, so no outline is drawn along its edges
-float bookNear(vec2 px, float r) {
-  float b = texture2D(tFill, px / uRes).b;
-  for (int i = 0; i < 16; i++) {
-    float t = float(i) * 0.392699;
-    vec2 d = vec2(cos(t), sin(t));
-    b = max(b, max(texture2D(tFill, (px + d * r) / uRes).b, texture2D(tFill, (px + d * r * 0.5) / uRes).b));
-  }
-  return b;
+// coverage of everything except the book, so the book is never outlined
+float fillAt(vec2 px) {
+  float id = idAt(px);
+  if (isBook(id)) return 0.;
+  vec4 f = texture2D(tFill, px / uRes);
+  return clamp(f.r + f.g + f.b, 0., 1.);
 }
 // clean silhouette: a smooth band where the blurred coverage crosses 0.5
 float cleanSil(vec2 px, float r) {
@@ -346,7 +343,7 @@ void main() {
   vec2 e2 = edges(px0 + boil(px0, uSeed + 3.7, 1.6) + vec2(0.6) * uPx, uPx * 1.6) * 0.35 * uPencil;
   vec2 e = max(e1, e2) * grain;
   if (uPencil < 0.5) { e.y = cleanSil(px, r * 1.25); e.x = cleanOverlap(px, r * 1.1); }
-  e *= 1.0 - smoothstep(0.0, 0.3, bookNear(px, r * 2.6));  // the book is a plain dark shape, never outlined
+  if (isBook(idAt(px))) e = vec2(0.);  // the book is a plain dark shape, never outlined
 
   vec3 col = uFillCol;
   col = mix(col, uInkCol, ink * (0.88 + 0.12 * grain));
@@ -378,7 +375,7 @@ void main() {
 
 const rtOpts = { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: true };
 const idRT = new THREE.WebGLRenderTarget(1, 1, rtOpts);
-const fillRT = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: true, samples: 4 });
+const fillRT = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: true, samples: Math.min(8, renderer.capabilities.maxSamples) });
 
 const STYLES = {
   line:  { fill: 0x0f0f11, ink: 0xf2f2f0, line: 0xf2f2f0, sil: 0xf2f2f0 },
@@ -528,22 +525,39 @@ for (let i = 0; i < PUFFS + 1; i++) {
 
 // Book: one dark slab with a thin light border, held up in front of the face so
 // the eyes peek over it. A grey paw peeks out from behind the left edge and an
-// oval paw sits over the right edge. Covers render into the B channel (filled
-// dark, never outlined); the grey paw writes a lower alpha, which the
+// oval paw sits over the right edge. The cover renders into the B channel
+// (filled dark, never outlined); the grey paw writes a lower alpha, which the
 // composite turns into a light grey shade.
 const book = new THREE.Group();
 rig.add(book);
 const bookFill = fillMat(false);
-const coverFill = new THREE.MeshBasicMaterial({ color: 0x0000ff, toneMapped: false });
+// flat card with its own smooth edge (screen-space derivative), so long slanted
+// edges stay clean no matter how many MSAA samples the GPU gives us
+const cardFill = (rgb, w, h) => new THREE.ShaderMaterial({
+  uniforms: { uCol: { value: new THREE.Vector3(...rgb) }, uSize: { value: new THREE.Vector2(w, h) } },
+  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform vec3 uCol; uniform vec2 uSize; varying vec2 vUv;
+    void main() {
+      vec2 q = min(vUv, 1.0 - vUv) * uSize;
+      float d = min(q.x, q.y);
+      float a = clamp(d / max(fwidth(d), 1e-5), 0.0, 1.0);
+      gl_FragColor = vec4(uCol, a);
+    }`,
+  transparent: true,
+});
 const greyFill = new THREE.MeshBasicMaterial({ color: 0xff0000, opacity: 0.5, toneMapped: false });
+const BOOK_ID = 12;  // own id so outlines skip the book entirely (see composite)
 const bookPart = (geo, fill = bookFill) => {
   const m = new THREE.Mesh(geo, fill);
-  m.userData = { fill, id: idMat(1, false) };
+  m.userData = { fill, id: idMat(BOOK_ID, false) };
   return m;
 };
-const BOOK_W = 0.64, BOOK_H = 0.46, BORDER = 0.022;
-book.add(bookPart(new THREE.BoxGeometry(BOOK_W, BOOK_H, 0.004), coverFill));
-book.add(bookPart(new THREE.BoxGeometry(BOOK_W + BORDER * 2, BOOK_H + BORDER * 2, 0.004).translate(0, 0, -0.005)));
+const BOOK_W = 0.74, BOOK_H = 0.46, BORDER = 0.022;
+const bookCover = bookPart(new THREE.PlaneGeometry(BOOK_W, BOOK_H), cardFill([0, 0, 1], BOOK_W, BOOK_H));
+const bookBorder = bookPart(new THREE.PlaneGeometry(BOOK_W + BORDER * 2, BOOK_H + BORDER * 2).translate(0, 0, -0.004), cardFill([1, 0, 0], BOOK_W + BORDER * 2, BOOK_H + BORDER * 2));
+// border first, so the cover's soft edge blends over it rather than over a hole
+bookBorder.renderOrder = 1; bookCover.renderOrder = 2;
+book.add(bookCover, bookBorder);
 const leftPaw = bookPart(new THREE.SphereGeometry(1, 24, 16), greyFill);
 leftPaw.scale.set(0.085, 0.1, 0.03);
 leftPaw.position.set(-BOOK_W / 2 - 0.02, -0.02, -0.05);
@@ -1185,7 +1199,8 @@ const EXPRESSIONS = [
     name: 'Reading', dur: 7.0,
     keys: [
       [0, { book: 1, gy: 10, eyeH: 100, rx: 0.04, ry: -0.42, rz: 0.06 }],
-      [6.0, { book: 0, gy: 0, eyeH: 112, rx: 0, ry: 0, rz: 0 }],
+      [6.0, { gy: 0, eyeH: 112, rx: 0, ry: 0, rz: 0 }],
+      [6.0, { book: 0 }, 'face'],  // no overshoot on the way out
     ],
     proc(t, add) {
       const e = env(t, 0.6, 5.8, 0.3);
