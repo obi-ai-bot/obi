@@ -1320,23 +1320,22 @@ function goIdle(hold) { play(IDLE); idleUntil = clock + hold; }
 const POKE_SURPRISE = {
   name: 'Poked', dur: 1.3,
   keys: [
-    [0, { sq: 0.76, y: -0.04, eyeH: 70 }, 'snap'],
-    [0.08, { sq: 1.22, y: 0.2, eyeH: 132, eyeW: 92, eyeR: 1, mW: 30, mO: 0.8, mRound: 1, earLa: 2.6, earRa: 2.6, earLb: 0.2, earRb: 0.2, ts: 1.3, fx: 'bang' }, 'fast'],
-    [0.32, { y: 0, sq: 0.88 }, 'jelly'],
-    [0.5, { sq: 1 }],
+    [0, { sq: 0.93, y: -0.01, eyeH: 90 }, 'fast'],
+    [0.08, { sq: 1.05, y: 0.06, eyeH: 126, eyeW: 92, eyeR: 1, mW: 30, mO: 0.8, mRound: 1, earLa: 2.6, earRa: 2.6, earLb: 0.2, earRb: 0.2, ts: 1.3, fx: 'bang' }, 'fast'],
+    [0.3, { y: 0, sq: 1 }, 'body'],
     [0.95, { eyeH: 112, eyeW: 64, eyeR: 0.92, mW: 0, mO: 0, mRound: 0, earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2, ts: 1 }],
   ],
 };
 const POKE_ANGRY = {
   name: 'Annoyed', dur: 2.2,
   keys: [
-    [0, { sq: 0.86, rx: -0.06 }, 'fast'],
-    [0.12, { rx: 0.14, sq: 0.94, lidA: 0.55, lidT: 0.26, eyeW: 72, eyeH: 96, eyeR: 0.7, mW: 56, mC: -0.38, mT: 17, earLa: 1.25, earRa: 1.25, earLb: -0.25, earRb: -0.25, ts: 1.25, fx: 'anger' }],
+    [0, { sq: 0.95, rx: -0.03 }, 'fast'],
+    [0.12, { rx: 0.1, sq: 0.97, lidA: 0.55, lidT: 0.26, eyeW: 72, eyeH: 96, eyeR: 0.7, mW: 56, mC: -0.38, mT: 17, earLa: 1.25, earRa: 1.25, earLb: -0.25, earRb: -0.25, ts: 1.25, fx: 'anger' }],
     [1.7, { rx: 0, sq: 1, lidA: 0, lidT: 0, eyeW: 64, eyeH: 112, eyeR: 0.92, mW: 0, mC: 0, mT: 15, earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2, ts: 1 }],
   ],
   proc(t, add) {
     const e = env(t, 0.15, 1.6, 0.1);
-    add('x', Math.sin(t * 61) * 0.012 * e); add('rz', Math.sin(t * 47) * 0.015 * e);
+    add('x', Math.sin(t * 61) * 0.004 * e); add('rz', Math.sin(t * 47) * 0.005 * e);
   },
 };
 const POKE_IGNORE = {
@@ -1360,7 +1359,7 @@ function poke() {
   if (pokes >= 6) {
     if (cur === POKE_IGNORE) {
       // already ignoring: just a small twitch, and keep ignoring a bit longer
-      P.sq.vel -= 2.5; P.rz.vel += 1.5; curT = Math.min(curT, 0.6);
+      P.sq.vel -= 0.8; P.rz.vel += 0.4; curT = Math.min(curT, 0.6);
       return;
     }
     play(POKE_IGNORE);
@@ -1368,7 +1367,7 @@ function poke() {
     play(POKE_ANGRY);
   } else {
     // tilt toward a different side each time
-    POKE_SURPRISE.keys[1][1].rz = pokes % 2 ? -0.1 : 0.1;
+    POKE_SURPRISE.keys[1][1].rz = pokes % 2 ? -0.04 : 0.04;
     play(POKE_SURPRISE);
   }
 }
