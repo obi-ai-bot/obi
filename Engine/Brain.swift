@@ -17,9 +17,15 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
         var repo: String
         var baseBranch: String?
         var pr: Int?
+        /// The issue the work is about. Oby fetches it for the agent, who has no GitHub login.
+        var issue: Int?
         var kind: Kind
         var task: String
         var inputs: [String]
+        /// How many rounds the agent may take: 1 unless the user asked to keep going until done.
+        var rounds: Int
+        /// A one-line command that must succeed for the work to count as done.
+        var check: String?
     }
 
     struct Question: Codable, Equatable, Sendable {
@@ -68,6 +74,10 @@ extension Plan {
             if dispatch.task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { problems.append("task is empty") }
             if dispatch.task.count > 2000 { problems.append("task is longer than 2,000 characters") }
             if let pr = dispatch.pr, pr <= 0 { problems.append("pr must be a positive number") }
+            if let issue = dispatch.issue, issue <= 0 { problems.append("issue must be a positive number") }
+            if dispatch.pr != nil, dispatch.issue != nil { problems.append("a job is about a pr or an issue, not both") }
+            if !(1...10).contains(dispatch.rounds) { problems.append("rounds must be 1 to 10") }
+            if let check = dispatch.check, !Plan.isCheck(check) { problems.append("check must be one line of 1 to 200 characters") }
             if let base = dispatch.baseBranch, !Plan.isBranchName(base) { problems.append("base_branch isn't a branch name") }
             if let unknown = dispatch.inputs.first(where: { !context.handles.contains($0) }) { problems.append("input \(unknown) doesn't exist") }
         case .askUser:
@@ -88,18 +98,27 @@ extension Plan {
             && !name.contains("..") && !name.contains("//") && !name.contains("/.")
     }
 
+    /// A command Oby will run to check the work: one line, short enough to read on the card.
+    nonisolated static func isCheck(_ command: String) -> Bool {
+        let trimmed = command.trimmingCharacters(in: .whitespaces)
+        return !trimmed.isEmpty && trimmed.count <= 200 && !trimmed.contains(where: \.isNewline)
+    }
+
     /// The JSON schema the model has to fill, with the choices it has right now.
     nonisolated static func schema(for context: BrainContext) -> Data {
         let nullable = { (object: [String: Any]) -> [String: Any] in ["anyOf": [["type": "null"], object]] }
         let dispatch: [String: Any] = [
             "type": "object", "additionalProperties": false,
-            "required": ["agent", "account", "repo", "base_branch", "pr", "kind", "task", "inputs"],
+            "required": ["agent", "account", "repo", "base_branch", "pr", "issue", "kind", "task", "inputs", "rounds", "check"],
             "properties": [
                 "agent": ["enum": context.accounts.keys.sorted()],
                 "account": ["enum": Array(Set(context.accounts.values.joined())).sorted()],
                 "repo": ["enum": context.repos],
                 "base_branch": ["type": ["string", "null"]],
                 "pr": ["type": ["integer", "null"]],
+                "issue": ["type": ["integer", "null"]],
+                "rounds": ["type": "integer", "minimum": 1, "maximum": 10],
+                "check": ["type": ["string", "null"], "maxLength": 200],
                 "kind": ["enum": Kind.allCases.map(\.rawValue)],
                 "task": ["type": "string", "maxLength": 2000],
                 "inputs": context.handles.isEmpty ? ["type": "array", "maxItems": 0] : ["type": "array", "items": ["enum": context.handles]],
@@ -201,7 +220,7 @@ nonisolated struct Planner: Sendable {
         """
         You are the planner inside Oby, a Mac app that hands coding work (reviews, fixes, builds, tests, investigations) to a coding agent working in its own copy of a repository. Turn what the user said into one plan that matches the JSON schema.
 
-        - dispatch: coding work in one of the schema's repositories: reviewing, fixing, building, testing, investigating, or running the repository's own commands and scripts. The user may name a repository by its short name ("oby" is deskree-inc/oby when only one repository is called that); when several names are close, pick the exact match. `task` restates the work for the agent in the user's terms. `pr` is the pull request number if the user gave one. `base_branch` only if the user named a branch to start from. `agent` and `account` are "auto" unless the user names a tool or an account; Oby then picks the least busy one. `reply` is one short line, like "Oby will review PR #482 in tetrix-front-end."
+        - dispatch: coding work in one of the schema's repositories: reviewing, fixing, building, testing, investigating, or running the repository's own commands and scripts. The user may name a repository by its short name ("oby" is deskree-inc/oby when only one repository is called that); when several names are close, pick the exact match. `task` restates the work for the agent in the user's terms. `pr` is the pull request number when the user says PR or pull request; `issue` is the issue number when the user says issue, or gives a bare number like #42 for work other than a review (never both). `base_branch` only if the user named a branch to start from. `rounds` is 1, or 5 when the user wants the agent to keep going until it's done ("until the tests pass", "keep going", "loop"). `check` is a one-line shell command that must succeed for the work to count as done, only when the user named one; otherwise null. `agent` and `account` are "auto" unless the user names a tool or an account; Oby then picks the least busy one. `reply` is one short line, like "Oby will review PR #482 in tetrix-front-end."
         - ask_user: the repository or the work is unclear. `question` has the question and up to 4 short options.
         - reply_only: anything that isn't coding work, or something Oby never does (merging, pushing, approving, publishing, deleting repositories): say so in `reply`.
         - stop_agent: the user wants running work stopped.
@@ -233,11 +252,19 @@ nonisolated enum Rules {
         }
         let stems: [(String, Plan.Kind)] = [("review", .review), ("fix", .fix), ("build", .build), ("test", .test), ("investigat", .investigate), ("debug", .investigate)]
         let kind = stems.first { text.contains($0.0) }?.1 ?? .investigate
-        let pr = text.firstMatch(of: /(?:#|\bpr\s*#?|pull request\s*#?)(\d+)/).flatMap { Int($0.1) }
+        // "PR 12" and "pull request 12" are pull requests, "issue 42" is an issue, and a bare #42 is an
+        // issue unless the work is a review.
+        let named = text.firstMatch(of: /\b(pr|pull request|issue)\s*#?(\d+)/)
+        let bare = text.firstMatch(of: /#(\d+)/).flatMap { Int($0.1) }
+        var pr = named.flatMap { $0.1 == "issue" ? nil : Int($0.2) }
+        var issue = named.flatMap { $0.1 == "issue" ? Int($0.2) : nil }
+        if named == nil, let bare { if kind == .review { pr = bare } else { issue = bare } }
+        let keepGoing = text.contains("until") || text.contains("keep going") || text.contains("loop")
         let name = repo.split(separator: "/").last.map(String.init) ?? repo
-        return Plan(action: .dispatch, reply: "\(kind.rawValue.capitalized) in \(name)\(pr.map { ", PR #\($0)" } ?? "").",
-                    dispatch: Plan.Dispatch(agent: agent, account: account, repo: repo, baseBranch: nil, pr: pr,
-                                       kind: kind, task: said, inputs: []),
+        let number = pr.map { ", PR #\($0)" } ?? issue.map { ", issue #\($0)" } ?? ""
+        return Plan(action: .dispatch, reply: "\(kind.rawValue.capitalized) in \(name)\(number).",
+                    dispatch: Plan.Dispatch(agent: agent, account: account, repo: repo, baseBranch: nil, pr: pr, issue: issue,
+                                            kind: kind, task: said, inputs: [], rounds: keepGoing ? 5 : 1, check: nil),
                     question: nil)
     }
 }

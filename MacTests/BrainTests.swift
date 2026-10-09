@@ -7,7 +7,7 @@ struct BrainTests {
                                repos: ["deskree-inc/oby", "deskree-inc/tetrix-front-end", "deskree-inc/tetrix-frontend"])
 
     /// A plan exactly as `claude --json-schema` returned it on 2026-10-09.
-    let review = Data(#"{"action": "dispatch", "reply": "Claude Code will review PR #482 in tetrix-front-end.", "dispatch": {"agent": "claude", "account": "default", "repo": "deskree-inc/tetrix-front-end", "base_branch": null, "pr": 482, "kind": "review", "task": "Review pull request #482 in tetrix-front-end.", "inputs": []}, "question": null}"#.utf8)
+    let review = Data(#"{"action": "dispatch", "reply": "Claude Code will review PR #482 in tetrix-front-end.", "dispatch": {"agent": "claude", "account": "default", "repo": "deskree-inc/tetrix-front-end", "base_branch": null, "pr": 482, "issue": null, "kind": "review", "task": "Review pull request #482 in tetrix-front-end.", "inputs": [], "rounds": 1, "check": null}, "question": null}"#.utf8)
 
     @Test func realPlanDecodesAndPasses() throws {
         let plan = try Plan.decode(review)

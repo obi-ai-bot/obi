@@ -123,9 +123,12 @@ final class Desk {
                 return .reply("No \(tool) account is signed in with room to spare. Check Settings › Accounts.")
             }
             let id = String(UUID().uuidString.prefix(8)).lowercased()
-            let job = Job(id: id, request: said, agent: account.agent, account: account.id, repo: dispatch.repo,
-                          branch: Job.branch(kind: dispatch.kind, pr: dispatch.pr, id: id), base: dispatch.baseBranch,
-                          pr: dispatch.pr, kind: dispatch.kind, task: dispatch.task)
+            var job = Job(id: id, request: said, agent: account.agent, account: account.id, repo: dispatch.repo,
+                          branch: Job.branch(kind: dispatch.kind, pr: dispatch.pr, issue: dispatch.issue, id: id),
+                          base: dispatch.baseBranch, pr: dispatch.pr, kind: dispatch.kind, task: dispatch.task)
+            job.issue = dispatch.issue
+            job.rounds = dispatch.rounds > 1 ? dispatch.rounds : nil
+            job.check = dispatch.check
             let reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
             return .plan(Draft(said: said, reply: reply, job: job, guessed: result.by == "rules"))
         case .askUser:
@@ -169,23 +172,34 @@ final class Desk {
     }
 
     /// Dispatches one of the latest plans, by its job's id, with the user's changes (the runner's API).
-    func dispatch(_ id: String, branch: String, account: String) throws -> Job {
+    /// Rounds and check keep the plan's values unless the client sends them.
+    func dispatch(_ id: String, branch: String, account: String, rounds: Int? = nil, check: String?? = nil) throws -> Job {
         guard var draft = drafts.first(where: { $0.job.id == id }) else {
             throw Shell.Failure(message: "Oby doesn't have that plan any more. Ask again.")
         }
-        draft.job = try Self.edit(draft.job, branch: branch, account: accounts.state(account))
+        draft.job = try Self.edit(draft.job, branch: branch, account: accounts.state(account), rounds: rounds, check: check)
         return dispatch(draft)
     }
 
-    /// A plan's job with the only changes the user may make: a branch name Oby can create, and a
-    /// signed-in account, whose tool the job then runs with.
-    nonisolated static func edit(_ job: Job, branch: String, account: AccountState?) throws -> Job {
+    /// A plan's job with the only changes the user may make: a branch name Oby can create, a
+    /// signed-in account (whose tool the job then runs with), and how it loops: 1 to 10 rounds,
+    /// and a one-line check or none.
+    nonisolated static func edit(_ job: Job, branch: String, account: AccountState?, rounds: Int? = nil, check: String?? = nil) throws -> Job {
         guard Plan.isBranchName(branch) else { throw Shell.Failure(message: "That isn't a branch name Oby can create.") }
         guard let account, account.signedIn else { throw Shell.Failure(message: "That account isn't signed in.") }
         var job = job
         job.branch = branch
         job.account = account.account.id
         job.agent = account.account.agent
+        if let rounds {
+            guard (1...10).contains(rounds) else { throw Shell.Failure(message: "Rounds go from 1 to 10.") }
+            job.rounds = rounds > 1 ? rounds : nil
+        }
+        if let check {
+            let trimmed = check?.trimmingCharacters(in: .whitespaces) ?? ""
+            guard trimmed.isEmpty || Plan.isCheck(trimmed) else { throw Shell.Failure(message: "The check is one line of up to 200 characters.") }
+            job.check = trimmed.isEmpty ? nil : trimmed
+        }
         return job
     }
 
@@ -250,8 +264,38 @@ final class Desk {
             replace(job, save: false)
         case .usage:
             accounts.record(event, for: job.account)
+        case .turnEnded(let summary, let failed):
+            // One turn and no check: the job ends when the agent does, after any background work.
+            guard job.loops else { agents[id]?.end(); return }
+            Task { await afterTurn(id, summary: summary, failed: failed) }
         case .finished(let summary, let failed):
             finish(id, failed ? .failed : .done, summary)
+        }
+    }
+
+    /// Runs the job's check, if it has one, then ends the job or sends the agent another round.
+    private func afterTurn(_ id: String, summary: String, failed: Bool) async {
+        guard var job = job(id), job.isActive, let agent = agents[id] else { return }
+        var check: Rounds.Check?
+        if let command = job.check, !failed {
+            job.step = "Checking: \(command)"
+            replace(job, save: false)
+            let result = try? await Shell.run(["sh", "-c", command], in: Workspace.worktree(id), env: Agents.overrides, timeout: 1200)
+            let output = result.map { String(decoding: $0.out, as: UTF8.self) + $0.err } ?? "Oby couldn't run it."
+            check = Rounds.Check(command: command, passed: result?.status == 0, output: String(output.suffix(4000)))
+            // Stopped while the check ran.
+            guard let latest = self.job(id), latest.isActive else { return }
+            job = latest
+        }
+        switch Rounds.next(job, summary: summary, failed: failed, check: check) {
+        case let .finish(status, text):
+            agent.end()
+            finish(id, status, text)
+        case let .again(message):
+            job.round = job.currentRound + 1
+            job.step = "Round \(job.currentRound) of \(job.maxRounds)"
+            replace(job)
+            agent.send(message)
         }
     }
 
@@ -279,5 +323,55 @@ final class Desk {
         jobs[index] = job
         if save { store.save(job) }
         onJobChange(job)
+    }
+}
+
+/// What happens after an agent's turn in a job that loops: the job's check decides, or the
+/// agent's own last line (`GOAL MET` / `GOAL NOT MET: …`), within the job's rounds.
+nonisolated enum Rounds {
+    struct Check: Equatable, Sendable {
+        var command: String
+        var passed: Bool
+        /// The end of what the command printed: what the agent needs to fix it.
+        var output: String
+    }
+
+    enum Next: Equatable {
+        case finish(Job.Status, String)
+        /// Another round, with this message to the agent.
+        case again(String)
+    }
+
+    enum Verdict: Equatable {
+        case met
+        case notMet(String)
+    }
+
+    static func next(_ job: Job, summary: String, failed: Bool, check: Check?) -> Next {
+        let last = job.currentRound >= job.maxRounds
+        let rounds = "\(job.maxRounds) round\(job.maxRounds == 1 ? "" : "s")"
+        if failed { return .finish(.failed, summary) }
+        if let check {
+            if check.passed { return .finish(.done, summary + "\n\nChecked: `\(check.command)` passed.") }
+            if last { return .finish(.failed, "`\(check.command)` still fails after \(rounds).\n\n" + summary) }
+            return .again("Oby ran `\(check.command)` and it failed:\n\n```\n\(check.output)\n```\n\nFix it, run it again yourself, and finish with a short summary.")
+        }
+        switch verdict(summary) {
+        // No verdict line: take the agent at its word rather than loop on a missing line.
+        case .met, nil: return .finish(.done, summary)
+        case .notMet(let left):
+            if last { return .finish(.failed, "Not finished after \(rounds): \(left)\n\n" + summary) }
+            return .again("Keep going: \(left)")
+        }
+    }
+
+    /// The agent's verdict on its own work: its summary's last line.
+    static func verdict(_ summary: String) -> Verdict? {
+        guard let line = summary.split(separator: "\n").last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) else { return nil }
+        let plain = line.filter { $0 != "`" && $0 != "*" }.trimmingCharacters(in: .whitespaces)
+        if plain.uppercased() == "GOAL MET" { return .met }
+        guard plain.uppercased().hasPrefix("GOAL NOT MET") else { return nil }
+        let left = plain.dropFirst("GOAL NOT MET".count).trimmingCharacters(in: CharacterSet(charactersIn: ": "))
+        return .notMet(left.isEmpty ? "the goal isn't met yet" : left)
     }
 }
