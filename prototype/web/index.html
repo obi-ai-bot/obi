@@ -43,7 +43,6 @@
   .chip.on { background: var(--chip-on); color: #000; }
   .chip.auto { border: 1px solid #333; background: transparent; }
   .chip.auto.on { background: transparent; color: var(--ink); border-color: #777; }
-  .chip.toggle:not(.on) { color: var(--muted); text-decoration: line-through; }
   body.collapsed #ui { display: none; }
   #uiToggle {
     position: fixed; right: 10px; top: 10px; z-index: 2;
@@ -80,7 +79,6 @@
     <label class="slider" data-k="round">Round <input type="range" min="0.04" max="0.46" step="0.01" value="0.23"><output></output></label>
     <label class="slider" data-k="width">Width <input type="range" min="0.75" max="1.4" step="0.01" value="0.93"><output></output></label>
     <label class="slider" data-k="height">Height <input type="range" min="0.75" max="1.4" step="0.01" value="0.75"><output></output></label>
-    <label class="slider" data-k="circleR">Circle <input type="range" min="0.4" max="1.2" step="0.01" value="0.7"><output></output></label>
     <button class="chip auto" id="reset">Reset</button>
   </div>
 </div>
@@ -230,11 +228,9 @@ const COMPOSITE_FRAG = /* glsl */`
 precision highp float;
 uniform sampler2D tFill;
 uniform vec2 uRes; uniform float uPx, uLineScale;
-uniform vec3 uCircle;    // backdrop circle: centre x, y and radius in framebuffer px
-uniform float uCircleOn;
 uniform vec4 uWall;      // hiding wall (Hiding): rounded pillar box x0, y0, x1, y1 in framebuffer px
 uniform float uWallOn;
-uniform vec3 uCircleCol, uFillCol, uInkCol, uSilCol;
+uniform vec3 uFillCol, uInkCol, uSilCol;
 
 float fillAt(vec2 px) {
   vec4 f = texture2D(tFill, px / uRes);
@@ -265,18 +261,6 @@ void main() {
   float alpha = fill + e * (1.0 - fill);
   vec3 premul = col * fill + uSilCol * e * (1.0 - fill);
 
-  // static grey circle behind the mascot. Anything above its middle or out to
-  // the sides may peek past the edge; anything dropping below it is clipped,
-  // as if the mascot sits in a round window.
-  if (uCircleOn > 0.5) {
-    float d = length(px - uCircle.xy);
-    float inC = 1.0 - smoothstep(uCircle.z - uPx, uCircle.z + uPx, d);
-    float below = smoothstep(uCircle.y + uPx, uCircle.y - uPx, px.y);
-    float clip = mix(1.0, inC, below);
-    premul *= clip; alpha *= clip;
-    premul += uCircleCol * inC * (1.0 - alpha);
-    alpha += inC * (1.0 - alpha);
-  }
   // wall (Hiding): an invisible pillar in front of the mascot
   vec2 wc = (uWall.xy + uWall.zw) * 0.5, wh = (uWall.zw - uWall.xy) * 0.5;
   float wr = 14.0 * uPx;
@@ -298,8 +282,7 @@ const compositeMat = new THREE.ShaderMaterial({
   uniforms: {
     tFill: { value: fillRT.texture },
     uRes: { value: new THREE.Vector2(1, 1) }, uPx: { value: 1 }, uLineScale: { value: 1 },
-    uCircle: { value: new THREE.Vector3() }, uCircleOn: { value: 0 }, uWall: { value: new THREE.Vector4() }, uWallOn: { value: 0 },
-    uCircleCol: { value: srgb(0x4a4a4f) },
+    uWall: { value: new THREE.Vector4() }, uWallOn: { value: 0 },
     uFillCol: { value: srgb(0xf1f1ee) }, uInkCol: { value: srgb(0x0d0d0e) }, uSilCol: { value: srgb(0xf1f1ee) },
   },
   vertexShader: 'void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }',
@@ -327,9 +310,6 @@ function roundedCube(size = 1, radius = 0.13, seg = 40) {
 }
 
 const BASE_Y = -0.12;
-// world units. The body sits low: the circle's bottom edge cuts off its base,
-// so the circle reads as a frame it rises out of, not a disc behind it.
-const CIRCLE = { x: 0, y: 0.12, r: 0.7 };
 const rig = new THREE.Group(); scene.add(rig);
 let bodyRadius = 0.23;
 const body = new THREE.Mesh(roundedCube(1, bodyRadius), fillMat(true));
@@ -353,14 +333,13 @@ face.renderOrder = 2;
 rig.add(face);
 
 // bump when the defaults change, so saved settings from older builds are dropped once
-const SETTINGS_VERSION = '3';
+const SETTINGS_VERSION = '4';
 try {
   if (localStorage.getItem('cube.v') !== SETTINGS_VERSION) {
     Object.keys(localStorage).filter((k) => k.startsWith('cube.')).forEach((k) => localStorage.removeItem(k));
     localStorage.setItem('cube.v', SETTINGS_VERSION);
   }
 } catch {}
-const show = { circle: false };  // toggles in the chip bar
 /* ---------------------------------------------------------------------------
    Face drawing (black ink on transparent, 512-unit space centred at 0,0)
 --------------------------------------------------------------------------- */
@@ -1084,7 +1063,6 @@ function applyToScene() {
   rig.position.set(V('x'), BASE_Y + V('y'), V('z'));
   rig.rotation.set(V('rx'), V('ry') + V('gx') * 0.0018, V('rz'), 'YXZ');
   rig.scale.setScalar(V('scale'));
-  compositeMat.uniforms.uCircleOn.value = show.circle ? 1 : 0;
   updateWall();
 }
 // Pillar (world units): it never moves; its right edge sits just past the
@@ -1118,17 +1096,6 @@ const autoBtn = document.createElement('button');
 autoBtn.className = 'chip auto on'; autoBtn.textContent = 'Auto';
 autoBtn.onclick = () => setAuto(!auto);
 chips.appendChild(autoBtn);
-for (const [key, name] of [['circle', 'Circle']]) {
-  try { const saved = localStorage.getItem('cube.show.' + key); if (saved !== null) show[key] = saved === '1'; } catch {}
-  const b = document.createElement('button');
-  b.className = 'chip auto toggle' + (show[key] ? ' on' : ''); b.textContent = name;
-  b.onclick = () => {
-    show[key] = !show[key];
-    b.classList.toggle('on', show[key]);
-    try { localStorage.setItem('cube.show.' + key, show[key] ? '1' : '0'); } catch {}
-  };
-  chips.appendChild(b);
-}
 function setAuto(on) { auto = on; autoBtn.classList.toggle('on', on); if (on && cur === IDLE) idleUntil = clock + 0.4; }
 
 addEventListener('keydown', (e) => {
@@ -1156,16 +1123,7 @@ function setSize(v) {
 sizeInput.addEventListener('input', () => setSize(parseFloat(sizeInput.value)));
 
 // Shape: corner roundness rebuilds the body; width/height feed the deform.
-// circle position/size in framebuffer px (origin bottom-left), from world units
-function updateCircle() {
-  const w = innerWidth, h = innerHeight, dprR = renderer.getPixelRatio();
-  camera.updateMatrixWorld();
-  const c = new THREE.Vector3(CIRCLE.x, CIRCLE.y, 0).project(camera), e = new THREE.Vector3(CIRCLE.x + CIRCLE.r, CIRCLE.y, 0).project(camera);
-  compositeMat.uniforms.uCircle.value.set((c.x * 0.5 + 0.5) * w * dprR, (c.y * 0.5 + 0.5) * h * dprR, (e.x - c.x) * 0.5 * w * dprR);
-}
-
 const SHAPE = {
-  circleR: (v) => { CIRCLE.r = v; updateCircle(); },
   round: (v) => { bodyRadius = v; body.geometry.dispose(); body.geometry = roundedCube(1, v); },
   width: (v) => { U.uW.value = v; },
   height: (v) => { U.uH.value = v; },
@@ -1227,12 +1185,11 @@ function resize() {
   camera.lookAt(0, -shift, 0);
   camera.updateProjectionMatrix();
   unitPx = h / needH;
-  updateCircle();
 }
 addEventListener('resize', resize);
 setSize(size);
 
-// Only the box around the cube (plus the circle, when on) is drawn; the rest of
+// Only the box around the cube is drawn; the rest of
 // the canvas stays transparent. The fill pass covers a wider box than the
 // composite, so the outline never samples stale pixels.
 const corner = new THREE.Vector3(), box = { x0: 0, y0: 0, x1: 0, y1: 0 };
@@ -1246,11 +1203,6 @@ function cubeBox() {
     const px = (corner.x * 0.5 + 0.5) * bw, py = (corner.y * 0.5 + 0.5) * bh;
     box.x0 = Math.min(box.x0, px); box.x1 = Math.max(box.x1, px);
     box.y0 = Math.min(box.y0, py); box.y1 = Math.max(box.y1, py);
-  }
-  if (show.circle) {
-    const c = compositeMat.uniforms.uCircle.value;
-    box.x0 = Math.min(box.x0, c.x - c.z); box.x1 = Math.max(box.x1, c.x + c.z);
-    box.y0 = Math.min(box.y0, c.y - c.z); box.y1 = Math.max(box.y1, c.y + c.z);
   }
 }
 function scissor(target, m) {
