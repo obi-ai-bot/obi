@@ -8,6 +8,8 @@ struct HomeView: View {
     @State private var text = ""
     @State private var settings = false
     @FocusState private var typing: Bool
+    /// Jobs that finished by this time (the runner's clock) are hidden from Home only; the runner keeps them all.
+    @AppStorage("home.clearedAt") private var clearedAt: Double = 0
 
     var body: some View {
         NavigationStack {
@@ -19,7 +21,7 @@ struct HomeView: View {
                             .font(.footnote).foregroundStyle(.orange)
                             .padding(.horizontal, 4)
                     }
-                    ForEach(phone.visibleJobs) { job in
+                    ForEach(jobs) { job in
                         NavigationLink(value: job.id) { JobRow(job: job) }
                             .buttonStyle(.plain)
                     }
@@ -31,6 +33,13 @@ struct HomeView: View {
             .background(Color.black)
             .navigationDestination(for: String.self) { JobScreen(id: $0) }
             .toolbar {
+                if jobs.contains(where: { !$0.isActive }) {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Clear done") {
+                            clearedAt = phone.jobs.compactMap(\.finished).max()?.timeIntervalSince1970 ?? clearedAt
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { settings = true } label: { Image(systemName: "gearshape") }
                         .accessibilityLabel("Settings")
@@ -41,6 +50,11 @@ struct HomeView: View {
             .sheet(isPresented: $settings) { SettingsScreen() }
             .onChange(of: mood, initial: true) { character.mood = mood }
         }
+    }
+
+    /// Running jobs, then the ones that finished after the last Clear done.
+    private var jobs: [Job] {
+        phone.visibleJobs.filter { $0.isActive || ($0.finished?.timeIntervalSince1970 ?? 0) > clearedAt }
     }
 
     private var mood: String {
