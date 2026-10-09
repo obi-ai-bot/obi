@@ -876,24 +876,22 @@ const EXPRESSIONS = [
     },
   },
   {
-    // spins round like Working; with its back to you it melts into three dots
-    // like liquid, the dots bounce in a wave while it loads, then they run back
-    // together into the cube, which finishes the spin to face you again
+    // spins round like Working while shrinking into a ball, which melts into
+    // three dots like liquid; the dots bounce in a wave while it loads, then run
+    // back together into a ball that swells into the cube as it spins to face you
     name: 'Loading', dur: 6.0,
     keys: [
       [0, { ry: -0.3, sq: 0.92 }, 'fast'],                                  // wind-up
-      [0.2, { ry: Math.PI, sq: 1 }, 'body'],                                // turns its back to you
-      [0.55, { inflate: 1, scale: 0.5 }, 'body'],                           // rounds into a ball as it turns
-      [0.75, { dR: 1 }, 'pop'],
-      [0.75, { scale: 0.04 }, 'melt'],                                      // the ball melts...
-      [0.85, { dSpread: 1 }, 'spread'],                                     // ...and pulls apart into dots
-      [1.3, { dBounce: 1 }, 'slow'],
+      [0.2, { ry: Math.PI, sq: 1, inflate: 1, scale: 0.5 }, 'body'],        // spins round as it shrinks into a ball
+      [0.5, { dR: 1 }, 'pop'],
+      [0.5, { scale: 0.04 }, 'melt'],                                       // the ball melts...
+      [0.6, { dSpread: 1 }, 'spread'],                                      // ...and pulls apart into dots
+      [1.1, { dBounce: 1 }, 'slow'],
       [4.0, { dBounce: 0 }, 'fast'],
       [4.1, { dSpread: 0 }, 'spread'],                                      // dots run back together
       [4.25, { scale: 0.5 }, 'melt'],                                       // into a ball
-      [4.5, { inflate: 0.17, scale: 1 }, 'body'],                           // that swells back into the cube
-      [4.55, { dR: 0 }, 'body'],
-      [4.7, { ry: TAU }, 'body'],                                           // and spins round to face you
+      [4.45, { inflate: 0.17, scale: 1, ry: TAU }, 'body'],                 // that swells back into the cube as it spins to face you
+      [4.5, { dR: 0 }, 'body'],
     ],
     end() { P.ry.v -= TAU; },
   },
