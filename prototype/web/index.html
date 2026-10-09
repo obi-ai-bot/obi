@@ -44,6 +44,15 @@
   .chip.auto { border: 1px solid #333; background: transparent; }
   .chip.auto.on { background: transparent; color: var(--ink); border-color: #777; }
   .chip.toggle:not(.on) { color: var(--muted); text-decoration: line-through; }
+  body.collapsed #ui { display: none; }
+  #uiToggle {
+    position: fixed; right: 10px; top: 10px; z-index: 2;
+    width: 28px; height: 28px; border-radius: 50%; border: 1px solid #333;
+    background: transparent; color: var(--muted); cursor: pointer;
+    display: grid; place-items: center; padding: 0;
+  }
+  #uiToggle:hover { color: var(--ink); border-color: #777; }
+  body:not(.collapsed) #uiToggle { color: var(--ink); border-color: #777; }
   @media (max-width: 520px) {
     #chips { max-width: 360px; gap: 4px; }
     .chip { padding: 3px 8px; font-size: 11px; }
@@ -58,6 +67,11 @@
 </head>
 <body>
 <div id="stage"></div>
+<button id="uiToggle" title="Controls" aria-label="Show or hide controls">
+  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+    <path d="M2 4h10M2 10h10"/><circle cx="5" cy="4" r="1.6" fill="#0a0a0b"/><circle cx="9" cy="10" r="1.6" fill="#0a0a0b"/>
+  </svg>
+</button>
 <div id="ui">
   <div id="label">idle</div>
   <div id="chips"></div>
@@ -1823,6 +1837,18 @@ for (const [k, apply] of Object.entries(SHAPE)) {
 
 const params = new URLSearchParams(location.search);
 if (params.has('nochips')) document.getElementById('ui').style.display = 'none';
+// Controls toggle: hidden by default in the menu bar app (loaded from a file),
+// open in the browser; the choice is remembered.
+{
+  let open = location.protocol !== 'file:';
+  try { const saved = localStorage.getItem('cube.ui'); if (saved !== null) open = saved === '1'; } catch {}
+  document.body.classList.toggle('collapsed', !open);
+  document.getElementById('uiToggle').onclick = () => {
+    const nowOpen = document.body.classList.toggle('collapsed') === false;
+    try { localStorage.setItem('cube.ui', nowOpen ? '1' : '0'); } catch {}
+    resize();
+  };
+}
 
 let unitPx = 100;
 function resize() {
