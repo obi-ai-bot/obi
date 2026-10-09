@@ -40,11 +40,13 @@ final class Devices {
         for device in saved.devices { Logger.runner.notice("device \(device.id, privacy: .public): \(device.name, privacy: .public)") }
     }
 
-    /// Adds a phone's publishing key and returns its id.
+    /// Adds a phone's publishing key and returns its id. A key it already knows keeps its id, so the
+    /// app can register every time it connects and always holds an id this runner knows.
     func register(name: String, publicKey: String) throws -> String {
         guard Self.key(publicKey) != nil else {
             throw APIError(.unprocessableContent, "publicKey isn't a P-256 public key (X9.63, base64).")
         }
+        if let known = saved.devices.first(where: { $0.publicKey == publicKey }) { return known.id }
         let device = Device(id: UUID().uuidString.lowercased(), name: name, publicKey: publicKey, registered: .now)
         saved.devices.append(device)
         try save()

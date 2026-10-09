@@ -90,6 +90,14 @@ final class DevicesTests {
         #expect(refusal(garbled) == .forbidden)
     }
 
+    /// The app registers every time it connects; the same key keeps one id, and other keys get their own.
+    @Test func registeringAgainKeepsTheId() throws {
+        let first = try register()
+        #expect(try register() == first)
+        let other = P256.Signing.PrivateKey().publicKey.x963Representation.base64EncodedString()
+        #expect(try devices.register(name: "Other iPhone", publicKey: other) != first)
+    }
+
     @Test func malformedKeysDontRegister() {
         for key in ["BJ3x", "not base64!", Data(repeating: 4, count: 65).base64EncodedString(), key.publicKey.rawRepresentation.base64EncodedString()] {
             let error = #expect(throws: APIError.self) { try self.devices.register(name: "x", publicKey: key) }
