@@ -44,6 +44,7 @@ while True:
         depth -= 1
         if depth == 0 and c == '}': spans.append((entry, i + 1))
     i += 1
+assert s[i] == ']', f'scanner stopped at {s[i]!r}, not the end of EXPRESSIONS'
 kept = []
 for a, b in reversed(spans):
     name = re.search(r"name: '([^']+)'", s[a:b]).group(1)
@@ -55,6 +56,17 @@ for a, b in reversed(spans):
     s = s[:a] + s[b:]
 missing = keep - set(kept)
 assert not missing, f'KEEP names not found: {missing}'
+# what actually ships must be exactly KEEP
+arr = s[s.index('const EXPRESSIONS = ['):s.index('\nconst IDLE')]
+shipped = set(re.findall(r"^    name: '([^']+)'", arr, flags=re.M))
+assert shipped == keep, f'shipped {sorted(shipped)} != KEEP'
+# 3. state pools: only name expressions that ship
+def prune(m):
+    names = [n for n in re.findall(r"'([^']+)'", m.group(1)) if n in keep]
+    return 'pool: [' + ', '.join(f"'{n}'" for n in names) + ']'
+states = s.index('const STATES = {'); end = s.index('\n};', states)
+s = s[:states] + re.sub(r'pool: \[([^\]]*)\]', prune, s[states:end]) + s[end:]
+
 open(dst, 'w').write(s)
 print('expressions:', ', '.join(reversed(kept)))
 EOF
@@ -62,8 +74,13 @@ EOF
 cp "$src/vendor/three.module.js" "$out/vendor/"
 cp "$here/README.md" "$here/demo.html" "$out/"
 cp "$src/mac/Info.plist" "$out/mac/"
-# the sample app's "Say hi" waves with Hello, which doesn't ship: just listen
-sed -e '/oby("play(.Hello.)")/d' -e 's/"Hi Oby": wave, then listen/"Hi Oby": listen/' "$src/mac/main.swift" > "$out/mac/main.swift"
+# the sample app's "Say hi" waves with Hello; when Hello doesn't ship, it just listens
+if [[ " $KEEP " == *" Hello "* ]]; then
+  cp "$src/mac/main.swift" "$out/mac/"
+else
+  sed -e '/oby("play(.Hello.)")/d' -e 's/"Hi Oby": wave, then listen/"Hi Oby": listen/' "$src/mac/main.swift" > "$out/mac/main.swift"
+  ! grep -q "Hello" "$out/mac/main.swift" || { echo "build.sh: couldn't take Hello out of mac/main.swift" >&2; exit 1; }
+fi
 cp "$src/mac/build.sh" "$out/mac/"
 
 (cd "$dist" && zip -qr oby.zip oby -x '*.DS_Store')

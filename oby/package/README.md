@@ -13,7 +13,7 @@ oby/
   oby.html                 Oby. Load it in a web view or an iframe.
   vendor/three.module.js   three.js 0.170 (MIT), its only dependency. Keep it next to oby.html.
   demo.html                every state and expression on one page
-  mac/                     sample macOS menu bar app hosting Oby (main.swift, build.sh)
+  mac/                     sample macOS menu bar app hosting Oby (main.swift, build.sh, Info.plist)
 ```
 
 ## See it
@@ -48,6 +48,10 @@ oby.expressions  // list of expressions
 - An unknown name throws, and the error lists the valid names.
 - `setState` waits for a running `play()` to finish, so calls chain:
   `oby.play('Agree'); oby.setState('working')` nods first, then gets to work.
+- Asking for the state Oby is already in does nothing; add `{ now: true }`
+  to start it over.
+- Events arrive just after the change, so a listener can call `oby` back,
+  e.g. `oby.on('end', …)` can `play()` something else.
 
 ### States
 
@@ -96,6 +100,12 @@ Oby forgets the clicks after 6 seconds.
 | `end` | `{ name, completed }` | an expression ended; `completed` is false if it was cut off |
 | `poke` | `{ count }` | someone clicked Oby |
 
+Clicks play their own reactions (`Poked`, `Annoyed`, `Ignoring you`). They
+show up in `expression`/`end` and `oby.playing`, but you can't `play()` them.
+
+A `play()` that's running while Oby is paused or hidden finishes only once
+it's drawing again, because its clock stops with it.
+
 ## Integrating
 
 The page is transparent and has no controls, so put any background behind it.
@@ -107,11 +117,17 @@ the default is `1`, which leaves room for it to move.
 ```swift
 config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs") // lets it load vendor/ from the bundle
 config.userContentController.add(self, name: "oby")                      // events: { oby: "poke", count: 2 }
-webView.setValue(false, forKey: "drawsBackground")                       // see through to your view
+webView.setValue(false, forKey: "drawsBackground")                       // macOS: see through to your view
 webView.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
 
+// once the page has loaded (webView(_:didFinish:)); calls before that are lost
 webView.evaluateJavaScript("oby.setState('thinking')")
 ```
+
+- On iOS, use `webView.isOpaque = false` and `backgroundColor = .clear` instead
+  of `drawsBackground`.
+- `add(self, name:)` keeps `self` alive. In a view controller, call
+  `removeScriptMessageHandler(forName: "oby")` when you're done with it.
 
 `mac/main.swift` is a complete example in about 140 lines. Run
 `zsh mac/build.sh` to try it, then right-click the menu bar icon to switch
@@ -122,15 +138,19 @@ states.
 ```html
 <iframe src="oby/oby.html?size=1.2" style="width:160px;height:160px;border:0"></iframe>
 <script>
-  const oby = document.querySelector('iframe').contentWindow;
-  oby.postMessage({ setState: 'listening' }, '*');
-  oby.postMessage({ play: 'Agree' }, '*');
-  oby.postMessage({ pause: true }, '*');
+  const frame = document.querySelector('iframe');
+  frame.addEventListener('load', () => {  // before load, messages go nowhere
+    const oby = frame.contentWindow;
+    oby.postMessage({ setState: 'listening' }, '*');      // { setState, now: true } switches at once
+    oby.postMessage({ play: 'Agree' }, '*');
+    oby.postMessage({ pause: true }, '*');
+  });
   addEventListener('message', (e) => { if (e.data?.oby) console.log(e.data); }); // { oby: 'poke', count: 1 }
 </script>
 ```
 
-On the same origin you can also call `iframe.contentWindow.oby` directly.
+Oby only takes messages from the page it's embedded in. On the same origin
+you can also call `iframe.contentWindow.oby` directly.
 
 ## Power
 

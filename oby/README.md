@@ -13,6 +13,7 @@ oby/
   oby.html                 Oby: one page with all the code
   vendor/three.module.js   three.js 0.170 (MIT), the only dependency
   mac/                     sample macOS menu bar app that hosts Oby
+  package/                 builds and publishes the handoff package (see below)
 ```
 
 ## This copy vs. the package
@@ -80,6 +81,11 @@ oby.play('Hello')            // waves…
 oby.setState('listening')    // …then listens, once the wave is done
 ```
 
+- Asking for the state Oby is already in does nothing; add `{ now: true }`
+  to start it over.
+- Events arrive just after the change, so a listener can call `oby` back,
+  e.g. `oby.on('end', …)` can `play()` something else.
+
 ### States
 
 A state is a list of expressions Oby picks from, with a pause between them.
@@ -92,7 +98,7 @@ there.
 | `idle`      | Distracted, Wink, Grin, Yawn, Hiding, Sleepy (random) | 7–16 s        |
 | `listening` | Listening, over and over                              | none          |
 | `thinking`  | Thinking, over and over                               | none          |
-| `working`   | Working and Loading (random)                          | 0.3–0.8 s     |
+| `working`   | Working and Loading, taking turns                     | 0.3–0.8 s     |
 | `quiet`     | nothing; idles only                                   | none          |
 
 ### Expressions
@@ -139,6 +145,12 @@ After 6 seconds without a click, it forgets the count.
 | `end` | `{ name, completed }` | an expression ended; `completed` is false if it was cut off |
 | `poke` | `{ count }` | someone clicked Oby |
 
+Clicks play their own reactions (`Poked`, `Annoyed`, `Ignoring you`). They
+show up in `expression`/`end` and `oby.playing`, but you can't `play()` them.
+
+A `play()` that's running while Oby is paused or hidden finishes only once
+it's drawing again, because its clock stops with it.
+
 ## Putting Oby in an app
 
 **Native macOS / iOS (WKWebView).** Bundle `oby.html` and `vendor/` together
@@ -146,8 +158,9 @@ and load the page with `loadFileURL`. Turn on `allowFileAccessFromFileURLs`
 so the page can load three.js from the bundle. Then:
 
 ```swift
+config.userContentController.add(self, name: "oby")  // before creating the web view; events arrive as { oby: "poke", count: 2 }
+// once the page has loaded (webView(_:didFinish:)); calls before that are lost
 webView.evaluateJavaScript("oby.setState('thinking')")
-config.userContentController.add(self, name: "oby")  // events arrive as { oby: "poke", count: 2 }
 ```
 
 `mac/main.swift` does all of this in about 150 lines.
@@ -159,11 +172,14 @@ the default is `1`.
 ```html
 <iframe src="oby/oby.html?embed&size=1.4" style="width:120px;height:120px;border:0"></iframe>
 <script>
-  const oby = document.querySelector('iframe').contentWindow;
-  oby.postMessage({ setState: 'listening' }, '*');
-  oby.postMessage({ play: 'Agree' }, '*');
-  oby.postMessage({ pause: true }, '*');
-  addEventListener('message', (e) => { if (e.data?.oby) console.log(e.data); });  // { oby: 'poke', count: 1 }
+  const frame = document.querySelector('iframe');
+  frame.addEventListener('load', () => {  // before load, messages go nowhere
+    const oby = frame.contentWindow;
+    oby.postMessage({ setState: 'listening' }, '*');      // { setState, now: true } switches at once
+    oby.postMessage({ play: 'Agree' }, '*');
+    oby.postMessage({ pause: true }, '*');
+  });
+  addEventListener('message', (e) => { if (e.data?.oby) console.log(e.data); }); // { oby: 'poke', count: 1 }
 </script>
 ```
 
@@ -180,9 +196,9 @@ Oby was tuned after it made a laptop run hot. Keep these when changing it:
 ## Look
 
 Its look comes from four sliders in the playground: size, roundness, width
-and height. The defaults are in the markup. Values a viewer changes are
-saved in that browser's `localStorage` under `cube.*`; this doesn't happen
-with `?embed`.
+and height. They start from `LOOK` in `oby.html` (the size slider starts at
+56% to leave room for the controls). Values a viewer changes are saved in
+that browser's `localStorage` under `cube.*`, but not with `?embed`.
 
 Drawing rules:
 

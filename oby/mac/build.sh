@@ -9,8 +9,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/web/vendor"
 cp "$here/Info.plist" "$app/Contents/Info.plist"
 cp "$here/../oby.html" "$app/Contents/Resources/web/"
 cp "$here/../vendor/three.module.js" "$app/Contents/Resources/web/vendor/"
-swiftc -O "$here/main.swift" -o "$app/Contents/MacOS/Oby" -framework Cocoa -framework WebKit
+swiftc -O -target arm64-apple-macos13.0 "$here/main.swift" -o "$app/Contents/MacOS/Oby" -framework Cocoa -framework WebKit
 
 pkill -x Oby 2>/dev/null && sleep 1 || true
-pkill -x Cube 2>/dev/null || true
 open "$app"
