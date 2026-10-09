@@ -8,22 +8,26 @@
   html, body { margin: 0; height: 100%; }
   body {
     background: #0a0a0b; color: #e9e9ea;
-    font: 12px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    font: 12px/1.4 "SF Mono", ui-monospace, Menlo, monospace;
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 16px; box-sizing: border-box;
   }
   iframe { width: 300px; height: 300px; border: 0; }
-  .row { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; max-width: 560px; }
-  button { appearance: none; border: 0; border-radius: 999px; padding: 5px 11px; background: #1a1a1d; color: inherit; font: inherit; cursor: pointer; }
-  button.state { background: transparent; box-shadow: inset 0 0 0 1px #333; }
-  button.on { box-shadow: inset 0 0 0 1px #888; }
-  #log { font: 11px/1.4 "SF Mono", ui-monospace, Menlo, monospace; color: #6b6b70; min-height: 16px; }
+  /* plain text lists: states on the left, expressions on the right */
+  .lists { display: flex; gap: 48px; }
+  .list { display: flex; flex-direction: column; align-items: flex-start; }
+  .list h2 { margin: 0 0 6px; font: inherit; color: #4a4a4f; }
+  .list button { appearance: none; border: 0; background: none; padding: 2px 0; color: #8a8a90; font: inherit; cursor: pointer; text-align: left; }
+  .list button:hover, .list button.on { color: #e9e9ea; }
+  #log { color: #4a4a4f; min-height: 16px; }
 </style>
 </head>
 <body>
 <!-- Oby in an iframe, driven with postMessage; events come back the same way. -->
 <iframe id="oby" src="oby.html" title="Oby"></iframe>
-<div class="row" id="states"></div>
-<div class="row" id="expressions"></div>
+<div class="lists">
+  <div class="list" id="states"><h2>setState</h2></div>
+  <div class="list" id="expressions"><h2>play</h2></div>
+</div>
 <div id="log">click a state or an expression, or click Oby</div>
 <script>
   const frame = document.getElementById('oby');
@@ -32,14 +36,14 @@
     if (!e.data?.oby) return;
     const { oby: event, ...data } = e.data;
     document.getElementById('log').textContent = `${event} ${JSON.stringify(data)}`;
-    if (event === 'state') for (const b of document.querySelectorAll('.state')) b.classList.toggle('on', b.textContent === data.state);
+    if (event === 'state') for (const b of document.querySelectorAll('#states button')) b.classList.toggle('on', b.textContent === data.state);
   });
   const init = () => {
     // same origin here, so the lists can be read straight off the page
     const { states, expressions, state } = frame.contentWindow.oby;
     for (const name of states) {
       const b = document.createElement('button');
-      b.className = 'state' + (name === state ? ' on' : ''); b.textContent = name;
+      b.className = name === state ? 'on' : ''; b.textContent = name;
       b.onclick = () => send({ setState: name, now: true });
       document.getElementById('states').append(b);
     }

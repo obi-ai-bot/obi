@@ -10,7 +10,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, WKN
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
     private var webView: WKWebView!
-    private var blinkTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -55,11 +54,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, WKN
     // The page only animates while the popover is open; closed, it draws nothing.
     private func setPaused(_ paused: Bool) { oby("pause(\(paused))") }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { setPaused(!popover.isShown) }
+    // If the page's process dies, the popover would stay blank: load it again.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { webView.reload() }
     func popoverWillShow(_ notification: Notification) { setPaused(false) }
     func popoverDidClose(_ notification: Notification) { setPaused(true) }
 
     @objc private func pickState(_ item: NSMenuItem) {
-        oby("setState('\(item.representedObject as! String)', { now: true })")
+        guard let state = item.representedObject as? String else { return }
+        oby("setState('\(state)', { now: true })")
         showPopover()
     }
     // "Hi Oby": listen
@@ -95,9 +97,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, WKN
 
     // Blink the menu bar icon every few seconds, sometimes twice.
     private func scheduleBlink() {
-        blinkTimer = Timer.scheduledTimer(withTimeInterval: Double.random(in: 2.5...6), repeats: false) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: Double.random(in: 2.5...6), repeats: false) { [weak self] _ in
             self?.blink(times: Double.random(in: 0...1) < 0.2 ? 2 : 1)
         }
+        timer.tolerance = 0.5  // lets the system batch the wakeups
     }
 
     private func blink(times: Int) {
