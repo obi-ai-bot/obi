@@ -4,20 +4,21 @@ import OSLog
 
 /// Keeps the Live Activity in step with the runner's jobs: one activity while any agent works,
 /// ended with how the last job finished.
-// ponytail: updated only while the app runs; after that the Lock Screen keeps the last step and the
-// clock keeps ticking. Live updates in the background need push from the Oby platform (F11, spike #27).
+// ponytail: steps update only while the app runs; in the background the Lock Screen keeps the last
+// step and the clock keeps ticking, and JobWaiter wakes the app to end it. Live steps in the
+// background need push from the Oby platform (F11, spike #27).
 enum JobsActivity {
     private static var current: Activity<ObyActivity>? {
         Activity<ObyActivity>.activities.first { $0.activityState == .active || $0.activityState == .stale }
     }
 
-    static func sync(_ jobs: [Job]) {
+    static func sync(_ jobs: [Job]) async {
         let active = jobs.filter(\.isActive)
         if let job = active.first {
             let state = state(job, working: active.count)
             if let current {
                 guard current.content.state != state || current.content.staleDate != nil else { return }
-                Task { await current.update(ActivityContent(state: state, staleDate: nil)) }
+                await current.update(ActivityContent(state: state, staleDate: nil))
             } else if ActivityAuthorizationInfo().areActivitiesEnabled {
                 do {
                     _ = try Activity.request(attributes: ObyActivity(), content: ActivityContent(state: state, staleDate: nil))
@@ -29,7 +30,7 @@ enum JobsActivity {
                   let last = jobs.max(by: { ($0.finished ?? .distantPast) < ($1.finished ?? .distantPast) }) {
             // The Lock Screen keeps how it ended for 15 minutes after the job finished.
             let end = (last.finished ?? .now).addingTimeInterval(15 * 60)
-            Task { await current.end(ActivityContent(state: state(last, working: 0), staleDate: nil), dismissalPolicy: .after(end)) }
+            await current.end(ActivityContent(state: state(last, working: 0), staleDate: nil), dismissalPolicy: .after(end))
         }
     }
 

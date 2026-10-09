@@ -32,8 +32,17 @@ final class Phone {
     /// The job list arrived at least once, so an empty list really is empty.
     private(set) var loaded = false
     private(set) var jobs: [Job] = [] {
-        didSet { JobsActivity.sync(jobs) }
+        didSet {
+            // One Live Activity update at a time, in order.
+            syncing = Task { [jobs, syncing] in
+                await syncing?.value
+                await JobsActivity.sync(jobs)
+            }
+            JobWaiter.shared.wait(for: jobs, runner: runnerURL)
+        }
     }
+    /// The Live Activity's latest update, so a background wake can wait for it to land.
+    @ObservationIgnored private var syncing: Task<Void, Never>?
     private(set) var accounts: [Account] = []
     private(set) var models: ModelSettings?
     private var loop: Task<Void, Never>?
@@ -79,6 +88,15 @@ final class Phone {
                 wait = min(wait * 2, 15)
             }
         }
+    }
+
+    /// iOS woke Oby because a job ended (JobWaiter): fetch the list, and wait until the Live
+    /// Activity says how it ended before iOS suspends Oby again.
+    func catchUp() async {
+        JobWaiter.shared.reconnect()
+        guard let fresh = try? await runner.jobs() else { return }
+        jobs = fresh
+        await syncing?.value
     }
 
     /// The app went to the background: no connection, no battery spent.

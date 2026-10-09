@@ -34,6 +34,7 @@ final class API {
         router.post("v1/jobs") { request, _ in try await self.dispatch(try await Self.decode(DispatchRequest.self, from: request)) }
         router.get("v1/jobs") { request, _ in await self.jobs(limit: request.uri.queryParameters.get("limit", as: Int.self) ?? 50) }
         router.get("v1/jobs/:id") { _, context in try await self.job(context.parameters.require("id")) }
+        router.get("v1/jobs/:id/wait") { _, context in try await self.wait(context.parameters.require("id")) }
         router.post("v1/jobs/:id/stop") { _, context in try await self.stop(context.parameters.require("id")) }
         router.get("v1/jobs/:id/publish") { _, context in try await self.publishAction(context.parameters.require("id")) }
         router.post("v1/jobs/:id/publish") { request, context in
@@ -77,6 +78,26 @@ final class API {
 
     func job(_ id: String) throws -> Response {
         Self.json(JobJSON(job: try known(id)))
+    }
+
+    /// Answers once the job has ended, with the job. The iPhone waits on this as a background
+    /// download, which iOS keeps going while Oby is suspended and which wakes Oby when it's
+    /// answered, so its Live Activity can say how the job ended. A space every 15 seconds keeps
+    /// the connection open through proxies (JSON allows whitespace before the value).
+    func wait(_ id: String) throws -> Response {
+        _ = try known(id)
+        return Response(status: .ok, headers: [.contentType: "application/json", .cacheControl: "no-cache"],
+                        body: ResponseBody { writer in
+                            var seconds = 0
+                            // ponytail: looks once a second; a continuation per job if many phones wait
+                            while await self.isRunning(id) {
+                                if seconds % 15 == 0 { try await writer.write(ByteBuffer(string: " ")) }
+                                try await Task.sleep(for: .seconds(1))
+                                seconds += 1
+                            }
+                            if let json = await self.jobJSON(id) { try await writer.write(ByteBuffer(string: json)) }
+                            try await writer.finish(nil)
+                        })
     }
 
     /// A job that already ended comes back as it is.
@@ -133,6 +154,12 @@ final class API {
     // MARK: Helpers
 
     private var accounts: [AccountJSON] { desk.accounts.accounts.map(AccountJSON.init) }
+
+    private func isRunning(_ id: String) -> Bool { desk.job(id)?.isActive ?? false }
+
+    private func jobJSON(_ id: String) -> String? {
+        desk.job(id).flatMap { try? Self.encode(JobJSON(job: $0)) }.map { String(decoding: $0, as: UTF8.self) }
+    }
 
     private func known(_ id: String) throws -> Job {
         guard let job = desk.job(id) else { throw APIError(.notFound, "There's no job \(id).") }
