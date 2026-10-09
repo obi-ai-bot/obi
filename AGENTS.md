@@ -32,4 +32,5 @@ Oby is a native macOS app (SwiftUI, macOS 26 and later) that lives in the notch 
 - Open `Oby.xcodeproj` in Xcode 27 and run the `Oby` scheme on My Mac, or `xcodebuild -project Oby.xcodeproj -scheme Oby build`.
 - The character's source is `Character/`. A build phase runs `Character/package/build.sh` and bundles the clean copy (no playground) into the app.
 - The app isn't sandboxed (it runs the user's CLIs) and ships with Developer ID, not the App Store.
-- macOS ignores letter case in paths by default: `oby/` and `Oby/` are the same folder. Never create a lowercase `oby/` folder in this repo.
+- One repository for every platform. The Apple apps share `Oby.xcodeproj`: the Mac app's sources are in `Mac/`, and the iPhone (`iOS/`) and Apple Watch (`Watch/`) apps join it as targets. `Android/` (phones and Wear OS, one Gradle project) and `Desktop/` (Windows and Linux) come later. Every app shows the same character from `Character/`.
+- macOS ignores letter case in paths by default: `oby/` and `Oby/` would be the same folder. Never create a folder that differs from an existing one only by case.
