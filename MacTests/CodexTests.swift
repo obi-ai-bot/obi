@@ -84,10 +84,10 @@ struct CodexTests {
 }
 
 struct ModelsTests {
-    @Test func defaultsAreOpusExtraHighAndSolHigh() {
+    @Test func defaultsAreOpusExtraHighAndSol61High() {
         #expect(AgentModels.defaults["claude.model"] == "claude-opus-5-5")
         #expect(AgentModels.defaults["claude.effort"] == "xhigh")
-        #expect(AgentModels.defaults["codex.model"] == "gpt-6-sol")
+        #expect(AgentModels.defaults["codex.model"] == "gpt-6.1-sol")
         #expect(AgentModels.defaults["codex.effort"] == "high")
         #expect(AgentModels.effortName("xhigh") == "Extra high")
     }

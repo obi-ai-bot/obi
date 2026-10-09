@@ -3,7 +3,7 @@ import Foundation
 /// The model and effort each tool's jobs run with. Settings › Models changes them.
 nonisolated enum AgentModels {
     static let defaults = ["claude.model": "claude-opus-5-5", "claude.effort": "xhigh",
-                           "codex.model": "gpt-6-sol", "codex.effort": "high"]
+                           "codex.model": "gpt-6.1-sol", "codex.effort": "high"]
 
     static let claude = [("claude-opus-5-5", "Opus 5.5"), ("claude-sonnet-5-5", "Sonnet 5.5"),
                          ("claude-haiku-5-5", "Haiku 5.5"), ("claude-fable-5-1", "Fable 5.1")]
