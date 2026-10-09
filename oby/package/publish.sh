@@ -2,8 +2,8 @@
 # Publishes the package to the repo's main branch: builds dist/oby from the
 # working copy (dev), commits exactly those files on top of main on a
 # publish/<sha> branch, and opens a pull request into main (the org requires
-# one). Merge it on GitHub to ship. main holds only the package, so whoever
-# integrates Oby clones main and gets nothing else. Needs the gh CLI.
+# one). Merge it on GitHub to ship. On main the package lives in Character/,
+# next to the app; nothing outside Character/ is touched. Needs the gh CLI.
 set -euo pipefail
 here=${0:A:h}
 root=$(git -C "$here" rev-parse --show-toplevel)
@@ -30,7 +30,7 @@ else
   echo "Couldn't reach origin." >&2; exit 1
 fi
 
-rsync -a --delete --exclude .git "$root/dist/oby/" "$tmp/"
+rsync -a --delete "$root/dist/oby/" "$tmp/Character/"
 git -C "$tmp" add -A
 if git -C "$tmp" diff --cached --quiet; then
   echo "main is already up to date"
