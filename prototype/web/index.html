@@ -113,6 +113,7 @@ const DEFAULTS = {
   eL: [1, 'face'], eR: [1, 'face'], close: [0, 'face'], blink: [0, 'blink'],
   lidT: [0, 'face'], lidA: [0, 'face'], happy: [0, 'face'], calm: [0, 'face'],
   mW: [0, 'mouth'], mC: [0, 'mouth'], mO: [0, 'mouth'], mRound: [0, 'mouth'], mReveal: [0, 'face'], mArch: [0, 'face'],
+  book: [0, 'pop'],  // open book held in front (Reading)
   mY: [92, 'mouth'], mT: [15, 'mouth'], mTilt: [0, 'mouth'],
   // arms: out (0..1), hand target (cube-local), elbow bend
   aLo: [0, 'arm'], aLx: [-0.86, 'arm'], aLy: [-0.22, 'arm'], aLz: [0.05, 'arm'], aLbx: [0, 'arm'], aLby: [-0.12, 'arm'],
@@ -507,6 +508,54 @@ for (let i = 0; i < PUFFS + 1; i++) {
   tailPuffs.push(m);
   tail.add(m);
 }
+
+// Book: an open book held in front of the lower body, covers in a shallow V
+// with the spine nearest to us, pages peeking over the top, and three rounded
+// finger shapes wrapping each outer edge. Rises in from below for Reading.
+const book = new THREE.Group();
+rig.add(book);
+const bookFill = fillMat(false);
+const bookPart = (geo, id) => {
+  const m = new THREE.Mesh(geo, bookFill);
+  m.userData = { fill: bookFill, id: idMat(id, false) };
+  return m;
+};
+const COVER_W = 0.42, COVER_H = 0.5, BOOK_OPEN = 0.35;
+const bookSides = [-1, 1].map((s) => {
+  const side = new THREE.Group();
+  side.rotation.y = s * BOOK_OPEN;
+  const cover = bookPart(new THREE.BoxGeometry(COVER_W, COVER_H, 0.02).translate(s * COVER_W / 2, 0, 0), 7);
+  const pages = bookPart(new THREE.BoxGeometry(COVER_W - 0.03, COVER_H, 0.03).translate(s * (COVER_W / 2 - 0.01), 0.035, -0.03), 8);
+  side.add(cover, pages);
+  // fingers: horizontal capsules on the front face, tips at the outer edge
+  for (const fy of [-0.12, -0.04, 0.04]) {
+    const f = bookPart(new THREE.CapsuleGeometry(0.026, 0.06, 6, 12).rotateZ(Math.PI / 2), 9);
+    f.position.set(s * (COVER_W - 0.05), fy, 0.03);
+    side.add(f);
+  }
+  book.add(side);
+  return side;
+});
+// one page that flips from right to left now and then
+const flipPivot = new THREE.Group();
+const flipPage = bookPart(new THREE.BoxGeometry(COVER_W - 0.04, COVER_H - 0.02, 0.006).translate((COVER_W - 0.04) / 2, 0.03, 0), 10);
+flipPivot.add(flipPage);
+book.add(flipPivot);
+const bookMeshes = [];
+book.traverse((o) => { if (o.isMesh) bookMeshes.push(o); });
+let bookFlip = 0;  // 0..1 progress of the current page flip, set by Reading
+function updateBook() {
+  const k = V('book');
+  book.visible = k > 0.01;
+  if (!book.visible) return;
+  book.position.set(0, -0.52 - (1 - Math.min(1, k)) * 0.75, 0.74);
+  book.scale.setScalar(Math.max(0.01, Math.min(1.1, k)));
+  flipPivot.visible = bookFlip > 0.001 && bookFlip < 0.999;
+  // from lying on the right cover to lying on the left one, lifting as it goes
+  flipPivot.rotation.set(0, BOOK_OPEN + bookFlip * (Math.PI - 2 * BOOK_OPEN), 0);
+  flipPivot.position.y = Math.sin(bookFlip * Math.PI) * 0.03;
+}
+
 let tailPhase = 0;
 const show = { ears: false, limbs: false, tail: false, nose: false, mouth: false, circle: true };  // part toggles in the chip bar
 function updateTail(time) {
@@ -1125,6 +1174,22 @@ const EXPRESSIONS = [
     ],
   },
   {
+    // reads a book: eyes scan each line left to right, a page flips now and then
+    name: 'Reading', dur: 7.0,
+    keys: [
+      [0, { book: 1, gy: 12, eyeH: 96, rx: 0.06 }],
+      [6.0, { book: 0, gy: 0, eyeH: 112, rx: 0 }],
+    ],
+    proc(t, add) {
+      const e = env(t, 0.6, 5.8, 0.3);
+      const line = (t * 0.55) % 1;
+      add('gx', (line < 0.85 ? -26 + line / 0.85 * 52 : 26 - (line - 0.85) / 0.15 * 52) * e);
+      add('rz', Math.sin(t * 0.9) * 0.02 * e);
+      bookFlip = 0;
+      for (const at of [2.0, 4.2]) if (t > at && t < at + 0.7) bookFlip = THREE.MathUtils.smoothstep(t, at, at + 0.7);
+    },
+  },
+  {
     // a fly drifts past; eyes and head follow it, then snap back to you
     name: 'Distracted', dur: 4.0,
     keys: [
@@ -1294,6 +1359,7 @@ function applyToScene() {
   updateArm('L'); updateArm('R');
   updateEar('L'); updateEar('R');
   updateTail(clock);
+  updateBook();
 }
 
 /* ---------------------------------------------------------------------------
@@ -1443,7 +1509,7 @@ let last = performance.now();
 function renderPencil() {
   compositeMat.uniforms.uSeed.value = Math.floor(clock * 8) % 97;
 
-  const meshes = [body, ...arms.L.meshes, ...arms.R.meshes, ears.L, ears.R, ...tail.children];
+  const meshes = [body, ...arms.L.meshes, ...arms.R.meshes, ears.L, ears.R, ...tail.children, ...bookMeshes];
   meshes.forEach((m) => { m.material = m.userData.id; });
   face.visible = false;
   renderer.setRenderTarget(idRT); renderer.clear(); renderer.render(scene, camera);
