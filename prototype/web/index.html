@@ -1657,7 +1657,7 @@ function update(dt) {
       const e = rig.localToWorld(faceE.set(0.47 * U.uW.value, 0.05, 0.5)).project(camera);
       const half = Math.abs(e.x - c.x) * innerWidth / 2;
       const d = Math.hypot((pointer.x - c.x) * innerWidth / 2, (pointer.y - c.y) * innerHeight / 2) / Math.max(half, 1);
-      add('cross', 14 * (1 - THREE.MathUtils.smoothstep(d, 0.45, 1)) * f);
+      add('cross', 8 * (1 - THREE.MathUtils.smoothstep(d, 0.45, 1)) * f);
     } else if (clock > nextSaccade) {
       P.gx.base = (Math.random() - 0.5) * 50; P.gy.base = (Math.random() - 0.5) * 22;
       P.ry.base = P.gx.base * 0.004;
