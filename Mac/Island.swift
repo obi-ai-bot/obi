@@ -302,7 +302,7 @@ private struct OpenIsland: View {
                 field
             default:
                 ForEach(visibleJobs) { job in
-                    JobRow(job: job, onStop: { desk.stop(job.id) })
+                    JobRow(job: job, onStop: { desk.stop(job.id) }, onPublish: { try await desk.publish(job.id) })
                 }
                 field
             }
@@ -476,11 +476,16 @@ private struct PlanCard: View {
     }
 }
 
-/// One job: what it is, what it's doing now, and how it ended. Click a finished one to read its summary.
+/// One job: what it is, what it's doing now, and how it ended. Click a finished one to read its
+/// summary; a done one can be published, after Oby shows exactly what that does.
 private struct JobRow: View {
     let job: Job
     let onStop: () -> Void
+    let onPublish: () async throws -> Void
     @State private var expanded = false
+    @State private var confirming = false
+    @State private var publishing = false
+    @State private var problem: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -492,6 +497,14 @@ private struct JobRow: View {
                 }
                 Spacer(minLength: 8)
                 status
+                if job.status == .done {
+                    if let link = job.published.flatMap(URL.init(string:)) {
+                        Link(destination: link) { pill("Draft PR") }
+                    } else if !confirming {
+                        Button { confirming = true } label: { pill("Publish") }
+                            .buttonStyle(.plain)
+                    }
+                }
                 if job.isActive {
                     Button(action: onStop) {
                         Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
@@ -509,11 +522,50 @@ private struct JobRow: View {
                 }
                 .frame(maxHeight: 180)
             }
+            if confirming {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(Publish.action(for: job, base: job.base ?? "")).font(.system(size: 13, weight: .medium))
+                    if let problem {
+                        Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(3)
+                    }
+                    HStack(spacing: 8) {
+                        Button {
+                            Task {
+                                publishing = true
+                                defer { publishing = false }
+                                do {
+                                    try await onPublish()
+                                    confirming = false
+                                    problem = nil
+                                } catch {
+                                    problem = error.localizedDescription
+                                }
+                            }
+                        } label: {
+                            Label(publishing ? "Publishing…" : "Publish with Touch ID", systemImage: "touchid")
+                                .font(.system(size: 13, weight: .semibold)).foregroundStyle(.black)
+                                .padding(.horizontal, 14).frame(height: 30)
+                                .background(.white, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(publishing)
+                        Button { confirming = false; problem = nil } label: { pill("Not now") }
+                            .buttonStyle(.plain)
+                            .disabled(publishing)
+                    }
+                }
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 11)
         .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture { if !job.isActive { expanded.toggle() } }
+    }
+
+    private func pill(_ title: String) -> some View {
+        Text(title).font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 10).frame(height: 24)
+            .background(.white.opacity(0.12), in: Capsule())
     }
 
     private var subtitle: String {

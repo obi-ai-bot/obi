@@ -215,8 +215,6 @@ nonisolated enum Publish {
             \(request)
 
             Oby opened this draft pull request after the user approved it with Touch ID.
-
-            Tetrix-Session: 47a72034-472b-4eac-bd21-05670b8c2961
             """
     }
 

@@ -58,7 +58,7 @@ struct AgentTests {
     @Test func policyKeepsPublishingForTheUser() {
         let worktree = URL(filePath: "/tmp/oby/jobs/abc")
         for command in ["git push", "git push origin HEAD", "cd x && git -c a=b push --force", "gh pr comment 4 -b hi", "gh pr review --approve",
-                        "gh api -X POST repos/a/b/issues", "git remote set-url --push origin x", "gh auth token"] {
+                        "gh api -X POST repos/a/b/issues", "git remote set-url --push origin x", "git config remote.origin.pushUrl x", "gh auth token"] {
             #expect(Policy.deny(tool: "Bash", input: ["command": command], worktree: worktree) != nil, "\(command)")
         }
         for command in ["pnpm test", "git status", "git commit -m 'fix: push button'", "git -C sub commit -m 'push it'", "git log --oneline", "ls"] {

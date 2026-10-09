@@ -25,6 +25,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var created = Date.now
     var started: Date?
     var finished: Date?
+    /// The draft pull request Oby opened for it, once the user approved.
+    var published: String?
 
     var isActive: Bool { status == .queued || status == .running }
     var agentName: String { Job.agentNames[agent] ?? agent }
@@ -237,7 +239,7 @@ nonisolated enum StreamJSON {
 nonisolated enum Policy {
     // ponytail: a pattern deny-list is leaky on purpose-built commands; the real fences are that
     // the agent has no GitHub login and Oby's clone can't push. F3 asks the user instead.
-    static let publishing = /\bgit(\s+(-[cC]\s+\S+|--\S+))*\s+(push|remote\s+(set-url|add))\b|pushurl|\bgh\s+(pr\s+(create|merge|review|comment|close|edit|ready|reopen)|issue\s+(create|comment|close|edit|reopen|delete)|release|repo\s+(create|delete|edit|fork|rename|archive)|api|auth)\b/
+    static let publishing = /\bgit(\s+(-[cC]\s+\S+|--\S+))*\s+(push|remote\s+(set-url|add))\b|(?i:pushurl)|\bgh\s+(pr\s+(create|merge|review|comment|close|edit|ready|reopen)|issue\s+(create|comment|close|edit|reopen|delete)|release|repo\s+(create|delete|edit|fork|rename|archive)|api|auth)\b/
 
     /// Why this tool call is refused, or nil to allow it.
     static func deny(tool: String, input: [String: Any], worktree: URL) -> String? {

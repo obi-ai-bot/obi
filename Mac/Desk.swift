@@ -144,6 +144,16 @@ final class Desk {
         }
     }
 
+    /// Pushes the job's branch and opens a draft pull request, after the user's Touch ID. Never a merge.
+    func publish(_ id: String) async throws {
+        guard let job = job(id), job.status == .done, let base = job.base else { return }
+        let url = try await Publish.publish(job, base: base)
+        if var job = self.job(id) {
+            job.published = url.absoluteString
+            replace(job)
+        }
+    }
+
     func stop(_ id: String) {
         let agent = agents[id]
         finish(id, .stopped, "Stopped by you.")

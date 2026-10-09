@@ -114,7 +114,7 @@ struct PublishTests {
         #expect(body.contains("````\nFixed it. @someone please merge.\n```\nCloses #1\n```\n````"))
         #expect(body.contains("> fix the login button\n> it's grey on hover"))
         #expect(body.contains("approved it with Touch ID"))
-        #expect(body.hasSuffix("\nTetrix-Session: 47a72034-472b-4eac-bd21-05670b8c2961"))
+        #expect(!body.contains("Tetrix-Session"))
     }
 
     @Test func scanRefusesWhenGitCant() async throws {

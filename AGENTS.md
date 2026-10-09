@@ -25,11 +25,17 @@ Oby is a native macOS app (SwiftUI, macOS 26 and later) that lives in the notch 
 - **PATH:** read the login shell with `getpwuid(getuid()).pw_shell` (it can differ from `$SHELL`) and run it with `-l -c /usr/bin/env`.
 - **Codex:** `codex app-server` speaks JSON-RPC over stdio: `initialize`, then `account/read`, `account/rateLimits/read`, `thread/start`, `turn/start`, `turn/interrupt`.
 - **Separate accounts:** `CLAUDE_CONFIG_DIR` per Claude account, `CODEX_HOME` per Codex account.
+- **The brain:** `claude -p --model haiku --tools "" --strict-mcp-config --setting-sources "" --no-session-persistence --output-format json --system-prompt … --json-schema …`, the prompt on stdin, in an empty directory; the plan is `.structured_output` (it can be missing even on success). 3–4 s. Swift validates every plan (`Plan.problems`).
+- **Codex jobs:** `thread/start` with `sandbox: "workspace-write"`, `approvalPolicy: "on-request"`, `approvalsReviewer: "user"` and `config.sandbox_workspace_write` (`writable_roots`: the clone's git directory, `network_access: false`), so commits stay sandboxed. Approvals arrive as `item/commandExecution/requestApproval` and `item/fileChange/requestApproval`; answer `{"decision": "accept" | "decline"}`.
+- **Reading agents' output:** split on `\n` only. Foundation's `lines` also breaks at U+2028 inside JSON strings, and a broken `result` line hangs the job.
+- **Agents can't publish:** they run with an empty `GH_CONFIG_DIR` (no GitHub login) and Oby's clone has an invalid `remote.origin.pushurl`. Only Publish pushes, after Touch ID.
 - **The character in the notch:** `NSPanel` (borderless, non-activating) at `CGWindowLevelForKey(.mainMenuWindow) + 3`; `oby.html` served from the `oby://` scheme into SwiftUI's `WebView`; JavaScript calls go to the page's own world (`contentWorld: .page`). Paused while the island is closed: about 0% CPU.
 
 ## Build and run
 
 - Open `Oby.xcodeproj` in Xcode 27 and run the `Oby` scheme on My Mac, or `xcodebuild -project Oby.xcodeproj -scheme Oby build`.
+- Tests: `MacTests` (Swift Testing, hosted by the app). Run them with ⌘U or `xcodebuild -project Oby.xcodeproj -scheme Oby -destination 'platform=macOS' test`. While tests run, a test-host Oby is alive, so a freshly launched Oby quits (one instance at a time): launch it again when they finish.
+- Oby keeps its clones, job worktrees, `oby.sqlite` and `accounts.json` in `~/Library/Application Support/Oby`.
 - The character's source is `Character/`. A build phase runs `Character/package/build.sh` and bundles the clean copy (no playground) into the app.
 - The app isn't sandboxed (it runs the user's CLIs) and ships with Developer ID, not the App Store.
 - One repository for every platform. The Apple apps share `Oby.xcodeproj`: the Mac app's sources are in `Mac/`, and the iPhone (`iOS/`) and Apple Watch (`Watch/`) apps join it as targets. `Android/` (phones and Wear OS, one Gradle project) and `Desktop/` (Windows and Linux) come later. Every app shows the same character from `Character/`.
