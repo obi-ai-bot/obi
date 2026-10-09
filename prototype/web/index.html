@@ -98,6 +98,7 @@ const PRESET = {
   blink:  [1600, 75],
   gaze:   [650, 46],
   ear:    [70, 6],
+  roll:   [45, 13],  // unhurried eye movement (eye roll)
   wag:    [60, 11],
 };
 
@@ -1107,23 +1108,28 @@ const EXPRESSIONS = [
     },
   },
   {
-    // eye roll: the head turns away while the pupils stay on you (pressed into
-    // the near corner, half cut off), blink, open with the pupils pushed right
-    // up (half cut off by the top edge), hold, look back at you, blink, and
-    // turn back to face you
-    name: 'Eye roll', dur: 4.2,
+    // eye roll: looks you over (head dips, pupils travel slowly from bottom up
+    // to your eyes), locks on, slowly turns away and lifts its head while the
+    // pupils stay on you from the near corner, then the pupils drift up into
+    // the top edge, hold, look back at you, blink, and turn back to face you.
+    // Pupil positions are offsets of the eye's light dot from where it rests.
+    name: 'Eye roll', dur: 5.9,
+    noBlink: true,  // it has its own blink
     keys: [
-      [0, { ry: -0.45, rz: 0.05 }, 'slow'],  // slow turn, about a second
-      [0, { shX: 0.68, shY: 0.3, shS: 0.6 }, 'gaze'],
-      [1.0, { close: 1 }, 'snap'],
-      [1.1, { shX: -0.32, shY: -0.6 }, 'snap'],
-      [1.2, { close: 0 }, 'snap'],
-      [1.2, { rx: -0.05, mTilt: 4, mC: -0.15, fx: 'huff' }, 'body'],
-      [2.3, { shX: 0.68, shY: 0.3, rx: 0 }, 'gaze'],
-      [2.7, { close: 1 }, 'snap'],
-      [2.76, { shX: 0, shY: 0, shS: 0 }, 'snap'],
-      [2.82, { close: 0 }, 'snap'],
-      [2.82, { ry: 0, rz: 0, mTilt: 0, mC: 0 }, 'slow'],
+      [0, { shS: 0.6 }, 'face'],
+      [0, { shX: -0.32, shY: 1.04 }, 'gaze'],               // bottom
+      [0, { rx: 0.1, lidT: 0.15 }, 'body'],
+      [0.3, { shY: 0.4 }, 'slow'],                          // slowly up to centre: checking you out
+      [1.8, { ry: -0.45, rz: 0.05, rx: -0.02 }, 'slow'],    // turn away and lift, slowly
+      [1.8, { shX: 0.68, shY: 0.5 }, 'slow'],               // eyes stay on you, near corner
+      [3.0, { shX: -0.32, shY: -0.6 }, 'roll'],             // roll up into the top edge
+      [3.0, { lidT: 0, rx: -0.05 }, 'body'],
+      [3.3, { mTilt: 4, mC: -0.15, fx: 'huff' }, 'body'],
+      [4.1, { shX: 0.68, shY: 0.5 }, 'roll'],               // look back at you
+      [4.6, { close: 1 }, 'snap'],
+      [4.66, { shX: 0, shY: 0, shS: 0 }, 'snap'],
+      [4.72, { close: 0 }, 'snap'],
+      [4.72, { ry: 0, rz: 0, rx: 0, mTilt: 0, mC: 0 }, 'slow'],
     ],
   },
   {
@@ -1346,7 +1352,7 @@ const EAR_KEYS = {
   Yawn:      [[0.4, { earLa: 1.3, earRa: 1.3, earLb: 0.6, earRb: 0.6 }], [1.6, { earLa: -0.2, earRa: -0.2, earLb: 0.2, earRb: 0.2 }, 'slow'], [2.8, { earLa: 0, earRa: 0 }]],
   Agree:     [[0, { earLa: 0.5, earRa: 0.5 }], [1.9, { earLa: 0, earRa: 0 }]],
   Disagree:  [[0, { earLa: -0.35, earRa: -0.35, earLb: 0.05, earRb: 0.05 }, 'slow'], [2.4, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
-  'Eye roll': [[1.2, { earLa: -0.2, earRa: 0.4 }], [2.82, { earLa: 0, earRa: 0 }]],
+  'Eye roll': [[1.8, { earLa: -0.2, earRa: 0.4 }], [4.72, { earLa: 0, earRa: 0 }]],
   Tired:     [[0, { earLa: -0.35, earRa: -0.35, earLb: 0.05, earRb: 0.05 }, 'slow'], [3.4, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
   Distracted:[[0.3, { earLa: 1.4, earRa: 1.4, earLb: 0.5, earRb: 0.5 }], [3.1, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
   Sleepy:    [[0, { earLa: -0.15, earRa: -0.15 }, 'slow'], [2.4, { earLa: -0.4, earRa: -0.4, earLb: 0.05, earRb: 0.05 }, 'slow'], [6.4, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
