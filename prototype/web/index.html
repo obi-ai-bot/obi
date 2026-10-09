@@ -104,7 +104,7 @@ const PRESET = {
   blink:  [1600, 75],
   gaze:   [650, 46],
   roll:   [45, 13],
-  drop:   [150, 10],  // falls and bounces (glasses landing)  // unhurried eye movement (eye roll)
+  flip:   [150, 11],  // glasses swinging down on their hinge, with a little bounce  // unhurried eye movement (eye roll)
 };
 
 const DEFAULTS = {
@@ -121,8 +121,8 @@ const DEFAULTS = {
   shX: [0, 'gaze'], shY: [0, 'gaze'], shS: [0, 'face'],  // catchlight offset and extra size (eye roll)
   // mouth: only Yawn shows one (mouthOn), a dot that opens into a round yawn
   mouthOn: [0, 'face'], mW: [0, 'mouth'], mO: [0, 'mouth'], mY: [92, 'mouth'], mT: [15, 'mouth'],
-  // round glasses (Searching): shown, lift above the eyes, push back, flip up, tilt
-  glasses: [0, 'snap'], glY: [2.6, 'drop'], glZ: [0, 'body'], glRX: [0, 'body'], glTilt: [0, 'pop'],
+  // round glasses (Searching): shown, nudge up, push back, swing up into the head, tilt
+  glasses: [0, 'snap'], glY: [0, 'pop'], glZ: [0, 'body'], glRX: [1.7, 'flip'], glTilt: [0, 'pop'],
   wall: [0, 'body'],  // invisible wall to hide behind (Hiding)
 };
 
@@ -365,8 +365,14 @@ function deformPoint(x, y, z) {
 // Glasses (Searching): a real object in front of the face, not drawn on it.
 // Two round frames and a bridge in ink, a white glint across each lens, and
 // arms that run back along the sides of the head, so turning shows depth.
-const glasses = new THREE.Group();
+// They're stowed inside the forehead: they swing out and down over the eyes
+// on a hinge above them (glRX 0 = on, ~1.7 = tucked into the head, where the
+// body hides them), folding their arms flat as they go back in.
+const glasses = new THREE.Group();   // the hinge, on the forehead
+const glFrame = new THREE.Group();   // the frames, hanging from it
+glasses.add(glFrame);
 rig.add(glasses);
+const GL_HINGE = 0.2;  // hinge height above the eyes
 // B = worn ink: added on top of whatever's there (so the body underneath still
 // counts for the outline) and drawn by the composite without an outline of its own
 const glInk = new THREE.MeshBasicMaterial({ color: 0x0000ff, toneMapped: false, blending: THREE.CustomBlending,
@@ -384,12 +390,12 @@ for (const side of [-1, 1]) {
   const glint = new THREE.Mesh(new THREE.PlaneGeometry(0.02, 0.1), glWhite);
   glint.position.set(side * LENS_X - 0.055, 0.05, 0.02); glint.rotation.z = -0.65;
   const hinge = new THREE.Mesh(rodGeo, glInk), arm = new THREE.Mesh(rodGeo, glInk);
-  glasses.add(rim, glint, hinge, arm);
+  glFrame.add(rim, glint, hinge, arm);
   glArms.push({ side, hinge, arm });
 }
 const bridge = new THREE.Mesh(new THREE.TorusGeometry(LENS_X - LENS_R + 0.004, 0.014, 8, 20, Math.PI), glInk);
 bridge.position.y = -0.01;
-glasses.add(bridge);
+glFrame.add(bridge);
 const rodUp = new THREE.Vector3(0, 1, 0), rodDir = new THREE.Vector3();
 function placeRod(mesh, a, b) {
   rodDir.subVectors(b, a);
@@ -403,14 +409,17 @@ function updateGlasses() {
   // the eyes' height on the face plane, in the body's own units
   const yl = -(10 + V('eyeY') * (FACE_PX / 512 * 1.28) / U.uH.value) * FACE_UNITS / FACE_PX;
   const at = deformPoint(0, yl, 0.5);
-  glasses.position.set(at.x, at.y + V('glY'), at.z + 0.055 + V('glZ'));
+  glasses.position.set(at.x, at.y + GL_HINGE + V('glY'), at.z + 0.055 + V('glZ'));
   glasses.rotation.set(V('glRX'), 0, V('glTilt'));
-  // arms: out from each rim to the side of the head, then back along it
+  glFrame.position.y = -GL_HINGE;
+  // arms: out from each rim to the side of the head, then back along it;
+  // they fold in flat behind the lenses as the glasses swing up into the head
+  const fold = THREE.MathUtils.clamp(V('glRX') / 0.7, 0, 1);
   const sideX = deformPoint(0.5, yl, 0).x + 0.02;
   for (const { side, hinge, arm } of glArms) {
     const a = new THREE.Vector3(side * (LENS_X + LENS_R), 0.01, 0);
-    const b = new THREE.Vector3(side * sideX, 0.01, -0.2);
-    const c = new THREE.Vector3(side * sideX, -0.005, -0.75);
+    const b = new THREE.Vector3(side * sideX, 0.01, -0.2).lerp(new THREE.Vector3(side * (LENS_X + LENS_R - 0.02), 0.01, -0.03), fold);
+    const c = new THREE.Vector3(side * sideX, -0.005, -0.75).lerp(new THREE.Vector3(side * (LENS_X - 0.25), 0.01, -0.04), fold);
     placeRod(hinge, a, b); placeRod(arm, b, c);
   }
 }
@@ -506,7 +515,7 @@ function drawMouth(ctx) {
 // opposite to the head's turn, fading as the glasses lift away.
 function drawGlassesShadow(ctx) {
   if (V('glasses') < 0.5) return;
-  const lift = THREE.MathUtils.clamp(V('glY') / 0.25, 0, 1);
+  const lift = THREE.MathUtils.clamp(Math.max(V('glY') / 0.25, V('glRX') / 0.6), 0, 1);
   if (lift >= 1) return;
   const px = 512 / (1.28 * FACE_UNITS);  // world units -> face drawing units
   const sep = LENS_X * px, R = LENS_R * px, y = V('eyeY');
@@ -525,7 +534,7 @@ function drawGlassesShadow(ctx) {
 // Everything the face drawing reads. When none of it moved by a visible amount,
 // the canvas and its GPU upload are skipped.
 const FACE_KEYS = ['gx', 'gy', 'eLx', 'eRx', 'eyeSep', 'eyeY', 'eyeW', 'eyeH', 'eyeR', 'eL', 'eR', 'close', 'blink',
-  'lidT', 'lidA', 'happy', 'calm', 'peek', 'shX', 'shY', 'shS', 'mouthOn', 'mW', 'mO', 'mY', 'mT', 'glasses', 'glY', 'glTilt'];
+  'lidT', 'lidA', 'happy', 'calm', 'peek', 'shX', 'shY', 'shS', 'mouthOn', 'mW', 'mO', 'mY', 'mT', 'glasses', 'glY', 'glTilt', 'glRX'];
 let faceSig = '';
 function drawFace(time) {
   // the glasses' shadow also slides with the head's turn
@@ -812,26 +821,50 @@ const EXPRESSIONS = [
     end() { P.ry.v -= TAU; },
   },
   {
-    // puts on its glasses, turns its back to you and rummages around,
-    // spins back with a "found it!", then takes the glasses off
-    name: 'Searching', dur: 8.4,
+    // glasses swing down out of its forehead; head tipped down, it speed-reads
+    // through one pile then another, squints "hmm", checks on you, finds it,
+    // and the glasses swing back up into its head
+    name: 'Searching', dur: 7.6,
     keys: [
-      [0.1, { glasses: 1 }, 'snap'],
-      [0.1, { glY: 0, eyeH: 100, gy: -14 }, 'drop'],              // glasses fall in from above
-      [0.32, { sq: 0.94, gy: 0 }, 'fast'],                        // and land on its face
-      [0.5, { sq: 1 }, 'body'],
-      [0.75, { glY: 0.025, glTilt: 0.05 }, 'fast'],               // nudges them up
-      [0.9, { glY: 0, glTilt: 0 }, 'pop'],
-      [1.2, { ry: Math.PI, gx: 0 }, 'body'],                      // turns its back to you
-      [5.4, { ry: TAU, eyeH: 124, eyeW: 76, fx: 'bang' }, 'body'], // spins back: found it!
-      [6.1, { eyeH: 112, eyeW: 64 }],
-      [6.4, { glY: 0.05, glTilt: -0.06 }, 'fast'],                // pushes them up...
-      [6.7, { glY: 2.8, glTilt: 0.2 }, 'drop'],                   // ...and they pop off upward
-      [7.3, { glasses: 0 }, 'snap'],
+      [0, { glasses: 1 }, 'snap'],
+      [0.15, { glRX: 0 }, 'flip'],                                  // swing down over the eyes
+      [0.2, { blink: 1 }, 'blink'], [0.3, { blink: 0 }, 'blink'],
+      [0.6, { glY: 0.02, glTilt: 0.04 }, 'fast'],                   // settles them
+      [0.75, { glY: 0, glTilt: 0 }, 'pop'],
+      [5.2, { eyeH: 124, eyeW: 76, rx: -0.06, glY: 0.03, fx: 'bang' }, 'fast'],  // found it!
+      [5.45, { glY: 0 }, 'pop'],
+      [5.9, { eyeH: 112, eyeW: 64, rx: 0 }],
+      [6.3, { glRX: 1.7 }, 'flip'],                                 // swing back up into its head
+      [6.35, { blink: 1 }, 'blink'], [6.45, { blink: 0 }, 'blink'],
+      [7.2, { glasses: 0 }, 'snap'],
     ],
-    start() { this.glances = pickGlances(2.3, 4.6); },
-    proc(t, add) { rummage(t, add, 1.7, 5.2, this.glances); },
-    end() { P.ry.v -= TAU; },
+    start() {
+      // which pile it starts on, and when it squints and when it checks on you
+      this.side = Math.random() < 0.5 ? -1 : 1;
+      this.hmm = 2.6 + Math.random() * 1.2;
+      this.look = this.hmm < 3.2 ? 4.2 : 2.2;
+    },
+    proc(t, add) {
+      const e = env(t, 0.9, 5.0, 0.3);
+      if (e <= 0) return;
+      const near = (c, w) => Math.min(THREE.MathUtils.smoothstep(t, c, c + 0.15), 1 - THREE.MathUtils.smoothstep(t, c + w, c + w + 0.2));
+      const look = near(this.look, 0.5);      // quick check on you
+      const hmm = near(this.hmm, 0.6);        // "hmm" squint
+      const busy = e * (1 - look);
+      // two piles: head turned a little left, then right, swapping every ~1.6s
+      const pile = Math.sin((t - 0.9) * Math.PI / 1.6) > 0 ? this.side : -this.side;
+      add('ry', pile * 0.22 * busy);
+      add('rx', 0.13 * busy);
+      add('gy', 18 * busy);
+      // speed-reading: each line sweeps across in 0.38s and snaps back, a tiny
+      // head bob per line
+      const line = ((t - 0.9) / 0.45) % 1;
+      const sweep = line < 0.85 ? -20 + line / 0.85 * 40 : 20 - (line - 0.85) / 0.15 * 40;
+      add('gx', (sweep - pile * 10) * busy);
+      add('rx', Math.max(0, Math.sin(line * Math.PI * 2)) * 0.02 * busy);
+      add('lidT', 0.28 * hmm * e);
+      add('gy', -18 * look * e);
+    },
   },
   {
     // turns its back and looks through things, now and then turning partway
@@ -1372,7 +1405,7 @@ function cubeBox() {
   }
   if (glasses.visible) {
     for (const x of [-0.45, 0.45]) for (const y of [-0.25, 0.25]) for (const z of [-0.8, 0.1]) {
-      corner.set(x, y, z); glasses.localToWorld(corner).project(camera);
+      corner.set(x, y, z); glFrame.localToWorld(corner).project(camera);
       const px = (corner.x * 0.5 + 0.5) * bw, py = (corner.y * 0.5 + 0.5) * bh;
       box.x0 = Math.min(box.x0, px); box.x1 = Math.max(box.x1, px);
       box.y0 = Math.min(box.y0, py); box.y1 = Math.max(box.y1, py);
