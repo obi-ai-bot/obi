@@ -115,7 +115,8 @@ const DEFAULTS = {
   lidT: [0, 'face'], lidA: [0, 'face'], happy: [0, 'face'], calm: [0, 'face'], peek: [0, 'face'],
   shX: [0, 'gaze'], shY: [0, 'gaze'], shS: [0, 'face'],  // catchlight offset and extra size (eye roll)
   mW: [0, 'mouth'], mC: [0, 'mouth'], mO: [0, 'mouth'], mRound: [0, 'mouth'], mReveal: [0, 'face'], mArch: [0, 'face'], forceMouth: [0, 'face'],  // show the mouth even when toggled off (Yawn)
-  book: [0, 'pop'],  // open book held in front (Reading)
+  book: [0, 'pop'],
+  wall: [0, 'body'],  // hiding wall slides in from the left (Hiding)  // open book held in front (Reading)
   mY: [92, 'mouth'], mT: [15, 'mouth'], mTilt: [0, 'mouth'],
   // arms: out (0..1), hand target (cube-local), elbow bend
   aLo: [0, 'arm'], aLx: [-0.86, 'arm'], aLy: [-0.22, 'arm'], aLz: [0.05, 'arm'], aLbx: [0, 'arm'], aLby: [-0.12, 'arm'],
@@ -274,6 +275,8 @@ uniform vec2 uRes; uniform float uSeed, uPx, uLineScale;
 uniform float uPencil;   // 1 = wobbly grainy pencil, 0 = clean crisp line
 uniform vec3 uCircle;    // backdrop circle: centre x, y and radius in framebuffer px
 uniform float uCircleOn;
+uniform vec4 uWall;      // hiding wall (Hiding): rounded pillar box x0, y0, x1, y1 in framebuffer px
+uniform float uWallOn;
 uniform vec3 uCircleCol;
 uniform vec3 uFillCol, uInkCol, uLineCol, uSilCol;
 
@@ -374,9 +377,17 @@ void main() {
     float below = smoothstep(uCircle.y + uPx, uCircle.y - uPx, px0.y);
     float clip = mix(1.0, inC, below);
     premul *= clip; alpha *= clip;
-    gl_FragColor = vec4(premul + uCircleCol * inC * (1.0 - alpha), alpha + inC * (1.0 - alpha));
-    return;
+    premul += uCircleCol * inC * (1.0 - alpha);
+    alpha += inC * (1.0 - alpha);
   }
+  // wall (Hiding): an invisible pillar in front of the mascot
+  vec2 wc = (uWall.xy + uWall.zw) * 0.5, wh = (uWall.zw - uWall.xy) * 0.5;
+  float wr = 14.0 * uPx;
+  vec2 wq = abs(px0 - wc) - wh + wr;
+  float wd = length(max(wq, 0.0)) + min(max(wq.x, wq.y), 0.0) - wr;
+  float w = (1.0 - smoothstep(-uPx, uPx, wd)) * uWallOn;
+  premul *= 1.0 - w;  // same as the background: it just hides what's behind it
+  alpha *= 1.0 - w;
   gl_FragColor = vec4(premul, alpha);
 }`;
 
@@ -392,7 +403,7 @@ const compositeMat = new THREE.ShaderMaterial({
   uniforms: {
     tFill: { value: fillRT.texture }, tId: { value: idRT.texture },
     uRes: { value: new THREE.Vector2(1, 1) }, uSeed: { value: 0 }, uPx: { value: 1 }, uLineScale: { value: 1 }, uPencil: { value: 0 },
-    uCircle: { value: new THREE.Vector3() }, uCircleOn: { value: 1 }, uCircleCol: { value: new THREE.Color().setHex(0x4a4a4f, THREE.LinearSRGBColorSpace) },
+    uCircle: { value: new THREE.Vector3() }, uCircleOn: { value: 1 }, uWall: { value: new THREE.Vector4() }, uWallOn: { value: 0 }, uCircleCol: { value: new THREE.Color().setHex(0x4a4a4f, THREE.LinearSRGBColorSpace) },
     uFillCol: { value: new THREE.Color() }, uInkCol: { value: new THREE.Color() },
     uLineCol: { value: new THREE.Color() }, uSilCol: { value: new THREE.Color() },
   },
@@ -1359,6 +1370,26 @@ const EXPRESSIONS = [
     },
   },
   {
+    // a wall slides in; it scoots behind it, half hidden, and peeks out twice
+    name: 'Hiding', dur: 5.6,
+    keys: [
+      [0, { wall: 1 }, 'body'],
+      [0.1, { eyeH: 124, eyeW: 70 }, 'fast'],
+      [0.25, { x: -0.1, z: -0.08, ry: 0.22, sq: 0.94, gx: 10, eyeH: 104, eyeW: 66 }, 'body'],
+      // peek: lean the top out past the edge, eyes on you
+      [1.2, { lean: 0.32, x: 0.02, rz: -0.08, gx: -8, gy: -4 }, 'slow'],
+      [2.3, { lean: 0, x: -0.16, rz: 0, gx: 12 }, 'fast'],  // ducks back
+      [2.35, { blink: 1 }, 'blink'], [2.45, { blink: 0 }, 'blink'],
+      [3.1, { lean: 0.22, x: -0.04, rz: -0.06, gx: -6, gy: 2 }, 'slow'],  // smaller, shyer peek
+      [4.3, { wall: 0, x: 0, z: 0, ry: 0, rz: 0, lean: 0, sq: 1, gx: 0, gy: 0, eyeH: 112, eyeW: 64 }, 'body'],
+    ],
+    proc(t, add) {
+      // tiny nervous shuffle while tucked in
+      const e = env(t, 0.5, 4.1, 0.2);
+      add('x', Math.sin(t * 5.3) * 0.006 * e);
+    },
+  },
+  {
     // dog-style: fights sleep (head droops then jerks up, twice), flops down
     // with a sigh, breathes slow with a dream twitch, then lazily lifts its head
     name: 'Sleepy', dur: 6.8,
@@ -1636,6 +1667,22 @@ function applyToScene() {
   updateHair('L'); updateHair('R');
   updateTail(clock);
   updateBook();
+  updateWall();
+}
+// Pillar (world units): right edge just left of centre, a bit taller than the
+// cube. wall = 0 parks it off the left side.
+const WALL = { x: 0.02, w: 0.7, top: 0.62, bottom: -0.8 };
+function updateWall() {
+  const k = V('wall'), u = compositeMat.uniforms;
+  u.uWallOn.value = k > 0.001 ? 1 : 0;
+  if (k <= 0.001) return;
+  const x1 = THREE.MathUtils.lerp(-2.4, WALL.x, Math.min(1, k));
+  const toPx = (x, y) => {
+    const p = new THREE.Vector3(x, y, 0).project(camera), r = renderer.getPixelRatio();
+    return [(p.x * 0.5 + 0.5) * innerWidth * r, (p.y * 0.5 + 0.5) * innerHeight * r];
+  };
+  const [ax, ay] = toPx(x1 - WALL.w, WALL.bottom), [bx, by] = toPx(x1, WALL.top);
+  u.uWall.value.set(ax, ay, bx, by);
 }
 
 /* ---------------------------------------------------------------------------
