@@ -1,5 +1,4 @@
 import Foundation
-import SwiftUI
 
 /// One login of a coding tool that Oby can send jobs to, and who pays for it.
 nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
@@ -34,7 +33,8 @@ nonisolated struct AccountState: Equatable, Sendable {
 final class AccountStore {
     private(set) var accounts: [AccountState]
     private let file: URL
-    private let homes: URL
+    /// Where the homes Oby makes for accounts live.
+    let homes: URL
 
     init(root: URL = Workspace.root) {
         file = root.appending(path: "accounts.json")
@@ -106,15 +106,6 @@ final class AccountStore {
         }
     }
 
-    /// Opens Terminal on the tool's own login, with the account's home in the environment.
-    func signIn(_ account: Account) throws {
-        let script = URL(filePath: account.home ?? homes.path).appending(path: "sign-in-\(account.id).command")
-        try FileManager.default.createDirectory(at: script.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Self.signInScript(for: account).write(to: script, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
-        guard NSWorkspace.shared.open(script) else { throw Shell.Failure(message: "Couldn't open Terminal to sign in.") }
-    }
-
     private func save() throws {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
@@ -160,90 +151,5 @@ final class AccountStore {
     nonisolated static func isOwned(_ path: String, in homes: URL) -> Bool {
         let root = homes.standardizedFileURL.resolvingSymlinksInPath().path + "/"
         return URL(filePath: path).standardizedFileURL.resolvingSymlinksInPath().path.hasPrefix(root)
-    }
-}
-
-/// Settings › Accounts: the logins Oby spreads jobs across, who pays for each, and how much each has used.
-struct AccountsSettingsView: View {
-    let store: AccountStore
-    @State private var agent = "claude"
-    @State private var name = ""
-    @State private var payer = ""
-    @State private var removing: Account?
-    @State private var problem: String?
-
-    var body: some View {
-        Form {
-            Section("Accounts") {
-                ForEach(store.accounts, id: \.account.id, content: row)
-            }
-            Section("Add an account") {
-                Picker("Tool", selection: $agent) {
-                    Text("Claude Code").tag("claude")
-                    Text("Codex").tag("codex")
-                }
-                TextField("Name", text: $name, prompt: Text("Personal"))
-                TextField("Paid by", text: $payer, prompt: Text("Wellington"))
-                Button("Add Account") {
-                    attempt {
-                        try store.add(agent: agent, name: name.trimmingCharacters(in: .whitespaces), payer: payer.trimmingCharacters(in: .whitespaces))
-                        name = ""
-                        payer = ""
-                    }
-                }
-                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-            if let problem {
-                Text(problem).font(.caption).foregroundStyle(.red)
-            }
-        }
-        .formStyle(.grouped)
-        .frame(width: 460)
-        .task { await store.refresh() }
-        // Back from signing in, in Terminal.
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            Task { await store.refresh() }
-        }
-        .confirmationDialog("Remove \(removing?.name ?? "this account")?",
-                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-                            presenting: removing) { account in
-            Button("Remove", role: .destructive) { attempt { try store.remove(account) } }
-        } message: { account in
-            Text(account.home == nil ? "Its login stays in the tool's own settings." : "Oby deletes this account's settings folder.")
-        }
-    }
-
-    private func row(_ state: AccountState) -> some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(state.account.name) · \(state.account.agent == "codex" ? "Codex" : "Claude Code")")
-                Text(state.label ?? "Signed out")
-                    .font(.caption).foregroundStyle(.secondary)
-                if !state.account.payer.isEmpty {
-                    Text("Paid by \(state.account.payer)").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-            if state.signedIn {
-                Text("5h \(percent(state.fiveHour)) · 7d \(percent(state.sevenDay))")
-                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-            } else {
-                Button("Sign In") { attempt { try store.signIn(state.account) } }
-            }
-            Button("Remove", role: .destructive) { removing = state.account }
-        }
-    }
-
-    private func percent(_ used: Double?) -> String {
-        used.map { $0.formatted(.percent.precision(.fractionLength(0))) } ?? "–"
-    }
-
-    private func attempt(_ action: () throws -> Void) {
-        do {
-            try action()
-            problem = nil
-        } catch {
-            problem = error.localizedDescription
-        }
     }
 }

@@ -32,6 +32,11 @@
 			path = MacTests;
 			sourceTree = "<group>";
 		};
+		0B1E0C0A00000000000000B1 /* Engine */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Engine;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -52,6 +57,7 @@
 			isa = PBXGroup;
 			children = (
 				FB61F80D30795FDE00A9523D /* Mac */,
+				0B1E0C0A00000000000000B1 /* Engine */,
 				0B1E0C0A00000000000000A2 /* MacTests */,
 				FB61F80C30795FDE00A9523D /* Products */,
 			);
@@ -82,6 +88,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				FB61F80D30795FDE00A9523D /* Mac */,
+				0B1E0C0A00000000000000B1 /* Engine */,
 			);
 			name = Oby;
 			productName = Oby;

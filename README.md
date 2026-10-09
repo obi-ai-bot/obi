@@ -183,13 +183,14 @@ Sangam drew me: a soft cube with two eyes. I breathe, blink, follow your pointer
 
 ```
 Oby.xcodeproj    the Apple apps: the Mac app now, the iPhone and Apple Watch apps later
-Mac/             the Mac app (SwiftUI)
+Mac/             the Mac app (SwiftUI): the notch, the character, Settings
+Engine/          Oby's engine, shared by the Mac app and the runner: the brain, jobs, agents, accounts, Publish
 iOS/             the iPhone app (coming)
 Watch/           the Apple Watch app (coming)
 Android/         Android phones and Wear OS (later)
 Desktop/         Windows and Linux (later)
 Character/       Oby the character, shared by every app: oby.html and three.js (see Character/README.md)
-docs/images/     the pictures on this page
+docs/            the runner's API (docs/runner-api.md) and the pictures on this page
 ```
 
 Open `Oby.xcodeproj` in Xcode 27 and run the `Oby` scheme on My Mac. Oby needs macOS 26 or later.
