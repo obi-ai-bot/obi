@@ -545,7 +545,7 @@ function makeHair(obj) {
   rig.add(mesh);
   return mesh;
 }
-const hairs = { L: makeHair(7), R: makeHair(8) };
+const hairs = { L: makeHair(7), R: makeHair(7) };  // one id: the strands read as one tuft, no line where they cross
 
 // Book: one dark slab with a thin light border, held up in front of the face so
 // the eyes peek over it. A grey paw peeks out from behind the left edge and an
@@ -638,7 +638,7 @@ function updateHair(side) {
     const t = i / (HAIR_RINGS - 1);
     curve.getPointAt(t, c);
     // taper to a point
-    const r = 0.018 * Math.pow(1 - t, 0.8) + 0.001;
+    const r = 0.015 * Math.pow(1 - t, 0.75) + 0.0045;  // never thinner than ~2px, or the tip breaks into specks
     const N = frames.normals[i], B = frames.binormals[i];
     for (let j = 0; j < LIMB_SIDES; j++) {
       const a = j / LIMB_SIDES * Math.PI * 2, ca = Math.cos(a) * r, sa = Math.sin(a) * r;
