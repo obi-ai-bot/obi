@@ -4,3 +4,5 @@ build/
 DerivedData/
 Character/mac/build/
 dist/
+.build/
+.swiftpm/
