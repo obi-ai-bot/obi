@@ -682,30 +682,6 @@ const TAU = Math.PI * 2;
 const between = (t, a, b) => t >= a && t <= b;
 const env = (t, a, b, ramp = 0.25) => Math.max(0, Math.min(1, (t - a) / ramp, (b - t) / ramp));
 
-// Searching / Rummaging: while turned away (ry = PI), head down into it,
-// shifting side to side with little hops, and a few glances back over a
-// shoulder (turning partway round so one side of the face shows).
-function pickGlances(a, b) {
-  const out = [];
-  let t = a + Math.random() * 0.6, side = Math.random() < 0.5 ? -1 : 1;
-  while (t < b) { out.push({ t, side }); side = -side; t += 1.6 + Math.random() * 1.2; }
-  return out;
-}
-function rummage(t, add, t0, t1, glances) {
-  const e = env(t, t0, t1, 0.3);
-  let look = 0;
-  for (const g of glances) {
-    const k = Math.min(THREE.MathUtils.smoothstep(t, g.t, g.t + 0.3), 1 - THREE.MathUtils.smoothstep(t, g.t + 0.75, g.t + 1.05));
-    if (k > 0) { add('ry', -g.side * 1.9 * k); add('gx', -g.side * 30 * k); look = Math.max(look, k); }
-  }
-  const dig = e * (1 - look);  // stops digging while it looks at you
-  add('rx', (0.16 + 0.06 * Math.sin(t * 7)) * dig);
-  add('x', Math.sin(t * 2.4) * 0.07 * dig);
-  add('rz', Math.sin(t * 4.8) * 0.05 * dig);
-  add('y', Math.abs(Math.sin(t * 9)) * 0.022 * dig);
-  add('ry', Math.sin(t * 1.7) * 0.22 * dig);
-}
-
 const EXPRESSIONS = [
   {
     name: 'Hello', dur: 3.4,
@@ -865,19 +841,6 @@ const EXPRESSIONS = [
       add('lidT', 0.28 * hmm * e);
       add('gy', -18 * look * e);
     },
-  },
-  {
-    // turns its back and looks through things, now and then turning partway
-    // round to check on you before going back to it
-    name: 'Rummaging', dur: 8.0,
-    keys: [
-      [0.2, { ry: Math.PI, gx: 0 }, 'body'],
-      [6.6, { ry: TAU }, 'body'],
-      [7.0, { blink: 1 }, 'blink'], [7.1, { blink: 0 }, 'blink'],
-    ],
-    start() { this.glances = pickGlances(1.4, 5.6); },
-    proc(t, add) { rummage(t, add, 0.7, 6.4, this.glances); },
-    end() { P.ry.v -= TAU; },
   },
   {
     // happy squint with a little chuckle
