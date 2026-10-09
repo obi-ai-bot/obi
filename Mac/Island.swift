@@ -392,7 +392,9 @@ private struct PlanCard: View {
         VStack(alignment: .leading, spacing: 12) {
             Grid(horizontalSpacing: 12, verticalSpacing: 12) {
                 GridRow {
-                    tile("Agent") { Label(Job.agentNames[account?.agent ?? draft.job.agent] ?? "", systemImage: "asterisk") }
+                    tile("Agent · \(AgentModels.summary(account?.agent ?? draft.job.agent))") {
+                        Label(Job.agentNames[account?.agent ?? draft.job.agent] ?? "", systemImage: "asterisk")
+                    }
                     tile(accounts.count > 1 ? "Account · click to change" : "Account · the one you have") {
                         if accounts.count > 1 {
                             Menu {

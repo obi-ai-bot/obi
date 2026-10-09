@@ -101,7 +101,8 @@ final class ClaudeAgent: AgentRun {
         // Never --bare: it skips the user's own login.
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-                             "--verbose", "--permission-prompt-tool", "stdio"]
+                             "--verbose", "--permission-prompt-tool", "stdio",
+                             "--model", AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
         process.currentDirectoryURL = worktree
         process.environment = Agents.environment(["CLAUDE_CONFIG_DIR": configDirectory?.path])
         process.standardInput = input

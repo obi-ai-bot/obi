@@ -22,6 +22,7 @@ struct ObyApp: App {
             TabView {
                 SettingsView().tabItem { Label("General", systemImage: "gearshape") }
                 AccountsSettingsView(store: app.island.desk.accounts).tabItem { Label("Accounts", systemImage: "person.2") }
+                ModelsSettingsView().tabItem { Label("Models", systemImage: "cpu") }
             }
         }
     }
@@ -29,6 +30,11 @@ struct ObyApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let island = IslandController()
+
+    override init() {
+        UserDefaults.standard.register(defaults: AgentModels.defaults)
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hosting the unit tests: no island, and no fight with the Oby that's already running.

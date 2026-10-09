@@ -82,3 +82,30 @@ struct CodexTests {
         #expect(CodexRPC.account(message(#"{"account":null,"requiresOpenaiAuth":true}"#)) == nil)
     }
 }
+
+struct ModelsTests {
+    @Test func defaultsAreOpusExtraHighAndSolHigh() {
+        #expect(AgentModels.defaults["claude.model"] == "claude-opus-5-5")
+        #expect(AgentModels.defaults["claude.effort"] == "xhigh")
+        #expect(AgentModels.defaults["codex.model"] == "gpt-6-sol")
+        #expect(AgentModels.defaults["codex.effort"] == "high")
+        #expect(AgentModels.effortName("xhigh") == "Extra high")
+    }
+
+    @Test func turnStartCarriesModelAndEffort() {
+        let params = CodexRPC.turnStart(thread: "t", prompt: "hi", model: "gpt-6-sol", effort: "high")
+        #expect(params["model"] as? String == "gpt-6-sol")
+        #expect(params["effort"] as? String == "high")
+        #expect(CodexRPC.turnStart(thread: "t", prompt: "hi", model: "", effort: "")["model"] == nil)
+    }
+
+    /// `model/list` as codex 0.155.1 answered on 2026-10-09 (trimmed).
+    @Test func modelList() {
+        let result: [String: Any] = ["data": [
+            ["id": "gpt-6-astra", "displayName": "GPT-6-Astra", "supportedReasoningEfforts": ["low", "high"]],
+            ["id": "gpt-6-sol", "displayName": "GPT-6-Sol", "supportedReasoningEfforts": [["reasoningEffort": "high"]]],
+        ]]
+        #expect(CodexRPC.models(result) == [CodexModel(id: "gpt-6-astra", name: "GPT-6-Astra", efforts: ["low", "high"]),
+                                            CodexModel(id: "gpt-6-sol", name: "GPT-6-Sol", efforts: ["high"])])
+    }
+}

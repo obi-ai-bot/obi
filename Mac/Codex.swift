@@ -39,7 +39,9 @@ final class CodexAgent: AgentRun {
                 }
                 self.thread = thread
                 onEvent(.session(thread))
-                let turn = try await server.call("turn/start", ["threadId": thread, "input": [CodexRPC.text(prompt)]])
+                let turn = try await server.call("turn/start", CodexRPC.turnStart(thread: thread, prompt: prompt,
+                                                                                 model: AgentModels.value("codex", "model"),
+                                                                                 effort: AgentModels.value("codex", "effort")))
                 self.turn = (turn["turn"] as? [String: Any])?["id"] as? String
             } catch {
                 finish(summary: "Codex couldn't start: \(error.localizedDescription)", failed: true)
@@ -120,6 +122,11 @@ final class CodexAgent: AgentRun {
     static func usage(home: URL?) async throws -> (fiveHour: Double?, sevenDay: Double?) {
         let result = try await ask(home: home, "account/rateLimits/read")
         return (result["rateLimits"] as? [String: Any]).flatMap(CodexRPC.usage) ?? (nil, nil)
+    }
+
+    /// The models the account offers, with the efforts each takes.
+    static func models(home: URL?) async throws -> [CodexModel] {
+        CodexRPC.models(try await ask(home: home, "model/list"))
     }
 
     /// Starts a short-lived app-server, asks it one thing, and ends it.
@@ -217,6 +224,13 @@ final class CodexServer {
     }
 }
 
+/// A model a Codex account offers.
+nonisolated struct CodexModel: Equatable, Sendable {
+    var id: String
+    var name: String
+    var efforts: [String]
+}
+
 /// Reads what `codex app-server` sends.
 nonisolated enum CodexRPC {
     enum Answer: Equatable { case accept, decline(String) }
@@ -231,6 +245,24 @@ nonisolated enum CodexRPC {
             params["config"] = ["sandbox_workspace_write": ["writable_roots": [git], "network_access": false]]
         }
         return params
+    }
+
+    /// The task, with the model and effort chosen in Settings › Models (empty means Codex's own default).
+    static func turnStart(thread: String, prompt: String, model: String, effort: String) -> [String: Any] {
+        var params: [String: Any] = ["threadId": thread, "input": [text(prompt)]]
+        if !model.isEmpty { params["model"] = model }
+        if !effort.isEmpty { params["effort"] = effort }
+        return params
+    }
+
+    static func models(_ result: [String: Any]) -> [CodexModel] {
+        (result["data"] as? [[String: Any]] ?? []).compactMap { model in
+            guard let id = model["id"] as? String else { return nil }
+            let efforts = (model["supportedReasoningEfforts"] as? [Any] ?? []).compactMap { effort in
+                (effort as? String) ?? (effort as? [String: Any])?["reasoningEffort"] as? String
+            }
+            return CodexModel(id: id, name: model["displayName"] as? String ?? id, efforts: efforts)
+        }
     }
 
     static func text(_ text: String) -> [String: Any] {
