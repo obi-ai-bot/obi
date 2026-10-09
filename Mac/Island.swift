@@ -266,12 +266,23 @@ private struct OpenIsland: View {
     let onClose: () -> Void
     @State private var text = ""
     @FocusState private var typing: Bool
+    /// Finished jobs that ended before this are hidden from the island only; Desk keeps them all.
+    @AppStorage("islandClearedAt") private var clearedAt: Double = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
                 header.padding(.leading, characterWidth - 20)
                 Spacer(minLength: 12)
+                if clearable {
+                    Button { clearedAt = Date.now.timeIntervalSince1970 } label: {
+                        Text("Clear done")
+                            .font(.system(size: 12, weight: .semibold))
+                            .padding(.horizontal, 12).frame(height: 28)
+                            .background(.white.opacity(0.12), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
                 Button(action: onClose) {
                     Image(systemName: "chevron.up")
                         .font(.system(size: 12, weight: .bold))
@@ -317,7 +328,20 @@ private struct OpenIsland: View {
     /// Running jobs first, then the latest finished ones: four at most.
     private var visibleJobs: [Job] {
         let active = desk.active
-        return active + desk.jobs.filter { !$0.isActive }.prefix(max(0, 4 - active.count))
+        return active + finished.prefix(max(0, 4 - active.count))
+    }
+
+    /// Finished jobs that ended after the last Clear done.
+    private var finished: [Job] {
+        desk.jobs.filter { !$0.isActive && ($0.finished ?? .distantPast).timeIntervalSince1970 > clearedAt }
+    }
+
+    /// The job list is on screen and has something finished to clear.
+    private var clearable: Bool {
+        switch desk.talk {
+        case .plan, .question: false
+        default: !finished.isEmpty
+        }
     }
 
     @ViewBuilder private var header: some View {
