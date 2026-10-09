@@ -626,7 +626,7 @@ function updateHair(side) {
   // the two strands differ a little so they never move as one
   const k = side === 'L' ? 1 : 0.85, len = V('hl') * (side === 'L' ? 0.6 : 0.53);
   const droop = V('hd') * k, sx = V('hx') * k, sz = V('hz') * k;
-  const root = deformJS({ x: s * 0.045, y: 0.47, z: -0.2 });
+  const root = deformJS({ x: s * 0.018, y: 0.47, z: -0.2 });
   const up = new THREE.Vector3(sx * 0.03, 0.13 * len, sz * 0.03);
   const c1 = root.clone().add(up);
   const c2 = root.clone().add(new THREE.Vector3((s * (0.03 + droop * 0.08) + sx * 0.12) * 0.6, (0.25 - droop * 0.08) * len, (-0.02 + sz * 0.12) * 0.6));
