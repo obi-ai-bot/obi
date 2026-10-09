@@ -18,24 +18,24 @@ struct LoopsTests {
     }
 
     @Test func rulesTellIssuesFromPullRequestsAndHearLoops() {
-        let fix = Rules.plan("fix oby #42 until the tests pass", context: context).dispatch
+        let fix = Rules.plan("fix oby #42 until the tests pass", context: context).dispatches.first
         #expect(fix?.issue == 42 && fix?.pr == nil && fix?.rounds == 5)
-        let issue = Rules.plan("investigate issue 7 in oby", context: context).dispatch
+        let issue = Rules.plan("investigate issue 7 in oby", context: context).dispatches.first
         #expect(issue?.issue == 7 && issue?.pr == nil && issue?.rounds == 1)
-        let review = Rules.plan("review oby #12", context: context).dispatch
+        let review = Rules.plan("review oby #12", context: context).dispatches.first
         #expect(review?.pr == 12 && review?.issue == nil)
-        let pr = Rules.plan("fix the build on oby PR 9", context: context).dispatch
+        let pr = Rules.plan("fix the build on oby PR 9", context: context).dispatches.first
         #expect(pr?.pr == 9 && pr?.issue == nil)
     }
 
     @Test func swiftRefusesBadLoopsAndIssues() throws {
         let plan = Rules.plan("fix oby #42", context: context)
-        var dispatch = try #require(plan.dispatch)
+        var dispatch = try #require(plan.dispatches.first)
         dispatch.rounds = 11
         dispatch.check = "swift test\nrm -rf /"
         dispatch.pr = 3
         var bad = plan
-        bad.dispatch = dispatch
+        bad.dispatches = [dispatch]
         let problems = bad.problems(in: context, canary: "7f3a9c")
         #expect(problems.contains("rounds must be 1 to 10"))
         #expect(problems.contains("check must be one line of 1 to 200 characters"))

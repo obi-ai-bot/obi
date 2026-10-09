@@ -64,7 +64,7 @@ final class API {
     func dispatch(_ request: DispatchRequest) throws -> Response {
         do {
             let job = try desk.dispatch(request.job.id, branch: request.job.branch, account: request.job.account,
-                                        rounds: request.job.rounds, check: request.job.check)
+                                        rounds: request.job.rounds, check: request.job.check, model: request.job.model)
             return Self.json(JobJSON(job: job), status: .created)
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
@@ -315,7 +315,7 @@ struct Options: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, issue, rounds, round, check }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, issue, rounds, round, check, model }
 
     func encode(to encoder: any Encoder) throws {
         try job.encode(to: encoder)
@@ -332,6 +332,7 @@ struct JobJSON: Encodable {
         try nulls.encode(job.maxRounds, forKey: .rounds)
         try nulls.encode(job.currentRound, forKey: .round)
         if job.check == nil { try nulls.encodeNil(forKey: .check) }
+        if job.model == nil { try nulls.encodeNil(forKey: .model) }
     }
 }
 
@@ -360,9 +361,25 @@ struct PlanAnswer: Encodable {
         var reply: String
         var guessed: Bool
         var job: JobJSON
+        /// A stronger model for complex work, or null; the job uses it only if the client asks.
+        var suggestedModel: String?
+
+        private enum Keys: String, CodingKey { case said, reply, guessed, job, suggestedModel }
+
+        func encode(to encoder: any Encoder) throws {
+            var keys = encoder.container(keyedBy: Keys.self)
+            try keys.encode(said, forKey: .said)
+            try keys.encode(reply, forKey: .reply)
+            try keys.encode(guessed, forKey: .guessed)
+            try keys.encode(job, forKey: .job)
+            try keys.encode(suggestedModel, forKey: .suggestedModel)
+        }
     }
 
     var kind: String
+    /// Every job of the plan.
+    var drafts: [Draft]?
+    /// The first one, for apps that know only one job per plan.
     var draft: Draft?
     var said: String?
     var question: Plan.Question?
@@ -370,9 +387,10 @@ struct PlanAnswer: Encodable {
 
     @MainActor init(_ talk: Desk.Talk) {
         switch talk {
-        case .plan(let draft):
+        case .plan(let list):
             kind = "plan"
-            self.draft = Draft(said: draft.said, reply: draft.reply, guessed: draft.guessed, job: JobJSON(job: draft.job))
+            drafts = list.map { Draft(said: $0.said, reply: $0.reply, guessed: $0.guessed, job: JobJSON(job: $0.job), suggestedModel: $0.suggestedModel) }
+            draft = drafts?.first
         case .question(let said, let question):
             kind = "question"
             self.said = said
@@ -406,8 +424,10 @@ struct DispatchRequest: Decodable {
         var account: String
         var rounds: Int?
         var check: String??
+        /// The draft's suggested model to use it, or null to stay on Settings › Models.
+        var model: String??
 
-        private enum Keys: String, CodingKey { case id, branch, account, rounds, check }
+        private enum Keys: String, CodingKey { case id, branch, account, rounds, check, model }
 
         init(from decoder: any Decoder) throws {
             let keys = try decoder.container(keyedBy: Keys.self)
@@ -416,6 +436,7 @@ struct DispatchRequest: Decodable {
             account = try keys.decode(String.self, forKey: .account)
             rounds = try keys.decodeIfPresent(Int.self, forKey: .rounds)
             check = keys.contains(.check) ? .some(try keys.decodeIfPresent(String.self, forKey: .check)) : nil
+            model = keys.contains(.model) ? .some(try keys.decodeIfPresent(String.self, forKey: .model)) : nil
         }
     }
 

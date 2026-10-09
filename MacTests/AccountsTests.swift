@@ -31,10 +31,15 @@ struct AccountsTests {
         #expect(route([state("a", sevenDay: 0.95)]) == nil)
     }
 
-    @Test func routePrefersFewestRunningThenFiveHourThenSevenDay() {
-        #expect(route([state("a", running: 1), state("b", running: 0, fiveHour: 0.9, sevenDay: 0.9)]) == "b")
-        #expect(route([state("a", fiveHour: 0.5, sevenDay: 0.1), state("b", fiveHour: 0.2, sevenDay: 0.9)]) == "b")
+    /// The score is the busier window plus 0.15 per running job; the lowest wins.
+    @Test func routeBalancesUsageAndRunningJobs() {
+        // A running job (0.15) costs less than a nearly full window (0.9).
+        #expect(route([state("a", running: 1), state("b", running: 0, fiveHour: 0.9, sevenDay: 0.9)]) == "a")
+        // The busier window counts: 0.5 beats 0.9.
+        #expect(route([state("a", fiveHour: 0.5, sevenDay: 0.1), state("b", fiveHour: 0.2, sevenDay: 0.9)]) == "a")
         #expect(route([state("a", fiveHour: 0.2, sevenDay: 0.6), state("b", fiveHour: 0.2, sevenDay: 0.3)]) == "b")
+        // Two running jobs (0.3) lose to a window at 0.25.
+        #expect(route([state("a", running: 2), state("b", fiveHour: 0.25)]) == "b")
     }
 
     @Test func routeKeepsListOrderOnTiesAndCountsUnknownUsageAsZero() {

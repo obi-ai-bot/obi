@@ -114,15 +114,20 @@ final class AccountStore {
         try encoder.encode(accounts.map(\.account)).write(to: file, options: .atomic)
     }
 
-    /// The account for a new job: a signed-in account of that agent (any agent if nil) under 95%
-    /// of both its windows, with the fewest running jobs, then the lowest five-hour and
-    /// seven-day usage. Unknown usage counts as 0; ties keep list order.
+    /// The account for a new job, keeping every account in balance: a signed-in account of that
+    /// agent (any agent if nil) under 95% of both its windows, with the lowest score, the busier of
+    /// its two windows plus 0.15 per running job. Each account's usage is measured against its own
+    /// plan, so a small plan fills up faster and gets fewer jobs. Unknown usage counts as 0; ties
+    /// keep list order.
     nonisolated static func route(_ accounts: [AccountState], agent: String?) -> Account? {
-        let rank = { (index: Int, state: AccountState) in (state.running, state.fiveHour ?? 0, state.sevenDay ?? 0, index) }
-        return accounts.enumerated()
+        accounts.enumerated()
             .filter { $0.element.signedIn && (agent == nil || $0.element.account.agent == agent) && ($0.element.fiveHour ?? 0) < 0.95 && ($0.element.sevenDay ?? 0) < 0.95 }
-            .min { rank($0.offset, $0.element) < rank($1.offset, $1.element) }?
+            .min { (score($0.element), $0.offset) < (score($1.element), $1.offset) }?
             .element.account
+    }
+
+    nonisolated static func score(_ state: AccountState) -> Double {
+        max(state.fiveHour ?? 0, state.sevenDay ?? 0) + 0.15 * Double(state.running)
     }
 
     /// "Max · name@example.com" from `claude auth status --json`, or nil when it isn't signed in.

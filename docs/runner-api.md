@@ -39,7 +39,8 @@ This document is the contract between the runner and its clients. Change it in t
   "issue": null,
   "rounds": 1,
   "round": 1,
-  "check": null
+  "check": null,
+  "model": null
 }
 ```
 
@@ -54,6 +55,7 @@ This document is the contract between the runner and its clients. Change it in t
 - `check`: a one-line command that must succeed for the work to count as done.
   - After each round the runner runs it in the job's worktree. If it fails and rounds are left, the agent gets another round with the command's output.
   - Without a check and with more than one round, the agent's own last line decides: `GOAL MET`, or `GOAL NOT MET: …`, which means another round.
+- `model`: a stronger model the user chose for this job, or null for the one in Settings › Models.
 - What to show: the title is `"<Kind> <repo name> #<number>"` when `pr` or `issue` is set, otherwise the first line of `request`. Show "Round 2 of 5" when `rounds` is above 1.
 
 ### Account
@@ -70,10 +72,13 @@ This document is the contract between the runner and its clients. Change it in t
 What the plan card shows before anything runs:
 
 ```json
-{"said": "Review oby PR #33", "reply": "Oby will review PR #33 in oby.", "guessed": false, "job": { …Job, status "queued" } }
+{"said": "Review oby PR #33", "reply": "Oby will review PR #33 in oby.", "guessed": false, "job": { …Job, status "queued" },
+ "suggestedModel": null}
 ```
 
 `guessed` is true when the brain didn't answer and rules made the plan: say so on the card.
+
+`suggestedModel` is a stronger model (`claude-fable-5-1` or `gpt-6-astra`) when the brain judged the work complex, else null. Offer it as an opt-in; for `gpt-6-astra` on an account whose label starts with "Plus", warn that it uses the plan's limits fast.
 
 ## Endpoints
 
@@ -102,11 +107,13 @@ To answer the brain's question, send the original words with the answer:
 The answer is one of:
 
 ```json
-{"kind": "plan", "draft": { …Draft }}
+{"kind": "plan", "drafts": [ …Draft ], "draft": { …the first Draft }}
 {"kind": "question", "said": "Review PR 12", "question": {"text": "Which repository is PR #12 in?", "options": ["deskree-inc/oby", "deskree-inc/blok"]}}
 {"kind": "reply", "text": "Oby can't merge pull requests."}
 {"kind": "none"}
 ```
+
+One message can plan up to 10 jobs ("work on oby #12, #15 and #18", or "work on epic #30", which becomes one job per open sub-issue). Each draft is already routed to the least busy account; dispatch each with its own `POST /v1/jobs`. `draft` is kept for apps that know only one job.
 
 ### `POST /v1/jobs`
 
@@ -115,6 +122,7 @@ Dispatches the draft's job. The user may have changed:
 - `account`: any signed-in account; `agent` follows the account.
 - `rounds`: 1 to 10.
 - `check`: one line of up to 200 characters, or `null` for none.
+- `model`: the draft's `suggestedModel` to use it, or `null` (or left out) to stay on Settings › Models. Any other model is refused.
 
 Leave `rounds` or `check` out to keep the plan's values (older apps do). Everything else comes from the draft unchanged.
 

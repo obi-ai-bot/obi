@@ -194,15 +194,18 @@ final class APITests {
         #expect(old.rounds == nil && old.check == nil)
         let cleared = try decode(#"{"job": {"id": "a", "branch": "oby/fix-42", "account": "default", "rounds": 3, "check": null}}"#)
         #expect(cleared.rounds == 3 && cleared.check == .some(nil))
-        let set = try decode(#"{"job": {"id": "a", "branch": "oby/fix-42", "account": "default", "check": "swift test"}}"#)
-        #expect(set.check == .some("swift test"))
+        let set = try decode(#"{"job": {"id": "a", "branch": "oby/fix-42", "account": "default", "check": "swift test", "model": "claude-fable-5-1"}}"#)
+        #expect(set.check == .some("swift test") && set.model == .some("claude-fable-5-1") && old.model == nil)
     }
 
     @Test func plansMapToTheirKinds() throws {
         let draft = Desk.Draft(said: "Review oby PR #33", reply: "Oby will review PR #33 in oby.", job: job, guessed: true)
-        let plan = object(try API.encode(PlanAnswer(.plan(draft))))
+        let plan = object(try API.encode(PlanAnswer(.plan([draft]))))
         #expect(plan["kind"] as? String == "plan")
+        // Every job in `drafts`, and the first again in `draft` for apps that know only one.
+        #expect((plan["drafts"] as? [[String: Any]])?.count == 1)
         let body = try #require(plan["draft"] as? [String: Any])
+        #expect(body["suggestedModel"] is NSNull)
         #expect(body["said"] as? String == "Review oby PR #33" && body["reply"] as? String == "Oby will review PR #33 in oby.")
         #expect(body["guessed"] as? Bool == true)
         #expect((body["job"] as? [String: Any])?["status"] as? String == "queued")
@@ -226,9 +229,9 @@ final class APITests {
         let json = String(decoding: try API.encode(JobJSON(job: job)), as: UTF8.self)
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
-        for key in ["base", "session", "finished", "commits", "published", "issue", "check"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
+        for key in ["base", "session", "finished", "commits", "published", "issue", "check", "model"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 23)
+        #expect(decoded.count == 24)
         #expect(decoded["rounds"] as? Int == 1 && decoded["round"] as? Int == 1)
         #expect(decoded["kind"] as? String == "review" && decoded["pr"] as? Int == 33 && decoded["status"] as? String == "queued")
     }

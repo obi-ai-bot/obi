@@ -7,7 +7,8 @@ final class Desk {
     enum Talk: Equatable {
         case none
         case thinking(String)
-        case plan(Draft)
+        /// One draft per job, at least one.
+        case plan([Draft])
         case reply(String)
         case question(said: String, Plan.Question)
     }
@@ -19,6 +20,8 @@ final class Desk {
         var job: Job
         /// Made by rules because the brain didn't answer.
         var guessed: Bool
+        /// A stronger model for complex work, offered on the card and used only if the user turns it on.
+        var suggestedModel: String? = nil
     }
 
     var talk: Talk = .none
@@ -87,13 +90,39 @@ final class Desk {
         if repos.isEmpty { await refresh() }
         // The brain thinks with the least busy Claude account too, so a busy one doesn't slow it.
         let brain = ClaudeBrain(home: AccountStore.route(accounts.accounts, agent: "claude")?.home)
-        let talk = card(for: await Planner(adapters: [brain]).plan(said, context: brainContext), said: said)
-        if case .plan(let draft) = talk {
-            // ponytail: the last 20 plans, in memory; a plan made before a restart is made again.
-            drafts.append(draft)
-            if drafts.count > 20 { drafts.removeFirst() }
+        var result = await Planner(adapters: [brain]).plan(said, context: brainContext)
+        var epics: [Int: Int] = [:]
+        (result.plan.dispatches, epics) = await Self.expandEpics(result.plan.dispatches)
+        if result.plan.action == .dispatch, result.plan.dispatches.isEmpty {
+            return .reply(epics.isEmpty ? "Oby couldn't plan that. Try saying it another way." : "That epic has no open sub-issues to work on.")
+        }
+        let talk = card(for: result, said: said)
+        if case .plan(let list) = talk {
+            // ponytail: the last 20 drafts, in memory; a plan made before a restart is made again.
+            drafts.append(contentsOf: list)
+            if drafts.count > 20 { drafts.removeFirst(drafts.count - 20) }
         }
         return talk
+    }
+
+    /// An epic becomes one job per open sub-issue (10 at most): GitHub's sub-issues, otherwise the
+    /// issues its task list names. Returns the jobs and, per epic, how many sub-issues it had.
+    nonisolated static func expandEpics(_ dispatches: [Plan.Dispatch]) async -> ([Plan.Dispatch], [Int: Int]) {
+        var jobs: [Plan.Dispatch] = []
+        var epics: [Int: Int] = [:]
+        for dispatch in dispatches {
+            guard let epic = dispatch.epic else { jobs.append(dispatch); continue }
+            let subIssues = await Workspace.openSubIssues(of: epic, in: dispatch.repo)
+            epics[epic] = subIssues.count
+            for (number, title) in subIssues.prefix(max(0, 10 - jobs.count)) {
+                var job = dispatch
+                job.epic = nil
+                job.issue = number
+                job.task = "Work on issue #\(number) (\(title)), part of epic #\(epic). What the user asked for the epic: \(dispatch.task)"
+                jobs.append(job)
+            }
+        }
+        return (jobs, epics)
     }
 
     /// The user picked one of the brain's options: plan again with the answer.
@@ -112,25 +141,32 @@ final class Desk {
         let plan = result.plan
         switch plan.action {
         case .dispatch:
-            guard let dispatch = plan.dispatch else { return .none }
-            let agent = dispatch.agent == "auto" ? nil : dispatch.agent
-            let named = accounts.accounts.first { $0.signedIn && $0.account.name == dispatch.account && (agent == nil || $0.account.agent == agent) }
-            if dispatch.account != "auto", named == nil {
-                return .reply("\(dispatch.account) isn't signed in. Sign in from Settings › Accounts.")
+            // Each job is routed knowing where the ones before it went, so a plan spreads out.
+            var states = accounts.accounts
+            var drafts: [Draft] = []
+            for dispatch in plan.dispatches {
+                let agent = dispatch.agent == "auto" ? nil : dispatch.agent
+                let named = states.first { $0.signedIn && $0.account.name == dispatch.account && (agent == nil || $0.account.agent == agent) }
+                if dispatch.account != "auto", named == nil {
+                    return .reply("\(dispatch.account) isn't signed in. Sign in from Settings › Accounts.")
+                }
+                guard let account = named?.account ?? AccountStore.route(states, agent: agent) else {
+                    let tool = agent.map { Job.agentNames[$0] ?? $0 } ?? "coding tool"
+                    return .reply("No \(tool) account is signed in with room to spare. Check Settings › Accounts.")
+                }
+                if let index = states.firstIndex(where: { $0.account.id == account.id }) { states[index].running += 1 }
+                let id = String(UUID().uuidString.prefix(8)).lowercased()
+                var job = Job(id: id, request: said, agent: account.agent, account: account.id, repo: dispatch.repo,
+                              branch: Job.branch(kind: dispatch.kind, pr: dispatch.pr, issue: dispatch.issue, id: id),
+                              base: dispatch.baseBranch, pr: dispatch.pr, kind: dispatch.kind, task: dispatch.task)
+                job.issue = dispatch.issue
+                job.rounds = dispatch.rounds > 1 ? dispatch.rounds : nil
+                job.check = dispatch.check
+                let reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
+                drafts.append(Draft(said: said, reply: reply, job: job, guessed: result.by == "rules",
+                                    suggestedModel: dispatch.complexity == .complex ? AgentModels.stronger[account.agent] : nil))
             }
-            guard let account = named?.account ?? AccountStore.route(accounts.accounts, agent: agent) else {
-                let tool = agent.map { Job.agentNames[$0] ?? $0 } ?? "coding tool"
-                return .reply("No \(tool) account is signed in with room to spare. Check Settings › Accounts.")
-            }
-            let id = String(UUID().uuidString.prefix(8)).lowercased()
-            var job = Job(id: id, request: said, agent: account.agent, account: account.id, repo: dispatch.repo,
-                          branch: Job.branch(kind: dispatch.kind, pr: dispatch.pr, issue: dispatch.issue, id: id),
-                          base: dispatch.baseBranch, pr: dispatch.pr, kind: dispatch.kind, task: dispatch.task)
-            job.issue = dispatch.issue
-            job.rounds = dispatch.rounds > 1 ? dispatch.rounds : nil
-            job.check = dispatch.check
-            let reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
-            return .plan(Draft(said: said, reply: reply, job: job, guessed: result.by == "rules"))
+            return drafts.isEmpty ? .none : .plan(drafts)
         case .askUser:
             return plan.question.map { .question(said: said, $0) } ?? .reply(plan.reply)
         case .replyOnly, .stopAgent:
@@ -173,11 +209,18 @@ final class Desk {
 
     /// Dispatches one of the latest plans, by its job's id, with the user's changes (the runner's API).
     /// Rounds and check keep the plan's values unless the client sends them.
-    func dispatch(_ id: String, branch: String, account: String, rounds: Int? = nil, check: String?? = nil) throws -> Job {
+    func dispatch(_ id: String, branch: String, account: String, rounds: Int? = nil, check: String?? = nil, model: String?? = nil) throws -> Job {
         guard var draft = drafts.first(where: { $0.job.id == id }) else {
             throw Shell.Failure(message: "Oby doesn't have that plan any more. Ask again.")
         }
         draft.job = try Self.edit(draft.job, branch: branch, account: accounts.state(account), rounds: rounds, check: check)
+        if let model {
+            // Only the stronger model the plan offered (for the tool the job ended up with), or none.
+            guard model == nil || (draft.suggestedModel != nil && AgentModels.stronger.values.contains(model ?? "")) else {
+                throw Shell.Failure(message: "That model wasn't offered for this job.")
+            }
+            draft.job.model = model == nil ? nil : AgentModels.stronger[draft.job.agent]
+        }
         return dispatch(draft)
     }
 
@@ -241,8 +284,14 @@ final class Desk {
         let home = accounts.state(job.account)?.account.home.map { URL(filePath: $0) }
         let agent: any AgentRun
         switch job.agent {
-        case "claude": agent = ClaudeAgent(worktree: Workspace.worktree(job.id), configDirectory: home)
-        case "codex": agent = CodexAgent(worktree: Workspace.worktree(job.id), home: home)
+        case "claude":
+            let claude = ClaudeAgent(worktree: Workspace.worktree(job.id), configDirectory: home)
+            claude.model = job.model
+            agent = claude
+        case "codex":
+            let codex = CodexAgent(worktree: Workspace.worktree(job.id), home: home)
+            codex.model = job.model
+            agent = codex
         default: finish(job.id, .failed, "\(job.agentName) can't run jobs yet."); return
         }
         agents[job.id] = agent
