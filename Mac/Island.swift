@@ -207,11 +207,6 @@ struct IslandView: View {
         let shape = UnevenRoundedRectangle(bottomLeadingRadius: model.radius, bottomTrailingRadius: model.radius, style: .continuous)
 
         ZStack(alignment: .topLeading) {
-            // The shadow belongs to the static shape only: on the whole island it would be
-            // recomputed on every one of Oby's frames.
-            shape.fill(.black)
-                .shadow(color: .black.opacity(model.state == .open ? 0.5 : 0), radius: 30, y: 14)
-
             WebView(character.page)
                 .webViewContentBackground(.hidden)
                 .allowsHitTesting(model.state == .open)
@@ -249,6 +244,11 @@ struct IslandView: View {
         }
         .foregroundStyle(.white)
         .frame(width: size.width, height: size.height, alignment: .topLeading)
+        // While the island springs open or shut, nothing spills past its shape.
+        .clipShape(shape)
+        // The shadow belongs to the static shape only: on the whole island it would be
+        // recomputed on every one of Oby's frames.
+        .background(shape.fill(.black).shadow(color: .black.opacity(model.state == .open ? 0.5 : 0), radius: 30, y: 14))
         .contentShape(shape)
         .onTapGesture { if model.state != .open { onOpen() } }
         .animation(.spring(response: 0.42, dampingFraction: 0.8), value: model.state)
@@ -394,17 +394,19 @@ private struct PlanCard: View {
                 GridRow {
                     tile("Agent") { Label(Job.agentNames[account?.agent ?? draft.job.agent] ?? "", systemImage: "asterisk") }
                     tile(accounts.count > 1 ? "Account · click to change" : "Account · the one you have") {
-                        Menu {
-                            ForEach(accounts, id: \.account.id) { state in
-                                Button("\(state.account.name) · \(Job.agentNames[state.account.agent] ?? state.account.agent)") { accountID = state.account.id }
+                        if accounts.count > 1 {
+                            Menu {
+                                ForEach(accounts, id: \.account.id) { state in
+                                    Button(Self.name(state.account)) { accountID = state.account.id }
+                                }
+                            } label: {
+                                Text(account.map(Self.name) ?? "No account").lineLimit(1)
                             }
-                        } label: {
-                            Text(account.map { "\($0.name) · \(Job.agentNames[$0.agent] ?? $0.agent)" } ?? "No account").lineLimit(1)
+                            .menuStyle(.button)
+                            .buttonStyle(.plain)
+                        } else {
+                            Text(account.map(Self.name) ?? "No account").lineLimit(1)
                         }
-                        .menuStyle(.button)
-                        .buttonStyle(.plain)
-                        .menuIndicator(accounts.count > 1 ? .visible : .hidden)
-                        .disabled(accounts.count < 2)
                     }
                 }
                 GridRow {
@@ -447,6 +449,11 @@ private struct PlanCard: View {
         }
         .onAppear { branch = draft.job.branch; accountID = draft.job.account }
         .onChange(of: draft.job.id) { branch = draft.job.branch; accountID = draft.job.account }
+    }
+
+    /// "Personal · Claude Code"
+    private static func name(_ account: Account) -> String {
+        "\(account.name) · \(Job.agentNames[account.agent] ?? account.agent)"
     }
 
     private func tile(_ label: String, @ViewBuilder value: () -> some View) -> some View {
