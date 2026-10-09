@@ -64,8 +64,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, WKN
         oby("setState('\(state)', { now: true })")
         showPopover()
     }
-    // "Hi Oby": listen
+    // "Hi Oby": wave, then listen
     @objc private func sayHi() {
+        oby("play('Hello')")
         oby("setState('listening')")
         showPopover()
     }

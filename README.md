@@ -190,7 +190,7 @@ docs/images/     the pictures on this page
 
 Open `Oby.xcodeproj` in Xcode 27 and run the `Oby` scheme on My Mac. Oby needs macOS 26 or later.
 
-**Branches.** `main` is the app, and changes land through pull requests. `dev` is the character’s working copy; its `publish.sh` updates `Character/` on `main` through a pull request.
+**Branches.** Everything starts from `dev`: branch from it and open your pull request into it. When a feature’s tests pass on a real Mac, `dev` is merged into `main`, so `main` always holds a version you can trust. The character’s source lives in `Character/`, and `Character/package/build.sh` builds the clean copy the app ships.
 
 **Roadmap.** Oby is built feature by feature, and every feature ends with a test you can run yourself. Follow along in the [milestones](https://github.com/deskree-inc/oby/milestones).
 

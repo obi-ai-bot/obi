@@ -10,6 +10,56 @@
   body { -webkit-user-select: none; user-select: none; }
   #stage { position: fixed; inset: 0; }
   #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  /* dev:start  the playground (controls); package/build.sh strips every dev block */
+  :root {
+    --bg: #0a0a0b;
+    --ink: #e9e9ea;
+    --muted: #6b6b70;
+    --chip: #1a1a1d;
+    --chip-on: #f2f2f2;
+  }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 12px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  }
+  #ui {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 10px 12px 12px;
+    display: flex; flex-direction: column; gap: 8px; align-items: center;
+  }
+  #sliders { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 18px; }
+  .slider { display: flex; align-items: center; gap: 8px; color: var(--muted); font: 11px/1 "SF Mono", ui-monospace, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
+  .slider input { -webkit-appearance: none; appearance: none; width: 140px; height: 2px; background: #333; border-radius: 2px; outline: none; }
+  .slider input::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--ink); cursor: pointer; }
+  .slider output { width: 34px; text-align: right; }
+  @media (max-width: 520px) { .slider input { width: 90px; } }
+  #label { font: 11px/1 "SF Mono", ui-monospace, Menlo, monospace; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+  #states { display: flex; gap: 6px; }
+  #chips {
+    display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; max-width: 720px;
+  }
+  .chip {
+    appearance: none; border: 0; border-radius: 999px; padding: 5px 10px;
+    background: var(--chip); color: var(--ink); font: inherit; cursor: pointer;
+  }
+  .chip.on { background: var(--chip-on); color: #000; }
+  .chip.auto { border: 1px solid #333; background: transparent; }
+  .chip.auto.on { background: transparent; color: var(--ink); border-color: #777; }
+  body.collapsed #ui { display: none; }
+  #uiToggle {
+    position: fixed; right: 10px; top: 10px; z-index: 2;
+    width: 28px; height: 28px; border-radius: 50%; border: 1px solid #333;
+    background: transparent; color: var(--muted); cursor: pointer;
+    display: grid; place-items: center; padding: 0;
+  }
+  #uiToggle:hover { color: var(--ink); border-color: #777; }
+  body:not(.collapsed) #uiToggle { color: var(--ink); border-color: #777; }
+  @media (max-width: 520px) {
+    #chips { max-width: 360px; gap: 4px; }
+    .chip { padding: 3px 8px; font-size: 11px; }
+  }
+  /* dev:end */
 </style>
 <script type="importmap">
 { "imports": { "three": "./vendor/three.module.js" } }
@@ -17,6 +67,25 @@
 </head>
 <body>
 <div id="stage"></div>
+<!-- dev:start -->
+<button id="uiToggle" title="Controls" aria-label="Show or hide controls">
+  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+    <path d="M2 4h10M2 10h10"/><circle cx="5" cy="4" r="1.6" fill="#0a0a0b"/><circle cx="9" cy="10" r="1.6" fill="#0a0a0b"/>
+  </svg>
+</button>
+<div id="ui">
+  <div id="label">idle</div>
+  <div id="states"></div>
+  <div id="chips"></div>
+  <div id="sliders">
+    <label class="slider" data-k="size">Size <input type="range" min="0.25" max="1" step="0.01" value="0.56"><output>56%</output></label>
+    <label class="slider" data-k="round">Round <input type="range" min="0.04" max="0.46" step="0.01" value="0.23"><output></output></label>
+    <label class="slider" data-k="width">Width <input type="range" min="0.75" max="1.4" step="0.01" value="0.93"><output></output></label>
+    <label class="slider" data-k="height">Height <input type="range" min="0.75" max="1.4" step="0.01" value="0.75"><output></output></label>
+    <button class="chip auto" id="reset">Reset</button>
+  </div>
+</div>
+<!-- dev:end -->
 
 <script type="module">
 import * as THREE from 'three';
@@ -321,6 +390,16 @@ function deformPoint(x, y, z) {
   return new THREE.Vector3(x + U.uLean.value * h * h, y, z + U.uLeanZ.value * h * h);
 }
 
+/* dev:start */
+// bump when the defaults change, so saved settings from older builds are dropped once
+const SETTINGS_VERSION = '4';
+try {
+  if (localStorage.getItem('cube.v') !== SETTINGS_VERSION) {
+    Object.keys(localStorage).filter((k) => k.startsWith('cube.')).forEach((k) => localStorage.removeItem(k));
+    localStorage.setItem('cube.v', SETTINGS_VERSION);
+  }
+} catch {}
+/* dev:end */
 /* ---------------------------------------------------------------------------
    Face drawing (black ink on transparent, 512-unit space centred at 0,0)
 --------------------------------------------------------------------------- */
@@ -550,6 +629,19 @@ const env = (t, a, b, ramp = 0.25) => Math.max(0, Math.min(1, (t - a) / ramp, (b
 
 const EXPRESSIONS = [
   {
+    name: 'Hello', dur: 3.4,
+    keys: [
+      [0, { sq: 0.93, y: -0.02 }],
+      [0.14, { sq: 1.05, y: 0.04, happy: 0.85, eyeH: 84, eyeW: 72, rz: -0.07, ry: 0.18 }],
+      [0.5, { sq: 1, y: 0 }],
+      [2.6, { happy: 0, eyeH: 112, eyeW: 64, rz: 0, ry: 0 }],
+    ],
+    proc(t, add) {
+      const e = env(t, 0.35, 2.5, 0.2);
+      add('rz', Math.sin(t * 13 + 1) * 0.018 * e);
+    },
+  },
+  {
     // the head turns slightly left, as if pointing an ear at the screen,
     // while the eyes stay on you
     name: 'Listening', dur: 3.8,
@@ -645,6 +737,29 @@ const EXPRESSIONS = [
     end() { if (P.ry.v > Math.PI) P.ry.v -= TAU; },  // unwind the turn, if it got that far
   },
   {
+    // happy squint with a little chuckle
+    name: 'Grin', dur: 3.0,
+    keys: [
+      [0, { sq: 0.94 }, 'fast'],
+      [0.15, { sq: 1.04, rz: -0.06, happy: 0.3, eyeH: 96, fx: 'sparkle' }],
+      [2.3, { sq: 1, rz: 0, happy: 0, eyeH: 112 }],
+    ],
+    proc(t, add) {
+      const e = env(t, 0.4, 2.2, 0.2);
+      add('y', Math.abs(Math.sin(t * 11)) * 0.015 * e);
+      add('rz', Math.sin(t * 5.5) * 0.02 * e);
+    },
+  },
+  {
+    name: 'Wink', dur: 2.2,
+    keys: [
+      [0, { rz: -0.06, ry: 0.12, eyeH: 104 }],
+      [0.15, { eR: 0.08, fx: 'sparkle' }, 'snap'],
+      [0.75, { eR: 1 }],
+      [1.5, { rz: 0, ry: 0, eyeH: 112 }],
+    ],
+  },
+  {
     name: 'Laugh', dur: 3.0,
     keys: [
       [0, { rx: -0.14, happy: 1, eyeH: 74, eyeW: 82 }],
@@ -673,6 +788,39 @@ const EXPRESSIONS = [
       [0.35, { sq: 1 }],
       [2.4, { rz: 0, eyeW: 64, eyeH: 112, eyeR: 0.92, gx: 0, gy: 0 }],
     ],
+  },
+  {
+    // "no thanks": nose up, head turned away, eyes shut in a soft ‿;
+    // sneaks one side-eye back at you, then turns away again
+    name: 'Unwilling', dur: 3.8,
+    keys: [
+      [0.3, { ry: -0.65, rx: -0.2, rz: 0.06, calm: 1, fx: 'huff' }, 'body'],
+      [1.7, { ry: -0.45, calm: 0, eyeH: 64, gx: 26, lidT: 0.3 }],
+      [2.2, { ry: -0.72, calm: 1, gx: 0, lidT: 0, eyeH: 112, fx: 'huff' }],
+      [3.1, { ry: 0, rx: 0, rz: 0, calm: 0 }],
+    ],
+  },
+  {
+    name: 'Sad', dur: 4.0,
+    keys: [
+      [0, { sq: 0.92, y: -0.04, rx: 0.24, scale: 0.97, gy: 26, lidA: -0.42, lidT: 0.22, eyeH: 94 }, 'slow'],
+      [1.7, { sq: 0.86 }, 'slow'],
+      [2.3, { sq: 0.93, fx: 'sweat' }, 'slow'],
+      [3.2, { sq: 1, y: 0, rx: 0, scale: 1, gy: 0, lidA: 0, lidT: 0, eyeH: 112 }],
+    ],
+  },
+  {
+    name: 'Angry', dur: 3.2,
+    keys: [
+      // wind up back, then head down and push forward like a ram
+      [0, { rx: -0.08, z: -0.05, sq: 1.04 }],
+      [0.22, { rx: 0.24, rz: 0.07, z: 0.12, leanZ: 0.06, scale: 1.03, sq: 0.93, inflate: 0.26, lidA: 0.55, lidT: 0.26, eyeW: 72, eyeH: 96, eyeR: 0.7, fx: 'anger' }],
+      [2.5, { rx: 0, rz: 0, z: 0, leanZ: 0, scale: 1, sq: 1, inflate: 0.17, lidA: 0, lidT: 0, eyeW: 64, eyeH: 112, eyeR: 0.92 }],
+    ],
+    proc(t, add) {
+      const e = env(t, 0.3, 2.3, 0.1);
+      add('x', Math.sin(t * 61) * 0.009 * e); add('rz', Math.sin(t * 47) * 0.012 * e);
+    },
   },
   {
     // drained: slumps, heavy lids, two long sighs
@@ -753,6 +901,38 @@ const EXPRESSIONS = [
       add('lean', THREE.MathUtils.clamp(P.x.vel * 0.5, -0.25, 0.25) * 0.85);
     },
   },
+  {
+    // dog-style: fights sleep (head droops then jerks up, twice), flops down
+    // with a sigh, breathes slow with a dream twitch, then lazily lifts its head
+    name: 'Sleepy', dur: 6.8,
+    noBlink: true,
+    keys: [
+      [0, { lidT: 0.4, gy: 10, eyeH: 96 }, 'slow'],
+      [2.4, { sq: 0.84, y: -0.07, rx: 0.16, close: 1, lidT: 0.5, gy: 0, fx: 'huff' }, 'body'],
+      [2.65, { sq: 0.88 }, 'slow'],
+      [3.0, { fx: 'z' }], [4.1, { fx: 'z' }], [5.2, { fx: 'z' }],
+      [5.8, { close: 0, lidT: 0.45, sq: 1, y: 0, rx: 0.04 }, 'slow'],
+      [6.4, { lidT: 0, rx: 0, eyeH: 112 }, 'face'],
+    ],
+    start() {
+      const b1 = 0.2 + Math.random() * 0.2;
+      this.bobs = [b1, b1 + 0.8 + Math.random() * 0.25];
+    },
+    proc(t, add) {
+      // fighting sleep: slow droop with eyes closing, then a quick jerk back up
+      for (const b of this.bobs) {
+        const p = t - b;
+        if (p > 0 && p < 0.55) { const k = (p / 0.55) ** 2; add('rx', 0.22 * k); add('close', 0.7 * k); }
+        else if (p >= 0.55 && p < 0.8) { const k = 1 - (p - 0.55) / 0.25; add('rx', 0.22 * k - 0.04 * (1 - k)); add('close', 0.7 * k); }
+      }
+      // asleep: slow deep breaths, and a little dream twitch
+      const e = env(t, 2.7, 5.7, 0.4);
+      add('sq', Math.sin(t * 2.2) * 0.03 * e);
+      add('y', Math.sin(t * 2.2) * 0.008 * e);
+      const twitch = Math.exp(-(((t - 4.6) * 9) ** 2));
+      add('rz', twitch * 0.025); add('sq', twitch * -0.03);
+    },
+  },
 ];
 const IDLE = { name: 'Idle', dur: Infinity, keys: [], follow: true };
 
@@ -799,7 +979,7 @@ function goIdle(hold) { play(IDLE); idleUntil = clock + hold; }
    idles: breathes, blinks, follows the pointer. Change them here.
 --------------------------------------------------------------------------- */
 const STATES = {
-  idle:      { pool: ['Distracted', 'Yawn', 'Hiding'], gap: [7, 16] },
+  idle:      { pool: ['Distracted', 'Wink', 'Grin', 'Yawn', 'Hiding', 'Sleepy'], gap: [7, 16] },
   listening: { pool: ['Listening'], gap: [0, 0] },
   thinking:  { pool: ['Thinking'], gap: [0, 0] },
   working:   { pool: ['Working', 'Loading'], gap: [0.3, 0.8] },
@@ -1100,6 +1280,87 @@ function resize() {
 addEventListener('resize', resize);
 setSize(size);
 
+/* dev:start ----------------------------------------------------------------
+   Playground: state buttons, expression buttons, look sliders (saved in this
+   browser), and a toggle to hide them. ?embed hides all of it.
+--------------------------------------------------------------------------- */
+{
+  let nextIdx = 0;
+  const embedded = params.has('embed');
+  const label = document.getElementById('label');
+  const chips = document.getElementById('chips');
+  const stateChips = document.getElementById('states');
+  for (const name of Object.keys(STATES)) {
+    const b = document.createElement('button');
+    b.className = 'chip auto'; b.textContent = name; b.dataset.state = name;
+    b.onclick = () => oby.setState(name, { now: true });
+    stateChips.appendChild(b);
+  }
+  EXPRESSIONS.forEach((e, i) => {
+    const b = document.createElement('button');
+    b.className = 'chip'; b.textContent = e.name; b.dataset.i = i;
+    b.onclick = () => oby.play(e.name);
+    chips.appendChild(b);
+  });
+  showPlaying = () => {
+    label.textContent = `${state} · ${cur === IDLE ? 'idle' : cur.name}`;
+    for (const b of chips.querySelectorAll('.chip[data-i]')) b.classList.toggle('on', EXPRESSIONS[b.dataset.i] === cur);
+    for (const b of stateChips.children) b.classList.toggle('on', b.dataset.state === state);
+  };
+  addEventListener('keydown', (e) => {
+    if (e.key === ' ' || e.key === 'ArrowRight') { oby.play(EXPRESSIONS[nextIdx].name); nextIdx = (nextIdx + 1) % EXPRESSIONS.length; }
+  });
+
+  if (params.has('nochips')) document.getElementById('ui').style.display = 'none';
+  if (embedded) {
+    for (const id of ['ui', 'uiToggle']) document.getElementById(id).style.display = 'none';
+    document.body.style.background = 'transparent';
+  }
+  // Controls toggle: hidden by default in the menu bar app (loaded from a file),
+  // open in the browser; the choice is remembered.
+  let open = location.protocol !== 'file:';
+  try { const saved = localStorage.getItem('cube.ui'); if (saved !== null) open = saved === '1'; } catch {}
+  document.body.classList.toggle('collapsed', !open);
+  document.getElementById('uiToggle').onclick = () => {
+    const nowOpen = document.body.classList.toggle('collapsed') === false;
+    try { localStorage.setItem('cube.ui', nowOpen ? '1' : '0'); } catch {}
+    resize();
+  };
+
+  // Sliders: start from LOOK (size starts smaller here, to leave room for the
+  // controls), then whatever this browser saved. Reset goes back to the start.
+  const fmt = {
+    size: (v) => Math.round(v * 100) + '%',
+    round: (v) => Math.round((v - 0.04) / 0.42 * 100) + '%',
+    width: (v) => v.toFixed(2) + '×',
+    height: (v) => v.toFixed(2) + '×',
+  };
+  const apply = { size: setSize, ...SHAPE };
+  for (const k of Object.keys(fmt)) {
+    const input = document.querySelector(`[data-k=${k}] input`), out = document.querySelector(`[data-k=${k}] output`);
+    if (k !== 'size') input.defaultValue = LOOK[k];
+    input.value = embedded && k === 'size' ? LOOK.size : input.defaultValue;
+    if (!embedded) {
+      let saved = NaN;
+      try { saved = parseFloat(localStorage.getItem('cube.' + k)); } catch {}
+      if (!Number.isNaN(saved)) input.value = saved;
+    }
+    const set = (v) => {
+      apply[k](v);
+      out.textContent = fmt[k](v);
+      if (!embedded) try { localStorage.setItem('cube.' + k, v); } catch {}
+    };
+    input.addEventListener('input', () => set(parseFloat(input.value)));
+    set(embedded && k === 'size' ? LOOK.size : parseFloat(input.value));  // ?size can go past the slider's max
+  }
+  document.getElementById('reset').onclick = () => {
+    for (const input of document.querySelectorAll('.slider input')) {
+      input.value = input.defaultValue;
+      input.dispatchEvent(new Event('input'));
+    }
+  };
+}
+/* dev:end */
 
 // Loader dots, in framebuffer px around the body's centre.
 const DOT_GAP = 0.3, DOT_R = 0.1;  // world units
@@ -1201,6 +1462,10 @@ document.addEventListener('visibilitychange', syncPaused);
 enterState();
 rafId = requestAnimationFrame(frame);
 
+/* dev:start */
+// debug hooks for screenshots
+window.__cube = { play: (n) => play(EXPRESSIONS.find((e) => e.name === n)), P, EXPRESSIONS, pointer, rig, camera };
+/* dev:end */
 </script>
 </body>
 </html>
