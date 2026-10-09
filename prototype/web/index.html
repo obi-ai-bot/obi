@@ -1312,6 +1312,70 @@ function play(expr) {
 }
 function goIdle(hold) { play(IDLE); idleUntil = clock + hold; }
 
+/* ---------------------------------------------------------------------------
+   Poking: click the mascot. 1-3 pokes: startled bounce. 4-5: angry.
+   6+: turns away with its eyes shut and only twitches. Leave it alone for
+   6s and it forgets.
+--------------------------------------------------------------------------- */
+const POKE_SURPRISE = {
+  name: 'Poked', dur: 1.3,
+  keys: [
+    [0, { sq: 0.76, y: -0.04, eyeH: 70 }, 'snap'],
+    [0.08, { sq: 1.22, y: 0.2, eyeH: 132, eyeW: 92, eyeR: 1, mW: 30, mO: 0.8, mRound: 1, earLa: 2.6, earRa: 2.6, earLb: 0.2, earRb: 0.2, ts: 1.3, fx: 'bang' }, 'fast'],
+    [0.32, { y: 0, sq: 0.88 }, 'jelly'],
+    [0.5, { sq: 1 }],
+    [0.95, { eyeH: 112, eyeW: 64, eyeR: 0.92, mW: 0, mO: 0, mRound: 0, earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2, ts: 1 }],
+  ],
+};
+const POKE_ANGRY = {
+  name: 'Annoyed', dur: 2.2,
+  keys: [
+    [0, { sq: 0.86, rx: -0.06 }, 'fast'],
+    [0.12, { rx: 0.14, sq: 0.94, lidA: 0.55, lidT: 0.26, eyeW: 72, eyeH: 96, eyeR: 0.7, mW: 56, mC: -0.38, mT: 17, earLa: 1.25, earRa: 1.25, earLb: -0.25, earRb: -0.25, ts: 1.25, fx: 'anger' }],
+    [1.7, { rx: 0, sq: 1, lidA: 0, lidT: 0, eyeW: 64, eyeH: 112, eyeR: 0.92, mW: 0, mC: 0, mT: 15, earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2, ts: 1 }],
+  ],
+  proc(t, add) {
+    const e = env(t, 0.15, 1.6, 0.1);
+    add('x', Math.sin(t * 61) * 0.012 * e); add('rz', Math.sin(t * 47) * 0.015 * e);
+  },
+};
+const POKE_IGNORE = {
+  name: 'Ignoring you', dur: 3.5,
+  keys: [
+    [0, { ry: -0.75, rx: -0.18, rz: 0.06, calm: 1, mW: 18, mC: -0.25, mTilt: -4, earLa: -0.2, earRa: 0.35, fx: 'huff' }, 'body'],
+    [2.9, { ry: 0, rx: 0, rz: 0, calm: 0, mW: 0, mC: 0, mTilt: 0, earLa: 0, earRa: 0 }],
+  ],
+};
+let pokes = 0, lastPoke = -99;
+const pixel = new Uint8Array(4);
+function onMascot(clientX, clientY) {
+  const dpr = renderer.getPixelRatio();
+  const x = Math.floor(clientX * dpr), y = Math.floor((innerHeight - clientY) * dpr);
+  renderer.readRenderTargetPixels(idRT, x, y, 1, 1, pixel);
+  return pixel[3] > 0;
+}
+function poke() {
+  if (clock - lastPoke > 6) pokes = 0;
+  pokes++; lastPoke = clock;
+  if (pokes >= 6) {
+    if (cur === POKE_IGNORE) {
+      // already ignoring: just a small twitch, and keep ignoring a bit longer
+      P.sq.vel -= 2.5; P.rz.vel += 1.5; curT = Math.min(curT, 0.6);
+      return;
+    }
+    play(POKE_IGNORE);
+  } else if (pokes >= 4) {
+    play(POKE_ANGRY);
+  } else {
+    // tilt toward a different side each time
+    POKE_SURPRISE.keys[1][1].rz = pokes % 2 ? -0.1 : 0.1;
+    play(POKE_SURPRISE);
+  }
+}
+document.getElementById('stage').addEventListener('pointerdown', (e) => {
+  if (onMascot(e.clientX, e.clientY)) poke();
+});
+
 function update(dt) {
   const prev = curT;
   curT += dt;
