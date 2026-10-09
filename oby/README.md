@@ -23,7 +23,7 @@ expression. The package handed to integrators is built from it:
 
 ```bash
 zsh oby/package/build.sh    # → dist/oby and dist/oby.zip
-zsh oby/package/publish.sh  # build, then push the package to the repo's main branch
+zsh oby/package/publish.sh  # build, then open a PR of the package into main
 ```
 
 The build:
@@ -34,7 +34,8 @@ The build:
 
 The look in the package is fixed to `LOOK` in `oby.html`. The repo has two
 branches: `dev` is this working copy, and `main` holds only the published
-package.
+package. The org only lets `main` change through a pull request, so
+`publish.sh` opens one; merge it on GitHub to ship.
 
 ## Try it
 

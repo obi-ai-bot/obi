@@ -1,7 +1,9 @@
 #!/bin/zsh
 # Publishes the package to the repo's main branch: builds dist/oby from the
-# working copy (dev), puts exactly those files on main, and pushes. main holds
-# only the package, so whoever integrates Oby clones main and gets nothing else.
+# working copy (dev), commits exactly those files on top of main on a
+# publish/<sha> branch, and opens a pull request into main (the org requires
+# one). Merge it on GitHub to ship. main holds only the package, so whoever
+# integrates Oby clones main and gets nothing else. Needs the gh CLI.
 set -euo pipefail
 here=${0:A:h}
 root=$(git -C "$here" rev-parse --show-toplevel)
@@ -37,5 +39,8 @@ fi
 msg=(-m "Oby, built from dev $sha")
 [[ -n ${PUBLISH_NOTE:-} ]] && msg+=(-m "$PUBLISH_NOTE")
 git -C "$tmp" commit -q "${msg[@]}"
-git -C "$tmp" push -q origin HEAD:main
-echo "published dev $sha to main"
+branch="publish/$sha"
+git -C "$tmp" push -q origin "HEAD:refs/heads/$branch"
+body="Package built from dev $sha by oby/package/publish.sh. Merge to ship it."
+[[ -n ${PUBLISH_PR_NOTE:-} ]] && body+=$'\n\n'"$PUBLISH_PR_NOTE"
+gh pr create --base main --head "$branch" --title "Oby, built from dev $sha" --body "$body"
