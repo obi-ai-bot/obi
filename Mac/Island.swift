@@ -409,8 +409,12 @@ private struct PlanCard: View {
     let onCancel: () -> Void
     @State private var branch = ""
     @State private var accountID = ""
+    @State private var rounds = 1
+    @State private var check = ""
 
     private var account: Account? { (accounts.first { $0.account.id == accountID } ?? accounts.first { $0.account.id == draft.job.account })?.account }
+    private var checkIsValid: Bool { check.trimmingCharacters(in: .whitespaces).isEmpty || Plan.isCheck(check) }
+    private var ready: Bool { Plan.isBranchName(branch) && checkIsValid }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -445,6 +449,19 @@ private struct PlanCard: View {
                     }
                 }
             }
+            HStack(spacing: 12) {
+                tile("Done when · a command that must pass") {
+                    TextField("Optional, like swift test", text: $check)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(checkIsValid ? .white : .red)
+                }
+                tile("Rounds") {
+                    Stepper(rounds == 1 ? "1, no loop" : "Up to \(rounds)", value: $rounds, in: 1...10)
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .frame(width: 170)
+            }
             Label("Works in Oby's own copy of the repository. Nothing is pushed or posted.", systemImage: "checkmark.shield")
                 .font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
             if draft.guessed {
@@ -459,22 +476,32 @@ private struct PlanCard: View {
                         draft.job.account = account.id
                         draft.job.agent = account.agent
                     }
+                    draft.job.rounds = rounds > 1 ? rounds : nil
+                    let command = check.trimmingCharacters(in: .whitespaces)
+                    draft.job.check = command.isEmpty ? nil : command
                     onDispatch(draft)
                 } label: {
                     Text("Dispatch").font(.system(size: 15, weight: .semibold)).foregroundStyle(.black)
                         .frame(maxWidth: .infinity).frame(height: 44)
-                        .background(.white.opacity(Plan.isBranchName(branch) ? 1 : 0.4), in: Capsule())
+                        .background(.white.opacity(ready ? 1 : 0.4), in: Capsule())
                 }
                 .buttonStyle(.plain)
-                .disabled(!Plan.isBranchName(branch))
+                .disabled(!ready)
                 .keyboardShortcut(.defaultAction)
                 pill("Edit", action: onEdit)
                 pill("Cancel", action: onCancel)
             }
             .padding(.top, 6)
         }
-        .onAppear { branch = draft.job.branch; accountID = draft.job.account }
-        .onChange(of: draft.job.id) { branch = draft.job.branch; accountID = draft.job.account }
+        .onAppear(perform: load)
+        .onChange(of: draft.job.id, load)
+    }
+
+    private func load() {
+        branch = draft.job.branch
+        accountID = draft.job.account
+        rounds = draft.job.maxRounds
+        check = draft.job.check ?? ""
     }
 
     /// "Personal · Claude Code"
@@ -522,6 +549,11 @@ private struct JobRow: View {
                     Text(subtitle).font(.system(size: 13)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
                 }
                 Spacer(minLength: 8)
+                if job.maxRounds > 1 {
+                    Text("\(job.currentRound)/\(job.maxRounds)")
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(.white.opacity(0.55))
+                        .accessibilityLabel("Round \(job.currentRound) of \(job.maxRounds)")
+                }
                 status
                 if job.status == .done, (job.commits ?? 0) > 0 {
                     if let link = job.published.flatMap(URL.init(string:)) {

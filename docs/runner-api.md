@@ -35,7 +35,11 @@ This document is the contract between the runner and its clients. Change it in t
   "started": "2026-10-09T21:42:55Z",
   "finished": null,
   "commits": null,
-  "published": null
+  "published": null,
+  "issue": null,
+  "rounds": 1,
+  "round": 1,
+  "check": null
 }
 ```
 
@@ -45,7 +49,12 @@ This document is the contract between the runner and its clients. Change it in t
 - `base`: the branch the work started from (filled in once the job is ready). `pr`: the pull request it works on, if any.
 - `commits`: commits made beyond `base` (set when a job is done). Publish is offered only when it's above 0.
 - `published`: the draft pull request's URL once published.
-- What to show: the title is `"<Kind> <repo name> #<pr>"` when `pr` is set, otherwise the first line of `request`.
+- `issue`: the GitHub issue the work is about. The runner fetches it for the agent, which has no GitHub login, and the draft pull request says `Closes #N`.
+- `rounds`: how many rounds the agent may take (1 means no loop); `round`: the one it's on.
+- `check`: a one-line command that must succeed for the work to count as done.
+  - After each round the runner runs it in the job's worktree. If it fails and rounds are left, the agent gets another round with the command's output.
+  - Without a check and with more than one round, the agent's own last line decides: `GOAL MET`, or `GOAL NOT MET: …`, which means another round.
+- What to show: the title is `"<Kind> <repo name> #<number>"` when `pr` or `issue` is set, otherwise the first line of `request`. Show "Round 2 of 5" when `rounds` is above 1.
 
 ### Account
 
@@ -101,7 +110,13 @@ The answer is one of:
 
 ### `POST /v1/jobs`
 
-Dispatches the draft's job. The user may have changed `branch` (must stay a valid branch name) and `account` (any signed-in account; `agent` follows the account). Everything else comes from the draft unchanged.
+Dispatches the draft's job. The user may have changed:
+- `branch`: it must stay a valid branch name.
+- `account`: any signed-in account; `agent` follows the account.
+- `rounds`: 1 to 10.
+- `check`: one line of up to 200 characters, or `null` for none.
+
+Leave `rounds` or `check` out to keep the plan's values (older apps do). Everything else comes from the draft unchanged.
 
 ```json
 {"job": { …the draft's Job }}

@@ -16,6 +16,8 @@ final class CodexAgent: AgentRun {
     private var files: [String: [String]] = [:]
     private var onEvent: (AgentEvent) -> Void = { _ in }
     private var finished = false
+    /// The latest turn's result: the job ends when the server does.
+    private var result: (summary: String, failed: Bool)?
 
     init(worktree: URL, home: URL?) {
         self.worktree = worktree
@@ -29,7 +31,9 @@ final class CodexAgent: AgentRun {
         let server = try CodexServer(home: home, in: worktree, log: log)
         self.server = server
         server.onMessage = { [weak self] in self?.handle($0) }
-        server.onExit = { [weak self] in self?.finish(summary: "Codex stopped without finishing.", failed: true) }
+        server.onExit = { [weak self] in
+            self?.finish(summary: self?.result?.summary ?? "Codex stopped without finishing.", failed: self?.result?.failed ?? true)
+        }
 
         Task {
             do {
@@ -50,6 +54,21 @@ final class CodexAgent: AgentRun {
                 server.end()
             }
         }
+    }
+
+    func send(_ text: String) {
+        guard let server, let thread else { return }
+        Task {
+            let turn = try? await server.call("turn/start", CodexRPC.turnStart(thread: thread, prompt: text,
+                                                                             model: AgentModels.value("codex", "model"),
+                                                                             effort: AgentModels.value("codex", "effort")))
+            self.turn = (turn?["turn"] as? [String: Any])?["id"] as? String
+        }
+    }
+
+    /// Closing stdin ends the server, and with it the job.
+    func end() {
+        server?.end()
     }
 
     func stop() {
@@ -75,9 +94,9 @@ final class CodexAgent: AgentRun {
         if let other = params["threadId"] as? String, let thread, other != thread { return }
         for event in CodexRPC.events(message) {
             if case let .finished(summary, failed) = event {
-                // One task per job for now: the server ends with the turn.
-                server?.end()
-                finish(summary: summary, failed: failed)
+                // The turn's result. Desk decides whether another round follows.
+                result = (summary, failed)
+                onEvent(.turnEnded(summary: summary, failed: failed))
             } else {
                 onEvent(event)
             }

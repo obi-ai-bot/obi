@@ -186,6 +186,18 @@ final class APITests {
         #expect(throws: Shell.Failure.self) { try Desk.edit(job, branch: "oby/review-33", account: signedOut) }
     }
 
+    /// An older app sends the job back without rounds or check: the plan's values stay. A newer
+    /// one may change them, and `"check": null` clears the check.
+    @Test func dispatchBodiesMayLeaveTheLoopOut() throws {
+        let decode = { (json: String) in try JSONDecoder().decode(DispatchRequest.self, from: Data(json.utf8)).job }
+        let old = try decode(#"{"job": {"id": "a", "branch": "oby/fix-42", "account": "default"}}"#)
+        #expect(old.rounds == nil && old.check == nil)
+        let cleared = try decode(#"{"job": {"id": "a", "branch": "oby/fix-42", "account": "default", "rounds": 3, "check": null}}"#)
+        #expect(cleared.rounds == 3 && cleared.check == .some(nil))
+        let set = try decode(#"{"job": {"id": "a", "branch": "oby/fix-42", "account": "default", "check": "swift test"}}"#)
+        #expect(set.check == .some("swift test"))
+    }
+
     @Test func plansMapToTheirKinds() throws {
         let draft = Desk.Draft(said: "Review oby PR #33", reply: "Oby will review PR #33 in oby.", job: job, guessed: true)
         let plan = object(try API.encode(PlanAnswer(.plan(draft))))
@@ -214,9 +226,10 @@ final class APITests {
         let json = String(decoding: try API.encode(JobJSON(job: job)), as: UTF8.self)
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
-        for key in ["base", "session", "finished", "commits", "published"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
+        for key in ["base", "session", "finished", "commits", "published", "issue", "check"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 19)
+        #expect(decoded.count == 23)
+        #expect(decoded["rounds"] as? Int == 1 && decoded["round"] as? Int == 1)
         #expect(decoded["kind"] as? String == "review" && decoded["pr"] as? Int == 33 && decoded["status"] as? String == "queued")
     }
 

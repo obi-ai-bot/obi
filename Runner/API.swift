@@ -63,7 +63,8 @@ final class API {
 
     func dispatch(_ request: DispatchRequest) throws -> Response {
         do {
-            let job = try desk.dispatch(request.job.id, branch: request.job.branch, account: request.job.account)
+            let job = try desk.dispatch(request.job.id, branch: request.job.branch, account: request.job.account,
+                                        rounds: request.job.rounds, check: request.job.check)
             return Self.json(JobJSON(job: job), status: .created)
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
@@ -314,7 +315,7 @@ struct Options: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, issue, rounds, round, check }
 
     func encode(to encoder: any Encoder) throws {
         try job.encode(to: encoder)
@@ -326,6 +327,11 @@ struct JobJSON: Encodable {
         if job.finished == nil { try nulls.encodeNil(forKey: .finished) }
         if job.commits == nil { try nulls.encodeNil(forKey: .commits) }
         if job.published == nil { try nulls.encodeNil(forKey: .published) }
+        if job.issue == nil { try nulls.encodeNil(forKey: .issue) }
+        // Rounds always has a value in the API: 1 when the job doesn't loop.
+        try nulls.encode(job.maxRounds, forKey: .rounds)
+        try nulls.encode(job.currentRound, forKey: .round)
+        if job.check == nil { try nulls.encodeNil(forKey: .check) }
     }
 }
 
@@ -392,10 +398,25 @@ struct PlanRequest: Decodable {
 
 /// Only what the user may change on a plan, and the plan's job id; the rest comes from the plan.
 struct DispatchRequest: Decodable {
+    /// The plan's job as the client sends it back. Rounds and check are optional: an older app
+    /// leaves them out and the plan's values stay; `"check": null` clears the check.
     struct Edited: Decodable {
         var id: String
         var branch: String
         var account: String
+        var rounds: Int?
+        var check: String??
+
+        private enum Keys: String, CodingKey { case id, branch, account, rounds, check }
+
+        init(from decoder: any Decoder) throws {
+            let keys = try decoder.container(keyedBy: Keys.self)
+            id = try keys.decode(String.self, forKey: .id)
+            branch = try keys.decode(String.self, forKey: .branch)
+            account = try keys.decode(String.self, forKey: .account)
+            rounds = try keys.decodeIfPresent(Int.self, forKey: .rounds)
+            check = keys.contains(.check) ? .some(try keys.decodeIfPresent(String.self, forKey: .check)) : nil
+        }
     }
 
     var job: Edited
