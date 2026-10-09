@@ -42,6 +42,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var round: Int?
     /// A one-line command that must succeed for the work to count as done.
     var check: String?
+    /// A model for this job instead of Settings › Models: the stronger one the card offered.
+    var model: String?
 
     var maxRounds: Int { rounds ?? 1 }
     var currentRound: Int { round ?? 1 }
@@ -113,6 +115,8 @@ final class ClaudeAgent: AgentRun {
     private let worktree: URL
     /// The account's own config directory, or nil for the default `~/.claude`.
     private let configDirectory: URL?
+    /// This job's model, or nil for Settings › Models.
+    var model: String?
     private var onEvent: (AgentEvent) -> Void = { _ in }
     private var finished = false
     /// The latest turn's result. The job ends when Claude Code exits, not when a turn ends.
@@ -129,7 +133,7 @@ final class ClaudeAgent: AgentRun {
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                              "--verbose", "--permission-prompt-tool", "stdio",
-                             "--model", AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
+                             "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
         process.currentDirectoryURL = worktree
         process.environment = Agents.environment(["CLAUDE_CONFIG_DIR": configDirectory?.path])
         process.standardInput = input
@@ -339,6 +343,38 @@ nonisolated enum Workspace {
         ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Oby")
     static func clone(_ repo: String) -> URL { root.appending(path: "repos/\(repo)") }
     static func worktree(_ id: String) -> URL { root.appending(path: "jobs/\(id)") }
+
+    /// An epic's open sub-issues with their titles: GitHub's sub-issues, otherwise the open issues
+    /// its task list names.
+    static func openSubIssues(of epic: Int, in repo: String) async -> [(number: Int, title: String)] {
+        if let text = try? await Shell.ok(["gh", "api", "repos/\(repo)/issues/\(epic)/sub_issues?per_page=50"]),
+           let list = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [[String: Any]] {
+            let open = list.filter { $0["state"] as? String == "open" }.compactMap { item -> (number: Int, title: String)? in
+                (item["number"] as? Int).map { ($0, item["title"] as? String ?? "") }
+            }
+            if !open.isEmpty { return open }
+        }
+        guard let body = try? await Shell.ok(["gh", "issue", "view", "\(epic)", "-R", repo, "--json", "body", "-q", ".body"]) else { return [] }
+        var open: [(number: Int, title: String)] = []
+        for number in taskList(body) {
+            guard let text = try? await Shell.ok(["gh", "issue", "view", "\(number)", "-R", repo, "--json", "title,state"]),
+                  let info = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+                  info["state"] as? String == "OPEN" else { continue }
+            open.append((number, info["title"] as? String ?? ""))
+        }
+        return open
+    }
+
+    /// The issues an epic's unchecked task list names: `- [ ] #12`, or a link to issue 12.
+    static func taskList(_ body: String) -> [Int] {
+        var numbers: [Int] = []
+        for line in body.split(separator: "\n") {
+            guard let item = line.firstMatch(of: /^\s*[-*]\s+\[ \]\s+.*?(?:#|\/issues\/)(\d+)/), let number = Int(item.1),
+                  !numbers.contains(number) else { continue }
+            numbers.append(number)
+        }
+        return numbers
+    }
 
     /// The repositories the planner may choose from: the 100 the user pushed to most recently.
     static func knownRepos() async throws -> [String] {

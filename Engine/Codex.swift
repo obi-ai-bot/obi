@@ -18,6 +18,8 @@ final class CodexAgent: AgentRun {
     private var finished = false
     /// The latest turn's result: the job ends when the server does.
     private var result: (summary: String, failed: Bool)?
+    /// This job's model, or nil for Settings › Models.
+    var model: String?
 
     init(worktree: URL, home: URL?) {
         self.worktree = worktree
@@ -46,7 +48,7 @@ final class CodexAgent: AgentRun {
                 self.thread = thread
                 onEvent(.session(thread))
                 let turn = try await server.call("turn/start", CodexRPC.turnStart(thread: thread, prompt: prompt,
-                                                                                 model: AgentModels.value("codex", "model"),
+                                                                                 model: model ?? AgentModels.value("codex", "model"),
                                                                                  effort: AgentModels.value("codex", "effort")))
                 self.turn = (turn["turn"] as? [String: Any])?["id"] as? String
             } catch {
@@ -60,7 +62,7 @@ final class CodexAgent: AgentRun {
         guard let server, let thread else { return }
         Task {
             let turn = try? await server.call("turn/start", CodexRPC.turnStart(thread: thread, prompt: text,
-                                                                             model: AgentModels.value("codex", "model"),
+                                                                             model: model ?? AgentModels.value("codex", "model"),
                                                                              effort: AgentModels.value("codex", "effort")))
             self.turn = (turn?["turn"] as? [String: Any])?["id"] as? String
         }

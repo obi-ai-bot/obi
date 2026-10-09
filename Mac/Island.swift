@@ -295,11 +295,16 @@ private struct OpenIsland: View {
             .frame(minHeight: 92, alignment: .top)
 
             switch desk.talk {
-            case .plan(let draft):
-                PlanCard(draft: draft, accounts: desk.accounts.accounts.filter(\.signedIn),
+            case .plan(let drafts) where drafts.count == 1:
+                PlanCard(draft: drafts[0], accounts: desk.accounts.accounts.filter(\.signedIn),
                          onDispatch: { desk.dispatch($0) },
-                         onEdit: { text = draft.said; desk.cancel(); typing = true },
+                         onEdit: { text = drafts[0].said; desk.cancel(); typing = true },
                          onCancel: { desk.cancel() })
+            case .plan(let drafts):
+                PlansCard(drafts: drafts, accounts: desk.accounts.accounts.filter(\.signedIn),
+                          onDispatch: { for draft in $0 { desk.dispatch(draft) } },
+                          onEdit: { text = drafts[0].said; desk.cancel(); typing = true },
+                          onCancel: { desk.cancel() })
             case .question(let said, let question):
                 ForEach(question.options, id: \.self) { option in
                     Button { desk.answer(option, said: said, question: question.text) } label: {
@@ -350,9 +355,9 @@ private struct OpenIsland: View {
             case .thinking(let said):
                 Text("Thinking…").font(.system(size: 19, weight: .semibold))
                 Text("You said “\(said)”").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
-            case .plan(let draft):
-                Text("You said “\(draft.said)”").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
-                Text(draft.reply).font(.system(size: 19, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+            case .plan(let drafts):
+                Text("You said “\(drafts[0].said)”").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
+                Text(drafts[0].reply).font(.system(size: 19, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
             case .reply(let reply):
                 Text(reply).font(.system(size: 17, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
                 Text("Type a task below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
@@ -411,6 +416,7 @@ private struct PlanCard: View {
     @State private var accountID = ""
     @State private var rounds = 1
     @State private var check = ""
+    @State private var stronger = false
 
     private var account: Account? { (accounts.first { $0.account.id == accountID } ?? accounts.first { $0.account.id == draft.job.account })?.account }
     private var checkIsValid: Bool { check.trimmingCharacters(in: .whitespaces).isEmpty || Plan.isCheck(check) }
@@ -462,6 +468,9 @@ private struct PlanCard: View {
                 }
                 .frame(width: 170)
             }
+            if draft.suggestedModel != nil, let account {
+                StrongerModel(agent: account.agent, plan: accounts.first { $0.account.id == account.id }?.label, on: $stronger)
+            }
             Label("Works in Oby's own copy of the repository. Nothing is pushed or posted.", systemImage: "checkmark.shield")
                 .font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
             if draft.guessed {
@@ -479,6 +488,7 @@ private struct PlanCard: View {
                     draft.job.rounds = rounds > 1 ? rounds : nil
                     let command = check.trimmingCharacters(in: .whitespaces)
                     draft.job.check = command.isEmpty ? nil : command
+                    draft.job.model = stronger ? AgentModels.stronger[draft.job.agent] : nil
                     onDispatch(draft)
                 } label: {
                     Text("Dispatch").font(.system(size: 15, weight: .semibold)).foregroundStyle(.black)
@@ -526,6 +536,126 @@ private struct PlanCard: View {
                 .background(.white.opacity(0.1), in: Capsule())
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Several jobs from one request, one row each with its own account, and Dispatch all.
+private struct PlansCard: View {
+    let drafts: [Desk.Draft]
+    let accounts: [AccountState]
+    let onDispatch: ([Desk.Draft]) -> Void
+    let onEdit: () -> Void
+    let onCancel: () -> Void
+    /// The account each draft goes to, by job id: the routed one unless the user picks another.
+    @State private var picked: [String: String] = [:]
+    @State private var stronger: Set<String> = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(drafts, id: \.job.id) { draft in
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(draft.job.title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                        Text(details(draft)).font(.system(size: 12, design: .monospaced)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    if draft.suggestedModel != nil {
+                        Toggle(AgentModels.name(AgentModels.stronger[agent(of: draft)] ?? ""), isOn: Binding {
+                            stronger.contains(draft.job.id)
+                        } set: { on in
+                            if on { stronger.insert(draft.job.id) } else { stronger.remove(draft.job.id) }
+                        })
+                        .toggleStyle(.checkbox).font(.system(size: 12))
+                        .help("This looks complex: run it on the stronger model")
+                    }
+                    Menu {
+                        ForEach(accounts, id: \.account.id) { state in
+                            Button(Self.name(state.account)) { picked[draft.job.id] = state.account.id }
+                        }
+                    } label: {
+                        Text(account(of: draft).map(Self.name) ?? "No account").font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    }
+                    .menuStyle(.button).buttonStyle(.plain).fixedSize()
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            if drafts.contains(where: { $0.guessed }) {
+                Label("Oby's brain didn't answer, so this plan is a guess. Check it before you dispatch.", systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 13)).foregroundStyle(.orange)
+            }
+            HStack(spacing: 10) {
+                Button(action: dispatchAll) {
+                    Text("Dispatch all \(drafts.count)").font(.system(size: 15, weight: .semibold)).foregroundStyle(.black)
+                        .frame(maxWidth: .infinity).frame(height: 44)
+                        .background(.white, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.defaultAction)
+                pill("Edit", action: onEdit)
+                pill("Cancel", action: onCancel)
+            }
+            .padding(.top, 6)
+        }
+    }
+
+    private func account(of draft: Desk.Draft) -> Account? {
+        (accounts.first { $0.account.id == picked[draft.job.id] } ?? accounts.first { $0.account.id == draft.job.account })?.account
+    }
+
+    private func agent(of draft: Desk.Draft) -> String { account(of: draft)?.agent ?? draft.job.agent }
+
+    /// "deskree-inc/oby · oby/fix-42 · until swift test passes"
+    private func details(_ draft: Desk.Draft) -> String {
+        var parts = [draft.job.repo, draft.job.branch]
+        if let check = draft.job.check { parts.append("until \(check) passes") } else if draft.job.maxRounds > 1 { parts.append("up to \(draft.job.maxRounds) rounds") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func dispatchAll() {
+        onDispatch(drafts.map { draft in
+            var draft = draft
+            if let account = account(of: draft) {
+                draft.job.account = account.id
+                draft.job.agent = account.agent
+            }
+            draft.job.model = stronger.contains(draft.job.id) ? AgentModels.stronger[draft.job.agent] : nil
+            return draft
+        })
+    }
+
+    nonisolated private static func name(_ account: Account) -> String {
+        "\(account.name) · \(Job.agentNames[account.agent] ?? account.agent)"
+    }
+
+    private func pill(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.system(size: 15, weight: .semibold))
+                .padding(.horizontal, 20).frame(height: 44)
+                .background(.white.opacity(0.1), in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// The offer for complex work: the tool's stronger model, off until the user turns it on. Astra
+/// on a ChatGPT Plus plan gets a warning, because it uses that plan's limits fast.
+private struct StrongerModel: View {
+    let agent: String
+    /// The account's label, like "Plus · name@example.com".
+    let plan: String?
+    @Binding var on: Bool
+
+    var body: some View {
+        let model = AgentModels.stronger[agent] ?? ""
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("This looks complex. Use \(AgentModels.name(model)) for this job?", isOn: $on)
+                .toggleStyle(.switch).font(.system(size: 13, weight: .medium))
+            if agent == "codex", plan?.hasPrefix("Plus") == true {
+                Label("Astra uses a ChatGPT Plus plan's limits fast.", systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 12)).foregroundStyle(.orange)
+            }
+        }
     }
 }
 

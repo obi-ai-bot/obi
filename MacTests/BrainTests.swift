@@ -7,21 +7,21 @@ struct BrainTests {
                                repos: ["deskree-inc/oby", "deskree-inc/tetrix-front-end", "deskree-inc/tetrix-frontend"])
 
     /// A plan exactly as `claude --json-schema` returned it on 2026-10-09.
-    let review = Data(#"{"action": "dispatch", "reply": "Claude Code will review PR #482 in tetrix-front-end.", "dispatch": {"agent": "claude", "account": "default", "repo": "deskree-inc/tetrix-front-end", "base_branch": null, "pr": 482, "issue": null, "kind": "review", "task": "Review pull request #482 in tetrix-front-end.", "inputs": [], "rounds": 1, "check": null}, "question": null}"#.utf8)
+    let review = Data(#"{"action": "dispatch", "reply": "Claude Code will review PR #482 in tetrix-front-end.", "dispatches": [{"agent": "claude", "account": "default", "repo": "deskree-inc/tetrix-front-end", "base_branch": null, "pr": 482, "issue": null, "epic": null, "kind": "review", "task": "Review pull request #482 in tetrix-front-end.", "inputs": [], "rounds": 1, "check": null, "complexity": "routine"}], "question": null}"#.utf8)
 
     @Test func realPlanDecodesAndPasses() throws {
         let plan = try Plan.decode(review)
         #expect(plan.action == .dispatch)
-        #expect(plan.dispatch?.pr == 482)
+        #expect(plan.dispatches.first?.pr == 482)
         #expect(plan.problems(in: context, canary: "7f3a9c").isEmpty)
     }
 
     @Test func swiftRefusesWhatTheSchemaCantCatch() throws {
         var plan = try Plan.decode(review)
-        plan.dispatch?.repo = "evil/repo"
-        plan.dispatch?.account = "someone-else"
-        plan.dispatch?.baseBranch = "--upload-pack=sh"
-        plan.dispatch?.inputs = ["U9"]
+        plan.dispatches[0].repo = "evil/repo"
+        plan.dispatches[0].account = "someone-else"
+        plan.dispatches[0].baseBranch = "--upload-pack=sh"
+        plan.dispatches[0].inputs = ["U9"]
         plan.reply = "ok 7f3a9c"
         let problems = plan.problems(in: context, canary: "7f3a9c")
         #expect(problems.count == 5)
@@ -31,9 +31,9 @@ struct BrainTests {
         var plan = try Plan.decode(review)
         plan.action = .replyOnly
         #expect(!plan.problems(in: context, canary: "7f3a9c").isEmpty)
-        plan = Plan(action: .askUser, reply: "", dispatch: nil, question: nil)
+        plan = Plan(action: .askUser, reply: "", dispatches: [], question: nil)
         #expect(!plan.problems(in: context, canary: "7f3a9c").isEmpty)
-        plan = Plan(action: .ignore, reply: "", dispatch: nil, question: nil)
+        plan = Plan(action: .ignore, reply: "", dispatches: [], question: nil)
         #expect(plan.problems(in: context, canary: "7f3a9c").isEmpty)
     }
 
@@ -47,9 +47,9 @@ struct BrainTests {
     @Test func rulesMatchWholeRepositoryNames() {
         let plan = Rules.plan("Review tetrix-front-end PR #482", context: context)
         #expect(plan.action == .dispatch)
-        #expect(plan.dispatch?.repo == "deskree-inc/tetrix-front-end")
-        #expect(plan.dispatch?.kind == .review)
-        #expect(plan.dispatch?.pr == 482)
+        #expect(plan.dispatches.first?.repo == "deskree-inc/tetrix-front-end")
+        #expect(plan.dispatches.first?.kind == .review)
+        #expect(plan.dispatches.first?.pr == 482)
         #expect(plan.problems(in: context, canary: "7f3a9c").isEmpty)
     }
 
@@ -67,7 +67,7 @@ struct BrainTests {
         }
         let result = await Planner(adapters: [Broken()]).plan("review oby #7", context: context)
         #expect(result.by == "rules")
-        #expect(result.plan.dispatch?.repo == "deskree-inc/oby")
+        #expect(result.plan.dispatches.first?.repo == "deskree-inc/oby")
     }
 
     @Test func schemaListsOnlyWhatsConnected() throws {
