@@ -114,7 +114,7 @@ const DEFAULTS = {
   eL: [1, 'face'], eR: [1, 'face'], close: [0, 'face'], blink: [0, 'blink'],
   lidT: [0, 'face'], lidA: [0, 'face'], happy: [0, 'face'], calm: [0, 'face'], peek: [0, 'face'],
   shX: [0, 'gaze'], shY: [0, 'gaze'], shS: [0, 'face'],  // catchlight offset and extra size (eye roll)
-  mW: [0, 'mouth'], mC: [0, 'mouth'], mO: [0, 'mouth'], mRound: [0, 'mouth'], mReveal: [0, 'face'], mArch: [0, 'face'],
+  mW: [0, 'mouth'], mC: [0, 'mouth'], mO: [0, 'mouth'], mRound: [0, 'mouth'], mReveal: [0, 'face'], mArch: [0, 'face'], forceMouth: [0, 'face'],  // show the mouth even when toggled off (Yawn)
   book: [0, 'pop'],  // open book held in front (Reading)
   mY: [92, 'mouth'], mT: [15, 'mouth'], mTilt: [0, 'mouth'],
   // arms: out (0..1), hand target (cube-local), elbow bend
@@ -822,7 +822,7 @@ function drawMouth(ctx) {
     ctx.lineWidth = 6;
     ctx.fill(); ctx.stroke();
   }
-  if (!show.mouth) { ctx.restore(); return; }
+  if (!show.mouth && V('forceMouth') < 0.5) { ctx.restore(); return; }
 
   // confused: a short line down from the nose into a lopsided upside-down
   // curve (left side droops, right side runs flat)
@@ -1257,13 +1257,19 @@ const EXPRESSIONS = [
     name: 'Yawn', dur: 3.6,
     keys: [
       [0, { lidT: 0.3, sq: 0.95 }, 'slow'],
+      // the mouth shows up as a small dot even if the mouth is toggled off...
+      [0.15, { forceMouth: 1, mW: 18, mO: 0.35, mRound: 1, mY: 100 }, 'face'],
       [0.4, { close: 1 }, 'face'],
-      [0.4, { sq: 1.15, y: 0.04, rx: -0.2, mW: 115, mO: 1, mRound: 1, mY: 100, aLo: 0.8, aRo: 0.8, aLx: -0.8, aLy: 0.3, aLz: 0.1, aRx: 0.8, aRy: 0.3, aRz: 0.1, aLby: 0.1, aRby: 0.1 }, 'slow'],
-      [1.6, { sq: 0.92, y: 0, rx: 0.05, mO: 0, mRound: 0, mW: 30, mC: 0.2, mY: 92, aLo: 0, aRo: 0 }, 'body'],
-      [1.9, { mO: 0.15 }, 'fast'],
-      [2.05, { mO: 0 }],
+      // ...opens into the big yawn...
+      [0.4, { sq: 1.15, y: 0.04, rx: -0.2, mW: 115, mO: 1, aLo: 0.8, aRo: 0.8, aLx: -0.8, aLy: 0.3, aLz: 0.1, aRx: 0.8, aRy: 0.3, aRz: 0.1, aLby: 0.1, aRby: 0.1 }, 'slow'],
+      // ...closes back down to the dot with a little smack...
+      [1.6, { sq: 0.92, y: 0, rx: 0.05, mW: 18, mO: 0.35, aLo: 0, aRo: 0 }, 'body'],
+      [1.9, { mO: 0.55 }, 'fast'],
+      [2.05, { mO: 0.35 }],
       [2.3, { close: 0, lidT: 0.25, sq: 1 }, 'slow'],
-      [3.0, { lidT: 0, mW: 0, mC: 0 }],
+      // ...and goes away
+      [2.5, { forceMouth: 0, mW: 0, mO: 0, mRound: 0, mY: 92 }, 'face'],
+      [3.0, { lidT: 0 }],
     ],
   },
   {
