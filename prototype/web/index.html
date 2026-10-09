@@ -1373,15 +1373,16 @@ const EXPRESSIONS = [
     // a wall slides in; it scoots behind it, half hidden, and peeks out twice
     name: 'Hiding', dur: 5.6,
     keys: [
-      [0, { wall: 1 }, 'body'],
+      [0, { wall: 1 }, 'snap'],
       [0.1, { eyeH: 124, eyeW: 70 }, 'fast'],
-      [0.25, { x: -0.1, z: -0.08, ry: 0.22, sq: 0.94, gx: 10, eyeH: 104, eyeW: 66 }, 'body'],
+      [0.25, { x: -0.55, z: -0.08, ry: 0.22, sq: 0.94, gx: 10, eyeH: 104, eyeW: 66 }, 'body'],
       // peek: lean the top out past the edge, eyes on you
-      [1.2, { lean: 0.32, x: 0.02, rz: -0.08, gx: -8, gy: -4 }, 'slow'],
-      [2.3, { lean: 0, x: -0.16, rz: 0, gx: 12 }, 'fast'],  // ducks back
+      [1.3, { lean: 0.32, x: -0.43, rz: -0.08, gx: -8, gy: -4 }, 'slow'],
+      [2.3, { lean: 0, x: -0.61, rz: 0, gx: 12 }, 'fast'],  // ducks back
       [2.35, { blink: 1 }, 'blink'], [2.45, { blink: 0 }, 'blink'],
-      [3.1, { lean: 0.22, x: -0.04, rz: -0.06, gx: -6, gy: 2 }, 'slow'],  // smaller, shyer peek
-      [4.3, { wall: 0, x: 0, z: 0, ry: 0, rz: 0, lean: 0, sq: 1, gx: 0, gy: 0, eyeH: 112, eyeW: 64 }, 'body'],
+      [3.1, { lean: 0.22, x: -0.49, rz: -0.06, gx: -6, gy: 2 }, 'slow'],  // smaller, shyer peek
+      [5.3, { wall: 0 }, 'snap'],  // only once it's clear of the edge
+      [4.3, { x: 0, z: 0, ry: 0, rz: 0, lean: 0, sq: 1, gx: 0, gy: 0, eyeH: 112, eyeW: 64 }, 'body'],
     ],
     proc(t, add) {
       // tiny nervous shuffle while tucked in
@@ -1669,14 +1670,14 @@ function applyToScene() {
   updateBook();
   updateWall();
 }
-// Pillar (world units): right edge just left of centre, a bit taller than the
-// cube. wall = 0 parks it off the left side.
-const WALL = { x: 0.02, w: 0.7, top: 0.62, bottom: -0.8 };
+// Pillar (world units): it never moves; its right edge sits just past the
+// cube's left side, so the cube has to walk over to hide behind it.
+const WALL = { x: -0.53, w: 0.8, top: 0.62, bottom: -0.8 };
 function updateWall() {
   const k = V('wall'), u = compositeMat.uniforms;
-  u.uWallOn.value = k > 0.001 ? 1 : 0;
-  if (k <= 0.001) return;
-  const x1 = THREE.MathUtils.lerp(-2.4, WALL.x, Math.min(1, k));
+  u.uWallOn.value = k > 0.5 ? 1 : 0;
+  if (k <= 0.5) return;
+  const x1 = WALL.x;
   const toPx = (x, y) => {
     const p = new THREE.Vector3(x, y, 0).project(camera), r = renderer.getPixelRatio();
     return [(p.x * 0.5 + 0.5) * innerWidth * r, (p.y * 0.5 + 0.5) * innerHeight * r];
