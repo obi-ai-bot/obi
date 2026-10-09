@@ -283,7 +283,8 @@ void main() {
   vec3 col;
   if (uLoader > 0.5) {
     // the shape is wherever the blend of cube and dots passes 0.5
-    a = clamp(a + dots(px, r), 0., 1.);
+    // the shrunken cube fades out completely, so no speck is left behind the dots
+    a = clamp(a * (1.0 - smoothstep(0.8, 0.98, uMelt)) + dots(px, r), 0., 1.);
     fill = smoothstep(0.44, 0.56, a);
     ink = min(ink * (1.0 - uMelt), fill);
   }
@@ -875,23 +876,26 @@ const EXPRESSIONS = [
     },
   },
   {
-    // melts into three dots like liquid, the dots bounce in a wave while it
-    // loads, then they run back together and swell back into the cube
-    name: 'Loading', dur: 5.4,
+    // spins round like Working; with its back to you it melts into three dots
+    // like liquid, the dots bounce in a wave while it loads, then they run back
+    // together into the cube, which finishes the spin to face you again
+    name: 'Loading', dur: 6.0,
     keys: [
-      [0, { close: 1, sq: 0.88 }, 'fast'],                                  // eyes shut, gathers itself
-      [0.12, { inflate: 1, scale: 0.5, sq: 1 }, 'body'],                    // rounds into a ball
-      [0.3, { dR: 1 }, 'pop'],
-      [0.32, { scale: 0.04 }, 'melt'],                                      // the ball melts...
-      [0.42, { dSpread: 1 }, 'spread'],                                     // ...and pulls apart into dots
-      [0.9, { dBounce: 1 }, 'slow'],
-      [3.8, { dBounce: 0 }, 'fast'],
-      [3.9, { dSpread: 0 }, 'spread'],                                      // dots run back together
-      [4.05, { scale: 0.5 }, 'melt'],                                       // into a ball
-      [4.3, { inflate: 0.17, scale: 1, sq: 1.06 }, 'body'],                 // that swells back into the cube
-      [4.35, { dR: 0 }, 'body'],
-      [4.6, { close: 0, sq: 1 }, 'face'],                                   // and opens its eyes
+      [0, { ry: -0.3, sq: 0.92 }, 'fast'],                                  // wind-up
+      [0.2, { ry: Math.PI, sq: 1 }, 'body'],                                // turns its back to you
+      [0.55, { inflate: 1, scale: 0.5 }, 'body'],                           // rounds into a ball as it turns
+      [0.75, { dR: 1 }, 'pop'],
+      [0.75, { scale: 0.04 }, 'melt'],                                      // the ball melts...
+      [0.85, { dSpread: 1 }, 'spread'],                                     // ...and pulls apart into dots
+      [1.3, { dBounce: 1 }, 'slow'],
+      [4.0, { dBounce: 0 }, 'fast'],
+      [4.1, { dSpread: 0 }, 'spread'],                                      // dots run back together
+      [4.25, { scale: 0.5 }, 'melt'],                                       // into a ball
+      [4.5, { inflate: 0.17, scale: 1 }, 'body'],                           // that swells back into the cube
+      [4.55, { dR: 0 }, 'body'],
+      [4.7, { ry: TAU }, 'body'],                                           // and spins round to face you
     ],
+    end() { P.ry.v -= TAU; },
   },
   {
     // happy squint with a little chuckle
