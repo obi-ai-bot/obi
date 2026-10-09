@@ -33,14 +33,6 @@ nonisolated struct AccountState: Equatable, Sendable {
 @Observable
 final class AccountStore {
     private(set) var accounts: [AccountState]
-    /// Codex's sign-in label for a home, or nil while signed out. The Codex runner can swap in
-    /// its app-server's `account/read`; until then `codex login status` answers.
-    @ObservationIgnored var codexLabel: (_ home: String?) async -> String? = { home in
-        // It exits 0 when signed in and says how on stderr: "Logged in using ChatGPT".
-        guard let result = try? await Shell.run(["codex", "login", "status"], env: ["CODEX_HOME": home], timeout: 30),
-              result.status == 0 else { return nil }
-        return result.err.split(separator: "\n").last.map(String.init) ?? "Signed in"
-    }
     private let file: URL
     private let homes: URL
 
@@ -100,7 +92,13 @@ final class AccountStore {
                 let result = try? await Shell.run(["claude", "auth", "status", "--json"], env: ["CLAUDE_CONFIG_DIR": account.home], timeout: 30)
                 label = result.flatMap { Self.claudeLabel(status: $0.out) }
             case "codex":
-                label = await codexLabel(account.home)
+                // Codex's app-server knows both the login and the limits; Claude Code's limits
+                // arrive with its first job.
+                let home = account.home.map { URL(filePath: $0) }
+                label = (try? await CodexAgent.account(home: home)) ?? nil
+                if label != nil, let used = try? await CodexAgent.usage(home: home) {
+                    record(.usage(fiveHour: used.fiveHour, sevenDay: used.sevenDay), for: account.id)
+                }
             default:
                 break
             }

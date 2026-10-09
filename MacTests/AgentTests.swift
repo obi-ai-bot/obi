@@ -34,6 +34,19 @@ struct AgentTests {
                 == [.finished(summary: "Claude Code hit an error.", failed: true)])
     }
 
+    /// A result whose text holds U+2028 must arrive as one line, or the job never finishes.
+    @MainActor @Test func linesSplitOnNewlinesOnly() async throws {
+        let pipe = Pipe()
+        let result = #"{"type": "result", "subtype": "success", "result": "a\#u{2028}b"}"#
+        try pipe.fileHandleForWriting.write(contentsOf: Data((result + "\n{}\n").utf8))
+        try pipe.fileHandleForWriting.close()
+        var lines: [Data] = []
+        try await eachLine(of: pipe.fileHandleForReading) { lines.append($0) }
+        #expect(lines.count == 2)
+        let message = try #require(JSONSerialization.jsonObject(with: lines[0]) as? [String: Any])
+        #expect(StreamJSON.events(message) == [.finished(summary: "a\u{2028}b", failed: false)])
+    }
+
     @Test func permissionRequest() throws {
         let request = message(#"{"type": "control_request", "request_id": "2250d026", "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "echo hi"}}}"#)
         let permission = try #require(StreamJSON.permission(request))

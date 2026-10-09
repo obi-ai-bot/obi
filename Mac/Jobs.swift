@@ -108,7 +108,7 @@ final class ClaudeAgent: AgentRun {
 
         Task {
             do {
-                for try await line in output.fileHandleForReading.bytes.lines { handle(line) }
+                try await eachLine(of: output.fileHandleForReading, handle)
             } catch {
                 Logger.jobs.error("reading Claude Code failed: \(error.localizedDescription, privacy: .public)")
             }
@@ -128,8 +128,8 @@ final class ClaudeAgent: AgentRun {
         if process.isRunning { process.terminate() }
     }
 
-    private func handle(_ line: String) {
-        guard let message = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return }
+    private func handle(_ line: Data) {
+        guard let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
         if let (id, tool, toolInput) = StreamJSON.permission(message) {
             if let reason = Policy.deny(tool: tool, input: toolInput, worktree: worktree) {
                 Logger.jobs.notice("denied \(tool, privacy: .public): \(reason, privacy: .public)")
@@ -164,6 +164,20 @@ final class ClaudeAgent: AgentRun {
         guard var data = try? JSONSerialization.data(withJSONObject: message) else { return }
         data.append(0x0A)
         try? input.fileHandleForWriting.write(contentsOf: data)
+    }
+}
+
+/// Calls `each` with every line an agent writes. Split on newlines only: Foundation's `lines`
+/// also breaks at U+2028, which JSON strings may hold, and a broken `result` would hang the job.
+func eachLine(of handle: FileHandle, _ each: (Data) -> Void) async throws {
+    var line = Data()
+    for try await byte in handle.bytes {
+        if byte == 0x0A {
+            each(line)
+            line.removeAll(keepingCapacity: true)
+        } else {
+            line.append(byte)
+        }
     }
 }
 

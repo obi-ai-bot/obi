@@ -452,7 +452,7 @@ private struct PlanCard: View {
     }
 
     /// "Personal · Claude Code"
-    private static func name(_ account: Account) -> String {
+    nonisolated private static func name(_ account: Account) -> String {
         "\(account.name) · \(Job.agentNames[account.agent] ?? account.agent)"
     }
 

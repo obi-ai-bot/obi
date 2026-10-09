@@ -186,17 +186,8 @@ final class CodexServer {
     }
 
     private func read() async {
-        // Split on newlines only: Foundation's `lines` also breaks at U+2028, which JSON strings may hold.
-        var line = Data()
         do {
-            for try await byte in output.fileHandleForReading.bytes {
-                if byte == 0x0A {
-                    receive(line)
-                    line.removeAll(keepingCapacity: true)
-                } else {
-                    line.append(byte)
-                }
-            }
+            try await eachLine(of: output.fileHandleForReading, receive)
         } catch {
             Logger.jobs.error("reading Codex failed: \(error.localizedDescription, privacy: .public)")
         }

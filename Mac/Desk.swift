@@ -170,6 +170,7 @@ final class Desk {
         let agent: any AgentRun
         switch job.agent {
         case "claude": agent = ClaudeAgent(worktree: Workspace.worktree(job.id), configDirectory: home)
+        case "codex": agent = CodexAgent(worktree: Workspace.worktree(job.id), home: home)
         default: finish(job.id, .failed, "\(job.agentName) can't run jobs yet."); return
         }
         agents[job.id] = agent
