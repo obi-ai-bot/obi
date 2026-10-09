@@ -1118,9 +1118,9 @@ const EXPRESSIONS = [
     keys: [
       [0, { shS: 0.6 }, 'face'],
       [0, { shX: -0.32, shY: 1.04 }, 'gaze'],               // bottom
-      [0, { rx: 0.1 }, 'body'],
+      [0, { rx: 0.24, y: -0.05, leanZ: 0.06, sq: 0.96 }, 'body'],  // clear dip forward
       [0.3, { shY: 0.4 }, 'slow'],                          // slowly up to centre: checking you out
-      [1.8, { ry: -0.45, rz: 0.05, rx: -0.02 }, 'slow'],    // turn away and lift, slowly
+      [1.8, { ry: -0.45, rz: 0.05, rx: -0.02, y: 0, leanZ: 0, sq: 1 }, 'slow'],    // turn away and lift, slowly
       [1.8, { shX: 0.68, shY: 0.5 }, 'slow'],               // eyes stay on you, near corner
       [3.0, { shX: -0.32, shY: -0.6 }, 'roll'],             // roll up into the top edge
       [3.0, { rx: -0.05 }, 'body'],
