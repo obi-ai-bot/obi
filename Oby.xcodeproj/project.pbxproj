@@ -11,9 +11,9 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		FB61F80D30795FDE00A9523D /* Oby */ = {
+		FB61F80D30795FDE00A9523D /* Mac */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Oby;
+			path = Mac;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -30,7 +30,7 @@
 		FB61F80230795FDE00A9523D = {
 			isa = PBXGroup;
 			children = (
-				FB61F80D30795FDE00A9523D /* Oby */,
+				FB61F80D30795FDE00A9523D /* Mac */,
 				FB61F80C30795FDE00A9523D /* Products */,
 			);
 			sourceTree = "<group>";
@@ -58,7 +58,7 @@
 			buildRules = (
 			);
 			fileSystemSynchronizedGroups = (
-				FB61F80D30795FDE00A9523D /* Oby */,
+				FB61F80D30795FDE00A9523D /* Mac */,
 			);
 			name = Oby;
 			productName = Oby;

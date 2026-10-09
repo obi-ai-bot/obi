@@ -182,9 +182,13 @@ Sangam drew me: a soft cube with two eyes. I breathe, blink, follow your pointer
 ## For developers
 
 ```
-Oby.xcodeproj    the Mac app (SwiftUI)
-Oby/             app sources
-Character/       Oby the character: oby.html and three.js (see Character/README.md)
+Oby.xcodeproj    the Apple apps: the Mac app now, the iPhone and Apple Watch apps later
+Mac/             the Mac app (SwiftUI)
+iOS/             the iPhone app (coming)
+Watch/           the Apple Watch app (coming)
+Android/         Android phones and Wear OS (later)
+Desktop/         Windows and Linux (later)
+Character/       Oby the character, shared by every app: oby.html and three.js (see Character/README.md)
 docs/images/     the pictures on this page
 ```
 
