@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(OSLog)
 import OSLog
+#endif
 
 /// What Oby's brain may decide: schema v1 from #31. There is no merge, push, approve or
 /// publish action, and Swift checks every plan before anyone sees it.

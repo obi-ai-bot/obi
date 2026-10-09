@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 /// One login of a coding tool that Oby can send jobs to, and who pays for it.
 nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
