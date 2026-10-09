@@ -1108,28 +1108,26 @@ const EXPRESSIONS = [
     },
   },
   {
-    // eye roll: looks you over (head dips, pupils travel slowly from bottom up
-    // to your eyes), locks on, slowly turns away and lifts its head while the
-    // pupils stay on you from the near corner, then the pupils drift up into
-    // the top edge, hold, look back at you, blink, and turn back to face you.
-    // Pupil positions are offsets of the eye's light dot from where it rests.
+    // eye roll: the black shapes are the eyes, the white dot only a reflection.
+    // Looks you over (head dips, eyes travel slowly from low up to you while the
+    // reflection drifts slightly up), locks on, slowly turns away and lifts its
+    // head while the eyes stay on you, rolls the eyes up, looks back at you,
+    // blinks, and turns back to face you.
     name: 'Eye roll', dur: 5.9,
     noBlink: true,  // it has its own blink
     keys: [
-      [0, { shS: 0.6 }, 'face'],
-      [0, { shX: -0.32, shY: 1.04 }, 'gaze'],               // bottom
-      [0, { rx: 0.24, y: -0.05, leanZ: 0.06, sq: 0.96 }, 'body'],  // clear dip forward
-      [0.3, { shY: 0.4 }, 'slow'],                          // slowly up to centre: checking you out
-      [1.8, { ry: -0.45, rz: 0.05, rx: -0.02, y: 0, leanZ: 0, sq: 1 }, 'slow'],    // turn away and lift, slowly
-      [1.8, { shX: 0.68, shY: 0.5 }, 'slow'],               // eyes stay on you, near corner
-      [3.0, { shX: -0.32, shY: -0.6 }, 'roll'],             // roll up into the top edge
+      [0, { rx: 0.24, y: -0.05, leanZ: 0.06, sq: 0.96 }, 'body'],    // clear dip forward
+      [0, { gy: 26, shY: -0.12 }, 'gaze'],                           // eyes low, reflection up a touch
+      [0.3, { gy: 0 }, 'slow'],                                       // slowly up to you: checking you out
+      [1.8, { ry: -0.45, rz: 0.05, rx: -0.02, y: 0, leanZ: 0, sq: 1, shY: 0 }, 'slow'],  // turn away and lift
+      [1.8, { gx: 24 }, 'slow'],                                      // eyes stay on you
+      [3.0, { gy: -34, gx: 6 }, 'roll'],                              // roll the eyes up
       [3.0, { rx: -0.05 }, 'body'],
       [3.3, { mTilt: 4, mC: -0.15, fx: 'huff' }, 'body'],
-      [4.1, { shX: 0.68, shY: 0.5 }, 'roll'],               // look back at you
+      [4.1, { gy: 0, gx: 24 }, 'roll'],                               // look back at you
       [4.6, { close: 1 }, 'snap'],
-      [4.66, { shX: 0, shY: 0, shS: 0 }, 'snap'],
       [4.72, { close: 0 }, 'snap'],
-      [4.72, { ry: 0, rz: 0, rx: 0, mTilt: 0, mC: 0 }, 'slow'],
+      [4.72, { ry: 0, rz: 0, rx: 0, gx: 0, mTilt: 0, mC: 0 }, 'slow'],
     ],
   },
   {
