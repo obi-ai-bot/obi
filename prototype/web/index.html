@@ -109,7 +109,7 @@ const DEFAULTS = {
   sq: [1, 'jelly'], lean: [0, 'body'], leanZ: [0, 'body'],
   twist: [0, 'body'], taper: [0, 'body'], inflate: [0.17, 'pop'], scale: [1, 'body'],
   // face (px in a 512 face canvas, origin at centre)
-  gx: [0, 'gaze'], gy: [0, 'gaze'], cross: [0, 'gaze'],  // cross: each eye shifts inward (px), pointer on the face
+  gx: [0, 'gaze'], gy: [0, 'gaze'], eLx: [0, 'gaze'], eRx: [0, 'gaze'],  // per-eye x offset (px): converging on a pointer up close
   eyeSep: [96, 'face'], eyeY: [-34, 'face'], eyeW: [64, 'face'], eyeH: [112, 'face'], eyeR: [0.92, 'face'],
   eL: [1, 'face'], eR: [1, 'face'], close: [0, 'face'], blink: [0, 'blink'],
   lidT: [0, 'face'], lidA: [0, 'face'], happy: [0, 'face'], calm: [0, 'face'], peek: [0, 'face'],
@@ -966,7 +966,7 @@ function drawFace(time) {
   fc.fillStyle = INK; fc.strokeStyle = INK;
   for (const side of [-1, 1]) {
     drawEye(side, time);
-    const cx = side * (V('eyeSep') - V('cross')) + V('gx'), cy = V('eyeY') + V('gy');
+    const cx = side * V('eyeSep') + V('gx') + V(side < 0 ? 'eLx' : 'eRx'), cy = V('eyeY') + V('gy');
     fc.drawImage(eyeBuf, cx - 128, cy - 128, 256, 256);
   }
   drawMouth(fc);
@@ -1652,12 +1652,17 @@ function update(dt) {
       const f = glanceEnd > 0 ? 0 : 1;
       add('gx', pointer.x * 34 * f); add('gy', -pointer.y * 22 * f);
       add('ry', pointer.x * 0.28 * f); add('rx', -pointer.y * 0.16 * f);
-      // pointer right on the face: the eyes go a little cross-eyed, like ours do up close
+      // pointer right on the face: each eye turns toward it, the farther eye more,
+      // like ours converge on something up close
       const c = rig.localToWorld(faceC.set(0, 0.05, 0.5)).project(camera);
       const e = rig.localToWorld(faceE.set(0.47 * U.uW.value, 0.05, 0.5)).project(camera);
       const half = Math.abs(e.x - c.x) * innerWidth / 2;
-      const d = Math.hypot((pointer.x - c.x) * innerWidth / 2, (pointer.y - c.y) * innerHeight / 2) / Math.max(half, 1);
-      add('cross', 8 * (1 - THREE.MathUtils.smoothstep(d, 0.45, 1)) * f);
+      const ux = (pointer.x - c.x) * innerWidth / 2 / Math.max(half, 1);
+      const d = Math.hypot(ux * Math.max(half, 1), (pointer.y - c.y) * innerHeight / 2) / Math.max(half, 1);
+      const near = (1 - THREE.MathUtils.smoothstep(d, 0.45, 1)) * f;
+      const eyeU = 0.35;  // eye centres, in half-widths from the face centre
+      add('eLx', THREE.MathUtils.clamp(10 * (ux + eyeU), -7, 7) * near);
+      add('eRx', THREE.MathUtils.clamp(10 * (ux - eyeU), -7, 7) * near);
     } else if (clock > nextSaccade) {
       P.gx.base = (Math.random() - 0.5) * 50; P.gy.base = (Math.random() - 0.5) * 22;
       P.ry.base = P.gx.base * 0.004;
