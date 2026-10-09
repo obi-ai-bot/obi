@@ -109,7 +109,7 @@ const DEFAULTS = {
   sq: [1, 'jelly'], lean: [0, 'body'], leanZ: [0, 'body'],
   twist: [0, 'body'], taper: [0, 'body'], inflate: [0.17, 'pop'], scale: [1, 'body'],
   // face (px in a 512 face canvas, origin at centre)
-  gx: [0, 'gaze'], gy: [0, 'gaze'],
+  gx: [0, 'gaze'], gy: [0, 'gaze'], cross: [0, 'gaze'],  // cross: each eye shifts inward (px), pointer on the face
   eyeSep: [96, 'face'], eyeY: [-34, 'face'], eyeW: [64, 'face'], eyeH: [112, 'face'], eyeR: [0.92, 'face'],
   eL: [1, 'face'], eR: [1, 'face'], close: [0, 'face'], blink: [0, 'blink'],
   lidT: [0, 'face'], lidA: [0, 'face'], happy: [0, 'face'], calm: [0, 'face'], peek: [0, 'face'],
@@ -966,7 +966,7 @@ function drawFace(time) {
   fc.fillStyle = INK; fc.strokeStyle = INK;
   for (const side of [-1, 1]) {
     drawEye(side, time);
-    const cx = side * V('eyeSep') + V('gx'), cy = V('eyeY') + V('gy');
+    const cx = side * (V('eyeSep') - V('cross')) + V('gx'), cy = V('eyeY') + V('gy');
     fc.drawImage(eyeBuf, cx - 128, cy - 128, 256, 256);
   }
   drawMouth(fc);
@@ -1491,7 +1491,8 @@ for (const e of EXPRESSIONS) {
 --------------------------------------------------------------------------- */
 let clock = 0, cur = IDLE, curT = 0, auto = true, idleUntil = 1.2, nextIdx = 0;
 let nextBlink = 1.5, blinkEnd = -1, nextSaccade = 0.5, nextTwitch = 4, nextWag = 6, wagEnd = -1;
-let nextGlance = 5, glanceEnd = -1;  // idle: now and then looks back to the front, waiting
+let nextGlance = 5, glanceEnd = -1;
+const faceC = new THREE.Vector3(), faceE = new THREE.Vector3();  // idle: now and then looks back to the front, waiting
 const pointer = { x: 0, y: 0, active: false };
 
 function applyKey(k) {
@@ -1651,6 +1652,12 @@ function update(dt) {
       const f = glanceEnd > 0 ? 0 : 1;
       add('gx', pointer.x * 34 * f); add('gy', -pointer.y * 22 * f);
       add('ry', pointer.x * 0.28 * f); add('rx', -pointer.y * 0.16 * f);
+      // pointer right on the face: the eyes go a little cross-eyed, like ours do up close
+      const c = rig.localToWorld(faceC.set(0, 0.05, 0.5)).project(camera);
+      const e = rig.localToWorld(faceE.set(0.47 * U.uW.value, 0.05, 0.5)).project(camera);
+      const half = Math.abs(e.x - c.x) * innerWidth / 2;
+      const d = Math.hypot((pointer.x - c.x) * innerWidth / 2, (pointer.y - c.y) * innerHeight / 2) / Math.max(half, 1);
+      add('cross', 14 * (1 - THREE.MathUtils.smoothstep(d, 0.45, 1)) * f);
     } else if (clock > nextSaccade) {
       P.gx.base = (Math.random() - 0.5) * 50; P.gy.base = (Math.random() - 0.5) * 22;
       P.ry.base = P.gx.base * 0.004;
@@ -1866,7 +1873,7 @@ goIdle(1.2);
 requestAnimationFrame(frame);
 
 // debug hooks for screenshots
-window.__cube = { play: (n) => play(EXPRESSIONS.find((e) => e.name === n)), setAuto, P, EXPRESSIONS };
+window.__cube = { play: (n) => play(EXPRESSIONS.find((e) => e.name === n)), setAuto, P, EXPRESSIONS, pointer, rig, camera };
 </script>
 </body>
 </html>
