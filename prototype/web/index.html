@@ -1371,7 +1371,7 @@ const EXPRESSIONS = [
   },
   {
     // a wall slides in; it scoots behind it, half hidden, and peeks out twice
-    name: 'Hiding', dur: 5.9,
+    name: 'Hiding', dur: 6.8,
     keys: [
       // no turn and no bend: just slides and tilts, so the face stays flat to you
       [0, { wall: 1 }, 'snap'],
@@ -1380,18 +1380,20 @@ const EXPRESSIONS = [
       [0.2, { gx: -34, gy: 4 }, 'gaze'],                                           // glances at the wall
       [0.55, { x: -0.75 }, 'body'],                                                 // then slides behind the wall
       [1.0, { gx: 10, gy: 0 }, 'gaze'],                                             // and looks back at you
-      // peek: tilt the top out past the edge, eyes on you
-      [1.5, { x: -0.32, rz: -0.3, gx: -8, gy: -4 }, 'body'],
-      [2.5, { x: -0.8, rz: 0, gx: 12 }, 'face'],  // ducks back, no overshoot
-      [2.55, { blink: 1 }, 'blink'], [2.65, { blink: 0 }, 'blink'],
-      [3.3, { x: -0.4, rz: -0.24, gx: -6, gy: 2 }, 'slow'],  // smaller, shyer peek
-      [4.4, { x: 0, rz: 0, gx: 0, gy: 0 }, 'body'],                                  // comes out
-      [4.85, { z: 0, scale: 1, sq: 1, eyeH: 112, eyeW: 64 }, 'body'],                // and steps forward again
-      [5.6, { wall: 0 }, 'snap'],  // only once it's clear of the edge
+      // hesitant peek: edges out a little, thinks better of it, then slowly leans out
+      [1.4, { x: -0.62, rz: -0.08 }, 'slow'],
+      [1.95, { x: -0.74, rz: -0.02 }, 'slow'],
+      [2.3, { x: -0.32, rz: -0.3, gx: -8, gy: -4 }, 'drift'],
+      [3.6, { x: -0.8, rz: 0, gx: 12 }, 'face'],  // ducks back, no overshoot
+      [3.65, { blink: 1 }, 'blink'], [3.75, { blink: 0 }, 'blink'],
+      [4.3, { x: -0.4, rz: -0.24, gx: -6, gy: 2 }, 'drift'],  // smaller, shyer peek
+      [5.3, { x: 0, rz: 0, gx: 0, gy: 0 }, 'body'],                                  // comes out
+      [5.75, { z: 0, scale: 1, sq: 1, eyeH: 112, eyeW: 64 }, 'body'],                // and steps forward again
+      [6.5, { wall: 0 }, 'snap'],  // only once it's clear of the edge
     ],
     proc(t, add) {
       // tiny nervous shuffle while tucked in
-      const e = env(t, 0.9, 4.3, 0.2);
+      const e = env(t, 0.9, 5.2, 0.2);
       add('x', Math.sin(t * 5.3) * 0.006 * e);
       // cancel most of the usual drag-bend from sliding sideways, so it doesn't stretch
       add('lean', THREE.MathUtils.clamp(P.x.vel * 0.5, -0.25, 0.25) * 0.85);
