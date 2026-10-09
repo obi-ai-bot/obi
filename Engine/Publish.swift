@@ -219,7 +219,7 @@ nonisolated enum Publish {
 
             \(request)
 
-            Oby opened this draft pull request after the user approved it with Touch ID.
+            Oby opened this draft pull request after the user approved it with Touch ID or Face ID on their own device.
             """
     }
 
