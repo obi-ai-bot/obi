@@ -912,7 +912,7 @@ let clock = 0, cur = IDLE, curT = 0, auto = true, idleUntil = 1.2, nextIdx = 0;
 let nextBlink = 1.5, blinkEnd = -1, nextSaccade = 0.5;
 let nextGlance = 5, glanceEnd = -1;
 const faceC = new THREE.Vector3(), faceE = new THREE.Vector3();  // idle: now and then looks back to the front, waiting
-const pointer = { x: 0, y: 0, active: false, t: 0 };
+const pointer = { x: 0, y: 0, active: false };
 
 function applyKey(k) {
   const [, vals, preset] = k;
@@ -1138,7 +1138,6 @@ addEventListener('keydown', (e) => {
 addEventListener('pointermove', (e) => {
   pointer.x = (e.clientX / innerWidth) * 2 - 1; pointer.y = -((e.clientY / innerHeight) * 2 - 1);
   pointer.active = true;
-  pointer.t = performance.now();
 });
 document.addEventListener('pointerleave', () => { pointer.active = false; });
 
@@ -1275,13 +1274,13 @@ function render() {
   renderer.render(quadScene, quadCam);
 }
 
-// 60fps while something is happening (an expression, effects, the pointer
-// moving), 30fps when it's just idling, and nothing at all while hidden.
+// 30fps always (the springs keep motion smooth at that rate), and nothing at
+// all while hidden.
+const FRAME_MS = 1000 / 30;
 let last = performance.now(), rafId = 0, paused = false;
 function frame(now) {
   rafId = requestAnimationFrame(frame);
-  const busy = cur !== IDLE || particles.length > 0 || now - pointer.t < 1500;
-  if (now - last < (busy ? 1000 / 60 : 1000 / 30) - 2) return;
+  if (now - last < FRAME_MS - 2) return;
   const dt = Math.min(1 / 20, (now - last) / 1000); last = now;
   clock += dt;
   update(dt);
