@@ -20,5 +20,7 @@ struct ObyPhoneApp: App {
                     character.pause(!active)
                 }
         }
+        // A job ended while Oby was suspended (JobWaiter): say so on the Live Activity.
+        .backgroundTask(.urlSession(JobWaiter.identifier)) { [phone] in await phone.catchUp() }
     }
 }

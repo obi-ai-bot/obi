@@ -223,6 +223,27 @@ final class APITests {
                 == "Review PR 12\n\n(Oby asked: Which repository is PR #12 in? The user answered: deskree-inc/oby)")
     }
 
+    /// What the iPhone's background download gets back: the job, once it ended.
+    @Test func waitAnswersWithTheJobOnceItEnded() async throws {
+        var ended = job
+        ended.status = .done
+        ended.finished = .now
+        let store = JobStore(url: folder.appending(path: "ended.sqlite"))
+        store.save(ended)
+        let desk = Desk(accounts: AccountStore(root: folder), store: store)
+        let app = Application(router: API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json"))).router(owner: "well@example.com"))
+        try await app.test(.router) { [owner] client in
+            try await client.execute(uri: "/v1/jobs/9f08fd10/wait", method: .get, headers: owner) { response in
+                #expect(response.status == .ok)
+                let body = String(decoding: response.body.readableBytesView, as: UTF8.self).trimmingCharacters(in: .whitespaces)
+                #expect(object(Data(body.utf8))["status"] as? String == "done")
+            }
+            try await client.execute(uri: "/v1/jobs/nobody/wait", method: .get, headers: owner) { response in
+                #expect(response.status == .notFound)
+            }
+        }
+    }
+
     @Test func jobsHaveISODatesAndEveryKey() throws {
         var job = job
         job.started = job.created + 2

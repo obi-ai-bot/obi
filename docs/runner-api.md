@@ -140,6 +140,12 @@ The latest jobs, newest first.
 
 One job.
 
+### `GET /v1/jobs/{id}/wait`
+
+Answers once the job has ended (`done`, `failed`, `stopped` or `interrupted`) with the `Job`, or right away if it already has. Until then it sends a space every 15 seconds to keep the connection open, so the body is the job's JSON after some whitespace. `404` for a job the runner doesn't know.
+
+The iPhone app waits on this as a background download: iOS keeps it going while the app is suspended and wakes the app when it's answered, so the Live Activity can say how the job ended without push.
+
 ### `POST /v1/jobs/{id}/stop`
 
 Stops a queued or running job. Returns the job (`status: "stopped"`).
