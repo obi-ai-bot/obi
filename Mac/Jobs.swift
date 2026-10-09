@@ -27,6 +27,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var finished: Date?
 
     var isActive: Bool { status == .queued || status == .running }
+    var agentName: String { Job.agentNames[agent] ?? agent }
+    static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
 
     /// "Review tetrix-front-end #482", or the user's own words.

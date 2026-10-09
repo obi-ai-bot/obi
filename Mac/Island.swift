@@ -285,7 +285,7 @@ private struct OpenIsland: View {
 
             switch desk.talk {
             case .plan(let draft):
-                PlanCard(draft: draft, account: desk.accountName,
+                PlanCard(draft: draft, accounts: desk.accounts.accounts.filter(\.signedIn),
                          onDispatch: { desk.dispatch($0) },
                          onEdit: { text = draft.said; desk.cancel(); typing = true },
                          onCancel: { desk.cancel() })
@@ -379,18 +379,33 @@ private struct OpenIsland: View {
 /// The plan, before anything runs: agent, account, repository and branch. Dispatch, Edit, Cancel.
 private struct PlanCard: View {
     let draft: Desk.Draft
-    let account: String
+    let accounts: [AccountState]
     let onDispatch: (Desk.Draft) -> Void
     let onEdit: () -> Void
     let onCancel: () -> Void
     @State private var branch = ""
+    @State private var accountID = ""
+
+    private var account: Account? { (accounts.first { $0.account.id == accountID } ?? accounts.first { $0.account.id == draft.job.account })?.account }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Grid(horizontalSpacing: 12, verticalSpacing: 12) {
                 GridRow {
-                    tile("Agent") { Label("Claude Code", systemImage: "asterisk") }
-                    tile("Account · the one you have") { Text(account).lineLimit(1) }
+                    tile("Agent") { Label(Job.agentNames[account?.agent ?? draft.job.agent] ?? "", systemImage: "asterisk") }
+                    tile(accounts.count > 1 ? "Account · click to change" : "Account · the one you have") {
+                        Menu {
+                            ForEach(accounts, id: \.account.id) { state in
+                                Button("\(state.account.name) · \(Job.agentNames[state.account.agent] ?? state.account.agent)") { accountID = state.account.id }
+                            }
+                        } label: {
+                            Text(account.map { "\($0.name) · \(Job.agentNames[$0.agent] ?? $0.agent)" } ?? "No account").lineLimit(1)
+                        }
+                        .menuStyle(.button)
+                        .buttonStyle(.plain)
+                        .menuIndicator(accounts.count > 1 ? .visible : .hidden)
+                        .disabled(accounts.count < 2)
+                    }
                 }
                 GridRow {
                     tile("Repository") { Text(draft.job.repo).lineLimit(1) }
@@ -412,6 +427,10 @@ private struct PlanCard: View {
                 Button {
                     var draft = draft
                     draft.job.branch = branch
+                    if let account {
+                        draft.job.account = account.id
+                        draft.job.agent = account.agent
+                    }
                     onDispatch(draft)
                 } label: {
                     Text("Dispatch").font(.system(size: 15, weight: .semibold)).foregroundStyle(.black)
@@ -426,8 +445,8 @@ private struct PlanCard: View {
             }
             .padding(.top, 6)
         }
-        .onAppear { branch = draft.job.branch }
-        .onChange(of: draft.job.id) { branch = draft.job.branch }
+        .onAppear { branch = draft.job.branch; accountID = draft.job.account }
+        .onChange(of: draft.job.id) { branch = draft.job.branch; accountID = draft.job.account }
     }
 
     private func tile(_ label: String, @ViewBuilder value: () -> some View) -> some View {

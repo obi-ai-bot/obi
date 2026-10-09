@@ -24,10 +24,11 @@ struct AccountsTests {
         #expect(route([]) == nil)
     }
 
-    @Test func routeSkipsAccountsNearTheirFiveHourLimit() {
+    @Test func routeSkipsAccountsNearEitherLimit() {
         #expect(route([state("a", fiveHour: 0.95), state("b", running: 3, fiveHour: 0.94)]) == "b")
         #expect(route([state("a", fiveHour: 1), state("b", fiveHour: 0.97)]) == nil)
-        #expect(route([state("a", sevenDay: 0.99)]) == "a")
+        #expect(route([state("a", sevenDay: 0.99), state("b", running: 2, sevenDay: 0.5)]) == "b")
+        #expect(route([state("a", sevenDay: 0.95)]) == nil)
     }
 
     @Test func routePrefersFewestRunningThenFiveHourThenSevenDay() {

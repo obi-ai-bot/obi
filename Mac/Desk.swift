@@ -22,9 +22,10 @@ final class Desk {
     }
 
     var talk: Talk = .none
-    private(set) var jobs: [Job]
-    /// "Max · name@example.com", from the agent's own login.
-    private(set) var accountName = "Your account"
+    private(set) var jobs: [Job] {
+        didSet { accounts.countRunning(jobs) }
+    }
+    let accounts: AccountStore
     /// Called when a job ends, for the notch's one line.
     var onFinish: (Job) -> Void = { _ in }
 
@@ -35,7 +36,8 @@ final class Desk {
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
 
-    init() {
+    init(accounts: AccountStore = AccountStore()) {
+        self.accounts = accounts
         jobs = store.recent()
         // Running when Oby last quit (or crashed): it didn't finish.
         for index in jobs.indices where jobs[index].isActive {
@@ -43,18 +45,23 @@ final class Desk {
             jobs[index].finished = jobs[index].finished ?? .now
             store.save(jobs[index])
         }
+        accounts.countRunning(jobs)
     }
 
     var active: [Job] { jobs.filter(\.isActive) }
 
     func refresh() async {
         if let repos = try? await Workspace.knownRepos(), !repos.isEmpty { self.repos = repos }
-        if let status = try? await Shell.ok(["claude", "auth", "status"]),
-           let json = try? JSONSerialization.jsonObject(with: Data(status.utf8)) as? [String: Any],
-           let email = json["email"] as? String {
-            let plan = (json["subscriptionType"] as? String).map { $0.capitalized + " · " } ?? ""
-            accountName = plan + email
-        }
+        await accounts.refresh()
+    }
+
+    /// The brain picks "auto" or an account by name; Swift turns that into a real account.
+    private var brainContext: BrainContext {
+        let signedIn = accounts.accounts.filter(\.signedIn).map(\.account)
+        let known = signedIn.isEmpty ? accounts.accounts.map(\.account) : signedIn
+        var choices = ["auto": ["auto"] + known.map(\.name)]
+        for (agent, list) in Dictionary(grouping: known, by: \.agent) { choices[agent] = ["auto"] + list.map(\.name) }
+        return BrainContext(accounts: choices, repos: repos)
     }
 
     // MARK: Planning
@@ -65,8 +72,7 @@ final class Desk {
         talk = .thinking(said)
         Task {
             if repos.isEmpty { await refresh() }
-            let context = BrainContext(accounts: ["claude": ["default"]], repos: repos)
-            let result = await planner.plan(said, context: context)
+            let result = await planner.plan(said, context: brainContext)
             // Cancelled or replaced while the brain was thinking.
             guard talk == .thinking(said) else { return }
             show(result, said: said)
@@ -85,11 +91,22 @@ final class Desk {
         switch plan.action {
         case .dispatch:
             guard let dispatch = plan.dispatch else { talk = .none; return }
+            let agent = dispatch.agent == "auto" ? nil : dispatch.agent
+            let named = accounts.accounts.first { $0.signedIn && $0.account.name == dispatch.account && (agent == nil || $0.account.agent == agent) }
+            if dispatch.account != "auto", named == nil {
+                talk = .reply("\(dispatch.account) isn't signed in. Sign in from Settings › Accounts.")
+                return
+            }
+            guard let account = named?.account ?? AccountStore.route(accounts.accounts, agent: agent) else {
+                let tool = agent.map { Job.agentNames[$0] ?? $0 } ?? "coding tool"
+                talk = .reply("No \(tool) account is signed in with room to spare. Check Settings › Accounts.")
+                return
+            }
             let id = String(UUID().uuidString.prefix(8)).lowercased()
-            let job = Job(id: id, request: said, agent: dispatch.agent, account: dispatch.account, repo: dispatch.repo,
+            let job = Job(id: id, request: said, agent: account.agent, account: account.id, repo: dispatch.repo,
                           branch: Job.branch(kind: dispatch.kind, pr: dispatch.pr, id: id), base: dispatch.baseBranch,
                           pr: dispatch.pr, kind: dispatch.kind, task: dispatch.task)
-            let reply = plan.reply.isEmpty ? "Claude Code will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
+            let reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
             talk = .plan(Draft(said: said, reply: reply, job: job, guessed: result.by == "rules"))
         case .askUser:
             talk = plan.question.map { .question(said: said, $0) } ?? .reply(plan.reply)
@@ -147,14 +164,19 @@ final class Desk {
         var job = prepared
         job.status = .running
         job.started = .now
-        job.step = "Starting Claude Code"
+        job.step = "Starting \(job.agentName)"
         replace(job)
-        let agent = ClaudeAgent(worktree: Workspace.worktree(job.id))
+        let home = accounts.state(job.account)?.account.home.map { URL(filePath: $0) }
+        let agent: any AgentRun
+        switch job.agent {
+        case "claude": agent = ClaudeAgent(worktree: Workspace.worktree(job.id), configDirectory: home)
+        default: finish(job.id, .failed, "\(job.agentName) can't run jobs yet."); return
+        }
         agents[job.id] = agent
         do {
             try agent.start(prompt: Prompts.agent(job)) { [weak self] event in self?.handle(event, job: job.id) }
         } catch {
-            finish(job.id, .failed, "Claude Code didn't start: \(error.localizedDescription)")
+            finish(job.id, .failed, "\(job.agentName) didn't start: \(error.localizedDescription)")
         }
     }
 
@@ -168,7 +190,7 @@ final class Desk {
             job.step = step
             replace(job, save: false)
         case .usage:
-            break
+            accounts.record(event, for: job.account)
         case .finished(let summary, let failed):
             finish(id, failed ? .failed : .done, summary)
         }

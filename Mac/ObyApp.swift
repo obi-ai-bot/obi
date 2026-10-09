@@ -19,7 +19,10 @@ struct ObyApp: App {
         }
 
         Settings {
-            SettingsView()
+            TabView {
+                SettingsView().tabItem { Label("General", systemImage: "gearshape") }
+                AccountsSettingsView(store: app.island.desk.accounts).tabItem { Label("Accounts", systemImage: "person.2") }
+            }
         }
     }
 }

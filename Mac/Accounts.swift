@@ -81,6 +81,8 @@ final class AccountStore {
         if let sevenDay { accounts[index].sevenDay = sevenDay }
     }
 
+    func state(_ id: String) -> AccountState? { accounts.first { $0.account.id == id } }
+
     /// Counts each account's active jobs; `Job.account` holds the account's id.
     func countRunning(_ jobs: [Job]) {
         for index in accounts.indices {
@@ -123,12 +125,12 @@ final class AccountStore {
     }
 
     /// The account for a new job: a signed-in account of that agent (any agent if nil) under 95%
-    /// of its five-hour window, with the fewest running jobs, then the lowest five-hour and
+    /// of both its windows, with the fewest running jobs, then the lowest five-hour and
     /// seven-day usage. Unknown usage counts as 0; ties keep list order.
     nonisolated static func route(_ accounts: [AccountState], agent: String?) -> Account? {
         let rank = { (index: Int, state: AccountState) in (state.running, state.fiveHour ?? 0, state.sevenDay ?? 0, index) }
         return accounts.enumerated()
-            .filter { $0.element.signedIn && (agent == nil || $0.element.account.agent == agent) && ($0.element.fiveHour ?? 0) < 0.95 }
+            .filter { $0.element.signedIn && (agent == nil || $0.element.account.agent == agent) && ($0.element.fiveHour ?? 0) < 0.95 && ($0.element.sevenDay ?? 0) < 0.95 }
             .min { rank($0.offset, $0.element) < rank($1.offset, $1.element) }?
             .element.account
     }
