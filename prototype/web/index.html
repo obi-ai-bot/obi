@@ -263,6 +263,14 @@ void main() {
   // edge, and only the uncovered part of a pixel shows the outline stroke
   float alpha = fill + e * (1.0 - fill);
   vec3 premul = col * fill + uSilCol * e * (1.0 - fill);
+  // worn objects (B): plain ink laid on top, outside the outline entirely
+  float worn = clamp(f.b, 0., 1.);
+  premul = uInkCol * worn + premul * (1.0 - worn);
+  alpha = worn + alpha * (1.0 - worn);
+  // lens glints leave alpha at 0.5 (everything else writes 1): white, but only
+  // where the body is behind them
+  float glint = (1.0 - smoothstep(0.1, 0.3, abs(f.a - 0.5))) * step(0.5, f.r);
+  premul = mix(premul, uFillCol, glint);
 
   // wall (Hiding): an invisible pillar in front of the mascot
   vec2 wc = (uWall.xy + uWall.zw) * 0.5, wh = (uWall.zw - uWall.xy) * 0.5;
@@ -359,8 +367,14 @@ function deformPoint(x, y, z) {
 // arms that run back along the sides of the head, so turning shows depth.
 const glasses = new THREE.Group();
 rig.add(glasses);
-const glInk = new THREE.MeshBasicMaterial({ color: 0x00ff00, toneMapped: false });   // G = ink
-const glWhite = new THREE.MeshBasicMaterial({ color: 0xff0000, toneMapped: false }); // R = body white
+// B = worn ink: added on top of whatever's there (so the body underneath still
+// counts for the outline) and drawn by the composite without an outline of its own
+const glInk = new THREE.MeshBasicMaterial({ color: 0x0000ff, toneMapped: false, blending: THREE.CustomBlending,
+  blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor });
+// glints keep the colour underneath and only mark alpha 0.5 (see composite)
+const glWhite = new THREE.MeshBasicMaterial({ color: 0x000000, toneMapped: false, opacity: 0.5, blending: THREE.CustomBlending,
+  blendEquation: THREE.AddEquation, blendSrc: THREE.ZeroFactor, blendDst: THREE.OneFactor,
+  blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.ZeroFactor });
 const LENS_R = 0.152, LENS_X = 0.192;  // matches the eyes' size and spacing
 const rodGeo = new THREE.CylinderGeometry(0.011, 0.011, 1, 8);
 const glArms = [];
