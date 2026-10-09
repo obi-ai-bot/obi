@@ -1073,6 +1073,59 @@ const EXPRESSIONS = [
     },
   },
   {
+    // nod of agreement: three clear nods, bigger and quicker than Listening's
+    name: 'Agree', dur: 2.4,
+    keys: [
+      [0, { ry: 0.1, happy: 0.35, eyeH: 100, mC: 0.4, mW: 40 }, 'body'],
+      [0, { rx: 0 }, 'fast'],
+      [1.9, { ry: 0, happy: 0, eyeH: 112, mC: 0, mW: 0 }],
+    ],
+    proc(t, add) {
+      const ph = (t - 0.2) / 0.3;  // one nod per 0.3s
+      if (ph > 0 && ph < 3) {
+        const dip = Math.sin(Math.PI * (ph % 1));
+        add('rx', dip * 0.26); add('sq', -dip * 0.03); add('gy', dip * 6);
+      }
+    },
+  },
+  {
+    // disappointed "no": droopy eyes, slow side-to-side shake that fades, a sigh
+    name: 'Disagree', dur: 3.0,
+    keys: [
+      [0, { lidA: -0.32, lidT: 0.22, eyeH: 96, gy: 10, rx: 0.08, mC: -0.4, mW: 36, fx: 'huff' }, 'body'],
+      [0, { ry: 0 }, 'fast'],
+      [2.4, { lidA: 0, lidT: 0, eyeH: 112, gy: 0, rx: 0, mC: 0, mW: 0 }],
+    ],
+    proc(t, add) {
+      const k = t - 0.3;
+      if (k > 0 && k < 1.9) {
+        const decay = 1 - k / 1.9;
+        add('ry', Math.sin(k * 10) * 0.3 * decay);
+        add('rz', Math.sin(k * 10 + 0.6) * 0.03 * decay);
+      }
+    },
+  },
+  {
+    // eye roll: heavy lids, eyes sweep up and over in an arc, head tips back, huff
+    name: 'Eye roll', dur: 2.8,
+    keys: [
+      [0, { lidT: 0.3, eyeH: 104, mTilt: 5, mW: 26, mC: -0.15 }, 'face'],
+      [0.25, { rx: -0.1, rz: 0.05 }, 'body'],
+      [1.4, { rx: 0, rz: -0.03, fx: 'huff' }, 'body'],
+      [2.2, { lidT: 0, eyeH: 112, mTilt: 0, mW: 0, mC: 0, rz: 0 }],
+    ],
+    proc(t, add) {
+      // gaze travels from lower left, up over the top, to the right and back down
+      const p = THREE.MathUtils.smoothstep(t, 0.2, 1.3);
+      if (t > 0.1 && t < 1.9) {
+        const a = Math.PI * (1.15 - 1.3 * p);
+        const fade = 1 - THREE.MathUtils.smoothstep(t, 1.4, 1.9);
+        add('gx', Math.cos(a) * 30 * fade);
+        add('gy', -Math.sin(a) * 30 * fade);
+      }
+    },
+  },
+  {
     name: 'Thinking', dur: 4.6,
     keys: [
       [0, { gx: -30, gy: -30, rz: 0.11, ry: -0.38, eL: 0.82, lidT: 0.12, mW: 26, mTilt: 6, mC: -0.1, aRo: 1, aRx: 0.24, aRy: -0.24, aRz: 0.66, aRbx: 0.28, aRby: -0.22, fx: 'dots' }],
@@ -1295,6 +1348,9 @@ const EAR_KEYS = {
   Grin:      [[0.15, { earLa: 1.0, earRa: 1.0, earLb: 0.4, earRb: 0.4 }], [2.3, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
   Unwilling: [[0.3, { earLa: -0.2, earRa: 0.35 }], [3.1, { earLa: 0, earRa: 0 }]],
   Yawn:      [[0.4, { earLa: 1.3, earRa: 1.3, earLb: 0.6, earRb: 0.6 }], [1.6, { earLa: -0.2, earRa: -0.2, earLb: 0.2, earRb: 0.2 }, 'slow'], [2.8, { earLa: 0, earRa: 0 }]],
+  Agree:     [[0, { earLa: 0.5, earRa: 0.5 }], [1.9, { earLa: 0, earRa: 0 }]],
+  Disagree:  [[0, { earLa: -0.35, earRa: -0.35, earLb: 0.05, earRb: 0.05 }, 'slow'], [2.4, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
+  'Eye roll': [[0.25, { earLa: -0.2, earRa: 0.4 }], [2.2, { earLa: 0, earRa: 0 }]],
   Tired:     [[0, { earLa: -0.35, earRa: -0.35, earLb: 0.05, earRb: 0.05 }, 'slow'], [3.4, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
   Distracted:[[0.3, { earLa: 1.4, earRa: 1.4, earLb: 0.5, earRb: 0.5 }], [3.1, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
   Sleepy:    [[0, { earLa: -0.15, earRa: -0.15 }, 'slow'], [3.6, { earLa: -0.4, earRa: -0.4, earLb: 0.05, earRb: 0.05 }, 'slow'], [7.6, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
@@ -1311,6 +1367,8 @@ const TAIL_KEYS = {
   Grin:      [[0.15, { tw: 0.5 }], [2.3, { tw: 0 }]],
   Unwilling: [[0.3, { ty: -0.05 }], [3.1, { ty: 0 }]],
   Yawn:      [[0.4, { ts: 1.15 }], [1.6, { ts: 1 }]],
+  Agree:     [[0, { tw: 0.35 }], [1.9, { tw: 0 }]],
+  Disagree:  [[0, { ty: -0.1 }, 'slow'], [2.4, { ty: 0 }]],
   Tired:     [[0, { ty: -0.14, ts: 0.88 }, 'slow'], [3.4, { ty: 0, ts: 1 }]],
   Distracted:[[0.3, { tw: 0.35 }], [3.0, { tw: 0 }]],
   Sleepy:    [[3.6, { ty: -0.14, ts: 0.9 }, 'slow'], [7.6, { ty: 0, ts: 1 }]],
