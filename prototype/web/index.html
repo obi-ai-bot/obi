@@ -1157,9 +1157,10 @@ const EXPRESSIONS = [
   {
     name: 'Angry', dur: 3.2,
     keys: [
-      [0, { rx: -0.08, sq: 1.04 }],
-      [0.22, { rx: 0.14, sq: 0.93, inflate: 0.26, lidA: 0.55, lidT: 0.26, eyeW: 72, eyeH: 96, eyeR: 0.7, mW: 56, mC: -0.38, mT: 17, aLo: 1, aRo: 1, aLx: -0.66, aLy: -0.3, aLz: 0.05, aRx: 0.66, aRy: -0.3, aRz: 0.05, aLbx: -0.22, aRbx: 0.22, aLby: 0.34, aRby: 0.34, fx: 'anger' }],
-      [2.5, { rx: 0, sq: 1, inflate: 0.17, lidA: 0, lidT: 0, eyeW: 64, eyeH: 112, eyeR: 0.92, mW: 0, mC: 0, mT: 15, aLo: 0, aRo: 0 }],
+      // wind up back, then head down and push forward like a ram
+      [0, { rx: -0.08, z: -0.05, sq: 1.04 }],
+      [0.22, { rx: 0.24, rz: 0.07, z: 0.12, leanZ: 0.06, scale: 1.03, sq: 0.93, inflate: 0.26, lidA: 0.55, lidT: 0.26, eyeW: 72, eyeH: 96, eyeR: 0.7, mW: 56, mC: -0.38, mT: 17, aLo: 1, aRo: 1, aLx: -0.66, aLy: -0.3, aLz: 0.05, aRx: 0.66, aRy: -0.3, aRz: 0.05, aLbx: -0.22, aRbx: 0.22, aLby: 0.34, aRby: 0.34, fx: 'anger' }],
+      [2.5, { rx: 0, rz: 0, z: 0, leanZ: 0, scale: 1, sq: 1, inflate: 0.17, lidA: 0, lidT: 0, eyeW: 64, eyeH: 112, eyeR: 0.92, mW: 0, mC: 0, mT: 15, aLo: 0, aRo: 0 }],
     ],
     proc(t, add) {
       const e = env(t, 0.3, 2.3, 0.1);
