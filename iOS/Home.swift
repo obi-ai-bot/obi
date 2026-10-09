@@ -10,6 +10,8 @@ struct HomeView: View {
     @FocusState private var typing: Bool
     /// Jobs that finished by this time (the runner's clock) are hidden from Home only; the runner keeps them all.
     @AppStorage("home.clearedAt") private var clearedAt: Double = 0
+    /// The scroll view's height, so an empty Home can put Oby in the middle of it.
+    @State private var height: CGFloat = 0
 
     var body: some View {
         NavigationStack {
@@ -24,11 +26,14 @@ struct HomeView: View {
                     ForEach(jobs) { job in
                         NavigationLink(value: job.id) { JobRow(job: job) }
                             .buttonStyle(.plain)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 16)
+                .animation(.spring(duration: 0.8, bounce: 0.35), value: centered)
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
             .scrollDismissesKeyboard(.interactively)
             .background(Color.black)
             .navigationDestination(for: String.self) { JobScreen(id: $0) }
@@ -49,8 +54,16 @@ struct HomeView: View {
             .sheet(isPresented: sheetShown) { sheet }
             .sheet(isPresented: $settings) { SettingsScreen() }
             .onChange(of: mood, initial: true) { character.mood = mood }
+            .onChange(of: centered) {
+                // Off to work with a grin; back in the middle with a hello.
+                character.mood = mood
+                character.play(centered ? "Hello" : "Grin")
+            }
         }
     }
+
+    /// Nothing to show: Oby waits big in the middle of Home, and the first job sends it to its corner.
+    private var centered: Bool { phone.loaded && jobs.isEmpty }
 
     /// Running jobs, then the ones that finished after the last Clear done.
     private var jobs: [Job] {
@@ -63,12 +76,39 @@ struct HomeView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 14) {
+        // One layout that changes shape, so Oby stays the same web view as it moves.
+        let layout = centered ? AnyLayout(VStackLayout(spacing: 8)) : AnyLayout(HStackLayout(alignment: .center, spacing: 14))
+        let size: CGFloat = centered ? 220 : 104
+        return layout {
+            // Drawn at the big size and scaled, so the page never resizes mid-move.
             WebView(character.page)
                 .webViewContentBackground(.hidden)
-                .frame(width: 104, height: 104)
+                .frame(width: 220, height: 220)
+                .scaleEffect(size / 220)
+                .frame(width: size, height: size)
+                .keyframeAnimator(initialValue: Hop(), trigger: centered) { oby, hop in
+                    oby.offset(y: hop.y).rotationEffect(.degrees(hop.angle)).scaleEffect(hop.scale)
+                } keyframes: { _ in
+                    // Crouch, leap, land.
+                    KeyframeTrack(\.y) {
+                        CubicKeyframe(10, duration: 0.12)
+                        SpringKeyframe(-36, duration: 0.28, spring: .snappy)
+                        SpringKeyframe(0, duration: 0.5, spring: .bouncy)
+                    }
+                    KeyframeTrack(\.scale) {
+                        CubicKeyframe(0.9, duration: 0.12)
+                        SpringKeyframe(1.12, duration: 0.28, spring: .snappy)
+                        SpringKeyframe(1, duration: 0.5, spring: .bouncy)
+                    }
+                    KeyframeTrack(\.angle) {
+                        CubicKeyframe(0, duration: 0.12)
+                        SpringKeyframe(-12, duration: 0.25, spring: .snappy)
+                        SpringKeyframe(8, duration: 0.2, spring: .snappy)
+                        SpringKeyframe(0, duration: 0.4, spring: .bouncy)
+                    }
+                }
                 .accessibilityLabel("Oby")
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: centered ? .center : .leading, spacing: 4) {
                 switch phone.talk {
                 case .thinking(let said):
                     Text("Thinking…").font(.title3.weight(.semibold))
@@ -83,8 +123,10 @@ struct HomeView: View {
                     Text(subline).font(.subheadline).foregroundStyle(.white.opacity(0.6))
                 }
             }
-            Spacer(minLength: 0)
+            .multilineTextAlignment(centered ? .center : .leading)
+            .frame(maxWidth: .infinity, alignment: centered ? .center : .leading)
         }
+        .frame(maxWidth: .infinity, minHeight: centered ? height * 0.72 : nil)
         .padding(.top, 4)
     }
 
@@ -156,6 +198,13 @@ struct HomeView: View {
             EmptyView()
         }
     }
+}
+
+/// Oby's leap between the middle of Home and its corner.
+private struct Hop {
+    var y: CGFloat = 0
+    var angle: Double = 0
+    var scale: CGFloat = 1
 }
 
 /// One job: what it is, what it's doing now, how it ended.

@@ -29,6 +29,8 @@ final class Phone {
     var talk: Talk = .none
     private(set) var connection: Connection = .connecting
     private(set) var host = ""
+    /// The job list arrived at least once, so an empty list really is empty.
+    private(set) var loaded = false
     private(set) var jobs: [Job] = [] {
         didSet { JobsActivity.sync(jobs) }
     }
@@ -62,6 +64,7 @@ final class Phone {
                     accounts = status.accounts
                     models = status.models
                     jobs = try await runner.jobs()
+                    loaded = true
                     connection = .live
                     wait = 1
                     do { _ = try await registerDevice(again: true) } catch {
