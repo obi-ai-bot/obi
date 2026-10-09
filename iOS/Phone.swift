@@ -62,7 +62,7 @@ final class Phone {
                     jobs = try await runner.jobs()
                     connection = .live
                     wait = 1
-                    do { _ = try await registerDevice() } catch {
+                    do { _ = try await registerDevice(again: true) } catch {
                         Logger.phone.error("registering this iPhone failed: \(error.localizedDescription, privacy: .public)")
                     }
                     for try await event in runner.events() { apply(event) }
@@ -169,9 +169,10 @@ final class Phone {
     private var deviceKey: String { "device.\(runnerURL.host() ?? runnerURL.absoluteString)" }
     var deviceID: String? { UserDefaults.standard.string(forKey: deviceKey) }
 
-    /// Registers the phone's Face ID key with the runner, once per runner, and returns its id.
-    private func registerDevice() async throws -> String {
-        if let deviceID { return deviceID }
+    /// Registers the phone's Face ID key with the runner and returns its id. On every connection it
+    /// registers `again`: the runner keeps a known key's id, and a reinstalled runner learns it anew.
+    private func registerDevice(again: Bool = false) async throws -> String {
+        if !again, let deviceID { return deviceID }
         guard DeviceKey.isAvailable else { throw RunnerError(message: "Publishing needs Face ID on your iPhone.") }
         let id = try await runner.register(name: "iPhone", publicKey: try DeviceKey.publicKey())
         UserDefaults.standard.set(id, forKey: deviceKey)
