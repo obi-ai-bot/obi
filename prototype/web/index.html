@@ -1490,10 +1490,10 @@ const POKE_SURPRISE = {
 const POKE_ANGRY = {
   name: 'Annoyed', dur: 2.2,
   keys: [
-    // a smaller version of Angry's ram push
-    [0, { sq: 0.95, rx: -0.04, z: -0.025 }, 'fast'],
-    [0.12, { rx: 0.12, rz: 0.035, z: 0.06, leanZ: 0.03, scale: 1.015, sq: 0.97, lidA: 0.55, lidT: 0.26, eyeW: 72, eyeH: 96, eyeR: 0.7, mW: 56, mC: -0.38, mT: 17, earLa: 1.25, earRa: 1.25, earLb: -0.25, earRb: -0.25, ts: 1.25, fx: 'anger' }],
-    [1.7, { rx: 0, rz: 0, z: 0, leanZ: 0, scale: 1, sq: 1, lidA: 0, lidT: 0, eyeW: 64, eyeH: 112, eyeR: 0.92, mW: 0, mC: 0, mT: 15, earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2, ts: 1 }],
+    // the same head-down ram push as Angry, just quicker to start
+    [0, { sq: 1.04, rx: -0.08, z: -0.05 }, 'fast'],
+    [0.14, { rx: 0.24, rz: 0.07, z: 0.12, leanZ: 0.06, scale: 1.03, sq: 0.93, inflate: 0.26, lidA: 0.55, lidT: 0.26, eyeW: 72, eyeH: 96, eyeR: 0.7, mW: 56, mC: -0.38, mT: 17, earLa: 1.25, earRa: 1.25, earLb: -0.25, earRb: -0.25, ts: 1.25, fx: 'anger' }],
+    [1.7, { rx: 0, rz: 0, z: 0, leanZ: 0, scale: 1, sq: 1, inflate: 0.17, lidA: 0, lidT: 0, eyeW: 64, eyeH: 112, eyeR: 0.92, mW: 0, mC: 0, mT: 15, earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2, ts: 1 }],
   ],
   proc(t, add) {
     const e = env(t, 0.15, 1.6, 0.1);
