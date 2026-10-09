@@ -98,6 +98,7 @@ const PRESET = {
   blink:  [1600, 75],
   gaze:   [650, 46],
   ear:    [70, 6],
+  hair:   [120, 4.5],  // springy cowlick, overshoots and wobbles
   roll:   [45, 13],  // unhurried eye movement (eye roll)
   wag:    [60, 11],
 };
@@ -124,6 +125,8 @@ const DEFAULTS = {
   earLa: [0, 'ear'], earLb: [0.2, 'ear'], earRa: [0, 'ear'], earRb: [0.2, 'ear'],
   // tail: wag amount, height, puff
   tw: [0, 'wag'], ty: [0, 'body'], ts: [1, 'pop'],
+  // cowlick: sideways / front-back sway, droop (+ flops over, - stiff), length
+  hx: [0, 'hair'], hz: [0, 'hair'], hd: [0, 'hair'], hl: [1, 'hair'],
 };
 
 const P = {};
@@ -285,6 +288,9 @@ vec2 boil(vec2 px, float s, float amp) {
   return (vec2(noise(q), noise(q + 31.7)) - 0.5) * amp * uPx;
 }
 float idAt(vec2 px) { return floor(texture2D(tId, px / uRes).a * 255.0 + 0.5); }
+// hair grows out of the body: no line where a strand meets it
+bool isHair(float id) { return abs(id - 7.0) < 0.5 || abs(id - 8.0) < 0.5; }
+bool joined(float a, float b) { return (abs(a - 1.0) < 0.5 && isHair(b)) || (abs(b - 1.0) < 0.5 && isHair(a)); }
 // x: line where an arm overlaps the body, y: outer silhouette
 vec2 edges(vec2 px, float r) {
   float c = idAt(px);
@@ -292,7 +298,7 @@ vec2 edges(vec2 px, float r) {
   for (int i = 0; i < 8; i++) {
     float a = float(i) * 0.785398;
     float n = idAt(px + vec2(cos(a), sin(a)) * r);
-    if (abs(n - c) < 0.5) continue;
+    if (abs(n - c) < 0.5 || joined(n, c)) continue;
     if (c < 0.5 || n < 0.5) e.y += 1.; else e.x += 1.;
   }
   return clamp(e / 3.0, 0., 1.);
@@ -308,7 +314,7 @@ float cleanOverlap(vec2 px, float r) {
     float t = float(i) * 0.5236;
     vec2 d = vec2(cos(t), sin(t));
     float a = idAt(px + d * r), b = idAt(px + d * r * 0.5);
-    n += (a > 0.5 && !isBook(a) && abs(a - c) > 0.5 ? 1. : 0.) + (b > 0.5 && !isBook(b) && abs(b - c) > 0.5 ? 1. : 0.);
+    n += (a > 0.5 && !isBook(a) && abs(a - c) > 0.5 && !joined(a, c) ? 1. : 0.) + (b > 0.5 && !isBook(b) && abs(b - c) > 0.5 && !joined(b, c) ? 1. : 0.);
   }
   return smoothstep(0.06, 0.28, n / 24.);
 }
@@ -525,6 +531,22 @@ for (let i = 0; i < PUFFS + 1; i++) {
   tail.add(m);
 }
 
+// Cowlick: two thin strands sprouting from the top-back, curling outward at
+// the tips. Rebuilt along a bezier each frame so they sway and boing.
+const HAIR_RINGS = 16;
+function makeHair(obj) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(HAIR_RINGS * LIMB_SIDES * 3), 3));
+  g.setIndex(limbIndex.slice(0, (HAIR_RINGS - 1) * LIMB_SIDES * 6));
+  const fill = fillMat(false);
+  const mesh = new THREE.Mesh(g, fill);
+  mesh.userData = { fill, id: idMat(obj, false) };
+  mesh.frustumCulled = false;
+  rig.add(mesh);
+  return mesh;
+}
+const hairs = { L: makeHair(7), R: makeHair(8) };
+
 // Book: one dark slab with a thin light border, held up in front of the face so
 // the eyes peek over it. A grey paw peeks out from behind the left edge and an
 // oval paw sits over the right edge. The cover renders into the B channel
@@ -579,7 +601,7 @@ function updateBook() {
 }
 
 let tailPhase = 0;
-const show = { ears: false, limbs: false, tail: false, nose: false, mouth: false, circle: true };  // part toggles in the chip bar
+const show = { hair: true, ears: false, limbs: false, tail: false, nose: false, mouth: false, circle: true };  // part toggles in the chip bar
 function updateTail(time) {
   tail.visible = show.tail;
   compositeMat.uniforms.uCircleOn.value = show.circle ? 1 : 0;
@@ -596,6 +618,34 @@ function updateTail(time) {
   tail.position.set(root.x + swing * wag * 0.5, root.y + Math.abs(swing) * wag * 0.05, root.z - 0.08 + Math.abs(swing) * wag * 0.12);
   tail.rotation.set(0, time * 0.3, swing * wag * 0.6);
   tail.scale.setScalar(TAIL_R * V('ts'));
+}
+function updateHair(side) {
+  const s = side === 'L' ? -1 : 1, mesh = hairs[side];
+  mesh.visible = show.hair;
+  if (!show.hair) return;
+  // the two strands differ a little so they never move as one
+  const k = side === 'L' ? 1 : 0.85, len = V('hl') * (side === 'L' ? 0.6 : 0.53);
+  const droop = V('hd') * k, sx = V('hx') * k, sz = V('hz') * k;
+  const root = deformJS({ x: s * 0.045, y: 0.47, z: -0.2 });
+  const up = new THREE.Vector3(sx * 0.03, 0.13 * len, sz * 0.03);
+  const c1 = root.clone().add(up);
+  const c2 = root.clone().add(new THREE.Vector3((s * (0.03 + droop * 0.08) + sx * 0.12) * 0.6, (0.25 - droop * 0.08) * len, (-0.02 + sz * 0.12) * 0.6));
+  const tip = root.clone().add(new THREE.Vector3((s * (0.14 + droop * 0.06) + sx * 0.16) * 0.6, (0.2 - droop * 0.2) * len, (-0.03 + sz * 0.16) * 0.6));
+  const curve = new THREE.CubicBezierCurve3(root, c1, c2, tip);
+  const frames = curve.computeFrenetFrames(HAIR_RINGS - 1, false);
+  const pos = mesh.geometry.attributes.position, c = new THREE.Vector3();
+  for (let i = 0; i < HAIR_RINGS; i++) {
+    const t = i / (HAIR_RINGS - 1);
+    curve.getPointAt(t, c);
+    // taper to a point
+    const r = 0.018 * Math.pow(1 - t, 0.8) + 0.001;
+    const N = frames.normals[i], B = frames.binormals[i];
+    for (let j = 0; j < LIMB_SIDES; j++) {
+      const a = j / LIMB_SIDES * Math.PI * 2, ca = Math.cos(a) * r, sa = Math.sin(a) * r;
+      pos.setXYZ(i * LIMB_SIDES + j, c.x + N.x * ca + B.x * sa, c.y + N.y * ca + B.y * sa, c.z + N.z * ca + B.z * sa);
+    }
+  }
+  pos.needsUpdate = true;
 }
 function updateEar(side) {
   const s = side === 'L' ? -1 : 1, mesh = ears[side];
@@ -1379,8 +1429,16 @@ const TAIL_KEYS = {
   Distracted:[[0.3, { tw: 0.35 }], [3.0, { tw: 0 }]],
   Sleepy:    [[2.4, { ty: -0.14, ts: 0.9 }, 'slow'], [6.4, { ty: 0, ts: 1 }]],
 };
+const HAIR_KEYS = {
+  Surprised: [[0.13, { hl: 1.3, hd: -0.5 }], [2.0, { hl: 1, hd: 0 }]],
+  Angry:     [[0.22, { hl: 1.15, hd: -0.4 }], [2.5, { hl: 1, hd: 0 }]],
+  Sad:       [[0, { hd: 1, hl: 0.9 }, 'slow'], [3.2, { hd: 0, hl: 1 }]],
+  Disagree:  [[0, { hd: 0.6 }, 'slow'], [2.4, { hd: 0 }]],
+  Tired:     [[0, { hd: 1, hl: 0.9 }, 'slow'], [3.4, { hd: 0, hl: 1 }]],
+  Sleepy:    [[2.4, { hd: 1.2, hl: 0.9 }, 'slow'], [5.8, { hd: -0.4, hl: 1.1 }], [6.4, { hd: 0, hl: 1 }]],
+};
 for (const e of EXPRESSIONS) {
-  e.keys = [...e.keys, ...(EAR_KEYS[e.name] || []), ...(TAIL_KEYS[e.name] || [])].sort((a, b) => a[0] - b[0]);
+  e.keys = [...e.keys, ...(EAR_KEYS[e.name] || []), ...(TAIL_KEYS[e.name] || []), ...(HAIR_KEYS[e.name] || [])].sort((a, b) => a[0] - b[0]);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1524,6 +1582,11 @@ function update(dt) {
   const spin = Math.abs(P.ry.vel) * 0.15;
   add('earLa', clampE(-P.y.vel * 1.4 + P.x.vel * 1.2 + P.rz.vel * 0.5 + V('rz') * 0.8 + spin));
   add('earRa', clampE(-P.y.vel * 1.4 - P.x.vel * 1.2 - P.rz.vel * 0.5 - V('rz') * 0.8 + spin));
+  // cowlick: whips opposite to body motion, squashes on landings
+  const clampH = (v) => THREE.MathUtils.clamp(v, -1.2, 1.2);
+  add('hx', clampH(-P.x.vel * 1.6 - P.ry.vel * 0.25 + P.rz.vel * 0.5 + V('rz') * 0.6));
+  add('hz', clampH(P.z.vel * 1.2 + P.rx.vel * 0.4 - V('rx') * 0.5));
+  add('hd', clampH(-P.y.vel * 1.8));
   // tail: wag speed rises with excitement; idle gets an occasional happy wag
   tailPhase += dt * (9 + 7 * Math.max(0, V('tw')));
   if (cur === IDLE && clock > nextWag && wagEnd < 0) { P.tw.base = 0.45; wagEnd = clock + 1.2; }
@@ -1561,6 +1624,7 @@ function applyToScene() {
   rig.scale.setScalar(V('scale'));
   updateArm('L'); updateArm('R');
   updateEar('L'); updateEar('R');
+  updateHair('L'); updateHair('R');
   updateTail(clock);
   updateBook();
 }
@@ -1599,7 +1663,7 @@ pencilBtn.onclick = () => {
   pencilBtn.classList.toggle('on', on);
 };
 chips.appendChild(pencilBtn);
-for (const [key, name] of [['ears', 'Ears'], ['limbs', 'Limbs'], ['tail', 'Tail'], ['nose', 'Nose'], ['mouth', 'Mouth'], ['circle', 'Circle']]) {
+for (const [key, name] of [['hair', 'Hair'], ['ears', 'Ears'], ['limbs', 'Limbs'], ['tail', 'Tail'], ['nose', 'Nose'], ['mouth', 'Mouth'], ['circle', 'Circle']]) {
   try { const saved = localStorage.getItem('cube.show.' + key); if (saved !== null) show[key] = saved === '1'; } catch {}
   const b = document.createElement('button');
   b.className = 'chip auto toggle' + (show[key] ? ' on' : ''); b.textContent = name;
@@ -1712,7 +1776,7 @@ let last = performance.now();
 function renderPencil() {
   compositeMat.uniforms.uSeed.value = Math.floor(clock * 8) % 97;
 
-  const meshes = [body, ...arms.L.meshes, ...arms.R.meshes, ears.L, ears.R, ...tail.children, ...bookMeshes];
+  const meshes = [body, ...arms.L.meshes, ...arms.R.meshes, ears.L, ears.R, hairs.L, hairs.R, ...tail.children, ...bookMeshes];
   meshes.forEach((m) => { m.material = m.userData.id; });
   face.visible = false;
   renderer.setRenderTarget(idRT); renderer.clear(); renderer.render(scene, camera);
