@@ -1450,6 +1450,7 @@ for (const e of EXPRESSIONS) {
 --------------------------------------------------------------------------- */
 let clock = 0, cur = IDLE, curT = 0, auto = true, idleUntil = 1.2, nextIdx = 0;
 let nextBlink = 1.5, blinkEnd = -1, nextSaccade = 0.5, nextTwitch = 4, nextWag = 6, wagEnd = -1;
+let nextGlance = 5, glanceEnd = -1;  // idle: now and then looks back to the front, waiting
 const pointer = { x: 0, y: 0, active: false };
 
 function applyKey(k) {
@@ -1603,8 +1604,12 @@ function update(dt) {
 
   if (cur.follow) {
     if (pointer.active) {
-      add('gx', pointer.x * 34); add('gy', -pointer.y * 22);
-      add('ry', pointer.x * 0.28); add('rx', -pointer.y * 0.16);
+      // every 4-10s, drop the pointer for ~1-1.8s and face front, as if waiting
+      if (clock > nextGlance && glanceEnd < 0) glanceEnd = clock + 1 + Math.random() * 0.8;
+      if (glanceEnd > 0 && clock > glanceEnd) { glanceEnd = -1; nextGlance = clock + 4 + Math.random() * 6; }
+      const f = glanceEnd > 0 ? 0 : 1;
+      add('gx', pointer.x * 34 * f); add('gy', -pointer.y * 22 * f);
+      add('ry', pointer.x * 0.28 * f); add('rx', -pointer.y * 0.16 * f);
     } else if (clock > nextSaccade) {
       P.gx.base = (Math.random() - 0.5) * 50; P.gy.base = (Math.random() - 0.5) * 22;
       P.ry.base = P.gx.base * 0.004;
