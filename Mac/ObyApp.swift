@@ -39,6 +39,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard others.isEmpty else { NSApp.terminate(nil); return }
         island.start()
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        island.desk.quit()
+    }
 }
 
 struct SettingsView: View {

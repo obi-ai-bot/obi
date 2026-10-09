@@ -32,6 +32,11 @@ final class ObyCharacter {
     /// What Oby does until told otherwise: idle, listening, thinking, working, quiet.
     func setState(_ state: String) { run("oby.setState(state, { now: true })", ["state": state]) }
 
+    /// The state Oby shows whenever the island isn't closed.
+    var mood = "idle" {
+        didSet { if !paused, mood != oldValue { setState(mood) } }
+    }
+
     /// One expression now, then back to the state.
     func play(_ expression: String) { run("oby.play(name)", ["name": expression]) }
 
@@ -44,7 +49,7 @@ final class ObyCharacter {
 
     private func applyPause() {
         guard paused else {
-            run("oby.pause(false); oby.setState('idle', { now: true })", [:])
+            run("oby.pause(false); oby.setState(state, { now: true })", ["state": mood])
             return
         }
         // Look ahead and settle into a calm face first: paused mid-fidget or mid-glance,

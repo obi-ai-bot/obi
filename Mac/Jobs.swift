@@ -268,7 +268,9 @@ nonisolated enum Workspace {
     static func prepare(_ job: Job) async throws -> Job {
         var job = job
         let clone = clone(job.repo)
-        let git = { (arguments: [String]) in try await Shell.ok(["git", "-C", clone.path] + arguments) }
+        @discardableResult func git(_ arguments: [String]) async throws -> String {
+            try await Shell.ok(["git", "-C", clone.path] + arguments)
+        }
         if !FileManager.default.fileExists(atPath: clone.appending(path: ".git").path) {
             try FileManager.default.createDirectory(at: clone.deletingLastPathComponent(), withIntermediateDirectories: true)
             try await Shell.ok(["gh", "repo", "clone", job.repo, clone.path])
@@ -286,10 +288,15 @@ nonisolated enum Workspace {
             try await git(["fetch", "--quiet", "origin", "+refs/pull/\(pr)/head:refs/oby/pr-\(pr)"])
             start = "refs/oby/pr-\(pr)"
             pullRequest = Data(try await Shell.ok(["gh", "pr", "view", "\(pr)", "-R", job.repo, "--json", "title,body,author,baseRefName,url"]).utf8)
-        } else if let base = job.base {
-            start = "origin/\(base)"
         } else {
-            start = "origin/HEAD"
+            if job.base == nil {
+                // ponytail: work starts from dev where a repository has one (Deskree's flow), else the
+                // default branch; a per-repository setting when someone needs otherwise.
+                let dev = (try? await git(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/dev"])) != nil
+                let head = try await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+                job.base = dev ? "dev" : String(head.dropFirst("origin/".count))
+            }
+            start = "origin/\(job.base ?? "HEAD")"
         }
 
         let wanted = job.branch
