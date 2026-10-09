@@ -1,3 +1,4 @@
-prototype/build/
+oby/mac/build/
 .DS_Store
 .claude/settings.local.json
+dist/

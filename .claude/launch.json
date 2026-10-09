@@ -2,10 +2,16 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "cube",
+      "name": "oby",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "5173", "--directory", "prototype/web"],
+      "runtimeArgs": ["-m", "http.server", "5173", "--directory", "oby"],
       "port": 5173
+    },
+    {
+      "name": "oby-package",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "5174", "--directory", "dist/oby"],
+      "port": 5174
     }
   ]
 }

@@ -1,10 +1,12 @@
 import Cocoa
 import WebKit
 
-// Menu bar host for the cube mascot: a status item with a tiny blinking cube,
-// and a popover that runs the web prototype (../web/index.html, bundled).
+// Sample menu bar host for Oby: a status item with a tiny blinking Oby, and a
+// popover that runs oby.html (bundled with vendor/). Shows how an app drives
+// Oby: call oby.setState / oby.play with evaluateJavaScript, and hear back
+// from it through the "oby" message handler. Right-click the icon to try it.
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, WKNavigationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
     private var webView: WKWebView!
@@ -21,10 +23,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, WKN
 
         let config = WKWebViewConfiguration()
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        config.userContentController.add(self, name: "oby")
         webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 380, height: 470), configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = self
-        if let page = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "web") {
+        if let page = Bundle.main.url(forResource: "oby", withExtension: "html", subdirectory: "web") {
             webView.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
         }
 
@@ -39,29 +42,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, WKN
         scheduleBlink()
     }
 
-    // The page only animates while the popover is open; closed, it draws nothing.
-    private func setPaused(_ paused: Bool) {
-        webView.evaluateJavaScript("window.__setPaused && window.__setPaused(\(paused))")
+    // Talking to Oby: any line of its API, e.g. oby("setState('thinking')").
+    private func oby(_ call: String) {
+        webView.evaluateJavaScript("window.oby && oby.\(call)")
     }
+
+    // Oby's events: { oby: "state" | "expression" | "end" | "poke", ... }
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        print("oby:", message.body)
+    }
+
+    // The page only animates while the popover is open; closed, it draws nothing.
+    private func setPaused(_ paused: Bool) { oby("pause(\(paused))") }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { setPaused(!popover.isShown) }
     func popoverWillShow(_ notification: Notification) { setPaused(false) }
     func popoverDidClose(_ notification: Notification) { setPaused(true) }
 
+    @objc private func pickState(_ item: NSMenuItem) {
+        oby("setState('\(item.representedObject as! String)', { now: true })")
+        showPopover()
+    }
+    // "Hi Oby": wave, then listen
+    @objc private func sayHi() {
+        oby("play('Hello')")
+        oby("setState('listening')")
+        showPopover()
+    }
+    private func showPopover() {
+        guard !popover.isShown, let button = statusItem.button else { return }
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+    }
+
     @objc private func handleClick(_ sender: NSStatusBarButton) {
         if NSApp.currentEvent?.type == .rightMouseUp {
             let menu = NSMenu()
-            menu.addItem(withTitle: "Quit Cube", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+            for state in ["idle", "listening", "thinking", "working", "quiet"] {
+                let item = menu.addItem(withTitle: state.capitalized, action: #selector(pickState(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = state
+            }
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Say hi", action: #selector(sayHi), keyEquivalent: "").target = self
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Quit Oby", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
             statusItem.menu = menu
             sender.performClick(nil)
             statusItem.menu = nil
             return
         }
-        if popover.isShown {
-            popover.performClose(sender)
-        } else {
-            popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
-        }
+        if popover.isShown { popover.performClose(sender) } else { showPopover() }
     }
 
     // Blink the menu bar icon every few seconds, sometimes twice.

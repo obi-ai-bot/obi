@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oby demo</title>
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: #0a0a0b; color: #e9e9ea;
+    font: 12px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 16px; box-sizing: border-box;
+  }
+  iframe { width: 300px; height: 300px; border: 0; }
+  .row { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; max-width: 560px; }
+  button { appearance: none; border: 0; border-radius: 999px; padding: 5px 11px; background: #1a1a1d; color: inherit; font: inherit; cursor: pointer; }
+  button.state { background: transparent; box-shadow: inset 0 0 0 1px #333; }
+  button.on { box-shadow: inset 0 0 0 1px #888; }
+  #log { font: 11px/1.4 "SF Mono", ui-monospace, Menlo, monospace; color: #6b6b70; min-height: 16px; }
+</style>
+</head>
+<body>
+<!-- Oby in an iframe, driven with postMessage; events come back the same way. -->
+<iframe id="oby" src="oby.html" title="Oby"></iframe>
+<div class="row" id="states"></div>
+<div class="row" id="expressions"></div>
+<div id="log">click a state or an expression, or click Oby</div>
+<script>
+  const frame = document.getElementById('oby');
+  const send = (msg) => frame.contentWindow.postMessage(msg, '*');
+  addEventListener('message', (e) => {
+    if (!e.data?.oby) return;
+    const { oby: event, ...data } = e.data;
+    document.getElementById('log').textContent = `${event} ${JSON.stringify(data)}`;
+    if (event === 'state') for (const b of document.querySelectorAll('.state')) b.classList.toggle('on', b.textContent === data.state);
+  });
+  const init = () => {
+    // same origin here, so the lists can be read straight off the page
+    const { states, expressions, state } = frame.contentWindow.oby;
+    for (const name of states) {
+      const b = document.createElement('button');
+      b.className = 'state' + (name === state ? ' on' : ''); b.textContent = name;
+      b.onclick = () => send({ setState: name, now: true });
+      document.getElementById('states').append(b);
+    }
+    for (const name of expressions) {
+      const b = document.createElement('button');
+      b.textContent = name;
+      b.onclick = () => send({ play: name });
+      document.getElementById('expressions').append(b);
+    }
+  };
+  frame.addEventListener('load', init);
+</script>
+</body>
+</html>

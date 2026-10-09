@@ -3,8 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cube Mascot</title>
+<title>Oby</title>
 <style>
+  /* Oby draws on a transparent background: the host decides what's behind it */
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { -webkit-user-select: none; user-select: none; }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  /* dev:start  the playground (controls); package/build.sh strips every dev block */
   :root {
     --bg: #0a0a0b;
     --ink: #e9e9ea;
@@ -12,15 +18,11 @@
     --chip: #1a1a1d;
     --chip-on: #f2f2f2;
   }
-  html, body { margin: 0; height: 100%; overflow: hidden; }
   body {
     background: var(--bg);
     color: var(--ink);
     font: 12px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-    -webkit-user-select: none; user-select: none;
   }
-  #stage { position: fixed; inset: 0; }
-  #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   #ui {
     position: fixed; left: 0; right: 0; bottom: 0;
     padding: 10px 12px 12px;
@@ -33,6 +35,7 @@
   .slider output { width: 34px; text-align: right; }
   @media (max-width: 520px) { .slider input { width: 90px; } }
   #label { font: 11px/1 "SF Mono", ui-monospace, Menlo, monospace; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+  #states { display: flex; gap: 6px; }
   #chips {
     display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; max-width: 720px;
   }
@@ -56,16 +59,15 @@
     #chips { max-width: 360px; gap: 4px; }
     .chip { padding: 3px 8px; font-size: 11px; }
   }
+  /* dev:end */
 </style>
 <script type="importmap">
-{ "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
-} }
+{ "imports": { "three": "./vendor/three.module.js" } }
 </script>
 </head>
 <body>
 <div id="stage"></div>
+<!-- dev:start -->
 <button id="uiToggle" title="Controls" aria-label="Show or hide controls">
   <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
     <path d="M2 4h10M2 10h10"/><circle cx="5" cy="4" r="1.6" fill="#0a0a0b"/><circle cx="9" cy="10" r="1.6" fill="#0a0a0b"/>
@@ -73,6 +75,7 @@
 </button>
 <div id="ui">
   <div id="label">idle</div>
+  <div id="states"></div>
   <div id="chips"></div>
   <div id="sliders">
     <label class="slider" data-k="size">Size <input type="range" min="0.25" max="1" step="0.01" value="0.56"><output>56%</output></label>
@@ -82,6 +85,7 @@
     <button class="chip auto" id="reset">Reset</button>
   </div>
 </div>
+<!-- dev:end -->
 
 <script type="module">
 import * as THREE from 'three';
@@ -103,10 +107,8 @@ const PRESET = {
   drift:  [14, 7.2],
   blink:  [1600, 75],
   gaze:   [650, 46],
-  roll:   [45, 13],
-  flip:   [150, 11],
   melt:   [55, 13],   // cube shrinking into / growing out of the dots
-  spread: [70, 7],    // dots pulling apart: a little wobble as they pinch off  // glasses swinging down on their hinge, with a little bounce  // unhurried eye movement (eye roll)
+  spread: [70, 7],    // dots pulling apart: a little wobble as they pinch off
 };
 
 const DEFAULTS = {
@@ -120,11 +122,8 @@ const DEFAULTS = {
   eyeSep: [96, 'face'], eyeY: [-34, 'face'], eyeW: [64, 'face'], eyeH: [112, 'face'], eyeR: [0.92, 'face'],
   eL: [1, 'face'], eR: [1, 'face'], close: [0, 'face'], blink: [0, 'blink'],
   lidT: [0, 'face'], lidA: [0, 'face'], happy: [0, 'face'], calm: [0, 'face'], peek: [0, 'face'],
-  shX: [0, 'gaze'], shY: [0, 'gaze'], shS: [0, 'face'],  // catchlight offset and extra size (eye roll)
   // mouth: only Yawn shows one (mouthOn), a dot that opens into a round yawn
   mouthOn: [0, 'face'], mW: [0, 'mouth'], mO: [0, 'mouth'], mY: [92, 'mouth'], mT: [15, 'mouth'],
-  // round glasses (Searching): shown, nudge up, push back, swing up into the head, tilt
-  glasses: [0, 'snap'], glY: [0, 'pop'], glZ: [0, 'body'], glRX: [1.7, 'flip'], glTilt: [0, 'pop'],
   wall: [0, 'body'],  // invisible wall to hide behind (Hiding)
   // liquid loader: cube melted away, dots pulled apart, dot size, bouncing
   dSpread: [0, 'spread'], dR: [0, 'pop'], dBounce: [0, 'body'],
@@ -159,7 +158,7 @@ const V = (k) => P[k].v;
 const U = {
   uInflate: { value: 0 }, uTwist: { value: 0 },
   uSq: { value: 1 }, uLean: { value: 0 }, uLeanZ: { value: 0 },
-  uW: { value: 1 }, uH: { value: 1 },  // body width / height from the shape sliders
+  uW: { value: 1 }, uH: { value: 1 },  // body width / height (LOOK)
 };
 
 const DEFORM_GLSL = /* glsl */`
@@ -298,10 +297,6 @@ void main() {
   float worn = clamp(f.b, 0., 1.);
   premul = uInkCol * worn + premul * (1.0 - worn);
   alpha = worn + alpha * (1.0 - worn);
-  // lens glints leave alpha at 0.5 (everything else writes 1): white, but only
-  // where the body is behind them
-  float glint = (1.0 - smoothstep(0.1, 0.3, abs(f.a - 0.5))) * step(0.5, f.r);
-  premul = mix(premul, uFillCol, glint);
 
   // wall (Hiding): an invisible pillar in front of the mascot
   vec2 wc = (uWall.xy + uWall.zw) * 0.5, wh = (uWall.zw - uWall.xy) * 0.5;
@@ -395,68 +390,7 @@ function deformPoint(x, y, z) {
   return new THREE.Vector3(x + U.uLean.value * h * h, y, z + U.uLeanZ.value * h * h);
 }
 
-// Glasses (Searching): a real object in front of the face, not drawn on it.
-// Two round frames and a bridge in ink, a white glint across each lens, and
-// arms that run back along the sides of the head, so turning shows depth.
-// They're stowed inside the forehead: they swing out and down over the eyes
-// on a hinge above them (glRX 0 = on, ~1.7 = tucked into the head, where the
-// body hides them), folding their arms flat as they go back in.
-const glasses = new THREE.Group();   // the hinge, on the forehead
-const glFrame = new THREE.Group();   // the frames, hanging from it
-glasses.add(glFrame);
-rig.add(glasses);
-const GL_HINGE = 0.2;  // hinge height above the eyes
-// B = worn ink: added on top of whatever's there (so the body underneath still
-// counts for the outline) and drawn by the composite without an outline of its own
-const glInk = new THREE.MeshBasicMaterial({ color: 0x0000ff, toneMapped: false, blending: THREE.CustomBlending,
-  blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor });
-// glints keep the colour underneath and only mark alpha 0.5 (see composite)
-const glWhite = new THREE.MeshBasicMaterial({ color: 0x000000, toneMapped: false, opacity: 0.5, blending: THREE.CustomBlending,
-  blendEquation: THREE.AddEquation, blendSrc: THREE.ZeroFactor, blendDst: THREE.OneFactor,
-  blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.ZeroFactor });
-const LENS_R = 0.152, LENS_X = 0.192;  // matches the eyes' size and spacing
-const rodGeo = new THREE.CylinderGeometry(0.011, 0.011, 1, 8);
-const glArms = [];
-for (const side of [-1, 1]) {
-  const rim = new THREE.Mesh(new THREE.TorusGeometry(LENS_R, 0.017, 10, 48), glInk);
-  rim.position.x = side * LENS_X;
-  const glint = new THREE.Mesh(new THREE.PlaneGeometry(0.02, 0.1), glWhite);
-  glint.position.set(side * LENS_X - 0.055, 0.05, 0.02); glint.rotation.z = -0.65;
-  const hinge = new THREE.Mesh(rodGeo, glInk), arm = new THREE.Mesh(rodGeo, glInk);
-  glFrame.add(rim, glint, hinge, arm);
-  glArms.push({ side, hinge, arm });
-}
-const bridge = new THREE.Mesh(new THREE.TorusGeometry(LENS_X - LENS_R + 0.004, 0.014, 8, 20, Math.PI), glInk);
-bridge.position.y = -0.01;
-glFrame.add(bridge);
-const rodUp = new THREE.Vector3(0, 1, 0), rodDir = new THREE.Vector3();
-function placeRod(mesh, a, b) {
-  rodDir.subVectors(b, a);
-  mesh.position.addVectors(a, b).multiplyScalar(0.5);
-  mesh.scale.set(1, rodDir.length(), 1);
-  mesh.quaternion.setFromUnitVectors(rodUp, rodDir.normalize());
-}
-function updateGlasses() {
-  glasses.visible = V('glasses') > 0.5;
-  if (!glasses.visible) return;
-  // the eyes' height on the face plane, in the body's own units
-  const yl = -(10 + V('eyeY') * (FACE_PX / 512 * 1.28) / U.uH.value) * FACE_UNITS / FACE_PX;
-  const at = deformPoint(0, yl, 0.5);
-  glasses.position.set(at.x, at.y + GL_HINGE + V('glY'), at.z + 0.055 + V('glZ'));
-  glasses.rotation.set(V('glRX'), 0, V('glTilt'));
-  glFrame.position.y = -GL_HINGE;
-  // arms: out from each rim to the side of the head, then back along it;
-  // they fold in flat behind the lenses as the glasses swing up into the head
-  const fold = THREE.MathUtils.clamp(V('glRX') / 0.7, 0, 1);
-  const sideX = deformPoint(0.5, yl, 0).x + 0.02;
-  for (const { side, hinge, arm } of glArms) {
-    const a = new THREE.Vector3(side * (LENS_X + LENS_R), 0.01, 0);
-    const b = new THREE.Vector3(side * sideX, 0.01, -0.2).lerp(new THREE.Vector3(side * (LENS_X + LENS_R - 0.02), 0.01, -0.03), fold);
-    const c = new THREE.Vector3(side * sideX, -0.005, -0.75).lerp(new THREE.Vector3(side * (LENS_X - 0.25), 0.01, -0.04), fold);
-    placeRod(hinge, a, b); placeRod(arm, b, c);
-  }
-}
-
+/* dev:start */
 // bump when the defaults change, so saved settings from older builds are dropped once
 const SETTINGS_VERSION = '4';
 try {
@@ -465,6 +399,7 @@ try {
     localStorage.setItem('cube.v', SETTINGS_VERSION);
   }
 } catch {}
+/* dev:end */
 /* ---------------------------------------------------------------------------
    Face drawing (black ink on transparent, 512-unit space centred at 0,0)
 --------------------------------------------------------------------------- */
@@ -518,7 +453,7 @@ function drawEye(side, time) {
   if (shine > 0.02) {
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'destination-out';
-    g.beginPath(); g.arc(w * (0.16 + V('shX') * 0.5), h * (-0.2 + V('shY') * 0.5), Math.min(w, h) * 0.2 * (1 + V('shS')) * shine, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.arc(w * 0.16, h * -0.2, Math.min(w, h) * 0.2 * shine, 0, Math.PI * 2); g.fill();
   }
 
   // calm: eyes closed into a soft ‿, like a content or unwilling dog
@@ -544,35 +479,13 @@ function drawMouth(ctx) {
   ctx.restore();
 }
 
-// Soft shadow the glasses cast on the face: grey rings offset down, sliding
-// opposite to the head's turn, fading as the glasses lift away.
-function drawGlassesShadow(ctx) {
-  if (V('glasses') < 0.5) return;
-  const lift = THREE.MathUtils.clamp(Math.max(V('glY') / 0.25, V('glRX') / 0.6), 0, 1);
-  if (lift >= 1) return;
-  const px = 512 / (1.28 * FACE_UNITS);  // world units -> face drawing units
-  const sep = LENS_X * px, R = LENS_R * px, y = V('eyeY');
-  ctx.save();
-  ctx.globalAlpha = 0.22 * (1 - lift);
-  ctx.filter = 'blur(4px)';
-  ctx.translate(-V('ry') * 30 + 4, 16 + V('rx') * 20 - V('glY') * px);
-  ctx.rotate(V('glTilt'));
-  ctx.lineWidth = 16;
-  ctx.beginPath();
-  for (const side of [-1, 1]) { ctx.moveTo(side * sep + R, y); ctx.arc(side * sep, y, R, 0, Math.PI * 2); }
-  ctx.stroke();
-  ctx.restore();
-}
-
 // Everything the face drawing reads. When none of it moved by a visible amount,
 // the canvas and its GPU upload are skipped.
 const FACE_KEYS = ['gx', 'gy', 'eLx', 'eRx', 'eyeSep', 'eyeY', 'eyeW', 'eyeH', 'eyeR', 'eL', 'eR', 'close', 'blink',
-  'lidT', 'lidA', 'happy', 'calm', 'peek', 'shX', 'shY', 'shS', 'mouthOn', 'mW', 'mO', 'mY', 'mT', 'glasses', 'glY', 'glTilt', 'glRX'];
+  'lidT', 'lidA', 'happy', 'calm', 'peek', 'mouthOn', 'mW', 'mO', 'mY', 'mT'];
 let faceSig = '';
 function drawFace(time) {
-  // the glasses' shadow also slides with the head's turn
-  const turn = V('glasses') > 0.5 ? [V('ry'), V('rx')].map((v) => Math.round(v * 50)).join() : '';
-  const sig = FACE_KEYS.map((k) => Math.round(V(k) * 50)).join() + turn + U.uW.value + U.uH.value;
+  const sig = FACE_KEYS.map((k) => Math.round(V(k) * 50)).join() + U.uW.value + U.uH.value;
   if (sig === faceSig) return;
   faceSig = sig;
   fc.setTransform(1, 0, 0, 1, 0, 0);
@@ -587,7 +500,6 @@ function drawFace(time) {
     fc.drawImage(eyeBuf, cx - 128, cy - 128, 256, 256);
   }
   drawMouth(fc);
-  drawGlassesShadow(fc);
   faceTex.needsUpdate = true;
 }
 
@@ -787,31 +699,6 @@ const EXPRESSIONS = [
     },
   },
   {
-    // eye roll: the black shapes are the eyes, the white dot only a reflection.
-    // Looks you over (head dips, eyes travel slowly from low up to you while the
-    // reflection drifts slightly up), locks on, slowly turns away and lifts its
-    // head while the eyes stay on you, rolls the eyes up, looks back at you,
-    // blinks, and turns back to face you.
-    name: 'Eye roll', dur: 5.9,
-    noBlink: true,  // it has its own blink
-    keys: [
-      [0, { rx: 0.24, y: -0.05, leanZ: 0.06, sq: 0.96 }, 'body'],    // clear dip forward
-      [0, { gy: 26, shY: -0.12 }, 'gaze'],                           // eyes low, reflection up a touch
-      [0, { eyeW: 78, eyeH: 82 }, 'face'],                            // round eyes for the whole roll
-      [0.3, { gy: 0 }, 'slow'],                                       // slowly up to you: checking you out
-      [1.8, { ry: -0.45, rz: 0.05, rx: -0.02, y: 0, leanZ: 0, sq: 1, shY: 0 }, 'slow'],  // turn away and lift
-      [1.8, { gx: 24 }, 'slow'],                                      // eyes stay on you
-      [3.0, { gy: -34, gx: 6 }, 'roll'],                              // roll the eyes up
-      [3.0, { rx: -0.05 }, 'body'],
-      [3.3, { fx: 'huff' }, 'body'],
-      [4.1, { gy: 0, gx: 24 }, 'roll'],                               // look back at you
-      [4.6, { close: 1 }, 'snap'],
-      [4.72, { close: 0 }, 'snap'],
-      [4.72, { ry: 0, rz: 0, rx: 0, gx: 0 }, 'slow'],
-      [4.72, { eyeW: 64, eyeH: 112 }, 'face'],                        // back to the usual pills as it faces you
-    ],
-  },
-  {
     name: 'Thinking', dur: 4.6,
     keys: [
       [0, { gx: -30, gy: -30, rz: 0.11, ry: -0.38, eL: 0.82, lidT: 0.12, fx: 'dots' }],
@@ -828,52 +715,6 @@ const EXPRESSIONS = [
     ],
     proc(t, add) { add('twist', THREE.MathUtils.clamp(-P.ry.vel * 0.06, -0.35, 0.35)); },
     end() { P.ry.v -= TAU; },
-  },
-  {
-    // glasses swing down out of its forehead; head tipped down, it speed-reads
-    // through one pile then another, squints "hmm", checks on you, finds it,
-    // and the glasses swing back up into its head
-    name: 'Searching', dur: 7.6,
-    keys: [
-      [0, { glasses: 1 }, 'snap'],
-      [0.15, { glRX: 0 }, 'flip'],                                  // swing down over the eyes
-      [0.2, { blink: 1 }, 'blink'], [0.3, { blink: 0 }, 'blink'],
-      [0.6, { glY: 0.02, glTilt: 0.04 }, 'fast'],                   // settles them
-      [0.75, { glY: 0, glTilt: 0 }, 'pop'],
-      [5.2, { eyeH: 124, eyeW: 76, rx: -0.06, glY: 0.03, fx: 'bang' }, 'fast'],  // found it!
-      [5.45, { glY: 0 }, 'pop'],
-      [5.9, { eyeH: 112, eyeW: 64, rx: 0 }],
-      [6.3, { glRX: 1.7 }, 'flip'],                                 // swing back up into its head
-      [6.35, { blink: 1 }, 'blink'], [6.45, { blink: 0 }, 'blink'],
-      [7.2, { glasses: 0 }, 'snap'],
-    ],
-    start() {
-      // which pile it starts on, and when it squints and when it checks on you
-      this.side = Math.random() < 0.5 ? -1 : 1;
-      this.hmm = 2.6 + Math.random() * 1.2;
-      this.look = this.hmm < 3.2 ? 4.2 : 2.2;
-    },
-    proc(t, add) {
-      const e = env(t, 0.9, 5.0, 0.3);
-      if (e <= 0) return;
-      const near = (c, w) => Math.min(THREE.MathUtils.smoothstep(t, c, c + 0.15), 1 - THREE.MathUtils.smoothstep(t, c + w, c + w + 0.2));
-      const look = near(this.look, 0.5);      // quick check on you
-      const hmm = near(this.hmm, 0.6);        // "hmm" squint
-      const busy = e * (1 - look);
-      // two piles: head turned a little left, then right, swapping every ~1.6s
-      const pile = Math.sin((t - 0.9) * Math.PI / 1.6) > 0 ? this.side : -this.side;
-      add('ry', pile * 0.22 * busy);
-      add('rx', 0.13 * busy);
-      add('gy', 18 * busy);
-      // speed-reading: each line sweeps across in 0.38s and snaps back, a tiny
-      // head bob per line
-      const line = ((t - 0.9) / 0.45) % 1;
-      const sweep = line < 0.85 ? -20 + line / 0.85 * 40 : 20 - (line - 0.85) / 0.15 * 40;
-      add('gx', (sweep - pile * 10) * busy);
-      add('rx', Math.max(0, Math.sin(line * Math.PI * 2)) * 0.02 * busy);
-      add('lidT', 0.28 * hmm * e);
-      add('gy', -18 * look * e);
-    },
   },
   {
     // spins round like Working while shrinking into a ball, which melts into
@@ -1101,7 +942,7 @@ for (const e of EXPRESSIONS) e.keys.sort((a, b) => a[0] - b[0]);
 /* ---------------------------------------------------------------------------
    Runner
 --------------------------------------------------------------------------- */
-let clock = 0, cur = IDLE, curT = 0, auto = true, idleUntil = 1.2, nextIdx = 0;
+let clock = 0, cur = IDLE, curT = 0, idleUntil = 1.2, nextIdx = 0;
 let nextBlink = 1.5, blinkEnd = -1, nextSaccade = 0.5;
 let nextGlance = 5, glanceEnd = -1;
 const faceC = new THREE.Vector3(), faceE = new THREE.Vector3();  // idle: now and then looks back to the front, waiting
@@ -1117,16 +958,98 @@ function applyKey(k) {
   }
 }
 function play(expr) {
+  if (cur !== IDLE) {
+    const completed = curT > cur.dur;
+    if (oneShot?.expr === cur) { oneShot.resolve(completed); oneShot = null; }
+    emit('end', { name: cur.name, completed });
+  }
   cur.end?.();
   resetTargets();
   cur = expr; curT = 0;
   expr.start?.();
-  if (expr !== IDLE) particles.length = 0;
+  if (expr !== IDLE) { particles.length = 0; emit('expression', { name: expr.name }); }
   for (const k of expr.keys) if (k[0] <= 0) applyKey(k);
-  label.textContent = expr.name;
-  for (const b of chips.querySelectorAll('.chip[data-i]')) b.classList.toggle('on', EXPRESSIONS[b.dataset.i] === expr);
+  showPlaying();
 }
 function goIdle(hold) { play(IDLE); idleUntil = clock + hold; }
+
+/* ---------------------------------------------------------------------------
+   States: what Oby does on its own until the app says otherwise. Each is a
+   pool of expressions with a pause between them (seconds); in the pauses it
+   idles: breathes, blinks, follows the pointer. Change them here.
+--------------------------------------------------------------------------- */
+const STATES = {
+  idle:      { pool: ['Distracted', 'Wink', 'Grin', 'Yawn', 'Hiding', 'Sleepy'], gap: [7, 16] },
+  listening: { pool: ['Listening'], gap: [0, 0] },
+  thinking:  { pool: ['Thinking'], gap: [0, 0] },
+  working:   { pool: ['Working', 'Loading'], gap: [0.3, 0.8] },
+  quiet:     { pool: [], gap: [Infinity, Infinity] },  // idles only, never acts on its own
+};
+let state = 'idle', oneShot = null, lastPicked = null;
+const findExpr = (name) => EXPRESSIONS.find((e) => e.name.toLowerCase() === String(name).toLowerCase());
+const rand = (a, b) => a + Math.random() * (b - a);
+function nextFromState() {
+  const pool = STATES[state].pool.map(findExpr).filter(Boolean);
+  if (!pool.length) { goIdle(Infinity); return; }
+  let e = pool[Math.floor(Math.random() * pool.length)];
+  if (pool.length > 1 && e === lastPicked) e = pool[(pool.indexOf(e) + 1) % pool.length];
+  lastPicked = e;
+  play(e);
+}
+// after an expression: pause as long as the state says, then pick the next
+function rest() { const [a, b] = STATES[state].gap; goIdle(rand(a, b)); }
+function enterState() { if (STATES[state].gap[0] === 0) nextFromState(); else rest(); }
+
+/* ---------------------------------------------------------------------------
+   The API the app calls. In the page: window.oby. From a native WKWebView:
+   evaluateJavaScript("oby.setState('thinking')"). From a parent page around
+   an <iframe>: postMessage({ setState: 'thinking' }), { play: 'Agree' },
+   { pause: true }. Events go out to oby.on() listeners, to
+   webkit.messageHandlers.oby (native), and to the parent page as { oby: event, ... }.
+--------------------------------------------------------------------------- */
+const listeners = {};
+function emit(event, data = {}) {
+  for (const fn of listeners[event] || []) fn(data);
+  const msg = { oby: event, ...data };
+  window.webkit?.messageHandlers?.oby?.postMessage(msg);
+  if (window.parent !== window) window.parent.postMessage(msg, '*');
+}
+const oby = {
+  states: Object.keys(STATES),
+  expressions: EXPRESSIONS.map((e) => e.name),
+  get state() { return state; },
+  get playing() { return cur === IDLE ? null : cur.name; },
+  // Switch what Oby does on its own. Waits for an expression started with
+  // play() to finish first, unless { now: true }.
+  setState(name, { now = false } = {}) {
+    if (!STATES[name]) throw new Error(`oby: no state "${name}". States: ${oby.states.join(', ')}`);
+    const changed = name !== state;
+    state = name;
+    if (changed) emit('state', { state });
+    showPlaying();
+    if (oneShot && !now) return;
+    if (changed || cur === IDLE) enterState();
+  },
+  // Play one expression now, then go back to the current state. Resolves
+  // true when it finished, false if something else cut it off.
+  play(name) {
+    const expr = findExpr(name);
+    if (!expr) return Promise.reject(new Error(`oby: no expression "${name}". Expressions: ${oby.expressions.join(', ')}`));
+    return new Promise((resolve) => { play(expr); oneShot = { expr, resolve }; });
+  },
+  pause(p) { setPaused(!!p); },
+  on(event, fn) { (listeners[event] ||= []).push(fn); return () => { listeners[event] = listeners[event].filter((f) => f !== fn); }; },
+};
+window.oby = oby;
+addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || typeof d !== 'object' || 'oby' in d) return;
+  try {
+    if (d.setState) oby.setState(d.setState, d);
+    if (d.play) oby.play(d.play).catch(() => {});
+    if ('pause' in d) oby.pause(d.pause);
+  } catch (err) { console.warn(err.message); }
+});
 
 /* ---------------------------------------------------------------------------
    Poking: click the mascot. 1-3 pokes: startled bounce. 4-5: angry.
@@ -1197,6 +1120,7 @@ function onMascot(clientX, clientY) {
 function poke() {
   if (clock - lastPoke > 6) pokes = 0;
   pokes++; lastPoke = clock;
+  emit('poke', { count: pokes });
   if (pokes >= 6) {
     // poked again while ignoring (even mid-peek): back to ignoring, small twitch
     const again = cur === POKE_IGNORE;
@@ -1220,9 +1144,9 @@ function update(dt) {
   for (const k of cur.keys) if (k[0] > prev && k[0] <= curT) applyKey(k);
 
   if (cur === IDLE) {
-    if (auto && clock > idleUntil) { play(EXPRESSIONS[nextIdx]); nextIdx = (nextIdx + 1) % EXPRESSIONS.length; }
+    if (clock > idleUntil) nextFromState();
   } else if (curT > cur.dur) {
-    goIdle(auto ? 1.1 : Infinity);
+    rest();
   }
 
   for (const k in P) P[k].off = 0;
@@ -1277,7 +1201,6 @@ function applyToScene() {
   rig.position.set(V('x'), BASE_Y + V('y'), V('z'));
   rig.rotation.set(V('rx'), V('ry') + V('gx') * 0.0018, V('rz'), 'YXZ');
   rig.scale.setScalar(V('scale'));
-  updateGlasses();
   updateWall();
 }
 // Pillar (world units): it never moves; its right edge sits just past the
@@ -1297,87 +1220,32 @@ function updateWall() {
 }
 
 /* ---------------------------------------------------------------------------
-   UI + loop
+   Pointer and look
 --------------------------------------------------------------------------- */
-const label = document.getElementById('label');
-const chips = document.getElementById('chips');
-EXPRESSIONS.forEach((e, i) => {
-  const b = document.createElement('button');
-  b.className = 'chip'; b.textContent = e.name; b.dataset.i = i;
-  b.onclick = () => { setAuto(false); play(e); };
-  chips.appendChild(b);
-});
-const autoBtn = document.createElement('button');
-autoBtn.className = 'chip auto on'; autoBtn.textContent = 'Auto';
-autoBtn.onclick = () => setAuto(!auto);
-chips.appendChild(autoBtn);
-function setAuto(on) { auto = on; autoBtn.classList.toggle('on', on); if (on && cur === IDLE) idleUntil = clock + 0.4; }
-
-addEventListener('keydown', (e) => {
-  if (e.key === ' ' || e.key === 'ArrowRight') { setAuto(false); play(EXPRESSIONS[nextIdx]); nextIdx = (nextIdx + 1) % EXPRESSIONS.length; }
-  if (e.key === 'a') setAuto(!auto);
-});
 addEventListener('pointermove', (e) => {
   pointer.x = (e.clientX / innerWidth) * 2 - 1; pointer.y = -((e.clientY / innerHeight) * 2 - 1);
   pointer.active = true;
 });
 document.addEventListener('pointerleave', () => { pointer.active = false; });
 
-// Size: shrinks the mascot inside the view; lines thin out a little with it.
-let size = 0.56;
-const sizeInput = document.querySelector('[data-k=size] input'), sizeOut = document.querySelector('[data-k=size] output');
-try { size = Math.min(1, Math.max(0.25, parseFloat(localStorage.getItem('cube.size')) || 0.56)); } catch {}
-sizeInput.value = size;
+// The look everyone gets. ?size=1.4 makes Oby bigger in its frame (lines thin
+// out a little as it shrinks); at 1 it leaves room around it to move.
+const params = new URLSearchParams(location.search);
+const LOOK = { size: parseFloat(params.get('size')) || 1, round: 0.23, width: 0.93, height: 0.75 };
+let size = LOOK.size;
 function setSize(v) {
   size = v;
-  sizeOut.textContent = Math.round(v * 100) + '%';
   compositeMat.uniforms.uLineScale.value = 0.5 + 0.5 * v;
-  try { localStorage.setItem('cube.size', v); } catch {}
   resize();
 }
-sizeInput.addEventListener('input', () => setSize(parseFloat(sizeInput.value)));
-
 // Shape: corner roundness rebuilds the body; width/height feed the deform.
 const SHAPE = {
   round: (v) => { bodyRadius = v; body.geometry.dispose(); body.geometry = roundedCube(1, v); },
   width: (v) => { U.uW.value = v; },
   height: (v) => { U.uH.value = v; },
 };
-// Reset puts every slider back to the value written in the markup.
-document.getElementById('reset').onclick = () => {
-  for (const input of document.querySelectorAll('.slider input')) {
-    input.value = input.defaultValue;
-    input.dispatchEvent(new Event('input'));
-  }
-};
-for (const [k, apply] of Object.entries(SHAPE)) {
-  const input = document.querySelector(`[data-k=${k}] input`), out = document.querySelector(`[data-k=${k}] output`);
-  const set = (v) => {
-    apply(v);
-    out.textContent = k === 'round' ? Math.round((v - 0.04) / 0.42 * 100) + '%' : v.toFixed(2) + '×';
-    try { localStorage.setItem('cube.' + k, v); } catch {}
-  };
-  let saved = NaN;
-  try { saved = parseFloat(localStorage.getItem('cube.' + k)); } catch {}
-  if (!Number.isNaN(saved)) input.value = saved;
-  input.addEventListener('input', () => set(parseFloat(input.value)));
-  set(parseFloat(input.value));
-}
-
-const params = new URLSearchParams(location.search);
-if (params.has('nochips')) document.getElementById('ui').style.display = 'none';
-// Controls toggle: hidden by default in the menu bar app (loaded from a file),
-// open in the browser; the choice is remembered.
-{
-  let open = location.protocol !== 'file:';
-  try { const saved = localStorage.getItem('cube.ui'); if (saved !== null) open = saved === '1'; } catch {}
-  document.body.classList.toggle('collapsed', !open);
-  document.getElementById('uiToggle').onclick = () => {
-    const nowOpen = document.body.classList.toggle('collapsed') === false;
-    try { localStorage.setItem('cube.ui', nowOpen ? '1' : '0'); } catch {}
-    resize();
-  };
-}
+for (const [k, apply] of Object.entries(SHAPE)) apply(LOOK[k]);
+let showPlaying = () => {};  // the playground shows what's playing
 
 let unitPx = 100;
 function resize() {
@@ -1391,7 +1259,7 @@ function resize() {
   fxCanvas.width = w * dpr; fxCanvas.height = h * dpr;
   camera.aspect = w / h;
   // fit a 2.8 x 2.9 unit box regardless of aspect; leave room for the chip bar
-  const uiH = document.getElementById('ui').offsetHeight;
+  const uiH = document.getElementById('ui')?.offsetHeight || 0;
   const fitH = 2.6 * h / Math.max(1, h - uiH);
   const needH = Math.max(fitH, 2.6 / camera.aspect) / size;
   const dist = needH / 2 / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
@@ -1403,6 +1271,87 @@ function resize() {
 }
 addEventListener('resize', resize);
 setSize(size);
+
+/* dev:start ----------------------------------------------------------------
+   Playground: state buttons, expression buttons, look sliders (saved in this
+   browser), and a toggle to hide them. ?embed hides all of it.
+--------------------------------------------------------------------------- */
+{
+  const embedded = params.has('embed');
+  const label = document.getElementById('label');
+  const chips = document.getElementById('chips');
+  const stateChips = document.getElementById('states');
+  for (const name of Object.keys(STATES)) {
+    const b = document.createElement('button');
+    b.className = 'chip auto'; b.textContent = name; b.dataset.state = name;
+    b.onclick = () => oby.setState(name, { now: true });
+    stateChips.appendChild(b);
+  }
+  EXPRESSIONS.forEach((e, i) => {
+    const b = document.createElement('button');
+    b.className = 'chip'; b.textContent = e.name; b.dataset.i = i;
+    b.onclick = () => oby.play(e.name);
+    chips.appendChild(b);
+  });
+  showPlaying = () => {
+    label.textContent = `${state} · ${cur === IDLE ? 'idle' : cur.name}`;
+    for (const b of chips.querySelectorAll('.chip[data-i]')) b.classList.toggle('on', EXPRESSIONS[b.dataset.i] === cur);
+    for (const b of stateChips.children) b.classList.toggle('on', b.dataset.state === state);
+  };
+  addEventListener('keydown', (e) => {
+    if (e.key === ' ' || e.key === 'ArrowRight') { oby.play(EXPRESSIONS[nextIdx].name); nextIdx = (nextIdx + 1) % EXPRESSIONS.length; }
+  });
+
+  if (params.has('nochips')) document.getElementById('ui').style.display = 'none';
+  if (embedded) {
+    for (const id of ['ui', 'uiToggle']) document.getElementById(id).style.display = 'none';
+    document.body.style.background = 'transparent';
+  }
+  // Controls toggle: hidden by default in the menu bar app (loaded from a file),
+  // open in the browser; the choice is remembered.
+  let open = location.protocol !== 'file:';
+  try { const saved = localStorage.getItem('cube.ui'); if (saved !== null) open = saved === '1'; } catch {}
+  document.body.classList.toggle('collapsed', !open);
+  document.getElementById('uiToggle').onclick = () => {
+    const nowOpen = document.body.classList.toggle('collapsed') === false;
+    try { localStorage.setItem('cube.ui', nowOpen ? '1' : '0'); } catch {}
+    resize();
+  };
+
+  // Sliders: start from LOOK (size starts smaller here, to leave room for the
+  // controls), then whatever this browser saved. Reset goes back to the start.
+  const fmt = {
+    size: (v) => Math.round(v * 100) + '%',
+    round: (v) => Math.round((v - 0.04) / 0.42 * 100) + '%',
+    width: (v) => v.toFixed(2) + '×',
+    height: (v) => v.toFixed(2) + '×',
+  };
+  const apply = { size: setSize, ...SHAPE };
+  for (const k of Object.keys(fmt)) {
+    const input = document.querySelector(`[data-k=${k}] input`), out = document.querySelector(`[data-k=${k}] output`);
+    if (k !== 'size') input.defaultValue = LOOK[k];
+    input.value = embedded && k === 'size' ? LOOK.size : input.defaultValue;
+    if (!embedded) {
+      let saved = NaN;
+      try { saved = parseFloat(localStorage.getItem('cube.' + k)); } catch {}
+      if (!Number.isNaN(saved)) input.value = saved;
+    }
+    const set = (v) => {
+      apply[k](v);
+      out.textContent = fmt[k](v);
+      if (!embedded) try { localStorage.setItem('cube.' + k, v); } catch {}
+    };
+    input.addEventListener('input', () => set(parseFloat(input.value)));
+    set(parseFloat(input.value));
+  }
+  document.getElementById('reset').onclick = () => {
+    for (const input of document.querySelectorAll('.slider input')) {
+      input.value = input.defaultValue;
+      input.dispatchEvent(new Event('input'));
+    }
+  };
+}
+/* dev:end */
 
 // Loader dots, in framebuffer px around the body's centre.
 const DOT_GAP = 0.3, DOT_R = 0.1;  // world units
@@ -1448,14 +1397,6 @@ function cubeBox() {
     for (const d of compositeMat.uniforms.uDot.value) {
       box.x0 = Math.min(box.x0, d.x - d.z - pad); box.x1 = Math.max(box.x1, d.x + d.z + pad);
       box.y0 = Math.min(box.y0, d.y - d.z - pad); box.y1 = Math.max(box.y1, d.y + d.z + pad);
-    }
-  }
-  if (glasses.visible) {
-    for (const x of [-0.45, 0.45]) for (const y of [-0.25, 0.25]) for (const z of [-0.8, 0.1]) {
-      corner.set(x, y, z); glFrame.localToWorld(corner).project(camera);
-      const px = (corner.x * 0.5 + 0.5) * bw, py = (corner.y * 0.5 + 0.5) * bh;
-      box.x0 = Math.min(box.x0, px); box.x1 = Math.max(box.x1, px);
-      box.y0 = Math.min(box.y0, py); box.y1 = Math.max(box.y1, py);
     }
   }
 }
@@ -1507,11 +1448,11 @@ function setPaused(p) {
 }
 window.__setPaused = setPaused;  // the menu bar app pauses it while the popover is closed
 document.addEventListener('visibilitychange', () => setPaused(document.hidden));
-goIdle(1.2);
+enterState();
 rafId = requestAnimationFrame(frame);
 
 // debug hooks for screenshots
-window.__cube = { play: (n) => play(EXPRESSIONS.find((e) => e.name === n)), setAuto, P, EXPRESSIONS, pointer, rig, camera };
+window.__cube = { play: (n) => play(EXPRESSIONS.find((e) => e.name === n)), P, EXPRESSIONS, pointer, rig, camera };
 </script>
 </body>
 </html>
