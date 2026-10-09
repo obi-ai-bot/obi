@@ -1110,14 +1110,16 @@ const EXPRESSIONS = [
     // eye roll: the (enlarged) dot looks up, the head turns away a little, the
     // eyes shut for a beat, then open looking off to the side while still
     // turned away, with lowered lids and a huff; then back to you
-    name: 'Eye roll', dur: 2.9,
+    name: 'Eye roll', dur: 3.1,
     keys: [
       [0, { shS: 0.6 }, 'face'],
-      [0.1, { shX: -0.28, shY: -0.24 }, 'gaze'],
-      [0.35, { ry: -0.35, rz: 0.05, rx: -0.06 }, 'body'],
-      [0.8, { close: 1 }, 'face'],
-      [1.25, { close: 0, shX: -0.6, shY: 0.12, gx: -22, lidT: 0.22, rx: 0, mTilt: 4, mC: -0.15, fx: 'huff' }, 'face'],
-      [2.3, { ry: 0, rz: 0, shX: 0, shY: 0, shS: 0, gx: 0, lidT: 0, mTilt: 0, mC: 0 }, 'body'],
+      // pupil rolls right up to the top edge, so half of it is cut off
+      [0.1, { shX: -0.32, shY: -0.6 }, 'gaze'],
+      // only once the eyes are up does the head turn away
+      [0.6, { ry: -0.35, rz: 0.05, rx: -0.06 }, 'body'],
+      [1.0, { close: 1 }, 'face'],
+      [1.45, { close: 0, shX: -0.6, shY: 0.12, gx: -22, lidT: 0.22, rx: 0, mTilt: 4, mC: -0.15, fx: 'huff' }, 'face'],
+      [2.5, { ry: 0, rz: 0, shX: 0, shY: 0, shS: 0, gx: 0, lidT: 0, mTilt: 0, mC: 0 }, 'body'],
     ],
   },
   {
@@ -1340,7 +1342,7 @@ const EAR_KEYS = {
   Yawn:      [[0.4, { earLa: 1.3, earRa: 1.3, earLb: 0.6, earRb: 0.6 }], [1.6, { earLa: -0.2, earRa: -0.2, earLb: 0.2, earRb: 0.2 }, 'slow'], [2.8, { earLa: 0, earRa: 0 }]],
   Agree:     [[0, { earLa: 0.5, earRa: 0.5 }], [1.9, { earLa: 0, earRa: 0 }]],
   Disagree:  [[0, { earLa: -0.35, earRa: -0.35, earLb: 0.05, earRb: 0.05 }, 'slow'], [2.4, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
-  'Eye roll': [[0.25, { earLa: -0.2, earRa: 0.4 }], [2.2, { earLa: 0, earRa: 0 }]],
+  'Eye roll': [[0.6, { earLa: -0.2, earRa: 0.4 }], [2.5, { earLa: 0, earRa: 0 }]],
   Tired:     [[0, { earLa: -0.35, earRa: -0.35, earLb: 0.05, earRb: 0.05 }, 'slow'], [3.4, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
   Distracted:[[0.3, { earLa: 1.4, earRa: 1.4, earLb: 0.5, earRb: 0.5 }], [3.1, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
   Sleepy:    [[0, { earLa: -0.15, earRa: -0.15 }, 'slow'], [2.4, { earLa: -0.4, earRa: -0.4, earLb: 0.05, earRb: 0.05 }, 'slow'], [6.4, { earLa: 0, earRa: 0, earLb: 0.2, earRb: 0.2 }]],
