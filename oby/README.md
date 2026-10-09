@@ -33,8 +33,8 @@ The build:
 - adds `package/README.md` (the integrator's docs) and `package/demo.html`.
 
 The look in the package is fixed to `LOOK` in `oby.html`. The repo has two
-branches: `dev` is this working copy, and `main` holds only the published
-package. The org only lets `main` change through a pull request, so
+branches: `dev` is this working copy, and `main` holds the app with the
+published package in `Character/`. The org only lets `main` change through a pull request, so
 `publish.sh` opens one; merge it on GitHub to ship.
 
 ## Try it
