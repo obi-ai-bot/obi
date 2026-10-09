@@ -622,7 +622,7 @@ const EXPRESSIONS = [
       [2.4, { y: 0, sq: 1, gx: 0, eyeH: 112 }],
     ],
     proc(t, add) { add('twist', THREE.MathUtils.clamp(-P.ry.vel * 0.06, -0.35, 0.35)); },
-    end() { P.ry.v -= TAU; },
+    end() { if (P.ry.v > Math.PI) P.ry.v -= TAU; },  // unwind the turn, if it got that far
   },
   {
     // spins round like Working while shrinking into a ball, which melts into
@@ -642,7 +642,7 @@ const EXPRESSIONS = [
       [4.45, { inflate: 0.17, scale: 1, ry: TAU }, 'body'],                 // that swells back into the cube as it spins to face you
       [4.5, { dR: 0 }, 'body'],
     ],
-    end() { P.ry.v -= TAU; },
+    end() { if (P.ry.v > Math.PI) P.ry.v -= TAU; },  // unwind the turn, if it got that far
   },
   {
     name: 'Laugh', dur: 3.0,
@@ -762,7 +762,7 @@ for (const e of EXPRESSIONS) e.keys.sort((a, b) => a[0] - b[0]);
 /* ---------------------------------------------------------------------------
    Runner
 --------------------------------------------------------------------------- */
-let clock = 0, cur = IDLE, curT = 0, idleUntil = 1.2, nextIdx = 0;
+let clock = 0, cur = IDLE, curT = 0, idleUntil = 0;
 let nextBlink = 1.5, blinkEnd = -1, nextSaccade = 0.5;
 let nextGlance = 5, glanceEnd = -1;
 const faceC = new THREE.Vector3(), faceE = new THREE.Vector3();  // idle: now and then looks back to the front, waiting
@@ -799,7 +799,7 @@ function goIdle(hold) { play(IDLE); idleUntil = clock + hold; }
    idles: breathes, blinks, follows the pointer. Change them here.
 --------------------------------------------------------------------------- */
 const STATES = {
-  idle:      { pool: ['Distracted', 'Wink', 'Grin', 'Yawn', 'Hiding', 'Sleepy'], gap: [7, 16] },
+  idle:      { pool: ['Distracted', 'Yawn', 'Hiding'], gap: [7, 16] },
   listening: { pool: ['Listening'], gap: [0, 0] },
   thinking:  { pool: ['Thinking'], gap: [0, 0] },
   working:   { pool: ['Working', 'Loading'], gap: [0.3, 0.8] },
@@ -807,7 +807,7 @@ const STATES = {
 };
 let state = 'idle', oneShot = null, lastPicked = null;
 const findExpr = (name) => EXPRESSIONS.find((e) => e.name.toLowerCase() === String(name).toLowerCase());
-const rand = (a, b) => a + Math.random() * (b - a);
+const rand = (a, b) => (a === b ? a : a + Math.random() * (b - a));  // a === b also covers Infinity (quiet)
 function nextFromState() {
   const pool = STATES[state].pool.map(findExpr).filter(Boolean);
   if (!pool.length) { goIdle(Infinity); return; }
@@ -828,11 +828,16 @@ function enterState() { if (STATES[state].gap[0] === 0) nextFromState(); else re
    webkit.messageHandlers.oby (native), and to the parent page as { oby: event, ... }.
 --------------------------------------------------------------------------- */
 const listeners = {};
+// Events go out once the current step is done, so a listener sees Oby settled
+// and can safely call it back (e.g. play something when an expression ends).
 function emit(event, data = {}) {
-  for (const fn of listeners[event] || []) fn(data);
-  const msg = { oby: event, ...data };
-  window.webkit?.messageHandlers?.oby?.postMessage(msg);
-  if (window.parent !== window) window.parent.postMessage(msg, '*');
+  queueMicrotask(() => {
+    // a throwing listener mustn't take the others (or the posts) down with it
+    for (const fn of listeners[event] || []) try { fn(data); } catch (err) { console.error(err); }
+    const msg = { oby: event, ...data };
+    window.webkit?.messageHandlers?.oby?.postMessage(msg);
+    if (window.parent !== window) window.parent.postMessage(msg, '*');
+  });
 }
 const oby = {
   states: Object.keys(STATES),
@@ -840,15 +845,16 @@ const oby = {
   get state() { return state; },
   get playing() { return cur === IDLE ? null : cur.name; },
   // Switch what Oby does on its own. Waits for an expression started with
-  // play() to finish first, unless { now: true }.
+  // play() to finish first, unless { now: true }. Asking for the state it's
+  // already in does nothing, unless { now: true } (then it starts over).
   setState(name, { now = false } = {}) {
-    if (!STATES[name]) throw new Error(`oby: no state "${name}". States: ${oby.states.join(', ')}`);
-    const changed = name !== state;
-    state = name;
-    if (changed) emit('state', { state });
+    name = String(name).toLowerCase();
+    if (!Object.hasOwn(STATES, name)) throw new Error(`oby: no state "${name}". States: ${oby.states.join(', ')}`);
+    if (name === state && !now) return;
+    if (name !== state) { state = name; emit('state', { state }); }
     showPlaying();
     if (oneShot && !now) return;
-    if (changed || cur === IDLE) enterState();
+    enterState();
   },
   // Play one expression now, then go back to the current state. Resolves
   // true when it finished, false if something else cut it off.
@@ -857,12 +863,14 @@ const oby = {
     if (!expr) return Promise.reject(new Error(`oby: no expression "${name}". Expressions: ${oby.expressions.join(', ')}`));
     return new Promise((resolve) => { play(expr); oneShot = { expr, resolve }; });
   },
-  pause(p) { setPaused(!!p); },
+  pause(p) { hostPaused = !!p; syncPaused(); },
   on(event, fn) { (listeners[event] ||= []).push(fn); return () => { listeners[event] = listeners[event].filter((f) => f !== fn); }; },
 };
 window.oby = oby;
 addEventListener('message', (e) => {
   const d = e.data;
+  // only the page Oby is embedded in may drive it
+  if (e.source !== window.parent || window.parent === window) return;
   if (!d || typeof d !== 'object' || 'oby' in d) return;
   try {
     if (d.setState) oby.setState(d.setState, d);
@@ -1186,13 +1194,13 @@ function setPaused(p) {
   cancelAnimationFrame(rafId);
   if (!p) { last = performance.now(); rafId = requestAnimationFrame(frame); }
 }
-window.__setPaused = setPaused;  // the menu bar app pauses it while the popover is closed
-document.addEventListener('visibilitychange', () => setPaused(document.hidden));
+// Runs only while the host hasn't paused it (oby.pause) and the page is visible.
+let hostPaused = false;
+const syncPaused = () => setPaused(hostPaused || document.hidden);
+document.addEventListener('visibilitychange', syncPaused);
 enterState();
 rafId = requestAnimationFrame(frame);
 
-// debug hooks for screenshots
-window.__cube = { play: (n) => play(EXPRESSIONS.find((e) => e.name === n)), P, EXPRESSIONS, pointer, rig, camera };
 </script>
 </body>
 </html>
