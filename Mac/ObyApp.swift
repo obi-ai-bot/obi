@@ -19,7 +19,11 @@ struct ObyApp: App {
         }
 
         Settings {
-            SettingsView()
+            TabView {
+                SettingsView().tabItem { Label("General", systemImage: "gearshape") }
+                AccountsSettingsView(store: app.island.desk.accounts).tabItem { Label("Accounts", systemImage: "person.2") }
+                ModelsSettingsView().tabItem { Label("Models", systemImage: "cpu") }
+            }
         }
     }
 }
@@ -27,12 +31,26 @@ struct ObyApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let island = IslandController()
 
+    override init() {
+        UserDefaults.standard.register(defaults: AgentModels.defaults)
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Hosting the unit tests: no island, and no fight with the Oby that's already running.
+        guard NSClassFromString("XCTestCase") == nil else { return }
+        // A pipe to an agent that just exited must not take Oby down with it.
+        signal(SIGPIPE, SIG_IGN)
+        Task.detached { _ = Shell.environment }
         // One Oby at a time: a second launch quietly leaves the first one in charge.
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
             .filter { $0 != .current }
         guard others.isEmpty else { NSApp.terminate(nil); return }
         island.start()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        island.desk.quit()
     }
 }
 

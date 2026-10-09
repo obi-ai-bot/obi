@@ -1,0 +1,79 @@
+import Foundation
+import Testing
+@testable import Oby
+
+struct BrainTests {
+    let context = BrainContext(accounts: ["claude": ["default"]],
+                               repos: ["deskree-inc/oby", "deskree-inc/tetrix-front-end", "deskree-inc/tetrix-frontend"])
+
+    /// A plan exactly as `claude --json-schema` returned it on 2026-10-09.
+    let review = Data(#"{"action": "dispatch", "reply": "Claude Code will review PR #482 in tetrix-front-end.", "dispatch": {"agent": "claude", "account": "default", "repo": "deskree-inc/tetrix-front-end", "base_branch": null, "pr": 482, "kind": "review", "task": "Review pull request #482 in tetrix-front-end.", "inputs": []}, "question": null}"#.utf8)
+
+    @Test func realPlanDecodesAndPasses() throws {
+        let plan = try Plan.decode(review)
+        #expect(plan.action == .dispatch)
+        #expect(plan.dispatch?.pr == 482)
+        #expect(plan.problems(in: context, canary: "7f3a9c").isEmpty)
+    }
+
+    @Test func swiftRefusesWhatTheSchemaCantCatch() throws {
+        var plan = try Plan.decode(review)
+        plan.dispatch?.repo = "evil/repo"
+        plan.dispatch?.account = "someone-else"
+        plan.dispatch?.baseBranch = "--upload-pack=sh"
+        plan.dispatch?.inputs = ["U9"]
+        plan.reply = "ok 7f3a9c"
+        let problems = plan.problems(in: context, canary: "7f3a9c")
+        #expect(problems.count == 5)
+    }
+
+    @Test func actionAndObjectMustAgree() throws {
+        var plan = try Plan.decode(review)
+        plan.action = .replyOnly
+        #expect(!plan.problems(in: context, canary: "7f3a9c").isEmpty)
+        plan = Plan(action: .askUser, reply: "", dispatch: nil, question: nil)
+        #expect(!plan.problems(in: context, canary: "7f3a9c").isEmpty)
+        plan = Plan(action: .ignore, reply: "", dispatch: nil, question: nil)
+        #expect(plan.problems(in: context, canary: "7f3a9c").isEmpty)
+    }
+
+    @Test func branchNames() {
+        #expect(Job.branch(kind: .review, pr: 482, id: "abcdef12") == "oby/review-482")
+        #expect(Job.branch(kind: .fix, pr: nil, id: "abcdef12") == "oby/fix-abcdef")
+        for good in ["main", "dev", "feat/f2-dispatch", "release/1.2"] { #expect(Plan.isBranchName(good)) }
+        for bad in ["-x", "a..b", "a.lock", "a/", "/a", ".a", "a//b", "a b", "a~1", "x@{1}", ""] { #expect(!Plan.isBranchName(bad), "\(bad)") }
+    }
+
+    @Test func rulesMatchWholeRepositoryNames() {
+        let plan = Rules.plan("Review tetrix-front-end PR #482", context: context)
+        #expect(plan.action == .dispatch)
+        #expect(plan.dispatch?.repo == "deskree-inc/tetrix-front-end")
+        #expect(plan.dispatch?.kind == .review)
+        #expect(plan.dispatch?.pr == 482)
+        #expect(plan.problems(in: context, canary: "7f3a9c").isEmpty)
+    }
+
+    @Test func rulesAskWhenTheyCantTell() {
+        #expect(Rules.plan("fix the flaky login test", context: context).action == .askUser)
+        #expect(Rules.plan("   ", context: context).action == .ignore)
+        // Plans from rules are validated like any other.
+        #expect(Rules.plan("fix the flaky login test", context: context).problems(in: context, canary: "7f3a9c").isEmpty)
+    }
+
+    @Test func plannerFallsBackToRulesWhenTheBrainFails() async {
+        struct Broken: BrainAdapter {
+            let name = "broken"
+            func complete(system: String, user: String, schema: Data, timeout: TimeInterval) async throws -> Data { Data("prose".utf8) }
+        }
+        let result = await Planner(adapters: [Broken()]).plan("review oby #7", context: context)
+        #expect(result.by == "rules")
+        #expect(result.plan.dispatch?.repo == "deskree-inc/oby")
+    }
+
+    @Test func schemaListsOnlyWhatsConnected() throws {
+        let schema = try #require(JSONSerialization.jsonObject(with: Plan.schema(for: context)) as? [String: Any])
+        let actions = ((schema["properties"] as? [String: Any])?["action"] as? [String: Any])?["enum"] as? [String]
+        #expect(actions == ["dispatch", "ask_user", "reply_only", "stop_agent", "ignore"])
+        #expect(String(decoding: Plan.schema(for: context), as: UTF8.self).contains("deskree-inc/tetrix-frontend"))
+    }
+}
