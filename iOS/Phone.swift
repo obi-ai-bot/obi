@@ -62,7 +62,9 @@ final class Phone {
                     jobs = try await runner.jobs()
                     connection = .live
                     wait = 1
-                    await registerDevice()
+                    do { _ = try await registerDevice() } catch {
+                        Logger.phone.error("registering this iPhone failed: \(error.localizedDescription, privacy: .public)")
+                    }
                     for try await event in runner.events() { apply(event) }
                 } catch {
                     if Task.isCancelled { return }
@@ -144,7 +146,7 @@ final class Phone {
     /// Face ID signs the action; the runner checks the signature, then pushes and opens a draft PR.
     func publish(_ id: String, action: String) async throws -> URL {
         guard DeviceKey.isAvailable else { throw RunnerError(message: "Publishing needs Face ID on your iPhone.") }
-        guard let device = deviceID else { throw RunnerError(message: "This iPhone isn't registered with the runner yet. Try again in a moment.") }
+        let device = try await registerDevice()
         let approval = try await Task.detached { try DeviceKey.approve(job: id, action: action, device: device) }.value
         let url = try await runner.publish(id, approval: approval)
         if var job = jobs.first(where: { $0.id == id }) {
@@ -167,15 +169,13 @@ final class Phone {
     private var deviceKey: String { "device.\(runnerURL.host() ?? runnerURL.absoluteString)" }
     var deviceID: String? { UserDefaults.standard.string(forKey: deviceKey) }
 
-    /// Registers the phone's Face ID key with the runner, once per runner.
-    private func registerDevice() async {
-        guard DeviceKey.isAvailable, deviceID == nil else { return }
-        do {
-            let id = try await runner.register(name: "iPhone", publicKey: try DeviceKey.publicKey())
-            UserDefaults.standard.set(id, forKey: deviceKey)
-        } catch {
-            Logger.phone.error("registering this iPhone failed: \(error.localizedDescription, privacy: .public)")
-        }
+    /// Registers the phone's Face ID key with the runner, once per runner, and returns its id.
+    private func registerDevice() async throws -> String {
+        if let deviceID { return deviceID }
+        guard DeviceKey.isAvailable else { throw RunnerError(message: "Publishing needs Face ID on your iPhone.") }
+        let id = try await runner.register(name: "iPhone", publicKey: try DeviceKey.publicKey())
+        UserDefaults.standard.set(id, forKey: deviceKey)
+        return id
     }
 }
 
