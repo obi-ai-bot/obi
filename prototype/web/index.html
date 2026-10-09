@@ -1168,6 +1168,7 @@ const EXPRESSIONS = [
     keys: [
       [0, { rx: 0.24, y: -0.05, leanZ: 0.06, sq: 0.96 }, 'body'],    // clear dip forward
       [0, { gy: 26, shY: -0.12 }, 'gaze'],                           // eyes low, reflection up a touch
+      [0, { eyeW: 78, eyeH: 82 }, 'face'],                            // round eyes for the whole roll
       [0.3, { gy: 0 }, 'slow'],                                       // slowly up to you: checking you out
       [1.8, { ry: -0.45, rz: 0.05, rx: -0.02, y: 0, leanZ: 0, sq: 1, shY: 0 }, 'slow'],  // turn away and lift
       [1.8, { gx: 24 }, 'slow'],                                      // eyes stay on you
@@ -1178,6 +1179,7 @@ const EXPRESSIONS = [
       [4.6, { close: 1 }, 'snap'],
       [4.72, { close: 0 }, 'snap'],
       [4.72, { ry: 0, rz: 0, rx: 0, gx: 0, mTilt: 0, mC: 0 }, 'slow'],
+      [4.72, { eyeW: 64, eyeH: 112 }, 'face'],                        // back to the usual pills as it faces you
     ],
   },
   {
