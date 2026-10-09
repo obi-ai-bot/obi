@@ -309,7 +309,17 @@ float cleanOverlap(vec2 px, float r) {
   }
   return smoothstep(0.06, 0.28, n / 24.);
 }
-float fillAt(vec2 px) { vec4 f = texture2D(tFill, px / uRes); return clamp(f.r + f.g, 0., 1.); }
+float fillAt(vec2 px) { vec4 f = texture2D(tFill, px / uRes); return clamp(f.r + f.g + f.b, 0., 1.); }
+// how much book is around a pixel, so no outline is drawn along its edges
+float bookNear(vec2 px, float r) {
+  float b = texture2D(tFill, px / uRes).b;
+  for (int i = 0; i < 16; i++) {
+    float t = float(i) * 0.392699;
+    vec2 d = vec2(cos(t), sin(t));
+    b = max(b, max(texture2D(tFill, (px + d * r) / uRes).b, texture2D(tFill, (px + d * r * 0.5) / uRes).b));
+  }
+  return b;
+}
 // clean silhouette: a smooth band where the blurred coverage crosses 0.5
 float cleanSil(vec2 px, float r) {
   float a = fillAt(px);
@@ -336,16 +346,17 @@ void main() {
   vec2 e2 = edges(px0 + boil(px0, uSeed + 3.7, 1.6) + vec2(0.6) * uPx, uPx * 1.6) * 0.35 * uPencil;
   vec2 e = max(e1, e2) * grain;
   if (uPencil < 0.5) { e.y = cleanSil(px, r * 1.25); e.x = cleanOverlap(px, r * 1.1); }
-  e *= 1.0 - bookInk;  // the book is a plain dark shape, never outlined
+  e *= 1.0 - smoothstep(0.0, 0.3, bookNear(px, r * 1.6));  // the book is a plain dark shape, never outlined
 
   vec3 col = uFillCol;
   col = mix(col, uInkCol, ink * (0.88 + 0.12 * grain));
-  col = mix(col, uInkCol, bookInk);
+  col = mix(col, uInkCol, clamp(bookInk / max(fill, 1e-3), 0., 1.));
   col = mix(col, uLineCol, e.x);
   col = mix(col, uSilCol, e.y);
-  // outside the shape only the silhouette stroke exists
-  col = mix(uSilCol, col, fill);
-  float alpha = max(fill, e.y);
+  // premultiplied: the shape keeps its own colour right to its anti-aliased
+  // edge, and only the uncovered part of a pixel shows the outline stroke
+  float alpha = fill + e.y * (1.0 - fill);
+  vec3 premul = col * fill + uSilCol * e.y * (1.0 - fill);
 
   // static grey circle behind the mascot. Anything above its middle or out to
   // the sides may peek past the edge; anything dropping below it is clipped,
@@ -354,11 +365,12 @@ void main() {
     float d = length(px0 - uCircle.xy);
     float inC = 1.0 - smoothstep(uCircle.z - uPx, uCircle.z + uPx, d);
     float below = smoothstep(uCircle.y + uPx, uCircle.y - uPx, px0.y);
-    alpha *= mix(1.0, inC, below);
-    gl_FragColor = vec4(col * alpha + uCircleCol * inC * (1.0 - alpha), alpha + inC * (1.0 - alpha));
+    float clip = mix(1.0, inC, below);
+    premul *= clip; alpha *= clip;
+    gl_FragColor = vec4(premul + uCircleCol * inC * (1.0 - alpha), alpha + inC * (1.0 - alpha));
     return;
   }
-  gl_FragColor = vec4(col * alpha, alpha);
+  gl_FragColor = vec4(premul, alpha);
 }`;
 
 const rtOpts = { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: true };
@@ -544,7 +556,7 @@ function updateBook() {
   const k = V('book');
   book.visible = k > 0.01;
   if (!book.visible) return;
-  book.position.set(-0.02, -0.31 - (1 - Math.min(1, k)) * 0.75, 0.74);
+  book.position.set(-0.02, -0.35 - (1 - Math.min(1, k)) * 0.75, 0.74);
   book.rotation.z = -0.06;
   book.scale.setScalar(Math.max(0.01, Math.min(1.1, k)));
 }
