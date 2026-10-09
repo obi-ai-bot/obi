@@ -28,6 +28,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let island = IslandController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Hosting the unit tests: no island, and no fight with the Oby that's already running.
+        guard NSClassFromString("XCTestCase") == nil else { return }
+        // A pipe to an agent that just exited must not take Oby down with it.
+        signal(SIGPIPE, SIG_IGN)
+        Task.detached { _ = Shell.environment }
         // One Oby at a time: a second launch quietly leaves the first one in charge.
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
             .filter { $0 != .current }

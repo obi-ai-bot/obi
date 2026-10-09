@@ -6,8 +6,19 @@
 	objectVersion = 110;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		0B1E0C0A00000000000000A7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FB61F80330795FDE00A9523D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FB61F80A30795FDE00A9523D;
+			remoteInfo = Oby;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		FB61F80B30795FDE00A9523D /* Oby.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Oby.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0B1E0C0A00000000000000A1 /* MacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -16,10 +27,20 @@
 			path = Mac;
 			sourceTree = "<group>";
 		};
+		0B1E0C0A00000000000000A2 /* MacTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MacTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		FB61F80830795FDE00A9523D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
+		0B1E0C0A00000000000000A5 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
 			);
@@ -31,6 +52,7 @@
 			isa = PBXGroup;
 			children = (
 				FB61F80D30795FDE00A9523D /* Mac */,
+				0B1E0C0A00000000000000A2 /* MacTests */,
 				FB61F80C30795FDE00A9523D /* Products */,
 			);
 			sourceTree = "<group>";
@@ -39,6 +61,7 @@
 			isa = PBXGroup;
 			children = (
 				FB61F80B30795FDE00A9523D /* Oby.app */,
+				0B1E0C0A00000000000000A1 /* MacTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -65,6 +88,27 @@
 			productReference = FB61F80B30795FDE00A9523D /* Oby.app */;
 			productType = "com.apple.product-type.application";
 		};
+		0B1E0C0A00000000000000A3 /* MacTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0B1E0C0A00000000000000A9 /* Build configuration list for PBXNativeTarget "MacTests" */;
+			buildPhases = (
+				0B1E0C0A00000000000000A4 /* Sources */,
+				0B1E0C0A00000000000000A5 /* Frameworks */,
+				0B1E0C0A00000000000000A6 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0B1E0C0A00000000000000A8 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				0B1E0C0A00000000000000A2 /* MacTests */,
+			);
+			name = MacTests;
+			productName = MacTests;
+			productReference = 0B1E0C0A00000000000000A1 /* MacTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -77,6 +121,10 @@
 				TargetAttributes = {
 					FB61F80A30795FDE00A9523D = {
 						CreatedOnToolsVersion = 27.0;
+					};
+					0B1E0C0A00000000000000A3 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = FB61F80A30795FDE00A9523D;
 					};
 				};
 			};
@@ -95,12 +143,18 @@
 			projectRoot = "";
 			targets = (
 				FB61F80A30795FDE00A9523D /* Oby */,
+				0B1E0C0A00000000000000A3 /* MacTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		FB61F80930795FDE00A9523D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+			);
+		};
+		0B1E0C0A00000000000000A6 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
 			);
@@ -135,7 +189,20 @@
 			files = (
 			);
 		};
+		0B1E0C0A00000000000000A4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		0B1E0C0A00000000000000A8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = FB61F80A30795FDE00A9523D /* Oby */;
+			targetProxy = 0B1E0C0A00000000000000A7 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		FB61F81430795FE000A9523D /* Debug configuration for PBXProject "Oby" */ = {
@@ -318,6 +385,50 @@
 			};
 			name = Release;
 		};
+		0B1E0C0A00000000000000AA /* Debug configuration for PBXNativeTarget "MacTests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 3UV9W5SV7W;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.deskree.oby.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Oby.app/Contents/MacOS/Oby";
+			};
+			name = Debug;
+		};
+		0B1E0C0A00000000000000AB /* Release configuration for PBXNativeTarget "MacTests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 3UV9W5SV7W;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.deskree.oby.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Oby.app/Contents/MacOS/Oby";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -334,6 +445,14 @@
 			buildConfigurations = (
 				FB61F81730795FE000A9523D /* Debug configuration for PBXNativeTarget "Oby" */,
 				FB61F81830795FE000A9523D /* Release configuration for PBXNativeTarget "Oby" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		0B1E0C0A00000000000000A9 /* Build configuration list for PBXNativeTarget "MacTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0B1E0C0A00000000000000AA /* Debug configuration for PBXNativeTarget "MacTests" */,
+				0B1E0C0A00000000000000AB /* Release configuration for PBXNativeTarget "MacTests" */,
 			);
 			defaultConfigurationName = Release;
 		};
