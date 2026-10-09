@@ -103,7 +103,8 @@ const PRESET = {
   drift:  [14, 7.2],
   blink:  [1600, 75],
   gaze:   [650, 46],
-  roll:   [45, 13],  // unhurried eye movement (eye roll)
+  roll:   [45, 13],
+  drop:   [150, 10],  // falls and bounces (glasses landing)  // unhurried eye movement (eye roll)
 };
 
 const DEFAULTS = {
@@ -120,8 +121,8 @@ const DEFAULTS = {
   shX: [0, 'gaze'], shY: [0, 'gaze'], shS: [0, 'face'],  // catchlight offset and extra size (eye roll)
   // mouth: only Yawn shows one (mouthOn), a dot that opens into a round yawn
   mouthOn: [0, 'face'], mW: [0, 'mouth'], mO: [0, 'mouth'], mY: [92, 'mouth'], mT: [15, 'mouth'],
-  // round glasses (Searching): opacity, vertical offset (px), tilt
-  glasses: [0, 'face'], glY: [-70, 'pop'], glTilt: [0, 'pop'],
+  // round glasses (Searching): shown, lift above the eyes, push back, flip up, tilt
+  glasses: [0, 'snap'], glY: [2.6, 'drop'], glZ: [0, 'body'], glRX: [0, 'body'], glTilt: [0, 'pop'],
   wall: [0, 'body'],  // invisible wall to hide behind (Hiding)
 };
 
@@ -334,6 +335,72 @@ const face = new THREE.Mesh(faceGeo, faceMat);
 face.renderOrder = 2;
 rig.add(face);
 
+// Point on the deformed body (same maths as the body's vertex shader), so
+// things worn on it stay put while it squashes, leans and twists.
+function deformPoint(x, y, z) {
+  const inf = U.uInflate.value;
+  if (inf) {
+    const l = Math.hypot(x, y, z) || 1;
+    x += (x / l * 0.62 - x) * inf; y += (y / l * 0.62 - y) * inf; z += (z / l * 0.62 - z) * inf;
+  }
+  x *= U.uW.value;
+  y = (y + 0.5) * U.uH.value - 0.5;
+  const a = U.uTwist.value * y, c = Math.cos(a), sn = Math.sin(a);
+  [x, z] = [c * x + sn * z, -sn * x + c * z];
+  const sq = U.uSq.value;
+  y = (y + 0.5) * sq - 0.5;
+  const inv = 1 / Math.sqrt(sq); x *= inv; z *= inv;
+  const h = y + 0.5;
+  return new THREE.Vector3(x + U.uLean.value * h * h, y, z + U.uLeanZ.value * h * h);
+}
+
+// Glasses (Searching): a real object in front of the face, not drawn on it.
+// Two round frames and a bridge in ink, a white glint across each lens, and
+// arms that run back along the sides of the head, so turning shows depth.
+const glasses = new THREE.Group();
+rig.add(glasses);
+const glInk = new THREE.MeshBasicMaterial({ color: 0x00ff00, toneMapped: false });   // G = ink
+const glWhite = new THREE.MeshBasicMaterial({ color: 0xff0000, toneMapped: false }); // R = body white
+const LENS_R = 0.152, LENS_X = 0.192;  // matches the eyes' size and spacing
+const rodGeo = new THREE.CylinderGeometry(0.011, 0.011, 1, 8);
+const glArms = [];
+for (const side of [-1, 1]) {
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(LENS_R, 0.017, 10, 48), glInk);
+  rim.position.x = side * LENS_X;
+  const glint = new THREE.Mesh(new THREE.PlaneGeometry(0.02, 0.1), glWhite);
+  glint.position.set(side * LENS_X - 0.055, 0.05, 0.02); glint.rotation.z = -0.65;
+  const hinge = new THREE.Mesh(rodGeo, glInk), arm = new THREE.Mesh(rodGeo, glInk);
+  glasses.add(rim, glint, hinge, arm);
+  glArms.push({ side, hinge, arm });
+}
+const bridge = new THREE.Mesh(new THREE.TorusGeometry(LENS_X - LENS_R + 0.004, 0.014, 8, 20, Math.PI), glInk);
+bridge.position.y = -0.01;
+glasses.add(bridge);
+const rodUp = new THREE.Vector3(0, 1, 0), rodDir = new THREE.Vector3();
+function placeRod(mesh, a, b) {
+  rodDir.subVectors(b, a);
+  mesh.position.addVectors(a, b).multiplyScalar(0.5);
+  mesh.scale.set(1, rodDir.length(), 1);
+  mesh.quaternion.setFromUnitVectors(rodUp, rodDir.normalize());
+}
+function updateGlasses() {
+  glasses.visible = V('glasses') > 0.5;
+  if (!glasses.visible) return;
+  // the eyes' height on the face plane, in the body's own units
+  const yl = -(10 + V('eyeY') * (FACE_PX / 512 * 1.28) / U.uH.value) * FACE_UNITS / FACE_PX;
+  const at = deformPoint(0, yl, 0.5);
+  glasses.position.set(at.x, at.y + V('glY'), at.z + 0.055 + V('glZ'));
+  glasses.rotation.set(V('glRX'), 0, V('glTilt'));
+  // arms: out from each rim to the side of the head, then back along it
+  const sideX = deformPoint(0.5, yl, 0).x + 0.02;
+  for (const { side, hinge, arm } of glArms) {
+    const a = new THREE.Vector3(side * (LENS_X + LENS_R), 0.01, 0);
+    const b = new THREE.Vector3(side * sideX, 0.01, -0.2);
+    const c = new THREE.Vector3(side * sideX, -0.005, -0.75);
+    placeRod(hinge, a, b); placeRod(arm, b, c);
+  }
+}
+
 // bump when the defaults change, so saved settings from older builds are dropped once
 const SETTINGS_VERSION = '4';
 try {
@@ -421,22 +488,22 @@ function drawMouth(ctx) {
   ctx.restore();
 }
 
-// Round nerdy glasses that sit over the eyes. They're on the face, not the
-// eyes, so they only drift a little with the gaze.
-function drawGlasses(ctx) {
-  const a = THREE.MathUtils.clamp(V('glasses'), 0, 1);
-  if (a < 0.01) return;
-  const sep = V('eyeSep'), y = V('eyeY'), R = 76;
+// Soft shadow the glasses cast on the face: grey rings offset down, sliding
+// opposite to the head's turn, fading as the glasses lift away.
+function drawGlassesShadow(ctx) {
+  if (V('glasses') < 0.5) return;
+  const lift = THREE.MathUtils.clamp(V('glY') / 0.25, 0, 1);
+  if (lift >= 1) return;
+  const px = 512 / (1.28 * FACE_UNITS);  // world units -> face drawing units
+  const sep = LENS_X * px, R = LENS_R * px, y = V('eyeY');
   ctx.save();
-  ctx.globalAlpha = a;
-  ctx.translate(V('gx') * 0.3, V('gy') * 0.3 + V('glY'));
+  ctx.globalAlpha = 0.22 * (1 - lift);
+  ctx.filter = 'blur(4px)';
+  ctx.translate(-V('ry') * 30 + 4, 16 + V('rx') * 20 - V('glY') * px);
   ctx.rotate(V('glTilt'));
-  ctx.lineWidth = 12; ctx.lineCap = 'round';
+  ctx.lineWidth = 16;
   ctx.beginPath();
   for (const side of [-1, 1]) { ctx.moveTo(side * sep + R, y); ctx.arc(side * sep, y, R, 0, Math.PI * 2); }
-  ctx.moveTo(-sep + R * 0.98, y - 12); ctx.quadraticCurveTo(0, y - 34, sep - R * 0.98, y - 12);  // bridge
-  ctx.moveTo(-sep - R, y - 10); ctx.lineTo(-sep - R - 18, y - 16);                           // temples
-  ctx.moveTo(sep + R, y - 10); ctx.lineTo(sep + R + 18, y - 16);
   ctx.stroke();
   ctx.restore();
 }
@@ -447,7 +514,9 @@ const FACE_KEYS = ['gx', 'gy', 'eLx', 'eRx', 'eyeSep', 'eyeY', 'eyeW', 'eyeH', '
   'lidT', 'lidA', 'happy', 'calm', 'peek', 'shX', 'shY', 'shS', 'mouthOn', 'mW', 'mO', 'mY', 'mT', 'glasses', 'glY', 'glTilt'];
 let faceSig = '';
 function drawFace(time) {
-  const sig = FACE_KEYS.map((k) => Math.round(V(k) * 50)).join() + U.uW.value + U.uH.value;
+  // the glasses' shadow also slides with the head's turn
+  const turn = V('glasses') > 0.5 ? [V('ry'), V('rx')].map((v) => Math.round(v * 50)).join() : '';
+  const sig = FACE_KEYS.map((k) => Math.round(V(k) * 50)).join() + turn + U.uW.value + U.uH.value;
   if (sig === faceSig) return;
   faceSig = sig;
   fc.setTransform(1, 0, 0, 1, 0, 0);
@@ -462,7 +531,7 @@ function drawFace(time) {
     fc.drawImage(eyeBuf, cx - 128, cy - 128, 256, 256);
   }
   drawMouth(fc);
-  drawGlasses(fc);
+  drawGlassesShadow(fc);
   faceTex.needsUpdate = true;
 }
 
@@ -733,14 +802,18 @@ const EXPRESSIONS = [
     // spins back with a "found it!", then takes the glasses off
     name: 'Searching', dur: 8.4,
     keys: [
-      [0.1, { glasses: 1, glY: 0, eyeH: 100 }, 'pop'],            // glasses drop on
-      [0.1, { sq: 0.95 }, 'fast'],
-      [0.45, { glY: -10, glTilt: 0.04, sq: 1 }, 'fast'],          // nudges them up
-      [0.6, { glY: 0, glTilt: 0 }, 'pop'],
+      [0.1, { glasses: 1 }, 'snap'],
+      [0.1, { glY: 0, eyeH: 100, gy: -14 }, 'drop'],              // glasses fall in from above
+      [0.32, { sq: 0.94, gy: 0 }, 'fast'],                        // and land on its face
+      [0.5, { sq: 1 }, 'body'],
+      [0.75, { glY: 0.025, glTilt: 0.05 }, 'fast'],               // nudges them up
+      [0.9, { glY: 0, glTilt: 0 }, 'pop'],
       [1.2, { ry: Math.PI, gx: 0 }, 'body'],                      // turns its back to you
       [5.4, { ry: TAU, eyeH: 124, eyeW: 76, fx: 'bang' }, 'body'], // spins back: found it!
       [6.1, { eyeH: 112, eyeW: 64 }],
-      [6.5, { glY: -60, glasses: 0 }, 'slow'],                    // pushes them up and off
+      [6.4, { glY: 0.05, glTilt: -0.06 }, 'fast'],                // pushes them up...
+      [6.7, { glY: 2.8, glTilt: 0.2 }, 'drop'],                   // ...and they pop off upward
+      [7.3, { glasses: 0 }, 'snap'],
     ],
     start() { this.glances = pickGlances(2.3, 4.6); },
     proc(t, add) { rummage(t, add, 1.7, 5.2, this.glances); },
@@ -1141,6 +1214,7 @@ function applyToScene() {
   rig.position.set(V('x'), BASE_Y + V('y'), V('z'));
   rig.rotation.set(V('rx'), V('ry') + V('gx') * 0.0018, V('rz'), 'YXZ');
   rig.scale.setScalar(V('scale'));
+  updateGlasses();
   updateWall();
 }
 // Pillar (world units): it never moves; its right edge sits just past the
@@ -1281,6 +1355,14 @@ function cubeBox() {
     const px = (corner.x * 0.5 + 0.5) * bw, py = (corner.y * 0.5 + 0.5) * bh;
     box.x0 = Math.min(box.x0, px); box.x1 = Math.max(box.x1, px);
     box.y0 = Math.min(box.y0, py); box.y1 = Math.max(box.y1, py);
+  }
+  if (glasses.visible) {
+    for (const x of [-0.45, 0.45]) for (const y of [-0.25, 0.25]) for (const z of [-0.8, 0.1]) {
+      corner.set(x, y, z); glasses.localToWorld(corner).project(camera);
+      const px = (corner.x * 0.5 + 0.5) * bw, py = (corner.y * 0.5 + 0.5) * bh;
+      box.x0 = Math.min(box.x0, px); box.x1 = Math.max(box.x1, px);
+      box.y0 = Math.min(box.y0, py); box.y1 = Math.max(box.y1, py);
+    }
   }
 }
 function scissor(target, m) {
