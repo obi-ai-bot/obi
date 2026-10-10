@@ -134,8 +134,8 @@ final class API {
         return Self.json(["action": Publish.action(for: job, base: base), "base": base])
     }
 
-    /// Publishes once a registered phone signed the runner's own sentence for it, and lets only
-    /// that sentence through to Publish.
+    /// Publishing by hand, for a job whose own publish failed: once a registered phone signed the
+    /// runner's own sentence for it, and only that sentence goes through to Publish.
     func publish(_ id: String, _ approval: Approval) async throws -> Response {
         let (job, base) = try publishable(id)
         let action = Publish.action(for: job, base: base)
@@ -377,7 +377,7 @@ struct Options: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, issue, rounds, round, check, model, notes }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes }
 
     func encode(to encoder: any Encoder) throws {
         try job.encode(to: encoder)
@@ -390,6 +390,8 @@ struct JobJSON: Encodable {
         if job.commits == nil { try nulls.encodeNil(forKey: .commits) }
         if job.published == nil { try nulls.encodeNil(forKey: .published) }
         if job.pushed == nil { try nulls.encodeNil(forKey: .pushed) }
+        if job.publishError == nil { try nulls.encodeNil(forKey: .publishError) }
+        if job.summaries == nil { try nulls.encodeNil(forKey: .summaries) }
         if job.issue == nil { try nulls.encodeNil(forKey: .issue) }
         // Rounds always has a value in the API: 1 when the job doesn't loop.
         try nulls.encode(job.maxRounds, forKey: .rounds)

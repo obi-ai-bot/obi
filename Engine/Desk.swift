@@ -44,11 +44,20 @@ final class Desk {
     private var agents: [String: any AgentRun] = [:]
     /// Jobs whose one turn ended: their agent is finishing and takes no more words.
     private var ending: Set<String> = []
+    /// Jobs that ended done and are counting their commits and publishing.
+    private var finishing: Set<String> = []
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
     /// Gets a job's worktree ready, and makes its agent (nil for a tool that can't run jobs yet). Tests put in their own.
     @ObservationIgnored var prepare: (Job) async throws -> Job = { try await Workspace.prepare($0) }
     @ObservationIgnored var makeAgent: (Job, _ home: URL?, _ resume: String?) -> (any AgentRun)? = Desk.agent
+    /// How many commits the job's worktree has beyond `since`, or nil when git can't say. Tests put in their own.
+    @ObservationIgnored var countCommits: (_ id: String, _ since: String) async -> Int? = { id, since in
+        (try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-list", "--count", "\(since)..HEAD"])).flatMap { Int($0) }
+    }
+    /// Publishes a job that ended done with commits, with no one to approve it: the check passed
+    /// and the secret scan gates it (case 4.1). Tests put in their own.
+    @ObservationIgnored var publishOnItsOwn: (Job, _ base: String) async throws -> URL = { try await Publish.publish($0, base: $1) { _ in } }
 
     init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))) {
         self.accounts = accounts
@@ -265,17 +274,27 @@ final class Desk {
         return job
     }
 
-    /// Pushes the job's branch and opens a draft pull request once `approve` lets the action
-    /// through: Touch ID on the Mac, a phone's signature on the runner. Never a merge.
+    /// Publishing by hand, for a job whose own publish failed: pushes the job's branch and opens
+    /// its pull request once `approve` lets the action through: Touch ID on the Mac, a phone's
+    /// signature on the runner. Never a merge.
     @discardableResult
     func publish(_ id: String, approve: (String) async throws -> Void) async throws -> URL {
         guard let job = job(id), job.canPublish, let base = job.base else { throw Shell.Failure(message: "Nothing to publish.") }
-        let url = try await Publish.publish(job, base: base, approve: approve)
-        if var job = self.job(id) {
-            job.published = url.absoluteString
-            replace(job)
+        do {
+            let url = try await Publish.publish(job, base: base, approve: approve)
+            if var job = self.job(id) {
+                job.published = url.absoluteString
+                job.publishError = nil
+                replace(job)
+            }
+            return url
+        } catch {
+            if var job = self.job(id), job.canPublish {
+                job.publishError = error.localizedDescription
+                replace(job)
+            }
+            throw error
         }
-        return url
     }
 
     func stop(_ id: String) {
@@ -394,6 +413,8 @@ final class Desk {
         case .usage:
             accounts.record(event, for: job.account)
         case .turnEnded(let summary, let failed):
+            job.summaries = (job.summaries ?? []) + [summary]
+            replace(job)
             // One turn and no check: the job ends when the agent does, after any background work.
             guard job.loops else {
                 ending.insert(id)
@@ -439,31 +460,61 @@ final class Desk {
     }
 
     /// Ends the job. A job that's done counts its commits first, so one that should have committed
-    /// and didn't ends as "nothing committed" rather than done.
+    /// and didn't ends as "nothing committed" rather than done. One that's done with commits its
+    /// pull request doesn't have yet publishes them before it ends (case 4.1): a possible secret
+    /// fails it, naming where; any other failure leaves it done, with the reason and Publish offered.
     private func finish(_ id: String, _ status: Job.Status, _ summary: String) {
         guard var job = job(id), job.isActive else { return }
         guard status == .done, let base = job.base else { return end(id, status, summary) }
+        // Already finishing: the agent's process ending after its last turn changes nothing.
+        guard finishing.insert(id).inserted else { return }
         job.step = "Counting commits"
         replace(job, save: false)
         // Its agent is done and takes no more words.
         ending.insert(id)
         Task {
-            let worktree = Workspace.worktree(id).path
-            let count = { (since: String) async in
-                (try? await Shell.ok(["git", "-C", worktree, "rev-list", "--count", "\(since)..HEAD"])).flatMap { Int($0) }
-            }
-            let commits = await count("refs/remotes/origin/\(base)")
+            defer { finishing.remove(id) }
+            let commits = await countCommits(id, "refs/remotes/origin/\(base)")
             // A pull request's branch has its own commits beyond the base: only the ones after its head are the job's.
-            let made = job.pr == nil ? commits : await count("refs/oby/pr-\(job.pr ?? 0)")
-            end(id, status, summary, commits: commits, made: made)
+            let made = job.pr == nil ? commits : await countCommits(id, "refs/oby/pr-\(job.pr ?? 0)")
+            guard var running = self.job(id), running.isActive else { return }
+            // The job as it would end, which is what gets published.
+            var ended = running
+            (ended.status, ended.summary) = Job.ending(ended, status, summary, made: made)
+            ended.commits = commits
+            guard ended.canPublish else { return end(id, status, summary, commits: commits, made: made) }
+            running.step = "Publishing"
+            replace(running, save: false)
+            do {
+                let url = try await publishOnItsOwn(ended, base)
+                end(id, status, summary, commits: commits, made: made, published: url)
+            } catch let blocked as Publish.Blocked {
+                end(id, .failed, (blocked.errorDescription ?? "Not published.") + "\n\n" + ended.summary, commits: commits, made: made)
+            } catch {
+                end(id, status, summary, commits: commits, made: made, publishError: error.localizedDescription)
+            }
         }
     }
 
     /// `commits`: beyond the base, what Publish would push. `made`: the ones this job made.
-    private func end(_ id: String, _ status: Job.Status, _ summary: String, commits: Int? = nil, made: Int? = nil) {
-        guard var job = job(id), job.isActive else { return }
+    /// `published`: the pull request it just published to, or `publishError`, why it couldn't.
+    private func end(_ id: String, _ status: Job.Status, _ summary: String, commits: Int? = nil, made: Int? = nil,
+                     published: URL? = nil, publishError: String? = nil) {
+        guard var job = job(id) else { return }
+        guard job.isActive else {
+            // Stopped while publishing: the pull request is out all the same.
+            if let published {
+                job.commits = commits ?? job.commits
+                job.published = published.absoluteString
+                replace(job)
+            }
+            return
+        }
         (job.status, job.summary) = Job.ending(job, status, summary, made: made)
         job.commits = commits
+        // After commits, so it counts them as pushed.
+        if let published { job.published = published.absoluteString }
+        job.publishError = publishError
         job.step = ""
         job.finished = .now
         replace(job)

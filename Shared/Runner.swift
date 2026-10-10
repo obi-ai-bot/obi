@@ -29,6 +29,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var published: String? { didSet { if published != nil { pushed = commits } } }
     /// Commits on the pull request when it was last published.
     var pushed: Int?
+    /// Why the runner couldn't publish it by itself, or nil (newer runners only).
+    var publishError: String?
     /// Newer runners only, so all optional: the issue the work is about, how many rounds the agent
     /// may take and the one it's on, the command that must pass, the stronger model it runs on,
     /// and what the user told the agent along the way, oldest first.
@@ -62,7 +64,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
     var canPublish: Bool { status == .done && unpublished > 0 }
 
-    /// Waiting for Publish, failed or interrupted: what the runner sends an alert for.
+    /// Waiting for Publish (the runner's own publish failed), failed or interrupted: what the runner sends an alert for.
     var needsYou: Bool { canPublish || status == .failed || status == .interrupted }
 
     /// "Round 2 of 5 · Fable 5.1", or empty for a one-round job on the usual model.

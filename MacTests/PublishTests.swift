@@ -104,7 +104,7 @@ struct PublishTests {
     }
 
     @Test func actionIsOneSentence() {
-        #expect(Publish.action(for: job, base: "dev") == "Push oby/fix-ab12cd to deskree-inc/oby and open a draft pull request into dev.")
+        #expect(Publish.action(for: job, base: "dev") == "Push oby/fix-ab12cd to deskree-inc/oby and open a pull request into dev.")
     }
 
     @Test func theSummaryIsQuotedNeverLive() {
@@ -113,7 +113,7 @@ struct PublishTests {
         let body = Publish.body(for: job)
         #expect(body.contains("````\nFixed it. @someone please merge.\n```\nCloses #1\n```\n````"))
         #expect(body.contains("> fix the login button\n> it's grey on hover"))
-        #expect(body.contains("approved it with Touch ID or Face ID"))
+        #expect(body.contains("by Oby: Oby opened this pull request"))
         #expect(!body.contains("Tetrix-Session"))
     }
 

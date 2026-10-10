@@ -37,6 +37,8 @@ This document is the contract between the runner and its clients. Change it in t
   "commits": null,
   "published": null,
   "pushed": null,
+  "publishError": null,
+  "summaries": null,
   "issue": null,
   "rounds": 1,
   "round": 1,
@@ -51,11 +53,17 @@ This document is the contract between the runner and its clients. Change it in t
 - `step`: what it's doing now, while queued or running. `summary`: the agent's final message; its first line is the one-line notice.
 - A `build`, `fix` or `test` job that ends with no commits of its own is `failed`, and its `summary` starts with `Nothing committed: ` followed by the agent's first line.
 - `base`: the branch the work started from (filled in once the job is ready). `pr`: the pull request it works on, if any.
-- `commits`: commits made beyond `base` (set when a job ends as done). Publish is offered only when some of them aren't on the pull request yet.
-- `published`: the draft pull request's URL once published.
-- `pushed`: how many of `commits` were on the pull request when it was last published, or null before then. A published job that ran again (`POST /v1/jobs/{id}/messages`) and ended `done` with `commits` above `pushed` has new commits to publish: offer "Publish the new commits". Publish pushes them to the same branch, so they land on the open pull request.
-- What needs you: a job that's `done` with commits not on its pull request (ready to publish), `failed` or `interrupted`. Say so where the apps would otherwise say nothing needs you.
-- `issue`: the GitHub issue the work is about. The runner fetches it for the agent, which has no GitHub login, and the draft pull request says `Closes #N`.
+- `commits`: commits made beyond `base` (set when a job ends as done).
+- Publishing happens by itself. A job that ends `done` with commits not on its pull request (its check passed, or it has none) publishes before it ends, with no device signature: `step` is `"Publishing"` meanwhile.
+  - It pushes the branch and opens a pull request into `base`, ready for review (never a draft), or pushes to the one already open.
+  - The secret scan still gates it. A possible secret makes the job `failed`, and its `summary` starts with `Not published: possible secret in <file>:<line> (<rule>).` Nothing goes out, and it never says the secret. If the scanner can't run, nothing goes out either.
+  - Any other failure (push, `gh`) leaves the job `done` with `publishError` set. Then Publish by hand is offered (`POST /v1/jobs/{id}/publish`).
+- `published`: the pull request's URL once published. Show "Published".
+- `publishError`: why the runner couldn't publish the job by itself, or null. Show it instead of "Published".
+- `pushed`: how many of `commits` were on the pull request when it was last published, or null before then. A published job that ran again (`POST /v1/jobs/{id}/messages`) and ended `done` with new commits pushes them to the same branch by itself, so they land on the open pull request.
+- `summaries`: every round's summary from the agent, oldest first, or null. The pull request's description quotes them all.
+- What needs you: a job that's `done` with commits the runner couldn't publish (`publishError`), `failed` or `interrupted`. Say so where the apps would otherwise say nothing needs you.
+- `issue`: the GitHub issue the work is about. The runner fetches it for the agent, which has no GitHub login, and the pull request says `Closes #N`.
 - `rounds`: how many rounds the agent may take (1 means no loop); `round`: the one it's on.
 - `check`: a one-line command that must succeed for the work to count as done.
   - After each round the runner runs it in the job's worktree. If it fails and rounds are left, the agent gets another round with the command's output.
@@ -184,28 +192,28 @@ event: accounts
 data: [ …Account ]
 ```
 
-- A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`. The app replaces the job with that `id`.
+- A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`. The app replaces the job with that `id`.
 - `accounts` comes when sign-ins or usage change.
 - A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop, then refetch `GET /v1/jobs` to catch up.
 
 ### `GET /v1/jobs/{id}/publish`
 
-What publishing this job would do, in one sentence. The app shows exactly this before asking for Face ID.
+What publishing this job by hand would do, in one sentence: for a job whose own publish failed (`publishError`). The app shows exactly this before asking for Face ID.
 
 ```json
-{"action": "Push oby/fix-ab12cd to deskree-inc/oby and open a draft pull request into dev.", "base": "dev"}
+{"action": "Push oby/fix-ab12cd to deskree-inc/oby and open a pull request into dev.", "base": "dev"}
 ```
 
-Once the job is published and has new commits, the sentence is about them: `"Push the new commits on oby/fix-ab12cd to deskree-inc/oby, for its draft pull request into dev."`
+Once the job is published and has new commits, the sentence is about them: `"Push the new commits on oby/fix-ab12cd to deskree-inc/oby, for its pull request into dev."`
 
 `409` if there's nothing to publish (no commits, not done, or published with every commit).
 
 ### `POST /v1/jobs/{id}/publish`
 
-Publishes after the user approved on a registered device. Nothing goes out without that approval: the runner has no Touch ID, so the iPhone's Face ID stands in for it.
+Publishes by hand, for a job whose own publish failed, after the user approved on a registered device. The runner has no Touch ID, so the iPhone's Face ID stands in for it.
 
 ```json
-{"device": "d7c1…", "action": "Push oby/fix-ab12cd to deskree-inc/oby and open a draft pull request into dev.",
+{"device": "d7c1…", "action": "Push oby/fix-ab12cd to deskree-inc/oby and open a pull request into dev.",
  "signedAt": "2026-10-09T22:01:07Z", "signature": "MEUCIQ…"}
 ```
 
@@ -216,7 +224,7 @@ Publishes after the user approved on a registered device. Nothing goes out witho
   - `action` matches its own sentence exactly;
   - `signedAt` is within 2 minutes;
   - this signature hasn't been used before.
-- Then it runs Publish: guards, the secret scan, push one pinned commit, draft pull request (the one already open for the branch, if there is one). It returns `{"url": "https://github.com/…/pull/42"}`, or an error line (for example the scan's findings, never the secret).
+- Then it runs Publish, as a job's own publish does: guards, the secret scan, push one pinned commit, then the pull request, ready for review (the one already open for the branch, if there is one). It returns `{"url": "https://github.com/…/pull/42"}`, or an error line (for example the scan's findings, never the secret).
 
 ### `POST /v1/devices`
 
@@ -266,12 +274,12 @@ Two seconds after a job changes, the runner sends an alert push (`apns-push-type
 
 | The job | Title | Body | `category` |
 |---|---|---|---|
-| Done with commits, not published | `Ready to publish: <title>` | the summary's first line | `ready` |
+| Done with commits it couldn't publish by itself | `Couldn't publish: <title>` | `publishError` (else the summary's first line) | `ready` |
 | `failed` | `Failed: <title>` | the reason (the summary's first line) | `job` |
 | `interrupted` | `Interrupted: <title>` | the reason | `job` |
 
 ```json
-{"aps": {"alert": {"title": "Ready to publish: Review oby #33", "body": "Fixed the review comments."},
+{"aps": {"alert": {"title": "Couldn't publish: Review oby #33", "body": "Couldn't push oby/review-33: the remote hung up."},
          "category": "ready", "sound": "default", "thread-id": "jobs"}, "job": "9f08fd10"}
 ```
 
@@ -292,6 +300,6 @@ Each tool's model and effort, as in `status.models`. `GET /v1/settings/models/op
 ## What the runner never does
 
 - **Merge, force-push or push to main:** not for anyone, not even with an approval.
-- **Publish without a fresh device signature:** no push, pull request, review or comment goes out otherwise.
+- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. No review or comment goes out.
 - **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
 - **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.

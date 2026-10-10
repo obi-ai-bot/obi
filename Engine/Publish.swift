@@ -3,11 +3,18 @@ import Foundation
 import LocalAuthentication
 #endif
 
-/// Publishing a finished job as the user: push its branch and open a draft pull request. Guards,
-/// then a secret scan, then the user's approval (Touch ID on the Mac, a phone's signature on the
-/// runner); nothing touches the network before it. Oby never merges, force-pushes or pushes to
-/// main for anyone.
+/// Publishing a finished job as the user: push its branch and open a pull request, ready for
+/// review. Guards, then a secret scan, then the approval; nothing touches the network before it.
+/// A job that ends done with commits publishes by itself (the approval lets everything through);
+/// a job whose publish failed is published by hand, with Touch ID on the Mac or a phone's
+/// signature on the runner. Oby never merges, force-pushes or pushes to main for anyone.
 nonisolated enum Publish {
+    /// The secret scan found something: nothing goes out, and the job fails naming where.
+    struct Blocked: LocalizedError {
+        var findings: [Finding]
+        var errorDescription: String? { Publish.blocked(by: findings) }
+    }
+
     /// Something the scan found: where, and which rule. Never the secret itself.
     struct Finding: Hashable, Sendable, CustomStringConvertible {
         var file: String
@@ -24,15 +31,16 @@ nonisolated enum Publish {
         var text: String
     }
 
-    /// The one sentence the user approves: shown in the notch, the Touch ID reason, and what a phone signs.
-    /// Once published, it pushes the new commits to the same branch, and `draft` finds the open pull request.
+    /// The one sentence a publish carries out: shown in the notch, the Touch ID reason, and what a phone signs.
+    /// Once published, it pushes the new commits to the same branch, and `pullRequest` finds the open pull request.
     static func action(for job: Job, base: String) -> String {
-        job.published == nil ? "Push \(job.branch) to \(job.repo) and open a draft pull request into \(base)."
-            : "Push the new commits on \(job.branch) to \(job.repo), for its draft pull request into \(base)."
+        job.published == nil ? "Push \(job.branch) to \(job.repo) and open a pull request into \(base)."
+            : "Push the new commits on \(job.branch) to \(job.repo), for its pull request into \(base)."
     }
 
-    /// Guards, secret scan, `approve` with the action, push, draft pull request. The first refusal
-    /// stops it with one line the notch can show. Returns the pull request's URL.
+    /// Guards, secret scan (`Blocked` when it finds something), `approve` with the action, push,
+    /// pull request. The first refusal stops it with one line the notch can show. Returns the pull
+    /// request's URL. `approve` is `{ _ in }` when a job publishes by itself.
     static func publish(_ job: Job, base: String, approve: (String) async throws -> Void) async throws -> URL {
         let worktree = Workspace.worktree(job.id)
         let git = { (arguments: [String]) in try? await Shell.ok(["git", "-C", worktree.path] + arguments) }
@@ -46,10 +54,11 @@ nonisolated enum Publish {
             throw Shell.Failure(message: "Nothing to publish: \(job.branch) has no commits that aren't on \(base).")
         }
         let findings = try await scan(worktree, base: base, head: head)
-        if !findings.isEmpty { throw Shell.Failure(message: blocked(by: findings)) }
+        if !findings.isEmpty { throw Blocked(findings: findings) }
         try await approve(action(for: job, base: base))
+        let subjects = await git(["log", "--reverse", "--no-merges", "--format=%s", "refs/remotes/origin/\(base)..\(head)"]) ?? ""
         try await push(head, of: job, from: worktree)
-        return try await draft(job, base: base)
+        return try await pullRequest(job, base: base, subjects: subjects.split(separator: "\n").map(String.init))
     }
 
     /// Why Oby won't publish this job, or nil to go ahead.
@@ -189,40 +198,82 @@ nonisolated enum Publish {
         guard result.status == 0 else { throw Shell.Failure(message: "Couldn't push \(job.branch): \(said(result.err))") }
     }
 
-    /// Opens the draft pull request, or returns the one already open for the branch.
-    static func draft(_ job: Job, base: String) async throws -> URL {
-        let open = try await Shell.ok(["gh", "pr", "list", "-R", job.repo, "--head", job.branch, "--state", "open",
-                                       "--json", "url", "--jq", ".[0].url // empty"])
-        if !open.isEmpty, let url = URL(string: open) { return url }
+    /// Opens the pull request, ready for review, or returns the one already open for the branch
+    /// with its description brought up to date (a later round's summary and check).
+    static func pullRequest(_ job: Job, base: String, subjects: [String]) async throws -> URL {
         let file = FileManager.default.temporaryDirectory.appending(path: "oby-pr-\(UUID().uuidString).md")
         try body(for: job).write(to: file, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: file) }
-        let created = try await Shell.ok(["gh", "pr", "create", "-R", job.repo, "--draft", "--base", base, "--head", job.branch,
-                                          "--title=\(job.title)", "--body-file", file.path])
+        let open = try await Shell.ok(["gh", "pr", "list", "-R", job.repo, "--head", job.branch, "--state", "open",
+                                       "--json", "url", "--jq", ".[0].url // empty"])
+        if !open.isEmpty, let url = URL(string: open) {
+            // The commits are on it already; a description that didn't update isn't worth failing for.
+            _ = try? await Shell.ok(["gh", "pr", "edit", open, "-R", job.repo, "--body-file", file.path])
+            return url
+        }
+        let created = try await Shell.ok(["gh", "pr", "create", "-R", job.repo, "--base", base, "--head", job.branch,
+                                          "--title=\(title(for: job, subjects: subjects))", "--body-file", file.path])
         guard let url = created.split(separator: "\n").last.flatMap({ URL(string: String($0)) }) else {
             throw Shell.Failure(message: "gh opened no pull request: \(created)")
         }
         return url
     }
 
-    /// The pull request's description. The agent's summary is untrusted (it may have read someone
-    /// else's pull request), so it goes in as a code block: no mentions, links or closing keywords.
-    static func body(for job: Job) -> String {
-        let fence = String(repeating: "`", count: max(3, (job.summary.matches(of: /`+/).map(\.output.count).max() ?? 0) + 1))
-        let request = job.request.split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n")
-        return """
-            The agent's summary:
+    /// The pull request's title in Conventional Commits form, ending with `(#issue)` when there is
+    /// one: the first commit subject that's already in that form, else the job's kind and the
+    /// agent's first line.
+    static func title(for job: Job, subjects: [String]) -> String {
+        let conventional = /^([a-z]+)(\([^()]+\))?!?: \S.*/
+        var title = subjects.lazy.map { $0.trimmingCharacters(in: .whitespaces) }.first { $0.wholeMatch(of: conventional) != nil }
+        if title == nil {
+            let type = switch job.kind { case .build: "feat"; case .fix: "fix"; case .test: "test"; default: "chore" }
+            let said = (job.summaries?.last ?? job.summary).split(separator: "\n").first.map(String.init) ?? ""
+            var line = said.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            // "Fixed the thing" reads "fixed the thing" after the colon; "iOS" and "API" stay as they are.
+            if let first = line.first, first.isUppercase, !(line.dropFirst().first?.isUppercase ?? false) {
+                line = first.lowercased() + line.dropFirst()
+            }
+            title = "\(type): \(line.isEmpty ? job.title : line)"
+        }
+        var text = title ?? job.title
+        // The issue goes last, once: a subject may carry one already.
+        text = text.replacing(/\s*\(#\d+\)$/, with: "")
+        let issue = job.issue.map { " (#\($0))" } ?? ""
+        if text.count + issue.count > 100 { text = text.prefix(99 - issue.count) + "…" }
+        return text + issue
+    }
 
-            \(fence)
-            \(job.summary)
-            \(fence)
+    /// The pull request's description: every round's summary, what the user asked for, the check
+    /// and the scan, `Closes #N`, and that Oby opened it. The agent's summaries are untrusted (it
+    /// may have read someone else's pull request), so they go in as code blocks: no mentions,
+    /// links or closing keywords.
+    static func body(for job: Job) -> String {
+        let summaries = job.summaries.flatMap { $0.isEmpty ? nil : $0 } ?? [job.summary]
+        let rounds = summaries.enumerated().map { index, summary in
+            let fence = String(repeating: "`", count: max(3, (summary.matches(of: /`+/).map(\.output.count).max() ?? 0) + 1))
+            let label = summaries.count == 1 ? "The agent's summary:" : "Round \(index + 1), the agent's summary:"
+            return "\(label)\n\n\(fence)\n\(summary)\n\(fence)"
+        }
+        let request = job.request.split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n")
+        let check = job.check.map { "- Check: \(code($0)) passed." } ?? "- Check: none, the job had no check."
+        return """
+            \(rounds.joined(separator: "\n\n"))
 
             What the user asked for:
 
             \(request)
 
-            Oby opened this draft pull request after the user approved it with Touch ID or Face ID on their own device.\(job.issue.map { "\n\nCloses #\($0)" } ?? "")
+            \(check)
+            - Secret scan: clean.\(job.issue.map { "\n\nCloses #\($0)" } ?? "")
+
+            by Oby: Oby opened this pull request after the check passed and the secret scan was clean. A person reviews it before it merges.
             """
+    }
+
+    /// Text as inline code, whatever backticks it holds.
+    static func code(_ text: String) -> String {
+        let ticks = String(repeating: "`", count: (text.matches(of: /`+/).map(\.output.count).max() ?? 0) + 1)
+        return "\(ticks) \(text) \(ticks)"
     }
 
     /// The last thing a tool said on stderr, skipping git's hints.

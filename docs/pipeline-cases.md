@@ -389,7 +389,7 @@ Decided 2026-10-10: no confirmation. The PR opens once the check passes and the 
 
 ### 4.1 Commit, push, open
 - **What happens:** commit, push the branch, and open the PR into dev with "Closes #N" and the steps and results in the body. Goes to 5.
-- **Oby today:** Partial. Publish runs the secret scan, asks for Touch ID or Face ID, and opens a draft PR into dev. Agents commit unsigned (`commit.gpgsign=false` in Oby's clones), and a build, fix or test job with no commits ends as "Nothing committed" with the agent's reason, not done. Signing at push isn't built yet.
+- **Oby today:** Partial. A job that ends done with commits (its check passed, or it has none) publishes by itself: the secret scan, then push and a PR into dev, ready for review, titled in Conventional Commits form with every round's summary, the check, "Closes #N" and a "by Oby" line in the body (#75). Publish by hand, with Touch ID or Face ID, stays for jobs whose own publish failed. Agents commit unsigned (`commit.gpgsign=false` in Oby's clones), and a build, fix or test job with no commits ends as "Nothing committed" with the agent's reason, not done. Signing at push isn't built yet.
 - **Claude Code:** project threads open a PR on their own for a clear fix, and Slack has a Create PR button. Tag opens a draft PR as the Claude GitHub App. Cloud PRs carry your identity, and signing keys stay outside the sandbox.
 - **Cursor:** Linear tasks open PRs automatically. Interactive cloud PRs are yours. Commits say "Cursor Agent" with you as co-author, and automations use cursor[bot] (2nd-hand).
 - **Codex:** a Create PR button with a draft option (2nd-hand). Author and signing: not found.
