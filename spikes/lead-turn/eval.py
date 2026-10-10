@@ -252,6 +252,10 @@ def run(cmd, cwd, stdin, timeout):
     return out, err, status, time.monotonic() - started
 
 
+# How much of a CLI's stderr each call keeps in --out: enough to see why it exited without a plan.
+STDERR_KEPT = 8000
+
+
 def lines(text):
     # Split on \n only: str.splitlines also breaks at U+2028 inside JSON strings (AGENTS.md).
     for line in text.split("\n"):
@@ -304,6 +308,7 @@ class Claude:
             "tools": [t for t in tools if t != "StructuredOutput"],
             "error": None if result.get("structured_output") is not None else
                      f"no structured_output (exit {status}, {result.get('subtype')}): {(err or result.get('result') or '')[-200:]}",
+            "exit": status, "stderr": err[-STDERR_KEPT:],
         }
 
 
@@ -334,10 +339,12 @@ class Codex:
             if not persist: cmd.append("--ephemeral")
             cmd.append("-")
         out, err, status, seconds = run(cmd, cwd, prompt, a.timeout)
-        thread, usage, tools = session, {}, []
+        thread, usage, tools, failures = session, {}, [], []
         for event in lines(out):
             if event.get("type") == "thread.started": thread = event.get("thread_id")
             elif event.get("type") == "turn.completed": usage = event.get("usage") or {}
+            # With --json, Codex reports a failed turn on stdout, not stderr.
+            elif event.get("type") in ("error", "turn.failed"): failures.append(event)
             elif event.get("type") == "item.completed":
                 item = event.get("item") or {}
                 if item.get("type") not in (None, "agent_message", "reasoning"): tools.append(item.get("type"))
@@ -346,7 +353,8 @@ class Codex:
         except (OSError, json.JSONDecodeError) as e: error = f"no plan (exit {status}): {e}; {err[-200:]}"
         return {"plan": plan, "session": thread, "seconds": seconds,
                 "tokens_in": usage.get("input_tokens") or 0, "tokens_cached": usage.get("cached_input_tokens") or 0,
-                "tokens_out": usage.get("output_tokens") or 0, "cost": None, "tools": tools, "error": error}
+                "tokens_out": usage.get("output_tokens") or 0, "cost": None, "tools": tools, "error": error,
+                "exit": status, "stderr": err[-STDERR_KEPT:], "failures": failures}
 
 
 class Cursor:
@@ -383,7 +391,7 @@ class Cursor:
         return {"plan": plan, "session": result.get("session_id"), "seconds": seconds,
                 "tokens_in": (usage.get("inputTokens") or 0) + (usage.get("cacheReadTokens") or 0),
                 "tokens_cached": usage.get("cacheReadTokens") or 0, "tokens_out": usage.get("outputTokens") or 0,
-                "cost": None, "tools": [], "error": error}
+                "cost": None, "tools": [], "error": error, "exit": status, "stderr": err[-STDERR_KEPT:]}
 
 
 # MARK: Running a case
