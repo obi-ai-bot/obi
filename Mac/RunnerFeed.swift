@@ -15,6 +15,8 @@ final class RunnerFeed {
         case ready
         case failed
         case interrupted
+        /// Oby's review requested changes for the last time it may: a person takes it from here.
+        case review
     }
 
     private(set) var jobs: [Job] = [] {
@@ -147,6 +149,7 @@ final class RunnerFeed {
 
     static func notice(for job: Job) -> Notice? {
         if job.canPublish { return .ready }
+        if job.reviewNeedsYou { return .review }
         switch job.status {
         case .failed: return .failed
         case .interrupted: return .interrupted
@@ -174,13 +177,15 @@ final class RunnerFeed {
         case .ready: "\(job.publishError == nil ? "Ready to publish" : "Couldn't publish"): \(job.heading)"
         case .failed: "Failed: \(job.heading)"
         case .interrupted: "Interrupted: \(job.heading)"
+        case .review: "Changes requested: \(job.heading)"
         }
     }
 
-    /// Why its own publish failed when that's what it needs, or the summary's first line.
+    /// Why its own publish failed when that's what it needs, why Oby's review stopped, or the summary's first line.
     static func body(_ notice: Notice, for job: Job) -> String {
         let line = job.summary.split(separator: "\n").first.map(String.init)
         if notice == .ready { return job.publishError ?? line ?? "Done" }
+        if notice == .review { return Review.stopLine }
         return line ?? job.status.rawValue.capitalized
     }
 

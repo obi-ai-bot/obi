@@ -63,6 +63,8 @@ final class Push {
         case ready
         case failed
         case interrupted
+        /// Oby's review requested changes for the last time it may: a person takes it from here.
+        case review
     }
 
     private struct Signer {
@@ -275,6 +277,7 @@ final class Push {
 
     static func notice(for job: Job) -> Notice? {
         if job.canPublish { return .ready }
+        if job.reviewNeedsYou { return .review }
         switch job.status {
         case .failed: return .failed
         case .interrupted: return .interrupted
@@ -308,9 +311,14 @@ final class Push {
         case .ready: "Couldn't publish: \(state.title)"
         case .failed: "Failed: \(state.title)"
         case .interrupted: "Interrupted: \(state.title)"
+        case .review: "Changes requested: \(state.title)"
         }
-        // Why its own publish failed, when that's what it needs.
-        let body = notice == .ready ? job.publishError ?? state.line : state.line
+        // Why its own publish failed, when that's what it needs; why Oby's review stopped.
+        let body = switch notice {
+        case .ready: job.publishError ?? state.line
+        case .review: Review.stopLine
+        case .failed, .interrupted: state.line
+        }
         let aps: [String: any Encodable] = ["alert": ["title": title, "body": body], "sound": "default",
                                             "category": notice == .ready ? "ready" : "job", "thread-id": "jobs"]
         return try encoder.encode(Fields(["aps": Fields(aps), "job": job.id]))

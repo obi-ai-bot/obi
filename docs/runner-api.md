@@ -47,6 +47,10 @@ This document is the contract between the runner and its clients. Change it in t
   "notes": null,
   "pullRequest": null,
   "pullRequestError": null,
+  "reviewing": null,
+  "review": null,
+  "reviewError": null,
+  "reviewOf": null,
   "title": "Review oby #33",
   "pipeline": {
     "number": 2,
@@ -78,7 +82,7 @@ This document is the contract between the runner and its clients. Change it in t
 - `publishError`: why the runner couldn't publish the job by itself, or null. Show it instead of "Published".
 - `pushed`: how many of `commits` were on the pull request when it was last published, or null before then. A published job that ran again (`POST /v1/jobs/{id}/messages`) and ended `done` with new commits pushes them to the same branch by itself, so they land on the open pull request.
 - `summaries`: every round's summary from the agent, oldest first, or null. The pull request's description quotes them all.
-- What needs you: a job that's `done` with commits the runner couldn't publish (`publishError`), `failed` or `interrupted`. Say so where the apps would otherwise say nothing needs you.
+- What needs you: a job that's `done` with commits the runner couldn't publish (`publishError`), `failed` or `interrupted`, or one Oby's review requested changes on for the fourth time (`review`, below). Say so where the apps would otherwise say nothing needs you.
 - `issue`: the GitHub issue the work is about. The runner fetches it for the agent, which has no GitHub login, and the pull request says `Closes #N`.
 - `rounds`: how many rounds the agent may take (1 means no loop); `round`: the one it's on.
 - `check`: a one-line command that must succeed for the work to count as done.
@@ -101,6 +105,25 @@ Every job response (list, detail, dispatch, stop, message, wait, plan and `job` 
 - `pullRequestError`: null after a successful refresh; otherwise a short retry message. Network/authentication/JSON failures preserve the last successful observation and retry at the next interval. `checkedAt` remains the date of that last success. Updates are saved and sent as `job` events without overwriting a concurrent agent step or resumed round.
 - Following is read-only: it never posts a review, pushes, or merges. [`gh pr view` JSON fields](https://cli.github.com/manual/gh_pr_view) supply only typed status data; GitHub prose never enters an agent prompt.
 - Older clients ignore these additive fields. New clients accept an absent pipeline from an older runner and show its ordinary status/step instead.
+
+### Oby's review
+
+When a job publishes (or pushes new commits to its pull request), the runner has the pull request reviewed by one of its own jobs, on a different account than the author's: it prefers the other tool (Claude Code reviews Codex's work, Codex reviews Claude Code's), takes only an account that's signed in with room on its limits (under 95% of both windows), and runs it on that account's model from Settings › Models. With no such account, nothing reviews and `reviewError` says so.
+
+- **The review job** is an ordinary `Job` in the list and the event stream: `kind` `review`, `pr` the published pull request's number, `branch` like `oby/review-80`, `task` the author's task, and `reviewOf` the author job's `id` (null on every other job). It reads the diff and the author's task, makes no commits and never publishes. Its `summary` is the review; its last line is the verdict (`VERDICT: APPROVED` or `VERDICT: CHANGES REQUESTED`).
+- **On the author job:** `reviewing` is the review job's `id` while it runs, else null. `review` is Oby's latest verdict, or null:
+
+  ```json
+  {"verdict": "approved", "job": "3c9d1e20", "agent": "codex", "account": "Work", "round": 1,
+   "date": "2026-10-09T22:04:11Z", "comment": "https://github.com/deskree-inc/oby/pull/80#issuecomment-1", "postError": null}
+  ```
+
+  `verdict` is `approved` or `changesRequested`; `job` the review job; `agent` and `account` the reviewer's tool and account name; `round` which of Oby's reviews of this pull request it is (1 to 4); `comment` the pull request comment it was posted as, or null with `postError` saying why it wasn't (a possible secret in the review, or `gh` failing). `reviewError` says why no review ran or none gave a verdict (no account with room, the reviewer failed, was stopped or interrupted, or gave no verdict), else null.
+- **The comment.** GitHub doesn't let the user approve or request changes on their own pull request, so the runner posts the review as a regular comment, after the secret scan like everything outgoing, headed `### Oby review · Claude Code · Personal: Approved` (or `Changes requested`), the review itself in a code block, and a `by Oby` line. The secret scan gates it: a possible secret means no comment, and the verdict still counts.
+- **The Review stage** shows GitHub's decision when it has one, else Oby's: `Oby is reviewing` (current), `Approved by Oby` (done, with Merged `current` and `Ready to merge`), or `Changes requested` (failed, reason `Oby requested changes.`). A failed review leaves it current with `Waiting for review · <reviewError>`. A merged pull request with no GitHub decision reads `Approved by Oby` or `Oby requested changes` instead of `Merged without review`.
+- **Changes requested** go to the author's agent as its next round, in the same session and worktree: the review is quoted in a file (`.oby/inputs/review-<round>.md`), never pasted into the prompt. The job goes back to `running` with a new `round` (and one more on `rounds`, as a message does), `step` `Working on Oby's review`, and ends as usual: when its check passes and it publishes the new commits, the review runs again. At most 4 reviews per job; when the fourth requests changes, the job stays `done`, needs you (`reviewNeedsYou`, below), and the runner reviews it no more, even after you talk to it.
+- **Approved:** the job shows it's ready to merge. The runner doesn't merge: nothing checks the Mac and iPhone builds before a merge yet.
+- What needs you now also includes a `done`, published job whose `review` is `changesRequested` with `round` 4 while the pull request is open. Say so where the apps list what needs you ("1 job needs your review").
 
 ### Account
 
@@ -307,6 +330,7 @@ Two seconds after a job changes, the runner sends an alert push (`apns-push-type
 | Done with commits it couldn't publish by itself | `Couldn't publish: <title>` | `publishError` (else the summary's first line) | `ready` |
 | `failed` | `Failed: <title>` | the reason (the summary's first line) | `job` |
 | `interrupted` | `Interrupted: <title>` | the reason | `job` |
+| Oby's fourth review requested changes | `Changes requested: <title>` | `Oby requested changes 4 times. Take it from here.` | `job` |
 
 ```json
 {"aps": {"alert": {"title": "Couldn't publish: Review oby #33", "body": "Couldn't push oby/review-33: the remote hung up."},
@@ -330,6 +354,6 @@ Each tool's model and effort, as in `status.models`. `GET /v1/settings/models/op
 ## What the runner never does
 
 - **Merge, force-push or push to main:** not for anyone, not even with an approval.
-- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. No review or comment goes out.
+- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comment that goes out is Oby's own review of its own pull request, after the secret scan; no GitHub review, approval or comment on anyone else's work.
 - **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
 - **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.

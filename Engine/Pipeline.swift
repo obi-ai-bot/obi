@@ -81,11 +81,12 @@ extension Job {
             set(.publish, .done, detail: "Secret scan clean · pushed · pull request opened")
             switch pullRequest?.state {
             case .merged:
-                // GitHub has no decision (or still wants one) when the PR merged without a review.
+                // GitHub has no decision (or still wants one) when the PR merged without a review:
+                // then Oby's own verdict, if it gave one.
                 let detail = switch pullRequest?.reviewDecision {
                 case .approved: "Approved"
                 case .changesRequested: "Review complete"
-                case .waiting, nil: "Merged without review"
+                case .waiting, nil: review.map { $0.verdict == .approved ? "Approved by Oby" : "Oby requested changes" } ?? "Merged without review"
                 }
                 set(.review, .done, detail: detail)
                 set(.merged, .done)
@@ -100,7 +101,20 @@ extension Job {
                 case .changesRequested:
                     set(.review, .failed, detail: "Changes requested", reason: "The reviewer requested changes.")
                 case .waiting, nil:
-                    set(.review, .current, detail: pullRequest == nil ? "Waiting for GitHub status" : "Waiting for review")
+                    // GitHub has no decision: Oby's own review stands in (Engine/Review.swift).
+                    if reviewing != nil {
+                        set(.review, .current, detail: "Oby is reviewing")
+                    } else if let review, review.verdict == .approved {
+                        set(.review, .done, detail: "Approved by Oby")
+                        set(.merged, .current, detail: "Ready to merge")
+                    } else if let review {
+                        set(.review, .failed, detail: "Changes requested",
+                            reason: review.stopsHere ? Review.stopLine : "Oby requested changes.")
+                    } else if let reviewError {
+                        set(.review, .current, detail: "Waiting for review · \(reviewError)")
+                    } else {
+                        set(.review, .current, detail: pullRequest == nil ? "Waiting for GitHub status" : "Waiting for review")
+                    }
                 }
             }
         }

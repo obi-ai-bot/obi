@@ -377,7 +377,7 @@ struct Options: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, reviewing, review, reviewError, reviewOf }
 
     private enum Derived: String, CodingKey { case pipeline, title }
 
@@ -406,6 +406,10 @@ struct JobJSON: Encodable {
         if job.notes == nil { try nulls.encodeNil(forKey: .notes) }
         if job.pullRequest == nil { try nulls.encodeNil(forKey: .pullRequest) }
         if job.pullRequestError == nil { try nulls.encodeNil(forKey: .pullRequestError) }
+        if job.reviewing == nil { try nulls.encodeNil(forKey: .reviewing) }
+        if job.review == nil { try nulls.encodeNil(forKey: .review) }
+        if job.reviewError == nil { try nulls.encodeNil(forKey: .reviewError) }
+        if job.reviewOf == nil { try nulls.encodeNil(forKey: .reviewOf) }
     }
 }
 

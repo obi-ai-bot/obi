@@ -105,8 +105,14 @@ final class AccountStore {
             default:
                 break
             }
-            if let index = accounts.firstIndex(where: { $0.account.id == account.id }) { accounts[index].label = label }
+            signedIn(account.id, as: label)
         }
+    }
+
+    /// What the tool said about an account's login: a label while signed in, nil when it isn't.
+    /// `refresh` learns it; tests set it.
+    func signedIn(_ id: String, as label: String?) {
+        if let index = accounts.firstIndex(where: { $0.account.id == id }) { accounts[index].label = label }
     }
 
     private func save() throws {
