@@ -76,6 +76,10 @@ final class Desk {
     @ObservationIgnored var publishByHand: (Job, _ base: String, _ approve: (String) async throws -> Void) async throws -> URL = {
         try await Publish.publish($0, base: $1, approve: $2)
     }
+    /// Oby's review of a job's pull request (Engine/Review.swift): posts it as a comment, after the
+    /// secret scan, and quotes it as a file for the author's next round. Tests put in their own.
+    @ObservationIgnored var postReview: (_ author: Job, _ body: String) async throws -> URL = Review.post
+    @ObservationIgnored var quoteReview: (_ author: Job, _ file: String, _ text: String) throws -> Void = Review.quote
 
     init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))) {
         self.accounts = accounts
@@ -88,6 +92,8 @@ final class Desk {
             store.save(jobs[index])
         }
         accounts.countRunning(jobs)
+        // A review that was running: its author stops waiting for it.
+        for job in jobs where job.reviewOf != nil && job.status == .interrupted { reviewEnded(job) }
         publishOnItsOwn = { [weak self] job, base in
             try await Publish.publish(job, base: base, progress: { self?.publishing(job.id, $0) }) { _ in }
         }
@@ -237,7 +243,13 @@ final class Desk {
     func dispatch(_ draft: Draft) -> Job {
         talk = .none
         drafts.removeAll { $0.job.id == draft.job.id }
-        var job = draft.job
+        return enqueue(draft.job)
+    }
+
+    /// Queues a job: its worktree gets ready, then its agent starts. Oby's own jobs (reviews) start here.
+    @discardableResult
+    func enqueue(_ job: Job) -> Job {
+        var job = job
         job.phase = .prepare
         job.step = "Getting \(job.repoName) ready"
         jobs.insert(job, at: 0)
@@ -318,6 +330,7 @@ final class Desk {
                 job.published = url.absoluteString
                 job.publishError = nil
                 replace(job)
+                reviewPublished(job)
             }
             return url
         } catch let merged as Publish.AlreadyOnBase {
@@ -430,7 +443,7 @@ final class Desk {
     }
 
     /// Starts the job's agent in its worktree: a new session, or the job's own picked up again.
-    private func run(_ job: Job, prompt: String, resume: String? = nil) {
+    func run(_ job: Job, prompt: String, resume: String? = nil) {
         let home = accounts.state(job.account)?.account.home.map { URL(filePath: $0) }
         guard let agent = makeAgent(job, home, resume) else { return finish(job.id, .failed, "\(job.agentName) can't run jobs yet.") }
         agents[job.id] = agent
@@ -657,6 +670,9 @@ final class Desk {
         asked.remove(id)
         roundMessage[id] = nil
         handoffs[id] = nil
+        // Oby reviews what was just published, and a review that ended reaches its author (Engine/Review.swift).
+        if published != nil { reviewPublished(job) }
+        if job.reviewOf != nil { reviewEnded(job) }
         onFinish(job)
     }
 
@@ -687,7 +703,7 @@ final class Desk {
         else { store.save(latest); onJobChange(latest) }
     }
 
-    private func replace(_ job: Job, save: Bool = true) {
+    func replace(_ job: Job, save: Bool = true) {
         guard let index = jobs.firstIndex(where: { $0.id == job.id }) else { return }
         jobs[index] = job
         if save { store.save(job) }

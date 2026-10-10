@@ -66,6 +66,13 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// When the user let it go (Dismiss), or nil. A job that needed them (Publish, failed,
     /// interrupted) then needs nothing: no alert, no Publish, until it runs again for their words.
     var dismissed: Date?
+    /// Oby's own review of the pull request (Engine/Review.swift): the review job under way, the
+    /// latest verdict, and why a review couldn't run or gave no verdict.
+    var reviewing: String?
+    var review: Review?
+    var reviewError: String?
+    /// The job whose pull request this job reviews: set on the review jobs Oby starts itself.
+    var reviewOf: String?
 
     var maxRounds: Int { rounds ?? 1 }
     var currentRound: Int { round ?? 1 }
@@ -77,11 +84,17 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// published, then the ones later rounds made. A job published before Oby counted has none.
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
     /// Done, with commits that aren't on its pull request yet: Oby publishes it when it ends, and
-    /// offers Publish when that failed. Not once the user dismissed it.
-    var canPublish: Bool { status == .done && base != nil && unpublished > 0 && dismissed == nil }
-    /// Waiting for Publish (its own publish failed), failed or interrupted, and not dismissed: what
-    /// an alert is sent for, what Home counts, and what Dismiss takes.
-    var needsYou: Bool { dismissed == nil && (canPublish || status == .failed || status == .interrupted) }
+    /// offers Publish when that failed. Not once the user dismissed it, and never on Oby's own review
+    /// jobs: a review makes no commits.
+    var canPublish: Bool { status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil }
+    /// Oby's review requested changes for the last time it may (Review.maxRounds), and the pull
+    /// request is still open: a person takes it from here.
+    var reviewNeedsYou: Bool {
+        status == .done && published != nil && (review?.stopsHere ?? false) && (pullRequest?.state ?? .open) == .open
+    }
+    /// Waiting for Publish (its own publish failed), failed, interrupted, or out of review rounds:
+    /// what an alert is sent for, what Home counts, and what Dismiss takes. Not once dismissed.
+    var needsYou: Bool { dismissed == nil && (canPublish || status == .failed || status == .interrupted || reviewNeedsYou) }
     var agentName: String { Job.agentNames[agent] ?? agent }
     static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
@@ -776,6 +789,8 @@ nonisolated enum Workspace {
 /// What Oby tells agents. Swift writes these; the model's text appears only as the task.
 nonisolated enum Prompts {
     static func agent(_ job: Job) -> String {
+        // Oby's own review of a pull request: a review only, no commits (Engine/Review.swift).
+        if job.reviewOf != nil { return Review.prompt(job) }
         var lines: [String] = []
         if let pr = job.pr {
             let base = "origin/\(job.base ?? "HEAD")"

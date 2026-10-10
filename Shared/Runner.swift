@@ -49,6 +49,12 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var pullRequestError: String?
     /// When the user let the job go (Dismiss), or nil: it then needs nothing (newer runners only).
     var dismissed: Date?
+    /// Oby's own review of the pull request (newer runners): the review job under way, the latest
+    /// verdict, why none came, and, on a review job, the job it reviews.
+    var reviewing: String?
+    var review: Review?
+    var reviewError: String?
+    var reviewOf: String?
 
     var isActive: Bool { status == .queued || status == .running }
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
@@ -76,9 +82,15 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Not once the user dismissed it.
     var canPublish: Bool { status == .done && base != nil && unpublished > 0 && dismissed == nil }
 
-    /// Waiting for Publish (the runner's own publish failed), failed or interrupted, and not
-    /// dismissed: what the runner sends an alert for, and what Dismiss takes.
-    var needsYou: Bool { dismissed == nil && (canPublish || status == .failed || status == .interrupted) }
+    /// Oby's review requested changes for the last time it may (4 rounds) and the pull request is still open.
+    var reviewNeedsYou: Bool {
+        status == .done && published != nil && review?.verdict == "changesRequested" && (review?.round ?? 0) >= 4
+            && (pullRequest?.state ?? "OPEN") == "OPEN"
+    }
+
+    /// Waiting for Publish (the runner's own publish failed), failed, interrupted or out of review
+    /// rounds, and not dismissed: what the runner sends an alert for, and what Dismiss takes.
+    var needsYou: Bool { dismissed == nil && (canPublish || status == .failed || status == .interrupted || reviewNeedsYou) }
 
     /// "Round 2 of 5 · Fable 5.1", or empty for a one-round job on the usual model.
     var extras: String {
@@ -112,6 +124,21 @@ nonisolated struct PullRequestStatus: Codable, Equatable, Sendable {
     var base: String
     var mergedAt: Date?
     var checkedAt: Date
+}
+
+/// Oby's verdict on a job's pull request (docs/runner-api.md).
+nonisolated struct Review: Codable, Equatable, Sendable {
+    /// "approved" or "changesRequested".
+    var verdict: String
+    var job: String
+    var agent: String
+    var account: String
+    var round: Int
+    var date: Date
+    var comment: String?
+    var postError: String?
+
+    var label: String { verdict == "approved" ? "Approved" : "Changes requested" }
 }
 
 nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
@@ -253,6 +280,7 @@ nonisolated enum NeedsYou {
             count(needing.count(where: \.canPublish), "is ready to publish", "are ready to publish"),
             count(needing.count { $0.status == .failed }, "failed", "failed"),
             count(needing.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
+            count(needing.count(where: \.reviewNeedsYou), "needs your review", "need your review"),
         ].compactMap(\.self)
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }

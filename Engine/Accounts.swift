@@ -137,6 +137,9 @@ final class AccountStore {
         }
     }
 
+    /// What the tool said about an account's login: a label while signed in, nil when it isn't.
+    /// `refresh` learns it; tests set it.
+
     private func save() throws {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
