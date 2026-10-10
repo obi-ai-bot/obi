@@ -158,8 +158,19 @@ Like email: each item waits for your decision, with no timeout and no guessing. 
 - **Lands here when:** something waits on someone else: a silent reviewer, a flaky check, a blocked dependency.
 - **Your actions:** Nudge, Hand to someone else, or Later.
 - **What Oby learns:** when to nudge on its own, and whom to hand work to.
-- **How others do it:** Superhuman puts reminders on mail that needs a reply. Linear snoozes until new activity.
-- **Decide:** how long a reviewer may stay silent before the first nudge.
+- **How others do it:**
+  - Google: respond within one business day at most.
+  - Meta's NudgeBot pings after 24 hours with no action, and cut time to a reviewer's first action by 9.9%.
+  - Microsoft's Nudge sends one reminder per PR and skips PRs with activity in the last 24 hours and weekends. Naive nudges drew 53% negative replies; the refined system was about 80% positive.
+  - GitHub scheduled reminders default to weekdays at 9:00, with age and staleness filters.
+  - GitHub team assignment can load-balance reviewers and skips people marked Busy.
+  - Superhuman reminds you about mail that needs a reply, and Linear snoozes until new activity.
+- **Decided 2026-10-10 (best practice, delegated by Wellington):**
+  - The first nudge comes after one business day with no reviewer activity, counted in the reviewer's working hours. Any comment, commit or review resets the clock.
+  - At most two nudges per PR (day 1 and day 3), then Oby stops pinging.
+  - Weekdays only, in the reviewer's time zone, skipping holidays and time off. One daily digest per reviewer, never a ping per comment.
+  - After 3 business days of silence, a Follow-up in your inbox offers a second reviewer: someone with a light load, skipping anyone Busy or out of office. Oby never swaps reviewers silently, and it learns your answer (X.4).
+  - When the reviewer is another Oby, it should acknowledge within minutes to an hour. If it doesn't, Oby retries once, then falls back to the human path.
 
 ### I.6 New task
 - **Lands here when:** work arrives from outside: an issue assigned to you, a Slack mention, a request from another Oby.
@@ -391,7 +402,7 @@ The reviewer is a teammate today and another Oby later (F12). Oby watches the PR
   - The reviewer's Oby asks its person once: "review it yourself, or shall I?" "Don't ask, review it yourself" becomes a rule.
   - Near the reviewer's limits, their Oby asks again before spending them.
   - Who reviews: CODEOWNERS or your past choices. Otherwise Oby asks once and remembers (X.4).
-  - Open: how long a silent reviewer waits before a nudge (I.5).
+  - Nudges: see I.5 in your inbox.
 
 ### 5.2 Changes requested
 - **What happens:** each review that requests changes becomes another round for the same job, in the same worktree and session. It tests again, pushes, replies and asks for a new review, until approved. Goes to 3, then back to 5.
@@ -639,4 +650,15 @@ From the runner's database on tetrix-lab (`/srv/nvme/oby/oby.sqlite`, 7 jobs, 20
   - hermes-agent.nousresearch.com/docs/user-guide: configuration, features/goals, security
   - docs.github.com: Copilot coding agent
   - metr.org/blog/2025-06-05-recent-reward-hacking
+- **Review nudge research (2026-10-10):**
+  - docs.github.com: managing scheduled reminders, managing code review settings for your team
+  - google.github.io/eng-practices/review/reviewer/speed.html
+  - sback.it/publications/icse2018seip.pdf
+  - 2022.esec-fse.org: Using Nudges to Accelerate Code Reviews at Scale
+  - engineering.fb.com/2022/11/16/culture/meta-code-review-time-improving
+  - arXiv 2011.12468 (Microsoft Nudge)
+  - axolo.co/docs/application-settings/reminders
+  - linearb.io/library/engineering-benchmarks-and-research
+  - graphite.com/blog/graphite-changelog-4-18-23
+  - github.com/danielma/reviewbot
 - **Oby's own spikes:** deskree-inc/oby#31 (the brain on any tool), #24 (Cursor with two accounts), #23 (switching accounts near a limit), #28 (Tetrix login)
