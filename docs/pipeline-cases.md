@@ -314,15 +314,23 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
 A job counts as done only when its check passes. Then the Lead reviews the diff against the brief and sends it back until it's satisfied.
 
 ### 3.1 Tests fail
-- **What happens:** the job runs its check, for example `swift test`. On failure, the output goes back to the agent for another round, up to the job's limit. Goes to 4 when green and the Lead approves, or to 2.3 when out of rounds.
-- **Oby today:** Partial. A check command and rounds, or the agent's own GOAL MET line (#44), but only when the brain set a check.
-- **Claude Code:** cloud Auto-fix reads failing checks and pushes a fix when it's clear. Desktop's "Auto-fix CI" iterates on the output.
-- **Cursor:** auto-fixes CI on PRs it created (GitHub Actions, Teams plan). `@cursor autofix off` stops it.
-- **Codex:** only on demand, with `@codex fix the CI failures`.
-- **Others:** Devin auto-fixes lint and CI, and can start on a failed check. Copilot acts only when mentioned.
+- **What happens:** Oby runs the job's check itself, for example `swift test`. On failure, the output goes back to the agent for another round, within limits that Oby holds, never the agent. Goes to 4 when green and the Lead approves, or to your inbox when the limit is hit.
+- **Oby today:** Partial. A check command and rounds, or the agent's own GOAL MET line (#44), but only when the brain set a check. No time limit and no no-progress check.
+- **Claude Code:** turn and budget caps (`--max-turns`, `--max-budget-usd`) are off by default. A Stop hook can send the agent round again, and Claude Code overrides it after 8 blocks in a row. Cloud Auto-fix pushes clear fixes. Nothing guards against test cheating.
+- **Cursor:** Bugbot Autofix makes at most 3 attempts per PR in 24 hours, and stop hooks loop at most 5 times. CI auto-fix works on its own PRs. The CLI has no turn limit.
+- **Codex:** no turn limit found, though goals take a token budget. CI fixes only on demand. The sandbox keeps `.git` read-only.
+- **Others:**
+  - OpenClaw: a 48-hour default limit, and 3 identical tool errors end a turn.
+  - Hermes: goals pause after 20 turns, and test gates retry 3 times. An optional check refuses "done" without fresh test evidence.
+  - Copilot: a hard 59-minute cap.
+  - None moves to a stronger model by itself.
+  - METR has documented models editing tests and scorers to pass.
 - **Open for Oby:**
-  - Proposal: every job has a check. Out of rounds, the Lead retries once on a stronger model, then asks you.
-  - Decide: how many rounds at most (today 5, up to 10)?
+  - Decided 2026-10-10: 1 attempt and 3 fix rounds. About 15 minutes a round, 45 minutes a job, 10 minutes a test run.
+  - Stop early when the same failure repeats twice (failures compared with timestamps and durations stripped), the failure count doesn't drop in 2 rounds, a round changes nothing, or 3 actions in a row are denied.
+  - At the limit: stop, keep the branch and push nothing. The inbox offers "one more round" or "one more round on the stronger model".
+  - Limits live in Swift, never in prompts, and Oby tunes them per repo (X.4).
+  - Inside a round: Claude Code jobs run with `--max-turns` and Oby's own timer. Codex and Cursor have no turn limit, so the timer alone applies.
 
 ### 3.2 No test command: the check isn't obvious
 - **What happens:** the Lead finds the check in the repo: AGENTS.md, the CI workflow, Package.swift. If there's none, the agent writes a test for its change. Goes to 3.1.
@@ -333,7 +341,7 @@ A job counts as done only when its check passes. Then the Lead reviews the diff 
 - **Others:** not found.
 - **Open for Oby:**
   - Decided 2026-10-10: tests are a hard gate twice: they must pass in the worktree before the PR opens, and CI must be green on the PR before the merge.
-  - Proposal: the Lead's review rejects a job that deleted, skipped or weakened tests to get green, and asks for a test with every change.
+  - Decided 2026-10-10 (strict): Oby runs the tests itself. A round fails on deleted or edited existing tests, new skip markers, a falling test count, or changed test or CI config. New tests are allowed and flagged for the Lead, which asks for a test with every change.
 
 ---
 
@@ -615,4 +623,15 @@ From the runner's database on tetrix-lab (`/srv/nvme/oby/oby.sqlite`, 7 jobs, 20
   - Cloud Security Alliance note on "Comment and Control" (2nd-hand)
   - 0din.ai on the Cursor README attack (2nd-hand)
   - simonwillison.net on the lethal trifecta
+- **Guardrails research (2026-10-10):**
+  - code.claude.com/docs/en: cli-reference, agent-sdk/agent-loop, hooks-guide, goal, permission-modes, scheduled-tasks, routines, sandboxing
+  - cursor.com: docs/bugbot, workflows/autonomous-agents/ci-autofix, docs/hooks, docs/cli/headless, docs/agent/security/run-modes
+  - Cursor forum threads on Bugbot limits and on hard stops (2nd-hand)
+  - developers.openai.com/codex: app-server, agent-approvals-security
+  - learn.chatgpt.com/docs/hooks
+  - docs.openclaw.ai: concepts/agent-loop, tools/loop-detection, gateway/sandboxing, tools/exec-approvals
+  - OpenClaw incident reports in TechCrunch and The Hacker News (2nd-hand)
+  - hermes-agent.nousresearch.com/docs/user-guide: configuration, features/goals, security
+  - docs.github.com: Copilot coding agent
+  - metr.org/blog/2025-06-05-recent-reward-hacking
 - **Oby's own spikes:** deskree-inc/oby#31 (the brain on any tool), #24 (Cursor with two accounts), #23 (switching accounts near a limit), #28 (Tetrix login)
