@@ -156,24 +156,23 @@ struct CrownConfirm: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 10) {
-                Text(action).font(.footnote).multilineTextAlignment(.center)
-                ZStack {
-                    Circle().stroke(Color.secondary.opacity(0.3), lineWidth: 8)
-                    Circle().trim(from: 0, to: min(turn, 1))
-                        .stroke(Color.orange, style: StrokeStyle(lineWidth: 8, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                    Image(systemName: fired ? "checkmark" : "digitalcrown.arrow.clockwise")
-                        .font(.title3.weight(.semibold))
-                }
-                .frame(width: 72, height: 72)
-                .animation(.easeOut(duration: 0.1), value: turn)
-                Text(fired ? "Publishing…" : "Turn the crown to publish")
-                    .font(.caption2).foregroundStyle(.secondary)
+        // No scroll view here: the crown belongs to the ring, not to scrolling.
+        VStack(spacing: 10) {
+            Text(action).font(.footnote).multilineTextAlignment(.center).lineLimit(4).minimumScaleFactor(0.7)
+            ZStack {
+                Circle().stroke(Color.secondary.opacity(0.3), lineWidth: 8)
+                Circle().trim(from: 0, to: min(turn, 1))
+                    .stroke(Color.orange, style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Image(systemName: fired ? "checkmark" : "digitalcrown.arrow.clockwise")
+                    .font(.title3.weight(.semibold))
             }
-            .padding(.vertical, 4)
+            .frame(width: 72, height: 72)
+            .animation(.easeOut(duration: 0.1), value: turn)
+            Text(fired ? "Publishing…" : "Turn the crown to publish")
+                .font(.caption2).foregroundStyle(.secondary)
         }
+        .padding(.vertical, 4)
         .focusable()
         .focused($focused)
         .digitalCrownRotation($turn, from: 0, through: 1, by: 0.02, sensitivity: .low, isContinuous: false, isHapticFeedbackEnabled: true)

@@ -36,7 +36,8 @@ struct TalkView: View {
 
     private var holdToTalk: some View {
         VStack(spacing: 8) {
-            if watch.reachable {
+            // Drawn while held too, so the gesture that opened the mic is still there to close it.
+            if watch.reachable || holding {
                 Image(systemName: holding ? "waveform" : "mic.fill")
                     .font(.title.weight(.semibold))
                     .foregroundStyle(.white)
@@ -65,6 +66,8 @@ struct TalkView: View {
         .task { await recorder.prepare() }
         // A hold the gesture never ends (the screen left, the app went inactive) is a release.
         .onChange(of: scenePhase) { if scenePhase != .active { release() } }
+        // The phone went out of reach mid-hold: there's nowhere to send it, so the mic closes.
+        .onChange(of: watch.reachable) { if !watch.reachable { release() } }
         .onDisappear {
             release()
             // Whatever state the talk is in, the microphone doesn't outlive the screen.
@@ -182,6 +185,8 @@ final class Recorder {
         guard let began else { cancel(); return nil }
         let heard = min(Date.now.timeIntervalSince(began), TimeInterval(Self.limit))
         cancel()
+        // Handed over, the recording doesn't stay on the watch.
+        defer { try? FileManager.default.removeItem(at: file) }
         guard heard >= 0.4, let data = try? Data(contentsOf: file), !data.isEmpty else {
             problem = "Hold the button while you talk."
             return nil
