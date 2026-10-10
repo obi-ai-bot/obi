@@ -79,8 +79,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
 
     /// Commits not on its pull request yet: all of them before it's published, then later rounds' ones.
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
-    /// Not once the user dismissed it.
-    var canPublish: Bool { status == .done && base != nil && unpublished > 0 && dismissed == nil }
+    /// Not once the user dismissed it, and never on Oby's own review jobs (as Engine's `Job.canPublish`).
+    var canPublish: Bool { status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil }
 
     /// Oby's review requested changes for the last time it may (4 rounds) and the pull request is still open.
     var reviewNeedsYou: Bool {

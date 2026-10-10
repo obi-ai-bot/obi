@@ -437,6 +437,10 @@ struct JobJSON: Encodable {
     private enum Derived: String, CodingKey { case pipeline, title }
 
     func encode(to encoder: any Encoder) throws {
+        // Oby's own review makes no commits; the ones in its worktree are the pull request's. Saying 0
+        // keeps apps built before their `canPublish` knew about reviews from offering Publish on them.
+        var job = job
+        if job.reviewOf != nil { job.commits = 0 }
         try job.encode(to: encoder)
         var derived = encoder.container(keyedBy: Derived.self)
         try derived.encode(job.pipeline, forKey: .pipeline)
