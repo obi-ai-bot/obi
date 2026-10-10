@@ -1,5 +1,8 @@
 import Foundation
 import Observation
+#if canImport(OSLog)
+import OSLog
+#endif
 
 /// Oby's desk: the conversation that turns words into a plan, and the jobs it dispatched.
 @Observable
