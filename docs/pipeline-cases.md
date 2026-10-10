@@ -190,8 +190,7 @@ From your goal to a list of jobs, then on to stage 2.
 - **Codex:** scheduled automations feed an inbox. Picking issues isn't documented.
 - **Others:** Copilot works on issues you assign, and Agentic Workflows only triage. Devin fires when a ticket newly matches a label or status filter.
 - **Open for Oby:** nobody ranks a roadmap by itself. Every product starts from a label, assignee or status a person set.
-  - Proposal: board order plus Status is the queue.
-  - Decide: may Oby take anything on the board, or only items marked "Ready for Oby"?
+  - Decided 2026-10-10: anything workable, in board order. Oby skips what's done, in review, blocked, waiting for your test or assigned to someone else, and an `oby:skip` label keeps an item out. Oby keeps the board's statuses true as it works.
 
 ### 1.2 Named issues or an epic: "#12, #15 and #18", "epic #30"
 - **What happens:** one job per issue. An epic becomes one job per open sub-issue, and sub-issues that depend on each other run in order. Goes to 2.
@@ -202,7 +201,8 @@ From your goal to a list of jobs, then on to stage 2.
 - **Others:** Copilot does one task, one branch, one PR. Devin's coordinator splits big tasks into child Devins, each in its own VM, and you can approve each batch.
 - **Open for Oby:**
   - Proposal: keep Swift's epic expansion. The Lead orders dependent sub-issues, and the Dispatch tap goes away.
-  - Decide: how many jobs may run at once per goal (today 10)?
+  - Decided 2026-10-10: no fixed cap. Oby runs as many jobs as your accounts' remaining limits allow, routed by how big each job is and how much room each account has.
+  - Open: the machine (tetrix-lab's CPU and memory) is the other limit.
 
 ### 1.3 Already taken: in progress, in review, waiting for your test
 - **What happens:** before starting, check for an open PR on the issue, an Oby job on it, an assignee, and the board status. Skip it and say why. Goes to the skipped list in the report.
@@ -212,8 +212,7 @@ From your goal to a list of jobs, then on to stage 2.
 - **Codex:** not found.
 - **Others:** Devin's preflight script dedupes by item id and version. Copilot: not found.
 - **Open for Oby:** nobody has a claim check.
-  - Proposal: Swift refuses a job on an issue with a running job or an open PR, and Oby assigns the issue to itself when it starts.
-  - Decide: self-assign on GitHub, or keep the claim inside Oby?
+  - Decided 2026-10-10: when a job starts, Oby assigns the issue to you and moves it to In progress. Swift refuses a job on an issue that already has a running job or an open PR.
 
 ### 1.4 Unclear or misheard: "OB", "Obi"
 - **What happens:** resolve against known repos, the conversation's last repo and similar names. Ask only when two readings lead to different work. Goes to 2, or to one question with options.
