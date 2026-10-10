@@ -49,7 +49,7 @@ struct LoopsTests {
     }
 
     @Test func issueJobsAreNamedAndBranchedByTheirIssue() {
-        #expect(job().title == "Fix oby #42")
+        #expect(job().heading == "Fix oby #42")
         #expect(Job.branch(kind: .fix, pr: nil, issue: 42, id: "ab12cd34") == "oby/fix-42")
     }
 

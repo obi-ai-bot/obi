@@ -40,10 +40,12 @@ let package = Package(
             exclude: ["CSQLite", "README.md", "oby-runner.service"],
             swiftSettings: features
         ),
+        // The apps' Shared/ code the runner's tests cover; the rest of Shared/ needs the apps.
+        .target(name: "ObyShared", path: "Shared", sources: ["Elapsed.swift"], swiftSettings: features),
         .testTarget(
             name: "RunnerTests",
             dependencies: [
-                "oby-runner", "ObyEngine",
+                "oby-runner", "ObyEngine", "ObyShared",
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
                 .product(name: "Crypto", package: "swift-crypto"),
             ],

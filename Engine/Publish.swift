@@ -278,9 +278,9 @@ nonisolated enum Publish {
             if let first = line.first, first.isUppercase, !(line.dropFirst().first?.isUppercase ?? false) {
                 line = first.lowercased() + line.dropFirst()
             }
-            title = "\(type): \(line.isEmpty ? job.title : line)"
+            title = "\(type): \(line.isEmpty ? job.heading : line)"
         }
-        var text = title ?? job.title
+        var text = title ?? job.heading
         // The issue goes last, once: a subject may carry one already.
         text = text.replacing(/\s*\(#\d+\)$/, with: "")
         let issue = job.issue.map { " (#\($0))" } ?? ""

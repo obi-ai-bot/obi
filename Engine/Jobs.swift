@@ -25,6 +25,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var pr: Int?
     var kind: Plan.Kind
     var task: String
+    /// The brain's short title for the work, like "Job progress screen", or nil (rules' plans, older jobs).
+    var title: String?
     var status: Status = .queued
     var step = ""
     var summary = ""
@@ -80,27 +82,34 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
 
-    /// "Review tetrix-front-end #482", or the user's own words.
-    var title: String {
+    /// The brain's title, like "Mac runner notifications", else "Review tetrix-front-end #482" or
+    /// the user's own words.
+    var heading: String {
+        if let title = brainTitle { return title }
         if let number = pr ?? issue { return "\(kind.rawValue.capitalized) \(repoName) #\(number)" }
         let line = request.split(separator: "\n").first.map(String.init) ?? request
         return line.count > 60 ? line.prefix(59) + "…" : line
     }
 
-    /// The task's compact title for runner clients; the notch keeps its request-based title.
+    /// The title runner clients show: the brain's, else like `heading` but from the task's first line.
     var shortTitle: String {
-        if pr != nil || issue != nil { return title }
+        if brainTitle != nil || pr != nil || issue != nil { return heading }
         let line = (task.isEmpty ? request : task).split(separator: "\n").first.map(String.init) ?? request
         return line.count > 60 ? line.prefix(59) + "…" : line
+    }
+
+    /// The brain's title, if it gave one that isn't blank.
+    var brainTitle: String? {
+        title.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// The one line the notch shows when the job ends.
     var doneLine: String {
         switch status {
-        case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done: \(title)"
-        case .failed: summary.hasPrefix("Nothing committed:") ? "Nothing committed: \(title)" : "Couldn't finish: \(title)"
-        case .stopped: "Stopped: \(title)"
-        case .interrupted: "Interrupted: \(title)"
+        case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done: \(heading)"
+        case .failed: summary.hasPrefix("Nothing committed:") ? "Nothing committed: \(heading)" : "Couldn't finish: \(heading)"
+        case .stopped: "Stopped: \(heading)"
+        case .interrupted: "Interrupted: \(heading)"
         case .queued, .running: step
         }
     }

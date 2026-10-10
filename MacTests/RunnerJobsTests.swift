@@ -13,7 +13,7 @@ struct RunnerJobsTests {
         #expect(decoded[0].kind == .investigate && decoded[0].status == .done && !decoded[0].canPublish)
         #expect(decoded[0].notes == ["In one sentence: which Tetrix tool did you call?"])
         #expect(decoded[0].finished == ISO8601DateFormatter().date(from: "2026-10-10T00:04:45Z"))
-        #expect(decoded[1].title == "In oby, count the Swift files in Engine/ and tell me in one line".prefix(59) + "…")
+        #expect(decoded[1].heading == "In oby, count the Swift files in Engine/ and tell me in one line".prefix(59) + "…")
         #expect(decoded[1].doneLine == "There are 8 Swift files in `Engine/`.")
 
         // The tag's name; the Mac skips the runner's accounts, which aren't Engine's.

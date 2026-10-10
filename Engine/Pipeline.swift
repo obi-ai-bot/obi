@@ -81,7 +81,13 @@ extension Job {
             set(.publish, .done, detail: "Secret scan clean · pushed · pull request opened")
             switch pullRequest?.state {
             case .merged:
-                set(.review, .done, detail: pullRequest?.reviewDecision == .approved ? "Approved" : "Review complete")
+                // GitHub has no decision (or still wants one) when the PR merged without a review.
+                let detail = switch pullRequest?.reviewDecision {
+                case .approved: "Approved"
+                case .changesRequested: "Review complete"
+                case .waiting, nil: "Merged without review"
+                }
+                set(.review, .done, detail: detail)
                 set(.merged, .done)
             case .closed:
                 set(.review, .failed, reason: "Pull request closed without merging.")

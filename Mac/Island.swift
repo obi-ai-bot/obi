@@ -35,7 +35,7 @@ final class IslandModel {
     /// What peeking shows next to Oby's name.
     var peekLine: String {
         if let notice { return notice }
-        if let job = desk.active.first ?? feed.active.first { return job.step.isEmpty ? job.title : job.step }
+        if let job = desk.active.first ?? feed.active.first { return job.step.isEmpty ? job.heading : job.step }
         return "All quiet"
     }
 
@@ -610,7 +610,7 @@ private struct PlansCard: View {
             ForEach(drafts, id: \.job.id) { draft in
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(draft.job.title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                        Text(draft.job.heading).font(.system(size: 14, weight: .semibold)).lineLimit(1)
                         Text(details(draft)).font(.system(size: 12, design: .monospaced)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
                     }
                     Spacer(minLength: 8)
@@ -741,7 +741,7 @@ private struct JobRow: View {
                 Image(systemName: "asterisk").font(.system(size: 17, weight: .semibold)).frame(width: 22)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text(job.title).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                        Text(job.heading).font(.system(size: 15, weight: .semibold)).lineLimit(1)
                         if let host {
                             Text(host).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.7))
                                 .padding(.horizontal, 7).frame(height: 18)

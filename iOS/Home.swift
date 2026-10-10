@@ -240,7 +240,7 @@ struct JobRow: View {
                 .font(.body.weight(.semibold))
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
-                Text(job.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                Text(job.heading).font(.subheadline.weight(.semibold)).lineLimit(2)
                 if let pipeline = job.pipeline {
                     Text(pipeline.label).font(.caption.weight(.medium)).foregroundStyle(.secondary)
                 }
@@ -475,7 +475,7 @@ struct PlansCard: View {
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(draft.job.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Text(draft.job.heading).font(.subheadline.weight(.semibold)).lineLimit(1)
                     Text(details(draft)).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 0)

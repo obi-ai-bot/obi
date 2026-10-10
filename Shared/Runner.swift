@@ -17,6 +17,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var pr: Int?
     var kind: String
     var task: String
+    /// What to call the job (docs/runner-api.md): the brain's short title, else the runner's
+    /// fallback. Older runners don't send it.
+    var title: String?
     var status: Status
     var step: String
     var summary: String
@@ -49,8 +52,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
     var agentName: String { agent == "codex" ? "Codex" : "Claude Code" }
 
-    /// "Review oby #33", or the first line of what the user asked.
-    var title: String {
+    /// The runner's title, like "Mac runner notifications", else "Review oby #33" or the first line
+    /// of what the user asked.
+    var heading: String {
+        if let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty { return title }
         if let number = pr ?? issue { return "\(kind.capitalized) \(repoName) #\(number)" }
         return (task.isEmpty ? request : task).split(separator: "\n").first.map(String.init) ?? request
     }
