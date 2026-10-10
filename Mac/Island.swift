@@ -157,7 +157,8 @@ final class IslandController {
         case .start(let key):
             noticeTask?.cancel()
             model.notice = nil
-            voice.start(key: key, context: Voice.context(repos: repos + desk.jobs.map(\.repo)))
+            // Your own jobs' repositories first: they're the ones you're likeliest to name.
+            voice.start(key: key, context: Voice.context(repos: desk.jobs.map(\.repo) + repos))
             set(.listening)
         case .handsFree:
             voice.handsFree = true

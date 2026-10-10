@@ -224,7 +224,8 @@ final class Voice {
     }
 
     /// What to listen for: product names, and each repository's name as written and as said.
-    static func context(repos: [String]) -> [String] {
+    /// The first repositories are the likeliest to be spoken: only the first 100 names are kept.
+    nonisolated static func context(repos: [String]) -> [String] {
         var names = ["Oby", "Claude", "Cursor", "Gemini", "GitHub", "pull request", "PR"] + Job.agentNames.values.sorted()
         for repo in repos {
             let name = String(repo.split(separator: "/").last ?? Substring(repo))

@@ -43,7 +43,7 @@ final class TalkKey {
     }
 
     private func install() -> Bool {
-        let types: [CGEventType] = [.flagsChanged, .keyDown, .keyUp]
+        let types: [CGEventType] = [.flagsChanged, .keyDown, .keyUp, .leftMouseDown, .rightMouseDown, .otherMouseDown]
         let mask = types.reduce(CGEventMask(0)) { $0 | CGEventMask(1) << $1.rawValue }
         guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
                                           eventsOfInterest: mask, callback: talkKeyEvent,
@@ -66,10 +66,18 @@ final class TalkKey {
             if flags.contains(.maskSecondaryFn) { press(.fn) } else { release(.fn) }
             return true
         case .flagsChanged:
-            let down = flags.intersection([.maskControl, .maskAlternate, .maskCommand, .maskShift]) == [.maskControl, .maskAlternate]
+            let modifiers = flags.intersection([.maskControl, .maskAlternate, .maskCommand, .maskShift])
+            let down = modifiers == [.maskControl, .maskAlternate]
             guard down != controlOptionDown else { return false }
             controlOptionDown = down
-            if down { press(.controlOption) } else { release(.controlOption) }
+            if down {
+                press(.controlOption)
+            } else if modifiers.isSuperset(of: [.maskControl, .maskAlternate]) {
+                // Command or Shift joined a held Control-Option: a shortcut, not talk.
+                if held == .controlOption { spoil() }
+            } else {
+                release(.controlOption)
+            }
             return false
         case .keyDown where code == Self.spaceCode && held != nil:
             if !repeating { keepListening() }
@@ -81,11 +89,9 @@ final class TalkKey {
         case .keyDown where code == Self.escapeCode && talking:
             stop(.cancel)
             return true
-        case .keyDown where held != nil:
-            // fn or Control-Option was part of a shortcut: not talk.
-            if talking, !handsFree { stop(.cancel) }
-            held = nil
-            wait?.cancel()
+        case .keyDown where held != nil, .leftMouseDown where held != nil, .rightMouseDown where held != nil, .otherMouseDown where held != nil:
+            // fn or Control-Option was part of a shortcut, or a click or drag: not talk.
+            spoil()
             return false
         default:
             return false
@@ -111,6 +117,13 @@ final class TalkKey {
         held = nil
         wait?.cancel()
         if talking, !handsFree { stop(.send) }
+    }
+
+    /// The held key turned out to be part of a shortcut: whatever it started is cancelled, not sent.
+    private func spoil() {
+        if talking, !handsFree { stop(.cancel) }
+        held = nil
+        wait?.cancel()
     }
 
     /// fn + Space: listening goes on after the key is let go, until it's pressed again.

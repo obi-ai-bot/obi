@@ -16,4 +16,9 @@ struct VoiceTests {
         let repos = (0..<300).map { "someone/repo-\($0)" }
         #expect(Voice.context(repos: repos).count == 100)
     }
+
+    @Test func theFirstRepositoriesSurviveTheCut() {
+        let repos = ["deskree-inc/tetrix-front-end"] + (0..<300).map { "someone/repo-\($0)" }
+        #expect(Voice.context(repos: repos).contains("tetrix front end"))
+    }
 }
