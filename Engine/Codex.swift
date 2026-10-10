@@ -153,10 +153,10 @@ final class CodexAgent: AgentRun {
         CodexRPC.account(try await ask(home: home, "account/read"))
     }
 
-    /// How much of the account's limits is used, 0...1.
-    static func usage(home: URL?) async throws -> (fiveHour: Double?, sevenDay: Double?) {
+    /// How much of the account's limits is used, 0...1, and when each window resets.
+    static func usage(home: URL?) async throws -> CodexRPC.Usage {
         let result = try await ask(home: home, "account/rateLimits/read")
-        return (result["rateLimits"] as? [String: Any]).flatMap(CodexRPC.usage) ?? (nil, nil)
+        return (result["rateLimits"] as? [String: Any]).flatMap(CodexRPC.usage) ?? CodexRPC.Usage()
     }
 
     /// The models the account offers, with the efforts each takes.
@@ -325,7 +325,7 @@ nonisolated enum CodexRPC {
         case "item/started":
             return (params["item"] as? [String: Any]).flatMap(step).map { [.step($0)] } ?? []
         case "account/rateLimits/updated":
-            return (params["rateLimits"] as? [String: Any]).flatMap(usage).map { [.usage(fiveHour: $0.fiveHour, sevenDay: $0.sevenDay)] } ?? []
+            return (params["rateLimits"] as? [String: Any]).flatMap(usage).map { [$0.event] } ?? []
         case "turn/completed":
             return [finished(params["turn"] as? [String: Any] ?? [:])]
         default:
@@ -419,17 +419,30 @@ nonisolated enum CodexRPC {
         return .finished(summary: reason.isEmpty ? "Codex hit an error." : "Codex hit an error: \(reason)", failed: true)
     }
 
-    /// The five-hour and weekly windows of Codex's own limit, 0...1.
-    static func usage(_ limits: [String: Any]) -> (fiveHour: Double?, sevenDay: Double?)? {
+    /// The five-hour and weekly windows of Codex's own limit, 0...1, and when each resets.
+    nonisolated struct Usage: Equatable, Sendable {
+        var fiveHour: Double?
+        var sevenDay: Double?
+        var fiveHourResets: Date?
+        var sevenDayResets: Date?
+
+        var event: AgentEvent {
+            .usage(fiveHour: fiveHour, sevenDay: sevenDay, fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets)
+        }
+    }
+
+    /// Codex's own limit from `account/rateLimits/read` or an `account/rateLimits/updated` notification.
+    static func usage(_ limits: [String: Any]) -> Usage? {
         // Other limits (like a model's reserve) arrive with their own id and say nothing about Codex's.
         guard (limits["limitId"] as? String ?? "codex") == "codex" else { return nil }
-        var used: [Int: Double] = [:]
+        var used: [Int: (Double, Date?)] = [:]
         for key in ["primary", "secondary"] {
             guard let window = limits[key] as? [String: Any], let minutes = window["windowDurationMins"] as? Int,
                   let percent = window["usedPercent"] as? Double else { continue }
-            used[minutes] = percent / 100
+            used[minutes] = (percent / 100, AgentEvent.epoch(window["resetsAt"]))
         }
-        return used.isEmpty ? nil : (used[300], used[10_080])
+        return used.isEmpty ? nil : Usage(fiveHour: used[300]?.0, sevenDay: used[10_080]?.0,
+                                          fiveHourResets: used[300]?.1, sevenDayResets: used[10_080]?.1)
     }
 
     static func account(_ result: [String: Any]) -> String? {
