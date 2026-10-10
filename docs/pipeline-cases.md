@@ -16,6 +16,7 @@ The plan for making Oby run Deskree's whole pipeline by itself, case by case. Th
 - **Tetrix is optional (2026-10-10).** Oby works fully on its own with local storage. Tetrix adds richer memory. See X.7.
 - **A vault (2026-10-10).** Secrets live in an encrypted vault that no agent ever sees. Oby uses them only through connections you set up. See 2.6 and F17 (deskree-inc/oby#60).
 - **Oby is a whiteboard (2026-10-10).** Like Claude Code, Cursor and Codex, it starts as a generic default pipeline. You reshape it by telling it, for example "add a Slack ping as a step", and over time it learns how you work, until the process is as automatic as possible.
+- **Cost first (2026-10-10).** When two choices are otherwise equal, Oby picks the cheaper one, for example acting only on reviews that request changes (5.2).
 - **Reviews go Oby to Oby (2026-10-10).** Requests go to the reviewer's Oby inside Oby, not through Slack (unless you add Slack as a step). See 5.1.
 - **AGENTS.md rewritten to match (2026-10-10).**
   - Oby merges into `dev` only, after the review approves and CI is green, and never pushes or merges to `main`.
@@ -241,8 +242,8 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
 - **Codex:** managed worktrees, keeping the 15 most recent. Conflicts aren't described.
 - **Others:** Devin uses child VMs, and its coordinator "resolves conflicts". Copilot uses one branch per task.
 - **Open for Oby:**
-  - Proposal: predict overlap with Tetrix `code_impact`, and have Swift run overlapping jobs in sequence.
-  - Decide: nothing yet.
+  - Decided 2026-10-10: Oby plans the work to keep conflicts rare. Each job claims the files it will touch, and overlapping jobs run one after another.
+  - With Tetrix, `code_impact` predicts overlap. Without it, the Lead's list is checked against the real diff (X.7).
 
 ### 2.2 Risky command: a permission prompt with nobody watching
 - **What happens:** Oby's policy answers. Work inside the worktree is allowed. GitHub, other MCP servers, Oby's secrets and pushing are denied. Goes back to the work, or to 2.3 if the job can't proceed.
@@ -400,10 +401,9 @@ The reviewer is a teammate today and another Oby later (F12). Oby watches the PR
 - **Codex:** `@codex fix the P1 issue` pushes if allowed. Handling of requested changes isn't documented.
 - **Others:** Devin's Auto-Fix pushes commits. It acts on other bots' comments only if allowed, because "all bots" can loop. Copilot acts only on @copilot.
 - **Open for Oby:**
+  - Decided 2026-10-10: only reviews that request changes start a round, to keep cost down. Plain comments are read as context in that round.
   - Proposal: the runner polls Oby's open PRs every minute.
-  - Decide: act on every comment, or only on change requests?
-  - Decide: whose comments count (repo members only)?
-  - Decide: how many review rounds before it asks you?
+  - Proposal: after 3 review rounds, Oby asks you (Bugbot stops at 3).
 
 ### 5.3 CI red on the PR
 - **What happens:** the failing check's log goes to the job as another round, exactly like 5.2. Goes to 3.
@@ -416,16 +416,17 @@ The reviewer is a teammate today and another Oby later (F12). Oby watches the PR
   - Decide: nothing new; it follows 5.2.
 
 ### 5.4 Conflict: dev moved under the PR
-- **What happens:** Oby brings dev into the job's branch, the agent resolves the conflicts, tests again and pushes. Goes to 3.
+- **What happens:** Oby rebases the job's branch onto dev, the agent resolves the conflicts, the tests run again, and Oby pushes. Goes to 3.
 - **Oby today:** Missing.
 - **Claude Code:** GitHub sends no event for a conflict. You ask Claude to rebase, or press "Resolve conflicts".
 - **Cursor:** not found.
 - **Codex:** not automatic.
 - **Others:** Copilot has `@copilot` and a "Fix with Copilot" button. Devin has a scheduled check for stale PRs.
 - **Open for Oby:** nobody does this on their own.
-  - Proposal: check mergeability while watching the PR.
-  - AGENTS.md now lets Oby force-push branches it created, so rebasing a job's own branch is allowed.
-  - Decide: rebase, or merge dev in?
+  - Decided 2026-10-10: always rebase, never merge dev in, and only once the job is done.
+  - Oby rebases when the PR opens, and again whenever a conflict appears while it waits for review. The tests run again (3.2), and Oby force-pushes the job's own branch, which AGENTS.md allows.
+  - Proposal: GitHub's merge queue does this natively for PRs waiting together. It's off for oby today.
+  - Note: a rebase after approval may need a fresh approval, depending on branch rules ("dismiss stale approvals").
 
 ---
 
