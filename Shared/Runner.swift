@@ -279,7 +279,7 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
 }
 
 extension Job {
-    #if os(iOS)
+    #if os(iOS) || os(watchOS)
     nonisolated var pullRequestState: String? { pullRequest?.state }
     nonisolated var reviewDecision: String? { pullRequest?.reviewDecision }
     #else
