@@ -60,7 +60,7 @@ While agents work, I sit quietly in the notch with a tiny counter. Hover over me
   <img src="docs/images/needs-approval.webp" width="410" alt="Claude Code finished a review: post it with Touch ID, read it first, or later">
 </p>
 
-When an agent wants to run something, you can allow it once, always for that repository, or say no, right from the notch. When work is ready to go out as you, a review, a comment or a pull request, you see exactly what will be sent and you confirm it with Touch ID.
+When an agent wants to run something, you can allow it once, always for that repository, or say no, right from the notch. When a job's check passes and the secret scan is clean, Oby pushes its branch and opens the pull request by itself, ready for your review. A review or a comment going out as you is shown first, and you confirm it with Touch ID.
 
 <p align="center">
   <img src="docs/images/needs-touch-id.webp" width="820" alt="Touch ID before Oby posts a review as you">
@@ -147,7 +147,7 @@ The more I know how you work, the better I dispatch. I read the sources you allo
 The rules I live by:
 
 - **I never merge.** Merging, force-pushing and pushing to main stay with you.
-- **Nothing goes out as you without your OK.** Every review, comment, push and pull request is shown first and confirmed with Touch ID.
+- **Nothing goes out that didn't pass.** A pull request opens by itself only once the job's check passed and the secret scan is clean, and it waits for a review before it merges. Every review and comment is shown first and confirmed with Touch ID.
 - **I check for secrets** in everything I’m about to send, and I stop if I find one.
 - **Every job has limits** on time and cost, and **⌃⌥⌘.** stops all of them at once.
 - **I only listen while you hold fn.**

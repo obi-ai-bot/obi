@@ -27,7 +27,7 @@ final class DevicesTests {
     let folder: URL
     let devices: Devices
     let key = P256.Signing.PrivateKey()
-    let action = "Push oby/fix-ab12cd to deskree-inc/oby and open a draft pull request into dev."
+    let action = "Push oby/fix-ab12cd to deskree-inc/oby and open a pull request into dev."
     let now = Date(timeIntervalSince1970: 1_791_582_173)
 
     init() throws {
@@ -68,7 +68,7 @@ final class DevicesTests {
     }
 
     @Test func theActionMustBeTheRunnersOwn() throws {
-        let other = "Push oby/fix-ab12cd to deskree-inc/oby and open a draft pull request into main."
+        let other = "Push oby/fix-ab12cd to deskree-inc/oby and open a pull request into main."
         #expect(refusal(try approval(device: try register(), action: other)) == .forbidden)
     }
 
@@ -272,9 +272,9 @@ final class APITests {
         let json = String(decoding: try API.encode(JobJSON(job: job)), as: UTF8.self)
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
-        for key in ["base", "session", "finished", "commits", "published", "pushed", "issue", "check", "model", "notes"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
+        for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "check", "model", "notes"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 26)
+        #expect(decoded.count == 28)
         #expect(decoded["rounds"] as? Int == 1 && decoded["round"] as? Int == 1)
         #expect(decoded["kind"] as? String == "review" && decoded["pr"] as? Int == 33 && decoded["status"] as? String == "queued")
     }
@@ -467,13 +467,13 @@ final class PushTests {
         done.base = "dev"
         done.commits = 2
         #expect(done.canPublish && done.unpublished == 2 && done.needsYou)
-        #expect(Publish.action(for: done, base: "dev") == "Push oby/review-33 to deskree-inc/oby and open a draft pull request into dev.")
+        #expect(Publish.action(for: done, base: "dev") == "Push oby/review-33 to deskree-inc/oby and open a pull request into dev.")
         done.published = "https://github.com/deskree-inc/oby/pull/42"
         #expect(done.pushed == 2 && done.unpublished == 0 && !done.canPublish && Push.notice(for: done) == nil)
         // Another round made one more commit.
         done.commits = 3
         #expect(done.canPublish && done.unpublished == 1 && Push.notice(for: done) == .ready)
-        #expect(Publish.action(for: done, base: "dev") == "Push the new commits on oby/review-33 to deskree-inc/oby, for its draft pull request into dev.")
+        #expect(Publish.action(for: done, base: "dev") == "Push the new commits on oby/review-33 to deskree-inc/oby, for its pull request into dev.")
         // Published again: the pull request has them all.
         done.published = "https://github.com/deskree-inc/oby/pull/42"
         #expect(done.pushed == 3 && !done.canPublish)
@@ -496,7 +496,11 @@ final class PushTests {
         let alert = object(try Push.notification(.ready, for: ready))
         let aps = try #require(alert["aps"] as? [String: Any])
         #expect(alert["job"] as? String == "9f08fd10" && aps["category"] as? String == "ready" && aps["timestamp"] == nil)
-        #expect(aps["alert"] as? [String: String] == ["title": "Ready to publish: Review oby #33", "body": "Fixed the review comments."])
+        #expect(aps["alert"] as? [String: String] == ["title": "Couldn't publish: Review oby #33", "body": "Fixed the review comments."])
+        // Why Oby couldn't publish it by itself, when it knows.
+        ready.publishError = "Couldn't push oby/review-33: the remote hung up."
+        let why = try #require(object(try Push.notification(.ready, for: ready))["aps"] as? [String: Any])
+        #expect(why["alert"] as? [String: String] == ["title": "Couldn't publish: Review oby #33", "body": "Couldn't push oby/review-33: the remote hung up."])
 
         var failed = job
         failed.status = .failed

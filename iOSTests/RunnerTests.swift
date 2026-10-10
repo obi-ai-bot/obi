@@ -90,9 +90,9 @@ struct RunnerTests {
 
     /// The bytes the Face ID key signs must be exactly what the runner checks.
     @Test func approvalMessage() {
-        let message = Approval.message(job: "abc", action: "Push oby/fix-1 to deskree-inc/oby and open a draft pull request into dev.", signedAt: "2026-10-09T22:01:07Z")
+        let message = Approval.message(job: "abc", action: "Push oby/fix-1 to deskree-inc/oby and open a pull request into dev.", signedAt: "2026-10-09T22:01:07Z")
         #expect(String(decoding: message, as: UTF8.self)
-                == "oby-publish\nabc\nPush oby/fix-1 to deskree-inc/oby and open a draft pull request into dev.\n2026-10-09T22:01:07Z")
+                == "oby-publish\nabc\nPush oby/fix-1 to deskree-inc/oby and open a pull request into dev.\n2026-10-09T22:01:07Z")
     }
 
     @Test func publishOnlyWithCommits() throws {

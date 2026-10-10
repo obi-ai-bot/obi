@@ -29,6 +29,12 @@ struct JobScreen: View {
                         if !job.extras.isEmpty {
                             Text(job.extras).font(.footnote).foregroundStyle(.white.opacity(0.6))
                         }
+                        // The runner publishes a job that ends done with commits by itself: it says how that went.
+                        if job.canPublish, let reason = job.publishError {
+                            Label(reason, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.orange)
+                        } else if job.published != nil, !job.canPublish {
+                            Label("Published", systemImage: "checkmark.seal").font(.footnote).foregroundStyle(.green)
+                        }
                     }
                     if job.isActive, !job.step.isEmpty {
                         Label(job.step, systemImage: "gearshape.2").font(.subheadline)
@@ -155,9 +161,9 @@ struct JobScreen: View {
             wide("Stop", filled: false) { await run { try await phone.stop(job.id) } }
         }
         if let link = job.published.flatMap(URL.init(string:)) {
-            wide("Open the draft pull request", filled: !job.canPublish) { openURL(link) }
+            wide("Open the pull request", filled: !job.canPublish) { openURL(link) }
         }
-        // Before the first publish, or when later rounds made commits the pull request doesn't have yet.
+        // The runner's own publish failed: before the first publish, or with later rounds' commits.
         if job.canPublish {
             if let action {
                 VStack(alignment: .leading, spacing: 10) {

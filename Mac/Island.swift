@@ -727,7 +727,8 @@ private struct StrongerModel: View {
 }
 
 /// One job: what it is, what it's doing now, and how it ended. Click a finished one to read its
-/// summary; a done one can be published, after Oby shows exactly what that does. A running or
+/// summary; a done one whose own publish failed can be published by hand, after Oby shows exactly
+/// what that does. A running or
 /// opened one takes a word for its agent.
 private struct JobRow: View {
     let job: Job
@@ -767,9 +768,9 @@ private struct JobRow: View {
                 }
                 status
                 if let link = job.published.flatMap(URL.init(string:)) {
-                    Link(destination: link) { pill("Draft PR") }
+                    Link(destination: link) { pill("Pull request") }
                 }
-                // Before the first publish, or when later rounds made commits the pull request doesn't have yet.
+                // Oby's own publish failed: before the first publish, or with later rounds' commits.
                 if job.canPublish {
                     if onPublish == nil {
                         Text("Publish from your iPhone").font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
@@ -790,6 +791,9 @@ private struct JobRow: View {
             // Only the top line opens and closes the row, so clicks in the field below stay there.
             .contentShape(Rectangle())
             .onTapGesture { if !job.isActive { expanded.toggle() } }
+            if job.canPublish, let reason = job.publishError {
+                Text(reason).font(.system(size: 12)).foregroundStyle(.orange).lineLimit(3)
+            }
             if expanded, !job.summary.isEmpty {
                 ScrollView {
                     Text(job.summary).font(.system(size: 13)).foregroundStyle(.white.opacity(0.85))
@@ -899,7 +903,8 @@ private struct JobRow: View {
         let (text, color): (String, Color) = switch job.status {
         case .queued: ("Starting", .blue)
         case .running: ("Working", .blue)
-        case .done where job.canPublish: ("Ready to publish", .orange)
+        case .done where job.canPublish: (job.publishError == nil ? "Ready to publish" : "Couldn't publish", .orange)
+        case .done where job.published != nil: ("Published", .green)
         case .done: ("Done", .green)
         case .failed: ("Failed", .red)
         case .stopped: ("Stopped", .gray)

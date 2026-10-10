@@ -34,11 +34,16 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var finished: Date?
     /// Commits the job made beyond its base: something to publish.
     var commits: Int?
-    /// The draft pull request Oby opened for it, once the user approved. Publishing (Desk.publish
-    /// sets this) also notes how many commits went out, so later rounds' commits can follow.
+    /// The pull request Oby opened for it. Publishing (by itself when the job ends, or Desk.publish)
+    /// also notes how many commits went out, so later rounds' commits can follow.
     var published: String? { didSet { if published != nil { pushed = commits } } }
     /// Commits on the pull request when Oby last published, or nil before then.
     var pushed: Int?
+    /// Why Oby couldn't publish it by itself (push or pull request failed), or nil. Publishing by
+    /// hand is offered then.
+    var publishError: String?
+    /// Every round's summary, oldest first, for the pull request's description.
+    var summaries: [String]?
     /// The issue the work is about.
     var issue: Int?
     /// How many rounds the agent may take (nil: one), and the round it's on.
@@ -60,9 +65,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Commits beyond its base that aren't on its pull request yet: all of them before it's
     /// published, then the ones later rounds made. A job published before Oby counted has none.
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
-    /// Done, with commits that aren't on its pull request yet.
+    /// Done, with commits that aren't on its pull request yet: Oby publishes it when it ends, and
+    /// offers Publish when that failed.
     var canPublish: Bool { status == .done && base != nil && unpublished > 0 }
-    /// Waiting for Publish, failed or interrupted: what an alert is sent for, and what Home counts.
+    /// Waiting for Publish (its own publish failed), failed or interrupted: what an alert is sent for, and what Home counts.
     var needsYou: Bool { canPublish || status == .failed || status == .interrupted }
     var agentName: String { Job.agentNames[agent] ?? agent }
     static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
@@ -341,7 +347,7 @@ nonisolated enum StreamJSON {
 }
 
 /// Oby's answers to an agent's permission prompts until F3 brings them to the notch: work
-/// inside the job's worktree is allowed, publishing is not.
+/// inside the job's worktree is allowed, publishing is not (only Oby publishes).
 nonisolated enum Policy {
     // ponytail: a pattern deny-list is leaky on purpose-built commands; the real fences are that
     // the agent has no GitHub login and Oby's clone can't push. F3 asks the user instead.
@@ -363,7 +369,7 @@ nonisolated enum Policy {
             return nil
         }
         if tool == "Bash", let command = input["command"] as? String, command.contains(publishing) {
-            return "Oby publishes only after the user approves it in the notch. Don't push or post; say in your summary what you'd publish."
+            return "Oby publishes the job's branch itself once the work is done. Don't push or post; say in your summary what you'd publish."
         }
         if let path = (input["file_path"] ?? input["notebook_path"]) as? String {
             let root = worktree.standardizedFileURL.path + "/"
@@ -561,7 +567,7 @@ nonisolated enum Workspace {
         if !FileManager.default.fileExists(atPath: clone.appending(path: ".git").path) {
             try FileManager.default.createDirectory(at: clone.deletingLastPathComponent(), withIntermediateDirectories: true)
             try await Shell.ok(["gh", "repo", "clone", job.repo, clone.path])
-            // Nothing is pushed from Oby's clone: publishing goes through the notch (F3).
+            // Nothing is pushed from Oby's clone: only Publish pushes, to GitHub's URL.
             try await git(["config", "remote.origin.pushurl", "oby-publishes-only-through-the-notch"])
             let exclude = clone.appending(path: ".git/info/exclude")
             let excluded = (try? String(contentsOf: exclude, encoding: .utf8)) ?? ""
@@ -631,7 +637,7 @@ nonisolated enum Prompts {
         }
         lines.append("What the user asked for: \(job.task)")
         lines.append("If the tetrix MCP server is connected, use it for questions about code structure, ownership and impact before reading many files: it saves tokens.")
-        lines.append("Commit your changes on this branch when they're ready. Commits here are unsigned: Oby signs them when it publishes. Don't push, open pull requests or post anything to GitHub: Oby publishes only after the user approves.")
+        lines.append("Commit your changes on this branch when they're ready. Commits here are unsigned: Oby signs them when it publishes. Don't push, open pull requests or post anything to GitHub: Oby publishes the branch itself once the work is done.")
         if Job.committing.contains(job.kind) {
             lines.append("If you can't commit, say why in your summary's first line: a \(job.kind.rawValue) job that ends with no commits counts as nothing committed.")
         }

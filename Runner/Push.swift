@@ -8,7 +8,7 @@ import OSLog
 
 /// Push to the iPhone, through Apple's push service: the Live Activity keeps the Lock Screen and
 /// Dynamic Island in step with the jobs while Oby is suspended, and an alert says when a job needs
-/// the user (ready to publish, failed or interrupted), and nothing else. On only when `folder`
+/// the user (its own publish failed, it failed, or it was interrupted), and nothing else. On only when `folder`
 /// holds `apns.json` (`{"team": …, "key": …}`) and that key's `AuthKey_<key>.p8`, which never
 /// leaves the folder.
 @MainActor
@@ -57,7 +57,7 @@ final class Push {
 
     /// What a job needs from the user, the only thing an alert is for.
     enum Notice: String, Codable {
-        /// Done with commits and not published: it waits for Publish.
+        /// Done with commits Oby couldn't publish by itself: it waits for Publish.
         case ready
         case failed
         case interrupted
@@ -303,11 +303,13 @@ final class Push {
         }
         let state = State(job, working: 0)
         let title = switch notice {
-        case .ready: "Ready to publish: \(state.title)"
+        case .ready: "Couldn't publish: \(state.title)"
         case .failed: "Failed: \(state.title)"
         case .interrupted: "Interrupted: \(state.title)"
         }
-        let aps: [String: any Encodable] = ["alert": ["title": title, "body": state.line], "sound": "default",
+        // Why its own publish failed, when that's what it needs.
+        let body = notice == .ready ? job.publishError ?? state.line : state.line
+        let aps: [String: any Encodable] = ["alert": ["title": title, "body": body], "sound": "default",
                                             "category": notice == .ready ? "ready" : "job", "thread-id": "jobs"]
         return try encoder.encode(Fields(["aps": Fields(aps), "job": job.id]))
     }
