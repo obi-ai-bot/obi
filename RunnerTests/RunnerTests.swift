@@ -557,6 +557,8 @@ struct SandboxTests {
 
         #expect(argv.first == "bwrap" && argv.suffix(3) == ["--", "claude", "-p"])
         #expect(at("--ro-bind", "/", "/", in: argv) != nil && at("--unshare-pid", in: argv) != nil)
+        // Its death signal would follow the idle Dispatch thread that started bwrap.
+        #expect(!argv.contains("--die-with-parent"))
         // Home is empty; only the tools, git's settings and Oby's own folder come back.
         #expect(at("--tmpfs", home, in: argv) != nil)
         #expect(at("--overlay-src", home, in: argv) == nil)
@@ -607,6 +609,21 @@ struct SandboxTests {
         let paths = Agents.tools + [".gitconfig", ".config/git"] + [Workspace.root.path].filter { $0.hasPrefix("\(home)/") }.map { String($0.dropFirst(home.count + 1)) }
         #expect(process.terminationStatus == 0)
         #expect(Set(listed).isSubset(of: paths.map { String($0.split(separator: "/")[0]) }), "\(listed)")
+    }
+
+    /// An agent started from a Dispatch worker, as Foundation starts processes, outlives that thread
+    /// going idle (about 5 s); with bwrap's --die-with-parent it died with SIGKILL mid-turn.
+    @Test(.enabled(if: bubblewrapRuns))
+    func agentsOutliveTheThreadThatStartedThem() async throws {
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/env")
+        process.arguments = Agents.sandboxed(["sleep", "30"], in: nil, own: nil)
+        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, any Error>) in
+            DispatchQueue.global().async { done.resume(with: Result { try process.run() }) }
+        }
+        try await Task.sleep(for: .seconds(8))
+        #expect(process.isRunning)
+        process.terminate()
     }
 
     /// Codex's own bubblewrap can't nest inside Oby's, so it runs none and asks Oby about every command.

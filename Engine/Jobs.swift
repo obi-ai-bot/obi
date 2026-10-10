@@ -627,7 +627,11 @@ nonisolated enum Agents {
     static func sandboxed(_ argv: [String], in worktree: URL?, own: String?, bubblewrap: Bool = Agents.bubblewrap) -> [String] {
         guard bubblewrap else { return argv }
         let exists = { (path: String) in FileManager.default.fileExists(atPath: path) }
-        var args = ["bwrap", "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+        // Never --die-with-parent: its death signal follows the thread that started bwrap, and Foundation
+        // starts processes on Dispatch worker threads, which exit after about 5 s idle: agents died with
+        // SIGKILL mid-turn (proven 2026-10-10 on tetrix-lab). systemd ends them with the runner instead
+        // (KillMode=control-group).
+        var args = ["bwrap", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
                     "--tmpfs", "/tmp", "--tmpfs", home]
         for folder in tools.map({ "\(home)/\($0)" }) where exists(folder) { args += ["--overlay-src", folder, "--tmp-overlay", folder] }
         for settings in [".gitconfig", ".config/git"] { args += ["--ro-bind-try", "\(home)/\(settings)", "\(home)/\(settings)"] }
