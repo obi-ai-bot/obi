@@ -19,7 +19,8 @@ signal(SIGPIPE, SIG_IGN)
 try FileManager.default.createDirectory(at: Workspace.root, withIntermediateDirectories: true)
 
 let desk = Desk()
-let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: "devices.json")))
+let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: "devices.json")),
+              push: Push(desk: desk, folder: Workspace.root.appending(path: "apns")))
 
 // systemd stops the runner with SIGTERM: agents end now, and their jobs show as interrupted.
 // The sources live as long as the runner.

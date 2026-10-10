@@ -39,10 +39,27 @@ Put the owner's Tailscale login in place of `you@example.com` (`tailscale status
 | Variable | What it is |
 | --- | --- |
 | `OBY_OWNER` | The owner's Tailscale login. Required. |
-| `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs), `accounts.json`, `devices.json` (the phones that may approve publishing), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
+| `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs), `accounts.json`, `devices.json` (the phones that may approve publishing), `apns/` (the APNs key and the phones' Live Activity tokens), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
 | `OBY_PORT` | The port on `127.0.0.1`. 7777 by default. |
 
 The models and efforts the app picks in Settings › Models are kept in `~/.config/oby-runner.plist`.
+
+## Live Activity push
+
+With an APNs key, the runner keeps the iPhone's Live Activity current while the app is suspended, and starts it when a job begins with the app closed ([`POST /v1/activities`](../docs/runner-api.md)). Without one it runs as before, and the app catches up when it opens.
+
+1. In the Apple Developer account of the iPhone app's team, make a key with Apple Push Notifications service (APNs) on. Download `AuthKey_<KEY ID>.p8`: Apple lets you download it once.
+2. Put it in `apns/` in `OBY_HOME`, readable only by the runner's user, with `apns.json` beside it:
+
+   ```sh
+   install -d -m 700 /srv/nvme/oby/apns
+   install -m 600 AuthKey_ABC123DEFG.p8 /srv/nvme/oby/apns/
+   echo '{"team": "PQKAL8E36D", "key": "ABC123DEFG"}' > /srv/nvme/oby/apns/apns.json
+   systemctl --user restart oby-runner
+   ```
+
+   `team` is the Team ID, `key` the Key ID. The log says `Live Activity push is on` (or why it's off). The key never leaves that folder; don't commit or copy it anywhere else.
+3. The app hands over its tokens when it opens. Pushes go out with `curl --http2` (the runner needs curl with HTTP/2, as Ubuntu's has), to Apple's development service for builds from Xcode and its production one for TestFlight.
 
 ## Put it on the tailnet
 

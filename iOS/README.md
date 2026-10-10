@@ -9,7 +9,7 @@ What it does today:
 - Publish a finished job: Oby shows the exact action, and Face ID signs it with a key that lives in the iPhone's Secure Enclave. Nothing is published without it, and Oby never merges.
 - Settings: the runner's address, its accounts, and each tool's model and effort.
 - Clear done: hides finished jobs from Home. The runner keeps every job.
-- A Live Activity while agents work: Oby, the job, its step and a clock, on the Lock Screen and in the Dynamic Island, ending with how the last job finished. The app updates it while it's open (the `ObyActivity` extension in `LiveActivity/` draws it). Once the app is in the background, the step stays where it was (the clock keeps ticking), and after a minute it says "Open Oby for the latest". When the job ends, the runner's `GET /v1/jobs/{id}/wait` wakes the app (a background download), and the card says "Done" or "Failed".
+- A Live Activity while agents work: Oby, the job, its step and a clock, on the Lock Screen and in the Dynamic Island, ending with how the last job finished. The app updates it while it's open (the `ObyActivity` extension in `LiveActivity/` draws it). In the background the runner pushes it (`POST /v1/activities`): new steps, "Done" or "Failed" when the last job ends, and a push-to-start when a job begins while the app is closed. On a runner without an APNs key, the step stays where it was (the clock keeps ticking), after a minute it says "Open Oby for the latest", and the runner's `GET /v1/jobs/{id}/wait` wakes the app when the job ends so the card says "Done" or "Failed". Push needs the `aps-environment` entitlement (`iOS/Oby.entitlements`): a build from Xcode uses Apple's development push service, TestFlight its production one.
 
 ## Run it
 
@@ -42,5 +42,5 @@ The app says it uses only exempt encryption (`ITSAppUsesNonExemptEncryption` = N
 
 ## Coming next
 
-- Live Activity updates in the background, and notifications, once the Oby platform can push (F11, spike #27). Push needs an APNs key from a paid Apple Developer team: Wellington's team can make one now.
+- Notifications beyond the Live Activity, once the Oby platform can push (F11, spike #27). The runner's Live Activity push uses Wellington's team's APNs key until then.
 - Talking to Oby, and the Apple Watch app (`Watch/`).

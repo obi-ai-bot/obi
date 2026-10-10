@@ -146,7 +146,7 @@ One job.
 
 Answers once the job has ended (`done`, `failed`, `stopped` or `interrupted`) with the `Job`, or right away if it already has. Until then it sends a space every 15 seconds to keep the connection open, so the body is the job's JSON after some whitespace. `404` for a job the runner doesn't know.
 
-The iPhone app waits on this as a background download: iOS keeps it going while the app is suspended and wakes the app when it's answered, so the Live Activity can say how the job ended without push.
+The iPhone app waits on this as a background download: iOS keeps it going while the app is suspended and wakes the app when it's answered, so the Live Activity can say how the job ended even on a runner without push (`POST /v1/activities`).
 
 ### `POST /v1/jobs/{id}/stop`
 
@@ -219,6 +219,25 @@ Registers the phone's publishing key, once per device:
 ```
 
 `publicKey` is the P-256 public key, X9.63 (65 bytes, uncompressed), base64. It returns `{"id": "d7c1…"}`. Only the runner's owner can register (the tailnet header); the runner lists devices in its log.
+
+### `POST /v1/activities`
+
+Hands the runner a Live Activity push token, so it can keep the phone's Lock Screen and Dynamic Island current while the app is suspended:
+
+```json
+{"token": "80a1f2…", "kind": "update", "topic": "dev.wellprado.oby", "environment": "development"}
+```
+
+- `token`: the push token in hex. `kind`: `"update"` for one activity's token, `"start"` for the app's push-to-start token (a newer one replaces the older for the same app and environment). `topic`: the app's bundle ID. `environment`: `"development"` (a build from Xcode) or `"production"` (TestFlight and the App Store).
+- It returns `{"push": true}` when the runner pushes, `{"push": false}` when it has no APNs key (the token isn't kept). `422` for a token, kind, topic or environment that isn't one of those.
+
+Two seconds after a job changes, the runner pushes what its jobs look like then (one Live Activity, as the app shows it):
+
+- **A job is active** and the runner has update tokens: an `update` with the newest active job (priority 5, skipped when nothing the card shows changed).
+- **A job is active**, no update tokens, and it hasn't started one yet: a push-to-start (`start`, priority 10, with an alert) to the start tokens. The phone then hands over the new activity's update token.
+- **Nothing is active:** an `end` with how the last job finished, an alert ("Done" or "Failed"), and a dismissal 15 minutes after it finished; then the update tokens are dropped.
+
+Apple's answer `410` or `BadDeviceToken` drops a token. The runner keeps tokens in `apns/tokens.json`.
 
 ### `GET /v1/settings/models` and `PUT /v1/settings/models`
 
