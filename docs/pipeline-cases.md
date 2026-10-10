@@ -25,7 +25,25 @@ The plan for making Oby run Deskree's whole pipeline by itself, case by case. Th
   - Nothing goes out unless the checks, the Lead's review and the secret scan pass.
   - Vault secrets never reach an agent.
 
-## Working assumptions (not decided)
+## Roadmap
+
+Being built in deskree-inc/oby#68, in this order:
+1. #62 Before Oby works alone: logs, honest endings, fenced secrets, a true board
+2. #63 Spike: the Lead's turn
+3. #64 Oby leads
+4. #65 Your inbox and a conversation
+5. #66 From PR to merge without you
+6. #67 Oby learns how you decide
+
+Related issues:
+- F17 #60: the vault.
+- F12 #16: Oby-to-Oby reviews.
+- F14 #18: models chosen at first launch.
+- F3 #7: rewritten as "Safe when nobody is watching".
+- F6 #10: Gemini is out of the MVP.
+- #28: Tetrix sign-in.
+
+## How it works
 
 - **Lead:** one Claude Code session per goal. Events wake it: your message, a job ending, a job stuck. It reads the roadmap, Oby's jobs and Tetrix, starts jobs, and reviews them. It answers with typed actions that Swift checks.
 - **Jobs:** Claude Code and Codex agents, each in its own worktree off Oby's clone, spread across your accounts.
@@ -94,7 +112,7 @@ Before stage 1. People connect only what they have. That decides which model the
 - **Jobs work with:** every connected account, routed by usage. The score is the higher of the 5-hour and 7-day use, plus 0.15 per running job.
 - **Oby today:** Partial. Jobs are routed across Claude and Codex, and the brain is always Claude.
 - **Decided 2026-10-10:** you pick the Lead's model at first launch, like the jobs' models. If you connect a new tool later, Oby asks in the conversation whether to change anything: no pop-ups.
-- **Proposal:** the Lead's own usage counts toward routing.
+- **Approved 2026-10-10:** the Lead's own usage counts toward routing.
 
 ---
 
@@ -273,8 +291,8 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
   - Proposal: answer in this order: Oby's fixed rules, then what you allowed before (X.4), then the Lead's judgment, then you. Your answer is remembered.
   - Proposal: fence Oby's own secrets off on tetrix-lab.
   - Decided 2026-10-10: network by allowlist. The first time a job wants a new site, it asks you. A yes adds that site to your allowlist, shown as a rule you can remove.
-  - Proposal: start from a small list of package registries, so the first job doesn't flood your inbox, the way Claude Code cloud's "Trusted" level does.
-  - Proposal: ask separately before a job sends data to a new site, because that's how secrets leak. The vault's proxy enforces both rules.
+  - Approved 2026-10-10: start from a small list of package registries, so the first job doesn't flood your inbox, the way Claude Code cloud's "Trusted" level does.
+  - Approved 2026-10-10: ask separately before a job sends data to a new site, because that's how secrets leak. The vault's proxy enforces both rules.
 
 ### 2.3 Stuck: needs a decision only you can make
 - **What happens:** the job asks the Lead first. The Lead answers from the issue, the roadmap, Tetrix and past jobs. Only a real product decision reaches you, as one question with options. Goes back to 2, or to you.
@@ -379,7 +397,7 @@ Decided 2026-10-10: no confirmation. The PR opens once the check passes and the 
 - **Open for Oby:**
   - Decided 2026-10-10: under your GitHub account, always ready for review, never a draft.
   - Signing is automatic. Agents commit unsigned, and Oby signs at push with your own signing key, which never reaches an agent. On tetrix-lab the key lives in the vault (F17). GitHub signs the squash-merge into `dev`.
-  - Proposal: the PR and Oby's comments say "by Oby", so teammates know a machine wrote them.
+  - Approved 2026-10-10: the PR and Oby's comments say "by Oby", so teammates know a machine wrote them.
 
 ### 4.2 Secret in the diff
 - **What happens:** a hard stop: the PR doesn't open. The job removes the secret and the scan runs again. If it's still there, it comes to you. Goes to 2, or to you.
@@ -419,8 +437,8 @@ The reviewer is a teammate today and another Oby later (F12). Oby watches the PR
 - **Others:** Devin's Auto-Fix pushes commits. It acts on other bots' comments only if allowed, because "all bots" can loop. Copilot acts only on @copilot.
 - **Open for Oby:**
   - Decided 2026-10-10: only reviews that request changes start a round, to keep cost down. Plain comments are read as context in that round.
-  - Proposal: the runner polls Oby's open PRs every minute.
-  - Proposal: after 3 review rounds, Oby asks you (Bugbot stops at 3).
+  - Approved 2026-10-10: the runner polls Oby's open PRs every minute.
+  - Approved 2026-10-10: after 3 review rounds, Oby asks you (Bugbot stops at 3).
 
 ### 5.3 CI red on the PR
 - **What happens:** the failing check's log goes to the job as another round, exactly like 5.2. Goes to 3.
