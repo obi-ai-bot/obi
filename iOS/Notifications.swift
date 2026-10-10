@@ -28,7 +28,8 @@ final class Notifications: NSObject, UIApplicationDelegate, UNUserNotificationCe
         return true
     }
 
-    /// The first job dispatched from the phone asks whether Oby may notify; after that it doesn't ask again.
+    /// The first connection to a runner, or the first job dispatched from the phone, asks whether
+    /// Oby may notify; after that it doesn't ask again.
     static func ask() {
         Task {
             let center = UNUserNotificationCenter.current()
