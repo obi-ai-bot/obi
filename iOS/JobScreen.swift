@@ -22,7 +22,7 @@ struct JobScreen: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(job.title).font(.title2.weight(.semibold))
                         HStack(spacing: 8) {
-                            StatusPill(status: job.status)
+                            StatusPill(job: job)
                             Text("\(job.agentName) · \(phone.accounts.first { $0.id == job.account }?.name ?? job.account)")
                                 .font(.footnote).foregroundStyle(.white.opacity(0.6))
                         }
@@ -155,8 +155,10 @@ struct JobScreen: View {
             wide("Stop", filled: false) { await run { try await phone.stop(job.id) } }
         }
         if let link = job.published.flatMap(URL.init(string:)) {
-            wide("Open the draft pull request", filled: true) { openURL(link) }
-        } else if job.canPublish {
+            wide("Open the draft pull request", filled: !job.canPublish) { openURL(link) }
+        }
+        // Before the first publish, or when later rounds made commits the pull request doesn't have yet.
+        if job.canPublish {
             if let action {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(action).font(.subheadline.weight(.medium))
@@ -172,7 +174,9 @@ struct JobScreen: View {
                 .padding(14)
                 .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             } else {
-                wide("Publish…", filled: true) { await run { action = try await phone.publishAction(job.id) } }
+                wide(job.published == nil ? "Publish…" : "Publish the new commits…", filled: true) {
+                    await run { action = try await phone.publishAction(job.id) }
+                }
             }
         }
     }

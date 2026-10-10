@@ -430,7 +430,10 @@ private struct OpenIsland: View {
                 Text("Pick one, or type below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
             case .none:
                 let working = desk.active.count + runnerJobs.count(where: \.isActive)
-                Text(working == 0 ? "All quiet." : working == 1 ? "1 agent is working. Nothing needs you." : "\(working) agents are working. Nothing needs you.")
+                // What needs you among the jobs listed: ready to publish, failed or interrupted.
+                let needs = NeedsYou.line(finished).map { "\($0)." }
+                let agents = working == 1 ? "1 agent is working." : "\(working) agents are working."
+                Text(working == 0 ? needs ?? "All quiet." : "\(agents) \(needs ?? "Nothing needs you.")")
                     .font(.system(size: 19, weight: .semibold))
                 Text("Type a task below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
             }
@@ -763,13 +766,15 @@ private struct JobRow: View {
                         .accessibilityLabel("Round \(job.currentRound) of \(job.maxRounds)")
                 }
                 status
-                if job.status == .done, (job.commits ?? 0) > 0 {
-                    if let link = job.published.flatMap(URL.init(string:)) {
-                        Link(destination: link) { pill("Draft PR") }
-                    } else if onPublish == nil {
+                if let link = job.published.flatMap(URL.init(string:)) {
+                    Link(destination: link) { pill("Draft PR") }
+                }
+                // Before the first publish, or when later rounds made commits the pull request doesn't have yet.
+                if job.canPublish {
+                    if onPublish == nil {
                         Text("Publish from your iPhone").font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
                     } else if !confirming {
-                        Button { confirming = true } label: { pill("Publish") }
+                        Button { confirming = true } label: { pill(job.published == nil ? "Publish" : "Publish the new commits") }
                             .buttonStyle(.plain)
                     }
                 }
@@ -894,6 +899,7 @@ private struct JobRow: View {
         let (text, color): (String, Color) = switch job.status {
         case .queued: ("Starting", .blue)
         case .running: ("Working", .blue)
+        case .done where job.canPublish: ("Ready to publish", .orange)
         case .done: ("Done", .green)
         case .failed: ("Failed", .red)
         case .stopped: ("Stopped", .gray)

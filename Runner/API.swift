@@ -204,8 +204,8 @@ final class API {
     private func publishable(_ id: String) throws -> (Job, String) {
         let job = try known(id)
         guard job.canPublish, let base = job.base else {
-            throw APIError(.conflict, job.published != nil ? "It's already published." :
-                           job.status != .done ? "Nothing to publish: the job hasn't finished." : "Nothing to publish: the job made no commits.")
+            throw APIError(.conflict, job.status != .done ? "Nothing to publish: the job hasn't finished." :
+                           job.published != nil ? "It's already published, with every commit." : "Nothing to publish: the job made no commits.")
         }
         return (job, base)
     }
@@ -377,7 +377,7 @@ struct Options: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, issue, rounds, round, check, model, notes }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, issue, rounds, round, check, model, notes }
 
     func encode(to encoder: any Encoder) throws {
         try job.encode(to: encoder)
@@ -389,6 +389,7 @@ struct JobJSON: Encodable {
         if job.finished == nil { try nulls.encodeNil(forKey: .finished) }
         if job.commits == nil { try nulls.encodeNil(forKey: .commits) }
         if job.published == nil { try nulls.encodeNil(forKey: .published) }
+        if job.pushed == nil { try nulls.encodeNil(forKey: .pushed) }
         if job.issue == nil { try nulls.encodeNil(forKey: .issue) }
         // Rounds always has a value in the API: 1 when the job doesn't loop.
         try nulls.encode(job.maxRounds, forKey: .rounds)

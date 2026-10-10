@@ -272,9 +272,9 @@ final class APITests {
         let json = String(decoding: try API.encode(JobJSON(job: job)), as: UTF8.self)
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
-        for key in ["base", "session", "finished", "commits", "published", "issue", "check", "model", "notes"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
+        for key in ["base", "session", "finished", "commits", "published", "pushed", "issue", "check", "model", "notes"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 25)
+        #expect(decoded.count == 26)
         #expect(decoded["rounds"] as? Int == 1 && decoded["round"] as? Int == 1)
         #expect(decoded["kind"] as? String == "review" && decoded["pr"] as? Int == 33 && decoded["status"] as? String == "queued")
     }
@@ -458,6 +458,33 @@ final class PushTests {
         // Failed after being ready: the newer state replaces it. A job the desk forgot is forgotten.
         let replaced = Push.notices([failed], after: [job.id: .ready, "gone": .failed])
         #expect(replaced.changes.map(\.1) == [.failed] && replaced.notified == [job.id: .failed])
+    }
+
+    /// Talking to a published job can make new commits: those can be published too, onto the same pull request.
+    @Test func laterRoundsCommitsCanBePublished() throws {
+        var done = job
+        done.status = .done
+        done.base = "dev"
+        done.commits = 2
+        #expect(done.canPublish && done.unpublished == 2 && done.needsYou)
+        #expect(Publish.action(for: done, base: "dev") == "Push oby/review-33 to deskree-inc/oby and open a draft pull request into dev.")
+        done.published = "https://github.com/deskree-inc/oby/pull/42"
+        #expect(done.pushed == 2 && done.unpublished == 0 && !done.canPublish && Push.notice(for: done) == nil)
+        // Another round made one more commit.
+        done.commits = 3
+        #expect(done.canPublish && done.unpublished == 1 && Push.notice(for: done) == .ready)
+        #expect(Publish.action(for: done, base: "dev") == "Push the new commits on oby/review-33 to deskree-inc/oby, for its draft pull request into dev.")
+        // Published again: the pull request has them all.
+        done.published = "https://github.com/deskree-inc/oby/pull/42"
+        #expect(done.pushed == 3 && !done.canPublish)
+
+        // Loading a job doesn't count anything, and one published before Oby counted has nothing new.
+        var saved = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(done)) as? [String: Any])
+        saved["pushed"] = nil
+        let old = try JSONDecoder().decode(Job.self, from: JSONSerialization.data(withJSONObject: saved))
+        #expect(old.pushed == nil && old.published != nil && old.unpublished == 0 && !old.canPublish)
+        let loaded = try JSONDecoder().decode(Job.self, from: JSONEncoder().encode(done))
+        #expect(loaded.pushed == 3)
     }
 
     @Test func alertsSayWhatTheJobNeeds() throws {

@@ -36,6 +36,7 @@ This document is the contract between the runner and its clients. Change it in t
   "finished": null,
   "commits": null,
   "published": null,
+  "pushed": null,
   "issue": null,
   "rounds": 1,
   "round": 1,
@@ -50,8 +51,10 @@ This document is the contract between the runner and its clients. Change it in t
 - `step`: what it's doing now, while queued or running. `summary`: the agent's final message; its first line is the one-line notice.
 - A `build`, `fix` or `test` job that ends with no commits of its own is `failed`, and its `summary` starts with `Nothing committed: ` followed by the agent's first line.
 - `base`: the branch the work started from (filled in once the job is ready). `pr`: the pull request it works on, if any.
-- `commits`: commits made beyond `base` (set when a job ends as done). Publish is offered only when it's above 0.
+- `commits`: commits made beyond `base` (set when a job ends as done). Publish is offered only when some of them aren't on the pull request yet.
 - `published`: the draft pull request's URL once published.
+- `pushed`: how many of `commits` were on the pull request when it was last published, or null before then. A published job that ran again (`POST /v1/jobs/{id}/messages`) and ended `done` with `commits` above `pushed` has new commits to publish: offer "Publish the new commits". Publish pushes them to the same branch, so they land on the open pull request.
+- What needs you: a job that's `done` with commits not on its pull request (ready to publish), `failed` or `interrupted`. Say so where the apps would otherwise say nothing needs you.
 - `issue`: the GitHub issue the work is about. The runner fetches it for the agent, which has no GitHub login, and the draft pull request says `Closes #N`.
 - `rounds`: how many rounds the agent may take (1 means no loop); `round`: the one it's on.
 - `check`: a one-line command that must succeed for the work to count as done.
@@ -191,7 +194,9 @@ What publishing this job would do, in one sentence. The app shows exactly this b
 {"action": "Push oby/fix-ab12cd to deskree-inc/oby and open a draft pull request into dev.", "base": "dev"}
 ```
 
-`409` if there's nothing to publish (no commits, not done, already published).
+Once the job is published and has new commits, the sentence is about them: `"Push the new commits on oby/fix-ab12cd to deskree-inc/oby, for its draft pull request into dev."`
+
+`409` if there's nothing to publish (no commits, not done, or published with every commit).
 
 ### `POST /v1/jobs/{id}/publish`
 
@@ -209,7 +214,7 @@ Publishes after the user approved on a registered device. Nothing goes out witho
   - `action` matches its own sentence exactly;
   - `signedAt` is within 2 minutes;
   - this signature hasn't been used before.
-- Then it runs Publish: guards, the secret scan, push one pinned commit, draft pull request. It returns `{"url": "https://github.com/…/pull/42"}`, or an error line (for example the scan's findings, never the secret).
+- Then it runs Publish: guards, the secret scan, push one pinned commit, draft pull request (the one already open for the branch, if there is one). It returns `{"url": "https://github.com/…/pull/42"}`, or an error line (for example the scan's findings, never the secret).
 
 ### `POST /v1/devices`
 

@@ -25,7 +25,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var started: Date?
     var finished: Date?
     var commits: Int?
-    var published: String?
+    /// Setting it (a publish from this phone) counts what went out, as the runner does.
+    var published: String? { didSet { if published != nil { pushed = commits } } }
+    /// Commits on the pull request when it was last published.
+    var pushed: Int?
     /// Newer runners only, so all optional: the issue the work is about, how many rounds the agent
     /// may take and the one it's on, the command that must pass, the stronger model it runs on,
     /// and what the user told the agent along the way, oldest first.
@@ -55,7 +58,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         }
     }
 
-    var canPublish: Bool { status == .done && (commits ?? 0) > 0 && published == nil }
+    /// Commits not on its pull request yet: all of them before it's published, then later rounds' ones.
+    var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
+    var canPublish: Bool { status == .done && unpublished > 0 }
 
     /// Waiting for Publish, failed or interrupted: what the runner sends an alert for.
     var needsYou: Bool { canPublish || status == .failed || status == .interrupted }
@@ -184,6 +189,20 @@ nonisolated struct RunnerStatus: Codable, Equatable, Sendable {
 nonisolated enum RunnerEvent: Equatable, Sendable {
     case job(Job)
     case accounts([Account])
+}
+
+/// What needs the user among these jobs, in one line, like "2 jobs are ready to publish, 1 job
+/// failed", or nil when nothing does. Home on the iPhone and the Mac's island both say it.
+nonisolated enum NeedsYou {
+    static func line(_ jobs: [Job]) -> String? {
+        func count(_ n: Int, _ one: String, _ many: String) -> String? { n == 0 ? nil : n == 1 ? "1 job \(one)" : "\(n) jobs \(many)" }
+        let parts = [
+            count(jobs.count(where: \.canPublish), "is ready to publish", "are ready to publish"),
+            count(jobs.count { $0.status == .failed }, "failed", "failed"),
+            count(jobs.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
+        ].compactMap(\.self)
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
 }
 
 nonisolated struct RunnerError: LocalizedError {

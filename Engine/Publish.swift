@@ -25,8 +25,10 @@ nonisolated enum Publish {
     }
 
     /// The one sentence the user approves: shown in the notch, the Touch ID reason, and what a phone signs.
+    /// Once published, it pushes the new commits to the same branch, and `draft` finds the open pull request.
     static func action(for job: Job, base: String) -> String {
-        "Push \(job.branch) to \(job.repo) and open a draft pull request into \(base)."
+        job.published == nil ? "Push \(job.branch) to \(job.repo) and open a draft pull request into \(base)."
+            : "Push the new commits on \(job.branch) to \(job.repo), for its draft pull request into \(base)."
     }
 
     /// Guards, secret scan, `approve` with the action, push, draft pull request. The first refusal
