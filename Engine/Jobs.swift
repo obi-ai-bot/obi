@@ -528,6 +528,11 @@ nonisolated enum Policy {
             }
             return nil
         }
+        // Commands and subagents left running in the background outlive the turn, and nothing
+        // could answer their permission prompts.
+        if ["Bash", "Agent", "Task"].contains(tool), input["run_in_background"] as? Bool == true {
+            return "Run it in the foreground: Oby ends the session when your turn ends, and background work can't ask for permissions."
+        }
         if tool == "Bash", let command = input["command"] as? String, command.contains(publishing) {
             return "Oby publishes the job's branch itself once the work is done. Don't push or post; say in your summary what you'd publish."
         }

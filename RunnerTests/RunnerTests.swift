@@ -648,3 +648,31 @@ struct ConnectorTests {
         #expect(ClaudeBrain().environment["CLAUDE_CONFIG_DIR"] == .some(nil))
     }
 }
+
+/// Claude Code's background commands and subagents outlive the turn Oby ends the session on,
+/// so Policy sends them to the foreground.
+struct BackgroundWorkTests {
+    let worktree = URL(filePath: "/tmp/oby/jobs/9f08fd10")
+    let foreground = "Run it in the foreground: Oby ends the session when your turn ends, and background work can't ask for permissions."
+
+    @Test func backgroundCommandsAreDenied() {
+        let input: [String: Any] = ["command": "pnpm dev", "run_in_background": true]
+        #expect(Policy.deny(tool: "Bash", input: input, worktree: worktree) == foreground)
+    }
+
+    @Test func backgroundSubagentsAreDenied() {
+        for tool in ["Agent", "Task"] {
+            let input: [String: Any] = ["description": "Find callers", "prompt": "Find Policy's callers", "run_in_background": true]
+            #expect(Policy.deny(tool: tool, input: input, worktree: worktree) == foreground, "\(tool)")
+        }
+    }
+
+    @Test func foregroundCommandsAndSubagentsAreAllowed() {
+        for background in [nil, false] as [Bool?] {
+            var command: [String: Any] = ["command": "swift test"], subagent: [String: Any] = ["description": "Find callers", "prompt": "Find Policy's callers"]
+            if let background { command["run_in_background"] = background; subagent["run_in_background"] = background }
+            #expect(Policy.deny(tool: "Bash", input: command, worktree: worktree) == nil)
+            for tool in ["Agent", "Task"] { #expect(Policy.deny(tool: tool, input: subagent, worktree: worktree) == nil, "\(tool)") }
+        }
+    }
+}
