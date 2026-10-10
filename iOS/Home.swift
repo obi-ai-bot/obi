@@ -38,7 +38,7 @@ struct HomeView: View {
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
             .refreshable { await phone.reload() }
             .scrollDismissesKeyboard(.interactively)
-            .background(Color.black)
+            .background(Color(uiColor: .systemGroupedBackground))
             .navigationDestination(for: String.self) { JobScreen(id: $0) }
             .toolbar {
                 if jobs.contains(where: { !$0.isActive }) {
@@ -122,15 +122,15 @@ struct HomeView: View {
                 switch phone.talk {
                 case .thinking(let said):
                     Text("Thinking…").font(.title3.weight(.semibold))
-                    Text("You said “\(said)”").font(.subheadline).foregroundStyle(.white.opacity(0.6)).lineLimit(2)
+                    Text("You said “\(said)”").font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
                 case .reply(let reply):
                     Text(reply).font(.headline)
-                    Text("Type a task below.").font(.subheadline).foregroundStyle(.white.opacity(0.6))
+                    Text("Type a task below.").font(.subheadline).foregroundStyle(.secondary)
                 default:
                     let working = phone.active.count
                     Text(working == 0 ? needs.map { "\($0)." } ?? "All quiet." : working == 1 ? "1 agent is working." : "\(working) agents are working.")
                         .font(.title3.weight(.semibold))
-                    Text(subline).font(.subheadline).foregroundStyle(.white.opacity(0.6))
+                    Text(subline).font(.subheadline).foregroundStyle(.secondary)
                 }
             }
             .multilineTextAlignment(centered ? .center : .leading)
@@ -163,9 +163,9 @@ struct HomeView: View {
             Button(action: send) {
                 Image(systemName: "arrow.up")
                     .font(.body.weight(.bold))
-                    .foregroundStyle(.black)
+                    .foregroundStyle(Color(uiColor: .systemBackground))
                     .frame(width: 34, height: 34)
-                    .background(.white.opacity(text.isEmpty ? 0.4 : 1), in: Circle())
+                    .background(Color.primary.opacity(text.isEmpty ? 0.4 : 1), in: Circle())
             }
             .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty)
             .accessibilityLabel("Send")
@@ -173,10 +173,10 @@ struct HomeView: View {
         .padding(.leading, 18)
         .padding(.trailing, 7)
         .padding(.vertical, 7)
-        .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background(Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
-        .background(Color.black)
+        .background(Color(uiColor: .systemGroupedBackground))
     }
 
     private func send() {
@@ -201,11 +201,11 @@ struct HomeView: View {
         switch phone.talk {
         case .plan(let drafts) where drafts.count == 1:
             ScrollView { PlanCard(draft: drafts[0], onEdit: edit) }
-                .background(Color.black)
+                .background(Color(uiColor: .systemGroupedBackground))
                 .presentationDetents([.large])
         case .plan(let drafts):
             ScrollView { PlansCard(drafts: drafts, onEdit: edit) }
-                .background(Color.black)
+                .background(Color(uiColor: .systemGroupedBackground))
                 .presentationDetents([.large])
         case .question(let said, let question):
             QuestionSheet(said: said, question: question)
@@ -235,23 +235,23 @@ struct JobRow: View {
     let job: Job
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(alignment: .top, spacing: 12) {
             Image(systemName: job.agent == "codex" ? "circle.hexagongrid" : "asterisk")
                 .font(.body.weight(.semibold))
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
-                Text(job.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                Text(job.line).font(.footnote).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
-                if !job.extras.isEmpty {
-                    Text(job.extras).font(.caption).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+                Text(job.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                if let pipeline = job.pipeline {
+                    Text(pipeline.label).font(.caption.weight(.medium)).foregroundStyle(.secondary)
                 }
+                Text(job.line).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+                StatusPill(job: job)
             }
-            Spacer(minLength: 8)
-            StatusPill(job: job)
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .contentShape(Rectangle())
     }
 }
@@ -264,6 +264,11 @@ struct StatusPill: View {
         case .queued: ("Starting", .blue)
         case .running: ("Working", .blue)
         case .done where job.canPublish: ("Ready to publish", .orange)
+        case .done where job.pullRequest?.state == "MERGED": ("Merged", .green)
+        case .done where job.pullRequest?.state == "CLOSED": ("PR closed", .secondary)
+        case .done where job.pullRequest?.reviewDecision == "CHANGES_REQUESTED": ("Changes requested", .orange)
+        case .done where job.pullRequest?.reviewDecision == "APPROVED": ("Approved", .green)
+        case .done where job.published != nil: ("In review", .blue)
         case .done: ("Done", .green)
         case .failed: ("Failed", .red)
         case .stopped: ("Stopped", .gray)
@@ -309,7 +314,7 @@ struct PlanCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("You said “\(draft.said)”").font(.footnote).foregroundStyle(.white.opacity(0.6)).lineLimit(2)
+                Text("You said “\(draft.said)”").font(.footnote).foregroundStyle(.secondary).lineLimit(2)
                 Text(draft.reply).font(.title3.weight(.semibold))
             }
             Grid(horizontalSpacing: 10, verticalSpacing: 10) {
@@ -319,7 +324,7 @@ struct PlanCard: View {
                             Text(account?.agent == "codex" ? "Codex" : "Claude Code")
                             if let models = phone.models {
                                 Text((account?.agent == "codex" ? models.codex : models.claude).label)
-                                    .font(.caption).foregroundStyle(.white.opacity(0.55))
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
                         }
                     }
@@ -341,7 +346,7 @@ struct PlanCard: View {
                             .font(.subheadline.monospaced().weight(.semibold))
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                            .foregroundStyle(validBranch ? .white : .red)
+                            .foregroundStyle(validBranch ? Color.primary : Color.red)
                     }
                 }
                 GridRow {
@@ -350,7 +355,7 @@ struct PlanCard: View {
                             .font(.subheadline.monospaced().weight(.semibold))
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                            .foregroundStyle(validCheck ? .white : .red)
+                            .foregroundStyle(validCheck ? Color.primary : Color.red)
                     }
                     .gridCellColumns(2)
                 }
@@ -365,7 +370,7 @@ struct PlanCard: View {
                 tile("This looks complex") { StrongerModel(model: model, plan: account?.label, on: $stronger) }
             }
             Label("Works in Oby's own copy of the repository. Nothing is pushed or posted.", systemImage: "checkmark.shield")
-                .font(.footnote).foregroundStyle(.white.opacity(0.6))
+                .font(.footnote).foregroundStyle(.secondary)
             if draft.guessed {
                 Label("Oby's brain didn't answer, so this plan is a guess. Check it before you dispatch.", systemImage: "exclamationmark.triangle")
                     .font(.footnote).foregroundStyle(.orange)
@@ -375,9 +380,9 @@ struct PlanCard: View {
             }
             HStack(spacing: 10) {
                 Button(action: dispatch) {
-                    Text(sending ? "Dispatching…" : "Dispatch").font(.headline).foregroundStyle(.black)
+                    Text(sending ? "Dispatching…" : "Dispatch").font(.headline).foregroundStyle(Color(uiColor: .systemBackground))
                         .frame(maxWidth: .infinity).frame(height: 48)
-                        .background(.white.opacity(ready ? 1 : 0.4), in: Capsule())
+                        .background(Color.primary.opacity(ready ? 1 : 0.4), in: Capsule())
                 }
                 .disabled(!ready || sending)
                 pill("Edit") { onEdit(draft.said) }
@@ -386,7 +391,7 @@ struct PlanCard: View {
         }
         .padding(20)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(Color.black)
+        .background(Color(uiColor: .systemGroupedBackground))
         .onAppear {
             branch = draft.job.branch
             accountID = draft.job.account
@@ -434,12 +439,12 @@ struct PlansCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("You said “\(drafts[0].said)”").font(.footnote).foregroundStyle(.white.opacity(0.6)).lineLimit(2)
+                Text("You said “\(drafts[0].said)”").font(.footnote).foregroundStyle(.secondary).lineLimit(2)
                 Text("Oby will start \(drafts.count) jobs.").font(.title3.weight(.semibold))
             }
             ForEach(drafts, id: \.job.id) { row($0) }
             Label("Each works in Oby's own copy of its repository. Nothing is pushed or posted.", systemImage: "checkmark.shield")
-                .font(.footnote).foregroundStyle(.white.opacity(0.6))
+                .font(.footnote).foregroundStyle(.secondary)
             if drafts.contains(where: \.guessed) {
                 Label("Oby's brain didn't answer, so this plan is a guess. Check it before you dispatch.", systemImage: "exclamationmark.triangle")
                     .font(.footnote).foregroundStyle(.orange)
@@ -449,9 +454,9 @@ struct PlansCard: View {
             }
             HStack(spacing: 10) {
                 Button(action: dispatchAll) {
-                    Text(sending ? "Dispatching…" : "Dispatch all \(drafts.count)").font(.headline).foregroundStyle(.black)
+                    Text(sending ? "Dispatching…" : "Dispatch all \(drafts.count)").font(.headline).foregroundStyle(Color(uiColor: .systemBackground))
                         .frame(maxWidth: .infinity).frame(height: 48)
-                        .background(.white.opacity(ready ? 1 : 0.4), in: Capsule())
+                        .background(Color.primary.opacity(ready ? 1 : 0.4), in: Capsule())
                 }
                 .disabled(!ready || sending)
                 pill("Edit") { onEdit(drafts[0].said) }
@@ -460,7 +465,7 @@ struct PlansCard: View {
         }
         .padding(20)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(Color.black)
+        .background(Color(uiColor: .systemGroupedBackground))
     }
 
     private func row(_ draft: Draft) -> some View {
@@ -471,7 +476,7 @@ struct PlansCard: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(draft.job.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                    Text(details(draft)).font(.caption.monospaced()).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+                    Text(details(draft)).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 0)
                 if sent {
@@ -497,7 +502,7 @@ struct PlansCard: View {
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
-        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private func account(of draft: Draft) -> Account? {
@@ -562,19 +567,19 @@ struct StrongerModel: View {
 /// A plan card's box: a small label over its value.
 private func tile(_ label: String, @ViewBuilder value: () -> some View) -> some View {
     VStack(alignment: .leading, spacing: 4) {
-        Text(label).font(.caption).foregroundStyle(.white.opacity(0.55))
+        Text(label).font(.caption).foregroundStyle(.secondary)
         value().font(.subheadline.weight(.semibold))
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(.horizontal, 12).padding(.vertical, 10)
-    .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 }
 
 private func pill(_ title: String, action: @escaping () -> Void) -> some View {
     Button(action: action) {
         Text(title).font(.headline)
             .padding(.horizontal, 18).frame(height: 48)
-            .background(.white.opacity(0.1), in: Capsule())
+            .background(Color.primary.opacity(0.1), in: Capsule())
     }
     .buttonStyle(.plain)
 }
@@ -593,13 +598,13 @@ struct QuestionSheet: View {
                     Text(option).font(.subheadline.weight(.medium))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16).padding(.vertical, 13)
-                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(20)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(Color.black)
+        .background(Color(uiColor: .systemGroupedBackground))
     }
 }

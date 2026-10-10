@@ -35,6 +35,16 @@ let stops = [SIGTERM, SIGINT].map { number in
     return source
 }
 
+// Published PRs outlive agent jobs. Refresh immediately, then every three minutes.
+let pullRequests = PullRequests(desk: desk)
+Task {
+    while !Task.isCancelled {
+        await pullRequests.poll()
+        do { try await Task.sleep(for: .seconds(PullRequests.interval)) }
+        catch { return }
+    }
+}
+
 // Who is signed in, and the repositories the brain may pick: now, then every five minutes.
 Task {
     while true {

@@ -55,6 +55,12 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var model: String?
     /// What the user told the agent along the way, oldest first.
     var notes: [String]?
+    /// Execution facts used by the shared pipeline derivation; nil on older jobs.
+    var phase: JobStage.ID?
+    var publishStep: PublishStep?
+    var pullRequest: PullRequestStatus?
+    /// A failed refresh keeps the last successful observation above.
+    var pullRequestError: String?
 
     var maxRounds: Int { rounds ?? 1 }
     var currentRound: Int { round ?? 1 }
@@ -78,6 +84,13 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var title: String {
         if let number = pr ?? issue { return "\(kind.rawValue.capitalized) \(repoName) #\(number)" }
         let line = request.split(separator: "\n").first.map(String.init) ?? request
+        return line.count > 60 ? line.prefix(59) + "…" : line
+    }
+
+    /// The task's compact title for runner clients; the notch keeps its request-based title.
+    var shortTitle: String {
+        if pr != nil || issue != nil { return title }
+        let line = (task.isEmpty ? request : task).split(separator: "\n").first.map(String.init) ?? request
         return line.count > 60 ? line.prefix(59) + "…" : line
     }
 
