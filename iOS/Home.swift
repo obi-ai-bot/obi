@@ -12,9 +12,11 @@ struct HomeView: View {
     @AppStorage("home.clearedAt") private var clearedAt: Double = 0
     /// The scroll view's height, so an empty Home can put Oby in the middle of it.
     @State private var height: CGFloat = 0
+    /// The job screens open, so a notification can open its job.
+    @State private var path: [String] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     header
@@ -53,6 +55,13 @@ struct HomeView: View {
             .safeAreaInset(edge: .bottom) { field }
             .sheet(isPresented: sheetShown) { sheet }
             .sheet(isPresented: $settings) { SettingsScreen() }
+            .onChange(of: phone.opening, initial: true) {
+                guard let id = phone.opening else { return }
+                phone.opening = nil
+                settings = false
+                phone.cancel()
+                path = [id]
+            }
             .onChange(of: mood, initial: true) { character.mood = mood }
             .onChange(of: centered) {
                 // Off to work with a grin; back in the middle with a hello.
@@ -118,7 +127,7 @@ struct HomeView: View {
                     Text("Type a task below.").font(.subheadline).foregroundStyle(.white.opacity(0.6))
                 default:
                     let working = phone.active.count
-                    Text(working == 0 ? "All quiet." : working == 1 ? "1 agent is working." : "\(working) agents are working.")
+                    Text(working == 0 ? needs.map { "\($0)." } ?? "All quiet." : working == 1 ? "1 agent is working." : "\(working) agents are working.")
                         .font(.title3.weight(.semibold))
                     Text(subline).font(.subheadline).foregroundStyle(.white.opacity(0.6))
                 }
@@ -130,9 +139,14 @@ struct HomeView: View {
         .padding(.top, 4)
     }
 
+    /// What needs you among the jobs Home shows: ready to publish, failed or interrupted.
+    private var needs: String? { NeedsYou.line(jobs) }
+
     private var subline: String {
         switch phone.connection {
-        case .live: "Nothing needs you. On \(phone.host)."
+        case .live:
+            // With nobody working, what needs you is the title already.
+            if let needs { phone.active.isEmpty ? "On \(phone.host)." : "\(needs). On \(phone.host)." } else { "Nothing needs you. On \(phone.host)." }
         case .connecting: "Reaching the runner…"
         case .offline: "The runner isn't answering."
         }
@@ -232,7 +246,7 @@ struct JobRow: View {
                 }
             }
             Spacer(minLength: 8)
-            StatusPill(status: job.status)
+            StatusPill(job: job)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -242,12 +256,13 @@ struct JobRow: View {
 }
 
 struct StatusPill: View {
-    let status: Job.Status
+    let job: Job
 
     var body: some View {
-        let (text, color): (String, Color) = switch status {
+        let (text, color): (String, Color) = switch job.status {
         case .queued: ("Starting", .blue)
         case .running: ("Working", .blue)
+        case .done where job.canPublish: ("Ready to publish", .orange)
         case .done: ("Done", .green)
         case .failed: ("Failed", .red)
         case .stopped: ("Stopped", .gray)

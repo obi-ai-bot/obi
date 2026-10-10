@@ -272,9 +272,9 @@ final class APITests {
         let json = String(decoding: try API.encode(JobJSON(job: job)), as: UTF8.self)
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
-        for key in ["base", "session", "finished", "commits", "published", "issue", "check", "model", "notes"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
+        for key in ["base", "session", "finished", "commits", "published", "pushed", "issue", "check", "model", "notes"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 25)
+        #expect(decoded.count == 26)
         #expect(decoded["rounds"] as? Int == 1 && decoded["round"] as? Int == 1)
         #expect(decoded["kind"] as? String == "review" && decoded["pr"] as? Int == 33 && decoded["status"] as? String == "queued")
     }
@@ -428,6 +428,106 @@ final class PushTests {
             #expect(error?.status == .unprocessableContent)
         }
         #expect(Push.quoted(#"{"a":"b\n"}"#) == #""{\"a\":\"b\\n\"}""#)
+    }
+
+    /// Only a job that needs the user notifies, once per state; a newer state or a clear follows.
+    @Test func onlyWhatNeedsYouNotifies() {
+        var running = job, quiet = job, ready = job, failed = job, interrupted = job, stopped = job
+        running.status = .running
+        quiet.status = .done
+        quiet.commits = 0
+        quiet.base = "dev"
+        ready.status = .done
+        ready.base = "dev"
+        ready.commits = 2
+        failed.status = .failed
+        interrupted.status = .interrupted
+        stopped.status = .stopped
+        for (index, job) in [running, quiet, ready, failed, interrupted, stopped].enumerated() {
+            #expect(Push.notice(for: { var job = job; job.id = "\(index)"; return job }()) == [nil, nil, .ready, .failed, .interrupted, nil][index])
+        }
+
+        let first = Push.notices([ready], after: [:])
+        #expect(first.changes.map(\.1) == [.ready] && first.notified == [job.id: .ready])
+        #expect(Push.notices([ready], after: first.notified).changes.isEmpty)
+        // Published: the alert clears.
+        var published = ready
+        published.published = "https://github.com/deskree-inc/oby/pull/42"
+        let cleared = Push.notices([published], after: first.notified)
+        #expect(cleared.changes.count == 1 && cleared.changes[0].1 == nil && cleared.notified.isEmpty)
+        // Failed after being ready: the newer state replaces it. A job the desk forgot is forgotten.
+        let replaced = Push.notices([failed], after: [job.id: .ready, "gone": .failed])
+        #expect(replaced.changes.map(\.1) == [.failed] && replaced.notified == [job.id: .failed])
+    }
+
+    /// Talking to a published job can make new commits: those can be published too, onto the same pull request.
+    @Test func laterRoundsCommitsCanBePublished() throws {
+        var done = job
+        done.status = .done
+        done.base = "dev"
+        done.commits = 2
+        #expect(done.canPublish && done.unpublished == 2 && done.needsYou)
+        #expect(Publish.action(for: done, base: "dev") == "Push oby/review-33 to deskree-inc/oby and open a draft pull request into dev.")
+        done.published = "https://github.com/deskree-inc/oby/pull/42"
+        #expect(done.pushed == 2 && done.unpublished == 0 && !done.canPublish && Push.notice(for: done) == nil)
+        // Another round made one more commit.
+        done.commits = 3
+        #expect(done.canPublish && done.unpublished == 1 && Push.notice(for: done) == .ready)
+        #expect(Publish.action(for: done, base: "dev") == "Push the new commits on oby/review-33 to deskree-inc/oby, for its draft pull request into dev.")
+        // Published again: the pull request has them all.
+        done.published = "https://github.com/deskree-inc/oby/pull/42"
+        #expect(done.pushed == 3 && !done.canPublish)
+
+        // Loading a job doesn't count anything, and one published before Oby counted has nothing new.
+        var saved = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(done)) as? [String: Any])
+        saved["pushed"] = nil
+        let old = try JSONDecoder().decode(Job.self, from: JSONSerialization.data(withJSONObject: saved))
+        #expect(old.pushed == nil && old.published != nil && old.unpublished == 0 && !old.canPublish)
+        let loaded = try JSONDecoder().decode(Job.self, from: JSONEncoder().encode(done))
+        #expect(loaded.pushed == 3)
+    }
+
+    @Test func alertsSayWhatTheJobNeeds() throws {
+        var ready = job
+        ready.status = .done
+        ready.base = "dev"
+        ready.commits = 1
+        ready.summary = "Fixed the review comments.\nMore below."
+        let alert = object(try Push.notification(.ready, for: ready))
+        let aps = try #require(alert["aps"] as? [String: Any])
+        #expect(alert["job"] as? String == "9f08fd10" && aps["category"] as? String == "ready" && aps["timestamp"] == nil)
+        #expect(aps["alert"] as? [String: String] == ["title": "Ready to publish: Review oby #33", "body": "Fixed the review comments."])
+
+        var failed = job
+        failed.status = .failed
+        failed.summary = "Couldn't get oby ready: no network"
+        let failure = try #require(object(try Push.notification(.failed, for: failed))["aps"] as? [String: Any])
+        #expect(failure["category"] as? String == "job")
+        #expect(failure["alert"] as? [String: String] == ["title": "Failed: Review oby #33", "body": "Couldn't get oby ready: no network"])
+
+        let clear = object(try Push.notification(nil, for: ready))
+        #expect(clear["clear"] as? String == "9f08fd10" && (clear["aps"] as? [String: Int]) == ["content-available": 1])
+    }
+
+    @Test func theAppHandsOverItsDeviceToken() async throws {
+        let apns = folder.appending(path: "apns")
+        try FileManager.default.createDirectory(at: apns, withIntermediateDirectories: true)
+        try Data(#"{"team": "PQKAL8E36D", "key": "TESTKEY123"}"#.utf8).write(to: apns.appending(path: "apns.json"))
+        try P256.Signing.PrivateKey().pemRepresentation.write(to: apns.appending(path: "AuthKey_TESTKEY123.p8"), atomically: true, encoding: .utf8)
+        let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")), push: Push(desk: desk, folder: apns))
+        let app = Application(router: api.router(owner: "well@example.com"))
+        let device = #"{"token": "80a1f2c3d4e5f60718293a4b5c6d7e8f", "topic": "dev.wellprado.oby", "environment": "production"}"#
+        let alertAsActivity = #"{"token": "80a1f2c3d4e5f60718293a4b5c6d7e8f", "kind": "alert", "topic": "dev.wellprado.oby", "environment": "production"}"#
+        try await app.test(.router) { [owner] client in
+            try await client.execute(uri: "/v1/notifications", method: .post, headers: owner, body: ByteBuffer(string: device)) { response in
+                #expect(String(decoding: response.body.readableBytesView, as: UTF8.self) == #"{"push":true}"#)
+            }
+            try await client.execute(uri: "/v1/activities", method: .post, headers: owner, body: ByteBuffer(string: alertAsActivity)) { response in
+                #expect(response.status == .unprocessableContent)
+            }
+        }
+        let saved = try JSONDecoder().decode([Push.Token].self, from: Data(contentsOf: apns.appending(path: "tokens.json")))
+        #expect(saved == [Push.Token(token: "80a1f2c3d4e5f60718293a4b5c6d7e8f", kind: "alert", topic: "dev.wellprado.oby", environment: "production")])
     }
 }
 

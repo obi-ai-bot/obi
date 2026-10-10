@@ -12,7 +12,7 @@ final class API {
 
     let desk: Desk
     let devices: Devices
-    /// Live Activity push, or nil when this runner has none.
+    /// Push to the iPhone (Live Activity and alerts), or nil when this runner has none.
     let push: Push?
     /// Everyone following `GET /v1/events`.
     private var streams: [UUID: AsyncStream<String>.Continuation] = [:]
@@ -52,6 +52,7 @@ final class API {
         router.get("v1/events") { _, _ in await self.events() }
         router.post("v1/devices") { request, _ in try await self.register(try await Self.decode(NewDevice.self, from: request)) }
         router.post("v1/activities") { request, _ in try await self.activity(try await Self.decode(Push.Token.self, from: request)) }
+        router.post("v1/notifications") { request, _ in try await self.notifications(try await Self.decode(NotificationToken.self, from: request)) }
         router.get("v1/settings/models") { _, _ in Self.json(Models.current) }
         router.put("v1/settings/models") { request, _ in try Self.change(try await Self.decode(Models.self, from: request)) }
         router.get("v1/settings/models/options") { _, _ in await Self.options() }
@@ -155,8 +156,15 @@ final class API {
 
     /// A Live Activity push token from the phone. `push` says whether the runner will push.
     func activity(_ token: Push.Token) throws -> Response {
+        guard token.kind != "alert" else { throw APIError(.unprocessableContent, "kind is update or start.") }
         guard let push else { return Self.json(["push": false]) }
         return Self.json(["push": try push.register(token)])
+    }
+
+    /// The app's device token, for alerts when a job needs the user. `push` says whether the runner will push.
+    func notifications(_ token: NotificationToken) throws -> Response {
+        guard let push else { return Self.json(["push": false]) }
+        return Self.json(["push": try push.register(Push.Token(token: token.token, kind: "alert", topic: token.topic, environment: token.environment))])
     }
 
     func events() -> Response {
@@ -196,8 +204,8 @@ final class API {
     private func publishable(_ id: String) throws -> (Job, String) {
         let job = try known(id)
         guard job.canPublish, let base = job.base else {
-            throw APIError(.conflict, job.published != nil ? "It's already published." :
-                           job.status != .done ? "Nothing to publish: the job hasn't finished." : "Nothing to publish: the job made no commits.")
+            throw APIError(.conflict, job.status != .done ? "Nothing to publish: the job hasn't finished." :
+                           job.published != nil ? "It's already published, with every commit." : "Nothing to publish: the job made no commits.")
         }
         return (job, base)
     }
@@ -369,7 +377,7 @@ struct Options: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, issue, rounds, round, check, model, notes }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, issue, rounds, round, check, model, notes }
 
     func encode(to encoder: any Encoder) throws {
         try job.encode(to: encoder)
@@ -381,6 +389,7 @@ struct JobJSON: Encodable {
         if job.finished == nil { try nulls.encodeNil(forKey: .finished) }
         if job.commits == nil { try nulls.encodeNil(forKey: .commits) }
         if job.published == nil { try nulls.encodeNil(forKey: .published) }
+        if job.pushed == nil { try nulls.encodeNil(forKey: .pushed) }
         if job.issue == nil { try nulls.encodeNil(forKey: .issue) }
         // Rounds always has a value in the API: 1 when the job doesn't loop.
         try nulls.encode(job.maxRounds, forKey: .rounds)
@@ -509,6 +518,12 @@ struct Approval: Decodable {
 struct NewDevice: Decodable {
     var name: String
     var publicKey: String
+}
+
+struct NotificationToken: Decodable {
+    var token: String
+    var topic: String
+    var environment: String
 }
 
 struct NewMessage: Decodable {

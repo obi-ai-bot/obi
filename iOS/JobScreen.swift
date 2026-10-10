@@ -4,6 +4,7 @@ import SwiftUI
 struct JobScreen: View {
     @Environment(Phone.self) private var phone
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     let id: String
     @State private var action: String?
     @State private var busy = false
@@ -21,7 +22,7 @@ struct JobScreen: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(job.title).font(.title2.weight(.semibold))
                         HStack(spacing: 8) {
-                            StatusPill(status: job.status)
+                            StatusPill(job: job)
                             Text("\(job.agentName) · \(phone.accounts.first { $0.id == job.account }?.name ?? job.account)")
                                 .font(.footnote).foregroundStyle(.white.opacity(0.6))
                         }
@@ -48,12 +49,37 @@ struct JobScreen: View {
                     actions(job)
                 }
                 .padding(16)
-            } else {
+            } else if phone.loaded {
                 ContentUnavailableView("This job isn't on the runner any more.", systemImage: "questionmark.folder")
+            } else {
+                ProgressView().padding(.top, 80)
             }
         }
         .background(Color.black)
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: publishAsked, initial: true) { publishFromNotification() }
+    }
+
+    /// The notification's Publish was tapped for this job, and Oby is in front with the job loaded.
+    private var publishAsked: Bool {
+        phone.publishing == id && phone.loaded && scenePhase == .active
+    }
+
+    /// Shows the action and asks for Face ID straight away, as tapping Publish… then Publish with
+    /// Face ID would. Already published (on the Mac, say): the screen shows the pull request.
+    private func publishFromNotification() {
+        guard publishAsked else { return }
+        phone.publishing = nil
+        guard let job, job.canPublish, !busy else { return }
+        Task {
+            await run {
+                let action = try await phone.publishAction(job.id)
+                self.action = action
+                let url = try await phone.publish(job.id, action: action)
+                self.action = nil
+                openURL(url)
+            }
+        }
     }
 
     /// What the user told the agent, oldest first.
@@ -129,8 +155,10 @@ struct JobScreen: View {
             wide("Stop", filled: false) { await run { try await phone.stop(job.id) } }
         }
         if let link = job.published.flatMap(URL.init(string:)) {
-            wide("Open the draft pull request", filled: true) { openURL(link) }
-        } else if job.canPublish {
+            wide("Open the draft pull request", filled: !job.canPublish) { openURL(link) }
+        }
+        // Before the first publish, or when later rounds made commits the pull request doesn't have yet.
+        if job.canPublish {
             if let action {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(action).font(.subheadline.weight(.medium))
@@ -146,7 +174,9 @@ struct JobScreen: View {
                 .padding(14)
                 .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             } else {
-                wide("Publish…", filled: true) { await run { action = try await phone.publishAction(job.id) } }
+                wide(job.published == nil ? "Publish…" : "Publish the new commits…", filled: true) {
+                    await run { action = try await phone.publishAction(job.id) }
+                }
             }
         }
     }

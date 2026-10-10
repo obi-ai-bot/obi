@@ -3,9 +3,12 @@ import SwiftUI
 /// Oby on iPhone: a client of the runner (docs/runner-api.md), so work goes on with the Mac closed.
 @main
 struct ObyPhoneApp: App {
-    @State private var phone = Phone()
+    /// Holds the phone, so a notification tapped before Home appears still opens its job.
+    @UIApplicationDelegateAdaptor(Notifications.self) private var notifications
     @State private var character = ObyCharacter()
     @Environment(\.scenePhase) private var scenePhase
+
+    private var phone: Phone { notifications.phone }
 
     var body: some Scene {
         WindowGroup {

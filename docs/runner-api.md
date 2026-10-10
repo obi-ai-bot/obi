@@ -36,6 +36,7 @@ This document is the contract between the runner and its clients. Change it in t
   "finished": null,
   "commits": null,
   "published": null,
+  "pushed": null,
   "issue": null,
   "rounds": 1,
   "round": 1,
@@ -50,8 +51,10 @@ This document is the contract between the runner and its clients. Change it in t
 - `step`: what it's doing now, while queued or running. `summary`: the agent's final message; its first line is the one-line notice.
 - A `build`, `fix` or `test` job that ends with no commits of its own is `failed`, and its `summary` starts with `Nothing committed: ` followed by the agent's first line.
 - `base`: the branch the work started from (filled in once the job is ready). `pr`: the pull request it works on, if any.
-- `commits`: commits made beyond `base` (set when a job ends as done). Publish is offered only when it's above 0.
+- `commits`: commits made beyond `base` (set when a job ends as done). Publish is offered only when some of them aren't on the pull request yet.
 - `published`: the draft pull request's URL once published.
+- `pushed`: how many of `commits` were on the pull request when it was last published, or null before then. A published job that ran again (`POST /v1/jobs/{id}/messages`) and ended `done` with `commits` above `pushed` has new commits to publish: offer "Publish the new commits". Publish pushes them to the same branch, so they land on the open pull request.
+- What needs you: a job that's `done` with commits not on its pull request (ready to publish), `failed` or `interrupted`. Say so where the apps would otherwise say nothing needs you.
 - `issue`: the GitHub issue the work is about. The runner fetches it for the agent, which has no GitHub login, and the draft pull request says `Closes #N`.
 - `rounds`: how many rounds the agent may take (1 means no loop); `round`: the one it's on.
 - `check`: a one-line command that must succeed for the work to count as done.
@@ -191,7 +194,9 @@ What publishing this job would do, in one sentence. The app shows exactly this b
 {"action": "Push oby/fix-ab12cd to deskree-inc/oby and open a draft pull request into dev.", "base": "dev"}
 ```
 
-`409` if there's nothing to publish (no commits, not done, already published).
+Once the job is published and has new commits, the sentence is about them: `"Push the new commits on oby/fix-ab12cd to deskree-inc/oby, for its draft pull request into dev."`
+
+`409` if there's nothing to publish (no commits, not done, or published with every commit).
 
 ### `POST /v1/jobs/{id}/publish`
 
@@ -209,7 +214,7 @@ Publishes after the user approved on a registered device. Nothing goes out witho
   - `action` matches its own sentence exactly;
   - `signedAt` is within 2 minutes;
   - this signature hasn't been used before.
-- Then it runs Publish: guards, the secret scan, push one pinned commit, draft pull request. It returns `{"url": "https://github.com/…/pull/42"}`, or an error line (for example the scan's findings, never the secret).
+- Then it runs Publish: guards, the secret scan, push one pinned commit, draft pull request (the one already open for the branch, if there is one). It returns `{"url": "https://github.com/…/pull/42"}`, or an error line (for example the scan's findings, never the secret).
 
 ### `POST /v1/devices`
 
@@ -240,9 +245,38 @@ Two seconds after a job changes, the runner pushes what its jobs look like then 
 
 - **A job is active** and the runner has update tokens: an `update` with the newest active job (priority 5, skipped when nothing the card shows changed).
 - **A job is active**, no update tokens, and it hasn't started one yet: a push-to-start (`start`, priority 10, with an alert) to the start tokens. The phone then hands over the new activity's update token.
-- **Nothing is active:** an `end` with how the last job finished, an alert ("Done" or "Failed"), and a dismissal 15 minutes after it finished; then the update tokens are dropped.
+- **Nothing is active:** an `end` with how the last job finished and a dismissal 15 minutes after it finished, with no alert (a job that needs you says so with its own notification, below); then the update tokens are dropped.
 
 Apple's answer `410` or `BadDeviceToken` drops a token. The runner keeps tokens in `apns/tokens.json`.
+
+### `POST /v1/notifications`
+
+Hands the runner the app's device token, so it can tell the phone when a job needs you:
+
+```json
+{"token": "5b0e9c…", "topic": "dev.wellprado.oby", "environment": "production"}
+```
+
+- `token`: the device token from `registerForRemoteNotifications`, in hex. `topic` and `environment` as for `/v1/activities`. The app sends it on every launch once notifications are allowed (it asks the first time a job is dispatched from the phone).
+- It returns `{"push": true}` or `{"push": false}`, and `422`, as `/v1/activities` does.
+
+Two seconds after a job changes, the runner sends an alert push (`apns-push-type: alert`, the app's bundle ID as topic, priority 10) for each job whose need changed. Nothing else notifies: steps, rounds, and jobs that end needing nothing (stopped, or done without commits) only move the Live Activity.
+
+| The job | Title | Body | `category` |
+|---|---|---|---|
+| Done with commits, not published | `Ready to publish: <title>` | the summary's first line | `ready` |
+| `failed` | `Failed: <title>` | the reason (the summary's first line) | `job` |
+| `interrupted` | `Interrupted: <title>` | the reason | `job` |
+
+```json
+{"aps": {"alert": {"title": "Ready to publish: Review oby #33", "body": "Fixed the review comments."},
+         "category": "ready", "sound": "default", "thread-id": "jobs"}, "job": "9f08fd10"}
+```
+
+- `job` is the job's `id`: tapping the notification opens it. The `ready` category offers **Publish** (it unlocks the phone and brings the app forward, where Face ID signs the approval as in the app) and **Open**; `job` offers **Open**.
+- `apns-collapse-id` is the job's `id`, so a newer state replaces the older notification.
+- When a job stops needing you (published, from the iPhone or the Mac, or running again after a message), the runner sends a background push (`apns-push-type: background`, priority 5), `{"aps": {"content-available": 1}, "clear": "<job id>"}`, and the app removes that job's notification. The app also removes them whenever it opens and sees the job needs nothing.
+- The runner remembers what it last said for each job in `apns/notices.json`, so a restart doesn't say it again, and jobs a restart interrupted notify once it's back.
 
 ### `GET /v1/settings/models` and `PUT /v1/settings/models`
 

@@ -6,10 +6,11 @@ What it does today:
 
 - Shows Oby and your jobs live: the step each agent is on, how each one ended, Stop.
 - Type a task, check the plan card (agent, model, account, repository, branch), and Dispatch.
-- Publish a finished job: Oby shows the exact action, and Face ID signs it with a key that lives in the iPhone's Secure Enclave. Nothing is published without it, and Oby never merges.
+- Publish a finished job: Oby shows the exact action, and Face ID signs it with a key that lives in the iPhone's Secure Enclave. Nothing is published without it, and Oby never merges. If you talk to a published job and it makes more commits, "Publish the new commits" pushes them onto the same pull request. Home says what needs you: jobs ready to publish, failed or interrupted.
 - Settings: the runner's address, its accounts, and each tool's model and effort.
 - Clear done: hides finished jobs from Home. The runner keeps every job.
 - A Live Activity while agents work: Oby, the job, its step and a clock, on the Lock Screen and in the Dynamic Island, ending with how the last job finished. The app updates it while it's open (the `ObyActivity` extension in `LiveActivity/` draws it). In the background the runner pushes it (`POST /v1/activities`): new steps, "Done" or "Failed" when the last job ends, and a push-to-start when a job begins while the app is closed. On a runner without an APNs key, the step stays where it was (the clock keeps ticking), after a minute it says "Open Oby for the latest", and the runner's `GET /v1/jobs/{id}/wait` wakes the app when the job ends so the card says "Done" or "Failed". Push needs the `aps-environment` entitlement (`iOS/Oby.entitlements`): a build from Xcode uses Apple's development push service, TestFlight its production one.
+- Notifications when a job needs you, and only then: "Ready to publish: <job>" with **Publish** (Face ID, then the draft pull request) and **Open**, or a failed or interrupted job with its reason. Tapping one opens the job. Oby asks for permission the first time you dispatch a job, hands the runner its device token (`POST /v1/notifications`), and the notification goes away once the job is published, from the iPhone or the Mac (`iOS/Notifications.swift`).
 
 ## Run it
 
@@ -42,5 +43,5 @@ The app says it uses only exempt encryption (`ITSAppUsesNonExemptEncryption` = N
 
 ## Coming next
 
-- Notifications beyond the Live Activity, once the Oby platform can push (F11, spike #27). The runner's Live Activity push uses Wellington's team's APNs key until then.
+- Notifications from the Oby platform rather than the runner (F11, spike #27). The runner's pushes use Wellington's team's APNs key until then.
 - Talking to Oby, and the Apple Watch app (`Watch/`).

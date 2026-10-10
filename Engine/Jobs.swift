@@ -34,8 +34,11 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var finished: Date?
     /// Commits the job made beyond its base: something to publish.
     var commits: Int?
-    /// The draft pull request Oby opened for it, once the user approved.
-    var published: String?
+    /// The draft pull request Oby opened for it, once the user approved. Publishing (Desk.publish
+    /// sets this) also notes how many commits went out, so later rounds' commits can follow.
+    var published: String? { didSet { if published != nil { pushed = commits } } }
+    /// Commits on the pull request when Oby last published, or nil before then.
+    var pushed: Int?
     /// The issue the work is about.
     var issue: Int?
     /// How many rounds the agent may take (nil: one), and the round it's on.
@@ -54,8 +57,13 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var loops: Bool { check != nil || maxRounds > 1 }
 
     var isActive: Bool { status == .queued || status == .running }
-    /// Done, with commits beyond its base, and not published yet.
-    var canPublish: Bool { status == .done && base != nil && (commits ?? 0) > 0 && published == nil }
+    /// Commits beyond its base that aren't on its pull request yet: all of them before it's
+    /// published, then the ones later rounds made. A job published before Oby counted has none.
+    var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
+    /// Done, with commits that aren't on its pull request yet.
+    var canPublish: Bool { status == .done && base != nil && unpublished > 0 }
+    /// Waiting for Publish, failed or interrupted: what an alert is sent for, and what Home counts.
+    var needsYou: Bool { canPublish || status == .failed || status == .interrupted }
     var agentName: String { Job.agentNames[agent] ?? agent }
     static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
