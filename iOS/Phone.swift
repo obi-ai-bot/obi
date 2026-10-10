@@ -112,6 +112,16 @@ final class Phone {
         await syncing?.value
     }
 
+    /// Pull to refresh: fetch the job list now, without waiting for the runner's next event.
+    func reload() async {
+        do {
+            jobs = try await runner.jobs()
+            loaded = true
+        } catch {
+            Logger.phone.error("reloading jobs failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// The app went to the background: no connection, no battery spent.
     func stop() {
         loop?.cancel()
