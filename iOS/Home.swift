@@ -236,7 +236,7 @@ struct JobRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: job.agent == "codex" ? "circle.hexagongrid" : "asterisk")
+            AgentMark(agent: job.agent)
                 .font(.body.weight(.semibold))
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
