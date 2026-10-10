@@ -1,0 +1,75 @@
+# The runner package (Engine/ and Runner/) on Linux, with bubblewrap, as on tetrix-lab. See docs/ci.md.
+name: Runner on Linux
+
+on:
+  pull_request:
+    branches: [dev]
+  push:
+    branches: [dev]
+
+# A newer push to the same pull request (or to dev) cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The runner's toolchain (Runner/README.md).
+  SWIFT_VERSION: 6.4.0
+
+jobs:
+  test:
+    name: Runner on Linux
+    # tetrix-lab runs Ubuntu 26.04: the same AppArmor profile lets bwrap make its namespaces.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install SQLite's headers and bubblewrap
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libsqlite3-dev bubblewrap
+
+      # The bubblewrap tests skip themselves when bwrap can't run; here they must run.
+      - name: Check bwrap runs
+        run: |
+          if ! bwrap --ro-bind / / -- /bin/true; then
+            echo "::warning::bwrap can't make user namespaces under AppArmor here; lifting the restriction for this runner."
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            bwrap --ro-bind / / -- /bin/true
+          fi
+
+      # With swiftly, where tetrix-lab has it too (Agents.tools copies it into agents' sandbox).
+      - name: Set up Swift ${{ env.SWIFT_VERSION }}
+        run: |
+          export SWIFTLY_HOME_DIR="$HOME/.local/share/swiftly"
+          export SWIFTLY_BIN_DIR="$SWIFTLY_HOME_DIR/bin" SWIFTLY_TOOLCHAINS_DIR="$SWIFTLY_HOME_DIR/toolchains"
+          cd "$RUNNER_TEMP"
+          curl -fsSL "https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz" | tar -xz
+          ./swiftly init --assume-yes --quiet-shell-followup --skip-install --no-modify-profile
+          . "$SWIFTLY_HOME_DIR/env.sh"
+          swiftly install --use --assume-yes --post-install-file=post-install.sh "$SWIFT_VERSION"
+          # The system packages the toolchain still needs, if any.
+          if [ -s post-install.sh ]; then sudo bash post-install.sh; fi
+          echo "$SWIFTLY_BIN_DIR" >> "$GITHUB_PATH"
+          printf 'SWIFTLY_HOME_DIR=%s\nSWIFTLY_BIN_DIR=%s\nSWIFTLY_TOOLCHAINS_DIR=%s\n' \
+            "$SWIFTLY_HOME_DIR" "$SWIFTLY_BIN_DIR" "$SWIFTLY_TOOLCHAINS_DIR" >> "$GITHUB_ENV"
+          swift --version
+
+      # The dependencies' checkouts and build products. Oby's own targets rebuild from source anyway.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            .build
+            ~/.cache/org.swift.swiftpm
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-swift-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: swiftpm-${{ runner.os }}-${{ runner.arch }}-swift-${{ env.SWIFT_VERSION }}-
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        run: swift test --skip-build
