@@ -46,6 +46,9 @@ final class Desk {
     private var ending: Set<String> = []
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
+    /// Gets a job's worktree ready, and makes its agent (nil for a tool that can't run jobs yet). Tests put in their own.
+    @ObservationIgnored var prepare: (Job) async throws -> Job = { try await Workspace.prepare($0) }
+    @ObservationIgnored var makeAgent: (Job, _ home: URL?, _ resume: String?) -> (any AgentRun)? = Desk.agent
 
     init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))) {
         self.accounts = accounts
@@ -150,7 +153,8 @@ final class Desk {
 
     func cancel() { talk = .none }
 
-    private func card(for result: Planner.Result, said: String) -> Talk {
+    /// What the user sees for the brain's plan. Stopping happens here: there's nothing to confirm.
+    func card(for result: Planner.Result, said: String) -> Talk {
         let plan = result.plan
         switch plan.action {
         case .dispatch:
@@ -182,9 +186,11 @@ final class Desk {
             return drafts.isEmpty ? .none : .plan(drafts)
         case .askUser:
             return plan.question.map { .question(said: said, $0) } ?? .reply(plan.reply)
-        case .replyOnly, .stopAgent:
-            return .reply(plan.reply.isEmpty ? "Stop a job with the × next to it." : plan.reply)
-        case .ignore:
+        case .stopAgent:
+            // The count, not the brain's reply: it doesn't know what was running.
+            let stopped = stopAll()
+            return .reply(stopped == 0 ? "Nothing is running." : "Stopped \(stopped) job\(stopped == 1 ? "" : "s").")
+        case .replyOnly, .ignore:
             return plan.reply.isEmpty ? .none : .reply(plan.reply)
         }
     }
@@ -204,7 +210,7 @@ final class Desk {
         let previous = setups[job.repo]
         let ready = Task { () async throws -> Job in
             await previous?.value
-            return try await Workspace.prepare(job)
+            return try await self.prepare(job)
         }
         setups[job.repo] = Task { _ = await ready.result }
         Task {
@@ -278,6 +284,14 @@ final class Desk {
         agent?.stop()
     }
 
+    /// Stops every queued and running job, and says how many.
+    @discardableResult
+    func stopAll() -> Int {
+        let ids = active.map(\.id)
+        for id in ids { stop(id) }
+        return ids.count
+    }
+
     /// The user talks to a job. A running one hears it now; a finished one picks its session up
     /// again in the same worktree, for one more round.
     func message(_ id: String, _ text: String) throws {
@@ -340,18 +354,7 @@ final class Desk {
     /// Starts the job's agent in its worktree: a new session, or the job's own picked up again.
     private func run(_ job: Job, prompt: String, resume: String? = nil) {
         let home = accounts.state(job.account)?.account.home.map { URL(filePath: $0) }
-        let agent: any AgentRun
-        switch job.agent {
-        case "claude":
-            let claude = ClaudeAgent(worktree: Workspace.worktree(job.id), configDirectory: home, resume: resume)
-            claude.model = job.model
-            agent = claude
-        case "codex":
-            let codex = CodexAgent(worktree: Workspace.worktree(job.id), home: home, resume: resume)
-            codex.model = job.model
-            agent = codex
-        default: finish(job.id, .failed, "\(job.agentName) can't run jobs yet."); return
-        }
+        guard let agent = makeAgent(job, home, resume) else { return finish(job.id, .failed, "\(job.agentName) can't run jobs yet.") }
         agents[job.id] = agent
         do {
             // Only the job's current agent speaks for it: one that was stopped or ended may still report.
@@ -361,6 +364,21 @@ final class Desk {
             }
         } catch {
             finish(job.id, .failed, "\(job.agentName) didn't start: \(error.localizedDescription)")
+        }
+    }
+
+    /// Claude Code or Codex in the job's worktree, or nil for a tool that can't run jobs yet.
+    static func agent(for job: Job, home: URL?, resume: String?) -> (any AgentRun)? {
+        switch job.agent {
+        case "claude":
+            let claude = ClaudeAgent(worktree: Workspace.worktree(job.id), configDirectory: home, resume: resume)
+            claude.model = job.model
+            return claude
+        case "codex":
+            let codex = CodexAgent(worktree: Workspace.worktree(job.id), home: home, resume: resume)
+            codex.model = job.model
+            return codex
+        default: return nil
         }
     }
 
