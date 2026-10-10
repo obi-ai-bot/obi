@@ -167,6 +167,24 @@ struct PublishOnItsOwnTests {
         #expect(ended.summary.hasPrefix("Not published: its commits are already on dev.\n\nfix(engine): open the PR by itself"))
     }
 
+    /// Its own publish failed, then its commits reached the base: Publish by hand finds nothing to
+    /// publish, and the job stops waiting for it, as when it publishes by itself. Its alert clears.
+    @Test func publishByHandFindsTheWorkAlreadyOnTheBase() async throws {
+        let failed = try await run("byhand", commits: 2) { _ in throw Shell.Failure(message: "Couldn't push oby/fix-75: the remote hung up.") }
+        #expect(failed.canPublish && Push.notice(for: failed) == .ready)
+        let alerted = Push.notices([failed], after: [:]).notified
+        desk.publishByHand = { _, base, _ in throw Publish.AlreadyOnBase(base: base) }
+        await #expect(throws: Publish.AlreadyOnBase.self) { try await desk.publish("byhand") { _ in } }
+        let ended = try #require(desk.job("byhand"))
+        #expect(ended.status == .done && ended.published == nil && ended.commits == 0)
+        #expect(!ended.canPublish && !ended.needsYou && ended.publishError == nil && Push.notice(for: ended) == nil)
+        #expect(ended.summary.hasPrefix("Not published: its commits are already on dev.\n\nfix(engine): open the PR by itself"))
+        let cleared = Push.notices([ended], after: alerted).changes
+        #expect(cleared.count == 1 && cleared.first?.0.id == "byhand" && cleared.first?.1 == nil)
+        // Nothing is left to publish.
+        await #expect(throws: Shell.Failure.self) { try await desk.publish("byhand") { _ in } }
+    }
+
     /// Its own publish failed: Oby doesn't try again by itself, not when the agent's process ends
     /// after its last turn, nor when the user talks to it and it makes no new commits. Publish by hand is offered.
     @Test func aJobsOwnPublishIsntRetried() async throws {

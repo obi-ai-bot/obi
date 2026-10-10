@@ -122,6 +122,9 @@ nonisolated enum AgentEvent: Equatable, Sendable {
     case turnEnded(summary: String, failed: Bool)
     /// The agent's process ended, with its last turn's result.
     case finished(summary: String, failed: Bool)
+    /// The agent's process ended mid-turn, without a result: the summary says how it ended. Its
+    /// session can be picked up again.
+    case cutOff(summary: String)
 }
 
 /// A coding agent working on one job in its worktree: Claude Code or Codex.
@@ -158,6 +161,8 @@ final class ClaudeAgent: AgentRun {
     /// ends the turn.
     private var sent = 0
     private var heard = 0
+    /// A message is waiting for its turn's result: the process ending now ends mid-turn.
+    private var waiting = false
 
     init(worktree: URL, configDirectory: URL? = nil, resume: String? = nil) {
         self.worktree = worktree
@@ -192,12 +197,40 @@ final class ClaudeAgent: AgentRun {
             } catch {
                 Logger.jobs.error("reading Claude Code failed: \(error.localizedDescription, privacy: .public)")
             }
-            finish(summary: result?.summary ?? "Claude Code stopped without finishing.", failed: result?.failed ?? true)
+            // The output ends when the process does: how it ended is what's left to say, since a
+            // process that's killed says nothing on stderr.
+            let exit = await Self.exit(of: process)
+            let job = worktree.lastPathComponent
+            guard let result, !waiting else {
+                Logger.jobs.error("job \(job, privacy: .public): Claude Code ended mid-turn, \(exit, privacy: .public)")
+                return finish(.cutOff(summary: "Claude Code stopped without finishing (\(exit))."))
+            }
+            Logger.jobs.notice("job \(job, privacy: .public): Claude Code ended, \(exit, privacy: .public)")
+            finish(.finished(summary: result.summary, failed: result.failed))
         }
+    }
+
+    /// How a process ended, once it has: "exit status 1", or "killed by signal 9 (SIGKILL)".
+    nonisolated static func exit(of process: Process) async -> String {
+        nonisolated(unsafe) let process = process
+        return await withCheckedContinuation { done in
+            DispatchQueue.global().async {
+                process.waitUntilExit()
+                done.resume(returning: ended(process.terminationReason, process.terminationStatus))
+            }
+        }
+    }
+
+    nonisolated static func ended(_ reason: Process.TerminationReason, _ status: Int32) -> String {
+        guard reason == .uncaughtSignal else { return "exit status \(status)" }
+        let names: [Int32: String] = [SIGHUP: "SIGHUP", SIGINT: "SIGINT", SIGQUIT: "SIGQUIT", SIGILL: "SIGILL", SIGABRT: "SIGABRT",
+                                      SIGBUS: "SIGBUS", SIGKILL: "SIGKILL", SIGSEGV: "SIGSEGV", SIGPIPE: "SIGPIPE", SIGTERM: "SIGTERM"]
+        return "killed by signal \(status)" + (names[status].map { " (\($0))" } ?? "")
     }
 
     func send(_ text: String) {
         sent += 1
+        waiting = true
         send(["type": "user", "message": ["role": "user", "content": text]])
     }
 
@@ -243,17 +276,21 @@ final class ClaudeAgent: AgentRun {
                 onEvent(.step(summary.split(separator: "\n").first.map(String.init) ?? "Finishing"))
                 // ponytail: nothing echoed at all means this Claude Code doesn't replay messages, so
                 // every result ends a turn, as before.
-                if heard >= sent || heard == 0 { onEvent(.turnEnded(summary: summary, failed: failed)) }
+                if heard >= sent || heard == 0 {
+                    waiting = false
+                    onEvent(.turnEnded(summary: summary, failed: failed))
+                }
             } else {
                 onEvent(event)
             }
         }
     }
 
-    private func finish(summary: String, failed: Bool) {
+    /// `.finished` or `.cutOff`, once.
+    private func finish(_ event: AgentEvent) {
         guard !finished else { return }
         finished = true
-        onEvent(.finished(summary: summary, failed: failed))
+        onEvent(event)
     }
 
     private func answer(_ id: String, _ response: [String: Any]) {
