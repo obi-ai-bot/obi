@@ -60,7 +60,7 @@ struct CodexTests {
     @Test func approvalsGoThroughPolicy() {
         let push = message(#"{"method":"item/commandExecution/requestApproval","id":0,"params":{"kind":"command","threadId":"01a1228c-479b","turnId":"01a1228c-483b","itemId":"exec-5eb53210","environmentId":"local","reason":"probe","command":"/bin/zsh -lc 'git push origin main'","cwd":"/tmp/oby/jobs/abc","commandActions":[{"type":"unknown","command":"git push origin main"}],"proposedExecpolicyAmendment":["git","push","origin","main"],"availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["git","push","origin","main"]}},"cancel"]}}"#)
         guard case .decline(let reason) = CodexRPC.answer(push, files: [:], worktree: worktree) else { Issue.record("git push was approved"); return }
-        #expect(reason.contains("Oby publishes only after the user approves"))
+        #expect(reason.contains("Oby publishes the job's branch itself"))
         let status = message(#"{"method":"item/commandExecution/requestApproval","id":0,"params":{"kind":"command","threadId":"01a1228d-573f","turnId":"01a1228d-57d2","itemId":"exec-9303d952","environmentId":"local","reason":"probe","command":"/bin/zsh -lc 'git status'","cwd":"/tmp/oby/jobs/abc","commandActions":[{"type":"unknown","command":"git status"}],"proposedExecpolicyAmendment":["git","status"],"availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["git","status"]}},"cancel"]}}"#)
         #expect(CodexRPC.answer(status, files: [:], worktree: worktree) == .accept)
     }
