@@ -26,10 +26,13 @@ final class Devices {
     }
 
     private let file: URL
+    /// Beside `devices.json`: the owner touches it on the runner's machine to let one new phone register.
+    let pairing: URL
     private var saved = Saved()
 
     init(file: URL) {
         self.file = file
+        pairing = file.deletingLastPathComponent().appending(path: "pairing")
         if let data = try? Data(contentsOf: file) {
             do {
                 saved = try Self.decoder.decode(Saved.self, from: data)
@@ -42,14 +45,23 @@ final class Devices {
 
     /// Adds a phone's publishing key and returns its id. A key it already knows keeps its id, so the
     /// app can register every time it connects and always holds an id this runner knows.
-    func register(name: String, publicKey: String) throws -> String {
+    /// A new key needs pairing open: `pairing` touched in the last 10 minutes, and that key uses it up.
+    /// The tailnet header can't be the gate: agents share the runner's machine, so through its tailnet
+    /// address they arrive as the owner. They can't touch `pairing`: OBY_HOME is empty in their bubblewrap.
+    // ponytail: only as strong as that bubblewrap, so Linux only; a runner on a Mac needs its agents boxed too.
+    func register(name: String, publicKey: String, now: Date = .now) throws -> String {
         guard Self.key(publicKey) != nil else {
             throw APIError(.unprocessableContent, "publicKey isn't a P-256 public key (X9.63, base64).")
         }
         if let known = saved.devices.first(where: { $0.publicKey == publicKey }) { return known.id }
-        let device = Device(id: UUID().uuidString.lowercased(), name: name, publicKey: publicKey, registered: .now)
+        let opened = (try? FileManager.default.attributesOfItem(atPath: pairing.path))?[.modificationDate] as? Date
+        guard let opened, now.timeIntervalSince(opened) < 600 else {
+            throw APIError(.forbidden, "To add this phone, run `touch \(pairing.path)` on the runner, then try again within 10 minutes.")
+        }
+        let device = Device(id: UUID().uuidString.lowercased(), name: name, publicKey: publicKey, registered: now)
         saved.devices.append(device)
         try save()
+        try? FileManager.default.removeItem(at: pairing)
         Logger.runner.notice("registered device \(device.id, privacy: .public): \(device.name, privacy: .public)")
         return device.id
     }
