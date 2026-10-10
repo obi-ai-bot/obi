@@ -70,11 +70,24 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var doneLine: String {
         switch status {
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done: \(title)"
-        case .failed: "Couldn't finish: \(title)"
+        case .failed: summary.hasPrefix("Nothing committed:") ? "Nothing committed: \(title)" : "Couldn't finish: \(title)"
         case .stopped: "Stopped: \(title)"
         case .interrupted: "Interrupted: \(title)"
         case .queued, .running: step
         }
+    }
+
+    /// Work that should end in commits: a build, fix or test job that made none didn't do its work.
+    static let committing: Set<Plan.Kind> = [.build, .fix, .test]
+
+    /// How a job really ends, given the status its agent and check gave it and the commits it made
+    /// (nil when unknown): a committing job that's done with none ends as "nothing committed", with
+    /// the agent's own words as the reason.
+    static func ending(_ job: Job, _ status: Status, _ summary: String, made: Int?) -> (Status, String) {
+        guard status == .done, made == 0, committing.contains(job.kind) else { return (status, summary) }
+        let lines = summary.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+        let reason = lines.first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
+        return (.failed, "Nothing committed: \(reason.isEmpty ? "the agent gave no reason." : reason)" + (lines.count > 1 ? "\n" + lines[1] : ""))
     }
 
     /// Branch names come from Swift, never from the model.
@@ -498,6 +511,9 @@ nonisolated enum Workspace {
             try (excluded + "\n.oby/\n").write(to: exclude, atomically: true, encoding: .utf8)
         }
         try await git(["fetch", "--prune", "--quiet", "origin"])
+        // Agents commit unsigned: no signing key reaches them, and a gpgsign from the user's own
+        // settings would fail every commit. Oby signs when it publishes (4.1). Every worktree reads it here.
+        try await git(["config", "commit.gpgsign", "false"])
 
         let start: String
         var pullRequest: Data?
@@ -558,7 +574,10 @@ nonisolated enum Prompts {
         }
         lines.append("What the user asked for: \(job.task)")
         lines.append("If the tetrix MCP server is connected, use it for questions about code structure, ownership and impact before reading many files: it saves tokens.")
-        lines.append("Commit your changes on this branch when they're ready. Don't push, open pull requests or post anything to GitHub: Oby publishes only after the user approves.")
+        lines.append("Commit your changes on this branch when they're ready. Commits here are unsigned: Oby signs them when it publishes. Don't push, open pull requests or post anything to GitHub: Oby publishes only after the user approves.")
+        if Job.committing.contains(job.kind) {
+            lines.append("If you can't commit, say why in your summary's first line: a \(job.kind.rawValue) job that ends with no commits counts as nothing committed.")
+        }
         if let check = job.check {
             lines.append("The work counts as done only when `\(check)` succeeds in this directory; Oby runs it after you finish. Run it yourself first.")
         } else if job.maxRounds > 1 {
@@ -596,7 +615,7 @@ nonisolated enum Prompts {
     }
 }
 
-/// The job list, kept in SQLite in Oby's folder.
+/// The job list and the brain's recent turns, kept in SQLite in Oby's folder.
 nonisolated final class JobStore {
     private var db: OpaquePointer?
 
@@ -605,6 +624,7 @@ nonisolated final class JobStore {
         if sqlite3_open(url.path, &db) != SQLITE_OK { Logger.jobs.error("can't open \(url.path, privacy: .public)") }
         // ponytail: the job as JSON next to its id and time; add columns when something needs to query them.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
+        sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS turns (created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
     }
 
     deinit { sqlite3_close(db) }
@@ -634,6 +654,37 @@ nonisolated final class JobStore {
             }
         }
         return jobs
+    }
+
+    /// How many of the brain's turns are kept.
+    static let keptTurns = 200
+
+    /// Keeps a brain turn, and only the latest `keptTurns`.
+    func save(_ turn: BrainTurn) {
+        guard let body = try? JSONEncoder().encode(turn) else { return }
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "INSERT INTO turns (created, body) VALUES (?, ?)", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, turn.date.timeIntervalSince1970)
+        sqlite3_bind_text(statement, 2, String(decoding: body, as: UTF8.self), -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        if sqlite3_step(statement) != SQLITE_DONE { Logger.jobs.error("saving a brain turn failed") }
+        sqlite3_exec(db, "DELETE FROM turns WHERE rowid NOT IN (SELECT rowid FROM turns ORDER BY created DESC, rowid DESC LIMIT \(Self.keptTurns))", nil, nil, nil)
+    }
+
+    /// The brain's latest turns, newest first.
+    func turns(_ limit: Int = 50) -> [BrainTurn] {
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT body FROM turns ORDER BY created DESC, rowid DESC LIMIT ?", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(limit))
+        var turns: [BrainTurn] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let text = sqlite3_column_text(statement, 0),
+               let turn = try? JSONDecoder().decode(BrainTurn.self, from: Data(String(cString: text).utf8)) {
+                turns.append(turn)
+            }
+        }
+        return turns
     }
 }
 

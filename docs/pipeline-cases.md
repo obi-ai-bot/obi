@@ -254,7 +254,7 @@ From your goal to a list of jobs, then on to stage 2.
 
 ### 1.4 Unclear or misheard: "OB", "Obi"
 - **What happens:** resolve against known repos, the conversation's last repo and similar names. Ask only when two readings lead to different work. Goes to 2, or to one question with options.
-- **Oby today:** Broken. The repo must match a known name. Your first roadmap request vanished because brain failures aren't logged on the runner.
+- **Oby today:** Broken. The repo must match a known name. Every brain turn is logged on the runner (the words typed, the plan made or refused) and the latest 200 are kept in `oby.sqlite`.
 - **Claude Code:** Projects can propose threads before starting them.
 - **Cursor:** posts a short plan in Slack before working.
 - **Codex:** not found.
@@ -282,7 +282,7 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
 
 ### 2.2 Risky command: a permission prompt with nobody watching
 - **What happens:** Oby's policy answers. Work inside the worktree is allowed. GitHub, other MCP servers, Oby's secrets and pushing are denied. Goes back to the work, or to 2.3 if the job can't proceed.
-- **Oby today:** Works. The policy answers prompts. Agents have no GitHub login, a broken push URL, and only Tetrix reads among MCP tools. Gap: on tetrix-lab, agents can read the gh token and the APNs key.
+- **Oby today:** Works. The policy answers prompts. Agents have no GitHub login, a broken push URL, and only Tetrix reads among MCP tools. On tetrix-lab, agents run in bubblewrap and can't read the gh token or the APNs key (`aJobCantReadObysSecrets`).
 - **Claude Code:** auto mode's classifier pauses after 3 blocks in a row or 20 in total, and headless runs deny the action and carry on. There's an OS sandbox for Bash. Cloud network can be none, trusted or full, and a GitHub proxy keeps credentials out of the VM.
 - **Cursor:** cloud VMs can restrict domains. The local terminal sandbox is on by default (2nd-hand).
 - **Codex:** in the cloud there's no internet while the agent works, with an optional allowlist. Locally, workspace-write has no network and `.git` is read-only. An optional reviewer agent can handle approvals.
@@ -389,7 +389,7 @@ Decided 2026-10-10: no confirmation. The PR opens once the check passes and the 
 
 ### 4.1 Commit, push, open
 - **What happens:** commit, push the branch, and open the PR into dev with "Closes #N" and the steps and results in the body. Goes to 5.
-- **Oby today:** Partial. Publish runs the secret scan, asks for Touch ID or Face ID, and opens a draft PR into dev. Agents can't sign commits, so one job (30b93910) ended with nothing committed.
+- **Oby today:** Partial. Publish runs the secret scan, asks for Touch ID or Face ID, and opens a draft PR into dev. Agents commit unsigned (`commit.gpgsign=false` in Oby's clones), and a build, fix or test job with no commits ends as "Nothing committed" with the agent's reason, not done. Signing at push isn't built yet.
 - **Claude Code:** project threads open a PR on their own for a clear fix, and Slack has a Create PR button. Tag opens a draft PR as the Claude GitHub App. Cloud PRs carry your identity, and signing keys stay outside the sandbox.
 - **Cursor:** Linear tasks open PRs automatically. Interactive cloud PRs are yours. Commits say "Cursor Agent" with you as co-author, and automations use cursor[bot] (2nd-hand).
 - **Codex:** a Create PR button with a draft option (2nd-hand). Author and signing: not found.

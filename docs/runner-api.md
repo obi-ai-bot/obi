@@ -48,8 +48,9 @@ This document is the contract between the runner and its clients. Change it in t
 - `agent`: `claude` or `codex`. `account`: an account `id`. `kind`: `review`, `fix`, `build`, `test` or `investigate`.
 - `status`: `queued`, `running`, `done`, `failed`, `stopped` or `interrupted`.
 - `step`: what it's doing now, while queued or running. `summary`: the agent's final message; its first line is the one-line notice.
+- A `build`, `fix` or `test` job that ends with no commits of its own is `failed`, and its `summary` starts with `Nothing committed: ` followed by the agent's first line.
 - `base`: the branch the work started from (filled in once the job is ready). `pr`: the pull request it works on, if any.
-- `commits`: commits made beyond `base` (set when a job is done). Publish is offered only when it's above 0.
+- `commits`: commits made beyond `base` (set when a job ends as done). Publish is offered only when it's above 0.
 - `published`: the draft pull request's URL once published.
 - `issue`: the GitHub issue the work is about. The runner fetches it for the agent, which has no GitHub login, and the draft pull request says `Closes #N`.
 - `rounds`: how many rounds the agent may take (1 means no loop); `round`: the one it's on.
