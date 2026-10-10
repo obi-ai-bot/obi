@@ -26,15 +26,16 @@ struct SettingsScreen: View {
                 }
 
                 Section("Accounts on the runner") {
-                    if phone.accounts.isEmpty { Text("None yet").foregroundStyle(.secondary) }
-                    ForEach(phone.accounts) { account in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(account.title)
-                            Text(account.label ?? "Signed out").font(.caption).foregroundStyle(.secondary)
-                            if account.signedIn {
-                                Text("5h \(percent(account.fiveHour)) · 7d \(percent(account.sevenDay)) · \(account.running) running")
-                                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                            }
+                    if phone.accounts.isEmpty {
+                        Text("None yet").foregroundStyle(.secondary)
+                    } else {
+                        Text(Usage.summary(phone.accounts.map(\.usage))).font(.subheadline)
+                    }
+                }
+                ForEach(Usage.agents(phone.accounts.map(\.agent)), id: \.self) { agent in
+                    Section(Usage.tool(agent)) {
+                        ForEach(phone.accounts.filter { $0.agent == agent }) { account in
+                            UsageCard(snapshot: account.usage)
                         }
                     }
                 }
@@ -107,10 +108,6 @@ struct SettingsScreen: View {
                 do { try await phone.setModels(changed) } catch { problem = error.localizedDescription }
             }
         }
-    }
-
-    private func percent(_ used: Double?) -> String {
-        used.map { $0.formatted(.percent.precision(.fractionLength(0))) } ?? "–"
     }
 
     private func effortName(_ effort: String) -> String { effort == "xhigh" ? "Extra high" : effort.capitalized }

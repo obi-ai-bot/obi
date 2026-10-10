@@ -15,6 +15,8 @@ final class RunnerFeed {
         case ready
         case failed
         case interrupted
+        /// Oby's review requested changes for the last time it may: a person takes it from here.
+        case review
     }
 
     private(set) var jobs: [Job] = [] {
@@ -28,6 +30,9 @@ final class RunnerFeed {
     private(set) var working = 0
     /// The name the runner reports in /v1/status, like "tetrix-lab".
     private(set) var host: String?
+    /// When Clear done was last pressed, here or on the iPhone (the runner's clock), or nil: the
+    /// island hides the jobs that finished by then, the runner's and this Mac's alike.
+    private(set) var clearedAt: Date?
     /// The runner didn't answer the last try; the feed keeps trying.
     private(set) var down = false
     /// A job's notice just changed to something that needs the user: the notch's heads-up.
@@ -71,6 +76,7 @@ final class RunnerFeed {
         if url != self.url {
             jobs = []
             host = nil
+            clearedAt = nil
             notified = nil
         }
         self.url = url
@@ -90,18 +96,23 @@ final class RunnerFeed {
         var wait = 1.0
         while !Task.isCancelled {
             do {
-                var name = host
-                if name == nil { name = try await runner.status().runner.host }
+                // Status every time: a Clear done while the connection was down is in it.
+                let status = try await runner.status()
                 let list = try await runner.jobs()
                 // Settings › Runner changed, or the Mac woke, while these were on their way.
                 try Task.checkCancellation()
-                host = name
+                host = status.runner.host
+                clearedAt = status.clearedAt
                 take(list)
                 down = false
                 wait = 1
                 Self.ask()
                 for try await event in runner.events() {
-                    if case .job(let job) = event { apply(job) }
+                    switch event {
+                    case .job(let job): apply(job)
+                    case .cleared(let date): clearedAt = date
+                    case .accounts: break
+                    }
                 }
             } catch {
                 if Task.isCancelled { return }
@@ -111,6 +122,13 @@ final class RunnerFeed {
             try? await Task.sleep(for: .seconds(wait))
             wait = min(wait * 2, 30)
         }
+    }
+
+    /// Clear done: the runner records the time, and the island here and Home on the iPhone hide
+    /// the jobs that finished by then.
+    func clear() async throws {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to clear done jobs.") }
+        clearedAt = try await runner.clear()
     }
 
     /// The runner's answer to Stop or a message, or one of its events: the job with that id.
@@ -137,7 +155,7 @@ final class RunnerFeed {
                 Self.post(notice, for: job)
                 onNotice(job, notice)
             } else {
-                // Published, from the iPhone or by the runner, or running again: its alert goes.
+                // Published, from the iPhone or by the runner, dismissed, or running again: its alert goes.
                 UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [job.id])
             }
         }
@@ -145,8 +163,11 @@ final class RunnerFeed {
 
     // MARK: Notices, as the runner decides them (Runner/Push.swift)
 
+    /// Nothing for a job the user dismissed: its alert clears.
     static func notice(for job: Job) -> Notice? {
+        guard job.needsYou else { return nil }
         if job.canPublish { return .ready }
+        if job.reviewNeedsYou { return .review }
         switch job.status {
         case .failed: return .failed
         case .interrupted: return .interrupted
@@ -174,13 +195,15 @@ final class RunnerFeed {
         case .ready: "\(job.publishError == nil ? "Ready to publish" : "Couldn't publish"): \(job.heading)"
         case .failed: "Failed: \(job.heading)"
         case .interrupted: "Interrupted: \(job.heading)"
+        case .review: "Changes requested: \(job.heading)"
         }
     }
 
-    /// Why its own publish failed when that's what it needs, or the summary's first line.
+    /// Why its own publish failed when that's what it needs, why Oby's review stopped, or the summary's first line.
     static func body(_ notice: Notice, for job: Job) -> String {
         let line = job.summary.split(separator: "\n").first.map(String.init)
         if notice == .ready { return job.publishError ?? line ?? "Done" }
+        if notice == .review { return Review.stopLine }
         return line ?? job.status.rawValue.capitalized
     }
 

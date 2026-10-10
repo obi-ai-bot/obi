@@ -168,7 +168,7 @@ final class APITests {
                 let account = try #require((status["accounts"] as? [[String: Any]])?.first)
                 #expect(account["id"] as? String == "default")
                 #expect(account["signedIn"] as? Bool == false)
-                #expect(account["label"] is NSNull)
+                #expect(account["label"] is NSNull && account["fullUntil"] is NSNull)
                 let claude = (status["models"] as? [String: Any])?["claude"] as? [String: Any]
                 #expect(claude?["model"] as? String == AgentModels.value("claude", "model"))
             }
@@ -272,9 +272,10 @@ final class APITests {
         let json = String(decoding: try API.encode(JobJSON(job: job)), as: UTF8.self)
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
-        for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "check", "model", "notes", "pullRequest", "pullRequestError"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
+        for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "check", "model", "notes", "pullRequest", "pullRequestError",
+                    "dismissed", "reviewing", "review", "reviewError", "reviewOf"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 32)
+        #expect(decoded.count == 37)
         #expect(decoded["pipeline"] is [String: Any])
         #expect(decoded["title"] as? String == "Review oby #33")
         #expect(decoded["rounds"] as? Int == 1 && decoded["round"] as? Int == 1)
@@ -645,5 +646,42 @@ struct ConnectorTests {
         #expect(env["CLAUDE_CONFIG_DIR"] == "/tmp/oby/accounts/personal")
         #expect(env["GH_TOKEN"] == .some(nil) && env["GITHUB_TOKEN"] == .some(nil))
         #expect(ClaudeBrain().environment["CLAUDE_CONFIG_DIR"] == .some(nil))
+    }
+}
+
+/// Claude Code's background commands and subagents outlive the turn Oby ends the session on,
+/// so Policy sends them to the foreground.
+struct BackgroundWorkTests {
+    let worktree = URL(filePath: "/tmp/oby/jobs/9f08fd10")
+    let foreground = "Run it in the foreground: Oby ends the session when your turn ends, and background work can't ask for permissions."
+
+    @Test func backgroundCommandsAreDenied() {
+        let input: [String: Any] = ["command": "pnpm dev", "run_in_background": true]
+        #expect(Policy.deny(tool: "Bash", input: input, worktree: worktree) == foreground)
+    }
+
+    /// Claude Code runs a subagent in the background unless it's told not to, and always when it's remote.
+    @Test func backgroundSubagentsAreDenied() {
+        let subagent: [String: Any] = ["description": "Find callers", "prompt": "Find Policy's callers"]
+        for tool in ["Agent", "Task"] {
+            for extra in [["run_in_background": true], [:], ["run_in_background": false, "isolation": "remote"]] as [[String: Any]] {
+                let input = subagent.merging(extra) { $1 }
+                #expect(Policy.deny(tool: tool, input: input, worktree: worktree) == foreground, "\(tool) \(extra)")
+            }
+        }
+    }
+
+    @Test func foregroundCommandsAndSubagentsAreAllowed() {
+        for background in [nil, false] as [Bool?] {
+            var command: [String: Any] = ["command": "swift test"]
+            if let background { command["run_in_background"] = background }
+            #expect(Policy.deny(tool: "Bash", input: command, worktree: worktree) == nil)
+        }
+        for tool in ["Agent", "Task"] {
+            for extra in [[:], ["isolation": "worktree"]] as [[String: Any]] {
+                let input = ["description": "Find callers", "prompt": "Find Policy's callers", "run_in_background": false].merging(extra) { $1 }
+                #expect(Policy.deny(tool: tool, input: input, worktree: worktree) == nil, "\(tool) \(extra)")
+            }
+        }
     }
 }

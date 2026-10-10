@@ -8,12 +8,12 @@ struct HomeView: View {
     @State private var text = ""
     @State private var settings = false
     @FocusState private var typing: Bool
-    /// Jobs that finished by this time (the runner's clock) are hidden from Home only; the runner keeps them all.
-    @AppStorage("home.clearedAt") private var clearedAt: Double = 0
     /// The scroll view's height, so an empty Home can put Oby in the middle of it.
     @State private var height: CGFloat = 0
     /// The job screens open, so a notification can open its job.
     @State private var path: [String] = []
+    /// Why the last Dismiss or Clear done didn't go through, until the next one does.
+    @State private var problem: String?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -25,10 +25,21 @@ struct HomeView: View {
                             .font(.footnote).foregroundStyle(.orange)
                             .padding(.horizontal, 4)
                     }
-                    ForEach(jobs) { job in
-                        NavigationLink(value: job.id) { JobRow(job: job) }
-                            .buttonStyle(.plain)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    ForEach(groups) { section in
+                        Text(section.group.rawValue)
+                            .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            .padding(.horizontal, 4).padding(.top, 4)
+                            .accessibilityAddTraits(.isHeader)
+                        ForEach(section.jobs) { job in
+                            NavigationLink(value: job.id) { JobRow(job: job) }
+                                .buttonStyle(.plain)
+                                // Swipe left on a job that needs you to let it go.
+                                .modifier(SwipeToDismiss(enabled: job.needsYou) { Task { await dismiss(job.id) } })
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
+                    }
+                    if let problem {
+                        Text(problem).font(.footnote).foregroundStyle(.red).padding(.horizontal, 4)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -43,9 +54,8 @@ struct HomeView: View {
             .toolbar {
                 if jobs.contains(where: { !$0.isActive }) {
                     ToolbarItem(placement: .topBarLeading) {
-                        Button("Clear done") {
-                            clearedAt = phone.jobs.compactMap(\.finished).max()?.timeIntervalSince1970 ?? clearedAt
-                        }
+                        // Through the runner, so the Mac's island clears too.
+                        Button("Clear done") { Task { await clear() } }
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -75,10 +85,11 @@ struct HomeView: View {
     /// Nothing to show: Oby waits big in the middle of Home, and the first job sends it to its corner.
     private var centered: Bool { phone.loaded && jobs.isEmpty }
 
-    /// Running jobs, then the ones that finished after the last Clear done.
-    private var jobs: [Job] {
-        phone.visibleJobs.filter { $0.isActive || ($0.finished?.timeIntervalSince1970 ?? 0) > clearedAt }
-    }
+    /// Every job but those that finished by the last Clear done, on any app.
+    private var jobs: [Job] { phone.visibleJobs }
+
+    /// The jobs in the groups both apps show: needs you, working, in review, done.
+    private var groups: [JobList.Section<Job>] { JobList.groups(jobs, by: \.group) }
 
     private var mood: String {
         if case .thinking = phone.talk { return "thinking" }
@@ -127,8 +138,8 @@ struct HomeView: View {
                     Text(reply).font(.headline)
                     Text("Type a task below.").font(.subheadline).foregroundStyle(.secondary)
                 default:
-                    let working = phone.active.count
-                    Text(working == 0 ? needs.map { "\($0)." } ?? "All quiet." : working == 1 ? "1 agent is working." : "\(working) agents are working.")
+                    // The same line as the Mac's notch and island (Shared/JobList.swift).
+                    Text(Summary.line(working: phone.active.count, needs: needs))
                         .font(.title3.weight(.semibold))
                     Text(subline).font(.subheadline).foregroundStyle(.secondary)
                 }
@@ -140,14 +151,12 @@ struct HomeView: View {
         .padding(.top, 4)
     }
 
-    /// What needs you among the jobs Home shows: ready to publish, failed or interrupted.
+    /// What needs you among the jobs Home shows: ready to publish, failed, interrupted or out of reviews.
     private var needs: String? { NeedsYou.line(jobs) }
 
     private var subline: String {
         switch phone.connection {
-        case .live:
-            // With nobody working, what needs you is the title already.
-            if let needs { phone.active.isEmpty ? "On \(phone.host)." : "\(needs). On \(phone.host)." } else { "Nothing needs you. On \(phone.host)." }
+        case .live: "On \(phone.host)."
         case .connecting: "Reaching the runner…"
         case .offline: "The runner isn't answering."
         }
@@ -184,6 +193,26 @@ struct HomeView: View {
         phone.ask(text)
         text = ""
         typing = false
+    }
+
+    /// Lets go of a job that needs you: the runner keeps it, and it stops counting here and on the Mac.
+    private func dismiss(_ id: String) async {
+        do {
+            try await phone.dismiss(id)
+            problem = nil
+        } catch {
+            problem = error.localizedDescription
+        }
+    }
+
+    /// Clear done: the runner records the time, and the finished jobs go from here and from the Mac's island.
+    private func clear() async {
+        do {
+            try await phone.clear()
+            problem = nil
+        } catch {
+            problem = error.localizedDescription
+        }
     }
 
     private var sheetShown: Binding<Bool> {
@@ -230,13 +259,69 @@ private struct Hop {
     var scale: CGFloat = 1
 }
 
+/// Swipe a row left to uncover Dismiss, as a List's swipe actions do; Home's rows are in a
+/// ScrollView, which keeps vertical drags for scrolling. Dismiss closes the row and lets the job go.
+private struct SwipeToDismiss: ViewModifier {
+    let enabled: Bool
+    let dismiss: () -> Void
+    @State private var offset: CGFloat = 0
+    @State private var open = false
+    private static let width: CGFloat = 96
+
+    func body(content: Content) -> some View {
+        content
+            .offset(x: offset)
+            .background(alignment: .trailing) {
+                if enabled, offset < 0 {
+                    Button {
+                        close()
+                        dismiss()
+                    } label: {
+                        Text("Dismiss").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                            .frame(width: Self.width).frame(maxHeight: .infinity)
+                            .background(.red, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dismiss")
+                }
+            }
+            .gesture(drag, including: enabled ? .all : .subviews)
+            .onChange(of: enabled) { if !enabled { close() } }
+            .accessibilityAction(named: "Dismiss") { if enabled { dismiss() } }
+    }
+
+    private var drag: some Gesture {
+        DragGesture(minimumDistance: 20, coordinateSpace: .local)
+            .onChanged { value in
+                // Only a sideways swipe; the scroll view keeps the vertical ones.
+                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                let start: CGFloat = open ? -Self.width : 0
+                offset = min(0, max(-Self.width - 24, start + value.translation.width))
+            }
+            .onEnded { value in
+                let end = (open ? -Self.width : 0) + value.translation.width
+                withAnimation(.snappy) {
+                    open = end < -Self.width / 2
+                    offset = open ? -Self.width : 0
+                }
+            }
+    }
+
+    private func close() {
+        withAnimation(.snappy) {
+            open = false
+            offset = 0
+        }
+    }
+}
+
 /// One job: what it is, what it's doing now, how it ended.
 struct JobRow: View {
     let job: Job
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: job.agent == "codex" ? "circle.hexagongrid" : "asterisk")
+            AgentMark(agent: job.agent)
                 .font(.body.weight(.semibold))
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
@@ -245,7 +330,12 @@ struct JobRow: View {
                     Text(pipeline.label).font(.caption.weight(.medium)).foregroundStyle(.secondary)
                 }
                 Text(job.line).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
-                StatusPill(job: job)
+                HStack(spacing: 8) {
+                    StatusPill(job: job)
+                    if let verdict = job.verdictLine {
+                        Text(verdict).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
             }
             Spacer(minLength: 0)
         }
@@ -256,27 +346,15 @@ struct JobRow: View {
     }
 }
 
+/// The status pill, with the words and colour both apps give the job (`Job.badge`, Shared/Runner.swift).
 struct StatusPill: View {
     let job: Job
 
     var body: some View {
-        let (text, color): (String, Color) = switch job.status {
-        case .queued: ("Starting", .blue)
-        case .running: ("Working", .blue)
-        case .done where job.canPublish: ("Ready to publish", .orange)
-        case .done where job.pullRequest?.state == "MERGED": ("Merged", .green)
-        case .done where job.pullRequest?.state == "CLOSED": ("PR closed", .secondary)
-        case .done where job.pullRequest?.reviewDecision == "CHANGES_REQUESTED": ("Changes requested", .orange)
-        case .done where job.pullRequest?.reviewDecision == "APPROVED": ("Approved", .green)
-        case .done where job.published != nil: ("In review", .blue)
-        case .done: ("Done", .green)
-        case .failed: ("Failed", .red)
-        case .stopped: ("Stopped", .gray)
-        case .interrupted: ("Interrupted", .gray)
-        }
-        Text(text).font(.caption.weight(.semibold)).foregroundStyle(color)
+        let badge = job.badge
+        Text(badge.text).font(.caption.weight(.semibold)).foregroundStyle(badge.tone.color)
             .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(color.opacity(0.18), in: Capsule())
+            .background(badge.tone.color.opacity(0.18), in: Capsule())
     }
 }
 

@@ -63,6 +63,16 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var pullRequest: PullRequestStatus?
     /// A failed refresh keeps the last successful observation above.
     var pullRequestError: String?
+    /// When the user let it go (Dismiss), or nil. A job that needed them (Publish, failed,
+    /// interrupted) then needs nothing: no alert, no Publish, until it runs again for their words.
+    var dismissed: Date?
+    /// Oby's own review of the pull request (Engine/Review.swift): the review job under way, the
+    /// latest verdict, and why a review couldn't run or gave no verdict.
+    var reviewing: String?
+    var review: Review?
+    var reviewError: String?
+    /// The job whose pull request this job reviews: set on the review jobs Oby starts itself.
+    var reviewOf: String?
 
     var maxRounds: Int { rounds ?? 1 }
     var currentRound: Int { round ?? 1 }
@@ -74,10 +84,17 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// published, then the ones later rounds made. A job published before Oby counted has none.
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
     /// Done, with commits that aren't on its pull request yet: Oby publishes it when it ends, and
-    /// offers Publish when that failed.
-    var canPublish: Bool { status == .done && base != nil && unpublished > 0 }
-    /// Waiting for Publish (its own publish failed), failed or interrupted: what an alert is sent for, and what Home counts.
-    var needsYou: Bool { canPublish || status == .failed || status == .interrupted }
+    /// offers Publish when that failed. Not once the user dismissed it, and never on Oby's own review
+    /// jobs: a review makes no commits.
+    var canPublish: Bool { status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil }
+    /// Oby's review requested changes for the last time it may (Review.maxRounds), and the pull
+    /// request is still open: a person takes it from here.
+    var reviewNeedsYou: Bool {
+        status == .done && published != nil && (review?.stopsHere ?? false) && (pullRequest?.state ?? .open) == .open
+    }
+    /// Waiting for Publish (its own publish failed), failed, interrupted, or out of review rounds:
+    /// what an alert is sent for, what Home counts, and what Dismiss takes. Not once dismissed.
+    var needsYou: Bool { dismissed == nil && (canPublish || status == .failed || status == .interrupted || reviewNeedsYou) }
     var agentName: String { Job.agentNames[agent] ?? agent }
     static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
@@ -119,9 +136,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
 
     /// How a job really ends, given the status its agent and check gave it and the commits it made
     /// (nil when unknown): a committing job that's done with none ends as "nothing committed", with
-    /// the agent's own words as the reason.
-    static func ending(_ job: Job, _ status: Status, _ summary: String, made: Int?) -> (Status, String) {
-        guard status == .done, made == 0, committing.contains(job.kind) else { return (status, summary) }
+    /// the agent's own words as the reason. Not a round the user `asked` for with a message: their
+    /// words say what it should do (reset the branch, drop the work), so none committed is done.
+    static func ending(_ job: Job, _ status: Status, _ summary: String, made: Int?, asked: Bool = false) -> (Status, String) {
+        guard status == .done, made == 0, committing.contains(job.kind), !asked else { return (status, summary) }
         let lines = summary.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
         let reason = lines.first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
         return (.failed, "Nothing committed: \(reason.isEmpty ? "the agent gave no reason." : reason)" + (lines.count > 1 ? "\n" + lines[1] : ""))
@@ -138,8 +156,11 @@ nonisolated enum AgentEvent: Equatable, Sendable {
     case session(String)
     /// What it's doing now, like "Running pnpm test".
     case step(String)
-    /// How much of the account's limits is used, 0...1.
-    case usage(fiveHour: Double?, sevenDay: Double?)
+    /// How much of the account's limits is used, 0...1, and when each window resets.
+    case usage(fiveHour: Double?, sevenDay: Double?, fiveHourResets: Date? = nil, sevenDayResets: Date? = nil)
+    /// The account hit its usage limit and the turn can't go on, with the reset time it named (nil
+    /// when it named none). Desk moves the job to an account with room; this agent is dropped.
+    case limit(resets: Date?)
     /// A turn ended; the agent waits for another message or for `end()`.
     case turnEnded(summary: String, failed: Bool)
     /// The agent's process ended, with its last turn's result.
@@ -147,6 +168,12 @@ nonisolated enum AgentEvent: Equatable, Sendable {
     /// The agent's process ended mid-turn, without a result: the summary says how it ended. Its
     /// session can be picked up again.
     case cutOff(summary: String)
+
+    /// A reset time as the tools send it: seconds since 1970 (milliseconds are taken too).
+    nonisolated static func epoch(_ value: Any?) -> Date? {
+        guard let seconds = (value as? Double) ?? (value as? Int).map(Double.init), seconds > 0 else { return nil }
+        return Date(timeIntervalSince1970: seconds > 1e11 ? seconds / 1000 : seconds)
+    }
 }
 
 /// A coding agent working on one job in its worktree: Claude Code or Codex.
@@ -383,12 +410,24 @@ nonisolated enum StreamJSON {
                 return .step(step(tool: name, input: block["input"] as? [String: Any] ?? [:]))
             }
         case "rate_limit_event":
-            let windows = ((message["rate_limit_info"] as? [String: Any])?["unifiedWindows"] as? [String: Any]) ?? [:]
-            let used = { (key: String) in (windows[key] as? [String: Any])?["utilization"] as? Double }
-            return [.usage(fiveHour: used("five_hour"), sevenDay: used("seven_day"))]
+            let info = message["rate_limit_info"] as? [String: Any] ?? [:]
+            let windows = info["unifiedWindows"] as? [String: Any] ?? [:]
+            let window = { (key: String) in windows[key] as? [String: Any] }
+            let used = { (key: String) in Limits.number(window(key)?["utilization"]) }
+            let resets = { (key: String) in AgentEvent.epoch(window(key)?["resetsAt"]) }
+            var events: [AgentEvent] = [.usage(fiveHour: used("five_hour"), sevenDay: used("seven_day"),
+                                               fiveHourResets: resets("five_hour"), sevenDayResets: resets("seven_day"))]
+            // At 100% (or refused outright) the account is full: when it resets, from the window that filled.
+            let full = ["five_hour", "seven_day"].filter { (used($0) ?? 0) >= 1 }
+            if info["status"] as? String == "rejected" || !full.isEmpty {
+                let at = full.compactMap { Limits.number(window($0)?["resetsAt"]) }.min() ?? Limits.number(info["resetsAt"])
+                events.append(.limit(resets: at.map { Date(timeIntervalSince1970: $0) }))
+            }
+            return events
         case "result":
             let failed = message["is_error"] as? Bool ?? (message["subtype"] as? String != "success")
             let text = (message["result"] as? String) ?? ""
+            if failed, Limits.isLimit(text) { return [.limit(resets: Limits.reset(in: text))] }
             return [.finished(summary: text.isEmpty ? (failed ? "Claude Code hit an error." : "Done.") : text, failed: failed)]
         default:
             return []
@@ -414,6 +453,59 @@ nonisolated enum StreamJSON {
     }
 }
 
+/// A tool's usage-limit message, like Codex's "You've hit your usage limit. Try again at 10:45 PM."
+/// or Claude Code's "Claude usage limit reached. Your limit will reset at 3pm (America/Sao_Paulo).":
+/// whether a text is one, and when it says the limit resets.
+nonisolated enum Limits {
+    static func isLimit(_ text: String) -> Bool {
+        text.contains(/(?i)\b(?:usage|rate)[ -]?limit|hit your limit|limit (?:reached|exceeded)\b/)
+    }
+
+    /// The reset the message names: a clock time ("at 10:45 PM", "resets 3pm", "until 22:30"), the
+    /// next one after `now` in the zone it names in parentheses (else `calendar`'s), or a wait
+    /// ("in 2 hours 15 minutes"). Nil when it names none.
+    static func reset(in text: String, now: Date = .now, calendar: Calendar = .current) -> Date? {
+        var calendar = calendar
+        if let zone = text.firstMatch(of: /\(([A-Za-z]+\/[A-Za-z_\/+-]+)\)/).flatMap({ TimeZone(identifier: String($0.1)) }) {
+            calendar.timeZone = zone
+        }
+        if let clock = text.firstMatch(of: /(?i)\b(?:at|resets?|until|by)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m|p\.?m)?\b/) {
+            var hour = Int(clock.1) ?? 0
+            let minute = clock.2.flatMap { Int($0) } ?? 0
+            let meridiem = clock.3?.lowercased().replacing(".", with: "")
+            if meridiem == "pm", hour < 12 { hour += 12 }
+            if meridiem == "am", hour == 12 { hour = 0 }
+            guard hour < 24, minute < 60, meridiem != nil || clock.2 != nil else { return nil }
+            var at = calendar.startOfDay(for: now)
+            at = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: at) ?? at
+            if at <= now { at = calendar.date(byAdding: .day, value: 1, to: at) ?? at }
+            return at
+        }
+        guard text.contains(/(?i)\b(?:in|after)\s+\d/) else { return nil }
+        var seconds = 0.0
+        for part in text.matches(of: /(?i)(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m)\b/) {
+            let n = Double(part.1) ?? 0
+            seconds += part.2.lowercased().hasPrefix("h") ? n * 3600 : n * 60
+        }
+        return seconds > 0 ? now.addingTimeInterval(seconds) : nil
+    }
+
+    /// "10:45 PM": how a reset time reads in a summary.
+    static func clock(_ date: Date) -> String {
+        date.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(Locale(identifier: "en_US")))
+    }
+
+    /// A JSON number as a Double, however the parser boxed it.
+    static func number(_ value: Any?) -> Double? {
+        switch value {
+        case let number as Double: number
+        case let number as Int: Double(number)
+        case let number as NSNumber: number.doubleValue
+        default: nil
+        }
+    }
+}
+
 /// Oby's answers to an agent's permission prompts until F3 brings them to the notch: work
 /// inside the job's worktree is allowed, publishing is not (only Oby publishes).
 nonisolated enum Policy {
@@ -435,6 +527,17 @@ nonisolated enum Policy {
                 return "Oby's agents use only Tetrix's graph reads among MCP tools. Say in your summary what you'd have done with \(tool)."
             }
             return nil
+        }
+        // Commands and subagents left running in the background outlive the turn, and nothing
+        // could answer their permission prompts. Claude Code runs a subagent in the background unless
+        // told otherwise, and always when it's remote (checked in 2.1.296).
+        let background = switch tool {
+        case "Bash": input["run_in_background"] as? Bool == true
+        case "Agent", "Task": input["run_in_background"] as? Bool != false || input["isolation"] as? String == "remote"
+        default: false
+        }
+        if background {
+            return "Run it in the foreground: Oby ends the session when your turn ends, and background work can't ask for permissions."
         }
         if tool == "Bash", let command = input["command"] as? String, command.contains(publishing) {
             return "Oby publishes the job's branch itself once the work is done. Don't push or post; say in your summary what you'd publish."
@@ -697,6 +800,8 @@ nonisolated enum Workspace {
 /// What Oby tells agents. Swift writes these; the model's text appears only as the task.
 nonisolated enum Prompts {
     static func agent(_ job: Job) -> String {
+        // Oby's own review of a pull request: a review only, no commits (Engine/Review.swift).
+        if job.reviewOf != nil { return Review.prompt(job) }
         var lines: [String] = []
         if let pr = job.pr {
             let base = "origin/\(job.base ?? "HEAD")"
@@ -720,6 +825,24 @@ nonisolated enum Prompts {
             lines.append("You may take up to \(job.maxRounds) rounds. End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.")
         }
         lines.append("Finish with a short summary. Its first line is one sentence the user will see in the notch.")
+        return lines.joined(separator: "\n\n")
+    }
+
+    /// What an agent hears when it takes a job over from `previous` (like "Codex · Deskree"), whose
+    /// account hit its limit mid-round: the task as the first agent heard it, what earlier rounds
+    /// reported, what the user said along the way, and the message that started the round to do over
+    /// (nil for the task itself).
+    static func takeover(_ job: Job, from previous: String, round: String?) -> String {
+        let quote = { (text: String) in text.split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n") }
+        var lines = [agent(job)]
+        lines.append("\(previous) was working on this job and hit its account's usage limit mid-round. You're taking over in the same worktree and branch: its commits are on the branch, and it may have left uncommitted changes. Check `git status` and `git log` before you go on, and do this round over from its start.")
+        if let summaries = job.summaries, !summaries.isEmpty {
+            lines.append("What earlier rounds reported, oldest first:\n\n" + summaries.map(quote).joined(separator: "\n\n"))
+        }
+        if let notes = job.notes, !notes.isEmpty {
+            lines.append("What the user told the agent along the way, oldest first:\n\n" + notes.map(quote).joined(separator: "\n\n"))
+        }
+        if let round { lines.append("The message that started this round:\n\n" + quote(round)) }
         return lines.joined(separator: "\n\n")
     }
 

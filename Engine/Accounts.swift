@@ -12,6 +12,9 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     var payer: String
     /// The account's config directory, or nil for the tool's default (`~/.claude`, `~/.codex`).
     var home: String?
+
+    /// "Codex · Deskree": the tool and the account, as reports name it.
+    var heading: String { "\(Job.agentNames[agent] ?? agent) · \(name)" }
 }
 
 /// An account with what Oby knows about it right now. Only `account` is saved.
@@ -22,10 +25,16 @@ nonisolated struct AccountState: Equatable, Sendable {
     /// How much of each limit window is used, 0...1, as the account's last job reported it.
     var fiveHour: Double?
     var sevenDay: Double?
+    /// When each window resets, as the tool last said; nil when it didn't say.
+    var fiveHourResets: Date?
+    var sevenDayResets: Date?
     /// Jobs queued or running on it.
     var running = 0
+    /// A job of its hit the account's usage limit: it gets no job until then.
+    var fullUntil: Date?
 
     var signedIn: Bool { label != nil }
+    func isFull(at now: Date = .now) -> Bool { (fullUntil ?? .distantPast) > now }
 }
 
 /// The accounts Oby spreads jobs across, saved in `accounts.json`. Homes Oby makes live in
@@ -66,12 +75,31 @@ final class AccountStore {
         if let home, Self.isOwned(home, in: homes) { try? FileManager.default.removeItem(atPath: home) }
     }
 
-    /// Keeps the usage an account's job just reported. A window it didn't report keeps its last value.
+    /// Keeps the usage an account's job just reported. A window it didn't report keeps its last
+    /// value and reset time; a window reported without a reset time keeps the last one.
     func record(_ usage: AgentEvent, for accountID: String) {
-        guard case let .usage(fiveHour, sevenDay) = usage,
+        guard case let .usage(fiveHour, sevenDay, fiveHourResets, sevenDayResets) = usage,
               let index = accounts.firstIndex(where: { $0.account.id == accountID }) else { return }
-        if let fiveHour { accounts[index].fiveHour = fiveHour }
-        if let sevenDay { accounts[index].sevenDay = sevenDay }
+        if let fiveHour {
+            accounts[index].fiveHour = fiveHour
+            if let fiveHourResets { accounts[index].fiveHourResets = fiveHourResets }
+        }
+        if let sevenDay {
+            accounts[index].sevenDay = sevenDay
+            if let sevenDayResets { accounts[index].sevenDayResets = sevenDayResets }
+        }
+    }
+
+    /// A job of the account's hit its usage limit: no job goes to it until `until`.
+    func markFull(_ accountID: String, until: Date) {
+        guard let index = accounts.firstIndex(where: { $0.account.id == accountID }) else { return }
+        accounts[index].fullUntil = until
+    }
+
+    /// What the tool says about the account's login, or nil when it's signed out.
+    func setLabel(_ label: String?, for accountID: String) {
+        guard let index = accounts.firstIndex(where: { $0.account.id == accountID }) else { return }
+        accounts[index].label = label
     }
 
     func state(_ id: String) -> AccountState? { accounts.first { $0.account.id == id } }
@@ -100,14 +128,17 @@ final class AccountStore {
                 let home = account.home.map { URL(filePath: $0) }
                 label = (try? await CodexAgent.account(home: home)) ?? nil
                 if label != nil, let used = try? await CodexAgent.usage(home: home) {
-                    record(.usage(fiveHour: used.fiveHour, sevenDay: used.sevenDay), for: account.id)
+                    record(used.event, for: account.id)
                 }
             default:
                 break
             }
-            if let index = accounts.firstIndex(where: { $0.account.id == account.id }) { accounts[index].label = label }
+            setLabel(label, for: account.id)
         }
     }
+
+    /// What the tool said about an account's login: a label while signed in, nil when it isn't.
+    /// `refresh` learns it; tests set it.
 
     private func save() throws {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -117,15 +148,21 @@ final class AccountStore {
     }
 
     /// The account for a new job, keeping every account in balance: a signed-in account of that
-    /// agent (any agent if nil) under 95% of both its windows, with the lowest score, the busier of
-    /// its two windows plus 0.15 per running job. Each account's usage is measured against its own
-    /// plan, so a small plan fills up faster and gets fewer jobs. Unknown usage counts as 0; ties
-    /// keep list order.
-    nonisolated static func route(_ accounts: [AccountState], agent: String?) -> Account? {
+    /// agent (any agent if nil) under 95% of both its windows and not marked full, with the lowest
+    /// score, the busier of its two windows plus 0.15 per running job. Each account's usage is
+    /// measured against its own plan, so a small plan fills up faster and gets fewer jobs. Unknown
+    /// usage counts as 0; ties keep list order.
+    nonisolated static func route(_ accounts: [AccountState], agent: String?, now: Date = .now) -> Account? {
         accounts.enumerated()
-            .filter { $0.element.signedIn && (agent == nil || $0.element.account.agent == agent) && ($0.element.fiveHour ?? 0) < 0.95 && ($0.element.sevenDay ?? 0) < 0.95 }
+            .filter { $0.element.signedIn && (agent == nil || $0.element.account.agent == agent) && !$0.element.isFull(at: now)
+                && ($0.element.fiveHour ?? 0) < 0.95 && ($0.element.sevenDay ?? 0) < 0.95 }
             .min { (score($0.element), $0.offset) < (score($1.element), $1.offset) }?
             .element.account
+    }
+
+    /// Where a job goes on from an account that hit its limit: the same tool first, then any.
+    nonisolated static func next(_ accounts: [AccountState], agent: String, now: Date = .now) -> Account? {
+        route(accounts, agent: agent, now: now) ?? route(accounts, agent: nil, now: now)
     }
 
     nonisolated static func score(_ state: AccountState) -> Double {

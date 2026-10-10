@@ -52,6 +52,14 @@ final class Desk {
     private var ranHere: [String: Int] = [:]
     /// Jobs whose agent was cut off mid-turn and picked up again: that happens once, then the job fails.
     private var pickedUp: Set<String> = []
+    /// Jobs running again for the user's words (`message` on a finished job): that round is theirs,
+    /// so ending it with nothing committed is done, not "nothing committed".
+    private var asked: Set<String> = []
+    /// The message that started a looping job's current round (the check's output, "Keep going"),
+    /// for an agent that takes the round over; nil when the round began with the task or the user's words.
+    private var roundMessage: [String: String] = [:]
+    /// How each job moved between accounts when one hit its limit, oldest first: the report says so.
+    private var handoffs: [String: [String]] = [:]
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
     /// Gets a job's worktree ready, and makes its agent (nil for a tool that can't run jobs yet). Tests put in their own.
@@ -68,6 +76,10 @@ final class Desk {
     @ObservationIgnored var publishByHand: (Job, _ base: String, _ approve: (String) async throws -> Void) async throws -> URL = {
         try await Publish.publish($0, base: $1, approve: $2)
     }
+    /// Oby's review of a job's pull request (Engine/Review.swift): posts it as a comment, after the
+    /// secret scan, and quotes it as a file for the author's next round. Tests put in their own.
+    @ObservationIgnored var postReview: (_ author: Job, _ body: String) async throws -> URL = Review.post
+    @ObservationIgnored var quoteReview: (_ author: Job, _ file: String, _ text: String) throws -> Void = Review.quote
 
     init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))) {
         self.accounts = accounts
@@ -80,6 +92,8 @@ final class Desk {
             store.save(jobs[index])
         }
         accounts.countRunning(jobs)
+        // A review that was running: its author stops waiting for it.
+        for job in jobs where job.reviewOf != nil && job.status == .interrupted { reviewEnded(job) }
         publishOnItsOwn = { [weak self] job, base in
             try await Publish.publish(job, base: base, progress: { self?.publishing(job.id, $0) }) { _ in }
         }
@@ -229,7 +243,13 @@ final class Desk {
     func dispatch(_ draft: Draft) -> Job {
         talk = .none
         drafts.removeAll { $0.job.id == draft.job.id }
-        var job = draft.job
+        return enqueue(draft.job)
+    }
+
+    /// Queues a job: its worktree gets ready, then its agent starts. Oby's own jobs (reviews) start here.
+    @discardableResult
+    func enqueue(_ job: Job) -> Job {
+        var job = job
         job.phase = .prepare
         job.step = "Getting \(job.repoName) ready"
         jobs.insert(job, at: 0)
@@ -310,6 +330,7 @@ final class Desk {
                 job.published = url.absoluteString
                 job.publishError = nil
                 replace(job)
+                reviewPublished(job)
             }
             return url
         } catch let merged as Publish.AlreadyOnBase {
@@ -333,6 +354,19 @@ final class Desk {
         let agent = agents[id]
         finish(id, .stopped, "Stopped by you.")
         agent?.stop()
+    }
+
+    /// The user lets go of a job that needs them (Publish, failed, interrupted): it stays as it
+    /// ended, in the list and in history, needing nothing. Telling it something undoes this.
+    /// A job dismissed already is left as it is.
+    func dismiss(_ id: String) throws {
+        guard var job = job(id) else { throw Shell.Failure(message: "There's no job \(id).") }
+        guard job.dismissed == nil else { return }
+        guard job.needsYou else {
+            throw Shell.Failure(message: job.isActive ? "It's still running: stop it instead." : "Nothing to dismiss: this job doesn't need you.")
+        }
+        job.dismissed = .now
+        replace(job)
     }
 
     /// Stops every queued and running job, and says how many.
@@ -360,6 +394,8 @@ final class Desk {
             guard let session = job.session else { throw Shell.Failure(message: "This job never started, so there's no session to pick up.") }
             let resumed = Self.resumed(job, text)
             replace(resumed)
+            asked.insert(id)
+            roundMessage[id] = nil
             run(resumed, prompt: text, resume: session)
         }
     }
@@ -373,13 +409,14 @@ final class Desk {
     }
 
     /// A finished job running again for the user's words: same id and branch, a new round, and
-    /// one more round on a loop's limit so the limit still holds.
+    /// one more round on a loop's limit so the limit still holds. Dismissed no more: it's theirs again.
     nonisolated static func resumed(_ job: Job, _ text: String) -> Job {
         var job = heard(job, text)
         job.status = .running
         job.phase = .work
         job.publishStep = nil
         job.finished = nil
+        job.dismissed = nil
         job.round = job.currentRound + 1
         if let rounds = job.rounds { job.rounds = rounds + 1 }
         return job
@@ -406,7 +443,7 @@ final class Desk {
     }
 
     /// Starts the job's agent in its worktree: a new session, or the job's own picked up again.
-    private func run(_ job: Job, prompt: String, resume: String? = nil) {
+    func run(_ job: Job, prompt: String, resume: String? = nil) {
         let home = accounts.state(job.account)?.account.home.map { URL(filePath: $0) }
         guard let agent = makeAgent(job, home, resume) else { return finish(job.id, .failed, "\(job.agentName) can't run jobs yet.") }
         agents[job.id] = agent
@@ -448,6 +485,10 @@ final class Desk {
             replace(job, save: false)
         case .usage:
             accounts.record(event, for: job.account)
+        case .limit(let resets):
+            // Its turn died on the account's limit. One that's finishing after its last turn is left to end.
+            guard !ending.contains(id) else { return }
+            moveOn(job, resets: resets)
         case .turnEnded(let summary, let failed):
             job.summaries = (job.summaries ?? []) + [summary]
             replace(job)
@@ -476,6 +517,39 @@ final class Desk {
 
     /// What an agent that was cut off mid-turn hears when its session picks up again.
     static let cutOff = "You were cut off mid-turn. Continue where you left off, then finish with a short summary as asked."
+
+    /// The job's account hit its usage limit mid-round: the account is full until `resets` (an
+    /// hour when the tool named no time), and the job does the round over on the next account with
+    /// room, the same tool first, in the same worktree and branch with a new session. With no
+    /// account to go to, it fails, saying when the first one resets.
+    private func moveOn(_ job: Job, resets: Date?) {
+        let id = job.id
+        let from = accounts.state(job.account)?.account.heading ?? job.agentName
+        accounts.markFull(job.account, until: resets ?? .now.addingTimeInterval(3600))
+        let when = resets.map { " (resets \(Limits.clock($0)))" } ?? ""
+        // Dropped before it's killed, so nothing it says as it dies counts.
+        let agent = agents[id]
+        agents[id] = nil
+        agent?.kill()
+        guard let next = AccountStore.next(accounts.accounts, agent: job.agent) else {
+            let first = accounts.accounts.filter(\.signedIn).compactMap(\.fullUntil).min()
+            let soonest = first.map { " The first resets at \(Limits.clock($0))." } ?? ""
+            Logger.jobs.error("job \(id, privacy: .public): \(from, privacy: .public) hit its limit, and no account has room")
+            return finish(id, .failed, "\(from) hit its usage limit\(when), and no other account has room.\(soonest)")
+        }
+        Logger.jobs.notice("job \(id, privacy: .public): \(from, privacy: .public) hit its limit\(when, privacy: .public); continuing on \(next.heading, privacy: .public)")
+        handoffs[id, default: []].append("\(from) hit its limit\(when); continued on \(next.heading).")
+        var moved = job
+        moved.account = next.id
+        moved.agent = next.agent
+        moved.session = nil
+        // The stronger model is the tool's own.
+        if moved.model != nil { moved.model = AgentModels.stronger[next.agent] }
+        moved.step = "\(from) hit its limit; continuing on \(next.heading)"
+        replace(moved)
+        pickedUp.remove(id)
+        run(moved, prompt: Prompts.takeover(moved, from: from, round: roundMessage[id]))
+    }
 
     /// Runs the job's check, if it has one, then ends the job or sends the agent another round.
     /// `heard` is how many of the user's words the turn had taken in.
@@ -506,6 +580,7 @@ final class Desk {
             job.phase = .work
             job.step = "Round \(job.currentRound) of \(job.maxRounds)"
             replace(job)
+            roundMessage[id] = message
             agent.send(message)
         }
     }
@@ -533,7 +608,7 @@ final class Desk {
             guard var running = self.job(id), running.isActive else { return }
             // The job as it would end, which is what gets published.
             var ended = running
-            (ended.status, ended.summary) = Job.ending(ended, status, summary, made: made)
+            (ended.status, ended.summary) = Job.ending(ended, status, summary, made: made, asked: asked.contains(id))
             ended.commits = commits
             guard ended.canPublish, let before = ranHere[id], (commits ?? 0) > before else {
                 // Still waiting for Publish by hand: why its own publish failed still holds.
@@ -573,8 +648,10 @@ final class Desk {
             }
             return
         }
-        (job.status, job.summary) = Job.ending(job, status, summary, made: made)
+        (job.status, job.summary) = Job.ending(job, status, summary, made: made, asked: asked.contains(id))
         if job.status == .failed && status == .done { job.phase = .work }
+        // How it moved between accounts, for the report.
+        if let moves = handoffs[id], !moves.isEmpty { job.summary += "\n\n" + moves.joined(separator: "\n") }
         job.commits = commits
         // After commits, so it counts them as pushed.
         if let published {
@@ -590,6 +667,12 @@ final class Desk {
         ranHere[id] = nil
         pickedUp.remove(id)
         ending.remove(id)
+        asked.remove(id)
+        roundMessage[id] = nil
+        handoffs[id] = nil
+        // Oby reviews what was just published, and a review that ended reaches its author (Engine/Review.swift).
+        if published != nil { reviewPublished(job) }
+        if job.reviewOf != nil { reviewEnded(job) }
         onFinish(job)
     }
 
@@ -620,7 +703,7 @@ final class Desk {
         else { store.save(latest); onJobChange(latest) }
     }
 
-    private func replace(_ job: Job, save: Bool = true) {
+    func replace(_ job: Job, save: Bool = true) {
         guard let index = jobs.firstIndex(where: { $0.id == job.id }) else { return }
         jobs[index] = job
         if save { store.save(job) }

@@ -29,21 +29,27 @@ final class IslandModel {
     /// Agents working now, on this Mac and on the runner.
     var working: Int { desk.active.count + feed.working }
 
+    /// Whether the island lists a job: it hasn't finished, or it finished after the last Clear done
+    /// on any app. The runner keeps that time, and this Mac's own jobs go by it too.
+    func lists(_ job: Job) -> Bool { job.isActive || JobList.shows(finished: job.finished, clearedAt: feed.clearedAt) }
+
+    /// The one line the iPhone's Home says too (Shared/JobList.swift): who's working, and what
+    /// needs you among the jobs listed.
+    var summary: String {
+        Summary.line(working: working, needs: NeedsYou.line((desk.jobs + feed.jobs).filter { lists($0) }))
+    }
+
     private let wing: CGFloat = 52
     private var top: CGFloat { notch == .zero ? barHeight : notch.height }
 
-    /// What peeking shows next to Oby's name.
-    var peekLine: String {
-        if let notice { return notice }
-        if let job = desk.active.first ?? feed.active.first { return job.step.isEmpty ? job.heading : job.step }
-        return "All quiet"
-    }
+    /// What peeking shows next to Oby's name: a job that just ended, else the summary.
+    var peekLine: String { notice ?? summary }
 
     var size: CGSize {
         let base = notch == .zero ? 180 : notch.width + 2 * wing
         switch state {
         case .compact: return CGSize(width: base, height: top)
-        case .peek: return CGSize(width: base + (peekLine == "All quiet" ? 140 : 320), height: top + 6)
+        case .peek: return CGSize(width: base + (peekLine == Summary.quiet ? 140 : 320), height: top + 6)
         case .open: return CGSize(width: 600, height: openHeight)
         }
     }
@@ -255,7 +261,7 @@ struct IslandView: View {
             }
 
             if model.state == .open {
-                OpenIsland(desk: model.desk, feed: model.feed, focus: model.focus, characterWidth: frame.maxX, top: model.contentTop, onClose: onClose)
+                OpenIsland(model: model, characterWidth: frame.maxX, top: model.contentTop, onClose: onClose)
                     .frame(width: size.width)
                     .fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { model.openHeight = $0 }
@@ -278,34 +284,40 @@ struct IslandView: View {
     }
 }
 
-/// The open island: what Oby is up to, the jobs, and the field where you type a task.
+/// The open island: what Oby is up to, every job the iPhone lists (the runner's and this Mac's, in
+/// the same groups), one job's screen when you click it, and the field where you type a task.
 private struct OpenIsland: View {
-    let desk: Desk
-    /// The runner's jobs, followed all the time (RunnerFeed).
-    let feed: RunnerFeed
-    /// The runner's job a notification opened the island on.
-    let focus: String?
+    let model: IslandModel
     let characterWidth: CGFloat
     let top: CGFloat
     let onClose: () -> Void
     @State private var text = ""
     @FocusState private var typing: Bool
-    /// Finished jobs that ended before this are hidden from the island only; Desk keeps them all.
-    @AppStorage("islandClearedAt") private var clearedAt: Double = 0
+    /// The job open in place of the list (a Row's id), or nil for the list.
+    @State private var selected: String?
+    /// Why the last Clear done didn't go through, until the next one does.
+    @State private var problem: String?
+    /// How tall the list or the job's screen wants to be: past `maxHeight`, it scrolls.
+    @State private var contentHeight: CGFloat = 0
+
+    /// The list or a job grows the island up to here, then scrolls: the panel is 760 points tall.
+    private static let maxHeight: CGFloat = 420
+
+    private var desk: Desk { model.desk }
+    private var feed: RunnerFeed { model.feed }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
                 header.padding(.leading, characterWidth - 20)
                 Spacer(minLength: 12)
-                if clearable {
-                    Button { clearedAt = Date.now.timeIntervalSince1970 } label: {
-                        Text("Clear done")
-                            .font(.system(size: 12, weight: .semibold))
-                            .padding(.horizontal, 12).frame(height: 28)
-                            .background(.white.opacity(0.12), in: Capsule())
-                    }
-                    .buttonStyle(.plain)
+                if selected != nil {
+                    Button { selected = nil } label: { topPill { Label("Back", systemImage: "chevron.left") } }
+                        .buttonStyle(.plain)
+                } else if clearable {
+                    // Through the runner, so the iPhone's Home clears too.
+                    Button(action: clear) { topPill { Text("Clear done") } }
+                        .buttonStyle(.plain)
                 }
                 Button(action: onClose) {
                     Image(systemName: "chevron.up")
@@ -341,63 +353,129 @@ private struct OpenIsland: View {
                 }
                 field
             default:
-                ForEach(visibleJobs) { row in
-                    if let host = row.host {
-                        // Publishing needs the iPhone's device key, so runner rows don't offer it.
-                        JobRow(job: row.job, host: host, focused: row.job.id == focus,
-                               onStop: { Task { if let job = try? await feed.runner?.stop(row.job.id) { feed.apply(job) } } },
-                               onPublish: nil, onMessage: { text in if let runner = feed.runner { feed.apply(try await runner.tell(row.job.id, text)) } })
-                    } else {
-                        let job = row.job
-                        JobRow(job: job, onStop: { desk.stop(job.id) }, onPublish: { try await desk.publish(job.id, approve: Publish.touchID) },
-                               onMessage: { try desk.message(job.id, $0) })
+                if let row = selectedRow {
+                    scrolling { screen(row).id(row.id) }
+                } else {
+                    if !groups.isEmpty {
+                        scrolling { list }
                     }
+                    if let problem {
+                        Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(2)
+                    }
+                    if feed.down {
+                        Text("\(feed.name) isn't reachable").font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
+                    }
+                    field
                 }
-                if feed.down {
-                    Text("\(feed.name) isn't reachable").font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
-                }
-                field
             }
         }
         .padding(.top, top + 10)
         .padding(.horizontal, 22)
         .padding(.bottom, 22)
-        .onExitCommand(perform: onClose)
+        // Escape leaves a job's screen first, then closes the island.
+        .onExitCommand { if selected != nil { selected = nil } else { onClose() } }
         .onAppear { typing = true }
+        // A notification opened the island on a runner's job: its screen opens.
+        .onChange(of: model.focus, initial: true) { if let focus = model.focus { selected = Row.id(focus, local: false) } }
     }
 
     /// A job in the list, and the runner it's on (nil: this Mac).
     private struct Row: Identifiable {
         var job: Job
         var host: String?
-        var id: String { "\(host ?? "")/\(job.id)" }
+        var id: String { Self.id(job.id, local: host == nil) }
+        static func id(_ job: String, local: Bool) -> String { "\(local ? "mac" : "runner")/\(job)" }
     }
 
-    /// Running jobs first, this Mac's and the runner's, then the latest finished ones: four at most.
-    /// The job a notification opened comes first, even if it's cleared or further down.
-    private var visibleJobs: [Row] {
-        let rows = desk.jobs.map { Row(job: $0) } + feed.jobs.map { Row(job: $0, host: feed.name) }
-        let active = rows.filter(\.job.isActive)
-        let finished = rows.filter { isListed($0.job) }.sorted { ($0.job.finished ?? .distantPast) > ($1.job.finished ?? .distantPast) }
-        let listed = active + finished.prefix(max(0, 4 - active.count))
-        guard let focused = rows.first(where: { $0.host != nil && $0.job.id == focus }) else { return listed }
-        return [focused] + listed.filter { $0.id != focused.id }
+    /// Every job, this Mac's and the runner's, newest first.
+    private var allRows: [Row] {
+        (desk.jobs.map { Row(job: $0) } + feed.jobs.map { Row(job: $0, host: feed.name) })
+            .sorted { $0.job.created > $1.job.created }
     }
 
-    /// Finished jobs that ended after the last Clear done.
-    private var finished: [Job] {
-        (desk.jobs + feed.jobs).filter(isListed)
-    }
+    /// The ones the island lists: all but those that finished by the last Clear done, on any app.
+    private var rows: [Row] { allRows.filter { model.lists($0.job) } }
 
-    private func isListed(_ job: Job) -> Bool {
-        !job.isActive && (job.finished ?? .distantPast).timeIntervalSince1970 > clearedAt
-    }
+    /// The list in the iPhone's groups: needs you, working, in review, done.
+    private var groups: [JobList.Section<Row>] { JobList.groups(rows) { $0.job.group } }
 
-    /// The job list is on screen and has something finished to clear.
+    /// The job open now, even one that's cleared (a notification opened it).
+    private var selectedRow: Row? { selected.flatMap { id in allRows.first { $0.id == id } } }
+
+    /// The job list is on screen, a runner is set (it keeps the clear's time), and something finished is listed.
     private var clearable: Bool {
         switch desk.talk {
         case .plan, .question: false
-        default: !finished.isEmpty
+        default: feed.runner != nil && rows.contains { !$0.job.isActive }
+        }
+    }
+
+    /// The island grows with what's in here up to `maxHeight`; past that, this scrolls.
+    private func scrolling(@ViewBuilder _ content: () -> some View) -> some View {
+        ScrollView {
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
+        }
+        .frame(height: min(contentHeight, Self.maxHeight))
+    }
+
+    /// The jobs under their groups' headings, as Home shows them on the iPhone.
+    private var list: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(groups) { section in
+                Text(section.group.rawValue)
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.5))
+                    .padding(.leading, 4).padding(.top, 2)
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(section.jobs) { row in
+                    JobRow(job: row.job, place: row.host ?? "This Mac", onOpen: { selected = row.id },
+                           onStop: { stop(row) }, onDismiss: { try await dismiss(row) })
+                }
+            }
+        }
+    }
+
+    /// The job's screen, with the same stages as the iPhone's. Publishing a runner's job needs the
+    /// iPhone's device key, so only this Mac's own jobs offer Publish here.
+    @ViewBuilder private func screen(_ row: Row) -> some View {
+        if let host = row.host {
+            JobView(job: row.job, place: host, account: nil, onStop: { stop(row) }, onPublish: nil,
+                    onMessage: { text in if let runner = feed.runner { feed.apply(try await runner.tell(row.job.id, text)) } },
+                    onDismiss: { try await dismiss(row) })
+        } else {
+            let job = row.job
+            JobView(job: job, place: "This Mac", account: desk.accounts.accounts.first { $0.account.id == job.account }?.account.name,
+                    onStop: { stop(row) }, onPublish: { try await desk.publish(job.id, approve: Publish.touchID) },
+                    onMessage: { try desk.message(job.id, $0) }, onDismiss: { try await dismiss(row) })
+        }
+    }
+
+    private func stop(_ row: Row) {
+        if row.host == nil {
+            desk.stop(row.job.id)
+        } else {
+            Task { if let job = try? await feed.runner?.stop(row.job.id) { feed.apply(job) } }
+        }
+    }
+
+    private func dismiss(_ row: Row) async throws {
+        if row.host == nil {
+            try desk.dismiss(row.job.id)
+        } else if let runner = feed.runner {
+            feed.apply(try await runner.dismiss(row.job.id))
+        }
+    }
+
+    /// Clear done: the runner records the time, and the finished jobs go from here and from the iPhone's Home.
+    private func clear() {
+        Task {
+            do {
+                try await feed.clear()
+                problem = nil
+            } catch {
+                problem = error.localizedDescription
+            }
         }
     }
 
@@ -417,16 +495,19 @@ private struct OpenIsland: View {
                 Text(question.text).font(.system(size: 17, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
                 Text("Pick one, or type below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
             case .none:
-                let working = desk.active.count + feed.working
-                // What needs you among the jobs listed: ready to publish, failed or interrupted.
-                let needs = NeedsYou.line(finished).map { "\($0)." }
-                let agents = working == 1 ? "1 agent is working." : "\(working) agents are working."
-                Text(working == 0 ? needs ?? "All quiet." : "\(agents) \(needs ?? "Nothing needs you.")")
-                    .font(.system(size: 19, weight: .semibold))
+                // The same line as the iPhone's Home and the closed notch (Shared/JobList.swift).
+                Text(model.summary).font(.system(size: 19, weight: .semibold))
                 Text("Type a task below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
             }
         }
         .padding(.top, 34)
+    }
+
+    private func topPill(@ViewBuilder _ label: () -> some View) -> some View {
+        label()
+            .font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 12).frame(height: 28)
+            .background(.white.opacity(0.12), in: Capsule())
     }
 
     private var field: some View {
@@ -482,7 +563,11 @@ private struct PlanCard: View {
             Grid(horizontalSpacing: 12, verticalSpacing: 12) {
                 GridRow {
                     tile("Agent · \(AgentModels.summary(account?.agent ?? draft.job.agent))") {
-                        Label(Job.agentNames[account?.agent ?? draft.job.agent] ?? "", systemImage: "asterisk")
+                        Label {
+                            Text(Job.agentNames[account?.agent ?? draft.job.agent] ?? "")
+                        } icon: {
+                            AgentMark(agent: account?.agent ?? draft.job.agent)
+                        }
                     }
                     tile(accounts.count > 1 ? "Account · click to change" : "Account · the one you have") {
                         if accounts.count > 1 {
@@ -714,60 +799,50 @@ private struct StrongerModel: View {
     }
 }
 
-/// One job: what it is, what it's doing now, and how it ended. Click a finished one to read its
-/// summary; a done one whose own publish failed can be published by hand, after Oby shows exactly
-/// what that does. A running or
-/// opened one takes a word for its agent.
+/// One job in the list, as the iPhone's row: its tool's mark, its title, where it runs, the stage
+/// it's at, its line, the status pill and Oby's verdict. Click it for the job's screen. A job that
+/// needs you offers Dismiss here, and a running one Stop.
 private struct JobRow: View {
     let job: Job
-    /// The runner the job is on, like "tetrix-lab", or nil for this Mac.
-    var host: String? = nil
-    /// A notification opened the island on this job: it opens, and stands out.
-    var focused = false
+    /// Where it runs: the runner's name, like "tetrix-lab", or "This Mac".
+    let place: String
+    let onOpen: () -> Void
     let onStop: () -> Void
-    /// Nil where this Mac can't publish: a runner's job needs the iPhone's device key.
-    let onPublish: (() async throws -> Void)?
-    let onMessage: (String) async throws -> Void
-    @State private var expanded = false
-    @State private var confirming = false
-    @State private var publishing = false
+    /// Lets go of a job that needs you (Publish, failed, interrupted, out of reviews); it then needs nothing.
+    let onDismiss: () async throws -> Void
     @State private var problem: String?
-    @State private var note = ""
-    @State private var noteProblem: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                Image(systemName: "asterisk").font(.system(size: 17, weight: .semibold)).frame(width: 22)
-                VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                AgentMark(agent: job.agent).font(.system(size: 17, weight: .semibold)).frame(width: 22)
+                VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
-                        Text(job.heading).font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                        if let host {
-                            Text(host).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.7))
-                                .padding(.horizontal, 7).frame(height: 18)
-                                .background(.white.opacity(0.12), in: Capsule())
+                        Text(job.heading).font(.system(size: 15, weight: .semibold)).lineLimit(2)
+                        Text(place).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.7))
+                            .padding(.horizontal, 7).frame(height: 18)
+                            .background(.white.opacity(0.12), in: Capsule())
+                    }
+                    Text(job.pipeline.label).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.55))
+                    if !job.line.isEmpty {
+                        Text(job.line).font(.system(size: 13)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+                    }
+                    HStack(spacing: 8) {
+                        StatusBadge(job: job)
+                        if let verdict = job.verdictLine {
+                            Text(verdict).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
                         }
                     }
-                    Text(subtitle).font(.system(size: 13)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                if job.maxRounds > 1 {
-                    Text("\(job.currentRound)/\(job.maxRounds)")
-                        .font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(.white.opacity(0.55))
-                        .accessibilityLabel("Round \(job.currentRound) of \(job.maxRounds)")
-                }
-                status
-                if let link = job.published.flatMap(URL.init(string:)) {
-                    Link(destination: link) { pill("Pull request") }
-                }
-                // Oby's own publish failed: before the first publish, or with later rounds' commits.
-                if job.canPublish {
-                    if onPublish == nil {
-                        Text("Publish from your iPhone").font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
-                    } else if !confirming {
-                        Button { confirming = true } label: { pill(job.published == nil ? "Publish" : "Publish the new commits") }
-                            .buttonStyle(.plain)
+                if job.needsYou {
+                    Button(action: dismiss) {
+                        Text("Dismiss").font(.system(size: 12, weight: .semibold))
+                            .padding(.horizontal, 10).frame(height: 24)
+                            .background(.white.opacity(0.12), in: Capsule())
                     }
+                    .buttonStyle(.plain)
+                    .help("Let this job go: it stays in the list, and stops needing you")
                 }
                 if job.isActive {
                     Button(action: onStop) {
@@ -778,134 +853,26 @@ private struct JobRow: View {
                     .accessibilityLabel("Stop")
                 }
             }
-            // Only the top line opens and closes the row, so clicks in the field below stay there.
-            .contentShape(Rectangle())
-            .onTapGesture { if !job.isActive { expanded.toggle() } }
-            if job.canPublish, let reason = job.publishError {
-                Text(reason).font(.system(size: 12)).foregroundStyle(.orange).lineLimit(3)
-            }
-            if expanded, !job.summary.isEmpty {
-                ScrollView {
-                    Text(job.summary).font(.system(size: 13)).foregroundStyle(.white.opacity(0.85))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxHeight: 180)
-            }
-            if job.status == .running || (expanded && job.session != nil) {
-                talk
-            }
-            if confirming {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(Publish.action(for: job, base: job.base ?? "")).font(.system(size: 13, weight: .medium))
-                    if let problem {
-                        Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(3)
-                    }
-                    HStack(spacing: 8) {
-                        Button {
-                            Task {
-                                publishing = true
-                                defer { publishing = false }
-                                do {
-                                    try await onPublish?()
-                                    confirming = false
-                                    problem = nil
-                                } catch {
-                                    problem = error.localizedDescription
-                                }
-                            }
-                        } label: {
-                            Label(publishing ? "Publishing…" : "Publish with Touch ID", systemImage: "touchid")
-                                .font(.system(size: 13, weight: .semibold)).foregroundStyle(.black)
-                                .padding(.horizontal, 14).frame(height: 30)
-                                .background(.white, in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(publishing)
-                        Button { confirming = false; problem = nil } label: { pill("Not now") }
-                            .buttonStyle(.plain)
-                            .disabled(publishing)
-                    }
-                }
+            if let problem {
+                Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(2)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 11)
         .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay {
-            if focused { RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.35)) }
-        }
-        .onChange(of: focused, initial: true) { if focused, !job.isActive { expanded = true } }
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onTapGesture(perform: onOpen)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint("Opens the job")
     }
 
-    /// One line for the agent, and why it didn't go if it didn't.
-    @ViewBuilder private var talk: some View {
-        let blank = note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        HStack(spacing: 8) {
-            TextField("Tell the agent…", text: $note)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .onSubmit(tell)
-            Button(action: tell) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.black)
-                    .frame(width: 24, height: 24)
-                    .background(.white.opacity(blank ? 0.4 : 1), in: Circle())
-            }
-            .buttonStyle(.plain)
-            .disabled(blank)
-            .accessibilityLabel("Send to the agent")
-        }
-        .padding(.leading, 12).padding(.trailing, 4)
-        .frame(height: 32)
-        .background(.white.opacity(0.08), in: Capsule())
-        if let noteProblem {
-            Text(noteProblem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(2)
-        }
-    }
-
-    private func tell() {
-        let text = note
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        note = ""
+    private func dismiss() {
         Task {
             do {
-                try await onMessage(text)
-                noteProblem = nil
+                try await onDismiss()
+                problem = nil
             } catch {
-                note = text
-                noteProblem = error.localizedDescription
+                problem = error.localizedDescription
             }
         }
-    }
-
-    private func pill(_ title: String) -> some View {
-        Text(title).font(.system(size: 12, weight: .semibold))
-            .padding(.horizontal, 10).frame(height: 24)
-            .background(.white.opacity(0.12), in: Capsule())
-    }
-
-    private var subtitle: String {
-        switch job.status {
-        case .queued, .running: job.step
-        case .done: (job.commits ?? 0) > 0 ? "\(job.commits ?? 0) commit\(job.commits == 1 ? "" : "s") on \(job.branch) · \(job.doneLine)" : job.doneLine
-        case .failed, .stopped, .interrupted: job.summary.split(separator: "\n").first.map(String.init) ?? ""
-        }
-    }
-
-    private var status: some View {
-        let (text, color): (String, Color) = switch job.status {
-        case .queued: ("Starting", .blue)
-        case .running: ("Working", .blue)
-        case .done where job.canPublish: (job.publishError == nil ? "Ready to publish" : "Couldn't publish", .orange)
-        case .done where job.published != nil: ("Published", .green)
-        case .done: ("Done", .green)
-        case .failed: ("Failed", .red)
-        case .stopped: ("Stopped", .gray)
-        case .interrupted: ("Interrupted", .gray)
-        }
-        return Text(text).font(.system(size: 12, weight: .semibold)).foregroundStyle(color)
-            .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(color.opacity(0.18), in: Capsule())
     }
 }

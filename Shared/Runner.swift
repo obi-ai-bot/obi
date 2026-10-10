@@ -47,6 +47,14 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var pipeline: JobPipeline?
     var pullRequest: PullRequestStatus?
     var pullRequestError: String?
+    /// When the user let the job go (Dismiss), or nil: it then needs nothing (newer runners only).
+    var dismissed: Date?
+    /// Oby's own review of the pull request (newer runners): the review job under way, the latest
+    /// verdict, why none came, and, on a review job, the job it reviews.
+    var reviewing: String?
+    var review: Review?
+    var reviewError: String?
+    var reviewOf: String?
 
     var isActive: Bool { status == .queued || status == .running }
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
@@ -71,10 +79,18 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
 
     /// Commits not on its pull request yet: all of them before it's published, then later rounds' ones.
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
-    var canPublish: Bool { status == .done && base != nil && unpublished > 0 }
+    /// Not once the user dismissed it.
+    var canPublish: Bool { status == .done && base != nil && unpublished > 0 && dismissed == nil }
 
-    /// Waiting for Publish (the runner's own publish failed), failed or interrupted: what the runner sends an alert for.
-    var needsYou: Bool { canPublish || status == .failed || status == .interrupted }
+    /// Oby's review requested changes for the last time it may (4 rounds) and the pull request is still open.
+    var reviewNeedsYou: Bool {
+        status == .done && published != nil && review?.verdict == "changesRequested" && (review?.round ?? 0) >= 4
+            && (pullRequest?.state ?? "OPEN") == "OPEN"
+    }
+
+    /// Waiting for Publish (the runner's own publish failed), failed, interrupted or out of review
+    /// rounds, and not dismissed: what the runner sends an alert for, and what Dismiss takes.
+    var needsYou: Bool { dismissed == nil && (canPublish || status == .failed || status == .interrupted || reviewNeedsYou) }
 
     /// "Round 2 of 5 · Fable 5.1", or empty for a one-round job on the usual model.
     var extras: String {
@@ -110,6 +126,21 @@ nonisolated struct PullRequestStatus: Codable, Equatable, Sendable {
     var checkedAt: Date
 }
 
+/// Oby's verdict on a job's pull request (docs/runner-api.md).
+nonisolated struct Review: Codable, Equatable, Sendable {
+    /// "approved" or "changesRequested".
+    var verdict: String
+    var job: String
+    var agent: String
+    var account: String
+    var round: Int
+    var date: Date
+    var comment: String?
+    var postError: String?
+
+    var label: String { verdict == "approved" ? "Approved" : "Changes requested" }
+}
+
 nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var agent: String
@@ -118,10 +149,21 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     var signedIn: Bool
     var fiveHour: Double?
     var sevenDay: Double?
+    /// When each window resets (docs/runner-api.md). Older runners don't send them.
+    var fiveHourResets: Date?
+    var sevenDayResets: Date?
     var running: Int
+    /// A job of its hit the account's usage limit: no job goes to it before then (newer runners only).
+    var fullUntil: Date?
 
     /// "Personal · Claude Code"
-    var title: String { "\(name) · \(agent == "codex" ? "Codex" : "Claude Code")" }
+    var title: String { "\(name) · \(Usage.tool(agent))" }
+
+    /// What Settings' usage card shows.
+    var usage: Usage.Snapshot {
+        Usage.Snapshot(agent: agent, name: name, label: label, fiveHour: fiveHour, sevenDay: sevenDay,
+                       fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running)
+    }
 }
 #endif
 
@@ -219,23 +261,92 @@ nonisolated struct RunnerStatus: Codable, Equatable, Sendable {
     var accounts: [Account]
     #endif
     var models: ModelSettings
+    /// When Clear done was last pressed, on any app, or nil (docs/runner-api.md). Older runners don't send it.
+    var clearedAt: Date?
+}
+
+/// What `POST /v1/clear` answers, and what the `clear` event carries.
+nonisolated struct ClearedAt: Codable, Equatable, Sendable {
+    var clearedAt: Date
 }
 
 /// One thing the runner reports while the app is open.
 nonisolated enum RunnerEvent: Equatable, Sendable {
     case job(Job)
     case accounts([Account])
+    /// Clear done was pressed, here or on another app: jobs that finished by then are hidden.
+    case cleared(Date)
+}
+
+extension Job {
+    #if os(iOS)
+    nonisolated var pullRequestState: String? { pullRequest?.state }
+    nonisolated var reviewDecision: String? { pullRequest?.reviewDecision }
+    #else
+    nonisolated var pullRequestState: String? { pullRequest?.state.rawValue }
+    nonisolated var reviewDecision: String? { pullRequest?.reviewDecision?.rawValue }
+
+    /// The one line a job's row says under its title, as the iPhone's `Job.line`: the step while it
+    /// runs, else the summary's first line.
+    nonisolated var line: String {
+        switch status {
+        case .queued, .running: step
+        case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
+        case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
+        }
+    }
+    #endif
+
+    /// Where the list puts the job (Shared/JobList.swift): what needs you first, then the ones
+    /// working, then published ones whose pull request is still open, then everything else.
+    nonisolated var group: JobGroup {
+        if needsYou { return .needsYou }
+        if isActive { return .working }
+        if status == .done, published != nil, (pullRequestState ?? "OPEN") == "OPEN" { return .inReview }
+        return .done
+    }
+
+    /// The status pill, the same on the iPhone and the Mac: how it's going, how it ended, and
+    /// where its pull request is. A job you let go says Dismissed, however it ended.
+    nonisolated var badge: JobBadge {
+        if dismissed != nil { return JobBadge(text: "Dismissed", tone: .gray) }
+        switch status {
+        case .queued: return JobBadge(text: "Starting", tone: .blue)
+        case .running: return JobBadge(text: "Working", tone: .blue)
+        case .done where canPublish: return JobBadge(text: "Ready to publish", tone: .orange)
+        case .done where pullRequestState == "MERGED": return JobBadge(text: "Merged", tone: .green)
+        case .done where pullRequestState == "CLOSED": return JobBadge(text: "PR closed", tone: .gray)
+        case .done where reviewDecision == "CHANGES_REQUESTED": return JobBadge(text: "Changes requested", tone: .orange)
+        case .done where reviewDecision == "APPROVED": return JobBadge(text: "Approved", tone: .green)
+        case .done where published != nil: return JobBadge(text: "In review", tone: .blue)
+        case .done: return JobBadge(text: "Done", tone: .green)
+        case .failed: return JobBadge(text: "Failed", tone: .red)
+        case .stopped: return JobBadge(text: "Stopped", tone: .gray)
+        case .interrupted: return JobBadge(text: "Interrupted", tone: .gray)
+        }
+    }
+
+    /// Oby's own verdict on the pull request, next to the pill: "Oby approved", "Oby requested
+    /// changes" (with the review's round after the first), "Oby is reviewing", or nil.
+    nonisolated var verdictLine: String? {
+        guard let review else { return reviewing == nil ? nil : "Oby is reviewing" }
+        let verdict = review.label == "Approved" ? "Oby approved" : "Oby requested changes"
+        return review.round > 1 ? "\(verdict) (review \(review.round))" : verdict
+    }
 }
 
 /// What needs the user among these jobs, in one line, like "2 jobs are ready to publish, 1 job
-/// failed", or nil when nothing does. Home on the iPhone and the Mac's island both say it.
+/// failed", or nil when nothing does. Home on the iPhone and the Mac's island both say it, through
+/// `Summary.line` (Shared/JobList.swift). Dismissed jobs aren't counted.
 nonisolated enum NeedsYou {
     static func line(_ jobs: [Job]) -> String? {
         func count(_ n: Int, _ one: String, _ many: String) -> String? { n == 0 ? nil : n == 1 ? "1 job \(one)" : "\(n) jobs \(many)" }
+        let needing = jobs.filter(\.needsYou)
         let parts = [
-            count(jobs.count(where: \.canPublish), "is ready to publish", "are ready to publish"),
-            count(jobs.count { $0.status == .failed }, "failed", "failed"),
-            count(jobs.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
+            count(needing.count(where: \.canPublish), "is ready to publish", "are ready to publish"),
+            count(needing.count { $0.status == .failed }, "failed", "failed"),
+            count(needing.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
+            count(needing.count(where: \.reviewNeedsYou), "needs your review", "need your review"),
         ].compactMap(\.self)
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
@@ -267,6 +378,13 @@ nonisolated struct Runner: Sendable {
     func status() async throws -> RunnerStatus { try await call("GET", "v1/status") }
     func jobs() async throws -> [Job] { try await call("GET", "v1/jobs?limit=50") }
     func stop(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/stop") }
+    /// Lets go of a job that needs the user: it then needs nothing. No signature: nothing goes out.
+    func dismiss(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/dismiss") }
+    /// Clear done: the runner records now, and every app hides the jobs that finished by then.
+    func clear() async throws -> Date {
+        let answer: ClearedAt = try await call("POST", "v1/clear")
+        return answer.clearedAt
+    }
 
     /// Tells the job's agent something. A finished job picks its session up again.
     func tell(_ id: String, _ text: String) async throws -> Job {
@@ -423,6 +541,7 @@ nonisolated struct EventParser {
             switch name {
             case "job": return (try? Runner.decoder.decode(Job.self, from: json)).map(RunnerEvent.job)
             case "accounts": return (try? Runner.decoder.decode([Account].self, from: json)).map(RunnerEvent.accounts)
+            case "clear": return (try? Runner.decoder.decode(ClearedAt.self, from: json)).map { .cleared($0.clearedAt) }
             default: return nil
             }
         }
