@@ -6,13 +6,15 @@ It shares `Engine/` with the Mac app. `Package.swift` at the root of the reposit
 
 ## Build
 
-You need Swift 6.4 ([swiftly](https://www.swift.org/install/linux/)) and SQLite's headers:
+You need Swift 6.4 ([swiftly](https://www.swift.org/install/linux/)), SQLite's headers and bubblewrap:
 
 ```sh
-sudo apt install libsqlite3-dev
+sudo apt install libsqlite3-dev bubblewrap
 swift build -c release
 swift test
 ```
+
+Agents (and the checks Oby runs between rounds) run inside `bwrap`, because they run as the runner's own user. They see no logins but their own account's: gh's, ssh's, other accounts' and all of `OBY_HOME` are empty. Everything else is read-only except their worktree, the git data it commits to, and their account home, and changes to the home folder don't last. Without `bwrap`, agents don't start. Use Ubuntu's package: its AppArmor profile lets it make the namespaces it needs.
 
 ## Sign in on the runner
 

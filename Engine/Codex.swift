@@ -188,7 +188,7 @@ final class CodexServer {
 
     init(home: URL?, in directory: URL?, log: URL?) throws {
         process.executableURL = URL(filePath: "/usr/bin/env")
-        process.arguments = ["codex", "app-server"]
+        process.arguments = Agents.sandboxed(["codex", "app-server"], in: directory, own: home?.path ?? "\(Agents.home)/.codex")
         process.currentDirectoryURL = directory
         process.environment = Agents.environment(["CODEX_HOME": home?.path])
         process.standardInput = input
@@ -273,7 +273,12 @@ nonisolated enum CodexRPC {
     /// Codex's own sandbox, workspace-write: it writes only in the worktree and in the clone's git
     /// data (so commits stay sandboxed), with no network. Escalations go to the user, which is Oby,
     /// rather than to Codex's reviewer agent. Without the git directory, plain workspace-write.
-    static func threadStart(worktree: URL, git: String?) -> [String: Any] {
+    /// On Linux, Oby's bubblewrap is the sandbox: Codex's own is bubblewrap too and can't run inside it
+    /// (Ubuntu's AppArmor denies it), so Codex runs none and asks Oby about every command instead.
+    static func threadStart(worktree: URL, git: String?, bubblewrap: Bool = Agents.bubblewrap) -> [String: Any] {
+        if bubblewrap {
+            return ["cwd": worktree.path, "sandbox": "danger-full-access", "approvalPolicy": "untrusted", "approvalsReviewer": "user"]
+        }
         var params: [String: Any] = ["cwd": worktree.path, "sandbox": "workspace-write",
                                      "approvalPolicy": "on-request", "approvalsReviewer": "user"]
         if let git {
