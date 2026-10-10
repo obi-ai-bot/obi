@@ -14,7 +14,7 @@ swift build -c release
 swift test
 ```
 
-Agents (and the checks Oby runs between rounds) run inside `bwrap`, because they run as the runner's own user. They see no logins but their own account's: gh's, ssh's, other accounts' and all of `OBY_HOME` are empty. Everything else is read-only except their worktree, the git data it commits to, and their account home, and changes to the home folder don't last. Without `bwrap`, agents don't start. Use Ubuntu's package: its AppArmor profile lets it make the namespaces it needs.
+Agents (and the checks Oby runs between rounds) run inside `bwrap`, because they run as the runner's own user. Their home is empty except for the folders the tools live in (`Agents.tools`: `~/.local/bin`, `~/.local/lib`, `~/.local/share/claude`, `~/.local/share/swiftly`, `~/.npm`, `~/.swiftpm`, each a throwaway copy), git's settings (read-only) and their own account's home. All of `OBY_HOME` is empty too. Everything else is read-only, except their worktree and the git data it commits to. If a runner's tools live somewhere else in home (`~/.nvm`, `~/.cargo`), add that folder to `Agents.tools`. Without `bwrap`, agents don't start. Use Ubuntu's package: its AppArmor profile lets it make the namespaces it needs.
 
 ## Sign in on the runner
 

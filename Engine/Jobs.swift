@@ -381,28 +381,33 @@ nonisolated enum Agents {
     /// The user's home folder, where the tools keep their default logins.
     static let home = FileManager.default.homeDirectoryForCurrentUser.path
 
-    /// On Linux, `argv` inside bubblewrap. Agents run as the runner's Unix user, so the logins it
-    /// keeps (gh's token, the APNs key, ssh, other accounts, all of `OBY_HOME`) become empty, and
-    /// nothing else an agent writes lasts: it can't leave behind a program or a git config that the
-    /// runner runs later outside the box. / is read-only; home is a throwaway copy, so caches still
-    /// work. Writable for real: the worktree, the git data it commits to, and `own`, the job's account
-    /// home (nil for none).
+    /// What agents see of home, each a throwaway copy: where Claude Code, Codex and Swift live, and
+    /// npm's and SwiftPM's caches.
+    // ponytail: what tetrix-lab installs; a tool that lives elsewhere in home (~/.nvm, ~/.cargo, ~/.bun)
+    // joins the list when a runner needs it.
+    static let tools = [".local/bin", ".local/lib", ".local/share/claude", ".local/share/swiftly", ".npm", ".swiftpm"]
+
+    /// On Linux, `argv` inside bubblewrap. Agents run as the runner's Unix user, so home is empty but
+    /// for `tools`, git's settings (read-only) and the job's own account, and so is all of `OBY_HOME`:
+    /// no gh token, APNs key, ssh key, other account, or anything else the user keeps there. Nothing
+    /// else an agent writes lasts, so it can't leave behind a program or a git config that the runner
+    /// runs later outside the box. Writable for real: the worktree, the git data it commits to, and
+    /// `own`, the job's account home (nil for none).
     /// On the Mac, `argv` as it is: gh's login is in the keychain, and agents have no credential helper.
-    // ponytail: one Unix user, logins hidden by path. Sockets that run commands for this user (docker
-    // is hidden, nothing else is) and the runner's API on 127.0.0.1 stay reachable; a Unix user of its
+    // ponytail: one Unix user, hidden by path. Sockets that run commands for this user (docker is
+    // hidden, nothing else is) and the runner's API on 127.0.0.1 stay reachable; a Unix user of its
     // own for agents is the upgrade.
     static func sandboxed(_ argv: [String], in worktree: URL?, own: String?, bubblewrap: Bool = Agents.bubblewrap) -> [String] {
         guard bubblewrap else { return argv }
-        var args = ["bwrap", "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
-                    "--tmpfs", "/tmp", "--overlay-src", home, "--tmp-overlay", home, "--tmpfs", Workspace.root.path]
-        // Folders become empty and files /dev/null. Outside home, / is read-only, so only what exists.
-        // The default Claude account keeps ~/.claude.json with ~/.claude; its changes don't last.
         let exists = { (path: String) in FileManager.default.fileExists(atPath: path) }
-        let folders = [".config/gh", ".ssh", ".claude", ".codex"].map { "\(home)/\($0)" } + ["/run/user/\(getuid())"].filter(exists)
-        let files = [".git-credentials", ".claude.json"].map { "\(home)/\($0)" } + ["/run/docker.sock"].filter(exists)
-        let kept = [own, own == "\(home)/.claude" ? "\(home)/.claude.json" : nil].compactMap { $0 }
-        for folder in folders where !kept.contains(folder) { args += ["--tmpfs", folder] }
-        for file in files where !kept.contains(file) { args += ["--ro-bind", "/dev/null", file] }
+        var args = ["bwrap", "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+                    "--tmpfs", "/tmp", "--tmpfs", home]
+        for folder in tools.map({ "\(home)/\($0)" }) where exists(folder) { args += ["--overlay-src", folder, "--tmp-overlay", folder] }
+        for settings in [".gitconfig", ".config/git"] { args += ["--ro-bind-try", "\(home)/\(settings)", "\(home)/\(settings)"] }
+        args += ["--tmpfs", Workspace.root.path]
+        // Outside home, / is read-only, so only what exists: systemd's user bus, docker.
+        for folder in ["/run/user/\(getuid())"] where exists(folder) { args += ["--tmpfs", folder] }
+        for file in ["/run/docker.sock"] where exists(file) { args += ["--ro-bind", "/dev/null", file] }
         if let worktree {
             // The worktree's git data is in Oby's clone, which Oby's own git uses later, outside the box.
             // Objects, refs, packed-refs and this worktree's own folder are real, so commits last; the rest
@@ -421,6 +426,8 @@ nonisolated enum Agents {
             }
         }
         if let own { args += ["--bind", own, own] }
+        // The default Claude account keeps ~/.claude.json with ~/.claude.
+        if own == "\(home)/.claude" { args += ["--bind-try", "\(home)/.claude.json", "\(home)/.claude.json"] }
         return args + ["--"] + argv
     }
 }

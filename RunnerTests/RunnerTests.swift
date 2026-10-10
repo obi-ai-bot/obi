@@ -428,8 +428,14 @@ struct SandboxTests {
 
         #expect(argv.first == "bwrap" && argv.suffix(3) == ["--", "claude", "-p"])
         #expect(at("--ro-bind", "/", "/", in: argv) != nil && at("--unshare-pid", in: argv) != nil)
-        for folder in [".config/gh", ".ssh", ".claude", ".codex"] { #expect(at("--tmpfs", "\(home)/\(folder)", in: argv) != nil) }
-        for file in [".git-credentials", ".claude.json"] { #expect(at("--ro-bind", "/dev/null", "\(home)/\(file)", in: argv) != nil) }
+        // Home is empty; only the tools, git's settings and Oby's own folder come back.
+        #expect(at("--tmpfs", home, in: argv) != nil)
+        #expect(at("--overlay-src", home, in: argv) == nil)
+        let shown = Set(argv.filter { $0.hasPrefix("\(home)/") && !$0.hasPrefix(root) })
+        #expect(shown.isSubset(of: Agents.tools.map { "\(home)/\($0)" } + ["\(home)/.gitconfig", "\(home)/.config/git"]), "\(shown)")
+        for secret in [".tetrix-lab", ".config/gh", ".ssh", ".cache", ".claude", ".codex", ".aws", ".kube"] {
+            #expect(!argv.contains { $0.hasPrefix("\(home)/\(secret)") }, "\(secret)")
+        }
         // All of OBY_HOME (apns/, devices.json, other accounts) is empty, then the job's own pieces come back.
         let hidden = try #require(at("--tmpfs", root, in: argv))
         #expect(try #require(at("--bind", own, own, in: argv)) > hidden)
@@ -447,15 +453,31 @@ struct SandboxTests {
     @Test func theDefaultClaudeAccountKeepsItsHomeAndConfig() {
         let argv = Agents.sandboxed(["claude"], in: nil, own: "\(home)/.claude", bubblewrap: true)
         #expect(at("--bind", "\(home)/.claude", "\(home)/.claude", in: argv) != nil)
-        #expect(at("--tmpfs", "\(home)/.claude", in: argv) == nil && !argv.contains("\(home)/.claude.json"))
-        #expect(at("--tmpfs", "\(home)/.codex", in: argv) != nil && at("--tmpfs", "\(home)/.config/gh", in: argv) != nil)
+        #expect(at("--bind-try", "\(home)/.claude.json", "\(home)/.claude.json", in: argv) != nil)
+        #expect(!argv.contains { $0.hasPrefix("\(home)/.codex") || $0.hasPrefix("\(home)/.config/gh") })
     }
 
     @Test func checksKeepNoAccountAndTheMacRunsAsIs() {
         let argv = Agents.sandboxed(["sh", "-c", "swift test"], in: nil, own: nil, bubblewrap: true)
-        #expect(at("--tmpfs", "\(home)/.claude", in: argv) != nil && at("--tmpfs", "\(home)/.codex", in: argv) != nil)
+        #expect(!argv.contains { $0.hasPrefix("\(home)/.claude") || $0.hasPrefix("\(home)/.codex") })
         #expect(!argv.contains("--bind"))
         #expect(Agents.sandboxed(["sh", "-c", "swift test"], in: nil, own: nil, bubblewrap: false) == ["sh", "-c", "swift test"])
+    }
+
+    /// Where there's bwrap (the runner's `swift test` on Linux), home really shows only that list.
+    @Test(.enabled(if: Agents.bubblewrap && FileManager.default.isExecutableFile(atPath: "/usr/bin/bwrap")))
+    func homeShowsOnlyTheToolsInsideBubblewrap() throws {
+        let process = Process(), out = Pipe()
+        process.executableURL = URL(filePath: "/usr/bin/env")
+        process.arguments = Agents.sandboxed(["ls", "-A", home], in: nil, own: nil)
+        process.standardOutput = out
+        try process.run()
+        let listed = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n").map(String.init)
+        process.waitUntilExit()
+        // The first folder of each path that comes back, and of OBY_HOME when it's in home.
+        let paths = Agents.tools + [".gitconfig", ".config/git"] + [Workspace.root.path].filter { $0.hasPrefix("\(home)/") }.map { String($0.dropFirst(home.count + 1)) }
+        #expect(process.terminationStatus == 0)
+        #expect(Set(listed).isSubset(of: paths.map { String($0.split(separator: "/")[0]) }), "\(listed)")
     }
 
     /// Codex's own bubblewrap can't nest inside Oby's, so it runs none and asks Oby about every command.
