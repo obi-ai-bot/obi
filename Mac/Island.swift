@@ -318,7 +318,8 @@ private struct OpenIsland: View {
                 field
             default:
                 ForEach(visibleJobs) { job in
-                    JobRow(job: job, onStop: { desk.stop(job.id) }, onPublish: { try await desk.publish(job.id, approve: Publish.touchID) })
+                    JobRow(job: job, onStop: { desk.stop(job.id) }, onPublish: { try await desk.publish(job.id, approve: Publish.touchID) },
+                           onMessage: { try desk.message(job.id, $0) })
                 }
                 field
             }
@@ -660,15 +661,19 @@ private struct StrongerModel: View {
 }
 
 /// One job: what it is, what it's doing now, and how it ended. Click a finished one to read its
-/// summary; a done one can be published, after Oby shows exactly what that does.
+/// summary; a done one can be published, after Oby shows exactly what that does. A running or
+/// opened one takes a word for its agent.
 private struct JobRow: View {
     let job: Job
     let onStop: () -> Void
     let onPublish: () async throws -> Void
+    let onMessage: (String) throws -> Void
     @State private var expanded = false
     @State private var confirming = false
     @State private var publishing = false
     @State private var problem: String?
+    @State private var note = ""
+    @State private var noteProblem: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -702,6 +707,9 @@ private struct JobRow: View {
                     .accessibilityLabel("Stop")
                 }
             }
+            // Only the top line opens and closes the row, so clicks in the field below stay there.
+            .contentShape(Rectangle())
+            .onTapGesture { if !job.isActive { expanded.toggle() } }
             if expanded, !job.summary.isEmpty {
                 ScrollView {
                     Text(job.summary).font(.system(size: 13)).foregroundStyle(.white.opacity(0.85))
@@ -709,6 +717,9 @@ private struct JobRow: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 180)
+            }
+            if job.status == .running || (expanded && job.session != nil) {
+                talk
             }
             if confirming {
                 VStack(alignment: .leading, spacing: 8) {
@@ -746,8 +757,44 @@ private struct JobRow: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 11)
         .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .contentShape(Rectangle())
-        .onTapGesture { if !job.isActive { expanded.toggle() } }
+    }
+
+    /// One line for the agent, and why it didn't go if it didn't.
+    @ViewBuilder private var talk: some View {
+        let blank = note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        HStack(spacing: 8) {
+            TextField("Tell the agent…", text: $note)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .onSubmit(tell)
+            Button(action: tell) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.black)
+                    .frame(width: 24, height: 24)
+                    .background(.white.opacity(blank ? 0.4 : 1), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(blank)
+            .accessibilityLabel("Send to the agent")
+        }
+        .padding(.leading, 12).padding(.trailing, 4)
+        .frame(height: 32)
+        .background(.white.opacity(0.08), in: Capsule())
+        if let noteProblem {
+            Text(noteProblem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(2)
+        }
+    }
+
+    private func tell() {
+        guard !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        do {
+            try onMessage(note)
+            note = ""
+            noteProblem = nil
+        } catch {
+            noteProblem = error.localizedDescription
+        }
     }
 
     private func pill(_ title: String) -> some View {

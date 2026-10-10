@@ -40,7 +40,8 @@ This document is the contract between the runner and its clients. Change it in t
   "rounds": 1,
   "round": 1,
   "check": null,
-  "model": null
+  "model": null,
+  "notes": null
 }
 ```
 
@@ -56,6 +57,7 @@ This document is the contract between the runner and its clients. Change it in t
   - After each round the runner runs it in the job's worktree. If it fails and rounds are left, the agent gets another round with the command's output.
   - Without a check and with more than one round, the agent's own last line decides: `GOAL MET`, or `GOAL NOT MET: …`, which means another round.
 - `model`: a stronger model the user chose for this job, or null for the one in Settings › Models.
+- `notes`: what the user told the agent along the way (`POST /v1/jobs/{id}/messages`), oldest first, or null.
 - What to show: the title is `"<Kind> <repo name> #<number>"` when `pr` or `issue` is set, otherwise the first line of `request`. Show "Round 2 of 5" when `rounds` is above 1.
 
 ### Account
@@ -149,6 +151,20 @@ The iPhone app waits on this as a background download: iOS keeps it going while 
 ### `POST /v1/jobs/{id}/stop`
 
 Stops a queued or running job. Returns the job (`status: "stopped"`).
+
+### `POST /v1/jobs/{id}/messages`
+
+Tells the job's agent something:
+
+```json
+{"text": "Also add a test for the empty case."}
+```
+
+- **Running:** the agent hears it now, in the turn under way or as the next one (Claude Code: another message; Codex: it steers the turn).
+- **Finished** (`done`, `failed`, `stopped` or `interrupted`): the runner picks the agent's session up again in the same worktree and branch. The job keeps its `id`, goes back to `running` and gets a new `round`; when `rounds` is above 1 it grows by one too, so a loop still has a round for this. It ends as usual.
+- The text is saved in `notes`, and `step` shows `"You: …"` until the agent moves on.
+
+Returns the job. `404` for an unknown job. `422` when the text isn't 1 to 2,000 characters, or the job can't take it: still getting ready, wrapping up its only turn (try again once it's done), or never started (no `session`).
 
 ### `GET /v1/events`
 

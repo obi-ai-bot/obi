@@ -36,6 +36,9 @@ final class API {
         router.get("v1/jobs/:id") { _, context in try await self.job(context.parameters.require("id")) }
         router.get("v1/jobs/:id/wait") { _, context in try await self.wait(context.parameters.require("id")) }
         router.post("v1/jobs/:id/stop") { _, context in try await self.stop(context.parameters.require("id")) }
+        router.post("v1/jobs/:id/messages") { request, context in
+            try await self.message(context.parameters.require("id"), try await Self.decode(NewMessage.self, from: request))
+        }
         router.get("v1/jobs/:id/publish") { _, context in try await self.publishAction(context.parameters.require("id")) }
         router.post("v1/jobs/:id/publish") { request, context in
             try await self.publish(context.parameters.require("id"), try await Self.decode(Approval.self, from: request))
@@ -105,6 +108,17 @@ final class API {
         let job = try known(id)
         desk.stop(id)
         return Self.json(JobJSON(job: desk.job(id) ?? job))
+    }
+
+    /// Words for the job's agent: a running job hears them now, a finished one runs again.
+    func message(_ id: String, _ message: NewMessage) throws -> Response {
+        _ = try known(id)
+        do {
+            try desk.message(id, message.text)
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+        return Self.json(JobJSON(job: try known(id)))
     }
 
     func publishAction(_ id: String) throws -> Response {
@@ -342,7 +356,7 @@ struct Options: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, issue, rounds, round, check, model }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, issue, rounds, round, check, model, notes }
 
     func encode(to encoder: any Encoder) throws {
         try job.encode(to: encoder)
@@ -360,6 +374,7 @@ struct JobJSON: Encodable {
         try nulls.encode(job.currentRound, forKey: .round)
         if job.check == nil { try nulls.encodeNil(forKey: .check) }
         if job.model == nil { try nulls.encodeNil(forKey: .model) }
+        if job.notes == nil { try nulls.encodeNil(forKey: .notes) }
     }
 }
 
@@ -481,4 +496,8 @@ struct Approval: Decodable {
 struct NewDevice: Decodable {
     var name: String
     var publicKey: String
+}
+
+struct NewMessage: Decodable {
+    var text: String
 }
