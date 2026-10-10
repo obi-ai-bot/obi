@@ -412,7 +412,7 @@ struct JobJSON: Encodable {
 struct AccountJSON: Encodable {
     var state: AccountState
 
-    private enum Keys: String, CodingKey { case id, agent, name, label, signedIn, fiveHour, sevenDay, running }
+    private enum Keys: String, CodingKey { case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -423,6 +423,8 @@ struct AccountJSON: Encodable {
         try keys.encode(state.signedIn, forKey: .signedIn)
         try keys.encode(state.fiveHour, forKey: .fiveHour)
         try keys.encode(state.sevenDay, forKey: .sevenDay)
+        try keys.encode(state.fiveHourResets, forKey: .fiveHourResets)
+        try keys.encode(state.sevenDayResets, forKey: .sevenDayResets)
         try keys.encode(state.running, forKey: .running)
     }
 }

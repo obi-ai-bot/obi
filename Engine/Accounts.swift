@@ -22,6 +22,9 @@ nonisolated struct AccountState: Equatable, Sendable {
     /// How much of each limit window is used, 0...1, as the account's last job reported it.
     var fiveHour: Double?
     var sevenDay: Double?
+    /// When each window resets, as the tool last said; nil when it didn't say.
+    var fiveHourResets: Date?
+    var sevenDayResets: Date?
     /// Jobs queued or running on it.
     var running = 0
 
@@ -66,12 +69,19 @@ final class AccountStore {
         if let home, Self.isOwned(home, in: homes) { try? FileManager.default.removeItem(atPath: home) }
     }
 
-    /// Keeps the usage an account's job just reported. A window it didn't report keeps its last value.
+    /// Keeps the usage an account's job just reported. A window it didn't report keeps its last
+    /// value and reset time; a window reported without a reset time keeps the last one.
     func record(_ usage: AgentEvent, for accountID: String) {
-        guard case let .usage(fiveHour, sevenDay) = usage,
+        guard case let .usage(fiveHour, sevenDay, fiveHourResets, sevenDayResets) = usage,
               let index = accounts.firstIndex(where: { $0.account.id == accountID }) else { return }
-        if let fiveHour { accounts[index].fiveHour = fiveHour }
-        if let sevenDay { accounts[index].sevenDay = sevenDay }
+        if let fiveHour {
+            accounts[index].fiveHour = fiveHour
+            if let fiveHourResets { accounts[index].fiveHourResets = fiveHourResets }
+        }
+        if let sevenDay {
+            accounts[index].sevenDay = sevenDay
+            if let sevenDayResets { accounts[index].sevenDayResets = sevenDayResets }
+        }
     }
 
     func state(_ id: String) -> AccountState? { accounts.first { $0.account.id == id } }
@@ -100,7 +110,7 @@ final class AccountStore {
                 let home = account.home.map { URL(filePath: $0) }
                 label = (try? await CodexAgent.account(home: home)) ?? nil
                 if label != nil, let used = try? await CodexAgent.usage(home: home) {
-                    record(.usage(fiveHour: used.fiveHour, sevenDay: used.sevenDay), for: account.id)
+                    record(used.event, for: account.id)
                 }
             default:
                 break

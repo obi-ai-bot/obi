@@ -138,8 +138,8 @@ nonisolated enum AgentEvent: Equatable, Sendable {
     case session(String)
     /// What it's doing now, like "Running pnpm test".
     case step(String)
-    /// How much of the account's limits is used, 0...1.
-    case usage(fiveHour: Double?, sevenDay: Double?)
+    /// How much of the account's limits is used, 0...1, and when each window resets.
+    case usage(fiveHour: Double?, sevenDay: Double?, fiveHourResets: Date? = nil, sevenDayResets: Date? = nil)
     /// A turn ended; the agent waits for another message or for `end()`.
     case turnEnded(summary: String, failed: Bool)
     /// The agent's process ended, with its last turn's result.
@@ -147,6 +147,12 @@ nonisolated enum AgentEvent: Equatable, Sendable {
     /// The agent's process ended mid-turn, without a result: the summary says how it ended. Its
     /// session can be picked up again.
     case cutOff(summary: String)
+
+    /// A reset time as the tools send it: seconds since 1970 (milliseconds are taken too).
+    nonisolated static func epoch(_ value: Any?) -> Date? {
+        guard let seconds = (value as? Double) ?? (value as? Int).map(Double.init), seconds > 0 else { return nil }
+        return Date(timeIntervalSince1970: seconds > 1e11 ? seconds / 1000 : seconds)
+    }
 }
 
 /// A coding agent working on one job in its worktree: Claude Code or Codex.
@@ -385,7 +391,9 @@ nonisolated enum StreamJSON {
         case "rate_limit_event":
             let windows = ((message["rate_limit_info"] as? [String: Any])?["unifiedWindows"] as? [String: Any]) ?? [:]
             let used = { (key: String) in (windows[key] as? [String: Any])?["utilization"] as? Double }
-            return [.usage(fiveHour: used("five_hour"), sevenDay: used("seven_day"))]
+            let resets = { (key: String) in AgentEvent.epoch((windows[key] as? [String: Any])?["resets_at"]) }
+            return [.usage(fiveHour: used("five_hour"), sevenDay: used("seven_day"),
+                           fiveHourResets: resets("five_hour"), sevenDayResets: resets("seven_day"))]
         case "result":
             let failed = message["is_error"] as? Bool ?? (message["subtype"] as? String != "success")
             let text = (message["result"] as? String) ?? ""

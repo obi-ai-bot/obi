@@ -106,10 +106,16 @@ Every job response (list, detail, dispatch, stop, message, wait, plan and `job` 
 
 ```json
 {"id": "default", "agent": "claude", "name": "Personal", "label": "Max · well0cp@gmail.com",
- "signedIn": true, "fiveHour": 0.12, "sevenDay": 0.4, "running": 1}
+ "signedIn": true, "fiveHour": 0.12, "sevenDay": 0.4,
+ "fiveHourResets": "2026-10-10T02:14:40Z", "sevenDayResets": "2026-10-14T19:27:22Z", "running": 1}
 ```
 
-`label` is what the tool says about the login (null while signed out). `fiveHour` and `sevenDay` are 0…1 or null when unknown. Accounts are signed in on the runner itself, through each tool's own login; the app only shows them.
+- `label` is what the tool says about the login (null while signed out). Its first part is the plan (`Max`, `Team`, `Plus`), which Settings shows next to the account's name.
+- `fiveHour` and `sevenDay` are 0…1 or null when unknown. An account with both null hasn't reported usage yet: Claude Code's limits arrive with its first job, Codex's when the runner asks its app-server.
+- `fiveHourResets` and `sevenDayResets`: when each window resets, or null when the tool didn't say. Claude Code sends them in its `rate_limit_event` (`resets_at` per window), Codex in `account/rateLimits/read` and its `account/rateLimits/updated` notifications (`resetsAt`). A window keeps its last reset time until the tool sends a new one. Older runners don't send these keys.
+- `running`: jobs queued or running on the account.
+
+Accounts are signed in on the runner itself, through each tool's own login; the app only shows them. Settings shows one card per account, grouped by tool, with a bar per window, its reset time, and the running count.
 
 ### Draft
 
@@ -223,7 +229,7 @@ data: [ …Account ]
 ```
 
 - A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`. The app replaces the job with that `id`.
-- `accounts` comes when sign-ins or usage change.
+- `accounts` comes when sign-ins, usage, reset times or running counts change.
 - A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop, then refetch `GET /v1/jobs` to catch up.
 
 ### `GET /v1/jobs/{id}/publish`
