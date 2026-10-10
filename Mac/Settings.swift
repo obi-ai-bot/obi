@@ -6,7 +6,7 @@ import SwiftUI
 struct SettingsView: View {
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var problem: String?
-    /// The always-on runner whose jobs the island lists too; empty turns that off.
+    /// The always-on runner whose jobs the island lists and RunnerFeed follows; empty turns that off.
     @AppStorage("runnerURL") private var runnerURL = ""
 
     var body: some View {
@@ -26,7 +26,7 @@ struct SettingsView: View {
             }
             Section("Runner") {
                 TextField("URL", text: $runnerURL, prompt: Text(Runner.defaultURL.absoluteString))
-                Text("The island lists the jobs running there too. Leave it empty to turn this off.")
+                Text("The island lists the jobs running there too, and Oby tells you when one needs you. Leave it empty to turn this off.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

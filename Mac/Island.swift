@@ -8,6 +8,7 @@ enum IslandState { case compact, peek, open }
 @Observable
 final class IslandModel {
     let desk: Desk
+    let feed: RunnerFeed
     var state: IslandState = .compact
     /// The notch's size, or zero on a screen without one.
     var notch: CGSize = .zero
@@ -17,8 +18,16 @@ final class IslandModel {
     var openHeight: CGFloat = 240
     /// A job just ended: the one line the notch shows for a few seconds.
     var notice: String?
+    /// The runner's job a notification opened the island on, until the island closes.
+    var focus: String?
 
-    init(desk: Desk) { self.desk = desk }
+    init(desk: Desk, feed: RunnerFeed) {
+        self.desk = desk
+        self.feed = feed
+    }
+
+    /// Agents working now, on this Mac and on the runner.
+    var working: Int { desk.active.count + feed.working }
 
     private let wing: CGFloat = 52
     private var top: CGFloat { notch == .zero ? barHeight : notch.height }
@@ -26,7 +35,7 @@ final class IslandModel {
     /// What peeking shows next to Oby's name.
     var peekLine: String {
         if let notice { return notice }
-        if let job = desk.active.first { return job.step.isEmpty ? job.title : job.step }
+        if let job = desk.active.first ?? feed.active.first { return job.step.isEmpty ? job.title : job.step }
         return "All quiet"
     }
 
@@ -63,6 +72,7 @@ final class IslandModel {
 /// above the menu bar, on every Space, and passes clicks through everywhere else.
 final class IslandController {
     let desk = Desk()
+    let feed = RunnerFeed()
     let model: IslandModel
     let character = ObyCharacter()
     private let panel = NotchPanel()
@@ -71,7 +81,7 @@ final class IslandController {
     private var clickMonitor: Any?
     private var noticeTask: Task<Void, Never>?
 
-    init() { model = IslandModel(desk: desk) }
+    init() { model = IslandModel(desk: desk, feed: feed) }
 
     func start() {
         panel.contentView = NSHostingView(rootView: IslandView(
@@ -81,7 +91,9 @@ final class IslandController {
         place()
         panel.orderFrontRegardless()
         character.pause(true)
-        desk.onFinish = { [weak self] job in self?.notify(job) }
+        desk.onFinish = { [weak self] job in self?.notify(job.doneLine, happy: job.status == .done) }
+        feed.onNotice = { [weak self] job, notice in self?.notify(RunnerFeed.title(notice, for: job), happy: notice == .ready && job.publishError == nil) }
+        feed.start()
         Task { await desk.refresh() }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.place() }
@@ -96,6 +108,12 @@ final class IslandController {
         }
     }
 
+    /// A notification was clicked: the island opens on its job.
+    func open(job id: String) {
+        model.focus = id
+        open()
+    }
+
     func open() {
         model.notice = nil
         set(.open)
@@ -105,6 +123,7 @@ final class IslandController {
 
     func close() {
         guard model.state == .open else { return }
+        model.focus = nil
         set(.compact)
         // Hand the keyboard back to the app you were in.
         if panel.isKeyWindow { NSWorkspace.shared.frontmostApplication?.activate() }
@@ -116,12 +135,12 @@ final class IslandController {
         character.pause(state == .compact)
     }
 
-    /// A job ended: say so in one line, with a face to match.
-    private func notify(_ job: Job) {
+    /// A job ended, or a runner's job needs you: say so in one line, with a face to match.
+    private func notify(_ line: String, happy: Bool) {
         guard model.state != .open else { return }
-        model.notice = job.doneLine
+        model.notice = line
         set(.peek)
-        character.play(job.status == .done ? "Agree" : "Confused")
+        character.play(happy ? "Agree" : "Confused")
         noticeTask?.cancel()
         noticeTask = Task {
             try? await Task.sleep(for: .seconds(6))
@@ -198,7 +217,7 @@ struct IslandView: View {
 
     private var mood: String {
         if case .thinking = model.desk.talk { return "thinking" }
-        return model.desk.active.isEmpty ? "idle" : "working"
+        return model.working == 0 ? "idle" : "working"
     }
 
     var body: some View {
@@ -214,11 +233,12 @@ struct IslandView: View {
                 .offset(x: frame.minX, y: frame.minY)
                 .accessibilityLabel("Oby")
 
-            if model.state == .compact, !model.desk.active.isEmpty {
-                Text("\(model.desk.active.count)")
+            // Agents working on this Mac and on the runner.
+            if model.state == .compact, model.working > 0 {
+                Text("\(model.working)")
                     .font(.system(size: 12, weight: .semibold).monospacedDigit())
                     .frame(width: size.width - 16, height: size.height, alignment: .trailing)
-                    .accessibilityLabel("\(model.desk.active.count) jobs running")
+                    .accessibilityLabel(model.working == 1 ? "1 agent running" : "\(model.working) agents running")
             }
 
             if model.state == .peek {
@@ -235,7 +255,7 @@ struct IslandView: View {
             }
 
             if model.state == .open {
-                OpenIsland(desk: model.desk, characterWidth: frame.maxX, top: model.contentTop, onClose: onClose)
+                OpenIsland(desk: model.desk, feed: model.feed, focus: model.focus, characterWidth: frame.maxX, top: model.contentTop, onClose: onClose)
                     .frame(width: size.width)
                     .fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { model.openHeight = $0 }
@@ -261,6 +281,10 @@ struct IslandView: View {
 /// The open island: what Oby is up to, the jobs, and the field where you type a task.
 private struct OpenIsland: View {
     let desk: Desk
+    /// The runner's jobs, followed all the time (RunnerFeed).
+    let feed: RunnerFeed
+    /// The runner's job a notification opened the island on.
+    let focus: String?
     let characterWidth: CGFloat
     let top: CGFloat
     let onClose: () -> Void
@@ -268,12 +292,6 @@ private struct OpenIsland: View {
     @FocusState private var typing: Bool
     /// Finished jobs that ended before this are hidden from the island only; Desk keeps them all.
     @AppStorage("islandClearedAt") private var clearedAt: Double = 0
-    /// Settings › Runner: the always-on runner whose jobs are listed too, or empty for none.
-    @AppStorage("runnerURL") private var runnerURL = ""
-    @State private var runnerJobs: [Job] = []
-    /// The name the runner reports in /v1/status, like "tetrix-lab".
-    @State private var runnerHost: String?
-    @State private var runnerDown = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -326,16 +344,17 @@ private struct OpenIsland: View {
                 ForEach(visibleJobs) { row in
                     if let host = row.host {
                         // Publishing needs the iPhone's device key, so runner rows don't offer it.
-                        JobRow(job: row.job, host: host, onStop: { Task { if let job = try? await runner?.stop(row.job.id) { update(job) } } },
-                               onPublish: nil, onMessage: { text in if let runner { update(try await runner.tell(row.job.id, text)) } })
+                        JobRow(job: row.job, host: host, focused: row.job.id == focus,
+                               onStop: { Task { if let job = try? await feed.runner?.stop(row.job.id) { feed.apply(job) } } },
+                               onPublish: nil, onMessage: { text in if let runner = feed.runner { feed.apply(try await runner.tell(row.job.id, text)) } })
                     } else {
                         let job = row.job
                         JobRow(job: job, onStop: { desk.stop(job.id) }, onPublish: { try await desk.publish(job.id, approve: Publish.touchID) },
                                onMessage: { try desk.message(job.id, $0) })
                     }
                 }
-                if runnerDown {
-                    Text("\(runnerName) isn't reachable").font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
+                if feed.down {
+                    Text("\(feed.name) isn't reachable").font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
                 }
                 field
             }
@@ -345,7 +364,6 @@ private struct OpenIsland: View {
         .padding(.bottom, 22)
         .onExitCommand(perform: onClose)
         .onAppear { typing = true }
-        .task(id: runnerURL) { await followRunner() }
     }
 
     /// A job in the list, and the runner it's on (nil: this Mac).
@@ -356,53 +374,23 @@ private struct OpenIsland: View {
     }
 
     /// Running jobs first, this Mac's and the runner's, then the latest finished ones: four at most.
+    /// The job a notification opened comes first, even if it's cleared or further down.
     private var visibleJobs: [Row] {
-        let rows = desk.jobs.map { Row(job: $0) } + runnerJobs.map { Row(job: $0, host: runnerName) }
+        let rows = desk.jobs.map { Row(job: $0) } + feed.jobs.map { Row(job: $0, host: feed.name) }
         let active = rows.filter(\.job.isActive)
         let finished = rows.filter { isListed($0.job) }.sorted { ($0.job.finished ?? .distantPast) > ($1.job.finished ?? .distantPast) }
-        return active + finished.prefix(max(0, 4 - active.count))
+        let listed = active + finished.prefix(max(0, 4 - active.count))
+        guard let focused = rows.first(where: { $0.host != nil && $0.job.id == focus }) else { return listed }
+        return [focused] + listed.filter { $0.id != focused.id }
     }
 
     /// Finished jobs that ended after the last Clear done.
     private var finished: [Job] {
-        (desk.jobs + runnerJobs).filter(isListed)
+        (desk.jobs + feed.jobs).filter(isListed)
     }
 
     private func isListed(_ job: Job) -> Bool {
         !job.isActive && (job.finished ?? .distantPast).timeIntervalSince1970 > clearedAt
-    }
-
-    private var runner: Runner? {
-        URL(string: runnerURL.trimmingCharacters(in: .whitespaces)).flatMap { $0.host() == nil ? nil : Runner(base: $0) }
-    }
-
-    /// "tetrix-lab": what the runner calls itself, or its URL's first name before it has answered.
-    private var runnerName: String {
-        runnerHost ?? runner?.base.host()?.split(separator: ".").first.map(String.init) ?? "The runner"
-    }
-
-    /// Lists the runner's jobs every few seconds while the island is open. A runner that doesn't
-    /// answer gets one quiet line, not an error per poll.
-    private func followRunner() async {
-        runnerJobs = []
-        runnerHost = nil
-        runnerDown = false
-        guard let runner else { return }
-        while !Task.isCancelled {
-            do {
-                if runnerHost == nil { runnerHost = try await runner.status().runner.host }
-                runnerJobs = try await runner.jobs()
-                runnerDown = false
-            } catch {
-                if !Task.isCancelled { runnerDown = true }
-            }
-            try? await Task.sleep(for: .seconds(3))
-        }
-    }
-
-    /// The runner's answer to Stop or a message, until the next poll.
-    private func update(_ job: Job) {
-        if let index = runnerJobs.firstIndex(where: { $0.id == job.id }) { runnerJobs[index] = job }
     }
 
     /// The job list is on screen and has something finished to clear.
@@ -429,7 +417,7 @@ private struct OpenIsland: View {
                 Text(question.text).font(.system(size: 17, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
                 Text("Pick one, or type below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
             case .none:
-                let working = desk.active.count + runnerJobs.count(where: \.isActive)
+                let working = desk.active.count + feed.working
                 // What needs you among the jobs listed: ready to publish, failed or interrupted.
                 let needs = NeedsYou.line(finished).map { "\($0)." }
                 let agents = working == 1 ? "1 agent is working." : "\(working) agents are working."
@@ -734,6 +722,8 @@ private struct JobRow: View {
     let job: Job
     /// The runner the job is on, like "tetrix-lab", or nil for this Mac.
     var host: String? = nil
+    /// A notification opened the island on this job: it opens, and stands out.
+    var focused = false
     let onStop: () -> Void
     /// Nil where this Mac can't publish: a runner's job needs the iPhone's device key.
     let onPublish: (() async throws -> Void)?
@@ -841,6 +831,10 @@ private struct JobRow: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 11)
         .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            if focused { RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.35)) }
+        }
+        .onChange(of: focused, initial: true) { if focused, !job.isActive { expanded = true } }
     }
 
     /// One line for the agent, and why it didn't go if it didn't.
