@@ -84,9 +84,13 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// published, then the ones later rounds made. A job published before Oby counted has none.
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
     /// Done, with commits that aren't on its pull request yet: Oby publishes it when it ends, and
-    /// offers Publish when that failed. Not once the user dismissed it, and never on Oby's own review
-    /// jobs: a review makes no commits.
-    var canPublish: Bool { status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil }
+    /// offers Publish when that failed. Not once the user dismissed it, never on Oby's own review
+    /// jobs (a review makes no commits), and never once its pull request was merged or closed: the
+    /// branch has nowhere to go.
+    var canPublish: Bool {
+        status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
+            && (pullRequest?.state ?? .open) == .open
+    }
     /// Oby's review requested changes for the last time it may (Review.maxRounds), and the pull
     /// request is still open: a person takes it from here.
     var reviewNeedsYou: Bool {

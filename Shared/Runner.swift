@@ -79,8 +79,12 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
 
     /// Commits not on its pull request yet: all of them before it's published, then later rounds' ones.
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
-    /// Not once the user dismissed it, and never on Oby's own review jobs (as Engine's `Job.canPublish`).
-    var canPublish: Bool { status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil }
+    /// Not once the user dismissed it, never on Oby's own review jobs, and never once its pull
+    /// request was merged or closed (as Engine's `Job.canPublish`).
+    var canPublish: Bool {
+        status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
+            && (pullRequest?.state ?? "OPEN") == "OPEN"
+    }
 
     /// Oby's review requested changes for the last time it may (4 rounds) and the pull request is still open.
     var reviewNeedsYou: Bool {
@@ -304,6 +308,11 @@ extension Job {
         if isActive { return .working }
         if status == .done, published != nil, (pullRequestState ?? "OPEN") == "OPEN" { return .inReview }
         return .done
+    }
+
+    /// Whether the list shows the job after the last Clear done, on any app (Shared/JobList.swift).
+    nonisolated func listed(after clearedAt: Date?) -> Bool {
+        JobList.lists(active: isActive, needsYou: needsYou, finished: finished, clearedAt: clearedAt)
     }
 
     /// The status pill, the same on the iPhone and the Mac: how it's going, how it ended, and

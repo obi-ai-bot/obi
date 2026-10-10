@@ -29,9 +29,9 @@ final class IslandModel {
     /// Agents working now, on this Mac and on the runner.
     var working: Int { desk.active.count + feed.working }
 
-    /// Whether the island lists a job: it hasn't finished, or it finished after the last Clear done
-    /// on any app. The runner keeps that time, and this Mac's own jobs go by it too.
-    func lists(_ job: Job) -> Bool { job.isActive || JobList.shows(finished: job.finished, clearedAt: feed.clearedAt) }
+    /// Whether the island lists a job: it hasn't finished, it still needs you, or it finished after
+    /// the last Clear done on any app. The runner keeps that time, and this Mac's own jobs go by it too.
+    func lists(_ job: Job) -> Bool { job.listed(after: feed.clearedAt) }
 
     /// The one line the iPhone's Home says too (Shared/JobList.swift): who's working, and what
     /// needs you among the jobs listed.
