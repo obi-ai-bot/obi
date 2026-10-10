@@ -137,7 +137,7 @@ final class RunnerFeed {
                 Self.post(notice, for: job)
                 onNotice(job, notice)
             } else {
-                // Published, from the iPhone or by the runner, or running again: its alert goes.
+                // Published, from the iPhone or by the runner, dismissed, or running again: its alert goes.
                 UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [job.id])
             }
         }
@@ -145,7 +145,9 @@ final class RunnerFeed {
 
     // MARK: Notices, as the runner decides them (Runner/Push.swift)
 
+    /// Nothing for a job the user dismissed: its alert clears.
     static func notice(for job: Job) -> Notice? {
+        guard job.needsYou else { return nil }
         if job.canPublish { return .ready }
         switch job.status {
         case .failed: return .failed

@@ -47,6 +47,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var pipeline: JobPipeline?
     var pullRequest: PullRequestStatus?
     var pullRequestError: String?
+    /// When the user let the job go (Dismiss), or nil: it then needs nothing (newer runners only).
+    var dismissed: Date?
 
     var isActive: Bool { status == .queued || status == .running }
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
@@ -71,10 +73,12 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
 
     /// Commits not on its pull request yet: all of them before it's published, then later rounds' ones.
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
-    var canPublish: Bool { status == .done && base != nil && unpublished > 0 }
+    /// Not once the user dismissed it.
+    var canPublish: Bool { status == .done && base != nil && unpublished > 0 && dismissed == nil }
 
-    /// Waiting for Publish (the runner's own publish failed), failed or interrupted: what the runner sends an alert for.
-    var needsYou: Bool { canPublish || status == .failed || status == .interrupted }
+    /// Waiting for Publish (the runner's own publish failed), failed or interrupted, and not
+    /// dismissed: what the runner sends an alert for, and what Dismiss takes.
+    var needsYou: Bool { dismissed == nil && (canPublish || status == .failed || status == .interrupted) }
 
     /// "Round 2 of 5 · Fable 5.1", or empty for a one-round job on the usual model.
     var extras: String {
@@ -119,6 +123,8 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     var fiveHour: Double?
     var sevenDay: Double?
     var running: Int
+    /// A job of its hit the account's usage limit: no job goes to it before then (newer runners only).
+    var fullUntil: Date?
 
     /// "Personal · Claude Code"
     var title: String { "\(name) · \(agent == "codex" ? "Codex" : "Claude Code")" }
@@ -229,13 +235,15 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
 
 /// What needs the user among these jobs, in one line, like "2 jobs are ready to publish, 1 job
 /// failed", or nil when nothing does. Home on the iPhone and the Mac's island both say it.
+/// Dismissed jobs aren't counted.
 nonisolated enum NeedsYou {
     static func line(_ jobs: [Job]) -> String? {
         func count(_ n: Int, _ one: String, _ many: String) -> String? { n == 0 ? nil : n == 1 ? "1 job \(one)" : "\(n) jobs \(many)" }
+        let needing = jobs.filter(\.needsYou)
         let parts = [
-            count(jobs.count(where: \.canPublish), "is ready to publish", "are ready to publish"),
-            count(jobs.count { $0.status == .failed }, "failed", "failed"),
-            count(jobs.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
+            count(needing.count(where: \.canPublish), "is ready to publish", "are ready to publish"),
+            count(needing.count { $0.status == .failed }, "failed", "failed"),
+            count(needing.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
         ].compactMap(\.self)
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
@@ -267,6 +275,8 @@ nonisolated struct Runner: Sendable {
     func status() async throws -> RunnerStatus { try await call("GET", "v1/status") }
     func jobs() async throws -> [Job] { try await call("GET", "v1/jobs?limit=50") }
     func stop(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/stop") }
+    /// Lets go of a job that needs the user: it then needs nothing. No signature: nothing goes out.
+    func dismiss(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/dismiss") }
 
     /// Tells the job's agent something. A finished job picks its session up again.
     func tell(_ id: String, _ text: String) async throws -> Job {

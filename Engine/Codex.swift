@@ -107,12 +107,17 @@ final class CodexAgent: AgentRun {
         let params = message["params"] as? [String: Any] ?? [:]
         if let other = params["threadId"] as? String, let thread, other != thread { return }
         for event in CodexRPC.events(message) {
-            if case let .finished(summary, failed) = event {
+            switch event {
+            case let .finished(summary, failed):
                 // The turn's result. Desk decides whether another round follows.
                 result = (summary, failed)
                 turn = nil
                 onEvent(.turnEnded(summary: summary, failed: failed))
-            } else {
+            case .limit:
+                // The turn died on the account's limit: Desk moves the job to another account.
+                turn = nil
+                onEvent(event)
+            default:
                 onEvent(event)
             }
         }
@@ -327,7 +332,10 @@ nonisolated enum CodexRPC {
         case "account/rateLimits/updated":
             return (params["rateLimits"] as? [String: Any]).flatMap(usage).map { [.usage(fiveHour: $0.fiveHour, sevenDay: $0.sevenDay)] } ?? []
         case "turn/completed":
-            return [finished(params["turn"] as? [String: Any] ?? [:])]
+            let ended = finished(params["turn"] as? [String: Any] ?? [:])
+            // "You've hit your usage limit. Try again at 10:45 PM.": the account is full, not the work wrong.
+            if case let .finished(summary, true) = ended, Limits.isLimit(summary) { return [.limit(resets: Limits.reset(in: summary))] }
+            return [ended]
         default:
             return []
         }

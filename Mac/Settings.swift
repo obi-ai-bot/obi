@@ -98,8 +98,14 @@ struct AccountsSettingsView: View {
             }
             Spacer()
             if state.signedIn {
-                Text("5h \(percent(state.fiveHour)) · 7d \(percent(state.sevenDay))")
-                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("5h \(percent(state.fiveHour)) · 7d \(percent(state.sevenDay))")
+                        .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                    // A job of its hit the limit: no job goes to it until then.
+                    if state.isFull(), let until = state.fullUntil {
+                        Text("Full until \(Limits.clock(until))").font(.caption).foregroundStyle(.orange)
+                    }
+                }
             } else {
                 Button("Sign In") { attempt { try store.signIn(state.account) } }
             }

@@ -194,7 +194,7 @@ final class Push {
 
     /// Alerts for what changed in what the jobs need: one per job, with the job's id as its collapse
     /// ID so a newer state replaces the older one, and a clearing push once a job needs nothing any
-    /// more (published, from the iPhone or the Mac, or running again).
+    /// more (published, from the iPhone or the Mac, dismissed, or running again).
     private func notify(now: Date) async {
         let (changes, notified) = Self.notices(desk.jobs, after: self.notified)
         guard notified != self.notified else { return }
@@ -273,7 +273,9 @@ final class Push {
 
     // MARK: Notices
 
+    /// Nothing for a job the user dismissed: its alert clears.
     static func notice(for job: Job) -> Notice? {
+        guard job.needsYou else { return nil }
         if job.canPublish { return .ready }
         switch job.status {
         case .failed: return .failed

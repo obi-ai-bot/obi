@@ -93,7 +93,7 @@ struct JobScreen: View {
     }
 
     @ViewBuilder private func result(_ job: Job) -> some View {
-        if !job.summary.isEmpty || job.commits != nil || job.published != nil || job.canPublish {
+        if !job.summary.isEmpty || job.commits != nil || job.published != nil || job.needsYou || job.dismissed != nil {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Result").font(.headline).accessibilityAddTraits(.isHeader)
                 if !job.summary.isEmpty { Text(job.summary).font(.callout).textSelection(.enabled) }
@@ -107,7 +107,16 @@ struct JobScreen: View {
                 if let error = job.pullRequestError {
                     Label(error, systemImage: "arrow.clockwise").font(.footnote).foregroundStyle(.secondary)
                 }
-                if job.canPublish { publishActions(job) }
+                if job.canPublish {
+                    publishActions(job)
+                } else if job.needsYou {
+                    // Failed or interrupted: nothing to publish, so Dismiss stands alone.
+                    dismissButton(job)
+                }
+                if job.dismissed != nil {
+                    Label("Dismissed. Tell the agent something to pick it up again.", systemImage: "xmark.circle")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading).padding(16)
             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
@@ -184,10 +193,21 @@ struct JobScreen: View {
             }.buttonStyle(.borderedProminent).disabled(busy)
             Button("Not now") { self.action = nil }.disabled(busy)
         } else {
-            Button(job.published == nil ? "Publish…" : "Publish new commits…") {
-                Task { await run { action = try await phone.publishAction(job.id) } }
-            }.buttonStyle(.borderedProminent).disabled(busy)
+            HStack(spacing: 12) {
+                Button(job.published == nil ? "Publish…" : "Publish new commits…") {
+                    Task { await run { action = try await phone.publishAction(job.id) } }
+                }.buttonStyle(.borderedProminent).disabled(busy)
+                dismissButton(job)
+            }
         }
+    }
+
+    /// Lets go of a job that needs you: the runner keeps it, and it stops counting everywhere.
+    private func dismissButton(_ job: Job) -> some View {
+        Button("Dismiss", systemImage: "xmark.circle") {
+            Task { await run { try await phone.dismiss(job.id) } }
+        }
+        .buttonStyle(.bordered).disabled(busy)
     }
 
     private var publishAsked: Bool { phone.publishing == id && phone.loaded && scenePhase == .active }

@@ -346,11 +346,12 @@ private struct OpenIsland: View {
                         // Publishing needs the iPhone's device key, so runner rows don't offer it.
                         JobRow(job: row.job, host: host, focused: row.job.id == focus,
                                onStop: { Task { if let job = try? await feed.runner?.stop(row.job.id) { feed.apply(job) } } },
-                               onPublish: nil, onMessage: { text in if let runner = feed.runner { feed.apply(try await runner.tell(row.job.id, text)) } })
+                               onPublish: nil, onMessage: { text in if let runner = feed.runner { feed.apply(try await runner.tell(row.job.id, text)) } },
+                               onDismiss: { if let runner = feed.runner { feed.apply(try await runner.dismiss(row.job.id)) } })
                     } else {
                         let job = row.job
                         JobRow(job: job, onStop: { desk.stop(job.id) }, onPublish: { try await desk.publish(job.id, approve: Publish.touchID) },
-                               onMessage: { try desk.message(job.id, $0) })
+                               onMessage: { try desk.message(job.id, $0) }, onDismiss: { try desk.dismiss(job.id) })
                     }
                 }
                 if feed.down {
@@ -716,8 +717,8 @@ private struct StrongerModel: View {
 
 /// One job: what it is, what it's doing now, and how it ended. Click a finished one to read its
 /// summary; a done one whose own publish failed can be published by hand, after Oby shows exactly
-/// what that does. A running or
-/// opened one takes a word for its agent.
+/// what that does, and one that needs you can be dismissed. A running or opened one takes a word
+/// for its agent.
 private struct JobRow: View {
     let job: Job
     /// The runner the job is on, like "tetrix-lab", or nil for this Mac.
@@ -728,6 +729,8 @@ private struct JobRow: View {
     /// Nil where this Mac can't publish: a runner's job needs the iPhone's device key.
     let onPublish: (() async throws -> Void)?
     let onMessage: (String) async throws -> Void
+    /// Lets go of a job that needs you (Publish, failed, interrupted); it then needs nothing.
+    let onDismiss: () async throws -> Void
     @State private var expanded = false
     @State private var confirming = false
     @State private var publishing = false
@@ -769,6 +772,21 @@ private struct JobRow: View {
                             .buttonStyle(.plain)
                     }
                 }
+                // Next to Publish, or alone on a failed or interrupted job.
+                if job.needsYou {
+                    Button {
+                        Task {
+                            do {
+                                try await onDismiss()
+                                problem = nil
+                            } catch {
+                                problem = error.localizedDescription
+                            }
+                        }
+                    } label: { pill("Dismiss") }
+                        .buttonStyle(.plain)
+                        .help("Let this job go: it stays in the list, and stops needing you")
+                }
                 if job.isActive {
                     Button(action: onStop) {
                         Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
@@ -783,6 +801,9 @@ private struct JobRow: View {
             .onTapGesture { if !job.isActive { expanded.toggle() } }
             if job.canPublish, let reason = job.publishError {
                 Text(reason).font(.system(size: 12)).foregroundStyle(.orange).lineLimit(3)
+            }
+            if let problem, !confirming {
+                Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(3)
             }
             if expanded, !job.summary.isEmpty {
                 ScrollView {
@@ -895,6 +916,8 @@ private struct JobRow: View {
 
     private var status: some View {
         let (text, color): (String, Color) = switch job.status {
+        // Let go by you: it needs nothing, however it ended.
+        case _ where job.dismissed != nil: ("Dismissed", .gray)
         case .queued: ("Starting", .blue)
         case .running: ("Working", .blue)
         case .done where job.canPublish: (job.publishError == nil ? "Ready to publish" : "Couldn't publish", .orange)
