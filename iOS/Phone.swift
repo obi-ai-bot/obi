@@ -87,6 +87,8 @@ final class Phone {
                     await Notifications.clear(Set(jobs.filter { !$0.needsYou }.map(\.id)))
                     connection = .live
                     wait = 1
+                    // Jobs dispatched from the Mac or the runner API notify too, so ask on connecting.
+                    Notifications.ask()
                     do { _ = try await registerDevice(again: true) } catch {
                         Logger.phone.error("registering this iPhone failed: \(error.localizedDescription, privacy: .public)")
                     }
