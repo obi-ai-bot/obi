@@ -150,6 +150,8 @@ struct PullRequestTextTests {
     }
 
     @Test func aPlantedKeyIsFoundWithItsFileAndLine() {
+        // Built at runtime so this file holds no line the scan would flag.
+        let key = "AKIA" + "ABCDEFGHIJKLMNOP"
         let diff = """
             diff --git a/Engine/Keys.swift b/Engine/Keys.swift
             --- a/Engine/Keys.swift
@@ -157,7 +159,7 @@ struct PullRequestTextTests {
             @@ -10,2 +10,3 @@
              let a = 1
              let b = 2
-            +let key = "AKIAABCDEFGHIJKLMNOP"
+            +let key = "\(key)"
             """
         let findings = Publish.findings(inDiff: diff)
         #expect(findings == [Publish.Finding(file: "Engine/Keys.swift", line: 12, rule: "AWS access key")])
