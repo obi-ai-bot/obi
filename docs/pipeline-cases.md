@@ -79,14 +79,14 @@ Before stage 1. People connect only what they have. That decides which model the
 - **Typed plan:** not enforced. The CLI returns a JSON wrapper with free text in `.result` (#31). The schema goes in the prompt, and Swift checks the reply and retries.
 - **Oby today:** Missing. There's no Cursor runner yet (F6, #10) and no Cursor brain.
 - **Decided 2026-10-10:** the same flow. Oby proposes defaults from the account's list, and you choose.
-- **Open:** is an unenforced schema reliable enough for 100% automation?
+- **Decided 2026-10-10:** with only Cursor connected, Oby shows a warning that it may ask you more often.
 
 ### 0.4 Only Gemini
 - **What happens:** same as Cursor: list the models, pick, show. Goes to 1.
 - **Lead and jobs:** unknown.
 - **Typed plan:** not enforced. Free text in `.response`. Google ended personal sign-in for the CLI on 2026-06-18, so it needs an API key or Vertex.
 - **Oby today:** Missing. Not built (F6).
-- **Decide:** support a Gemini-only setup in the first version at all?
+- **Decided 2026-10-10:** not in the first version. The MVP covers Claude Code, Codex and Cursor, the three Deskree uses most.
 
 ### 0.5 Several tools
 - **What happens:** one tool thinks, and jobs spread across every account by usage. First launch shows "Oby thinks with X and works with Y and Z". Goes to 1.
@@ -495,7 +495,7 @@ Things that hold at every step, and matter more now that nobody confirms a PR or
 - **Codex:** no internet in the cloud while the agent works.
 - **Others:** Copilot has a firewall, and its workflows need a person's click. Devin acts on bots' comments only if allowed.
 - **Open for Oby:** with auto-merge, a hostile review comment could steer a job.
-  - Decide: whose comments a job may act on: repo members only, or the PR's reviewers only?
+  - Decided 2026-10-10: only a change request from the PR's assigned reviewers or code owners starts work. Anyone else's review is shown to the Lead as information.
 
 ### X.2 Memory between jobs
 - **What happens:** every job is saved to Tetrix: summary, decisions, files. The Lead reads what was done before it starts, instead of exploring the repo again, which also saves tokens. Feeds stages 1 and 2.
@@ -506,7 +506,7 @@ Things that hold at every step, and matter more now that nobody confirms a PR or
 - **Others:** Copilot Memory is per repo, cited, expires in 28 days and is off by default. Devin has a knowledge base and playbooks.
 - **Open for Oby:**
   - Proposal: Tetrix sessions with digests, and a `Tetrix-Session` line on every PR.
-  - Decide: unblock #28 (the Keycloak client) before the Lead ships?
+  - Decided 2026-10-10: unblock #28 now. The realm admin registers the `oby-desktop` client, or clears the stale dynamically registered clients. The Lead still runs on local memory whenever Tetrix isn't there.
 
 ### X.3 When Oby may interrupt you
 - **What happens:** only for a decision only you can make, a hard stop (a secret, or the same failure after every round), or done. Everything else waits for the report.
@@ -516,9 +516,8 @@ Things that hold at every step, and matter more now that nobody confirms a PR or
 - **Codex:** Allow/Deny cards in Slack.
 - **Others:** Devin's coordinator handles its children's questions, with optional batch approval. Copilot sends a review request when done.
 - **Open for Oby:**
-  - Decide: a push for "done", or only for "needs you"?
-  - Decide: one push per goal, or per job?
-  - Decide: quiet hours?
+  - Decided 2026-10-10: every new inbox item notifies you, because it means Oby couldn't handle it. Nothing else does.
+  - No quiet hours: items simply wait in the inbox until you're there.
 
 ### X.4 Remember how you decide: decisions and preferences
 - **What happens:** every question or permission request from any worker (Claude Code, Codex, Cursor) goes to Oby first. Oby answers from what it knows about you, fetched from the graph only when the situation calls for it: past answers, past actions, the repo's AGENTS.md, CODEOWNERS. Only what it knows nothing about reaches you, and your answer is learned. Oby also learns from what you do: the reviewer you pick, where you merge, the PR you close. Next time it applies what it learned and names it in the report. Applies at every stage, and it's what keeps X.3 quiet.
@@ -532,7 +531,7 @@ Things that hold at every step, and matter more now that nobody confirms a PR or
   - Proposal: Oby's fixed rules always come first, and nothing learned can override them: agents never push, no secrets go out, untrusted text stays data.
   - Proposal: Tetrix already holds your GitHub history (who reviewed what, where you merged), so Oby learns from it with nothing new to collect.
   - Open: Tetrix keeps owner-only items out of graph search today. Personal memory needs owner-only items to be searchable.
-  - Open: how do you see and correct what Oby learned?
+  - Decided 2026-10-10: you see and correct what Oby learned by talking to it. A list in Settings is the secondary way, never the first.
 
 ### X.5 Oby's work queue: requests handled one by one
 - **What happens:** everything that comes in waits in one durable queue: your goals, workers' questions and permission requests, review comments, red CI. The Lead takes them one at a time, in priority order: you first, then hard stops, then workers, then GitHub events, then new work. Events about the same job are merged, so three review comments in a minute make one round. Jobs still run in parallel. Each event goes to the stage it belongs to.
@@ -543,7 +542,7 @@ Things that hold at every step, and matter more now that nobody confirms a PR or
 - **Others:** Devin's preflight step dedupes events by id and version, and a full queue drops new ones. Copilot: not found.
 - **Open for Oby:**
   - Proposal: the queue lives in the runner's database, so it survives restarts and the Mac and iPhone see the same one.
-  - Decide: one Lead for everything in strict order, or one per goal (goals side by side, events within a goal in order)?
+  - Decided 2026-10-10: one Lead per goal. Goals move side by side, and each Lead's context stays small, which keeps turns cheap. 2.1's file claims keep two Leads off the same files.
 
 ### X.6 Your inbox: like email, items wait for you
 - **What happens:** anything Oby can't decide, or only you can do, waits in your inbox until you decide. The job that asked waits, and the rest keep going. The same question from several workers shows once. Each decision teaches Oby, which then rechecks the inbox and clears what it can now answer itself. The decision goes back to the job that asked. Full design: "Your inbox" above.
@@ -578,7 +577,8 @@ Things that hold at every step, and matter more now that nobody confirms a PR or
 - **Open for Oby:**
   - Decided 2026-10-10: Tetrix is optional, and Oby never requires it.
   - Proposal: rules Oby applies itself (permissions, reviewer per repo) are stored as rows Swift reads directly. Preferences are entries with a "when this applies" line, like Devin's triggers, fetched by search.
-  - Decide: also keep a readable Markdown copy for you and any LLM, like Claude Code's memory folder?
+  - Decided 2026-10-10: no second copy kept in sync. "Export what you know" writes a Markdown file whenever you or another AI needs one.
+  - Claude Code keeps its memory as Markdown, and Cursor its rules. Codex generates memory files it says not to edit.
 
 ---
 
