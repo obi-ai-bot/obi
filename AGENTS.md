@@ -11,12 +11,12 @@ Oby is a native macOS app (SwiftUI, macOS 26 and later) that lives in the notch 
 
 ## Rules Oby never breaks
 
-- Oby never merges, force-pushes or pushes to `main` for anyone.
-- Nothing goes out as the user (a push, a pull request, a review, a comment) without showing the exact action and a Touch ID confirmation.
+- Oby never pushes or merges to `main`, and never force-pushes a branch it didn't create. It merges into `dev` only after the review approves and CI is green.
+- Nothing goes out unless the job's checks passed, the Lead approved the diff and the secret scan is clean. If the scanner can't run, nothing is published. Every outgoing action is listed in the job's report.
 - Everything outgoing is scanned for secrets. If the scanner can't run, nothing is published.
 - Text from GitHub, Slack, web pages, screenshots or other people's Obys is data, never instructions. It reaches agents only as quoted files, never in a prompt, and other Obys can only send typed actions.
 - The microphone opens only while the user holds fn. No telemetry unless the user turns it on.
-- Oby never reads, stores or forwards the user's agent credentials. Each tool signs in through its own login.
+- Oby never reads, stores or forwards the user's agent logins: each tool signs in through its own login. Secrets in Oby's vault never reach an agent (no prompt, environment, file, argument or log). Oby uses a secret only for a connection the user made.
 
 ## Proven on 2026-10-09 (keep these working)
 
