@@ -6,16 +6,18 @@ import HTTPTypes
 import OSLog
 #endif
 
-/// Live Activity push: keeps the iPhone's Lock Screen and Dynamic Island in step with the jobs
-/// while Oby is suspended, through Apple's push service. On only when `folder` holds `apns.json`
-/// (`{"team": …, "key": …}`) and that key's `AuthKey_<key>.p8`, which never leaves the folder.
+/// Push to the iPhone, through Apple's push service: the Live Activity keeps the Lock Screen and
+/// Dynamic Island in step with the jobs while Oby is suspended, and an alert says when a job needs
+/// the user (ready to publish, failed or interrupted), and nothing else. On only when `folder`
+/// holds `apns.json` (`{"team": …, "key": …}`) and that key's `AuthKey_<key>.p8`, which never
+/// leaves the folder.
 @MainActor
 final class Push {
-    /// A Live Activity push token from a phone, as `POST /v1/activities` takes it.
+    /// A push token from a phone, as `POST /v1/activities` and `POST /v1/notifications` take it.
     struct Token: Codable, Equatable {
         /// Hex.
         var token: String
-        /// "update" (one activity) or "start" (push-to-start).
+        /// "update" (one activity), "start" (push-to-start) or "alert" (the app's device token).
         var kind: String
         /// The app's bundle ID.
         var topic: String
@@ -53,6 +55,14 @@ final class Push {
         }
     }
 
+    /// What a job needs from the user, the only thing an alert is for.
+    enum Notice: String, Codable {
+        /// Done with commits and not published: it waits for Publish.
+        case ready
+        case failed
+        case interrupted
+    }
+
     private struct Signer {
         var team: String
         var keyID: String
@@ -63,6 +73,9 @@ final class Push {
     private let signer: Signer?
     private let file: URL
     private var tokens: [Token] = []
+    /// What each job's alert last said, kept in `notices.json` so a restart doesn't say it again.
+    private let noticesFile: URL
+    private var notified: [String: Notice] = [:]
     /// Push-to-start went out for the jobs running now.
     private var started = false
     private var lastSent: State?
@@ -75,6 +88,7 @@ final class Push {
     init(desk: Desk, folder: URL) {
         self.desk = desk
         file = folder.appending(path: "tokens.json")
+        noticesFile = folder.appending(path: "notices.json")
         struct Config: Decodable { var team: String; var key: String }
         guard let data = try? Data(contentsOf: folder.appending(path: "apns.json")) else {
             signer = nil
@@ -91,6 +105,15 @@ final class Push {
         signer = Signer(team: config.team, keyID: config.key, key: key)
         tokens = (try? JSONDecoder().decode([Token].self, from: Data(contentsOf: file))) ?? []
         Logger.runner.notice("Live Activity push is on (key \(config.key, privacy: .public), \(self.tokens.count, privacy: .public) tokens)")
+        if let saved = try? JSONDecoder().decode([String: Notice].self, from: Data(contentsOf: noticesFile)) {
+            notified = saved
+            // Jobs a restart interrupted say so now.
+            sending = Task { await notify(now: .now) }
+        } else {
+            // The first time, what the jobs already need isn't news.
+            notified = Self.notices(desk.jobs, after: [:]).notified
+            saveNotices()
+        }
     }
 
     /// Keeps a phone's token and says whether the runner pushes. A newer push-to-start token
@@ -100,7 +123,7 @@ final class Push {
               token.token.allSatisfy(\.isHexDigit) else {
             throw APIError(.unprocessableContent, "token isn't a push token in hex.")
         }
-        guard ["update", "start"].contains(token.kind) else { throw APIError(.unprocessableContent, "kind is update or start.") }
+        guard ["update", "start", "alert"].contains(token.kind) else { throw APIError(.unprocessableContent, "kind is update or start.") }
         guard ["development", "production"].contains(token.environment) else {
             throw APIError(.unprocessableContent, "environment is development or production.")
         }
@@ -127,9 +150,11 @@ final class Push {
             await previous?.value
             waiting = false
             await send()
+            await notify(now: .now)
         }
     }
 
+    /// The Live Activity.
     private func send() async {
         let active = desk.jobs.filter(\.isActive)
         let updates = tokens.filter { $0.kind == "update" }
@@ -139,13 +164,13 @@ final class Push {
             if !updates.isEmpty {
                 guard state != lastSent else { return }
                 lastSent = state
-                for token in updates { await deliver(["event": "update", "content-state": state], to: token, priority: 5, now: now) }
+                for token in updates { await activity(["event": "update", "content-state": state], to: token, priority: 5, now: now) }
             } else if !started {
                 started = true
                 lastSent = state
                 let alert = ["title": state.title, "body": state.line]
                 for token in tokens where token.kind == "start" {
-                    await deliver(["event": "start", "content-state": state, "attributes-type": "ObyActivity",
+                    await activity(["event": "start", "content-state": state, "attributes-type": "ObyActivity",
                                    "attributes": [String: String](), "alert": alert], to: token, priority: 10, now: now)
                 }
             }
@@ -156,18 +181,44 @@ final class Push {
                   let last = desk.jobs.max(by: { ($0.finished ?? .distantPast) < ($1.finished ?? .distantPast) }) else { return }
             let state = State(last, working: 0)
             let dismissal = Int((last.finished ?? now).addingTimeInterval(15 * 60).timeIntervalSince1970)
-            let alert = ["title": last.status == .done ? "Done" : "Failed", "body": state.title]
+            // No alert: a job that needs the user says so with its own (`notify`).
             for token in updates {
-                await deliver(["event": "end", "content-state": state, "dismissal-date": dismissal, "alert": alert], to: token, priority: 10, now: now)
+                await activity(["event": "end", "content-state": state, "dismissal-date": dismissal], to: token, priority: 10, now: now)
             }
             tokens.removeAll { updates.contains($0) }
             save()
         }
     }
 
+    /// Alerts for what changed in what the jobs need: one per job, with the job's id as its collapse
+    /// ID so a newer state replaces the older one, and a clearing push once a job needs nothing any
+    /// more (published, from the iPhone or the Mac, or running again).
+    private func notify(now: Date) async {
+        let (changes, notified) = Self.notices(desk.jobs, after: self.notified)
+        guard notified != self.notified else { return }
+        self.notified = notified
+        saveNotices()
+        let alerts = tokens.filter { $0.kind == "alert" }
+        for (job, notice) in changes {
+            guard let body = try? Self.notification(notice, for: job) else { continue }
+            for token in alerts {
+                if notice == nil {
+                    await deliver(body, to: token, type: "background", priority: 5, now: now)
+                } else {
+                    await deliver(body, to: token, type: "alert", priority: 10, collapse: job.id, now: now)
+                }
+            }
+        }
+    }
+
+    private func activity(_ aps: [String: any Encodable], to token: Token, priority: Int, now: Date) async {
+        guard let body = try? Self.payload(aps, now: now) else { return }
+        await deliver(body, to: token, type: "liveactivity", priority: priority, now: now)
+    }
+
     /// Sends one push; a token Apple no longer takes is dropped.
-    private func deliver(_ aps: [String: any Encodable], to token: Token, priority: Int, now: Date) async {
-        guard let signer, let body = try? Self.payload(aps, now: now) else { return }
+    private func deliver(_ body: Data, to token: Token, type: String, priority: Int, collapse: String? = nil, now: Date) async {
+        guard let signer else { return }
         // Apple takes a provider token for an hour, and refuses new ones more often than every 20 minutes.
         let bearer: String
         if let jwt, now.timeIntervalSince(jwt.made) < 50 * 60 {
@@ -178,26 +229,29 @@ final class Push {
             bearer = made
         }
         let host = token.environment == "production" ? "api.push.apple.com" : "api.sandbox.push.apple.com"
+        let topic = type == "liveactivity" ? "\(token.topic).push-type.liveactivity" : token.topic
         let config = [
             "url = \(Self.quoted("https://\(host)/3/device/\(token.token)"))",
             "request = \"POST\"",
             "header = \(Self.quoted("authorization: bearer \(bearer)"))",
-            "header = \"apns-push-type: liveactivity\"",
-            "header = \(Self.quoted("apns-topic: \(token.topic).push-type.liveactivity"))",
+            "header = \(Self.quoted("apns-push-type: \(type)"))",
+            "header = \(Self.quoted("apns-topic: \(topic)"))",
             "header = \"apns-priority: \(priority)\"",
             "header = \"content-type: application/json\"",
+        ] + (collapse.map { ["header = \(Self.quoted("apns-collapse-id: \($0)"))"] } ?? []) + [
             "data-binary = \(Self.quoted(String(decoding: body, as: UTF8.self)))",
             "silent", "max-time = 20", "write-out = \"\\n%{http_code}\"",
-        ].joined(separator: "\n") + "\n"
+        ]
+        let lines = config.joined(separator: "\n") + "\n"
         let name = String(token.token.prefix(8))
-        guard let result = try? await Shell.run(["curl", "--http2", "-K", "-"], input: Data(config.utf8), timeout: 30) else {
+        guard let result = try? await Shell.run(["curl", "--http2", "-K", "-"], input: Data(lines.utf8), timeout: 30) else {
             Logger.runner.error("push to \(name, privacy: .public)…: curl didn't run")
             return
         }
-        let lines = String(decoding: result.out, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false)
-        let code = lines.last.flatMap { Int($0) } ?? 0
+        let answered = String(decoding: result.out, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false)
+        let code = answered.last.flatMap { Int($0) } ?? 0
         guard code != 200 else { return }
-        let answer = lines.dropLast().joined(separator: "\n")
+        let answer = answered.dropLast().joined(separator: "\n")
         Logger.runner.error("push to \(name, privacy: .public)… answered \(code, privacy: .public): \(answer, privacy: .public)")
         if code == 410 || answer.contains("BadDeviceToken") {
             tokens.removeAll { $0.token == token.token }
@@ -208,6 +262,54 @@ final class Push {
     private func save() {
         guard let data = try? JSONEncoder().encode(tokens) else { return }
         try? data.write(to: file, options: .atomic)
+    }
+
+    private func saveNotices() {
+        guard let data = try? JSONEncoder().encode(notified) else { return }
+        try? data.write(to: noticesFile, options: .atomic)
+    }
+
+    // MARK: Notices
+
+    static func notice(for job: Job) -> Notice? {
+        if job.canPublish { return .ready }
+        switch job.status {
+        case .failed: return .failed
+        case .interrupted: return .interrupted
+        default: return nil
+        }
+    }
+
+    /// What each job needs now, against what its alert last said: the jobs whose alert changes
+    /// (nil: clear it), and what to remember. Jobs the desk no longer lists are forgotten.
+    static func notices(_ jobs: [Job], after notified: [String: Notice]) -> (changes: [(Job, Notice?)], notified: [String: Notice]) {
+        var changes: [(Job, Notice?)] = []
+        var now: [String: Notice] = [:]
+        for job in jobs {
+            let notice = notice(for: job)
+            now[job.id] = notice
+            if notice != notified[job.id] { changes.append((job, notice)) }
+        }
+        return (changes, now)
+    }
+
+    /// The alert for `notice`, with the job's id for the app to open (`category` "ready" offers
+    /// Publish), or for nil the background push that clears it.
+    static func notification(_ notice: Notice?, for job: Job) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard let notice else {
+            return try encoder.encode(Fields(["aps": Fields(["content-available": 1]), "clear": job.id]))
+        }
+        let state = State(job, working: 0)
+        let title = switch notice {
+        case .ready: "Ready to publish: \(state.title)"
+        case .failed: "Failed: \(state.title)"
+        case .interrupted: "Interrupted: \(state.title)"
+        }
+        let aps: [String: any Encodable] = ["alert": ["title": title, "body": state.line], "sound": "default",
+                                            "category": notice == .ready ? "ready" : "job", "thread-id": "jobs"]
+        return try encoder.encode(Fields(["aps": Fields(aps), "job": job.id]))
     }
 
     // MARK: Payloads

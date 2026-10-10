@@ -12,9 +12,11 @@ struct HomeView: View {
     @AppStorage("home.clearedAt") private var clearedAt: Double = 0
     /// The scroll view's height, so an empty Home can put Oby in the middle of it.
     @State private var height: CGFloat = 0
+    /// The job screens open, so a notification can open its job.
+    @State private var path: [String] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     header
@@ -53,6 +55,13 @@ struct HomeView: View {
             .safeAreaInset(edge: .bottom) { field }
             .sheet(isPresented: sheetShown) { sheet }
             .sheet(isPresented: $settings) { SettingsScreen() }
+            .onChange(of: phone.opening, initial: true) {
+                guard let id = phone.opening else { return }
+                phone.opening = nil
+                settings = false
+                phone.cancel()
+                path = [id]
+            }
             .onChange(of: mood, initial: true) { character.mood = mood }
             .onChange(of: centered) {
                 // Off to work with a grin; back in the middle with a hello.

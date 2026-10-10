@@ -4,6 +4,7 @@ import SwiftUI
 struct JobScreen: View {
     @Environment(Phone.self) private var phone
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     let id: String
     @State private var action: String?
     @State private var busy = false
@@ -48,12 +49,37 @@ struct JobScreen: View {
                     actions(job)
                 }
                 .padding(16)
-            } else {
+            } else if phone.loaded {
                 ContentUnavailableView("This job isn't on the runner any more.", systemImage: "questionmark.folder")
+            } else {
+                ProgressView().padding(.top, 80)
             }
         }
         .background(Color.black)
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: publishAsked, initial: true) { publishFromNotification() }
+    }
+
+    /// The notification's Publish was tapped for this job, and Oby is in front with the job loaded.
+    private var publishAsked: Bool {
+        phone.publishing == id && phone.loaded && scenePhase == .active
+    }
+
+    /// Shows the action and asks for Face ID straight away, as tapping Publish… then Publish with
+    /// Face ID would. Already published (on the Mac, say): the screen shows the pull request.
+    private func publishFromNotification() {
+        guard publishAsked else { return }
+        phone.publishing = nil
+        guard let job, job.canPublish, !busy else { return }
+        Task {
+            await run {
+                let action = try await phone.publishAction(job.id)
+                self.action = action
+                let url = try await phone.publish(job.id, action: action)
+                self.action = nil
+                openURL(url)
+            }
+        }
     }
 
     /// What the user told the agent, oldest first.

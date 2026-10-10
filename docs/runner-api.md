@@ -240,9 +240,38 @@ Two seconds after a job changes, the runner pushes what its jobs look like then 
 
 - **A job is active** and the runner has update tokens: an `update` with the newest active job (priority 5, skipped when nothing the card shows changed).
 - **A job is active**, no update tokens, and it hasn't started one yet: a push-to-start (`start`, priority 10, with an alert) to the start tokens. The phone then hands over the new activity's update token.
-- **Nothing is active:** an `end` with how the last job finished, an alert ("Done" or "Failed"), and a dismissal 15 minutes after it finished; then the update tokens are dropped.
+- **Nothing is active:** an `end` with how the last job finished and a dismissal 15 minutes after it finished, with no alert (a job that needs you says so with its own notification, below); then the update tokens are dropped.
 
 Apple's answer `410` or `BadDeviceToken` drops a token. The runner keeps tokens in `apns/tokens.json`.
+
+### `POST /v1/notifications`
+
+Hands the runner the app's device token, so it can tell the phone when a job needs you:
+
+```json
+{"token": "5b0e9c…", "topic": "dev.wellprado.oby", "environment": "production"}
+```
+
+- `token`: the device token from `registerForRemoteNotifications`, in hex. `topic` and `environment` as for `/v1/activities`. The app sends it on every launch once notifications are allowed (it asks the first time a job is dispatched from the phone).
+- It returns `{"push": true}` or `{"push": false}`, and `422`, as `/v1/activities` does.
+
+Two seconds after a job changes, the runner sends an alert push (`apns-push-type: alert`, the app's bundle ID as topic, priority 10) for each job whose need changed. Nothing else notifies: steps, rounds, and jobs that end needing nothing (stopped, or done without commits) only move the Live Activity.
+
+| The job | Title | Body | `category` |
+|---|---|---|---|
+| Done with commits, not published | `Ready to publish: <title>` | the summary's first line | `ready` |
+| `failed` | `Failed: <title>` | the reason (the summary's first line) | `job` |
+| `interrupted` | `Interrupted: <title>` | the reason | `job` |
+
+```json
+{"aps": {"alert": {"title": "Ready to publish: Review oby #33", "body": "Fixed the review comments."},
+         "category": "ready", "sound": "default", "thread-id": "jobs"}, "job": "9f08fd10"}
+```
+
+- `job` is the job's `id`: tapping the notification opens it. The `ready` category offers **Publish** (it unlocks the phone and brings the app forward, where Face ID signs the approval as in the app) and **Open**; `job` offers **Open**.
+- `apns-collapse-id` is the job's `id`, so a newer state replaces the older notification.
+- When a job stops needing you (published, from the iPhone or the Mac, or running again after a message), the runner sends a background push (`apns-push-type: background`, priority 5), `{"aps": {"content-available": 1}, "clear": "<job id>"}`, and the app removes that job's notification. The app also removes them whenever it opens and sees the job needs nothing.
+- The runner remembers what it last said for each job in `apns/notices.json`, so a restart doesn't say it again, and jobs a restart interrupted notify once it's back.
 
 ### `GET /v1/settings/models` and `PUT /v1/settings/models`
 

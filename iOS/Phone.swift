@@ -33,6 +33,10 @@ final class Phone {
     private(set) var loaded = false
     private(set) var jobs: [Job] = [] {
         didSet {
+            // Published or running again, here or on the Mac: its alert goes.
+            let needed = Set(oldValue.filter(\.needsYou).map(\.id))
+            let done = Set(jobs.filter { !$0.needsYou && needed.contains($0.id) }.map(\.id))
+            if !done.isEmpty { Task { await Notifications.clear(done) } }
             // One Live Activity update at a time, in order.
             syncing = Task { [jobs, syncing] in
                 await syncing?.value
@@ -46,6 +50,10 @@ final class Phone {
     private(set) var accounts: [Account] = []
     private(set) var models: ModelSettings?
     private var loop: Task<Void, Never>?
+    /// The job a notification asked to open; Home opens it.
+    var opening: String?
+    /// The job whose notification's Publish was tapped; its screen publishes once it's ready.
+    var publishing: String?
 
     init() {
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
@@ -75,6 +83,8 @@ final class Phone {
                     models = status.models
                     jobs = try await runner.jobs()
                     loaded = true
+                    // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
+                    await Notifications.clear(Set(jobs.filter { !$0.needsYou }.map(\.id)))
                     connection = .live
                     wait = 1
                     do { _ = try await registerDevice(again: true) } catch {
@@ -153,10 +163,17 @@ final class Phone {
 
     // MARK: Jobs
 
+    /// A notification was tapped: open its job, and publish it if that's what was tapped.
+    func open(_ id: String, publish: Bool) {
+        opening = id
+        publishing = publish ? id : nil
+    }
+
     func dispatch(_ draft: Draft) async throws {
         let job = try await runner.dispatch(draft.job)
         talk = .none
         apply(.job(job))
+        Notifications.ask()
     }
 
     /// Dispatch all: one `POST /v1/jobs` per draft, in order, then the card closes. A draft whose
@@ -166,6 +183,7 @@ final class Phone {
             apply(.job(try await runner.dispatch(draft.job)))
         }
         talk = .none
+        Notifications.ask()
     }
 
     func stop(_ id: String) async throws {

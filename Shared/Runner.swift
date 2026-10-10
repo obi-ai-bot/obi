@@ -57,6 +57,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
 
     var canPublish: Bool { status == .done && (commits ?? 0) > 0 && published == nil }
 
+    /// Waiting for Publish, failed or interrupted: what the runner sends an alert for.
+    var needsYou: Bool { canPublish || status == .failed || status == .interrupted }
+
     /// "Round 2 of 5 · Fable 5.1", or empty for a one-round job on the usual model.
     var extras: String {
         var parts: [String] = []
@@ -289,16 +292,30 @@ nonisolated struct Runner: Sendable {
     func registerActivity(token: Data, kind: String) async throws -> Bool {
         struct Body: Encodable { var token: String; var kind: String; var topic: String; var environment: String }
         struct Answer: Decodable { var push: Bool }
-        #if DEBUG
-        let environment = "development"
-        #else
-        let environment = "production"
-        #endif
-        let body = Body(token: token.map { String(format: "%02x", $0) }.joined(), kind: kind,
-                        topic: Bundle.main.bundleIdentifier ?? "", environment: environment)
+        let body = Body(token: Self.hex(token), kind: kind, topic: Bundle.main.bundleIdentifier ?? "", environment: Self.environment)
         let answer: Answer = try await call("POST", "v1/activities", body: body)
         return answer.push
     }
+
+    /// Hands the runner the app's device token, for alerts when a job needs the user. Answers
+    /// whether the runner pushes.
+    func registerNotifications(token: Data) async throws -> Bool {
+        struct Body: Encodable { var token: String; var topic: String; var environment: String }
+        struct Answer: Decodable { var push: Bool }
+        let body = Body(token: Self.hex(token), topic: Bundle.main.bundleIdentifier ?? "", environment: Self.environment)
+        let answer: Answer = try await call("POST", "v1/notifications", body: body)
+        return answer.push
+    }
+
+    /// Apple's push service this build uses: a build from Xcode the development one, TestFlight
+    /// and the App Store the production one.
+    #if DEBUG
+    private static let environment = "development"
+    #else
+    private static let environment = "production"
+    #endif
+
+    private static func hex(_ token: Data) -> String { token.map { String(format: "%02x", $0) }.joined() }
     #endif
 
     private func call<Answer: Decodable>(_ method: String, _ path: String, body: (any Encodable)? = nil) async throws -> Answer {

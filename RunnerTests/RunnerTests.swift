@@ -429,6 +429,79 @@ final class PushTests {
         }
         #expect(Push.quoted(#"{"a":"b\n"}"#) == #""{\"a\":\"b\\n\"}""#)
     }
+
+    /// Only a job that needs the user notifies, once per state; a newer state or a clear follows.
+    @Test func onlyWhatNeedsYouNotifies() {
+        var running = job, quiet = job, ready = job, failed = job, interrupted = job, stopped = job
+        running.status = .running
+        quiet.status = .done
+        quiet.commits = 0
+        quiet.base = "dev"
+        ready.status = .done
+        ready.base = "dev"
+        ready.commits = 2
+        failed.status = .failed
+        interrupted.status = .interrupted
+        stopped.status = .stopped
+        for (index, job) in [running, quiet, ready, failed, interrupted, stopped].enumerated() {
+            #expect(Push.notice(for: { var job = job; job.id = "\(index)"; return job }()) == [nil, nil, .ready, .failed, .interrupted, nil][index])
+        }
+
+        let first = Push.notices([ready], after: [:])
+        #expect(first.changes.map(\.1) == [.ready] && first.notified == [job.id: .ready])
+        #expect(Push.notices([ready], after: first.notified).changes.isEmpty)
+        // Published: the alert clears.
+        var published = ready
+        published.published = "https://github.com/deskree-inc/oby/pull/42"
+        let cleared = Push.notices([published], after: first.notified)
+        #expect(cleared.changes.count == 1 && cleared.changes[0].1 == nil && cleared.notified.isEmpty)
+        // Failed after being ready: the newer state replaces it. A job the desk forgot is forgotten.
+        let replaced = Push.notices([failed], after: [job.id: .ready, "gone": .failed])
+        #expect(replaced.changes.map(\.1) == [.failed] && replaced.notified == [job.id: .failed])
+    }
+
+    @Test func alertsSayWhatTheJobNeeds() throws {
+        var ready = job
+        ready.status = .done
+        ready.base = "dev"
+        ready.commits = 1
+        ready.summary = "Fixed the review comments.\nMore below."
+        let alert = object(try Push.notification(.ready, for: ready))
+        let aps = try #require(alert["aps"] as? [String: Any])
+        #expect(alert["job"] as? String == "9f08fd10" && aps["category"] as? String == "ready" && aps["timestamp"] == nil)
+        #expect(aps["alert"] as? [String: String] == ["title": "Ready to publish: Review oby #33", "body": "Fixed the review comments."])
+
+        var failed = job
+        failed.status = .failed
+        failed.summary = "Couldn't get oby ready: no network"
+        let failure = try #require(object(try Push.notification(.failed, for: failed))["aps"] as? [String: Any])
+        #expect(failure["category"] as? String == "job")
+        #expect(failure["alert"] as? [String: String] == ["title": "Failed: Review oby #33", "body": "Couldn't get oby ready: no network"])
+
+        let clear = object(try Push.notification(nil, for: ready))
+        #expect(clear["clear"] as? String == "9f08fd10" && (clear["aps"] as? [String: Int]) == ["content-available": 1])
+    }
+
+    @Test func theAppHandsOverItsDeviceToken() async throws {
+        let apns = folder.appending(path: "apns")
+        try FileManager.default.createDirectory(at: apns, withIntermediateDirectories: true)
+        try Data(#"{"team": "PQKAL8E36D", "key": "TESTKEY123"}"#.utf8).write(to: apns.appending(path: "apns.json"))
+        try P256.Signing.PrivateKey().pemRepresentation.write(to: apns.appending(path: "AuthKey_TESTKEY123.p8"), atomically: true, encoding: .utf8)
+        let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")), push: Push(desk: desk, folder: apns))
+        let app = Application(router: api.router(owner: "well@example.com"))
+        let device = #"{"token": "80a1f2c3d4e5f60718293a4b5c6d7e8f", "topic": "dev.wellprado.oby", "environment": "production"}"#
+        let alertAsActivity = #"{"token": "80a1f2c3d4e5f60718293a4b5c6d7e8f", "kind": "alert", "topic": "dev.wellprado.oby", "environment": "production"}"#
+        try await app.test(.router) { [owner] client in
+            try await client.execute(uri: "/v1/notifications", method: .post, headers: owner, body: ByteBuffer(string: device)) { response in
+                #expect(String(decoding: response.body.readableBytesView, as: UTF8.self) == #"{"push":true}"#)
+            }
+            try await client.execute(uri: "/v1/activities", method: .post, headers: owner, body: ByteBuffer(string: alertAsActivity)) { response in
+                #expect(response.status == .unprocessableContent)
+            }
+        }
+        let saved = try JSONDecoder().decode([Push.Token].self, from: Data(contentsOf: apns.appending(path: "tokens.json")))
+        #expect(saved == [Push.Token(token: "80a1f2c3d4e5f60718293a4b5c6d7e8f", kind: "alert", topic: "dev.wellprado.oby", environment: "production")])
+    }
 }
 
 /// What bubblewrap shows an agent on the runner (docs: Agents.sandboxed).
