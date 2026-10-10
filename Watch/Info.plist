@@ -4,5 +4,7 @@
 <dict>
 	<key>WKApplication</key>
 	<true/>
+	<key>ObyAppGroup</key>
+	<string>group.$(OBY_IPHONE_BUNDLE_ID).watch</string>
 </dict>
 </plist>
