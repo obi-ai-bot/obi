@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 @main
 struct ObyApp: App {
@@ -27,7 +28,7 @@ struct ObyApp: App {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     let island = IslandController()
 
     override init() {
@@ -45,7 +46,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
             .filter { $0 != .current }
         guard others.isEmpty else { NSApp.terminate(nil); return }
+        // Before the island starts, so a click on an alert that launched Oby still arrives.
+        UNUserNotificationCenter.current().delegate = self
+        RunnerFeed.registerCategories()
         island.start()
+    }
+
+    /// A click on a runner's alert opens the island on its job.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        guard let id = response.notification.request.content.userInfo[RunnerFeed.jobKey] as? String else { return }
+        island.open(job: id)
+    }
+
+    /// While Oby runs (always, in the menu bar), the alert still shows, so it isn't missed.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .list, .sound]
     }
 
     func applicationWillTerminate(_ notification: Notification) {
