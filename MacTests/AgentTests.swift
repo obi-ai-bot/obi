@@ -90,7 +90,7 @@ struct AgentTests {
         let env = Agents.environment(["CLAUDE_CONFIG_DIR": "/tmp/account-2"])
         #expect(env["GH_TOKEN"] == nil && env["GITHUB_TOKEN"] == nil)
         #expect(env["GH_CONFIG_DIR"]?.hasSuffix("gh-signed-out") == true)
-        #expect(env["GIT_CONFIG_KEY_0"] == "credential.helper" && env["GIT_CONFIG_VALUE_0"] == "" && env["GIT_CONFIG_COUNT"] == "1")
+        #expect(env["GIT_CONFIG_KEY_0"] == "credential.helper" && env["GIT_CONFIG_VALUE_0"] == "" && env["GIT_CONFIG_COUNT"] == "2")
         #expect(env["CLAUDECODE"] == nil)
         #expect(env["CLAUDE_CONFIG_DIR"] == "/tmp/account-2")
     }

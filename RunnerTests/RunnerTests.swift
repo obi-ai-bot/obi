@@ -408,3 +408,60 @@ final class PushTests {
         #expect(Push.quoted(#"{"a":"b\n"}"#) == #""{\"a\":\"b\\n\"}""#)
     }
 }
+
+/// What bubblewrap shows an agent on the runner (docs: Agents.sandboxed).
+struct SandboxTests {
+    let home = Agents.home
+
+    /// Where `run` starts in `argv`, as consecutive arguments.
+    func at(_ run: String..., in argv: [String]) -> Int? {
+        argv.indices.first { argv[$0...].starts(with: run) }
+    }
+
+    @Test func agentsSeeNoLoginsButTheirOwnAccount() throws {
+        let worktree = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: worktree) }
+        let common = "/srv/oby/repos/deskree-inc/oby/.git", admin = "\(common)/worktrees/9f08fd10"
+        try "gitdir: \(admin)\n".write(to: worktree.appending(path: ".git"), atomically: true, encoding: .utf8)
+        let root = Workspace.root.path, own = Workspace.root.appending(path: "accounts/personal").path
+        let argv = Agents.sandboxed(["claude", "-p"], in: worktree, own: own, bubblewrap: true)
+
+        #expect(argv.first == "bwrap" && argv.suffix(3) == ["--", "claude", "-p"])
+        #expect(at("--ro-bind", "/", "/", in: argv) != nil && at("--unshare-pid", in: argv) != nil)
+        for folder in [".config/gh", ".ssh", ".claude", ".codex"] { #expect(at("--tmpfs", "\(home)/\(folder)", in: argv) != nil) }
+        for file in [".git-credentials", ".claude.json"] { #expect(at("--ro-bind", "/dev/null", "\(home)/\(file)", in: argv) != nil) }
+        // All of OBY_HOME (apns/, devices.json, other accounts) is empty, then the job's own pieces come back.
+        let hidden = try #require(at("--tmpfs", root, in: argv))
+        #expect(try #require(at("--bind", own, own, in: argv)) > hidden)
+        #expect(try #require(at("--bind", worktree.path, worktree.path, in: argv)) > hidden)
+        #expect(!argv.contains { $0.hasPrefix("\(root)/apns") || $0.hasPrefix("\(root)/accounts/other") })
+        // Commits work; what Oby's own git reads later doesn't change.
+        #expect(at("--ro-bind", "\(worktree.path)/.git", "\(worktree.path)/.git", in: argv) != nil)
+        let copy = try #require(at("--overlay-src", common, "--tmp-overlay", common, in: argv))
+        for kept in ["objects", "refs", "logs", "packed-refs"] {
+            #expect(try #require(at("--bind-try", "\(common)/\(kept)", "\(common)/\(kept)", in: argv)) > copy)
+        }
+        #expect(at("--bind", admin, admin, in: argv) != nil && at("--ro-bind", "\(admin)/commondir", "\(admin)/commondir", in: argv) != nil)
+    }
+
+    @Test func theDefaultClaudeAccountKeepsItsHomeAndConfig() {
+        let argv = Agents.sandboxed(["claude"], in: nil, own: "\(home)/.claude", bubblewrap: true)
+        #expect(at("--bind", "\(home)/.claude", "\(home)/.claude", in: argv) != nil)
+        #expect(at("--tmpfs", "\(home)/.claude", in: argv) == nil && !argv.contains("\(home)/.claude.json"))
+        #expect(at("--tmpfs", "\(home)/.codex", in: argv) != nil && at("--tmpfs", "\(home)/.config/gh", in: argv) != nil)
+    }
+
+    @Test func checksKeepNoAccountAndTheMacRunsAsIs() {
+        let argv = Agents.sandboxed(["sh", "-c", "swift test"], in: nil, own: nil, bubblewrap: true)
+        #expect(at("--tmpfs", "\(home)/.claude", in: argv) != nil && at("--tmpfs", "\(home)/.codex", in: argv) != nil)
+        #expect(!argv.contains("--bind"))
+        #expect(Agents.sandboxed(["sh", "-c", "swift test"], in: nil, own: nil, bubblewrap: false) == ["sh", "-c", "swift test"])
+    }
+
+    /// Codex's own bubblewrap can't nest inside Oby's, so it runs none and asks Oby about every command.
+    @Test func codexAsksAboutEveryCommandInsideBubblewrap() {
+        let params = CodexRPC.threadStart(worktree: URL(filePath: "/tmp/oby/jobs/9f08fd10"), git: "/tmp/oby/.git", bubblewrap: true)
+        #expect(params["sandbox"] as? String == "danger-full-access" && params["approvalPolicy"] as? String == "untrusted")
+        #expect(params["approvalsReviewer"] as? String == "user" && params["config"] == nil)
+    }
+}

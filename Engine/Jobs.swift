@@ -141,12 +141,13 @@ final class ClaudeAgent: AgentRun {
         self.onEvent = onEvent
         // Never --bare: it skips the user's own login.
         process.executableURL = URL(filePath: "/usr/bin/env")
-        process.arguments = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+        process.arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                              "--verbose", "--replay-user-messages", "--permission-prompt-tool", "stdio",
                              // Only the account's own settings: a repo's .claude/settings.json could allow tools past Oby.
                              "--setting-sources", "user",
                              "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
-                            + (resume.map { ["--resume", $0] } ?? [])
+                            + (resume.map { ["--resume", $0] } ?? []),
+                            in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude")
         process.currentDirectoryURL = worktree
         process.environment = Agents.environment(["CLAUDE_CONFIG_DIR": configDirectory?.path])
         process.standardInput = input
@@ -366,7 +367,61 @@ nonisolated enum Agents {
          "GH_CONFIG_DIR": Workspace.root.appending(path: "gh-signed-out").path, "GIT_TERMINAL_PROMPT": "0",
          // An empty credential.helper empties git's helper list, so `git credential fill` can't hand
          // out the GitHub login macOS's keychain (or gh's helper) holds.
-         "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": ""]
+         "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
+         // In bubblewrap, packed-refs can't be replaced, so git's automatic upkeep would only print errors.
+         "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false"]
+    }
+
+    #if os(Linux)
+    static let bubblewrap = true
+    #else
+    static let bubblewrap = false
+    #endif
+
+    /// The user's home folder, where the tools keep their default logins.
+    static let home = FileManager.default.homeDirectoryForCurrentUser.path
+
+    /// On Linux, `argv` inside bubblewrap. Agents run as the runner's Unix user, so the logins it
+    /// keeps (gh's token, the APNs key, ssh, other accounts, all of `OBY_HOME`) become empty, and
+    /// nothing else an agent writes lasts: it can't leave behind a program or a git config that the
+    /// runner runs later outside the box. / is read-only; home is a throwaway copy, so caches still
+    /// work. Writable for real: the worktree, the git data it commits to, and `own`, the job's account
+    /// home (nil for none).
+    /// On the Mac, `argv` as it is: gh's login is in the keychain, and agents have no credential helper.
+    // ponytail: one Unix user, logins hidden by path. Sockets that run commands for this user (docker
+    // is hidden, nothing else is) and the runner's API on 127.0.0.1 stay reachable; a Unix user of its
+    // own for agents is the upgrade.
+    static func sandboxed(_ argv: [String], in worktree: URL?, own: String?, bubblewrap: Bool = Agents.bubblewrap) -> [String] {
+        guard bubblewrap else { return argv }
+        var args = ["bwrap", "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+                    "--tmpfs", "/tmp", "--overlay-src", home, "--tmp-overlay", home, "--tmpfs", Workspace.root.path]
+        // Folders become empty and files /dev/null. Outside home, / is read-only, so only what exists.
+        // The default Claude account keeps ~/.claude.json with ~/.claude; its changes don't last.
+        let exists = { (path: String) in FileManager.default.fileExists(atPath: path) }
+        let folders = [".config/gh", ".ssh", ".claude", ".codex"].map { "\(home)/\($0)" } + ["/run/user/\(getuid())"].filter(exists)
+        let files = [".git-credentials", ".claude.json"].map { "\(home)/\($0)" } + ["/run/docker.sock"].filter(exists)
+        let kept = [own, own == "\(home)/.claude" ? "\(home)/.claude.json" : nil].compactMap { $0 }
+        for folder in folders where !kept.contains(folder) { args += ["--tmpfs", folder] }
+        for file in files where !kept.contains(file) { args += ["--ro-bind", "/dev/null", file] }
+        if let worktree {
+            // The worktree's git data is in Oby's clone, which Oby's own git uses later, outside the box.
+            // Objects, refs, packed-refs and this worktree's own folder are real, so commits last; the rest
+            // (config, hooks, lock files, anything new) is a throwaway copy. The pointers that say where
+            // git finds a config (.git, commondir) are read-only. A real packed-refs can't be replaced,
+            // so `git pack-refs` fails rather than drop the loose refs it would have packed.
+            let path = worktree.path
+            args += ["--bind", path, path, "--ro-bind", "\(path)/.git", "\(path)/.git"]
+            if let pointer = try? String(contentsOfFile: "\(path)/.git", encoding: .utf8), pointer.hasPrefix("gitdir: ") {
+                // An absolute path, as `git worktree add` writes it.
+                let admin = String(pointer.dropFirst("gitdir: ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let common = URL(filePath: admin).deletingLastPathComponent().deletingLastPathComponent().path
+                args += ["--overlay-src", common, "--tmp-overlay", common]
+                for real in ["objects", "refs", "logs", "packed-refs"] { args += ["--bind-try", "\(common)/\(real)", "\(common)/\(real)"] }
+                args += ["--bind", admin, admin, "--ro-bind", "\(admin)/commondir", "\(admin)/commondir"]
+            }
+        }
+        if let own { args += ["--bind", own, own] }
+        return args + ["--"] + argv
     }
 }
 

@@ -386,7 +386,9 @@ final class Desk {
         if let command = job.check, !failed {
             job.step = "Checking: \(command)"
             replace(job, save: false)
-            let result = try? await Shell.run(["sh", "-c", command], in: Workspace.worktree(id), env: Agents.overrides, timeout: 1200)
+            let worktree = Workspace.worktree(id)
+            let result = try? await Shell.run(Agents.sandboxed(["sh", "-c", command], in: worktree, own: nil), in: worktree,
+                                              env: Agents.overrides, timeout: 1200)
             let output = result.map { String(decoding: $0.out, as: UTF8.self) + $0.err } ?? "Oby couldn't run it."
             check = Rounds.Check(command: command, passed: result?.status == 0, output: String(output.suffix(4000)))
             // Stopped while the check ran.
