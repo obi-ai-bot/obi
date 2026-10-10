@@ -49,6 +49,7 @@ final class Phone {
 
     init() {
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
+        JobsActivity.watchTokens { [weak self] in self?.runner }
     }
 
     var runner: Runner { Runner(base: runnerURL) }

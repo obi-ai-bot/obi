@@ -283,6 +283,24 @@ nonisolated struct Runner: Sendable {
         }
     }
 
+    #if os(iOS)
+    /// Hands the runner a Live Activity push token: "update" for one activity, "start" for
+    /// push-to-start. Answers whether the runner pushes.
+    func registerActivity(token: Data, kind: String) async throws -> Bool {
+        struct Body: Encodable { var token: String; var kind: String; var topic: String; var environment: String }
+        struct Answer: Decodable { var push: Bool }
+        #if DEBUG
+        let environment = "development"
+        #else
+        let environment = "production"
+        #endif
+        let body = Body(token: token.map { String(format: "%02x", $0) }.joined(), kind: kind,
+                        topic: Bundle.main.bundleIdentifier ?? "", environment: environment)
+        let answer: Answer = try await call("POST", "v1/activities", body: body)
+        return answer.push
+    }
+    #endif
+
     private func call<Answer: Decodable>(_ method: String, _ path: String, body: (any Encodable)? = nil) async throws -> Answer {
         var request = URLRequest(url: URL(string: path, relativeTo: base.appending(path: "/"))!)
         request.httpMethod = method
