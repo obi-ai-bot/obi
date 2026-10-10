@@ -252,7 +252,9 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
 - **Open for Oby:**
   - Proposal: answer in this order: Oby's fixed rules, then what you allowed before (X.4), then the Lead's judgment, then you. Your answer is remembered.
   - Proposal: fence Oby's own secrets off on tetrix-lab.
-  - Decide: network for agents: none, an allowlist, or full?
+  - Decided 2026-10-10: network by allowlist. The first time a job wants a new site, it asks you. A yes adds that site to your allowlist, shown as a rule you can remove.
+  - Proposal: start from a small list of package registries, so the first job doesn't flood your inbox, the way Claude Code cloud's "Trusted" level does.
+  - Proposal: ask separately before a job sends data to a new site, because that's how secrets leak. The vault's proxy enforces both rules.
 
 ### 2.3 Stuck: needs a decision only you can make
 - **What happens:** the job asks the Lead first. The Lead answers from the issue, the roadmap, Tetrix and past jobs. Only a real product decision reaches you, as one question with options. Goes back to 2, or to you.
@@ -263,7 +265,7 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
 - **Others:** Devin's coordinator is woken when a child needs input. Copilot requests your review when done, and you can steer a running session.
 - **Open for Oby:**
   - Proposal: the Lead answers first, from what Oby has learned about you (X.4) and the graph. Only what it knows nothing about reaches you, through the Live Activity and a push, and your answer is learned.
-  - Decide: what always counts as "needs you", even if Oby could guess: spending, deleting, security?
+  - Decided 2026-10-10: spending, deleting and security always reach you, even if Oby could guess, unless you tell it to handle one of them itself. Oby first shows you the risks, and your choice becomes a rule.
 
 ### 2.4 Usage limit: the account runs out mid-job
 - **What happens:** the job pauses, then carries on with another account of the same tool (same worktree, a new session given the summary so far) or waits for the reset. Goes back to 2.
@@ -273,7 +275,8 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
 - **Codex:** 5-hour and weekly limits. What happens mid-task: not found.
 - **Others:** Devin sleeps at its credit limit until woken (from 2025, may be stale). Copilot sessions stop at 59 minutes.
 - **Open for Oby:**
-  - Decide: move the job to another account (switching near a limit is opt-in, #23) or wait for the reset?
+  - Decided 2026-10-10: the first time, Oby asks whether to move the job to another account or wait for the reset, and shows #23's terms note.
+  - From then on it does what you said, until you change it or describe a case that calls for something else, like "switch for urgent jobs". Rules can carry a condition (X.7's "when this applies").
 
 ### 2.5 Restart: the runner or the Mac restarts mid-job
 - **What happens:** when Oby starts, it finds interrupted jobs and resumes their sessions in the same worktrees. Goes back to 2.
@@ -302,7 +305,7 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
   - In April 2026, injected PR text made agents post API keys into comments, encoded past masking (2nd-hand).
 - **Open for Oby:**
   - Proposal: a broker, never environment variables. A local proxy adds keys only for their hosts, and an `oby-sudo` command checks the caller and feeds sudo itself. Roadmap: F17, deskree-inc/oby#60.
-  - Decide: which secrets come first: API keys, sudo, or logins?
+  - Decided 2026-10-10: all of them in the first version: API keys, sudo and logins.
 
 ---
 
