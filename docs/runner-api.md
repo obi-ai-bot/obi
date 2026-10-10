@@ -123,8 +123,8 @@ Dispatches the draft's job. The user may have changed:
 - `branch`: it must stay a valid branch name.
 - `account`: any signed-in account; `agent` follows the account.
 - `rounds`: 1 to 10.
-- `check`: one line of up to 200 characters, or `null` for none.
-- `model`: the draft's `suggestedModel` to use it, or `null` (or left out) to stay on Settings › Models. Any other model is refused.
+- `check`: one line of up to 200 characters, or `null` for none. Leaving it out keeps the plan's check, so to clear it send `"check": null` explicitly (Swift's encoder leaves nils out).
+- `model`: `claude-fable-5-1` or `gpt-6-astra` to take the stronger model, or `null` (or left out) to stay on Settings › Models. It works only on a draft that came with a `suggestedModel`. The job runs the stronger model of the tool its account uses, so a Claude draft moved to a Codex account runs GPT-6-Astra. Any other model is refused.
 
 Leave `rounds` or `check` out to keep the plan's values (older apps do). Everything else comes from the draft unchanged.
 
