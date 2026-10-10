@@ -25,6 +25,8 @@ final class Notifications: NSObject, UIApplicationDelegate, UNUserNotificationCe
         Task {
             if await center.notificationSettings().authorizationStatus == .authorized { application.registerForRemoteNotifications() }
         }
+        // The watch's line to the runner goes through this phone, even while Oby is in the background.
+        WatchRelay.shared.start(phone)
         return true
     }
 

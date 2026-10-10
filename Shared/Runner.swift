@@ -1,8 +1,8 @@
 import Foundation
 
 // The Mac compiles Engine/, whose Job is what the runner sends: it reads jobs into that one, and
-// has its own Account. Only the iPhone needs these copies.
-#if os(iOS)
+// has its own Account. Only the iPhone and the watch need these copies.
+#if os(iOS) || os(watchOS)
 /// A job on the runner (docs/runner-api.md).
 nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     enum Status: String, Codable, Sendable { case queued, running, done, failed, stopped, interrupted }
@@ -215,7 +215,7 @@ nonisolated struct RunnerStatus: Codable, Equatable, Sendable {
         var host: String
     }
     var runner: Runner
-    #if os(iOS)
+    #if os(iOS) || os(watchOS)
     var accounts: [Account]
     #endif
     var models: ModelSettings
