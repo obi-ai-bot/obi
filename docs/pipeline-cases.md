@@ -15,6 +15,8 @@ The plan for making Oby run Deskree's whole pipeline by itself, case by case. Th
 - **An inbox like email (2026-10-10).** Anything Oby can't decide, or that only a person can do (passwords, sudo, sign-ins), waits in your inbox for your decision: no timeout, no guessing. Every decision teaches Oby, so it starts generic and becomes personal. See "Your inbox".
 - **Tetrix is optional (2026-10-10).** Oby works fully on its own with local storage. Tetrix adds richer memory. See X.7.
 - **A vault (2026-10-10).** Secrets live in an encrypted vault that no agent ever sees. Oby uses them only through connections you set up. See 2.6 and F17 (deskree-inc/oby#60).
+- **Oby is a whiteboard (2026-10-10).** Like Claude Code, Cursor and Codex, it starts as a generic default pipeline. You reshape it by telling it, for example "add a Slack ping as a step", and over time it learns how you work, until the process is as automatic as possible.
+- **Reviews go Oby to Oby (2026-10-10).** Requests go to the reviewer's Oby inside Oby, not through Slack (unless you add Slack as a step). See 5.1.
 - **AGENTS.md rewritten to match (2026-10-10).**
   - Oby merges into `dev` only, after the review approves and CI is green, and never pushes or merges to `main`.
   - It force-pushes only branches it created.
@@ -149,7 +151,7 @@ Like email: each item waits for your decision, with no timeout and no guessing. 
   - Claude Code: a "Ready for review" group (open PR or failing checks).
   - Copilot returns a draft PR and tags you.
   - vibe-kanban moves the card to In review.
-- **Decide:** may Oby approve a teammate's PR for you once it has learned enough (F12)?
+- **Decided 2026-10-10:** yes, once you tell it to ("don't ask, review it yourself"). Near your limits, it asks before spending them on someone else's review.
 
 ### I.5 Follow-up
 - **Lands here when:** something waits on someone else: a silent reviewer, a flaky check, a blocked dependency.
@@ -357,9 +359,9 @@ Decided 2026-10-10: no confirmation. The PR opens once the check passes and the 
 - **Codex:** a Create PR button with a draft option (2nd-hand). Author and signing: not found.
 - **Others:** Copilot always opens a PR, with commits co-authored by you and signed (2nd-hand), but it can't mark the PR ready, approve or merge. Devin opens PRs from its own GitHub account.
 - **Open for Oby:**
-  - Decide: whose name is on the PR: yours (Oby's gh login) or an Oby GitHub App (oby[bot])?
-  - Decide: draft, or ready for review?
-  - Decide: who signs? The agent never does; GitHub or Oby does at push.
+  - Decided 2026-10-10: under your GitHub account, always ready for review, never a draft.
+  - Signing is automatic. Agents commit unsigned, and Oby signs at push with your own signing key, which never reaches an agent. On tetrix-lab the key lives in the vault (F17). GitHub signs the squash-merge into `dev`.
+  - Proposal: the PR and Oby's comments say "by Oby", so teammates know a machine wrote them.
 
 ### 4.2 Secret in the diff
 - **What happens:** a hard stop: the PR doesn't open. The job removes the secret and the scan runs again. If it's still there, it comes to you. Goes to 2, or to you.
@@ -377,16 +379,18 @@ Decided 2026-10-10: no confirmation. The PR opens once the check passes and the 
 The reviewer is a teammate today and another Oby later (F12). Oby watches the PR and loops on it until it's approved.
 
 ### 5.1 Ping the reviewer
-- **What happens:** request a review from the owner (CODEOWNERS, or Tetrix's owners), then post in the project's Slack channel: the PR link and three lines on what changed. Then wait for the review.
+- **What happens:** request a review from the owner on GitHub, and send the request to their Oby with the PR link and three lines on what changed. Slack happens only if you add it to your workflow as a step. Then wait for the review.
 - **Oby today:** Missing. No review request and no Slack yet (F10).
 - **Claude Code:** Tag's PRs land in your review queue, linked to the Slack thread, and routines can post a Slack summary. CODEOWNERS: not found.
 - **Cursor:** automations can request reviewers, and Slack gets a completion message with the PR link.
 - **Codex:** the result goes back to the Slack thread.
 - **Others:** Copilot requests your review, and your approval doesn't count toward the required ones. Devin posts the PR link on the Linear ticket.
 - **Open for Oby:**
-  - Decide: who reviews each repo: CODEOWNERS, Tetrix's owners, or a list you set?
-  - Decide: Slack as you, or as an Oby bot?
-  - Decide: if nobody reviews in N hours, nudge, then ask someone else?
+  - Decided 2026-10-10: reviews go Oby to Oby, inside Oby (F11, F12), not through Slack.
+  - The reviewer's Oby asks its person once: "review it yourself, or shall I?" "Don't ask, review it yourself" becomes a rule.
+  - Near the reviewer's limits, their Oby asks again before spending them.
+  - Who reviews: CODEOWNERS or your past choices. Otherwise Oby asks once and remembers (X.4).
+  - Open: how long a silent reviewer waits before a nudge (I.5).
 
 ### 5.2 Changes requested
 - **What happens:** each review that requests changes becomes another round for the same job, in the same worktree and session. It tests again, pushes, replies and asks for a new review, until approved. Goes to 3, then back to 5.
