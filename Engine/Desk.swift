@@ -61,6 +61,7 @@ final class Desk {
 
     func refresh() async {
         if let repos = try? await Workspace.knownRepos(), !repos.isEmpty { self.repos = repos }
+        await Agents.readIdentity()
         await accounts.refresh()
     }
 

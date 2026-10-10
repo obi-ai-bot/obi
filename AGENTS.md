@@ -7,7 +7,7 @@ Oby is a native macOS app (SwiftUI, macOS 26 and later) that lives in the notch 
 - Branch from `dev` and open pull requests into `dev`. `dev` is merged into `main` only when a feature's "Test it when it's done" list passes on a real Mac.
 - One feature at a time, in roadmap order. Each feature issue has the test, the build list and the feasibility notes; read its spikes before starting.
 - Update the issue at every step, in the same turn: `status:in-progress` and the branch name when work starts; `status:in-review` and the pull request link when it's open; `status:blocked` and what it waits on; status labels off when it's merged. Move it on the project board too.
-- Commits follow Conventional Commits and are signed. Report the checks you actually ran and what they printed.
+- Commits follow Conventional Commits. Agents commit unsigned in their worktree (they have no signing key); commits are signed when Oby pushes them. Report the checks you actually ran and what they printed.
 
 ## Rules Oby never breaks
 

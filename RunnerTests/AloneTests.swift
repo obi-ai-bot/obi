@@ -99,6 +99,49 @@ struct HonestEndingTests {
     }
 }
 
+struct GitIdentityTests {
+    @Test func theProfileNamesWhoCommits() throws {
+        let public_ = try #require(GitIdentity(user: Data(#"{"login":"well-prado","id":123,"name":"Wellington Prado","email":"wellington@deskree.com"}"#.utf8)))
+        #expect(public_ == GitIdentity(name: "Wellington Prado", email: "wellington@deskree.com"))
+        // No name and a private email: the login, and the noreply address GitHub credits to the owner.
+        let hidden = try #require(GitIdentity(user: Data(#"{"login":"well-prado","id":123,"name":null,"email":null}"#.utf8)))
+        #expect(hidden == GitIdentity(name: "well-prado", email: "123+well-prado@users.noreply.github.com"))
+        #expect(GitIdentity(user: Data(#"{"message":"Bad credentials"}"#.utf8)) == nil)
+        #expect(GitIdentity(user: Data("prose".utf8)) == nil)
+    }
+
+    @Test func agentsGetItFromTheEnvironment() {
+        let identity = GitIdentity(name: "Wellington Prado", email: "wellington@deskree.com")
+        let overrides = Agents.overrides(identity: identity)
+        for key in ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"] { #expect(overrides[key] == "Wellington Prado") }
+        for key in ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"] { #expect(overrides[key] == "wellington@deskree.com") }
+        // The rest of the fence stays.
+        #expect(overrides["GH_TOKEN"] == .some(nil) && overrides["GIT_CONFIG_KEY_0"] == "credential.helper")
+        #expect(Agents.overrides(identity: nil)["GIT_AUTHOR_NAME"] == nil)
+    }
+
+    /// With no git config of anyone's (as in bubblewrap), the environment alone lets a commit through,
+    /// and no config file changes.
+    @Test func aCommitWorksWithNoConfig() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let repo = folder.appending(path: "repo"), home = folder.appending(path: "home")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        var env = Agents.overrides(identity: GitIdentity(name: "Wellington Prado", email: "wellington@deskree.com"))
+        env.merge(["HOME": home.path, "XDG_CONFIG_HOME": home.path, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"]) { $1 }
+        let git = { (arguments: [String]) in try await Shell.ok(["git", "-C", repo.path] + arguments, env: env) }
+        _ = try await Shell.ok(["git", "init", "--quiet", repo.path], env: env)
+        let config = try String(contentsOf: repo.appending(path: ".git/config"), encoding: .utf8)
+        try "hello\n".write(to: repo.appending(path: "a.txt"), atomically: true, encoding: .utf8)
+        _ = try await git(["add", "a.txt"])
+        _ = try await git(["commit", "--quiet", "-m", "test"])
+        #expect(try await git(["log", "-1", "--format=%an <%ae> / %cn <%ce>"])
+                == "Wellington Prado <wellington@deskree.com> / Wellington Prado <wellington@deskree.com>")
+        #expect(try String(contentsOf: repo.appending(path: ".git/config"), encoding: .utf8) == config)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: home.path).isEmpty)
+    }
+}
+
 /// Bubblewrap needs user namespaces: a job's own check, already inside Oby's bubblewrap, can't nest one.
 let bubblewrapRuns: Bool = {
     guard Agents.bubblewrap, FileManager.default.isExecutableFile(atPath: "/usr/bin/bwrap") else { return false }

@@ -2,6 +2,7 @@ import Foundation
 #if canImport(OSLog)
 import OSLog
 #endif
+import Synchronization
 #if canImport(SQLite3)
 import SQLite3
 #else
@@ -375,14 +376,37 @@ nonisolated enum Agents {
     }
 
     /// What changes from Oby's own environment, also for the checks Oby runs in a job's worktree.
-    static var overrides: [String: String?] {
-        ["GH_TOKEN": nil, "GITHUB_TOKEN": nil, "GH_ENTERPRISE_TOKEN": nil, "GITHUB_ENTERPRISE_TOKEN": nil,
+    static var overrides: [String: String?] { overrides(identity: identity.withLock { $0 }) }
+
+    /// The owner's name and email from GitHub, for agents' commits; nil until `readIdentity` finds them.
+    static let identity = Mutex<GitIdentity?>(nil)
+
+    /// Reads the owner's identity with Oby's own gh login, once: agents have no login to read it,
+    /// and in bubblewrap no git config of the owner's names them.
+    static func readIdentity() async {
+        guard identity.withLock({ $0 }) == nil,
+              let user = try? await Shell.ok(["gh", "api", "user"]),
+              var found = GitIdentity(user: Data(user.utf8)) else { return }
+        // A private email isn't in the profile; the primary one is, when gh's token may read it.
+        if found.email.hasSuffix("@users.noreply.github.com"),
+           let emails = try? await Shell.ok(["gh", "api", "user/emails", "-q", ".[] | select(.primary) | .email"]),
+           !emails.isEmpty, !emails.contains("\n") {
+            found.email = emails
+        }
+        identity.withLock { $0 = found }
+    }
+
+    static func overrides(identity: GitIdentity?) -> [String: String?] {
+        var overrides: [String: String?] = ["GH_TOKEN": nil, "GITHUB_TOKEN": nil, "GH_ENTERPRISE_TOKEN": nil, "GITHUB_ENTERPRISE_TOKEN": nil,
          "GH_CONFIG_DIR": Workspace.root.appending(path: "gh-signed-out").path, "GIT_TERMINAL_PROMPT": "0",
          // An empty credential.helper empties git's helper list, so `git credential fill` can't hand
          // out the GitHub login macOS's keychain (or gh's helper) holds.
          "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
          // In bubblewrap, packed-refs can't be replaced, so git's automatic upkeep would only print errors.
          "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false"]
+        // Who commits, from the environment: no git config file is written for it.
+        for (key, value) in identity?.environment ?? [:] { overrides[key] = value }
+        return overrides
     }
 
     #if os(Linux)
@@ -442,6 +466,31 @@ nonisolated enum Agents {
         // The default Claude account keeps ~/.claude.json with ~/.claude.
         if own == "\(home)/.claude" { args += ["--bind-try", "\(home)/.claude.json", "\(home)/.claude.json"] }
         return args + ["--"] + argv
+    }
+}
+
+/// Who agents commit as: the owner, as GitHub knows them.
+nonisolated struct GitIdentity: Equatable, Sendable {
+    var name: String
+    var email: String
+
+    init(name: String, email: String) {
+        self.name = name
+        self.email = email
+    }
+
+    /// From GitHub's user profile: its name and public email, else the login and GitHub's noreply
+    /// address, which GitHub still credits to the owner.
+    init?(user: Data) {
+        guard let user = try? JSONSerialization.jsonObject(with: user) as? [String: Any],
+              let login = user["login"] as? String, !login.isEmpty else { return nil }
+        let given = { (key: String) in (user[key] as? String).flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 } }
+        name = given("name") ?? login
+        email = given("email") ?? ((user["id"] as? Int).map { "\($0)+\(login)" } ?? login) + "@users.noreply.github.com"
+    }
+
+    var environment: [String: String] {
+        ["GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email, "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email]
     }
 }
 
