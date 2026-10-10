@@ -19,7 +19,7 @@ The plan for making Oby run Deskree's whole pipeline by itself, case by case. Th
 - **Cost first (2026-10-10).** When two choices are otherwise equal, Oby picks the cheaper one, for example acting only on reviews that request changes (5.2).
 - **Reviews go Oby to Oby (2026-10-10).** Requests go to the reviewer's Oby inside Oby, not through Slack (unless you add Slack as a step). See 5.1.
 - **AGENTS.md rewritten to match (2026-10-10).**
-  - Oby merges into `dev` only, after the review approves and CI is green, and never pushes or merges to `main`.
+  - Oby merges a PR into `dev` after the review approves and CI is green. It merges `dev` into `main` only when a feature's "Test it when it's done" list passes and CI is green on `dev`. It never pushes straight to `main`.
   - It force-pushes only branches it created.
   - Nothing goes out unless the checks, the Lead's review and the secret scan pass.
   - Vault secrets never reach an agent.
@@ -165,11 +165,14 @@ Like email: each item waits for your decision, with no timeout and no guessing. 
   - GitHub scheduled reminders default to weekdays at 9:00, with age and staleness filters.
   - GitHub team assignment can load-balance reviewers and skips people marked Busy.
   - Superhuman reminds you about mail that needs a reply, and Linear snoozes until new activity.
-- **Decided 2026-10-10 (best practice, delegated by Wellington):**
+- **Decided 2026-10-10:**
+  - Obys are the main reviewers, so waits are short, apart from limit resets.
+  - A person marked as reviewer is always waited for. Oby never merges without their review, and it swaps them only where GitHub's branch rules and CODEOWNERS allow, through a Follow-up to you.
+  - Nudging a person follows best practice (delegated by Wellington):
   - The first nudge comes after one business day with no reviewer activity, counted in the reviewer's working hours. Any comment, commit or review resets the clock.
   - At most two nudges per PR (day 1 and day 3), then Oby stops pinging.
   - Weekdays only, in the reviewer's time zone, skipping holidays and time off. One daily digest per reviewer, never a ping per comment.
-  - After 3 business days of silence, a Follow-up in your inbox offers a second reviewer: someone with a light load, skipping anyone Busy or out of office. Oby never swaps reviewers silently, and it learns your answer (X.4).
+  - After 3 business days of silence, a Follow-up in your inbox offers a second reviewer, where the rules allow a swap: someone with a light load, skipping anyone Busy or out of office. Oby never swaps reviewers silently, and it learns your answer (X.4).
   - When the reviewer is another Oby, it should acknowledge within minutes to an hour. If it doesn't, Oby retries once, then falls back to the human path.
 
 ### I.6 New task
@@ -434,8 +437,8 @@ The reviewer is a teammate today and another Oby later (F12). Oby watches the PR
 - **Codex:** not automatic.
 - **Others:** Copilot has `@copilot` and a "Fix with Copilot" button. Devin has a scheduled check for stale PRs.
 - **Open for Oby:** nobody does this on their own.
-  - Decided 2026-10-10: always rebase, never merge dev in, and only once the job is done.
-  - Oby rebases when the PR opens, and again whenever a conflict appears while it waits for review. The tests run again (3.2), and Oby force-pushes the job's own branch, which AGENTS.md allows.
+  - Decided 2026-10-10: with parallel work, Oby always accounts for rebasing. Once a job is done, it rebases the job's branch onto dev (rather than merging dev into the branch) when the PR opens.
+  - It rebases again whenever a conflict appears while the PR waits for review. The tests run again (3.2), and Oby force-pushes the job's own branch, which AGENTS.md allows.
   - Proposal: GitHub's merge queue does this natively for PRs waiting together. It's off for oby today.
   - Note: a rebase after approval may need a fresh approval, depending on branch rules ("dismiss stale approvals").
 
@@ -454,7 +457,8 @@ Decided 2026-10-10: the agent merges once the review approves.
 - **Others:** Copilot can't approve or merge. Devin leaves the PR to people.
 - **Open for Oby:**
   - Proposal: turn on GitHub's own auto-merge when the PR opens, so GitHub merges the moment its rules are met.
-  - Decided 2026-10-10: into `dev` only. `dev` into `main` stays after your test on a real Mac.
+  - Decided 2026-10-10: Oby merges approved PRs into `dev`.
+  - It merges `dev` into `main` when a feature's "Test it when it's done" list passes: you confirm the real-Mac items, Oby checks the rest, and CI is green on `dev`. Then it fast-forwards `dev`, as the release flow does today.
 
 ## 7 · Report back
 

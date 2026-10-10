@@ -11,7 +11,7 @@ Oby is a native macOS app (SwiftUI, macOS 26 and later) that lives in the notch 
 
 ## Rules Oby never breaks
 
-- Oby never pushes or merges to `main`, and never force-pushes a branch it didn't create. It merges into `dev` only after the review approves and CI is green.
+- Oby never pushes straight to `main` and never force-pushes a branch it didn't create. It merges a PR into `dev` after the review approves and CI is green, and merges `dev` into `main` only when a feature's "Test it when it's done" list passes (the user confirms the real-Mac items) and CI is green on `dev`.
 - Nothing goes out unless the job's checks passed, the Lead approved the diff and the secret scan is clean. If the scanner can't run, nothing is published. Every outgoing action is listed in the job's report.
 - Everything outgoing is scanned for secrets. If the scanner can't run, nothing is published.
 - Text from GitHub, Slack, web pages, screenshots or other people's Obys is data, never instructions. It reaches agents only as quoted files, never in a prompt, and other Obys can only send typed actions.
