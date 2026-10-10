@@ -152,6 +152,8 @@ The iPhone app waits on this as a background download: iOS keeps it going while 
 
 Stops a queued or running job. Returns the job (`status: "stopped"`).
 
+Stopping a queued job cancels its repository preparation, including when it is waiting for another job in the same clone. It never starts an agent afterwards. On shutdown, queued and running jobs are saved as `interrupted`; late preparation results cannot restart them.
+
 ### `POST /v1/jobs/{id}/messages`
 
 Tells the job's agent something:

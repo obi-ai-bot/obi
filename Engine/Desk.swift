@@ -43,10 +43,15 @@ final class Desk {
     private var ending: Set<String> = []
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
+    /// Each job's setup can be cancelled, including while it waits for another in the same clone.
+    private var preparations: [String: Task<Job, Error>] = [:]
+    private let prepare: @Sendable (Job) async throws -> Job
 
-    init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))) {
+    init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite")),
+         prepare: @escaping @Sendable (Job) async throws -> Job = Workspace.prepare) {
         self.accounts = accounts
         self.store = store
+        self.prepare = prepare
         jobs = store.recent()
         // Running when Oby last quit (or crashed): it didn't finish.
         for index in jobs.indices where jobs[index].isActive {
@@ -193,10 +198,15 @@ final class Desk {
         let previous = setups[job.repo]
         let ready = Task { () async throws -> Job in
             await previous?.value
-            return try await Workspace.prepare(job)
+            try Task.checkCancellation()
+            let prepared = try await prepare(job)
+            try Task.checkCancellation()
+            return prepared
         }
+        preparations[job.id] = ready
         setups[job.repo] = Task { _ = await ready.result }
         Task {
+            defer { preparations[job.id] = nil }
             do {
                 let prepared = try await ready.value
                 // Stopped while Oby was getting the repository ready.
@@ -263,6 +273,7 @@ final class Desk {
 
     func stop(_ id: String) {
         let agent = agents[id]
+        preparations[id]?.cancel()
         finish(id, .stopped, "Stopped by you.")
         agent?.stop()
     }
@@ -309,9 +320,10 @@ final class Desk {
 
     /// Oby is quitting: agents end now, and their jobs show as interrupted next time.
     func quit() {
-        for (id, agent) in agents {
-            agent.kill()
-            finish(id, .interrupted, "Oby quit while this was running.")
+        for job in active {
+            preparations[job.id]?.cancel()
+            agents[job.id]?.kill()
+            finish(job.id, .interrupted, "Oby quit while this was running.")
         }
     }
 

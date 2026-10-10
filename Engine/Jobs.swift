@@ -421,6 +421,7 @@ nonisolated enum Workspace {
     /// Clones the repository on first use, fetches it, and adds a worktree on a new branch.
     /// Returns the job with the branch it really got (and the PR's base branch).
     static func prepare(_ job: Job) async throws -> Job {
+        try Task.checkCancellation()
         var job = job
         let clone = clone(job.repo)
         @discardableResult func git(_ arguments: [String]) async throws -> String {
@@ -429,10 +430,13 @@ nonisolated enum Workspace {
         if !FileManager.default.fileExists(atPath: clone.appending(path: ".git").path) {
             try FileManager.default.createDirectory(at: clone.deletingLastPathComponent(), withIntermediateDirectories: true)
             try await Shell.ok(["gh", "repo", "clone", job.repo, clone.path])
-            // Nothing is pushed from Oby's clone: publishing goes through the notch (F3).
-            try await git(["config", "remote.origin.pushurl", "oby-publishes-only-through-the-notch"])
-            let exclude = clone.appending(path: ".git/info/exclude")
-            let excluded = (try? String(contentsOf: exclude, encoding: .utf8)) ?? ""
+        }
+        // A clone may have been interrupted before its safeguards were set up. Apply them on
+        // every preparation before fetching or starting an agent, including reused clones.
+        try await git(["config", "remote.origin.pushurl", "oby-publishes-only-through-the-notch"])
+        let exclude = clone.appending(path: ".git/info/exclude")
+        let excluded = (try? String(contentsOf: exclude, encoding: .utf8)) ?? ""
+        if !excluded.split(separator: "\n").contains(".oby/") {
             try (excluded + "\n.oby/\n").write(to: exclude, atomically: true, encoding: .utf8)
         }
         try await git(["fetch", "--prune", "--quiet", "origin"])
@@ -467,6 +471,7 @@ nonisolated enum Workspace {
         }
         let worktree = worktree(job.id)
         try await git(["worktree", "add", "--quiet", "-b", job.branch, worktree.path, start])
+        try Task.checkCancellation()
         try FileManager.default.createDirectory(at: worktree.appending(path: ".oby/inputs"), withIntermediateDirectories: true)
 
         if let pr = job.pr, let pullRequest, let info = try? JSONSerialization.jsonObject(with: pullRequest) as? [String: Any] {

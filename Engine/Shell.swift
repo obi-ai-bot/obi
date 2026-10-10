@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Runs the user's command-line tools (git, gh, claude) the way their terminal would.
 nonisolated enum Shell {
@@ -42,35 +47,43 @@ nonisolated enum Shell {
     /// Runs a tool found on the user's PATH. `env` adds variables, and a nil value removes one.
     static func run(_ arguments: [String], in directory: URL? = nil, input: Data? = nil,
                     env: [String: String?] = [:], timeout: TimeInterval = 600) async throws -> Output {
-        try await withCheckedThrowingContinuation { done in
-            DispatchQueue.global().async {
-                let process = Process()
-                let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
-                process.executableURL = URL(filePath: "/usr/bin/env")
-                process.arguments = arguments
-                process.currentDirectoryURL = directory
-                var environment = Self.environment
-                for (key, value) in env { environment[key] = value }
-                process.environment = environment
-                process.standardInput = stdin
-                process.standardOutput = stdout
-                process.standardError = stderr
-                do { try process.run() } catch { done.resume(throwing: error); return }
+        let running = RunningProcess()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            let output: Output = try await withCheckedThrowingContinuation { done in
+                DispatchQueue.global().async {
+                    let process = running.process
+                    let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
+                    process.executableURL = URL(filePath: "/usr/bin/env")
+                    process.arguments = arguments
+                    process.currentDirectoryURL = directory
+                    var environment = Self.environment
+                    for (key, value) in env { environment[key] = value }
+                    process.environment = environment
+                    process.standardInput = stdin
+                    process.standardOutput = stdout
+                    process.standardError = stderr
+                    do { try running.start() } catch { done.resume(throwing: error); return }
 
-                let kill = DispatchWorkItem { process.terminate() }
-                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: kill)
-                // Read stderr on its own thread so a chatty tool can't fill the pipe and stall.
-                let err = Collected()
-                let reading = DispatchGroup()
-                DispatchQueue.global().async(group: reading) { err.data = stderr.fileHandleForReading.readDataToEndOfFile() }
-                if let input { try? stdin.fileHandleForWriting.write(contentsOf: input) }
-                try? stdin.fileHandleForWriting.close()
-                let out = stdout.fileHandleForReading.readDataToEndOfFile()
-                reading.wait()
-                process.waitUntilExit()
-                kill.cancel()
-                done.resume(returning: Output(status: process.terminationStatus, out: out, err: String(decoding: err.data, as: UTF8.self)))
+                    let kill = DispatchWorkItem { running.terminate() }
+                    DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: kill)
+                    // Read stderr on its own thread so a chatty tool can't fill the pipe and stall.
+                    let err = Collected()
+                    let reading = DispatchGroup()
+                    DispatchQueue.global().async(group: reading) { err.data = stderr.fileHandleForReading.readDataToEndOfFile() }
+                    if let input { try? stdin.fileHandleForWriting.write(contentsOf: input) }
+                    try? stdin.fileHandleForWriting.close()
+                    let out = stdout.fileHandleForReading.readDataToEndOfFile()
+                    reading.wait()
+                    process.waitUntilExit()
+                    kill.cancel()
+                    done.resume(returning: Output(status: process.terminationStatus, out: out, err: String(decoding: err.data, as: UTF8.self)))
+                }
             }
+            try Task.checkCancellation()
+            return output
+        } onCancel: {
+            running.cancel()
         }
     }
 
@@ -86,4 +99,44 @@ nonisolated enum Shell {
     }
 
     private final class Collected: @unchecked Sendable { var data = Data() }
+
+    /// Cancellation may arrive before the worker starts, or while it launches the process.
+    /// Keep that decision and the launch together so a cancelled task never starts a late tool.
+    private final class RunningProcess: @unchecked Sendable {
+        let process = Process()
+        private let lock = NSLock()
+        private var cancelled = false
+
+        func start() throws {
+            try lock.withLock {
+                if cancelled { throw CancellationError() }
+                try process.run()
+            }
+        }
+
+        func cancel() {
+            lock.withLock {
+                cancelled = true
+            }
+            terminate()
+        }
+
+        func terminate() {
+            signal(SIGTERM)
+            // Some tools inherit a blocked SIGTERM on Linux or ignore it. Cancellation and
+            // timeouts still have to end, including children that hold the output pipes open.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1) { self.signal(SIGKILL) }
+        }
+
+        private func signal(_ value: Int32) {
+            lock.withLock {
+                guard process.isRunning else { return }
+                let pid = process.processIdentifier
+                // Foundation normally gives the tool its own group. Check before signalling
+                // the group, so we can never signal Oby or other jobs in a shared group.
+                if getpgid(pid) == pid { _ = kill(-pid, value) }
+                else { _ = kill(pid, value) }
+            }
+        }
+    }
 }
