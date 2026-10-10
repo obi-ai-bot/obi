@@ -57,6 +57,8 @@ This document is the contract between the runner and its clients. Change it in t
 - Publishing happens by itself. A job that ends `done` with commits not on its pull request (its check passed, or it has none) publishes before it ends, with no device signature: `step` is `"Publishing"` meanwhile.
   - It pushes the branch and opens a pull request into `base`, ready for review (never a draft), or pushes to the one already open.
   - The secret scan still gates it. A possible secret makes the job `failed`, and its `summary` starts with `Not published: possible secret in <file>:<line> (<rule>).` Nothing goes out, and it never says the secret. If the scanner can't run, nothing goes out either.
+  - Only a job that ends while the runner is up, with commits made since its agent started, publishes by itself. A job that ended before the runner started never does, and one whose own publish failed isn't tried again by itself (a round with no new commits keeps its `publishError`).
+  - Before publishing, the runner fetches `base` and compares the job's commits with it by patch (`git cherry`, then a trial merge for squash merges). When they're all on it already, nothing goes out: the job stays `done` with `commits` 0, and its `summary` starts with `Not published: its commits are already on <base>.`
   - Any other failure (push, `gh`) leaves the job `done` with `publishError` set. Then Publish by hand is offered (`POST /v1/jobs/{id}/publish`).
 - `published`: the pull request's URL once published. Show "Published".
 - `publishError`: why the runner couldn't publish the job by itself, or null. Show it instead of "Published".

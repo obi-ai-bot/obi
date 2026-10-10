@@ -104,6 +104,144 @@ struct PublishOnItsOwnTests {
         #expect(published.jobs.last?.summaries == ["fix(engine): open the PR by itself", "docs: say so in runner-api.md"])
         #expect(again.status == .done && again.pushed == 2 && !again.canPublish)
     }
+
+    /// The runner restarts: jobs that ended before it started, published or not, stay as they
+    /// are, and only a job that finishes in this run publishes.
+    @Test func onlyAJobThatFinishesInThisRunPublishes() async throws {
+        let store = JobStore(url: folder.appending(path: "restart.sqlite"))
+        var earlier = job
+        earlier.id = "earlier"
+        earlier.kind = .fix
+        earlier.pr = nil
+        earlier.base = "dev"
+        earlier.branch = "oby/fix-77"
+        earlier.status = .done
+        earlier.commits = 2
+        earlier.finished = .now.addingTimeInterval(-3 * 3600)
+        var failedBefore = earlier
+        failedBefore.id = "failedbefore"
+        failedBefore.publishError = "Couldn't push oby/fix-75: the remote hung up."
+        var running = earlier
+        running.id = "running"
+        running.status = .running
+        running.finished = nil
+        for job in [earlier, failedBefore, running] { store.save(job) }
+
+        let restarted = Desk(accounts: AccountStore(root: folder), store: store)
+        restarted.makeAgent = { [agent] _, _, _ in agent }
+        restarted.prepare = { $0 }
+        restarted.countCommits = { _, _ in 1 }
+        restarted.publishOnItsOwn = { [published] job, _ in
+            published.jobs.append(job)
+            return URL(string: "https://github.com/deskree-inc/oby/pull/81")!
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(published.jobs.isEmpty)
+        #expect(restarted.job("earlier")?.canPublish == true && restarted.job("earlier")?.published == nil)
+        #expect(restarted.job("failedbefore")?.publishError == "Couldn't push oby/fix-75: the remote hung up.")
+        #expect(restarted.job("running")?.status == .interrupted)
+
+        // A job dispatched after the restart finishes now, and publishes.
+        var new = job
+        new.id = "new"
+        new.kind = .fix
+        new.pr = nil
+        new.base = "dev"
+        new.branch = "oby/fix-80"
+        restarted.dispatch(Desk.Draft(said: "fix oby #80", reply: "", job: new, guessed: false))
+        for _ in 0..<500 where restarted.job("new")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
+        agent.onEvent(.turnEnded(summary: "fix(engine): publish only what ends now", failed: false))
+        agent.onEvent(.finished(summary: "fix(engine): publish only what ends now", failed: false))
+        for _ in 0..<500 where restarted.job("new")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(published.jobs.map(\.id) == ["new"])
+        #expect(restarted.job("new")?.published == "https://github.com/deskree-inc/oby/pull/81")
+        #expect(restarted.job("earlier")?.published == nil)
+    }
+
+    /// Its commits reached the base by a squash merge: nothing is published and nothing waits for Publish.
+    @Test func workAlreadyOnTheBaseIsntPublished() async throws {
+        let ended = try await run("merged", commits: 2) { _ in throw Publish.AlreadyOnBase(base: "dev") }
+        #expect(published.jobs.count == 1)
+        #expect(ended.status == .done && ended.published == nil && ended.commits == 0)
+        #expect(!ended.canPublish && !ended.needsYou && ended.publishError == nil && Push.notice(for: ended) == nil)
+        #expect(ended.summary.hasPrefix("Not published: its commits are already on dev.\n\nfix(engine): open the PR by itself"))
+    }
+
+    /// Its own publish failed: Oby doesn't try again by itself, not when the agent's process ends
+    /// after its last turn, nor when the user talks to it and it makes no new commits. Publish by hand is offered.
+    @Test func aJobsOwnPublishIsntRetried() async throws {
+        let first = try await run("retry", commits: 2) { _ in throw Shell.Failure(message: "Couldn't push oby/fix-75: the remote hung up.") }
+        #expect(first.publishError == "Couldn't push oby/fix-75: the remote hung up.")
+        agent.onEvent(.finished(summary: "fix(engine): open the PR by itself", failed: false))
+        try desk.message("retry", "is it on GitHub yet?")
+        for _ in 0..<500 where desk.job("retry")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
+        agent.onEvent(.turnEnded(summary: "No: Oby publishes it.", failed: false))
+        agent.onEvent(.finished(summary: "No: Oby publishes it.", failed: false))
+        for _ in 0..<500 where desk.job("retry")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
+        let again = try #require(desk.job("retry"))
+        #expect(published.jobs.count == 1)
+        #expect(again.status == .done && again.canPublish && again.needsYou && again.published == nil)
+        #expect(again.publishError == "Couldn't push oby/fix-75: the remote hung up." && Push.notice(for: again) == .ready)
+    }
+}
+
+/// Publish compares the job's commits with its base by patch: a squash merge or a cherry-pick
+/// changes their hashes, not what they change.
+struct AlreadyOnBaseTests {
+    let repo: URL
+
+    init() async throws {
+        repo = try temporaryFolder()
+        try await Shell.ok(["git", "-C", repo.path, "init", "--quiet", "-b", "dev"])
+        try await Self.commit("README.md", in: repo)
+        try await Self.git(["switch", "--quiet", "-c", "oby/fix-1"], in: repo)
+        try await Self.commit("a.txt", in: repo)
+        try await Self.commit("b.txt", in: repo)
+        try await Self.git(["switch", "--quiet", "dev"], in: repo)
+    }
+
+    @discardableResult
+    static func git(_ arguments: [String], in repo: URL) async throws -> String {
+        try await Shell.ok(["git", "-C", repo.path, "-c", "user.name=Oby", "-c", "user.email=oby@example.com",
+                            "-c", "commit.gpgsign=false"] + arguments)
+    }
+
+    @discardableResult
+    static func commit(_ file: String, in repo: URL) async throws -> String {
+        try "\(file)\n".write(to: repo.appending(path: file), atomically: true, encoding: .utf8)
+        try await git(["add", file], in: repo)
+        try await git(["commit", "--quiet", "-m", "add \(file)"], in: repo)
+        return try await git(["rev-parse", "HEAD"], in: repo)
+    }
+
+    /// GitHub's dev, as Publish reads it.
+    func origin() async throws { try await Self.git(["update-ref", "refs/remotes/origin/dev", "dev"], in: repo) }
+
+    @Test func newWorkIsLeftToPublish() async throws {
+        try await origin()
+        #expect(await Publish.unmerged(repo, base: "dev", head: "oby/fix-1") == 2)
+    }
+
+    @Test func aSquashMergeCountsAsOnTheBase() async throws {
+        try await Self.git(["merge", "--quiet", "--squash", "oby/fix-1"], in: repo)
+        try await Self.git(["commit", "--quiet", "-m", "fix: both files (#77)"], in: repo)
+        try await Self.commit("later.txt", in: repo)
+        try await origin()
+        #expect(await Publish.unmerged(repo, base: "dev", head: "oby/fix-1") == 0)
+    }
+
+    @Test func aCherryPickedCommitCountsAsOnTheBase() async throws {
+        try await Self.git(["cherry-pick", "oby/fix-1~1"], in: repo)
+        try await origin()
+        #expect(await Publish.unmerged(repo, base: "dev", head: "oby/fix-1") == 1)
+        try await Self.git(["cherry-pick", "oby/fix-1"], in: repo)
+        try await origin()
+        #expect(await Publish.unmerged(repo, base: "dev", head: "oby/fix-1") == 0)
+    }
+
+    @Test func noBaseToCompareWithSaysSo() async throws {
+        #expect(await Publish.unmerged(repo, base: "dev", head: "oby/fix-1") == nil)
+    }
 }
 
 struct PullRequestTextTests {
