@@ -6,6 +6,8 @@ import SwiftUI
 struct SettingsView: View {
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var problem: String?
+    /// The always-on runner whose jobs the island lists too; empty turns that off.
+    @AppStorage("runnerURL") private var runnerURL = ""
 
     var body: some View {
         Form {
@@ -22,9 +24,14 @@ struct SettingsView: View {
             if let problem {
                 Text(problem).font(.caption).foregroundStyle(.red)
             }
+            Section("Runner") {
+                TextField("URL", text: $runnerURL, prompt: Text(Runner.defaultURL.absoluteString))
+                Text("The island lists the jobs running there too. Leave it empty to turn this off.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 380)
+        .frame(width: 460)
         .onAppear { NSApp.activate() }
     }
 }

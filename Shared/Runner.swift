@@ -1,5 +1,8 @@
 import Foundation
 
+// The Mac compiles Engine/, whose Job is what the runner sends: it reads jobs into that one, and
+// has its own Account. Only the iPhone needs these copies.
+#if os(iOS)
 /// A job on the runner (docs/runner-api.md).
 nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     enum Status: String, Codable, Sendable { case queued, running, done, failed, stopped, interrupted }
@@ -76,6 +79,7 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     /// "Personal · Claude Code"
     var title: String { "\(name) · \(agent == "codex" ? "Codex" : "Claude Code")" }
 }
+#endif
 
 /// The plan card, before anything runs.
 nonisolated struct Draft: Codable, Equatable, Sendable {
@@ -167,7 +171,9 @@ nonisolated struct RunnerStatus: Codable, Equatable, Sendable {
         var host: String
     }
     var runner: Runner
+    #if os(iOS)
     var accounts: [Account]
+    #endif
     var models: ModelSettings
 }
 
@@ -234,11 +240,14 @@ nonisolated struct Runner: Sendable {
         return answer.action
     }
 
+    // Approvals come from the iPhone's Face ID key (iOS/DeviceKey.swift).
+    #if os(iOS)
     func publish(_ id: String, approval: Approval) async throws -> URL {
         struct Answer: Decodable { var url: URL }
         let answer: Answer = try await call("POST", "v1/jobs/\(id)/publish", body: approval)
         return answer.url
     }
+    #endif
 
     func register(name: String, publicKey: Data) async throws -> String {
         struct Body: Encodable { var name: String; var publicKey: String }
