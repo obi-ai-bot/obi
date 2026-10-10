@@ -14,6 +14,8 @@ struct HomeView: View {
     @State private var height: CGFloat = 0
     /// The job screens open, so a notification can open its job.
     @State private var path: [String] = []
+    /// Why the last Dismiss didn't go through, until the next one does.
+    @State private var problem: String?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -28,7 +30,12 @@ struct HomeView: View {
                     ForEach(jobs) { job in
                         NavigationLink(value: job.id) { JobRow(job: job) }
                             .buttonStyle(.plain)
+                            // Swipe left on a job that needs you to let it go.
+                            .modifier(SwipeToDismiss(enabled: job.needsYou) { Task { await dismiss(job.id) } })
                             .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                    if let problem {
+                        Text(problem).font(.footnote).foregroundStyle(.red).padding(.horizontal, 4)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -186,6 +193,16 @@ struct HomeView: View {
         typing = false
     }
 
+    /// Lets go of a job that needs you: the runner keeps it, and it stops counting here and on the Mac.
+    private func dismiss(_ id: String) async {
+        do {
+            try await phone.dismiss(id)
+            problem = nil
+        } catch {
+            problem = error.localizedDescription
+        }
+    }
+
     private var sheetShown: Binding<Bool> {
         Binding {
             switch phone.talk {
@@ -230,13 +247,69 @@ private struct Hop {
     var scale: CGFloat = 1
 }
 
+/// Swipe a row left to uncover Dismiss, as a List's swipe actions do; Home's rows are in a
+/// ScrollView, which keeps vertical drags for scrolling. Dismiss closes the row and lets the job go.
+private struct SwipeToDismiss: ViewModifier {
+    let enabled: Bool
+    let dismiss: () -> Void
+    @State private var offset: CGFloat = 0
+    @State private var open = false
+    private static let width: CGFloat = 96
+
+    func body(content: Content) -> some View {
+        content
+            .offset(x: offset)
+            .background(alignment: .trailing) {
+                if enabled, offset < 0 {
+                    Button {
+                        close()
+                        dismiss()
+                    } label: {
+                        Text("Dismiss").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                            .frame(width: Self.width).frame(maxHeight: .infinity)
+                            .background(.red, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dismiss")
+                }
+            }
+            .gesture(drag, including: enabled ? .all : .subviews)
+            .onChange(of: enabled) { if !enabled { close() } }
+            .accessibilityAction(named: "Dismiss") { if enabled { dismiss() } }
+    }
+
+    private var drag: some Gesture {
+        DragGesture(minimumDistance: 20, coordinateSpace: .local)
+            .onChanged { value in
+                // Only a sideways swipe; the scroll view keeps the vertical ones.
+                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                let start: CGFloat = open ? -Self.width : 0
+                offset = min(0, max(-Self.width - 24, start + value.translation.width))
+            }
+            .onEnded { value in
+                let end = (open ? -Self.width : 0) + value.translation.width
+                withAnimation(.snappy) {
+                    open = end < -Self.width / 2
+                    offset = open ? -Self.width : 0
+                }
+            }
+    }
+
+    private func close() {
+        withAnimation(.snappy) {
+            open = false
+            offset = 0
+        }
+    }
+}
+
 /// One job: what it is, what it's doing now, how it ended.
 struct JobRow: View {
     let job: Job
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: job.agent == "codex" ? "circle.hexagongrid" : "asterisk")
+            AgentMark(agent: job.agent)
                 .font(.body.weight(.semibold))
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
@@ -261,6 +334,8 @@ struct StatusPill: View {
 
     var body: some View {
         let (text, color): (String, Color) = switch job.status {
+        // Let go by you: it needs nothing, however it ended.
+        case _ where job.dismissed != nil: ("Dismissed", .gray)
         case .queued: ("Starting", .blue)
         case .running: ("Working", .blue)
         case .done where job.canPublish: ("Ready to publish", .orange)

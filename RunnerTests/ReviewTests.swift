@@ -45,9 +45,9 @@ struct ReviewTests {
         accounts = AccountStore(root: folder)
         personal = try accounts.add(agent: "claude", name: "Personal", payer: "")
         work = try accounts.add(agent: "codex", name: "Work", payer: "Deskree")
-        accounts.signedIn("default", as: "Max · well@example.com")
-        accounts.signedIn(personal.id, as: "Max · personal@example.com")
-        accounts.signedIn(work.id, as: "Plus · work@example.com")
+        accounts.setLabel("Max · well@example.com", for: "default")
+        accounts.setLabel("Max · personal@example.com", for: personal.id)
+        accounts.setLabel("Plus · work@example.com", for: work.id)
         desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
         desk.prepare = { $0 }
         desk.makeAgent = { [made] job, _, resume in
@@ -139,8 +139,8 @@ struct ReviewTests {
     }
 
     @Test func withNoOtherAccountNothingReviewsAndTheJobSaysSo() async throws {
-        accounts.signedIn(personal.id, as: nil)
-        accounts.signedIn(work.id, as: nil)
+        accounts.setLabel(nil, for: personal.id)
+        accounts.setLabel(nil, for: work.id)
         let published = try await publishAuthor()
         try await Task.sleep(for: .milliseconds(50))
         #expect(published.reviewing == nil && published.review == nil)

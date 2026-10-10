@@ -168,7 +168,7 @@ final class APITests {
                 let account = try #require((status["accounts"] as? [[String: Any]])?.first)
                 #expect(account["id"] as? String == "default")
                 #expect(account["signedIn"] as? Bool == false)
-                #expect(account["label"] is NSNull)
+                #expect(account["label"] is NSNull && account["fullUntil"] is NSNull)
                 let claude = (status["models"] as? [String: Any])?["claude"] as? [String: Any]
                 #expect(claude?["model"] as? String == AgentModels.value("claude", "model"))
             }
@@ -273,9 +273,9 @@ final class APITests {
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
         for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "check", "model", "notes", "pullRequest", "pullRequestError",
-                    "reviewing", "review", "reviewError", "reviewOf"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
+                    "dismissed", "reviewing", "review", "reviewError", "reviewOf"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 36)
+        #expect(decoded.count == 37)
         #expect(decoded["pipeline"] is [String: Any])
         #expect(decoded["title"] as? String == "Review oby #33")
         #expect(decoded["rounds"] as? Int == 1 && decoded["round"] as? Int == 1)

@@ -48,7 +48,12 @@ struct AccountsSettingsView: View {
     var body: some View {
         Form {
             Section("Accounts") {
-                ForEach(store.accounts, id: \.account.id, content: row)
+                Text(Usage.summary(store.accounts.map(\.usage))).font(.subheadline)
+            }
+            ForEach(Usage.agents(store.accounts.map(\.account.agent)), id: \.self) { agent in
+                Section(Usage.tool(agent)) {
+                    ForEach(store.accounts.filter { $0.account.agent == agent }, id: \.account.id, content: row)
+                }
             }
             Section("Add an account") {
                 Picker("Tool", selection: $agent) {
@@ -86,29 +91,27 @@ struct AccountsSettingsView: View {
         }
     }
 
+    /// The account's usage card, who pays for it, and its buttons.
     private func row(_ state: AccountState) -> some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(state.account.name) · \(state.account.agent == "codex" ? "Codex" : "Claude Code")")
-                Text(state.label ?? "Signed out")
-                    .font(.caption).foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                UsageCard(snapshot: state.usage)
+                // A job of its hit the limit: no job goes to it until then.
+                if state.isFull(), let until = state.fullUntil {
+                    Text("Full until \(Limits.clock(until))").font(.caption).foregroundStyle(.orange)
+                }
                 if !state.account.payer.isEmpty {
                     Text("Paid by \(state.account.payer)").font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Spacer()
-            if state.signedIn {
-                Text("5h \(percent(state.fiveHour)) · 7d \(percent(state.sevenDay))")
-                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-            } else {
-                Button("Sign In") { attempt { try store.signIn(state.account) } }
+            VStack(alignment: .trailing, spacing: 6) {
+                if !state.signedIn {
+                    Button("Sign In") { attempt { try store.signIn(state.account) } }
+                }
+                Button("Remove", role: .destructive) { removing = state.account }
             }
-            Button("Remove", role: .destructive) { removing = state.account }
+            .padding(.top, 4)
         }
-    }
-
-    private func percent(_ used: Double?) -> String {
-        used.map { $0.formatted(.percent.precision(.fractionLength(0))) } ?? "–"
     }
 
     private func attempt(_ action: () throws -> Void) {
@@ -165,6 +168,14 @@ struct ModelsSettingsView: View {
     private var codexEfforts: [String] {
         let efforts = codexChoices.first { $0.id == codexModel }?.efforts ?? []
         return efforts.contains(codexEffort) ? efforts : [codexEffort] + efforts
+    }
+}
+
+extension AccountState {
+    /// What Settings' usage card shows.
+    var usage: Usage.Snapshot {
+        Usage.Snapshot(agent: account.agent, name: account.name, label: label, fiveHour: fiveHour, sevenDay: sevenDay,
+                       fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running)
     }
 }
 

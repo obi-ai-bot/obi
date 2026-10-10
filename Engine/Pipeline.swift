@@ -118,6 +118,14 @@ extension Job {
                 }
             }
         }
+        // The user let it go: nothing is published, reviewed or merged. A pull request from an
+        // earlier round keeps its own progress; a failed publish keeps its reason.
+        if dismissed != nil, !isActive, published == nil || stopped, let publish = stages.firstIndex(where: { $0.id == .publish }) {
+            stages[publish].state = .skipped
+            stages[publish].detail = "Dismissed"
+            if phase != .publish || !stopped { stages[publish].reason = nil }
+            for index in stages.indices where index > publish { stages[index].state = .skipped }
+        }
         let position = stages.firstIndex { $0.state == .current || $0.state == .failed }
             ?? stages.lastIndex { $0.state == .done || $0.state == .skipped } ?? 0
         return JobPipeline(stages: stages, number: position + 1, total: stages.count)

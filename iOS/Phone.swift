@@ -33,7 +33,7 @@ final class Phone {
     private(set) var loaded = false
     private(set) var jobs: [Job] = [] {
         didSet {
-            // Published or running again, here or on the Mac: its alert goes.
+            // Published, dismissed or running again, here or on the Mac: its alert goes.
             let needed = Set(oldValue.filter(\.needsYou).map(\.id))
             let done = Set(jobs.filter { !$0.needsYou && needed.contains($0.id) }.map(\.id))
             if !done.isEmpty { Task { await Notifications.clear(done) } }
@@ -200,6 +200,11 @@ final class Phone {
 
     func stop(_ id: String) async throws {
         apply(.job(try await runner.stop(id)))
+    }
+
+    /// Lets go of a job that needs you; its alert clears with the runner's answer.
+    func dismiss(_ id: String) async throws {
+        apply(.job(try await runner.dismiss(id)))
     }
 
     /// Tells the job's agent something; the runner answers with the job, running again.

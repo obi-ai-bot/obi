@@ -47,6 +47,7 @@ This document is the contract between the runner and its clients. Change it in t
   "notes": null,
   "pullRequest": null,
   "pullRequestError": null,
+  "dismissed": null,
   "reviewing": null,
   "review": null,
   "reviewError": null,
@@ -69,7 +70,8 @@ This document is the contract between the runner and its clients. Change it in t
 - `agent`: `claude` or `codex`. `account`: an account `id`. `kind`: `review`, `fix`, `build`, `test` or `investigate`.
 - `status`: `queued`, `running`, `done`, `failed`, `stopped` or `interrupted`.
 - `step`: what it's doing now, while queued or running. `summary`: the agent's final message; its first line is the one-line notice.
-- A `build`, `fix` or `test` job that ends with no commits of its own is `failed`, and its `summary` starts with `Nothing committed: ` followed by the agent's first line.
+- A `build`, `fix` or `test` job that ends with no commits of its own is `failed`, and its `summary` starts with `Nothing committed: ` followed by the agent's first line. Not a round the user started with `POST /v1/jobs/{id}/messages`: their words say what it should do (reset the branch, drop the work), so that round ending with nothing committed is `done`.
+- When the job's account hits its usage limit mid-round (Codex: "You've hit your usage limit… try again at 10:45 PM"; Claude Code: a `rate_limit_event` at 100%, or a usage-limit result), the runner marks the account full until the reset time it named (an hour when it named none), and the job does that round over on the next account with room, the same tool first, then another tool, in the same worktree and branch with a new session: `account`, `agent` and `session` change, and `step` says so. Its `summary` then ends with a line like `Codex · Deskree hit its limit (resets 10:45 PM); continued on Claude Code · Personal.` When no account has room, the job is `failed`, and its `summary` says when the first one resets. An account marked full isn't picked for a new job before its reset (`fullUntil`).
 - `base`: the branch the work started from (filled in once the job is ready). `pr`: the pull request it works on, if any.
 - `commits`: commits made beyond `base` (set when a job ends as done).
 - Publishing happens by itself. A job that ends `done` with commits not on its pull request (its check passed, or it has none) publishes before it ends, with no device signature: `step` is `"Publishing"` meanwhile, and `publishStep` follows the scan, push and PR creation.
@@ -82,7 +84,8 @@ This document is the contract between the runner and its clients. Change it in t
 - `publishError`: why the runner couldn't publish the job by itself, or null. Show it instead of "Published".
 - `pushed`: how many of `commits` were on the pull request when it was last published, or null before then. A published job that ran again (`POST /v1/jobs/{id}/messages`) and ended `done` with new commits pushes them to the same branch by itself, so they land on the open pull request.
 - `summaries`: every round's summary from the agent, oldest first, or null. The pull request's description quotes them all.
-- What needs you: a job that's `done` with commits the runner couldn't publish (`publishError`), `failed` or `interrupted`, or one Oby's review requested changes on for the fourth time (`review`, below). Say so where the apps would otherwise say nothing needs you.
+- What needs you: a job that's `done` with commits the runner couldn't publish (`publishError`), `failed` or `interrupted`, or one Oby's review requested changes on for the fourth time (`review`, below), unless it's dismissed. Say so where the apps would otherwise say nothing needs you.
+- `dismissed`: when the user let the job go (`POST /v1/jobs/{id}/dismiss`), or null. A dismissed job needs nothing: it sends no alert, offers no Publish, and its `pipeline` shows Publish as `skipped` with the detail `Dismissed`. It stays in the list and in history. Telling it something (`POST /v1/jobs/{id}/messages`) clears `dismissed`.
 - `issue`: the GitHub issue the work is about. The runner fetches it for the agent, which has no GitHub login, and the pull request says `Closes #N`.
 - `rounds`: how many rounds the agent may take (1 means no loop); `round`: the one it's on.
 - `check`: a one-line command that must succeed for the work to count as done.
@@ -129,10 +132,17 @@ When a job publishes (or pushes new commits to its pull request), the runner has
 
 ```json
 {"id": "default", "agent": "claude", "name": "Personal", "label": "Max · well0cp@gmail.com",
- "signedIn": true, "fiveHour": 0.12, "sevenDay": 0.4, "running": 1}
+ "signedIn": true, "fiveHour": 0.12, "sevenDay": 0.4,
+ "fiveHourResets": "2026-10-10T02:14:40Z", "sevenDayResets": "2026-10-14T19:27:22Z", "running": 1, "fullUntil": null}
 ```
 
-`label` is what the tool says about the login (null while signed out). `fiveHour` and `sevenDay` are 0…1 or null when unknown. Accounts are signed in on the runner itself, through each tool's own login; the app only shows them.
+- `label` is what the tool says about the login (null while signed out). Its first part is the plan (`Max`, `Team`, `Plus`), which Settings shows next to the account's name.
+- `fiveHour` and `sevenDay` are 0…1 or null when unknown. An account with both null hasn't reported usage yet: Claude Code's limits arrive with its first job, Codex's when the runner asks its app-server.
+- `fiveHourResets` and `sevenDayResets`: when each window resets, or null when the tool didn't say. Claude Code sends them in its `rate_limit_event` (`resetsAt` per window), Codex in `account/rateLimits/read` and its `account/rateLimits/updated` notifications (`resetsAt`). A window keeps its last reset time until the tool sends a new one. Older runners don't send these keys.
+- `running`: jobs queued or running on the account.
+- `fullUntil` is set while a job of the account's hit its usage limit: no job goes to it before then. Accounts are signed in on the runner itself, through each tool's own login; the app only shows them.
+
+Accounts are signed in on the runner itself, through each tool's own login; the app only shows them. Settings shows one card per account, grouped by tool, with a bar per window, its reset time, and the running count.
 
 ### Draft
 
@@ -219,6 +229,12 @@ The iPhone app waits on this as a background download: iOS keeps it going while 
 
 Stops a queued or running job. Returns the job (`status: "stopped"`).
 
+### `POST /v1/jobs/{id}/dismiss`
+
+Lets go of a job that needs you (`done` with commits it couldn't publish, `failed` or `interrupted`): it stays as it ended, in the list and in history, and needs nothing. Its alert clears (the runner sends the clearing push below), Home stops counting it, and Publish isn't offered. Returns the job with `dismissed` set. A job dismissed already comes back as it is. No device signature: nothing goes out.
+
+`404` for an unknown job. `409` when the job doesn't need you (running, stopped, done and published, or done with nothing to publish).
+
 ### `POST /v1/jobs/{id}/messages`
 
 Tells the job's agent something:
@@ -228,7 +244,7 @@ Tells the job's agent something:
 ```
 
 - **Running:** the agent hears it now, in the turn under way or as the next one (Claude Code: another message; Codex: it steers the turn).
-- **Finished** (`done`, `failed`, `stopped` or `interrupted`): the runner picks the agent's session up again in the same worktree and branch. The job keeps its `id`, goes back to `running` and gets a new `round`; when `rounds` is above 1 it grows by one too, so a loop still has a round for this. It ends as usual.
+- **Finished** (`done`, `failed`, `stopped` or `interrupted`): the runner picks the agent's session up again in the same worktree and branch. The job keeps its `id`, goes back to `running` and gets a new `round`; when `rounds` is above 1 it grows by one too, so a loop still has a round for this. A dismissed job is dismissed no more. It ends as usual, except that this round may end `done` with nothing committed: your words decide what it should do.
 - The text is saved in `notes`, and `step` shows `"You: …"` until the agent moves on.
 
 Returns the job. `404` for an unknown job. `422` when the text isn't 1 to 2,000 characters, or the job can't take it: still getting ready, wrapping up its only turn (try again once it's done), or never started (no `session`).
@@ -245,8 +261,8 @@ event: accounts
 data: [ …Account ]
 ```
 
-- A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`. The app replaces the job with that `id`.
-- `accounts` comes when sign-ins or usage change.
+- A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`, `dismissed`, a move to another account. The app replaces the job with that `id`.
+- `accounts` comes when sign-ins, usage, reset times, running counts or `fullUntil` change.
 - A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop, then refetch `GET /v1/jobs` to catch up.
 
 ### `GET /v1/jobs/{id}/publish`
@@ -339,7 +355,7 @@ Two seconds after a job changes, the runner sends an alert push (`apns-push-type
 
 - `job` is the job's `id`: tapping the notification opens it. The `ready` category offers **Publish** (it unlocks the phone and brings the app forward, where Face ID signs the approval as in the app) and **Open**; `job` offers **Open**.
 - `apns-collapse-id` is the job's `id`, so a newer state replaces the older notification.
-- When a job stops needing you (published, from the iPhone or the Mac, or running again after a message), the runner sends a background push (`apns-push-type: background`, priority 5), `{"aps": {"content-available": 1}, "clear": "<job id>"}`, and the app removes that job's notification. The app also removes them whenever it opens and sees the job needs nothing.
+- When a job stops needing you (published, from the iPhone or the Mac, dismissed, or running again after a message), the runner sends a background push (`apns-push-type: background`, priority 5), `{"aps": {"content-available": 1}, "clear": "<job id>"}`, and the app removes that job's notification. The app also removes them whenever it opens and sees the job needs nothing.
 - The runner remembers what it last said for each job in `apns/notices.json`, so a restart doesn't say it again, and jobs a restart interrupted notify once it's back.
 
 ### `GET /v1/settings/models` and `PUT /v1/settings/models`
