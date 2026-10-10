@@ -10,14 +10,16 @@ struct WatchRelayTests {
             created: .now, finished: finished, notes: ["Also test the empty case."])
     }
 
-    /// What needs you first, then what's running, then what finished lately; nothing older.
+    /// What needs you first, then what's running, then what finished lately; nothing older, and a
+    /// failure from a month ago no longer needs you.
     @Test func keepsWhatTheWatchShowsFirstAndDropsTheLongTexts() throws {
         let long = String(repeating: "x", count: 5_000)
         let context = WatchContext(jobs: [
             job("running", status: .running, summary: long),
             job("old", status: .done, finished: .now.addingTimeInterval(-10 * 86400)),
             job("recent", status: .done, finished: .now.addingTimeInterval(-3600)),
-            job("failed", status: .failed, finished: .now.addingTimeInterval(-30 * 86400)),
+            job("failed", status: .failed, finished: .now.addingTimeInterval(-86400)),
+            job("stale", status: .failed, finished: .now.addingTimeInterval(-30 * 86400)),
         ], accounts: [], host: "tetrix-lab", sentAt: .now)
         let data = try WatchRelay.fit(context)
         let kept = try Runner.decoder.decode(WatchContext.self, from: data)
@@ -25,6 +27,19 @@ struct WatchRelayTests {
         #expect(kept.jobs[1].summary.count == 600)
         #expect(kept.jobs[1].notes == nil)
         #expect(kept.host == "tetrix-lab")
+    }
+
+    /// Clear done on the phone hides finished jobs up to a time; the watch hides the same ones.
+    @Test func respectsClearDone() throws {
+        let context = WatchContext(jobs: [
+            job("running", status: .running),
+            job("failed", status: .failed, finished: .now.addingTimeInterval(-3600)),
+            job("cleared", status: .failed, finished: .now.addingTimeInterval(-7200)),
+            job("done", status: .done, finished: .now.addingTimeInterval(-7200)),
+        ], accounts: [], host: "tetrix-lab", sentAt: .now)
+        let data = try WatchRelay.fit(context, clearedAt: .now.addingTimeInterval(-5400))
+        let kept = try Runner.decoder.decode(WatchContext.self, from: data)
+        #expect(kept.jobs.map(\.id) == ["failed", "running"])
     }
 
     /// A busy stretch of finished jobs never pushes out one that needs you.

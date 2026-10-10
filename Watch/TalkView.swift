@@ -10,6 +10,9 @@ struct TalkView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var recorder = Recorder()
+    /// True only while the finger is down: SwiftUI resets it when the gesture ends or is
+    /// cancelled, so every hold has a release.
+    @GestureState private var pressing = false
     @State private var holding = false
 
     var body: some View {
@@ -48,9 +51,9 @@ struct TalkView: View {
                     .gesture(
                         // Pressed and released, wherever the finger goes: the mic follows the hold.
                         DragGesture(minimumDistance: 0)
-                            .onChanged { _ in if !holding { holding = true; start() } }
-                            .onEnded { _ in release() }
+                            .updating($pressing) { _, pressing, _ in pressing = true }
                     )
+                    .onChange(of: pressing) { if pressing { start() } else { release() } }
                     .accessibilityLabel("Hold to talk")
                 Text(caption).font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
             } else {
@@ -95,7 +98,8 @@ struct TalkView: View {
     /// Synchronous: nothing waits between the hold and the microphone, so a release always finds
     /// the recorder it has to stop.
     private func start() {
-        guard watch.talk == .none else { return }
+        guard !holding, watch.talk == .none else { return }
+        holding = true
         do {
             try recorder.start()
             watch.talk = .recording

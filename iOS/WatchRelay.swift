@@ -27,6 +27,13 @@ final class WatchRelay: NSObject {
         session.delegate = self
         session.activate()
         follow()
+        // Clear done on the phone hides finished jobs; the watch hides the same ones at once.
+        NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: UserDefaults.standard, queue: .main) { _ in
+            Task { @MainActor in
+                guard self.clearedAt != self.pushedClearedAt else { return }
+                self.pushContext()
+            }
+        }
     }
 
     /// Pushes the jobs to the watch whenever the phone's change (the runner's events, a dispatch,
@@ -34,6 +41,7 @@ final class WatchRelay: NSObject {
     private func follow() {
         guard let phone else { return }
         withObservationTracking {
+            _ = phone.loaded
             _ = phone.jobs
             _ = phone.accounts
             _ = phone.host
@@ -47,15 +55,23 @@ final class WatchRelay: NSObject {
 
     // MARK: The jobs on the watch
 
+    /// Only once the phone has a list: before that, an empty one would wipe the watch's.
     private func pushContext() {
-        guard let phone else { return }
+        guard let phone, phone.loaded else { return }
         push(WatchContext(jobs: phone.jobs, accounts: phone.accounts, host: phone.host, sentAt: .now))
     }
+
+    /// Clear done on the phone's Home (iOS/Home.swift): finished jobs up to this time are hidden.
+    private var clearedAt: Date { Date(timeIntervalSince1970: UserDefaults.standard.double(forKey: "home.clearedAt")) }
+    /// The Clear done time the watch's list was last trimmed with.
+    private var pushedClearedAt: Date?
 
     private func push(_ context: WatchContext) {
         guard let session, session.activationState == .activated, session.isPaired, session.isWatchAppInstalled else { return }
         do {
-            try session.updateApplicationContext([WatchWire.context: try Self.fit(context)])
+            let clearedAt = clearedAt
+            try session.updateApplicationContext([WatchWire.context: try Self.fit(context, clearedAt: clearedAt)])
+            pushedClearedAt = clearedAt
         } catch {
             Logger.phone.error("keeping the jobs on the watch failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -84,12 +100,15 @@ final class WatchRelay: NSObject {
     /// WatchConnectivity carries about 65 KB. The watch shows what needs you and what's running,
     /// so those jobs go first, then the ones that finished in the last two days, without the long
     /// texts; the list is cut at 20 and then from the end until it fits, so what needs you stays.
-    nonisolated static func fit(_ context: WatchContext, limit: Int = WatchWire.limit) throws -> Data {
+    /// A job hidden by Clear done on the phone (`clearedAt`), or one that failed over a week ago,
+    /// doesn't count as needing you on the wrist either.
+    nonisolated static func fit(_ context: WatchContext, clearedAt: Date = .distantPast, now: Date = .now, limit: Int = WatchWire.limit) throws -> Data {
         var context = context
-        let cutoff = Date.now.addingTimeInterval(-2 * 86400)
         let jobs = context.jobs
-        let recent = jobs.filter { !$0.needsYou && !$0.isActive && ($0.finished ?? .distantPast) > cutoff }
-        context.jobs = (jobs.filter(\.needsYou) + jobs.filter { $0.isActive && !$0.needsYou } + recent)
+        func finished(_ job: Job, after date: Date) -> Bool { (job.finished ?? now) > date }
+        let needing = jobs.filter { $0.needsYou && finished($0, after: max(clearedAt, now.addingTimeInterval(-7 * 86400))) }
+        let recent = jobs.filter { !$0.needsYou && !$0.isActive && finished($0, after: max(clearedAt, now.addingTimeInterval(-2 * 86400))) }
+        context.jobs = (needing + jobs.filter { $0.isActive && !$0.needsYou } + recent)
             .prefix(20)
             .map { job in
                 var job = job
@@ -119,7 +138,7 @@ final class WatchRelay: NSObject {
             switch kind {
             case .refresh:
                 guard let context = await refresh() else { return [WatchWire.error: "Your iPhone can't reach the runner."] }
-                return [WatchWire.context: try Self.fit(context)]
+                return [WatchWire.context: try Self.fit(context, clearedAt: clearedAt)]
             case .voice:
                 guard let audio = message[WatchWire.audio] as? Data else { return bad }
                 let said = try await Self.transcribe(audio)

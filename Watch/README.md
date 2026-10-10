@@ -34,9 +34,9 @@ The watch keeps nothing but the last application context and the id of the ask i
 
 The watch app is Swift, one 60 KB PNG of Oby and the icon: far under the 75 MB cap on watch apps.
 
-## Issue #20: where it stands
+## Part of #20
 
-Build list:
+The build list, as it stands after this slice:
 
 - [x] watchOS app, embedded in the iPhone app: Home with needs-you and the running jobs with their stage, the job's stages and result, Publish with the crown, notifications mirrored from the phone, the relay through the iPhone.
 - [ ] Oby animated as pre-rendered frames (the pipeline that rendered the preview does this).
