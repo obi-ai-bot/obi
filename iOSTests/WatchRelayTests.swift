@@ -10,29 +10,33 @@ struct WatchRelayTests {
             created: .now, finished: finished, notes: ["Also test the empty case."])
     }
 
-    @Test func keepsWhatTheWatchShowsAndDropsTheLongTexts() throws {
+    /// What needs you first, then what's running, then what finished lately; nothing older.
+    @Test func keepsWhatTheWatchShowsFirstAndDropsTheLongTexts() throws {
         let long = String(repeating: "x", count: 5_000)
         let context = WatchContext(jobs: [
             job("running", status: .running, summary: long),
             job("old", status: .done, finished: .now.addingTimeInterval(-10 * 86400)),
             job("recent", status: .done, finished: .now.addingTimeInterval(-3600)),
+            job("failed", status: .failed, finished: .now.addingTimeInterval(-30 * 86400)),
         ], accounts: [], host: "tetrix-lab", sentAt: .now)
         let data = try WatchRelay.fit(context)
         let kept = try Runner.decoder.decode(WatchContext.self, from: data)
-        #expect(kept.jobs.map(\.id) == ["running", "recent"])
-        #expect(kept.jobs[0].summary.count == 600)
-        #expect(kept.jobs[0].notes == nil)
+        #expect(kept.jobs.map(\.id) == ["failed", "running", "recent"])
+        #expect(kept.jobs[1].summary.count == 600)
+        #expect(kept.jobs[1].notes == nil)
         #expect(kept.host == "tetrix-lab")
     }
 
-    @Test func dropsTheOldestUntilItFits() throws {
-        let jobs = (0..<20).map { job("j\($0)", status: .running, summary: String(repeating: "y", count: 600)) }
+    /// A busy stretch of finished jobs never pushes out one that needs you.
+    @Test func cutsFromTheEndSoWhatNeedsYouStays() throws {
+        var jobs = (0..<30).map { job("done\($0)", status: .done, finished: .now.addingTimeInterval(-Double($0)), summary: String(repeating: "y", count: 600)) }
+        jobs.append(job("failed", status: .failed, finished: .now.addingTimeInterval(-86400)))
         let context = WatchContext(jobs: jobs, accounts: [], host: "tetrix-lab", sentAt: .now)
         let data = try WatchRelay.fit(context, limit: 4_000)
         #expect(data.count <= 4_000)
         let kept = try Runner.decoder.decode(WatchContext.self, from: data)
-        #expect(!kept.jobs.isEmpty)
-        #expect(kept.jobs.first?.id == "j0")
+        #expect(kept.jobs.first?.id == "failed")
+        #expect(kept.jobs.count < 20)
     }
 
     @Test func relayedPlanMirrorsEveryAnswer() throws {

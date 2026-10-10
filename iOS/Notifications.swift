@@ -10,6 +10,9 @@ final class Notifications: NSObject, UIApplicationDelegate, UNUserNotificationCe
 
     static let publish = "publish"
     static let open = "open"
+    /// A publish the watch asked for while Oby was in the background (iOS/WatchRelay.swift):
+    /// Face ID can't come up then, so this notification's Publish does it.
+    static let approve = "approve"
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         let center = UNUserNotificationCenter.current()
@@ -17,9 +20,11 @@ final class Notifications: NSObject, UIApplicationDelegate, UNUserNotificationCe
         let open = UNNotificationAction(identifier: Self.open, title: "Open", options: [.foreground])
         let publish = UNNotificationAction(identifier: Self.publish, title: "Publish", options: [.authenticationRequired, .foreground])
         // The runner's `category`: "ready" for a job waiting for Publish, "job" for the rest.
+        let approve = UNNotificationAction(identifier: Self.publish, title: "Publish with Face ID", options: [.authenticationRequired, .foreground])
         center.setNotificationCategories([
             UNNotificationCategory(identifier: "ready", actions: [publish, open], intentIdentifiers: []),
             UNNotificationCategory(identifier: "job", actions: [open], intentIdentifiers: []),
+            UNNotificationCategory(identifier: Self.approve, actions: [approve], intentIdentifiers: []),
         ])
         // Allowed before: the token can change, so the runner gets it on every launch.
         Task {

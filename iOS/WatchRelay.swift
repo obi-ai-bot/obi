@@ -17,10 +17,6 @@ import WatchConnectivity
 final class WatchRelay: NSObject {
     static let shared = WatchRelay()
 
-    /// The phone's local notification that finishes a publish the watch asked for while Oby
-    /// was in the background: its Publish action is the app's own.
-    static let approve = "approve"
-
     private var phone: Phone?
     private var session: WCSession? { WCSession.isSupported() ? WCSession.default : nil }
 
@@ -86,13 +82,14 @@ final class WatchRelay: NSObject {
     }
 
     /// WatchConnectivity carries about 65 KB. The watch shows what needs you and what's running,
-    /// so those jobs and the ones that finished in the last two days go, without the long texts,
-    /// and the oldest are dropped until it fits.
+    /// so those jobs go first, then the ones that finished in the last two days, without the long
+    /// texts; the list is cut at 20 and then from the end until it fits, so what needs you stays.
     nonisolated static func fit(_ context: WatchContext, limit: Int = WatchWire.limit) throws -> Data {
         var context = context
         let cutoff = Date.now.addingTimeInterval(-2 * 86400)
-        context.jobs = context.jobs
-            .filter { $0.isActive || $0.needsYou || ($0.finished ?? .distantPast) > cutoff }
+        let jobs = context.jobs
+        let recent = jobs.filter { !$0.needsYou && !$0.isActive && ($0.finished ?? .distantPast) > cutoff }
+        context.jobs = (jobs.filter(\.needsYou) + jobs.filter { $0.isActive && !$0.needsYou } + recent)
             .prefix(20)
             .map { job in
                 var job = job
@@ -127,7 +124,7 @@ final class WatchRelay: NSObject {
                 guard let audio = message[WatchWire.audio] as? Data else { return bad }
                 let said = try await Self.transcribe(audio)
                 guard !said.isEmpty else { return [WatchWire.error: "Oby didn't catch that."] }
-                Task { await self.plan(said, answer: nil, request: request) }
+                Task { await self.inBackground("plan") { await self.plan(said, answer: nil, request: request) } }
                 return [WatchWire.text: said]
             case .plan:
                 guard let said = message[WatchWire.said] as? String else { return bad }
@@ -135,7 +132,7 @@ final class WatchRelay: NSObject {
                 if let question = message[WatchWire.question] as? String, let option = message[WatchWire.option] as? String {
                     answer = (question, option)
                 }
-                Task { await self.plan(said, answer: answer, request: request) }
+                Task { await self.inBackground("plan") { await self.plan(said, answer: answer, request: request) } }
                 return [WatchWire.ok: true]
             case .dispatch:
                 guard let data = message[WatchWire.draft] as? Data else { return bad }
@@ -159,7 +156,7 @@ final class WatchRelay: NSObject {
                 return [WatchWire.action: try await phone.runner.publishAction(id)]
             case .publish:
                 guard let id = message[WatchWire.job] as? String, let action = message[WatchWire.action] as? String else { return bad }
-                Task { await self.publish(id, action: action) }
+                Task { await self.inBackground("publish") { await self.publish(id, action: action) } }
                 return [WatchWire.ok: true]
             case .planned, .published:
                 return bad
@@ -202,24 +199,34 @@ final class WatchRelay: NSObject {
         _ = await refresh()
     }
 
+    /// The "approve" category is registered at launch with the others (iOS/Notifications.swift),
+    /// so the button is there however long the notification waits.
     private func askOnPhone(_ id: String, action: String) async throws {
         let center = UNUserNotificationCenter.current()
         guard await center.notificationSettings().authorizationStatus == .authorized else {
             throw RunnerError(message: "Open Oby on your iPhone to publish with Face ID.")
         }
-        var categories = await center.notificationCategories()
-        if !categories.contains(where: { $0.identifier == Self.approve }) {
-            let publish = UNNotificationAction(identifier: Notifications.publish, title: "Publish with Face ID", options: [.authenticationRequired, .foreground])
-            categories.insert(UNNotificationCategory(identifier: Self.approve, actions: [publish], intentIdentifiers: []))
-            center.setNotificationCategories(categories)
-        }
         let content = UNMutableNotificationContent()
         content.title = "Publish from your watch"
         content.body = action
-        content.categoryIdentifier = Self.approve
+        content.categoryIdentifier = Notifications.approve
         content.userInfo = ["job": id]
         content.sound = .default
-        try await center.add(UNNotificationRequest(identifier: "\(Self.approve)-\(id)", content: content, trigger: nil))
+        try await center.add(UNNotificationRequest(identifier: "\(Notifications.approve)-\(id)", content: content, trigger: nil))
+    }
+
+    /// iOS wakes Oby in the background for the watch and suspends it again soon after the reply:
+    /// this asks for the time to finish (planning, a publish, writing a recording down) first.
+    private func inBackground<T>(_ name: String, _ work: () async -> T) async -> T {
+        let app = UIApplication.shared
+        // The expiration handler ends the task it belongs to, so it has to see the id set below it.
+        nonisolated(unsafe) var task = UIBackgroundTaskIdentifier.invalid
+        task = app.beginBackgroundTask(withName: name) {
+            app.endBackgroundTask(task)
+            task = .invalid
+        }
+        defer { if task != .invalid { app.endBackgroundTask(task) } }
+        return await work()
     }
 
     /// A message to the watch app while it's up, else queued for the next time it is.
@@ -243,7 +250,9 @@ final class WatchRelay: NSObject {
         let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
         if await AssetInventory.status(forModules: [transcriber]) != .installed {
             if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-                Task.detached { try await request.downloadAndInstall() }
+                Task { @MainActor in
+                    await WatchRelay.shared.inBackground("speech model") { try? await request.downloadAndInstall() }
+                }
             }
             throw RunnerError(message: "Your iPhone is getting the speech model. Try again in a minute.")
         }
@@ -277,16 +286,16 @@ extension WatchRelay: WCSessionDelegate {
     }
 
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
-        Task { @MainActor in replyHandler(await self.answer(message)) }
+        Task { @MainActor in replyHandler(await self.inBackground("answer the watch") { await self.answer(message) }) }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
-        Task { @MainActor in _ = await self.answer(message) }
+        Task { @MainActor in _ = await self.inBackground("answer the watch") { await self.answer(message) } }
     }
 
     /// Queued on the watch while this phone was out of reach (a dictated request): its answer
     /// goes back the same way.
     nonisolated func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
-        Task { @MainActor in _ = await self.answer(userInfo) }
+        Task { @MainActor in _ = await self.inBackground("answer the watch") { await self.answer(userInfo) } }
     }
 }

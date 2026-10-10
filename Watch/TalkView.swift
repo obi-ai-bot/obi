@@ -8,6 +8,7 @@ import SwiftUI
 struct TalkView: View {
     @Environment(Watch.self) private var watch
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var recorder = Recorder()
     @State private var holding = false
 
@@ -47,7 +48,7 @@ struct TalkView: View {
                         // Pressed and released, wherever the finger goes: the mic follows the hold.
                         DragGesture(minimumDistance: 0)
                             .onChanged { _ in if !holding { holding = true; start() } }
-                            .onEnded { _ in holding = false; stop() }
+                            .onEnded { _ in release() }
                     )
                     .accessibilityLabel("Hold to talk")
                 Text(caption).font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -60,7 +61,11 @@ struct TalkView: View {
             } onSubmit: { watch.ask($0) }
             .disabled(watch.talk != .none)
         }
-        .onDisappear { if holding { holding = false; recorder.cancel(); watch.cancel() } }
+        // The permission is asked here, before any hold, so a hold starts the mic at once or not at all.
+        .task { await recorder.prepare() }
+        // A hold the gesture never ends (the screen left, the app went inactive) is a release.
+        .onChange(of: scenePhase) { if scenePhase != .active { release() } }
+        .onDisappear { release() }
     }
 
     private var caption: String {
@@ -80,16 +85,23 @@ struct TalkView: View {
         }
     }
 
+    /// Synchronous: nothing waits between the hold and the microphone, so a release always finds
+    /// the recorder it has to stop.
     private func start() {
         guard watch.talk == .none else { return }
-        watch.talk = .recording
-        Task {
-            do { try await recorder.start() }
-            catch {
-                recorder.problem = error.localizedDescription
-                watch.talk = .none
-            }
+        do {
+            try recorder.start()
+            watch.talk = .recording
+        } catch {
+            recorder.problem = error.localizedDescription
+            holding = false
         }
+    }
+
+    private func release() {
+        guard holding else { return }
+        holding = false
+        stop()
     }
 
     private func stop() {
@@ -115,13 +127,20 @@ final class Recorder {
 
     private(set) var seconds = 0
     var problem: String?
+    /// Whether the microphone may be used; nil until the user has answered.
+    private(set) var allowed: Bool?
     private var recorder: AVAudioRecorder?
     private var ticking: Task<Void, Never>?
     private let file = FileManager.default.temporaryDirectory.appending(path: "talk.m4a")
 
-    func start() async throws {
-        guard await AVAudioApplication.requestRecordPermission() else {
-            throw RunnerError(message: "Oby needs the microphone to hear you.")
+    /// Asks for the microphone, once, before any hold.
+    func prepare() async {
+        allowed = await AVAudioApplication.requestRecordPermission()
+    }
+
+    func start() throws {
+        guard allowed == true else {
+            throw RunnerError(message: allowed == nil ? "One moment: Oby is asking for the microphone." : "Oby needs the microphone to hear you. Allow it in Settings.")
         }
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.record, mode: .default)
