@@ -332,8 +332,8 @@ A job counts as done only when its check passes. Then the Lead reviews the diff 
 - **Codex:** commands live in AGENTS.md.
 - **Others:** not found.
 - **Open for Oby:**
-  - Proposal: read the CI workflow. The PR's own CI is the last check (5.3).
-  - Decide: must local tests pass before the PR opens, or is green CI on the PR enough?
+  - Decided 2026-10-10: tests are a hard gate twice: they must pass in the worktree before the PR opens, and CI must be green on the PR before the merge.
+  - Proposal: the Lead's review rejects a job that deleted, skipped or weakened tests to get green, and asks for a test with every change.
 
 ---
 
