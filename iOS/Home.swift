@@ -184,19 +184,27 @@ struct HomeView: View {
 
     @ViewBuilder private var sheet: some View {
         switch phone.talk {
-        case .plan(let draft):
-            PlanCard(draft: draft) { edit in
-                text = edit
-                phone.cancel()
-                typing = true
-            }
-            .presentationDetents([.medium, .large])
+        case .plan(let drafts) where drafts.count == 1:
+            ScrollView { PlanCard(draft: drafts[0], onEdit: edit) }
+                .background(Color.black)
+                .presentationDetents([.large])
+        case .plan(let drafts):
+            ScrollView { PlansCard(drafts: drafts, onEdit: edit) }
+                .background(Color.black)
+                .presentationDetents([.large])
         case .question(let said, let question):
             QuestionSheet(said: said, question: question)
                 .presentationDetents([.medium])
         default:
             EmptyView()
         }
+    }
+
+    /// Edit on a plan card: its words go back in the field.
+    private func edit(_ said: String) {
+        text = said
+        phone.cancel()
+        typing = true
     }
 }
 
@@ -219,6 +227,9 @@ struct JobRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(job.title).font(.subheadline.weight(.semibold)).lineLimit(1)
                 Text(job.line).font(.footnote).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+                if !job.extras.isEmpty {
+                    Text(job.extras).font(.caption).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+                }
             }
             Spacer(minLength: 8)
             StatusPill(status: job.status)
@@ -248,13 +259,17 @@ struct StatusPill: View {
     }
 }
 
-/// The plan, before anything runs: agent, account, repository and branch.
+/// The plan, before anything runs: agent, account, repository, branch, how it loops, and the
+/// stronger model when the work looks complex.
 struct PlanCard: View {
     @Environment(Phone.self) private var phone
     let draft: Draft
     let onEdit: (String) -> Void
     @State private var branch = ""
     @State private var accountID = ""
+    @State private var rounds = 1
+    @State private var check = ""
+    @State private var stronger = false
     @State private var sending = false
     @State private var problem: String?
 
@@ -266,6 +281,14 @@ struct PlanCard: View {
         branch.wholeMatch(of: /[A-Za-z0-9._\/-]{1,100}/) != nil && !branch.hasPrefix("-") && !branch.contains("..")
             && !branch.hasSuffix("/") && !branch.hasSuffix(".lock")
     }
+
+    /// One line of up to 200 characters, or empty for none.
+    private var validCheck: Bool {
+        let command = check.trimmingCharacters(in: .whitespaces)
+        return command.count <= 200 && !command.contains(where: \.isNewline)
+    }
+
+    private var ready: Bool { validBranch && validCheck && account != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -305,6 +328,25 @@ struct PlanCard: View {
                             .foregroundStyle(validBranch ? .white : .red)
                     }
                 }
+                GridRow {
+                    tile("Done when · a command that must pass") {
+                        TextField("Optional, like swift test", text: $check)
+                            .font(.subheadline.monospaced().weight(.semibold))
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .foregroundStyle(validCheck ? .white : .red)
+                    }
+                    .gridCellColumns(2)
+                }
+                GridRow {
+                    tile("Rounds") {
+                        Stepper(rounds == 1 ? "1, no loop" : "Up to \(rounds)", value: $rounds, in: 1...10)
+                    }
+                    .gridCellColumns(2)
+                }
+            }
+            if let model = draft.strongerModel(for: account?.agent ?? draft.job.agent) {
+                tile("This looks complex") { StrongerModel(model: model, plan: account?.label, on: $stronger) }
             }
             Label("Works in Oby's own copy of the repository. Nothing is pushed or posted.", systemImage: "checkmark.shield")
                 .font(.footnote).foregroundStyle(.white.opacity(0.6))
@@ -319,9 +361,9 @@ struct PlanCard: View {
                 Button(action: dispatch) {
                     Text(sending ? "Dispatching…" : "Dispatch").font(.headline).foregroundStyle(.black)
                         .frame(maxWidth: .infinity).frame(height: 48)
-                        .background(.white.opacity(validBranch && account != nil ? 1 : 0.4), in: Capsule())
+                        .background(.white.opacity(ready ? 1 : 0.4), in: Capsule())
                 }
-                .disabled(!validBranch || account == nil || sending)
+                .disabled(!ready || sending)
                 pill("Edit") { onEdit(draft.said) }
                 pill("Cancel") { phone.cancel() }
             }
@@ -332,41 +374,193 @@ struct PlanCard: View {
         .onAppear {
             branch = draft.job.branch
             accountID = draft.job.account
+            rounds = draft.job.rounds ?? 1
+            check = draft.job.check ?? ""
         }
     }
 
     private func dispatch() {
         var draft = draft
+        // Before the account changes the job's agent: the offer is for the routed tool.
+        let model = stronger ? draft.strongerModel(for: account?.agent ?? draft.job.agent) : nil
         draft.job.branch = branch
         if let account {
             draft.job.account = account.id
             draft.job.agent = account.agent
         }
+        draft.job.rounds = rounds
+        let command = check.trimmingCharacters(in: .whitespaces)
+        draft.job.check = command.isEmpty ? nil : command
+        draft.job.model = model
         sending = true
         Task {
             defer { sending = false }
             do { try await phone.dispatch(draft) } catch { problem = error.localizedDescription }
         }
     }
+}
 
-    private func tile(_ label: String, @ViewBuilder value: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption).foregroundStyle(.white.opacity(0.55))
-            value().font(.subheadline.weight(.semibold))
+/// Several jobs from one message: one row each, with its own account and stronger model, and
+/// Dispatch all. Each job keeps the plan's rounds and check.
+struct PlansCard: View {
+    @Environment(Phone.self) private var phone
+    let drafts: [Draft]
+    let onEdit: (String) -> Void
+    /// The account each draft goes to, by job id: the routed one unless the user picks another.
+    @State private var picked: [String: String] = [:]
+    /// The drafts whose stronger model is on, by job id.
+    @State private var stronger: Set<String> = []
+    @State private var sending = false
+    @State private var problem: String?
+
+    private var ready: Bool { drafts.allSatisfy { account(of: $0) != nil } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("You said “\(drafts[0].said)”").font(.footnote).foregroundStyle(.white.opacity(0.6)).lineLimit(2)
+                Text("Oby will start \(drafts.count) jobs.").font(.title3.weight(.semibold))
+            }
+            ForEach(drafts, id: \.job.id) { row($0) }
+            Label("Each works in Oby's own copy of its repository. Nothing is pushed or posted.", systemImage: "checkmark.shield")
+                .font(.footnote).foregroundStyle(.white.opacity(0.6))
+            if drafts.contains(where: \.guessed) {
+                Label("Oby's brain didn't answer, so this plan is a guess. Check it before you dispatch.", systemImage: "exclamationmark.triangle")
+                    .font(.footnote).foregroundStyle(.orange)
+            }
+            if let problem {
+                Text(problem).font(.footnote).foregroundStyle(.red)
+            }
+            HStack(spacing: 10) {
+                Button(action: dispatchAll) {
+                    Text(sending ? "Dispatching…" : "Dispatch all \(drafts.count)").font(.headline).foregroundStyle(.black)
+                        .frame(maxWidth: .infinity).frame(height: 48)
+                        .background(.white.opacity(ready ? 1 : 0.4), in: Capsule())
+                }
+                .disabled(!ready || sending)
+                pill("Edit") { onEdit(drafts[0].said) }
+                pill("Cancel") { phone.cancel() }
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 12).padding(.vertical, 10)
+        .padding(20)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Color.black)
+    }
+
+    private func row(_ draft: Draft) -> some View {
+        let account = account(of: draft)
+        // Sent already: Dispatch all failed on a later one and will send only the rest.
+        let sent = phone.jobs.contains { $0.id == draft.job.id }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(draft.job.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Text(details(draft)).font(.caption.monospaced()).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                if sent {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityLabel("Sent")
+                }
+            }
+            Menu {
+                ForEach(phone.signedIn) { account in
+                    Button(account.title) { picked[draft.job.id] = account.id }
+                }
+            } label: {
+                Label(account?.title ?? "No account", systemImage: "person.crop.circle")
+                    .font(.footnote.weight(.semibold)).lineLimit(1)
+            }
+            .disabled(phone.signedIn.count < 2 || sent)
+            if let model = draft.strongerModel(for: account?.agent ?? draft.job.agent) {
+                StrongerModel(model: model, plan: account?.label, on: Binding {
+                    stronger.contains(draft.job.id)
+                } set: { on in
+                    if on { stronger.insert(draft.job.id) } else { stronger.remove(draft.job.id) }
+                })
+                .disabled(sent)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12)
         .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    private func pill(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title).font(.headline)
-                .padding(.horizontal, 18).frame(height: 48)
-                .background(.white.opacity(0.1), in: Capsule())
-        }
-        .buttonStyle(.plain)
+    private func account(of draft: Draft) -> Account? {
+        phone.signedIn.first { $0.id == picked[draft.job.id] } ?? phone.signedIn.first { $0.id == draft.job.account }
     }
+
+    /// "deskree-inc/oby · oby/fix-42 · until swift test passes"
+    private func details(_ draft: Draft) -> String {
+        var parts = [draft.job.repo, draft.job.branch]
+        if let check = draft.job.check {
+            parts.append("until \(check) passes")
+        } else if let rounds = draft.job.rounds, rounds > 1 {
+            parts.append("up to \(rounds) rounds")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func dispatchAll() {
+        let edited = drafts.map { draft in
+            var edited = draft
+            let account = account(of: draft)
+            edited.job.model = stronger.contains(draft.job.id) ? draft.strongerModel(for: account?.agent ?? draft.job.agent) : nil
+            if let account {
+                edited.job.account = account.id
+                edited.job.agent = account.agent
+            }
+            return edited
+        }
+        sending = true
+        Task {
+            defer { sending = false }
+            do {
+                try await phone.dispatch(all: edited)
+                problem = nil
+            } catch {
+                problem = error.localizedDescription
+            }
+        }
+    }
+}
+
+/// The offer for complex work: the stronger model, off until the user turns it on. Astra on a
+/// ChatGPT Plus plan gets a warning, because it uses that plan's limits fast.
+struct StrongerModel: View {
+    let model: String
+    /// The account's label, like "Plus · name@example.com".
+    let plan: String?
+    @Binding var on: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Use \(ModelChoice.name(model))", isOn: $on)
+                .font(.subheadline.weight(.semibold))
+            if model == "gpt-6-astra", plan?.hasPrefix("Plus") == true {
+                Label("Astra uses a Plus plan's limits fast.", systemImage: "exclamationmark.triangle")
+                    .font(.footnote).foregroundStyle(.orange)
+            }
+        }
+    }
+}
+
+/// A plan card's box: a small label over its value.
+private func tile(_ label: String, @ViewBuilder value: () -> some View) -> some View {
+    VStack(alignment: .leading, spacing: 4) {
+        Text(label).font(.caption).foregroundStyle(.white.opacity(0.55))
+        value().font(.subheadline.weight(.semibold))
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.horizontal, 12).padding(.vertical, 10)
+    .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+}
+
+private func pill(_ title: String, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+        Text(title).font(.headline)
+            .padding(.horizontal, 18).frame(height: 48)
+            .background(.white.opacity(0.1), in: Capsule())
+    }
+    .buttonStyle(.plain)
 }
 
 /// The brain needs one more thing: pick an option, or close and type it.
