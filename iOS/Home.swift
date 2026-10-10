@@ -36,6 +36,7 @@ struct HomeView: View {
                 .animation(.spring(duration: 0.8, bounce: 0.35), value: centered)
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+            .refreshable { await phone.reload() }
             .scrollDismissesKeyboard(.interactively)
             .background(Color.black)
             .navigationDestination(for: String.self) { JobScreen(id: $0) }
