@@ -14,15 +14,19 @@ final class API {
     let devices: Devices
     /// Push to the iPhone (Live Activity and alerts), or nil when this runner has none.
     let push: Push?
+    /// When Clear done was last pressed, on any app (Runner/Cleared.swift).
+    let cleared: Cleared
     /// Everyone following `GET /v1/events`.
     private var streams: [UUID: AsyncStream<String>.Continuation] = [:]
     /// The accounts as last sent, so an unchanged list isn't sent again.
     private var sentAccounts = Data()
 
-    init(desk: Desk, devices: Devices, push: Push? = nil) {
+    /// Without `cleared` (the tests), the clear time lives in memory only.
+    init(desk: Desk, devices: Devices, push: Push? = nil, cleared: Cleared? = nil) {
         self.desk = desk
         self.devices = devices
         self.push = push
+        self.cleared = cleared ?? Cleared(file: nil)
         sentAccounts = (try? Self.encode(accounts)) ?? Data()
         desk.onJobChange = { [weak self] job in
             self?.send("job", JobJSON(job: job))
@@ -50,6 +54,7 @@ final class API {
         router.post("v1/jobs/:id/publish") { request, context in
             try await self.publish(context.parameters.require("id"), try await Self.decode(Approval.self, from: request))
         }
+        router.post("v1/clear") { _, _ in try await self.clear() }
         router.get("v1/events") { _, _ in await self.events() }
         router.post("v1/devices") { request, _ in try await self.register(try await Self.decode(NewDevice.self, from: request)) }
         router.post("v1/activities") { request, _ in try await self.activity(try await Self.decode(Push.Token.self, from: request)) }
@@ -64,7 +69,21 @@ final class API {
 
     func status() -> Response {
         Self.json(Status(runner: .init(version: Self.version, host: ProcessInfo.processInfo.hostName),
-                         accounts: accounts, models: .current))
+                         accounts: accounts, models: .current, clearedAt: cleared.at))
+    }
+
+    /// Clear done, on the iPhone or the Mac: the runner records now, answers it, and tells every
+    /// app following events, so the others hide the same finished jobs at once.
+    func clear() throws -> Response {
+        let time: Date
+        do {
+            time = try cleared.clear()
+        } catch {
+            throw APIError(.internalServerError, "The runner couldn't save the clear: \(error.localizedDescription)")
+        }
+        let answer = ClearedJSON(clearedAt: time)
+        send("clear", answer)
+        return Self.json(answer)
     }
 
     func plan(_ request: PlanRequest) async -> Response {
@@ -180,17 +199,24 @@ final class API {
     }
 
     func events() -> Response {
+        let stream = follow()
+        return Response(status: .ok, headers: [.contentType: "text/event-stream", .cacheControl: "no-cache"],
+                        body: ResponseBody { writer in
+                            for await event in stream { try await writer.write(ByteBuffer(string: event)) }
+                            try await writer.finish(nil)
+                        })
+    }
+
+    /// Everything the apps are told from now on, as Server-Sent Events text, until the stream is
+    /// dropped. `GET /v1/events` writes one of these out; the tests read one directly.
+    func follow() -> AsyncStream<String> {
         let (stream, continuation) = AsyncStream.makeStream(of: String.self, bufferingPolicy: .bufferingNewest(256))
         let id = UUID()
         streams[id] = continuation
         continuation.onTermination = { _ in Task { @MainActor in self.streams[id] = nil } }
         // Something right away, so proxies pass the headers on.
         continuation.yield(": ping\n\n")
-        return Response(status: .ok, headers: [.contentType: "text/event-stream", .cacheControl: "no-cache"],
-                        body: ResponseBody { writer in
-                            for await event in stream { try await writer.write(ByteBuffer(string: event)) }
-                            try await writer.finish(nil)
-                        })
+        return stream
     }
 
     /// Keeps event streams open, and finds the ones whose app went away.
@@ -351,6 +377,23 @@ struct Status: Encodable {
     var runner: Runner
     var accounts: [AccountJSON]
     var models: Models
+    /// When Clear done was last pressed, or null: the API promises the key either way.
+    var clearedAt: Date?
+
+    private enum Keys: String, CodingKey { case runner, accounts, models, clearedAt }
+
+    func encode(to encoder: any Encoder) throws {
+        var keys = encoder.container(keyedBy: Keys.self)
+        try keys.encode(runner, forKey: .runner)
+        try keys.encode(accounts, forKey: .accounts)
+        try keys.encode(models, forKey: .models)
+        try keys.encode(clearedAt, forKey: .clearedAt)
+    }
+}
+
+/// What `POST /v1/clear` answers and the `clear` event carries.
+struct ClearedJSON: Encodable {
+    var clearedAt: Date
 }
 
 /// Each tool's model and effort, as Settings › Models keeps them.

@@ -164,8 +164,21 @@ What the plan card shows before anything runs:
 ```json
 {"runner": {"version": "0.2.0", "host": "tetrix-lab"},
  "accounts": [ …Account ],
- "models": {"claude": {"model": "claude-opus-5-5", "effort": "xhigh"}, "codex": {"model": "gpt-6-sol", "effort": "high"}}}
+ "models": {"claude": {"model": "claude-opus-5-5", "effort": "xhigh"}, "codex": {"model": "gpt-6-sol", "effort": "high"}},
+ "clearedAt": "2026-10-10T08:12:00Z"}
 ```
+
+`clearedAt` is when Clear done was last pressed, on any app (`POST /v1/clear`), or null when it never was. Every app hides the jobs that finished at that second or before (`finished` not after `clearedAt`); running jobs, and finished ones that ran again since, stay. Older runners don't send the key.
+
+### `POST /v1/clear`
+
+Clear done, on the iPhone or the Mac: the runner records now, on its own clock, as the last clear, and answers it. It keeps every job; only the apps' lists change, and the same way on each, so clearing on one clears on both. No body.
+
+```json
+{"clearedAt": "2026-10-10T08:12:00Z"}
+```
+
+Every app following `GET /v1/events` gets a `clear` event with the same body, and `GET /v1/status` says the time from then on. The clock never goes back: a clear earlier than the last one keeps the later time.
 
 ### `POST /v1/plans`
 
@@ -259,10 +272,14 @@ data: { …Job }
 
 event: accounts
 data: [ …Account ]
+
+event: clear
+data: {"clearedAt": "2026-10-10T08:12:00Z"}
 ```
 
 - A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`, `dismissed`, a move to another account. The app replaces the job with that `id`.
 - `accounts` comes when sign-ins, usage, reset times, running counts or `fullUntil` change.
+- `clear` comes when Clear done is pressed on any app (`POST /v1/clear`): hide the jobs that finished by `clearedAt`.
 - A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop, then refetch `GET /v1/jobs` to catch up.
 
 ### `GET /v1/jobs/{id}/publish`

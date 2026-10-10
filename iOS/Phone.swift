@@ -49,6 +49,9 @@ final class Phone {
     @ObservationIgnored private var syncing: Task<Void, Never>?
     private(set) var accounts: [Account] = []
     private(set) var models: ModelSettings?
+    /// When Clear done was last pressed, here or on the Mac (the runner's clock), or nil: Home
+    /// hides the jobs that finished by then. The runner keeps them all.
+    private(set) var clearedAt: Date?
     private var loop: Task<Void, Never>?
     /// The job a notification asked to open; Home opens it.
     var opening: String?
@@ -64,8 +67,9 @@ final class Phone {
     var active: [Job] { jobs.filter(\.isActive) }
     var signedIn: [Account] { accounts.filter(\.signedIn) }
 
-    /// Running jobs first, then the rest, newest first.
-    var visibleJobs: [Job] { active + jobs.filter { !$0.isActive } }
+    /// The jobs Home lists: all but those that finished by the last Clear done, newest first. Home
+    /// puts them in their groups (JobList.groups), as the Mac's island does.
+    var visibleJobs: [Job] { jobs.filter { $0.isActive || JobList.shows(finished: $0.finished, clearedAt: clearedAt) } }
 
     // MARK: Staying live
 
@@ -81,6 +85,7 @@ final class Phone {
                     host = status.runner.host
                     accounts = status.accounts
                     models = status.models
+                    clearedAt = status.clearedAt
                     jobs = try await runner.jobs()
                     loaded = true
                     // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
@@ -136,6 +141,8 @@ final class Phone {
             if let index = jobs.firstIndex(where: { $0.id == job.id }) { jobs[index] = job } else { jobs.insert(job, at: 0) }
         case .accounts(let accounts):
             self.accounts = accounts
+        case .cleared(let date):
+            clearedAt = date
         }
     }
 
@@ -205,6 +212,12 @@ final class Phone {
     /// Lets go of a job that needs you; its alert clears with the runner's answer.
     func dismiss(_ id: String) async throws {
         apply(.job(try await runner.dismiss(id)))
+    }
+
+    /// Clear done: the runner records the time, and Home here and the Mac's island hide the jobs
+    /// that finished by then.
+    func clear() async throws {
+        clearedAt = try await runner.clear()
     }
 
     /// Tells the job's agent something; the runner answers with the job, running again.
