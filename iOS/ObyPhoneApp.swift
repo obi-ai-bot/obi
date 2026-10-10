@@ -14,8 +14,6 @@ struct ObyPhoneApp: App {
         WindowGroup {
             HomeView(character: character)
                 .environment(phone)
-                .preferredColorScheme(.dark)
-                .tint(.white)
                 .onChange(of: scenePhase, initial: true) { _, phase in
                     // In the background: no connection and no drawing, so no battery spent.
                     let active = phase == .active

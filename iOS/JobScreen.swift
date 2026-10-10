@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// One job in full: what it's doing or how it ended, where it lives, and Publish.
+/// The runner supplies the pipeline; the phone presents it and sends the user's next words.
 struct JobScreen: View {
     @Environment(Phone.self) private var phone
     @Environment(\.openURL) private var openURL
@@ -12,67 +12,187 @@ struct JobScreen: View {
     @State private var note = ""
     @State private var telling = false
     @State private var noteProblem: String?
+    @State private var requestExpanded = false
 
     private var job: Job? { phone.jobs.first { $0.id == id } }
 
     var body: some View {
         ScrollView {
             if let job {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(job.title).font(.title2.weight(.semibold))
-                        HStack(spacing: 8) {
-                            StatusPill(job: job)
-                            Text("\(job.agentName) · \(phone.accounts.first { $0.id == job.account }?.name ?? job.account)")
-                                .font(.footnote).foregroundStyle(.white.opacity(0.6))
+                VStack(alignment: .leading, spacing: 24) {
+                    header(job)
+                    if let pipeline = job.pipeline {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(pipeline.label).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(pipeline.stages) { stage in
+                                    StageRow(stage: stage, last: stage.id == pipeline.stages.last?.id)
+                                }
+                            }
                         }
-                        if !job.extras.isEmpty {
-                            Text(job.extras).font(.footnote).foregroundStyle(.white.opacity(0.6))
-                        }
-                        // The runner publishes a job that ends done with commits by itself: it says how that went.
-                        if job.canPublish, let reason = job.publishError {
-                            Label(reason, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.orange)
-                        } else if job.published != nil, !job.canPublish {
-                            Label("Published", systemImage: "checkmark.seal").font(.footnote).foregroundStyle(.green)
-                        }
-                    }
-                    if job.isActive, !job.step.isEmpty {
+                    } else if !job.step.isEmpty {
                         Label(job.step, systemImage: "gearshape.2").font(.subheadline)
                     }
-                    if !job.summary.isEmpty {
-                        Text(job.summary).font(.callout).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(14)
-                            .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    result(job)
+                    DisclosureGroup("What you asked", isExpanded: $requestExpanded) {
+                        Text(job.request).font(.body).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
                     }
-                    if let notes = job.notes, !notes.isEmpty { told(notes) }
-                    // A finished job with a session picks it up again; one that never started can't.
-                    if job.status == .running || (!job.isActive && job.session != nil) { talk(job) }
                     details(job)
-                    if let problem {
-                        Text(problem).font(.footnote).foregroundStyle(.red)
+                    if let notes = job.notes, !notes.isEmpty {
+                        DisclosureGroup("You told the agent (\(notes.count))") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(notes.indices, id: \.self) { index in
+                                    Label(notes[index], systemImage: "text.bubble").font(.callout)
+                                }
+                            }.padding(.top, 8)
+                        }
                     }
-                    actions(job)
+                    if job.isActive {
+                        Button("Stop job", role: .destructive) {
+                            Task { await run { try await phone.stop(job.id) } }
+                        }.disabled(busy)
+                    }
+                    if let problem { Text(problem).font(.footnote).foregroundStyle(.red) }
                 }
-                .padding(16)
+                .padding(20)
             } else if phone.loaded {
                 ContentUnavailableView("This job isn't on the runner any more.", systemImage: "questionmark.folder")
             } else {
                 ProgressView().padding(.top, 80)
             }
         }
-        .background(Color.black)
+        .background(Color(uiColor: .systemGroupedBackground))
+        .safeAreaInset(edge: .bottom) {
+            if let job, job.status == .running || (!job.isActive && job.session != nil) {
+                composer(job).padding(.horizontal).padding(.vertical, 10).background(.bar)
+            }
+        }
         .navigationBarTitleDisplayMode(.inline)
         .onChange(of: publishAsked, initial: true) { publishFromNotification() }
     }
 
-    /// The notification's Publish was tapped for this job, and Oby is in front with the job loaded.
-    private var publishAsked: Bool {
-        phone.publishing == id && phone.loaded && scenePhase == .active
+    private func header(_ job: Job) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(job.title).font(.title2.weight(.semibold)).lineLimit(2)
+                .accessibilityAddTraits(.isHeader)
+            ViewThatFits(in: .horizontal) {
+                HStack { StatusPill(job: job); elapsed(job) }
+                VStack(alignment: .leading, spacing: 8) { StatusPill(job: job); elapsed(job) }
+            }
+            Text("\(job.agentName) · \(phone.accounts.first { $0.id == job.account }?.name ?? job.account)")
+                .font(.subheadline).foregroundStyle(.secondary)
+        }
     }
 
-    /// Shows the action and asks for Face ID straight away, as tapping Publish… then Publish with
-    /// Face ID would. Already published (on the Mac, say): the screen shows the pull request.
+    private func elapsed(_ job: Job) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let seconds = max(0, Int((job.finished ?? context.date).timeIntervalSince(job.started ?? job.created)))
+            let time = seconds >= 3600 ? "\(seconds / 3600)h \(seconds % 3600 / 60)m" : "\(seconds / 60)m \(seconds % 60)s"
+            Text("\(time) elapsed").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private func result(_ job: Job) -> some View {
+        if !job.summary.isEmpty || job.commits != nil || job.published != nil || job.canPublish {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Result").font(.headline).accessibilityAddTraits(.isHeader)
+                if !job.summary.isEmpty { Text(job.summary).font(.callout).textSelection(.enabled) }
+                if let commits = job.commits {
+                    Label("\(commits) \(commits == 1 ? "commit" : "commits")", systemImage: "point.3.connected.trianglepath.dotted")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                if let url = job.published.flatMap(URL.init(string:)) {
+                    Link(destination: url) { Label("Open pull request", systemImage: "arrow.up.right.square") }
+                }
+                if let error = job.pullRequestError {
+                    Label(error, systemImage: "arrow.clockwise").font(.footnote).foregroundStyle(.secondary)
+                }
+                if job.canPublish { publishActions(job) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(16)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        }
+    }
+
+    private func details(_ job: Job) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Details").font(.headline)
+            detail("Repository", job.repo)
+            detail("Branch", job.branch)
+            detail("Base", job.base ?? "Repository default")
+            detail("Model", job.model.map(ModelChoice.name) ?? "Account default")
+        }
+    }
+
+    private func detail(_ name: String, _ value: String) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(name).foregroundStyle(.secondary)
+                Spacer(minLength: 16)
+                Text(value).fixedSize(horizontal: true, vertical: false)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name).foregroundStyle(.secondary)
+                Text(value)
+            }
+        }
+        .font(.footnote).textSelection(.enabled)
+    }
+
+    private func composer(_ job: Job) -> some View {
+        let text = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField("Tell the agent…", text: $note, axis: .vertical)
+                    .lineLimit(1...5).padding(12)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+                Button { send(text, to: job.id) } label: {
+                    if telling { ProgressView().frame(minWidth: 44, minHeight: 44) }
+                    else { Image(systemName: "arrow.up.circle.fill").font(.title).frame(minWidth: 44, minHeight: 44) }
+                }
+                .disabled(!(1...2000).contains(text.count) || telling)
+                .accessibilityLabel("Send to the agent")
+            }
+            if text.count > 2000 { Text("Keep your message under 2,000 characters.").font(.footnote).foregroundStyle(.red) }
+            if let noteProblem { Text(noteProblem).font(.footnote).foregroundStyle(.red) }
+        }
+    }
+
+    private func send(_ text: String, to id: String) {
+        telling = true
+        Task {
+            defer { telling = false }
+            do {
+                try await phone.tell(id, text)
+                note = ""
+                noteProblem = nil
+            } catch { noteProblem = error.localizedDescription }
+        }
+    }
+
+    @ViewBuilder private func publishActions(_ job: Job) -> some View {
+        if let action {
+            Text(action).font(.subheadline)
+            Button(busy ? "Publishing…" : "Publish with Face ID", systemImage: "faceid") {
+                Task {
+                    await run {
+                        let url = try await phone.publish(job.id, action: action)
+                        self.action = nil
+                        openURL(url)
+                    }
+                }
+            }.buttonStyle(.borderedProminent).disabled(busy)
+            Button("Not now") { self.action = nil }.disabled(busy)
+        } else {
+            Button(job.published == nil ? "Publish…" : "Publish new commits…") {
+                Task { await run { action = try await phone.publishAction(job.id) } }
+            }.buttonStyle(.borderedProminent).disabled(busy)
+        }
+    }
+
+    private var publishAsked: Bool { phone.publishing == id && phone.loaded && scenePhase == .active }
+
     private func publishFromNotification() {
         guard publishAsked else { return }
         phone.publishing = nil
@@ -88,125 +208,64 @@ struct JobScreen: View {
         }
     }
 
-    /// What the user told the agent, oldest first.
-    private func told(_ notes: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("You told the agent").font(.footnote).foregroundStyle(.white.opacity(0.55))
-            ForEach(notes.indices, id: \.self) { index in
-                Label(notes[index], systemImage: "text.bubble").font(.footnote).lineLimit(3)
-            }
-        }
-    }
-
-    /// One message for the agent, and why it didn't go if it didn't.
-    private func talk(_ job: Job) -> some View {
-        let text = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        let ready = (1...2000).contains(text.count) && !telling
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                TextField("Tell the agent…", text: $note, axis: .vertical)
-                    .lineLimit(1...5)
-                Button { send(text, to: job.id) } label: {
-                    Image(systemName: "arrow.up")
-                        .font(.body.weight(.bold))
-                        .foregroundStyle(.black)
-                        .frame(width: 34, height: 34)
-                        .background(.white.opacity(ready ? 1 : 0.4), in: Circle())
-                }
-                .disabled(!ready)
-                .accessibilityLabel("Send to the agent")
-            }
-            .padding(.leading, 16).padding(.trailing, 7).padding(.vertical, 7)
-            .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-            if let noteProblem {
-                Text(noteProblem).font(.footnote).foregroundStyle(.red)
-            }
-        }
-    }
-
-    private func send(_ text: String, to id: String) {
-        telling = true
-        Task {
-            defer { telling = false }
-            do {
-                try await phone.tell(id, text)
-                note = ""
-                noteProblem = nil
-            } catch {
-                noteProblem = error.localizedDescription
-            }
-        }
-    }
-
-    private func details(_ job: Job) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            row("Repository", job.repo)
-            row("Branch", job.branch, mono: true)
-            if let base = job.base { row("Started from", base, mono: true) }
-            if let commits = job.commits { row("Commits", commits == 0 ? "None" : "\(commits)") }
-            Text("You asked: \(job.request)").font(.footnote).foregroundStyle(.white.opacity(0.55))
-        }
-    }
-
-    private func row(_ label: String, _ value: String, mono: Bool = false) -> some View {
-        HStack {
-            Text(label).font(.footnote).foregroundStyle(.white.opacity(0.55))
-            Spacer()
-            Text(value).font(mono ? .footnote.monospaced() : .footnote).lineLimit(1)
-        }
-    }
-
-    @ViewBuilder private func actions(_ job: Job) -> some View {
-        if job.isActive {
-            wide("Stop", filled: false) { await run { try await phone.stop(job.id) } }
-        }
-        if let link = job.published.flatMap(URL.init(string:)) {
-            wide("Open the pull request", filled: !job.canPublish) { openURL(link) }
-        }
-        // The runner's own publish failed: before the first publish, or with later rounds' commits.
-        if job.canPublish {
-            if let action {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(action).font(.subheadline.weight(.medium))
-                    wide(busy ? "Publishing…" : "Publish with Face ID", filled: true, icon: "faceid") {
-                        await run {
-                            let url = try await phone.publish(job.id, action: action)
-                            self.action = nil
-                            openURL(url)
-                        }
-                    }
-                    wide("Not now", filled: false) { self.action = nil }
-                }
-                .padding(14)
-                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            } else {
-                wide(job.published == nil ? "Publish…" : "Publish the new commits…", filled: true) {
-                    await run { action = try await phone.publishAction(job.id) }
-                }
-            }
-        }
-    }
-
-    private func wide(_ title: String, filled: Bool, icon: String? = nil, perform: @escaping () async -> Void) -> some View {
-        Button { Task { await perform() } } label: {
-            Label { Text(title) } icon: { if let icon { Image(systemName: icon) } }
-                .font(.headline)
-                .foregroundStyle(filled ? .black : .white)
-                .frame(maxWidth: .infinity).frame(height: 48)
-                .background(filled ? AnyShapeStyle(.white) : AnyShapeStyle(.white.opacity(0.1)), in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .disabled(busy)
-    }
-
     private func run(_ work: () async throws -> Void) async {
         busy = true
         defer { busy = false }
-        do {
-            try await work()
-            problem = nil
-        } catch {
-            problem = error.localizedDescription
+        do { try await work(); problem = nil }
+        catch { problem = error.localizedDescription }
+    }
+}
+
+private struct StageRow: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ScaledMetric(relativeTo: .body) private var markerSize = 24
+    let stage: JobStage
+    let last: Bool
+
+    private var color: Color {
+        switch stage.state {
+        case .done: .green
+        case .current: .accentColor
+        case .failed: .red
+        case .upcoming, .skipped: .secondary
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(spacing: 4) {
+                marker.frame(width: markerSize, height: markerSize)
+                if !last { Rectangle().fill(Color.secondary.opacity(0.25)).frame(width: 2).frame(maxHeight: .infinity) }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(stage.title).font(.headline)
+                    if stage.state == .skipped { Text("Skipped").font(.caption) }
+                }
+                if let detail = stage.detail { Text(detail).font(.subheadline).foregroundStyle(.secondary) }
+                if let reason = stage.reason { Text(reason).font(.subheadline).foregroundStyle(.red) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, last ? 0 : 20)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .foregroundStyle(stage.state == .upcoming || stage.state == .skipped ? Color.secondary : Color.primary)
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(stage.state.rawValue.capitalized)
+    }
+
+    @ViewBuilder private var marker: some View {
+        if stage.state == .current && !reduceMotion {
+            ProgressView().tint(color).accessibilityHidden(true)
+        } else {
+            let symbol = switch stage.state {
+            case .done: "checkmark.circle.fill"
+            case .current: "circle.inset.filled"
+            case .upcoming: "circle"
+            case .failed: "exclamationmark.circle.fill"
+            case .skipped: "minus.circle"
+            }
+            Image(systemName: symbol).font(.body).foregroundStyle(color).accessibilityHidden(true)
         }
     }
 }

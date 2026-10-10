@@ -40,6 +40,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var check: String?
     var model: String?
     var notes: [String]?
+    /// Derived by Engine and sent by newer runners; old runners still decode.
+    var pipeline: JobPipeline?
+    var pullRequest: PullRequestStatus?
+    var pullRequestError: String?
 
     var isActive: Bool { status == .queued || status == .running }
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
@@ -48,7 +52,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// "Review oby #33", or the first line of what the user asked.
     var title: String {
         if let number = pr ?? issue { return "\(kind.capitalized) \(repoName) #\(number)" }
-        return request.split(separator: "\n").first.map(String.init) ?? request
+        return (task.isEmpty ? request : task).split(separator: "\n").first.map(String.init) ?? request
     }
 
     /// The one line a finished job is known by.
@@ -62,7 +66,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
 
     /// Commits not on its pull request yet: all of them before it's published, then later rounds' ones.
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
-    var canPublish: Bool { status == .done && unpublished > 0 }
+    var canPublish: Bool { status == .done && base != nil && unpublished > 0 }
 
     /// Waiting for Publish (the runner's own publish failed), failed or interrupted: what the runner sends an alert for.
     var needsYou: Bool { canPublish || status == .failed || status == .interrupted }
@@ -74,6 +78,31 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         if let model { parts.append(ModelChoice.name(model)) }
         return parts.joined(separator: " · ")
     }
+}
+
+/// Wire types only. Pipeline state is derived by Engine, never by the phone.
+nonisolated struct JobStage: Codable, Equatable, Identifiable, Sendable {
+    enum State: String, Codable, Sendable { case done, current, upcoming, failed, skipped }
+    var id: String
+    var title: String
+    var state: State
+    var detail: String?
+    var reason: String?
+}
+
+nonisolated struct JobPipeline: Codable, Equatable, Sendable {
+    var stages: [JobStage]
+    var number: Int
+    var total: Int
+    var label: String { "Stage \(number) of \(total)" }
+}
+
+nonisolated struct PullRequestStatus: Codable, Equatable, Sendable {
+    var state: String
+    var reviewDecision: String?
+    var base: String
+    var mergedAt: Date?
+    var checkedAt: Date
 }
 
 nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {

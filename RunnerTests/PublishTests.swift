@@ -71,6 +71,8 @@ struct PublishOnItsOwnTests {
         #expect(ended.status == .failed && ended.published == nil)
         #expect(ended.summary.hasPrefix("Not published: possible secret in Engine/Keys.swift:12 (AWS access key)."))
         #expect(Push.notice(for: ended) == .failed)
+        #expect(ended.phase == .publish)
+        #expect(ended.pipeline.stages.first { $0.id == .publish }?.state == .failed)
     }
 
     @Test func anyOtherFailureLeavesPublishByHand() async throws {
@@ -78,6 +80,7 @@ struct PublishOnItsOwnTests {
         #expect(ended.status == .done && ended.published == nil && ended.canPublish && ended.needsYou)
         #expect(ended.publishError == "Couldn't push oby/fix-75: the remote hung up.")
         #expect(Push.notice(for: ended) == .ready)
+        #expect(ended.pipeline.stages.first { $0.id == .publish }?.reason == ended.publishError)
     }
 
     @Test func noCommitsOrAFailureOpenNothing() async throws {
@@ -93,6 +96,8 @@ struct PublishOnItsOwnTests {
         let url = URL(string: "https://github.com/deskree-inc/oby/pull/80")!
         let first = try await run("again", commits: 1) { _ in url }
         #expect(first.pushed == 1)
+        desk.followed("again", published: url.absoluteString, pushed: 1,
+                      status: PullRequestStatus(state: .open, reviewDecision: .approved, base: "dev", checkedAt: .now), error: nil)
         desk.countCommits = { _, _ in 2 }
         try desk.message("again", "also update the docs")
         for _ in 0..<500 where desk.job("again")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
@@ -103,6 +108,8 @@ struct PublishOnItsOwnTests {
         #expect(published.jobs.count == 2 && published.jobs.last?.published == url.absoluteString)
         #expect(published.jobs.last?.summaries == ["fix(engine): open the PR by itself", "docs: say so in runner-api.md"])
         #expect(again.status == .done && again.pushed == 2 && !again.canPublish)
+        #expect(again.pullRequest == nil)
+        #expect(again.pipeline.stages.first { $0.id == .review }?.state == .current)
     }
 
     /// The runner restarts: jobs that ended before it started, published or not, stay as they

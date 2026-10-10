@@ -49,7 +49,9 @@ nonisolated enum Publish {
     /// secret scan (`Blocked` when it finds something), `approve` with the action, push, pull
     /// request. The first refusal stops it with one line the notch can show. Returns the pull
     /// request's URL. `approve` is `{ _ in }` when a job publishes by itself.
-    static func publish(_ job: Job, base: String, approve: (String) async throws -> Void) async throws -> URL {
+    static func publish(_ job: Job, base: String, progress: (PublishStep) -> Void = { _ in },
+                        approve: (String) async throws -> Void) async throws -> URL {
+        progress(.scan)
         let worktree = Workspace.worktree(job.id)
         let git = { (arguments: [String]) in try? await Shell.ok(["git", "-C", worktree.path] + arguments) }
         let defaultBranch = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).map { String($0.dropFirst("origin/".count)) }
@@ -71,7 +73,9 @@ nonisolated enum Publish {
         if !findings.isEmpty { throw Blocked(findings: findings) }
         try await approve(action(for: job, base: base))
         let subjects = await git(["log", "--reverse", "--no-merges", "--format=%s", "refs/remotes/origin/\(base)..\(head)"]) ?? ""
+        progress(.push)
         try await push(head, of: job, from: worktree)
+        progress(.pullRequest)
         return try await pullRequest(job, base: base, subjects: subjects.split(separator: "\n").map(String.init))
     }
 
@@ -320,5 +324,17 @@ nonisolated enum Publish {
     /// The last thing a tool said on stderr, skipping git's hints.
     private static func said(_ err: String) -> String {
         err.split(separator: "\n").last { !$0.hasPrefix("hint:") }.map(String.init) ?? "no reason given"
+    }
+}
+
+/// Persisted publishing detail, independent of the agent's free-form step.
+nonisolated enum PublishStep: String, Codable, Sendable {
+    case scan, push, pullRequest
+    var detail: String {
+        switch self {
+        case .scan: "Secret scan"
+        case .push: "Secret scan clean · pushing commits"
+        case .pullRequest: "Commits pushed · opening pull request"
+        }
     }
 }

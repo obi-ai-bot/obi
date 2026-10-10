@@ -377,10 +377,15 @@ struct Options: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError }
+
+    private enum Derived: String, CodingKey { case pipeline, title }
 
     func encode(to encoder: any Encoder) throws {
         try job.encode(to: encoder)
+        var derived = encoder.container(keyedBy: Derived.self)
+        try derived.encode(job.pipeline, forKey: .pipeline)
+        try derived.encode(job.shortTitle, forKey: .title)
         var nulls = encoder.container(keyedBy: Nullable.self)
         if job.base == nil { try nulls.encodeNil(forKey: .base) }
         if job.pr == nil { try nulls.encodeNil(forKey: .pr) }
@@ -399,6 +404,8 @@ struct JobJSON: Encodable {
         if job.check == nil { try nulls.encodeNil(forKey: .check) }
         if job.model == nil { try nulls.encodeNil(forKey: .model) }
         if job.notes == nil { try nulls.encodeNil(forKey: .notes) }
+        if job.pullRequest == nil { try nulls.encodeNil(forKey: .pullRequest) }
+        if job.pullRequestError == nil { try nulls.encodeNil(forKey: .pullRequestError) }
     }
 }
 

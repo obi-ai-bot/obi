@@ -80,6 +80,12 @@ final class Desk {
             store.save(jobs[index])
         }
         accounts.countRunning(jobs)
+        publishOnItsOwn = { [weak self] job, base in
+            try await Publish.publish(job, base: base, progress: { self?.publishing(job.id, $0) }) { _ in }
+        }
+        publishByHand = { [weak self] job, base, approve in
+            try await Publish.publish(job, base: base, progress: { self?.publishing(job.id, $0) }, approve: approve)
+        }
     }
 
     var active: [Job] { jobs.filter(\.isActive) }
@@ -221,6 +227,7 @@ final class Desk {
         talk = .none
         drafts.removeAll { $0.job.id == draft.job.id }
         var job = draft.job
+        job.phase = .prepare
         job.step = "Getting \(job.repoName) ready"
         jobs.insert(job, at: 0)
         store.save(job)
@@ -295,6 +302,8 @@ final class Desk {
         do {
             let url = try await publishByHand(job, base, approve)
             if var job = self.job(id) {
+                job.pullRequest = nil
+                job.pullRequestError = nil
                 job.published = url.absoluteString
                 job.publishError = nil
                 replace(job)
@@ -365,6 +374,8 @@ final class Desk {
     nonisolated static func resumed(_ job: Job, _ text: String) -> Job {
         var job = heard(job, text)
         job.status = .running
+        job.phase = .work
+        job.publishStep = nil
         job.finished = nil
         job.round = job.currentRound + 1
         if let rounds = job.rounds { job.rounds = rounds + 1 }
@@ -384,6 +395,7 @@ final class Desk {
     private func start(_ prepared: Job) {
         var job = prepared
         job.status = .running
+        job.phase = .work
         job.started = .now
         job.step = "Starting \(job.agentName)"
         replace(job)
@@ -468,8 +480,9 @@ final class Desk {
         guard var job = job(id), job.isActive, let agent = agents[id] else { return }
         var check: Rounds.Check?
         if let command = job.check, !failed {
+            job.phase = .check
             job.step = "Checking: \(command)"
-            replace(job, save: false)
+            replace(job)
             let worktree = Workspace.worktree(id)
             let result = try? await Shell.run(Agents.sandboxed(["sh", "-c", command], in: worktree, own: nil), in: worktree,
                                               env: Agents.overrides, timeout: 1200)
@@ -487,6 +500,7 @@ final class Desk {
             finish(id, status, text)
         case let .again(message):
             job.round = job.currentRound + 1
+            job.phase = .work
             job.step = "Round \(job.currentRound) of \(job.maxRounds)"
             replace(job)
             agent.send(message)
@@ -522,8 +536,10 @@ final class Desk {
                 // Still waiting for Publish by hand: why its own publish failed still holds.
                 return end(id, status, summary, commits: commits, made: made, publishError: ended.canPublish ? ended.publishError : nil)
             }
+            running.phase = .publish
+            running.publishStep = .scan
             running.step = "Publishing"
-            replace(running, save: false)
+            replace(running)
             do {
                 let url = try await publishOnItsOwn(ended, base)
                 end(id, status, summary, commits: commits, made: made, published: url)
@@ -548,14 +564,21 @@ final class Desk {
             if let published {
                 job.commits = commits ?? job.commits
                 job.published = published.absoluteString
+                job.pullRequest = nil
+                job.pullRequestError = nil
                 replace(job)
             }
             return
         }
         (job.status, job.summary) = Job.ending(job, status, summary, made: made)
+        if job.status == .failed && status == .done { job.phase = .work }
         job.commits = commits
         // After commits, so it counts them as pushed.
-        if let published { job.published = published.absoluteString }
+        if let published {
+            job.pullRequest = nil
+            job.pullRequestError = nil
+            job.published = published.absoluteString
+        }
         job.publishError = publishError
         job.step = ""
         job.finished = .now
@@ -565,6 +588,33 @@ final class Desk {
         pickedUp.remove(id)
         ending.remove(id)
         onFinish(job)
+    }
+
+    private func publishing(_ id: String, _ step: PublishStep) {
+        guard var job = job(id) else { return }
+        job.phase = .publish
+        job.publishStep = step
+        job.publishError = nil
+        replace(job)
+    }
+
+    /// Includes older published jobs beyond the UI's recent 50. Live jobs win over saved steps.
+    var pullRequestsToFollow: [Job] {
+        var all = Dictionary(uniqueKeysWithValues: store.recent(-1).map { ($0.id, $0) })
+        for job in jobs { all[job.id] = job }
+        return all.values.filter {
+            $0.published != nil && ($0.pullRequest == nil || $0.pullRequest?.state == .open)
+        }.sorted { $0.id < $1.id }
+    }
+
+    /// Apply only the observation to the latest job: it may have resumed while gh was running.
+    func followed(_ id: String, published: String, pushed: Int?, status: PullRequestStatus?, error: String?) {
+        guard var latest = job(id) ?? store.recent(-1).first(where: { $0.id == id }),
+              latest.published == published, latest.pushed == pushed else { return }
+        if let status { latest.pullRequest = status }
+        latest.pullRequestError = error
+        if job(id) != nil { replace(latest) }
+        else { store.save(latest); onJobChange(latest) }
     }
 
     private func replace(_ job: Job, save: Bool = true) {
