@@ -41,7 +41,7 @@ Put the owner's Tailscale login in place of `you@example.com` (`tailscale status
 | Variable | What it is |
 | --- | --- |
 | `OBY_OWNER` | The owner's Tailscale login. Required. |
-| `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs), `accounts.json`, `devices.json` (the phones that may approve publishing; to add one, `touch $OBY_HOME/pairing` and open the app within 10 minutes), `apns/` (the APNs key and the phones' Live Activity tokens), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
+| `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs, and the brain's latest 200 turns), `accounts.json`, `devices.json` (the phones that may approve publishing; to add one, `touch $OBY_HOME/pairing` and open the app within 10 minutes), `apns/` (the APNs key and the phones' Live Activity tokens), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
 | `OBY_PORT` | The port on `127.0.0.1`. 7777 by default. |
 
 The models and efforts the app picks in Settings › Models are kept in `~/.config/oby-runner.plist`.
@@ -79,7 +79,7 @@ On `tetrix-lab`, port 443 belongs to the Tetrix stack, so the runner is on 8443:
 journalctl --user -u oby-runner -f
 ```
 
-The log lists the registered phones at startup. Stopping the service ends running agents, and their jobs show as interrupted.
+The log lists the registered phones at startup, and every turn of the brain: the words the user typed, the plan it made (or the rules' plan when it didn't answer), and any plan Swift refused, with why. Stopping the service ends running agents, and their jobs show as interrupted.
 
 ## Run it by hand
 

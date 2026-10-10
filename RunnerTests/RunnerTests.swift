@@ -486,8 +486,8 @@ struct SandboxTests {
         #expect(Agents.sandboxed(["sh", "-c", "swift test"], in: nil, own: nil, bubblewrap: false) == ["sh", "-c", "swift test"])
     }
 
-    /// Where there's bwrap (the runner's `swift test` on Linux), home really shows only that list.
-    @Test(.enabled(if: Agents.bubblewrap && FileManager.default.isExecutableFile(atPath: "/usr/bin/bwrap")))
+    /// Where bwrap runs (the runner's `swift test` on Linux, outside a job), home really shows only that list.
+    @Test(.enabled(if: bubblewrapRuns))
     func homeShowsOnlyTheToolsInsideBubblewrap() throws {
         let process = Process(), out = Pipe()
         process.executableURL = URL(filePath: "/usr/bin/env")

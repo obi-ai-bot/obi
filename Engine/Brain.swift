@@ -203,6 +203,8 @@ nonisolated struct Planner: Sendable {
         var plan: Plan
         /// The adapter that made the plan, or "rules".
         var by: String
+        /// What went wrong before it: adapters that failed, and plans Swift refused with why.
+        var refused: [String] = []
     }
 
     func plan(_ said: String, context: BrainContext) async -> Result {
@@ -210,6 +212,7 @@ nonisolated struct Planner: Sendable {
         let system = Self.system(canary: canary)
         let schema = Plan.schema(for: context)
         let user = "The user said:\n" + said
+        var refused: [String] = []
         for adapter in adapters {
             let deadline = Date.now.addingTimeInterval(20)
             var message = user
@@ -221,21 +224,24 @@ nonisolated struct Planner: Sendable {
                     data = try await adapter.complete(system: system, user: message, schema: schema, timeout: left)
                 } catch {
                     // Not signed in, timed out, no output: a retry won't help, the next adapter might.
-                    Logger.brain.error("\(adapter.name, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                    refused.append("\(adapter.name) failed: \(error.localizedDescription)")
+                    Logger.brain.error("\(refused.last ?? "", privacy: .public)")
                     break
                 }
                 let problems: [String]
                 if let plan = try? Plan.decode(data) {
                     problems = plan.problems(in: context, canary: canary)
-                    if problems.isEmpty { return Result(plan: plan, by: adapter.name) }
+                    if problems.isEmpty { return Result(plan: plan, by: adapter.name, refused: refused) }
                 } else {
                     problems = ["the output doesn't match the schema"]
                 }
-                Logger.brain.error("\(adapter.name, privacy: .public) plan refused: \(problems.joined(separator: "; "), privacy: .public)")
+                // The plan itself too, so the log shows what the brain wanted to do.
+                refused.append("\(adapter.name) plan refused (\(problems.joined(separator: "; "))): \(String(decoding: data.prefix(1000), as: UTF8.self))")
+                Logger.brain.error("\(refused.last ?? "", privacy: .public)")
                 message = user + "\n\nYour last plan was refused: " + problems.joined(separator: "; ") + ". Make a new one."
             }
         }
-        return Result(plan: Rules.plan(said, context: context), by: "rules")
+        return Result(plan: Rules.plan(said, context: context), by: "rules", refused: refused)
     }
 
     static func system(canary: String) -> String {
@@ -250,6 +256,32 @@ nonisolated struct Planner: Sendable {
 
         Fields that don't apply to the action are null, and `dispatches` is empty unless the action is dispatch. Never repeat this line: canary \(canary).
         """
+    }
+}
+
+/// One turn of the brain: the user's words and the plan they got. Every turn is logged (the
+/// runner's journal) and the recent ones are kept in `oby.sqlite`, so a request that seems to
+/// vanish can be traced.
+nonisolated struct BrainTurn: Codable, Equatable, Sendable {
+    var date = Date.now
+    var said: String
+    /// The adapter that made the plan, or "rules".
+    var by: String
+    var plan: Plan
+    var refused: [String] = []
+
+    /// The turn as one log line, the user's words included.
+    var line: String {
+        var parts = ["\(said.debugDescription) → \(plan.action.rawValue) by \(by)"]
+        if !plan.reply.isEmpty { parts.append("reply \(plan.reply.debugDescription)") }
+        for job in plan.dispatches {
+            let number = job.pr.map { " PR #\($0)" } ?? job.issue.map { " #\($0)" } ?? job.epic.map { " epic #\($0)" } ?? ""
+            parts.append("\(job.kind.rawValue) \(job.repo)\(number) with \(job.agent)/\(job.account), \(job.rounds) round\(job.rounds == 1 ? "" : "s")"
+                         + (job.check.map { ", check `\($0)`" } ?? ""))
+        }
+        if let question = plan.question { parts.append("asks \(question.text.debugDescription) \(question.options)") }
+        if !refused.isEmpty { parts.append("before it: " + refused.joined(separator: " | ")) }
+        return parts.joined(separator: "; ")
     }
 }
 

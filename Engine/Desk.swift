@@ -1,5 +1,8 @@
 import Foundation
 import Observation
+#if canImport(OSLog)
+import OSLog
+#endif
 
 /// Oby's desk: the conversation that turns words into a plan, and the jobs it dispatched.
 @Observable
@@ -61,6 +64,7 @@ final class Desk {
 
     func refresh() async {
         if let repos = try? await Workspace.knownRepos(), !repos.isEmpty { self.repos = repos }
+        await Agents.readIdentity()
         await accounts.refresh()
     }
 
@@ -93,6 +97,7 @@ final class Desk {
         // The brain thinks with the least busy Claude account too, so a busy one doesn't slow it.
         let brain = ClaudeBrain(home: AccountStore.route(accounts.accounts, agent: "claude")?.home)
         var result = await Planner(adapters: [brain]).plan(said, context: brainContext)
+        record(BrainTurn(said: said, by: result.by, plan: result.plan, refused: result.refused))
         var epics: [Int: Int] = [:]
         (result.plan.dispatches, epics) = await Self.expandEpics(result.plan.dispatches)
         if result.plan.action == .dispatch, result.plan.dispatches.isEmpty {
@@ -105,6 +110,12 @@ final class Desk {
             if drafts.count > 20 { drafts.removeFirst(drafts.count - 20) }
         }
         return talk
+    }
+
+    /// Every turn of the brain goes to the log (the runner's journal) and `oby.sqlite`, with the words.
+    func record(_ turn: BrainTurn) {
+        Logger.brain.notice("\(turn.line, privacy: .public)")
+        store.save(turn)
     }
 
     /// An epic becomes one job per open sub-issue (10 at most): GitHub's sub-issues, otherwise the
@@ -409,24 +420,38 @@ final class Desk {
         }
     }
 
+    /// Ends the job. A job that's done counts its commits first, so one that should have committed
+    /// and didn't ends as "nothing committed" rather than done.
     private func finish(_ id: String, _ status: Job.Status, _ summary: String) {
         guard var job = job(id), job.isActive else { return }
-        job.status = status
-        job.summary = summary
+        guard status == .done, let base = job.base else { return end(id, status, summary) }
+        job.step = "Counting commits"
+        replace(job, save: false)
+        // Its agent is done and takes no more words.
+        ending.insert(id)
+        Task {
+            let worktree = Workspace.worktree(id).path
+            let count = { (since: String) async in
+                (try? await Shell.ok(["git", "-C", worktree, "rev-list", "--count", "\(since)..HEAD"])).flatMap { Int($0) }
+            }
+            let commits = await count("refs/remotes/origin/\(base)")
+            // A pull request's branch has its own commits beyond the base: only the ones after its head are the job's.
+            let made = job.pr == nil ? commits : await count("refs/oby/pr-\(job.pr ?? 0)")
+            end(id, status, summary, commits: commits, made: made)
+        }
+    }
+
+    /// `commits`: beyond the base, what Publish would push. `made`: the ones this job made.
+    private func end(_ id: String, _ status: Job.Status, _ summary: String, commits: Int? = nil, made: Int? = nil) {
+        guard var job = job(id), job.isActive else { return }
+        (job.status, job.summary) = Job.ending(job, status, summary, made: made)
+        job.commits = commits
         job.step = ""
         job.finished = .now
         replace(job)
         agents[id] = nil
         ending.remove(id)
         onFinish(job)
-        guard status == .done, let base = job.base else { return }
-        Task {
-            let count = try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-list", "--count", "refs/remotes/origin/\(base)..HEAD"])
-            if var job = self.job(id) {
-                job.commits = count.flatMap { Int($0) }
-                replace(job)
-            }
-        }
     }
 
     private func replace(_ job: Job, save: Bool = true) {
