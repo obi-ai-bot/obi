@@ -12,16 +12,22 @@ final class API {
 
     let desk: Desk
     let devices: Devices
+    /// Live Activity push, or nil when this runner has none.
+    let push: Push?
     /// Everyone following `GET /v1/events`.
     private var streams: [UUID: AsyncStream<String>.Continuation] = [:]
     /// The accounts as last sent, so an unchanged list isn't sent again.
     private var sentAccounts = Data()
 
-    init(desk: Desk, devices: Devices) {
+    init(desk: Desk, devices: Devices, push: Push? = nil) {
         self.desk = desk
         self.devices = devices
+        self.push = push
         sentAccounts = (try? Self.encode(accounts)) ?? Data()
-        desk.onJobChange = { [weak self] job in self?.send("job", JobJSON(job: job)) }
+        desk.onJobChange = { [weak self] job in
+            self?.send("job", JobJSON(job: job))
+            self?.push?.changed()
+        }
         watchAccounts()
     }
 
@@ -45,6 +51,7 @@ final class API {
         }
         router.get("v1/events") { _, _ in await self.events() }
         router.post("v1/devices") { request, _ in try await self.register(try await Self.decode(NewDevice.self, from: request)) }
+        router.post("v1/activities") { request, _ in try await self.activity(try await Self.decode(Push.Token.self, from: request)) }
         router.get("v1/settings/models") { _, _ in Self.json(Models.current) }
         router.put("v1/settings/models") { request, _ in try Self.change(try await Self.decode(Models.self, from: request)) }
         router.get("v1/settings/models/options") { _, _ in await Self.options() }
@@ -144,6 +151,12 @@ final class API {
 
     func register(_ device: NewDevice) throws -> Response {
         Self.json(["id": try devices.register(name: device.name, publicKey: device.publicKey)])
+    }
+
+    /// A Live Activity push token from the phone. `push` says whether the runner will push.
+    func activity(_ token: Push.Token) throws -> Response {
+        guard let push else { return Self.json(["push": false]) }
+        return Self.json(["push": try push.register(token)])
     }
 
     func events() -> Response {

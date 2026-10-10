@@ -311,3 +311,100 @@ final class APITests {
         #expect(StreamJSON.events(message) == [.finished(summary: "a\u{2028}b", failed: false)])
     }
 }
+
+@MainActor
+final class PushTests {
+    let folder: URL
+    let desk: Desk
+    let owner: HTTPFields = [.tailscaleUserLogin: "well@example.com"]
+    let token = #"{"token": "80a1f2c3d4e5f60718293a4b5c6d7e8f", "kind": "update", "topic": "dev.wellprado.oby", "environment": "development"}"#
+
+    init() throws {
+        folder = try temporaryFolder()
+        desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+    }
+
+    deinit { try? FileManager.default.removeItem(at: folder) }
+
+    /// ActivityKit decodes the content state with a plain JSONDecoder: `started` is a Date's
+    /// default Codable, seconds since 2001.
+    @Test func theContentStateIsTheAppsOwn() throws {
+        struct ContentState: Decodable, Equatable {
+            var working: Int, title: String, line: String, started: Date, status: String, agent: String
+        }
+        var running = job
+        running.status = .running
+        running.started = running.created + 2
+        let payload = object(try Push.payload(["event": "update", "content-state": Push.State(running, working: 2)], now: running.created))
+        let aps = try #require(payload["aps"] as? [String: Any])
+        #expect(aps["event"] as? String == "update" && aps["timestamp"] as? Int == 1_791_582_173)
+        let state = try JSONDecoder().decode(ContentState.self, from: JSONSerialization.data(withJSONObject: try #require(aps["content-state"])))
+        #expect(state == ContentState(working: 2, title: "Review oby #33", line: "Starting…", started: running.created + 2, status: "running", agent: "claude"))
+
+        var ended = job
+        ended.status = .failed
+        ended.pr = nil
+        ended.request = "Fix the flaky test\nin JobStore"
+        ended.summary = "The test still fails.\nDetails below."
+        let end = Push.State(ended, working: 0)
+        #expect(end.title == "Fix the flaky test" && end.line == "The test still fails." && end.started == job.created.timeIntervalSinceReferenceDate)
+    }
+
+    @Test func theProviderTokenVerifies() throws {
+        let key = P256.Signing.PrivateKey()
+        let jwt = try Push.jwt(team: "PQKAL8E36D", keyID: "ABC123DEFG", key: key, now: job.created)
+        let parts = jwt.split(separator: ".").map(String.init)
+        try #require(parts.count == 3)
+        func decoded(_ part: String) throws -> Data {
+            var base64 = part.replacing("-", with: "+").replacing("_", with: "/")
+            base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+            return try #require(Data(base64Encoded: base64))
+        }
+        #expect(!jwt.contains("=") && !jwt.contains("+") && !jwt.contains("/"))
+        let header = object(try decoded(parts[0])), claims = object(try decoded(parts[1]))
+        #expect(header["alg"] as? String == "ES256" && header["kid"] as? String == "ABC123DEFG")
+        #expect(claims["iss"] as? String == "PQKAL8E36D" && claims["iat"] as? Int == 1_791_582_173)
+        let signature = try P256.Signing.ECDSASignature(rawRepresentation: try decoded(parts[2]))
+        #expect(key.publicKey.isValidSignature(signature, for: Data("\(parts[0]).\(parts[1])".utf8)))
+    }
+
+    @Test func withoutAKeyThereIsNoPush() async throws {
+        let push = Push(desk: desk, folder: folder.appending(path: "apns"))
+        #expect(!push.isOn)
+        for api in [API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")), push: push),
+                    API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))] {
+            let app = Application(router: api.router(owner: "well@example.com"))
+            try await app.test(.router) { [owner, token] client in
+                try await client.execute(uri: "/v1/activities", method: .post, headers: owner, body: ByteBuffer(string: token)) { response in
+                    #expect(response.status == .ok)
+                    #expect(String(decoding: response.body.readableBytesView, as: UTF8.self) == #"{"push":false}"#)
+                }
+            }
+        }
+    }
+
+    @Test func aKeyTurnsItOnAndTokensAreChecked() throws {
+        let apns = folder.appending(path: "apns")
+        try FileManager.default.createDirectory(at: apns, withIntermediateDirectories: true)
+        try Data(#"{"team": "PQKAL8E36D", "key": "TESTKEY123"}"#.utf8).write(to: apns.appending(path: "apns.json"))
+        try P256.Signing.PrivateKey().pemRepresentation.write(to: apns.appending(path: "AuthKey_TESTKEY123.p8"), atomically: true, encoding: .utf8)
+        let push = Push(desk: desk, folder: apns)
+        #expect(push.isOn)
+        let good = Push.Token(token: "80A1F2C3D4E5F60718293A4B5C6D7E8F", kind: "start", topic: "dev.wellprado.oby", environment: "production")
+        #expect(try push.register(good))
+        var other = good
+        other.token = String(repeating: "1a", count: 40)
+        #expect(try push.register(other))
+        // The newer push-to-start token replaced the older one.
+        let saved = try JSONDecoder().decode([Push.Token].self, from: Data(contentsOf: apns.appending(path: "tokens.json")))
+        #expect(saved == [other])
+        for bad in [Push.Token(token: "80a1f2c3d4e5f60718293a4b5c6d7e\"", kind: "update", topic: "dev.wellprado.oby", environment: "production"),
+                    Push.Token(token: "80a1f2c3d4e5f60718293a4b5c6d7e8f", kind: "end", topic: "dev.wellprado.oby", environment: "production"),
+                    Push.Token(token: "80a1f2c3d4e5f60718293a4b5c6d7e8f", kind: "update", topic: "dev.wellprado.oby\nurl = x", environment: "production"),
+                    Push.Token(token: "80a1f2c3d4e5f60718293a4b5c6d7e8f", kind: "update", topic: "dev.wellprado.oby", environment: "staging")] {
+            let error = #expect(throws: APIError.self) { try push.register(bad) }
+            #expect(error?.status == .unprocessableContent)
+        }
+        #expect(Push.quoted(#"{"a":"b\n"}"#) == #""{\"a\":\"b\\n\"}""#)
+    }
+}
