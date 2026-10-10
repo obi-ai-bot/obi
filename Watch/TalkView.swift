@@ -65,12 +65,16 @@ struct TalkView: View {
         .task { await recorder.prepare() }
         // A hold the gesture never ends (the screen left, the app went inactive) is a release.
         .onChange(of: scenePhase) { if scenePhase != .active { release() } }
-        .onDisappear { release() }
+        .onDisappear {
+            release()
+            // Whatever state the talk is in, the microphone doesn't outlive the screen.
+            recorder.cancel()
+        }
     }
 
     private var caption: String {
         switch watch.talk {
-        case .recording: "Listening… \(recorder.seconds)s"
+        case .recording: recorder.seconds >= Recorder.limit ? "That's \(Recorder.limit)s, the most the watch sends. Let go." : "Listening… \(recorder.seconds)s"
         case .sending: "Sending to your iPhone…"
         default: recorder.problem ?? "Hold to talk"
         }
@@ -98,14 +102,15 @@ struct TalkView: View {
         }
     }
 
+    /// The hold ended, however it ended: the microphone closes now. The recording is sent only
+    /// when the talk is still the one it was made for (a notification tapped meanwhile cancels it).
     private func release() {
         guard holding else { return }
         holding = false
-        stop()
+        if watch.talk == .recording { stop() } else { recorder.cancel() }
     }
 
     private func stop() {
-        guard watch.talk == .recording else { return }
         guard let audio = recorder.stop() else {
             watch.talk = .none
             return
@@ -125,11 +130,15 @@ final class Recorder {
     /// Longer wouldn't fit in one message to the phone.
     static let limit = 15
 
+    /// How long the hold has lasted, up to the limit, where the counter stops.
     private(set) var seconds = 0
     var problem: String?
     /// Whether the microphone may be used; nil until the user has answered.
     private(set) var allowed: Bool?
     private var recorder: AVAudioRecorder?
+    /// When the recording began. The length is measured from here: once the recorder has stopped
+    /// itself at the limit, it reports no time of its own.
+    private var began: Date?
     private var ticking: Task<Void, Never>?
     private let file = FileManager.default.temporaryDirectory.appending(path: "talk.m4a")
 
@@ -152,12 +161,16 @@ final class Recorder {
             AVEncoderBitRateKey: 24_000,
         ]
         let recorder = try AVAudioRecorder(url: file, settings: settings)
-        recorder.record(forDuration: TimeInterval(Self.limit))
+        // The recorder stops itself at the limit; what it recorded until then is kept and sent on release.
+        guard recorder.record(forDuration: TimeInterval(Self.limit)) else {
+            throw RunnerError(message: "The microphone didn't start.")
+        }
         self.recorder = recorder
+        began = .now
         problem = nil
         seconds = 0
         ticking = Task {
-            while !Task.isCancelled {
+            while !Task.isCancelled, seconds < Self.limit {
                 try? await Task.sleep(for: .seconds(1))
                 if !Task.isCancelled { seconds += 1 }
             }
@@ -166,12 +179,9 @@ final class Recorder {
 
     /// Stops and hands over the recording, or nil when there's too little to send.
     func stop() -> Data? {
-        ticking?.cancel()
-        guard let recorder else { return nil }
-        let heard = recorder.currentTime
-        recorder.stop()
-        self.recorder = nil
-        try? AVAudioSession.sharedInstance().setActive(false)
+        guard let began else { cancel(); return nil }
+        let heard = min(Date.now.timeIntervalSince(began), TimeInterval(Self.limit))
+        cancel()
         guard heard >= 0.4, let data = try? Data(contentsOf: file), !data.isEmpty else {
             problem = "Hold the button while you talk."
             return nil
@@ -179,10 +189,14 @@ final class Recorder {
         return data
     }
 
+    /// Closes the microphone, whatever was going on. Safe to call again.
     func cancel() {
         ticking?.cancel()
-        recorder?.stop()
-        recorder = nil
+        ticking = nil
+        began = nil
+        guard let recorder else { return }
+        recorder.stop()
+        self.recorder = nil
         try? AVAudioSession.sharedInstance().setActive(false)
     }
 }
