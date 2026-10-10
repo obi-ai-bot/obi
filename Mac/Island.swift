@@ -268,6 +268,12 @@ private struct OpenIsland: View {
     @FocusState private var typing: Bool
     /// Finished jobs that ended before this are hidden from the island only; Desk keeps them all.
     @AppStorage("islandClearedAt") private var clearedAt: Double = 0
+    /// Settings › Runner: the always-on runner whose jobs are listed too, or empty for none.
+    @AppStorage("runnerURL") private var runnerURL = ""
+    @State private var runnerJobs: [Job] = []
+    /// The name the runner reports in /v1/status, like "tetrix-lab".
+    @State private var runnerHost: String?
+    @State private var runnerDown = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -317,9 +323,19 @@ private struct OpenIsland: View {
                 }
                 field
             default:
-                ForEach(visibleJobs) { job in
-                    JobRow(job: job, onStop: { desk.stop(job.id) }, onPublish: { try await desk.publish(job.id, approve: Publish.touchID) },
-                           onMessage: { try desk.message(job.id, $0) })
+                ForEach(visibleJobs) { row in
+                    if let host = row.host {
+                        // Publishing needs the iPhone's device key, so runner rows don't offer it.
+                        JobRow(job: row.job, host: host, onStop: { Task { if let job = try? await runner?.stop(row.job.id) { update(job) } } },
+                               onPublish: nil, onMessage: { text in if let runner { update(try await runner.tell(row.job.id, text)) } })
+                    } else {
+                        let job = row.job
+                        JobRow(job: job, onStop: { desk.stop(job.id) }, onPublish: { try await desk.publish(job.id, approve: Publish.touchID) },
+                               onMessage: { try desk.message(job.id, $0) })
+                    }
+                }
+                if runnerDown {
+                    Text("\(runnerName) isn't reachable").font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
                 }
                 field
             }
@@ -329,17 +345,64 @@ private struct OpenIsland: View {
         .padding(.bottom, 22)
         .onExitCommand(perform: onClose)
         .onAppear { typing = true }
+        .task(id: runnerURL) { await followRunner() }
     }
 
-    /// Running jobs first, then the latest finished ones: four at most.
-    private var visibleJobs: [Job] {
-        let active = desk.active
+    /// A job in the list, and the runner it's on (nil: this Mac).
+    private struct Row: Identifiable {
+        var job: Job
+        var host: String?
+        var id: String { "\(host ?? "")/\(job.id)" }
+    }
+
+    /// Running jobs first, this Mac's and the runner's, then the latest finished ones: four at most.
+    private var visibleJobs: [Row] {
+        let rows = desk.jobs.map { Row(job: $0) } + runnerJobs.map { Row(job: $0, host: runnerName) }
+        let active = rows.filter(\.job.isActive)
+        let finished = rows.filter { isListed($0.job) }.sorted { ($0.job.finished ?? .distantPast) > ($1.job.finished ?? .distantPast) }
         return active + finished.prefix(max(0, 4 - active.count))
     }
 
     /// Finished jobs that ended after the last Clear done.
     private var finished: [Job] {
-        desk.jobs.filter { !$0.isActive && ($0.finished ?? .distantPast).timeIntervalSince1970 > clearedAt }
+        (desk.jobs + runnerJobs).filter(isListed)
+    }
+
+    private func isListed(_ job: Job) -> Bool {
+        !job.isActive && (job.finished ?? .distantPast).timeIntervalSince1970 > clearedAt
+    }
+
+    private var runner: Runner? {
+        URL(string: runnerURL.trimmingCharacters(in: .whitespaces)).flatMap { $0.host() == nil ? nil : Runner(base: $0) }
+    }
+
+    /// "tetrix-lab": what the runner calls itself, or its URL's first name before it has answered.
+    private var runnerName: String {
+        runnerHost ?? runner?.base.host()?.split(separator: ".").first.map(String.init) ?? "The runner"
+    }
+
+    /// Lists the runner's jobs every few seconds while the island is open. A runner that doesn't
+    /// answer gets one quiet line, not an error per poll.
+    private func followRunner() async {
+        runnerJobs = []
+        runnerHost = nil
+        runnerDown = false
+        guard let runner else { return }
+        while !Task.isCancelled {
+            do {
+                if runnerHost == nil { runnerHost = try await runner.status().runner.host }
+                runnerJobs = try await runner.jobs()
+                runnerDown = false
+            } catch {
+                if !Task.isCancelled { runnerDown = true }
+            }
+            try? await Task.sleep(for: .seconds(3))
+        }
+    }
+
+    /// The runner's answer to Stop or a message, until the next poll.
+    private func update(_ job: Job) {
+        if let index = runnerJobs.firstIndex(where: { $0.id == job.id }) { runnerJobs[index] = job }
     }
 
     /// The job list is on screen and has something finished to clear.
@@ -366,7 +429,7 @@ private struct OpenIsland: View {
                 Text(question.text).font(.system(size: 17, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
                 Text("Pick one, or type below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
             case .none:
-                let working = desk.active.count
+                let working = desk.active.count + runnerJobs.count(where: \.isActive)
                 Text(working == 0 ? "All quiet." : working == 1 ? "1 agent is working. Nothing needs you." : "\(working) agents are working. Nothing needs you.")
                     .font(.system(size: 19, weight: .semibold))
                 Text("Type a task below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
@@ -665,9 +728,12 @@ private struct StrongerModel: View {
 /// opened one takes a word for its agent.
 private struct JobRow: View {
     let job: Job
+    /// The runner the job is on, like "tetrix-lab", or nil for this Mac.
+    var host: String? = nil
     let onStop: () -> Void
-    let onPublish: () async throws -> Void
-    let onMessage: (String) throws -> Void
+    /// Nil where this Mac can't publish: a runner's job needs the iPhone's device key.
+    let onPublish: (() async throws -> Void)?
+    let onMessage: (String) async throws -> Void
     @State private var expanded = false
     @State private var confirming = false
     @State private var publishing = false
@@ -680,7 +746,14 @@ private struct JobRow: View {
             HStack(spacing: 12) {
                 Image(systemName: "asterisk").font(.system(size: 17, weight: .semibold)).frame(width: 22)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(job.title).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(job.title).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                        if let host {
+                            Text(host).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.7))
+                                .padding(.horizontal, 7).frame(height: 18)
+                                .background(.white.opacity(0.12), in: Capsule())
+                        }
+                    }
                     Text(subtitle).font(.system(size: 13)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
                 }
                 Spacer(minLength: 8)
@@ -693,6 +766,8 @@ private struct JobRow: View {
                 if job.status == .done, (job.commits ?? 0) > 0 {
                     if let link = job.published.flatMap(URL.init(string:)) {
                         Link(destination: link) { pill("Draft PR") }
+                    } else if onPublish == nil {
+                        Text("Publish from your iPhone").font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
                     } else if !confirming {
                         Button { confirming = true } label: { pill("Publish") }
                             .buttonStyle(.plain)
@@ -733,7 +808,7 @@ private struct JobRow: View {
                                 publishing = true
                                 defer { publishing = false }
                                 do {
-                                    try await onPublish()
+                                    try await onPublish?()
                                     confirming = false
                                     problem = nil
                                 } catch {
@@ -787,13 +862,17 @@ private struct JobRow: View {
     }
 
     private func tell() {
-        guard !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        do {
-            try onMessage(note)
-            note = ""
-            noteProblem = nil
-        } catch {
-            noteProblem = error.localizedDescription
+        let text = note
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        note = ""
+        Task {
+            do {
+                try await onMessage(text)
+                noteProblem = nil
+            } catch {
+                note = text
+                noteProblem = error.localizedDescription
+            }
         }
     }
 
