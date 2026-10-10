@@ -6,3 +6,4 @@ Character/mac/build/
 dist/
 .build/
 .swiftpm/
+__pycache__/
