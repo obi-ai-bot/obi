@@ -37,8 +37,14 @@ final class DevicesTests {
 
     deinit { try? FileManager.default.removeItem(at: folder) }
 
-    func register() throws -> String {
-        try devices.register(name: "Test iPhone", publicKey: key.publicKey.x963Representation.base64EncodedString())
+    /// Registers `key` (or another), with pairing opened first as the owner would.
+    func register(_ publicKey: String? = nil) throws -> String {
+        openPairing()
+        return try devices.register(name: "Test iPhone", publicKey: publicKey ?? key.publicKey.x963Representation.base64EncodedString())
+    }
+
+    func openPairing(at date: Date = .now) {
+        FileManager.default.createFile(atPath: devices.pairing.path, contents: nil, attributes: [.modificationDate: date])
     }
 
     /// What the phone sends: the runner's sentence for the job, signed at `signedAt`.
@@ -95,7 +101,23 @@ final class DevicesTests {
         let first = try register()
         #expect(try register() == first)
         let other = P256.Signing.PrivateKey().publicKey.x963Representation.base64EncodedString()
-        #expect(try devices.register(name: "Other iPhone", publicKey: other) != first)
+        #expect(try register(other) != first)
+    }
+
+    /// Agents reach the API as the owner, so a new key needs the owner's `touch pairing` from the last
+    /// 10 minutes, and uses it up. A known key needs nothing.
+    @Test func newPhonesNeedPairing() throws {
+        let mine = key.publicKey.x963Representation.base64EncodedString()
+        let other = P256.Signing.PrivateKey().publicKey.x963Representation.base64EncodedString()
+        let closed = { (key: String) in (#expect(throws: APIError.self) { try self.devices.register(name: "x", publicKey: key) })?.status }
+        #expect(closed(mine) == .forbidden)
+        openPairing(at: .now - 601)
+        #expect(closed(mine) == .forbidden)
+        openPairing()
+        let id = try devices.register(name: "Test iPhone", publicKey: mine)
+        #expect(!FileManager.default.fileExists(atPath: devices.pairing.path))
+        #expect(closed(other) == .forbidden)
+        #expect(try devices.register(name: "Test iPhone", publicKey: mine) == id)
     }
 
     @Test func malformedKeysDontRegister() {

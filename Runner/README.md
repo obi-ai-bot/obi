@@ -41,7 +41,7 @@ Put the owner's Tailscale login in place of `you@example.com` (`tailscale status
 | Variable | What it is |
 | --- | --- |
 | `OBY_OWNER` | The owner's Tailscale login. Required. |
-| `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs), `accounts.json`, `devices.json` (the phones that may approve publishing), `apns/` (the APNs key and the phones' Live Activity tokens), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
+| `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs), `accounts.json`, `devices.json` (the phones that may approve publishing; to add one, `touch $OBY_HOME/pairing` and open the app within 10 minutes), `apns/` (the APNs key and the phones' Live Activity tokens), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
 | `OBY_PORT` | The port on `127.0.0.1`. 7777 by default. |
 
 The models and efforts the app picks in Settings › Models are kept in `~/.config/oby-runner.plist`.

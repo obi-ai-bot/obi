@@ -89,8 +89,10 @@ final class AccountStore {
             var label: String?
             switch account.agent {
             case "claude":
-                // It exits 1 when signed out, still printing its JSON.
-                let result = try? await Shell.run(["claude", "auth", "status", "--json"], env: ["CLAUDE_CONFIG_DIR": account.home], timeout: 30)
+                // It exits 1 when signed out, still printing its JSON. Boxed like a job: agents can write
+                // to this home, so its settings may be theirs.
+                let status = Agents.sandboxed(["claude", "auth", "status", "--json"], in: nil, own: account.home ?? "\(Agents.home)/.claude")
+                let result = try? await Shell.run(status, env: ["CLAUDE_CONFIG_DIR": account.home], timeout: 30)
                 label = result.flatMap { Self.claudeLabel(status: $0.out) }
             case "codex":
                 // Codex's app-server knows both the login and the limits; Claude Code's limits
