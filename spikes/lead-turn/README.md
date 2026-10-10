@@ -2,7 +2,7 @@
 
 Can the Lead be one CLI session per goal that wakes on events, reads (Read, Grep, Glob), and answers each turn with a typed plan Swift checks? And is it fast and cheap enough to run on every event?
 
-`eval.py` runs the eval set against Claude Code, Codex and Cursor in a copy of `fixture/`, in two modes:
+`eval.py` runs the eval set against Claude Code, Codex and Cursor in a new folder, with `fixture/` copied into its `.oby/`, in two modes:
 - **fresh:** a new session for every turn (`--no-session-persistence`).
 - **resume:** the turn resumes a session that has already read the board, the way a goal's session would. On Claude, every case forks one warm-up session (`--resume <id> --fork-session`). Codex and Cursor can't fork, so each case gets its own warm-up, which isn't counted.
 
@@ -17,6 +17,8 @@ python3 -I spikes/lead-turn/eval.py --mcp-config tetrix-read.json   # with Tetri
 It prints a Markdown report and writes every call, with its plan, tokens and tools, to `--out`.
 
 ## The fixture
+
+It's kept in `fixture/context` and `fixture/inputs`, not in a `.oby` folder, because Oby's clones exclude `.oby/`. Each run copies it to `.oby/context` and `.oby/inputs`, where the Lead reads it.
 
 - `.oby/context/roadmap.md`: the board in order, with status, labels, assignees and linked PRs. #6, #36 and #41 have `status:needs-test`. There's also an item in progress, a blocked one, an `oby:skip` one, one assigned to someone else and one with a running Oby job. The workable items are #7, #12, #13 and epic #30.
 - `.oby/context/jobs.md`: Oby's jobs, including the two that picked #6 (from "Evidence" in `docs/pipeline-cases.md`).

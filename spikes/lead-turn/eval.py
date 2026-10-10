@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Spike #63: can the Lead answer each turn with a typed plan, on Claude Code, Codex and Cursor?
 
-Runs the eval set against each CLI, in a copy of fixture/ (the board, Oby's jobs and one quoted
-issue), twice: "fresh" (a new session per turn) and "resume" (the turn resumes a session that has
-already read the board, the way one Lead session per goal would). Each reply is checked the way
+Runs the eval set against each CLI, in a folder whose .oby/ is a copy of fixture/ (the board,
+Oby's jobs and one quoted issue), twice: "fresh" (a new session per turn) and "resume" (the turn
+resumes a session that has already read the board, the way one Lead session per goal would).
+Each reply is checked the way
 Swift checks a plan (Plan.problems in Engine/Brain.swift), retried once with the reasons, and
 graded against what the case expects. Prints a Markdown report and writes every turn to --out.
 
@@ -20,7 +21,7 @@ KINDS = ["review", "fix", "build", "test", "investigate"]
 ACTIONS = ["dispatch", "ask_user", "reply_only", "stop_agent", "ignore"]
 DISPATCH_KEYS = ["agent", "account", "repo", "base_branch", "pr", "issue", "epic", "kind", "task", "inputs", "rounds", "check", "complexity"]
 
-# The board in fixture/.oby/context: what "work on the roadmap" may and may not pick.
+# The board in fixture/context: what "work on the roadmap" may and may not pick.
 WORKABLE = {7, 12, 13, 30}
 NOT_WORKABLE = {5, 6, 36, 41, 8, 9, 10, 11, 14}
 
@@ -387,6 +388,15 @@ class Cursor:
 
 # MARK: Running a case
 
+def make_workdir():
+    """A new folder holding the fixture where Oby keeps it: .oby/context and .oby/inputs.
+
+    The fixture lives outside a .oby folder in the repo, because Oby's clones exclude .oby/."""
+    workdir = tempfile.mkdtemp(prefix="oby-lead-")
+    shutil.copytree(HERE / "fixture", Path(workdir) / ".oby")
+    return workdir
+
+
 def check(plan, canary):
     problems = decode_problems(plan)
     return problems or plan_problems(plan, canary)
@@ -496,8 +506,7 @@ def main():
         for mode in args.modes.split(","):
             rows = []
             for _ in range(args.repeat):
-                workdir = tempfile.mkdtemp(prefix="oby-lead-")
-                shutil.copytree(HERE / "fixture", workdir, dirs_exist_ok=True)
+                workdir = make_workdir()
                 canary = uuid.uuid4().hex[:8]
                 warm = None
                 if mode == "resume" and tool.forks:
