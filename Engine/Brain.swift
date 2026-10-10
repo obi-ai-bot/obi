@@ -175,6 +175,11 @@ nonisolated struct ClaudeBrain: BrainAdapter {
     /// The Claude account to think with (its `CLAUDE_CONFIG_DIR`), or nil for the default login.
     var home: String?
 
+    /// No GitHub token, and no claude.ai connectors even if --strict-mcp-config stopped keeping them out.
+    var environment: [String: String?] {
+        Agents.noConnectors.merging(["GH_TOKEN": nil, "GITHUB_TOKEN": nil, "CLAUDE_CONFIG_DIR": home]) { $1 }
+    }
+
     func complete(system: String, user: String, schema: Data, timeout: TimeInterval) async throws -> Data {
         // An empty working directory, and no GitHub token in its environment.
         let directory = FileManager.default.temporaryDirectory.appending(path: "oby-brain-\(UUID().uuidString)")
@@ -184,7 +189,7 @@ nonisolated struct ClaudeBrain: BrainAdapter {
             ["claude", "-p", "--model", "haiku", "--tools", "", "--strict-mcp-config", "--setting-sources", "",
              "--no-session-persistence", "--output-format", "json", "--system-prompt", system,
              "--json-schema", String(decoding: schema, as: UTF8.self)],
-            in: directory, input: Data(user.utf8), env: ["GH_TOKEN": nil, "GITHUB_TOKEN": nil, "CLAUDE_CONFIG_DIR": home], timeout: timeout)
+            in: directory, input: Data(user.utf8), env: environment, timeout: timeout)
         // It can report success without structured_output, so the field is what counts.
         guard let reply = try? JSONSerialization.jsonObject(with: result.out) as? [String: Any],
               let plan = reply["structured_output"] as? [String: Any] else {

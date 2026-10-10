@@ -183,19 +183,28 @@ final class ClaudeAgent: AgentRun {
         self.resume = resume
     }
 
-    func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
-        self.onEvent = onEvent
-        // Never --bare: it skips the user's own login.
-        process.executableURL = URL(filePath: "/usr/bin/env")
-        process.arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+    /// The command line and environment Claude Code starts with.
+    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?) -> (arguments: [String], environment: [String: String]) {
+        // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
+        // mcpServers (Tetrix) stay; only its claude.ai connectors are off.
+        let arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                              "--verbose", "--replay-user-messages", "--permission-prompt-tool", "stdio",
                              // Only the account's own settings: a repo's .claude/settings.json could allow tools past Oby.
                              "--setting-sources", "user",
                              "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
                             + (resume.map { ["--resume", $0] } ?? []),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude")
+        let environment = Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 })
+        return (arguments, environment)
+    }
+
+    func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
+        self.onEvent = onEvent
+        process.executableURL = URL(filePath: "/usr/bin/env")
+        let launch = Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume)
+        process.arguments = launch.arguments
+        process.environment = launch.environment
         process.currentDirectoryURL = worktree
-        process.environment = Agents.environment(["CLAUDE_CONFIG_DIR": configDirectory?.path])
         process.standardInput = input
         process.standardOutput = output
         let log = worktree.appending(path: ".oby/agent.log")
@@ -438,6 +447,11 @@ nonisolated enum Agents {
         for (key, value) in overrides.merging(extra, uniquingKeysWith: { $1 }) { env[key] = value }
         return env
     }
+
+    /// Claude Code without the account's claude.ai connectors (Slack, Drive, Claude Docs, …): each
+    /// holds a login that could act as the user, and loading them cut sessions off mid-turn. The
+    /// switch is Claude Code's own (checked in 2.1.296: "0", "false", "no" or "off" turn it off).
+    static let noConnectors: [String: String?] = ["ENABLE_CLAUDEAI_MCP_SERVERS": "false"]
 
     /// What changes from Oby's own environment, also for the checks Oby runs in a job's worktree.
     static var overrides: [String: String?] { overrides(identity: identity.withLock { $0 }) }

@@ -615,3 +615,35 @@ struct SandboxTests {
         #expect(params["approvalsReviewer"] as? String == "user" && params["config"] == nil)
     }
 }
+
+/// Claude Code starts without the user's claude.ai connectors (Slack, Drive, Claude Docs), which
+/// could act as the user, but keeps the account's own mcpServers like Tetrix.
+struct ConnectorTests {
+    let worktree = URL(filePath: "/tmp/oby/jobs/9f08fd10")
+
+    @Test func agentsStartWithClaudeAIConnectorsOff() {
+        for account in [nil, URL(filePath: "/tmp/oby/accounts/personal")] {
+            let launch = ClaudeAgent.launch(worktree: worktree, configDirectory: account, model: "opus", resume: nil)
+            #expect(launch.environment["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false")
+            // Still the account's own login and config, where its mcpServers live.
+            #expect(launch.environment["CLAUDE_CONFIG_DIR"] == account?.path)
+            #expect(launch.arguments.contains("claude") && launch.arguments.contains("--setting-sources"))
+            // Nothing that would also drop the account's own servers.
+            for flag in ["--strict-mcp-config", "--mcp-config", "--bare"] { #expect(!launch.arguments.contains(flag), "\(flag)") }
+        }
+    }
+
+    @Test func aResumedSessionKeepsThemOffToo() {
+        let launch = ClaudeAgent.launch(worktree: worktree, configDirectory: nil, model: nil, resume: "5f3c0d8e")
+        #expect(launch.arguments.suffix(2) == ["--resume", "5f3c0d8e"])
+        #expect(launch.environment["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false")
+    }
+
+    @Test func theBrainHasNoConnectorsAndNoGitHubToken() {
+        let env = ClaudeBrain(home: "/tmp/oby/accounts/personal").environment
+        #expect(env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false")
+        #expect(env["CLAUDE_CONFIG_DIR"] == "/tmp/oby/accounts/personal")
+        #expect(env["GH_TOKEN"] == .some(nil) && env["GITHUB_TOKEN"] == .some(nil))
+        #expect(ClaudeBrain().environment["CLAUDE_CONFIG_DIR"] == .some(nil))
+    }
+}
