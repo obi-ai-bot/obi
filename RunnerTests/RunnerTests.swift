@@ -648,3 +648,40 @@ struct ConnectorTests {
         #expect(ClaudeBrain().environment["CLAUDE_CONFIG_DIR"] == .some(nil))
     }
 }
+
+/// Claude Code's background commands and subagents outlive the turn Oby ends the session on,
+/// so Policy sends them to the foreground.
+struct BackgroundWorkTests {
+    let worktree = URL(filePath: "/tmp/oby/jobs/9f08fd10")
+    let foreground = "Run it in the foreground: Oby ends the session when your turn ends, and background work can't ask for permissions."
+
+    @Test func backgroundCommandsAreDenied() {
+        let input: [String: Any] = ["command": "pnpm dev", "run_in_background": true]
+        #expect(Policy.deny(tool: "Bash", input: input, worktree: worktree) == foreground)
+    }
+
+    /// Claude Code runs a subagent in the background unless it's told not to, and always when it's remote.
+    @Test func backgroundSubagentsAreDenied() {
+        let subagent: [String: Any] = ["description": "Find callers", "prompt": "Find Policy's callers"]
+        for tool in ["Agent", "Task"] {
+            for extra in [["run_in_background": true], [:], ["run_in_background": false, "isolation": "remote"]] as [[String: Any]] {
+                let input = subagent.merging(extra) { $1 }
+                #expect(Policy.deny(tool: tool, input: input, worktree: worktree) == foreground, "\(tool) \(extra)")
+            }
+        }
+    }
+
+    @Test func foregroundCommandsAndSubagentsAreAllowed() {
+        for background in [nil, false] as [Bool?] {
+            var command: [String: Any] = ["command": "swift test"]
+            if let background { command["run_in_background"] = background }
+            #expect(Policy.deny(tool: "Bash", input: command, worktree: worktree) == nil)
+        }
+        for tool in ["Agent", "Task"] {
+            for extra in [[:], ["isolation": "worktree"]] as [[String: Any]] {
+                let input = ["description": "Find callers", "prompt": "Find Policy's callers", "run_in_background": false].merging(extra) { $1 }
+                #expect(Policy.deny(tool: tool, input: input, worktree: worktree) == nil, "\(tool) \(extra)")
+            }
+        }
+    }
+}

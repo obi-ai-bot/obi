@@ -528,6 +528,17 @@ nonisolated enum Policy {
             }
             return nil
         }
+        // Commands and subagents left running in the background outlive the turn, and nothing
+        // could answer their permission prompts. Claude Code runs a subagent in the background unless
+        // told otherwise, and always when it's remote (checked in 2.1.296).
+        let background = switch tool {
+        case "Bash": input["run_in_background"] as? Bool == true
+        case "Agent", "Task": input["run_in_background"] as? Bool != false || input["isolation"] as? String == "remote"
+        default: false
+        }
+        if background {
+            return "Run it in the foreground: Oby ends the session when your turn ends, and background work can't ask for permissions."
+        }
         if tool == "Bash", let command = input["command"] as? String, command.contains(publishing) {
             return "Oby publishes the job's branch itself once the work is done. Don't push or post; say in your summary what you'd publish."
         }
