@@ -8,7 +8,7 @@ final class Phone {
     enum Talk: Equatable {
         case none
         case thinking(String)
-        case plan(Draft)
+        case plan([Draft])
         case question(said: String, Question)
         case reply(String)
     }
@@ -137,7 +137,7 @@ final class Phone {
             let result: Talk
             do {
                 switch try await runner.plan(said, answer: answer) {
-                case .plan(let draft): result = .plan(draft)
+                case .plan(let drafts): result = .plan(drafts)
                 case .question(let said, let question): result = .question(said: said, question)
                 case .reply(let text): result = .reply(text)
                 case .none: result = .none
@@ -158,8 +158,22 @@ final class Phone {
         apply(.job(job))
     }
 
+    /// Dispatch all: one `POST /v1/jobs` per draft, in order, then the card closes. A draft whose
+    /// job is already here was sent before, so after a failure this sends only the rest.
+    func dispatch(all drafts: [Draft]) async throws {
+        for draft in drafts where !jobs.contains(where: { $0.id == draft.job.id }) {
+            apply(.job(try await runner.dispatch(draft.job)))
+        }
+        talk = .none
+    }
+
     func stop(_ id: String) async throws {
         apply(.job(try await runner.stop(id)))
+    }
+
+    /// Tells the job's agent something; the runner answers with the job, running again.
+    func tell(_ id: String, _ text: String) async throws {
+        apply(.job(try await runner.tell(id, text)))
     }
 
     /// The exact sentence publishing this job would carry out.

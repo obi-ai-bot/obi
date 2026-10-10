@@ -23,6 +23,15 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var finished: Date?
     var commits: Int?
     var published: String?
+    /// Newer runners only, so all optional: the issue the work is about, how many rounds the agent
+    /// may take and the one it's on, the command that must pass, the stronger model it runs on,
+    /// and what the user told the agent along the way, oldest first.
+    var issue: Int?
+    var rounds: Int?
+    var round: Int?
+    var check: String?
+    var model: String?
+    var notes: [String]?
 
     var isActive: Bool { status == .queued || status == .running }
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
@@ -30,7 +39,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
 
     /// "Review oby #33", or the first line of what the user asked.
     var title: String {
-        if let pr { return "\(kind.capitalized) \(repoName) #\(pr)" }
+        if let number = pr ?? issue { return "\(kind.capitalized) \(repoName) #\(number)" }
         return request.split(separator: "\n").first.map(String.init) ?? request
     }
 
@@ -44,6 +53,14 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     }
 
     var canPublish: Bool { status == .done && (commits ?? 0) > 0 && published == nil }
+
+    /// "Round 2 of 5 · Fable 5.1", or empty for a one-round job on the usual model.
+    var extras: String {
+        var parts: [String] = []
+        if let rounds, rounds > 1 { parts.append("Round \(round ?? 1) of \(rounds)") }
+        if let model { parts.append(ModelChoice.name(model)) }
+        return parts.joined(separator: " · ")
+    }
 }
 
 nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
@@ -66,6 +83,15 @@ nonisolated struct Draft: Codable, Equatable, Sendable {
     var reply: String
     var guessed: Bool
     var job: Job
+    /// A stronger model the brain offers for complex work, or nil.
+    var suggestedModel: String?
+
+    /// The stronger model on `agent`'s tool, or nil when none was offered. The runner runs the
+    /// stronger model of the tool the job ends up with, so picking another account changes it.
+    func strongerModel(for agent: String) -> String? {
+        guard let suggestedModel else { return nil }
+        return agent == job.agent ? suggestedModel : ["claude": "claude-fable-5-1", "codex": "gpt-6-astra"][agent]
+    }
 }
 
 nonisolated struct Question: Codable, Equatable, Sendable {
@@ -75,17 +101,21 @@ nonisolated struct Question: Codable, Equatable, Sendable {
 
 /// What the brain made of the user's words.
 nonisolated enum PlanResult: Decodable, Equatable, Sendable {
-    case plan(Draft)
+    /// One draft per job, 1 to 10.
+    case plan([Draft])
     case question(said: String, Question)
     case reply(String)
     case none
 
-    private enum Keys: String, CodingKey { case kind, draft, said, question, text }
+    private enum Keys: String, CodingKey { case kind, drafts, draft, said, question, text }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
         switch try c.decode(String.self, forKey: .kind) {
-        case "plan": self = .plan(try c.decode(Draft.self, forKey: .draft))
+        case "plan":
+            // Older runners send only `draft`.
+            let drafts = try c.decodeIfPresent([Draft].self, forKey: .drafts) ?? []
+            self = .plan(drafts.isEmpty ? [try c.decode(Draft.self, forKey: .draft)] : drafts)
         case "question": self = .question(said: try c.decode(String.self, forKey: .said), try c.decode(Question.self, forKey: .question))
         case "reply": self = .reply(try c.decode(String.self, forKey: .text))
         default: self = .none
@@ -101,9 +131,14 @@ nonisolated struct ModelChoice: Codable, Equatable, Sendable {
 extension ModelChoice {
     /// "Opus 5.5 · Extra high"
     nonisolated var label: String {
-        let names = ["claude-opus-5-5": "Opus 5.5", "claude-sonnet-5-5": "Sonnet 5.5",
-                     "claude-haiku-5-5": "Haiku 5.5", "claude-fable-5-1": "Fable 5.1"]
-        return "\(names[model] ?? model) · \(effort == "xhigh" ? "Extra high" : effort.capitalized)"
+        "\(Self.name(model)) · \(effort == "xhigh" ? "Extra high" : effort.capitalized)"
+    }
+
+    /// "Fable 5.1", "GPT-6-Astra", or the id as it is.
+    nonisolated static func name(_ model: String) -> String {
+        let names = ["claude-opus-5-5": "Opus 5.5", "claude-sonnet-5-5": "Sonnet 5.5", "claude-haiku-5-5": "Haiku 5.5",
+                     "claude-fable-5-1": "Fable 5.1", "gpt-6-astra": "GPT-6-Astra"]
+        return names[model] ?? model
     }
 }
 
@@ -168,6 +203,12 @@ nonisolated struct Runner: Sendable {
     func status() async throws -> RunnerStatus { try await call("GET", "v1/status") }
     func jobs() async throws -> [Job] { try await call("GET", "v1/jobs?limit=50") }
     func stop(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/stop") }
+
+    /// Tells the job's agent something. A finished job picks its session up again.
+    func tell(_ id: String, _ text: String) async throws -> Job {
+        struct Body: Encodable { var text: String }
+        return try await call("POST", "v1/jobs/\(id)/messages", body: Body(text: text))
+    }
     func models() async throws -> ModelSettings { try await call("GET", "v1/settings/models") }
     func modelOptions() async throws -> ModelOptions { try await call("GET", "v1/settings/models/options") }
 
@@ -182,8 +223,8 @@ nonisolated struct Runner: Sendable {
     }
 
     func dispatch(_ job: Job) async throws -> Job {
-        struct Body: Encodable { var job: Job }
-        return try await call("POST", "v1/jobs", body: Body(job: job))
+        struct Body: Encodable { var job: DispatchedJob }
+        return try await call("POST", "v1/jobs", body: Body(job: DispatchedJob(job: job)))
     }
 
     /// The exact sentence publishing would carry out.
@@ -252,6 +293,21 @@ nonisolated struct Runner: Sendable {
         struct Problem: Decodable { var error: String }
         if let data, let problem = try? JSONDecoder().decode(Problem.self, from: data) { throw RunnerError(message: problem.error) }
         throw RunnerError(message: http.statusCode == 401 ? "The runner only answers its owner's Tailscale login." : "The runner answered \(http.statusCode).")
+    }
+}
+
+/// The job `POST /v1/jobs` sends back. Swift leaves nils out, but a missing check keeps the plan's,
+/// so no check and the usual model go as null.
+nonisolated struct DispatchedJob: Encodable {
+    var job: Job
+
+    private enum Nulls: String, CodingKey { case check, model }
+
+    func encode(to encoder: any Encoder) throws {
+        try job.encode(to: encoder)
+        var nulls = encoder.container(keyedBy: Nulls.self)
+        if job.check == nil { try nulls.encodeNil(forKey: .check) }
+        if job.model == nil { try nulls.encodeNil(forKey: .model) }
     }
 }
 
