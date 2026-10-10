@@ -42,6 +42,7 @@ final class API {
         router.get("v1/jobs/:id") { _, context in try await self.job(context.parameters.require("id")) }
         router.get("v1/jobs/:id/wait") { _, context in try await self.wait(context.parameters.require("id")) }
         router.post("v1/jobs/:id/stop") { _, context in try await self.stop(context.parameters.require("id")) }
+        router.post("v1/jobs/:id/dismiss") { _, context in try await self.dismiss(context.parameters.require("id")) }
         router.post("v1/jobs/:id/messages") { request, context in
             try await self.message(context.parameters.require("id"), try await Self.decode(NewMessage.self, from: request))
         }
@@ -116,6 +117,17 @@ final class API {
         let job = try known(id)
         desk.stop(id)
         return Self.json(JobJSON(job: desk.job(id) ?? job))
+    }
+
+    /// The user lets go of a job that needs them: it then needs nothing. No signature: nothing goes out.
+    func dismiss(_ id: String) throws -> Response {
+        _ = try known(id)
+        do {
+            try desk.dismiss(id)
+        } catch {
+            throw APIError(.conflict, error.localizedDescription)
+        }
+        return Self.json(JobJSON(job: try known(id)))
     }
 
     /// Words for the job's agent: a running job hears them now, a finished one runs again.
@@ -377,7 +389,7 @@ struct Options: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed }
 
     private enum Derived: String, CodingKey { case pipeline, title }
 
@@ -406,13 +418,14 @@ struct JobJSON: Encodable {
         if job.notes == nil { try nulls.encodeNil(forKey: .notes) }
         if job.pullRequest == nil { try nulls.encodeNil(forKey: .pullRequest) }
         if job.pullRequestError == nil { try nulls.encodeNil(forKey: .pullRequestError) }
+        if job.dismissed == nil { try nulls.encodeNil(forKey: .dismissed) }
     }
 }
 
 struct AccountJSON: Encodable {
     var state: AccountState
 
-    private enum Keys: String, CodingKey { case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running }
+    private enum Keys: String, CodingKey { case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -426,6 +439,7 @@ struct AccountJSON: Encodable {
         try keys.encode(state.fiveHourResets, forKey: .fiveHourResets)
         try keys.encode(state.sevenDayResets, forKey: .sevenDayResets)
         try keys.encode(state.running, forKey: .running)
+        try keys.encode(state.fullUntil, forKey: .fullUntil)
     }
 }
 

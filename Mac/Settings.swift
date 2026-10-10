@@ -96,6 +96,10 @@ struct AccountsSettingsView: View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 UsageCard(snapshot: state.usage)
+                // A job of its hit the limit: no job goes to it until then.
+                if state.isFull(), let until = state.fullUntil {
+                    Text("Full until \(Limits.clock(until))").font(.caption).foregroundStyle(.orange)
+                }
                 if !state.account.payer.isEmpty {
                     Text("Paid by \(state.account.payer)").font(.caption).foregroundStyle(.secondary)
                 }

@@ -89,7 +89,7 @@ struct UsageTests {
     }
 
     @Test func claudeCodeSendsResetTimes() {
-        let event = message(#"{"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {"five_hour": {"utilization": 0.33, "resets_at": 1791593680}, "seven_day": {"utilization": 0.5, "resets_at": 1792001242}}}}"#)
+        let event = message(#"{"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {"five_hour": {"utilization": 0.33, "resetsAt": 1791593680}, "seven_day": {"utilization": 0.5, "resetsAt": 1792001242}}}}"#)
         #expect(StreamJSON.events(event) == [.usage(fiveHour: 0.33, sevenDay: 0.5, fiveHourResets: Date(timeIntervalSince1970: 1_791_593_680),
                                                     sevenDayResets: Date(timeIntervalSince1970: 1_792_001_242))])
         let bare = message(#"{"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {"five_hour": {"utilization": 0.33}}}}"#)
