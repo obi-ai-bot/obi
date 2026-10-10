@@ -25,6 +25,9 @@ struct AgentTests {
     @Test func usage() {
         let event = message(#"{"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {"five_hour": {"utilization": 0.33}, "seven_day": {"utilization": 0.5}}}}"#)
         #expect(StreamJSON.events(event) == [.usage(fiveHour: 0.33, sevenDay: 0.5)])
+        let timed = message(#"{"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {"five_hour": {"utilization": 0.33, "resetsAt": 1791593680}, "seven_day": {"utilization": 0.5, "resetsAt": 1792001242}}}}"#)
+        #expect(StreamJSON.events(timed) == [.usage(fiveHour: 0.33, sevenDay: 0.5, fiveHourResets: Date(timeIntervalSince1970: 1_791_593_680),
+                                                    sevenDayResets: Date(timeIntervalSince1970: 1_792_001_242))])
     }
 
     @Test func result() {

@@ -122,12 +122,21 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     var signedIn: Bool
     var fiveHour: Double?
     var sevenDay: Double?
+    /// When each window resets (docs/runner-api.md). Older runners don't send them.
+    var fiveHourResets: Date?
+    var sevenDayResets: Date?
     var running: Int
     /// A job of its hit the account's usage limit: no job goes to it before then (newer runners only).
     var fullUntil: Date?
 
     /// "Personal · Claude Code"
-    var title: String { "\(name) · \(agent == "codex" ? "Codex" : "Claude Code")" }
+    var title: String { "\(name) · \(Usage.tool(agent))" }
+
+    /// What Settings' usage card shows.
+    var usage: Usage.Snapshot {
+        Usage.Snapshot(agent: agent, name: name, label: label, fiveHour: fiveHour, sevenDay: sevenDay,
+                       fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running)
+    }
 }
 #endif
 

@@ -143,8 +143,8 @@ nonisolated enum AgentEvent: Equatable, Sendable {
     case session(String)
     /// What it's doing now, like "Running pnpm test".
     case step(String)
-    /// How much of the account's limits is used, 0...1.
-    case usage(fiveHour: Double?, sevenDay: Double?)
+    /// How much of the account's limits is used, 0...1, and when each window resets.
+    case usage(fiveHour: Double?, sevenDay: Double?, fiveHourResets: Date? = nil, sevenDayResets: Date? = nil)
     /// The account hit its usage limit and the turn can't go on, with the reset time it named (nil
     /// when it named none). Desk moves the job to an account with room; this agent is dropped.
     case limit(resets: Date?)
@@ -155,6 +155,12 @@ nonisolated enum AgentEvent: Equatable, Sendable {
     /// The agent's process ended mid-turn, without a result: the summary says how it ended. Its
     /// session can be picked up again.
     case cutOff(summary: String)
+
+    /// A reset time as the tools send it: seconds since 1970 (milliseconds are taken too).
+    nonisolated static func epoch(_ value: Any?) -> Date? {
+        guard let seconds = (value as? Double) ?? (value as? Int).map(Double.init), seconds > 0 else { return nil }
+        return Date(timeIntervalSince1970: seconds > 1e11 ? seconds / 1000 : seconds)
+    }
 }
 
 /// A coding agent working on one job in its worktree: Claude Code or Codex.
@@ -395,7 +401,9 @@ nonisolated enum StreamJSON {
             let windows = info["unifiedWindows"] as? [String: Any] ?? [:]
             let window = { (key: String) in windows[key] as? [String: Any] }
             let used = { (key: String) in Limits.number(window(key)?["utilization"]) }
-            var events: [AgentEvent] = [.usage(fiveHour: used("five_hour"), sevenDay: used("seven_day"))]
+            let resets = { (key: String) in AgentEvent.epoch(window(key)?["resetsAt"]) }
+            var events: [AgentEvent] = [.usage(fiveHour: used("five_hour"), sevenDay: used("seven_day"),
+                                               fiveHourResets: resets("five_hour"), sevenDayResets: resets("seven_day"))]
             // At 100% (or refused outright) the account is full: when it resets, from the window that filled.
             let full = ["five_hour", "seven_day"].filter { (used($0) ?? 0) >= 1 }
             if info["status"] as? String == "rejected" || !full.isEmpty {

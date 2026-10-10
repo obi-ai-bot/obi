@@ -43,7 +43,8 @@ struct CodexTests {
 
     @Test func rateLimits() {
         let update = message(#"{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":8,"windowDurationMins":300,"resetsAt":1791593680},"secondary":{"usedPercent":40,"windowDurationMins":10080,"resetsAt":1792001242},"planType":"plus"}}}"#)
-        #expect(CodexRPC.events(update) == [.usage(fiveHour: 0.08, sevenDay: 0.4)])
+        #expect(CodexRPC.events(update) == [.usage(fiveHour: 0.08, sevenDay: 0.4, fiveHourResets: Date(timeIntervalSince1970: 1_791_593_680),
+                                                   sevenDayResets: Date(timeIntervalSince1970: 1_792_001_242))])
         let reserve = message(#"{"limitId":"base_model_inference","limitName":"gpt-reserve","primary":{"usedPercent":100,"windowDurationMins":10080,"resetsAt":1791760565},"secondary":null}"#)
         #expect(CodexRPC.usage(reserve) == nil)
     }

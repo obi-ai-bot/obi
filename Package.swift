@@ -41,7 +41,7 @@ let package = Package(
             swiftSettings: features
         ),
         // The apps' Shared/ code the runner's tests cover; the rest of Shared/ needs the apps.
-        .target(name: "ObyShared", path: "Shared", sources: ["Elapsed.swift"], swiftSettings: features),
+        .target(name: "ObyShared", path: "Shared", sources: ["Elapsed.swift", "Usage.swift"], swiftSettings: features),
         .testTarget(
             name: "RunnerTests",
             dependencies: [

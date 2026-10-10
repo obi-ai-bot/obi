@@ -46,7 +46,8 @@ struct LimitMessageTests {
             {"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1791586200,"rateLimitType":"five_hour",
              "unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":1791586200,"status":"rejected"},"seven_day":{"utilization":0.62,"resetsAt":1792000000}}}}
             """#.utf8)) as? [String: Any])
-        #expect(StreamJSON.events(rejected) == [.usage(fiveHour: 1, sevenDay: 0.62), .limit(resets: Date(timeIntervalSince1970: 1_791_586_200))])
+        #expect(StreamJSON.events(rejected) == [.usage(fiveHour: 1, sevenDay: 0.62, fiveHourResets: Date(timeIntervalSince1970: 1_791_586_200),
+                                                     sevenDayResets: Date(timeIntervalSince1970: 1_792_000_000)), .limit(resets: Date(timeIntervalSince1970: 1_791_586_200))])
         let warning = try #require(JSONSerialization.jsonObject(with: Data(#"""
             {"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","unifiedWindows":{"five_hour":{"utilization":0.9},"seven_day":{"utilization":0.3}}}}
             """#.utf8)) as? [String: Any])
