@@ -38,7 +38,9 @@ final class Push {
         /// What iOS/JobsActivity.swift shows for `job`.
         init(_ job: Job, working: Int) {
             self.working = working
-            if let number = job.pr ?? job.issue {
+            if let title = job.brainTitle {
+                self.title = title
+            } else if let number = job.pr ?? job.issue {
                 title = "\(job.kind.rawValue.capitalized) \(job.repoName) #\(number)"
             } else {
                 title = job.request.split(separator: "\n").first.map(String.init) ?? job.request

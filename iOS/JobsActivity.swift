@@ -89,7 +89,7 @@ enum JobsActivity {
     }
 
     private static func state(_ job: Job, working: Int) -> ObyActivity.ContentState {
-        ObyActivity.ContentState(working: working, title: job.title, line: job.line.isEmpty ? "Starting…" : job.line,
+        ObyActivity.ContentState(working: working, title: job.heading, line: job.line.isEmpty ? "Starting…" : job.line,
                                  started: job.started ?? job.created, status: job.status.rawValue, agent: job.agent)
     }
 }

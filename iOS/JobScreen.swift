@@ -74,7 +74,7 @@ struct JobScreen: View {
 
     private func header(_ job: Job) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(job.title).font(.title2.weight(.semibold)).lineLimit(2)
+            Text(job.heading).font(.title2.weight(.semibold)).lineLimit(2)
                 .accessibilityAddTraits(.isHeader)
             ViewThatFits(in: .horizontal) {
                 HStack { StatusPill(job: job); elapsed(job) }
@@ -87,9 +87,8 @@ struct JobScreen: View {
 
     private func elapsed(_ job: Job) -> some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            let seconds = max(0, Int((job.finished ?? context.date).timeIntervalSince(job.started ?? job.created)))
-            let time = seconds >= 3600 ? "\(seconds / 3600)h \(seconds % 3600 / 60)m" : "\(seconds / 60)m \(seconds % 60)s"
-            Text("\(time) elapsed").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            Text(Elapsed.line(started: job.started ?? job.created, finished: job.finished, now: context.date))
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
         }
     }
 

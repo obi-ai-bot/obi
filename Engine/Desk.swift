@@ -159,6 +159,8 @@ final class Desk {
                 var job = dispatch
                 job.epic = nil
                 job.issue = number
+                // The epic's title doesn't name one sub-issue: these show "Fix oby #12".
+                job.title = nil
                 job.task = "Work on issue #\(number) (\(title)), part of epic #\(epic). What the user asked for the epic: \(dispatch.task)"
                 jobs.append(job)
             }
@@ -202,6 +204,7 @@ final class Desk {
                               branch: Job.branch(kind: dispatch.kind, pr: dispatch.pr, issue: dispatch.issue, id: id),
                               base: dispatch.baseBranch, pr: dispatch.pr, kind: dispatch.kind, task: dispatch.task)
                 job.issue = dispatch.issue
+                job.title = dispatch.title
                 job.rounds = dispatch.rounds > 1 ? dispatch.rounds : nil
                 job.check = dispatch.check
                 let reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply

@@ -171,9 +171,9 @@ final class RunnerFeed {
     /// didn't say why is just ready to publish.
     static func title(_ notice: Notice, for job: Job) -> String {
         switch notice {
-        case .ready: "\(job.publishError == nil ? "Ready to publish" : "Couldn't publish"): \(job.title)"
-        case .failed: "Failed: \(job.title)"
-        case .interrupted: "Interrupted: \(job.title)"
+        case .ready: "\(job.publishError == nil ? "Ready to publish" : "Couldn't publish"): \(job.heading)"
+        case .failed: "Failed: \(job.heading)"
+        case .interrupted: "Interrupted: \(job.heading)"
         }
     }
 

@@ -75,7 +75,7 @@ struct HonestEndingTests {
             #expect(text == "Nothing committed: I couldn't commit: gpg failed to sign the data.\n\nThe change is in the worktree.")
             var ended = job(kind)
             (ended.status, ended.summary) = (status, text)
-            #expect(ended.doneLine == "Nothing committed: \(ended.title)")
+            #expect(ended.doneLine == "Nothing committed: \(ended.heading)")
         }
         #expect(Job.ending(job(.build), .done, "", made: 0).1 == "Nothing committed: the agent gave no reason.")
     }

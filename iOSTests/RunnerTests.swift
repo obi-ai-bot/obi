@@ -8,7 +8,7 @@ struct RunnerTests {
 
     @Test func jobDecodesWithISODates() throws {
         let job = try Runner.decoder.decode(Job.self, from: Data(job.utf8))
-        #expect(job.title == "Review oby #33")
+        #expect(job.heading == "Review oby #33")
         #expect(job.isActive)
         #expect(job.line == "Running pnpm test")
         #expect(job.created == ISO8601DateFormatter().date(from: "2026-10-09T21:42:53Z"))
@@ -41,7 +41,7 @@ struct RunnerTests {
         }
         let plan = #"{"kind": "plan", "drafts": [\#(draft(12, #""claude-fable-5-1""#)), \#(draft(15, "null"))], "draft": \#(draft(12, #""claude-fable-5-1""#))}"#
         guard case .plan(let drafts) = try Runner.decoder.decode(PlanResult.self, from: Data(plan.utf8)) else { Issue.record("not a plan"); return }
-        #expect(drafts.map(\.job.title) == ["Fix oby #12", "Fix oby #15"])
+        #expect(drafts.map(\.job.heading) == ["Fix oby #12", "Fix oby #15"])
         #expect(drafts[0].job.extras == "Round 1 of 3")
         #expect(drafts[0].strongerModel(for: "claude") == "claude-fable-5-1")
         // Another account's tool runs that tool's stronger model.
