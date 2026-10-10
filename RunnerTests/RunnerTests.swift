@@ -660,19 +660,28 @@ struct BackgroundWorkTests {
         #expect(Policy.deny(tool: "Bash", input: input, worktree: worktree) == foreground)
     }
 
+    /// Claude Code runs a subagent in the background unless it's told not to, and always when it's remote.
     @Test func backgroundSubagentsAreDenied() {
+        let subagent: [String: Any] = ["description": "Find callers", "prompt": "Find Policy's callers"]
         for tool in ["Agent", "Task"] {
-            let input: [String: Any] = ["description": "Find callers", "prompt": "Find Policy's callers", "run_in_background": true]
-            #expect(Policy.deny(tool: tool, input: input, worktree: worktree) == foreground, "\(tool)")
+            for extra in [["run_in_background": true], [:], ["run_in_background": false, "isolation": "remote"]] as [[String: Any]] {
+                let input = subagent.merging(extra) { $1 }
+                #expect(Policy.deny(tool: tool, input: input, worktree: worktree) == foreground, "\(tool) \(extra)")
+            }
         }
     }
 
     @Test func foregroundCommandsAndSubagentsAreAllowed() {
         for background in [nil, false] as [Bool?] {
-            var command: [String: Any] = ["command": "swift test"], subagent: [String: Any] = ["description": "Find callers", "prompt": "Find Policy's callers"]
-            if let background { command["run_in_background"] = background; subagent["run_in_background"] = background }
+            var command: [String: Any] = ["command": "swift test"]
+            if let background { command["run_in_background"] = background }
             #expect(Policy.deny(tool: "Bash", input: command, worktree: worktree) == nil)
-            for tool in ["Agent", "Task"] { #expect(Policy.deny(tool: tool, input: subagent, worktree: worktree) == nil, "\(tool)") }
+        }
+        for tool in ["Agent", "Task"] {
+            for extra in [[:], ["isolation": "worktree"]] as [[String: Any]] {
+                let input = ["description": "Find callers", "prompt": "Find Policy's callers", "run_in_background": false].merging(extra) { $1 }
+                #expect(Policy.deny(tool: tool, input: input, worktree: worktree) == nil, "\(tool) \(extra)")
+            }
         }
     }
 }
