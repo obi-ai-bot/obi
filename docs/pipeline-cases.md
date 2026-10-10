@@ -16,6 +16,7 @@ The plan for making Oby run Deskree's whole pipeline by itself, case by case. Th
 - **Tetrix is optional (2026-10-10).** Oby works fully on its own with local storage. Tetrix adds richer memory. See X.7.
 - **A vault (2026-10-10).** Secrets live in an encrypted vault that no agent ever sees. Oby uses them only through connections you set up. See 2.6 and F17 (deskree-inc/oby#60).
 - **Oby is a whiteboard (2026-10-10).** Like Claude Code, Cursor and Codex, it starts as a generic default pipeline. You reshape it by telling it, for example "add a Slack ping as a step", and over time it learns how you work, until the process is as automatic as possible.
+- **Oby talks (2026-10-10).** Oby is an assistant you reach with as little effort as possible. It asks in the conversation when it needs something, instead of popping up UI. It answers in words you read, and you type or speak (hold fn, like Wispr Flow). Spoken replies come later.
 - **Cost first (2026-10-10).** When two choices are otherwise equal, Oby picks the cheaper one, for example acting only on reviews that request changes (5.2).
 - **Reviews go Oby to Oby (2026-10-10).** Requests go to the reviewer's Oby inside Oby, not through Slack (unless you add Slack as a step). See 5.1.
 - **AGENTS.md rewritten to match (2026-10-10).**
@@ -62,7 +63,7 @@ Before stage 1. People connect only what they have. That decides which model the
 - **Jobs work with:** Opus 5.5 at extra high effort today. Fable 5.1 is the stronger model for complex work.
 - **Typed plan:** enforced. `--json-schema` fills `.structured_output`. 4 of 4 were valid in the #31 test, taking 3–6 s with Haiku.
 - **Oby today:** Works. Claude is the only brain Oby has.
-- **Decide:** jobs on Opus 5.5, or on Sonnet 5.5 to stretch a Pro plan's limits? When may Fable 5.1 be used without asking?
+- **Decided 2026-10-10:** you choose at first launch, from defaults Oby fills in: Sonnet 5.5 for routine jobs, Opus 5.5 for complex ones, and Fable 5.1 only when you allow it.
 
 ### 0.2 Only Codex
 - **What happens:** Oby asks Codex which models this account may use (`model/list`, which includes each model's efforts) and picks from that list, never from a hard-coded name. Goes to 1.
@@ -70,14 +71,15 @@ Before stage 1. People connect only what they have. That decides which model the
 - **Jobs work with:** gpt-6-sol at high effort today. The code's default is gpt-6.1-sol, which a ChatGPT Plus login can't use. gpt-6-astra is stronger but uses up a Plus plan fast.
 - **Typed plan:** enforced. `codex exec --output-schema` was 4 of 4 valid in #31, at about 9 s and 18k tokens a call. Whether app-server turns accept a schema is still to check.
 - **Oby today:** Broken. Jobs run on Codex, but planning is Claude-only: without Claude, Oby falls back to keyword rules.
-- **Decide:** the Lead's Codex model and effort. Should Astra never be the default on a Plus plan?
+- **Decided 2026-10-10:** you choose at first launch, from the account's own list: a smaller Codex model for routine jobs, a stronger one for complex jobs, and Astra only if you pick it.
 
 ### 0.3 Only Cursor
 - **What happens:** Oby lists the account's models with `agent models` after you sign in, picks two and shows them. Goes to 1.
 - **Lead and jobs:** unknown until we can list the models. The Cursor CLI on Wellington's Mac (2026.10.01) isn't signed in. Using two Cursor accounts is spike #24.
 - **Typed plan:** not enforced. The CLI returns a JSON wrapper with free text in `.result` (#31). The schema goes in the prompt, and Swift checks the reply and retries.
 - **Oby today:** Missing. There's no Cursor runner yet (F6, #10) and no Cursor brain.
-- **Decide:** the default models, once we can list them. Is an unenforced schema reliable enough for 100% automation, or does a Cursor-only Lead ask you more often?
+- **Decided 2026-10-10:** the same flow. Oby proposes defaults from the account's list, and you choose.
+- **Open:** is an unenforced schema reliable enough for 100% automation?
 
 ### 0.4 Only Gemini
 - **What happens:** same as Cursor: list the models, pick, show. Goes to 1.
@@ -91,7 +93,8 @@ Before stage 1. People connect only what they have. That decides which model the
 - **Lead thinks with:** the best planner connected: Claude (enforced schema), then Codex, then Cursor, then Gemini.
 - **Jobs work with:** every connected account, routed by usage. The score is the higher of the 5-hour and 7-day use, plus 0.15 per running job.
 - **Oby today:** Partial. Jobs are routed across Claude and Codex, and the brain is always Claude.
-- **Decide:** always the same tool for the Lead, or the one with the most room left? Does the Lead's own usage count toward routing?
+- **Decided 2026-10-10:** you pick the Lead's model at first launch, like the jobs' models. If you connect a new tool later, Oby asks in the conversation whether to change anything: no pop-ups.
+- **Proposal:** the Lead's own usage counts toward routing.
 
 ---
 
@@ -122,7 +125,7 @@ Like email: each item waits for your decision, with no timeout and no guessing. 
 - **How others do it:**
   - Claude Code has a "Needs input" group. You answer inline in the peek panel (number keys, Tab for a suggested reply), it shows "waiting 3m", and questions stay open until answered.
   - Linear Triage: Accept, Decline and Duplicate on 1, 2 and 3.
-- **Decide:** does a waiting question pause only its job, or its whole goal?
+- **Decided 2026-10-10:** only its job. Other jobs, worktrees and agents keep going.
 
 ### I.2 Permission
 - **Lands here when:** a worker asks to run something that neither Oby's fixed rules nor your learned rules settle.
@@ -463,7 +466,7 @@ Decided 2026-10-10: the agent merges once the review approves.
 ## 7 · Report back
 
 ### 7.1 Report
-- **What happens:** one message per goal, landing in the notch, as a push on the iPhone, and in the Tetrix session:
+- **What happens:** each job carries its own report, shown on the notch and the iPhone and saved in the Tetrix session:
   - The result: what merged, with links.
   - The steps: worktree, tests (3 rounds), PR, reviewed by X, 1 change, merged.
   - Worth knowing: risks, follow-ups, what was skipped and why.
@@ -474,7 +477,9 @@ Decided 2026-10-10: the agent merges once the review approves.
 - **Others:** Devin keeps an activity feed on the Linear ticket with the PR link. Copilot shows the full session log and the PR.
 - **Open for Oby:** nobody has a fixed "result, steps, worth knowing" report.
   - Proposal: Oby writes the steps from its own events, and the agent adds only "worth knowing".
-  - Decide: where it lands: the notch, a push, a Slack DM, a daily digest?
+  - Decided 2026-10-10: the report stays in its job, as today, with a much better screen.
+  - Clear only hides a job. A history list keeps it, and you can ask Oby about any past job and get the answer in words.
+  - Open: redesign the job report screen on the Mac and the iPhone. Today's screen is hard to read.
 
 ---
 
