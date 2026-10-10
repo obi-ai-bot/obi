@@ -46,6 +46,10 @@ final class Desk {
     private var ending: Set<String> = []
     /// Jobs that ended done and are counting their commits and publishing.
     private var finishing: Set<String> = []
+    /// Jobs whose agent this run of Oby started, with the commits each had then. Only they publish
+    /// by themselves, and only with commits made since: a job that ended before Oby started never
+    /// does, and one whose own publish failed isn't retried (Publish by hand is).
+    private var ranHere: [String: Int] = [:]
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
     /// Gets a job's worktree ready, and makes its agent (nil for a tool that can't run jobs yet). Tests put in their own.
@@ -375,6 +379,7 @@ final class Desk {
         let home = accounts.state(job.account)?.account.home.map { URL(filePath: $0) }
         guard let agent = makeAgent(job, home, resume) else { return finish(job.id, .failed, "\(job.agentName) can't run jobs yet.") }
         agents[job.id] = agent
+        ranHere[job.id] = job.commits ?? 0
         do {
             // Only the job's current agent speaks for it: one that was stopped or ended may still report.
             try agent.start(prompt: prompt) { [weak self, weak agent] event in
@@ -461,8 +466,10 @@ final class Desk {
 
     /// Ends the job. A job that's done counts its commits first, so one that should have committed
     /// and didn't ends as "nothing committed" rather than done. One that's done with commits its
-    /// pull request doesn't have yet publishes them before it ends (case 4.1): a possible secret
-    /// fails it, naming where; any other failure leaves it done, with the reason and Publish offered.
+    /// pull request doesn't have yet, made since its agent started in this run of Oby, publishes
+    /// them before it ends (case 4.1): commits already on the base by patch leave nothing to
+    /// publish; a possible secret fails it, naming where; any other failure leaves it done, with
+    /// the reason and Publish offered.
     private func finish(_ id: String, _ status: Job.Status, _ summary: String) {
         guard var job = job(id), job.isActive else { return }
         guard status == .done, let base = job.base else { return end(id, status, summary) }
@@ -482,12 +489,18 @@ final class Desk {
             var ended = running
             (ended.status, ended.summary) = Job.ending(ended, status, summary, made: made)
             ended.commits = commits
-            guard ended.canPublish else { return end(id, status, summary, commits: commits, made: made) }
+            guard ended.canPublish, let before = ranHere[id], (commits ?? 0) > before else {
+                // Still waiting for Publish by hand: why its own publish failed still holds.
+                return end(id, status, summary, commits: commits, made: made, publishError: ended.canPublish ? ended.publishError : nil)
+            }
             running.step = "Publishing"
             replace(running, save: false)
             do {
                 let url = try await publishOnItsOwn(ended, base)
                 end(id, status, summary, commits: commits, made: made, published: url)
+            } catch let merged as Publish.AlreadyOnBase {
+                // Merged already (a squash merge changes the hashes): nothing is left to publish.
+                end(id, status, (merged.errorDescription ?? "Not published.") + "\n\n" + ended.summary, commits: 0, made: made)
             } catch let blocked as Publish.Blocked {
                 end(id, .failed, (blocked.errorDescription ?? "Not published.") + "\n\n" + ended.summary, commits: commits, made: made)
             } catch {
@@ -519,6 +532,7 @@ final class Desk {
         job.finished = .now
         replace(job)
         agents[id] = nil
+        ranHere[id] = nil
         ending.remove(id)
         onFinish(job)
     }

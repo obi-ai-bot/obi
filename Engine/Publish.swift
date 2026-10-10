@@ -4,7 +4,7 @@ import LocalAuthentication
 #endif
 
 /// Publishing a finished job as the user: push its branch and open a pull request, ready for
-/// review. Guards, then a secret scan, then the approval; nothing touches the network before it.
+/// review. Guards, then a secret scan, then the approval; nothing is sent before it (only the base is fetched).
 /// A job that ends done with commits publishes by itself (the approval lets everything through);
 /// a job whose publish failed is published by hand, with Touch ID on the Mac or a phone's
 /// signature on the runner. Oby never merges, force-pushes or pushes to main for anyone.
@@ -13,6 +13,13 @@ nonisolated enum Publish {
     struct Blocked: LocalizedError {
         var findings: [Finding]
         var errorDescription: String? { Publish.blocked(by: findings) }
+    }
+
+    /// Every commit the job would push is on its base already, compared by patch (a squash merge
+    /// changes their hashes): publishing would open a pull request for merged work.
+    struct AlreadyOnBase: LocalizedError {
+        var base: String
+        var errorDescription: String? { "Not published: its commits are already on \(base)." }
     }
 
     /// Something the scan found: where, and which rule. Never the secret itself.
@@ -38,8 +45,9 @@ nonisolated enum Publish {
             : "Push the new commits on \(job.branch) to \(job.repo), for its pull request into \(base)."
     }
 
-    /// Guards, secret scan (`Blocked` when it finds something), `approve` with the action, push,
-    /// pull request. The first refusal stops it with one line the notch can show. Returns the pull
+    /// Guards, the commits compared with the base by patch (`AlreadyOnBase` when they're all on it),
+    /// secret scan (`Blocked` when it finds something), `approve` with the action, push, pull
+    /// request. The first refusal stops it with one line the notch can show. Returns the pull
     /// request's URL. `approve` is `{ _ in }` when a job publishes by itself.
     static func publish(_ job: Job, base: String, approve: (String) async throws -> Void) async throws -> URL {
         let worktree = Workspace.worktree(job.id)
@@ -53,6 +61,12 @@ nonisolated enum Publish {
         if await git(["rev-list", "--count", "refs/remotes/origin/\(base)..\(head)"]) == "0" {
             throw Shell.Failure(message: "Nothing to publish: \(job.branch) has no commits that aren't on \(base).")
         }
+        // The base as GitHub has it now: work merged since the job started counts as merged.
+        try? await fetch(base, of: job, into: worktree)
+        guard let left = await unmerged(worktree, base: base, head: head) else {
+            throw Shell.Failure(message: "Not published: can't compare \(job.branch) with \(base).")
+        }
+        if left == 0 { throw AlreadyOnBase(base: base) }
         let findings = try await scan(worktree, base: base, head: head)
         if !findings.isEmpty { throw Blocked(findings: findings) }
         try await approve(action(for: job, base: base))
@@ -187,15 +201,42 @@ nonisolated enum Publish {
     }
     #endif
 
-    /// Pushes one commit to the job's own branch, never with --force. The agent could have changed
-    /// the clone's config, so no hooks, tags, submodules or signing programs, and only gh signs in.
+    /// The agent could have changed the clone's config, so git talks to GitHub with no hooks, and only gh signs in.
+    private static let toGitHub = ["git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
+                                   "-c", "credential.helper=!gh auth git-credential"]
+
+    /// Pushes one commit to the job's own branch, never with --force: no tags, submodules or signing programs either.
     static func push(_ commit: String, of job: Job, from worktree: URL) async throws {
         let result = try await Shell.run(
-            ["git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
-             "push", "--no-follow-tags", "--no-signed", "--recurse-submodules=no",
-             "https://github.com/\(job.repo).git", "\(commit):refs/heads/\(job.branch)"],
+            toGitHub + ["push", "--no-follow-tags", "--no-signed", "--recurse-submodules=no",
+                        "https://github.com/\(job.repo).git", "\(commit):refs/heads/\(job.branch)"],
             in: worktree, env: ["GIT_TERMINAL_PROMPT": "0"])
         guard result.status == 0 else { throw Shell.Failure(message: "Couldn't push \(job.branch): \(said(result.err))") }
+    }
+
+    /// Brings origin/<base> up to date from GitHub, so what's merged since the job started counts.
+    static func fetch(_ base: String, of job: Job, into worktree: URL) async throws {
+        let result = try await Shell.run(
+            toGitHub + ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no",
+                        "https://github.com/\(job.repo).git", "+refs/heads/\(base):refs/remotes/origin/\(base)"],
+            in: worktree, env: ["GIT_TERMINAL_PROMPT": "0"], timeout: 120)
+        guard result.status == 0 else { throw Shell.Failure(message: "Couldn't fetch \(base): \(said(result.err))") }
+    }
+
+    /// How many commits up to `head` aren't on origin/<base>, compared by patch, so a cherry-pick,
+    /// a rebase or a squash merge counts as on it. Nil when git can't say.
+    static func unmerged(_ worktree: URL, base: String, head: String = "HEAD") async -> Int? {
+        let git = { (arguments: [String]) in try? await Shell.ok(["git", "-C", worktree.path] + arguments) }
+        let since = "refs/remotes/origin/\(base)"
+        // One line per commit: "-" when a commit with the same patch is on the base, "+" when not.
+        guard let cherry = await git(["cherry", since, head]) else { return nil }
+        let left = cherry.split(separator: "\n").count { $0.hasPrefix("+") }
+        guard left > 0 else { return 0 }
+        // A squash merge lands them all as one commit: then merging them into the base changes nothing.
+        // A conflict (merge-tree fails) means they aren't all there.
+        guard let merged = await git(["merge-tree", "--write-tree", since, head]),
+              let tree = await git(["rev-parse", "\(since)^{tree}"]) else { return left }
+        return merged.split(separator: "\n").first.map(String.init) == tree ? 0 : left
     }
 
     /// Opens the pull request, ready for review, or returns the one already open for the branch
