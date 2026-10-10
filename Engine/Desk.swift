@@ -50,6 +50,8 @@ final class Desk {
     /// by themselves, and only with commits made since: a job that ended before Oby started never
     /// does, and one whose own publish failed isn't retried (Publish by hand is).
     private var ranHere: [String: Int] = [:]
+    /// Jobs whose agent was cut off mid-turn and picked up again: that happens once, then the job fails.
+    private var pickedUp: Set<String> = []
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
     /// Gets a job's worktree ready, and makes its agent (nil for a tool that can't run jobs yet). Tests put in their own.
@@ -62,6 +64,10 @@ final class Desk {
     /// Publishes a job that ended done with commits, with no one to approve it: the check passed
     /// and the secret scan gates it (case 4.1). Tests put in their own.
     @ObservationIgnored var publishOnItsOwn: (Job, _ base: String) async throws -> URL = { try await Publish.publish($0, base: $1) { _ in } }
+    /// Publishes by hand, once `approve` lets the action through. Tests put in their own.
+    @ObservationIgnored var publishByHand: (Job, _ base: String, _ approve: (String) async throws -> Void) async throws -> URL = {
+        try await Publish.publish($0, base: $1, approve: $2)
+    }
 
     init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))) {
         self.accounts = accounts
@@ -280,18 +286,28 @@ final class Desk {
 
     /// Publishing by hand, for a job whose own publish failed: pushes the job's branch and opens
     /// its pull request once `approve` lets the action through: Touch ID on the Mac, a phone's
-    /// signature on the runner. Never a merge.
+    /// signature on the runner. Never a merge. Commits already on the base leave nothing to
+    /// publish, as when the job publishes by itself: it stops waiting for Publish, and the reason
+    /// is thrown too.
     @discardableResult
     func publish(_ id: String, approve: (String) async throws -> Void) async throws -> URL {
         guard let job = job(id), job.canPublish, let base = job.base else { throw Shell.Failure(message: "Nothing to publish.") }
         do {
-            let url = try await Publish.publish(job, base: base, approve: approve)
+            let url = try await publishByHand(job, base, approve)
             if var job = self.job(id) {
                 job.published = url.absoluteString
                 job.publishError = nil
                 replace(job)
             }
             return url
+        } catch let merged as Publish.AlreadyOnBase {
+            if var job = self.job(id), job.canPublish {
+                job.summary = (merged.errorDescription ?? "Not published.") + "\n\n" + job.summary
+                job.commits = 0
+                job.publishError = nil
+                replace(job)
+            }
+            throw merged
         } catch {
             if var job = self.job(id), job.canPublish {
                 job.publishError = error.localizedDescription
@@ -430,8 +446,21 @@ final class Desk {
             Task { await afterTurn(id, summary: summary, failed: failed, heard: heard) }
         case .finished(let summary, let failed):
             finish(id, failed ? .failed : .done, summary)
+        case .cutOff(let summary):
+            // Its process died mid-turn (killed, out of memory): the session picks up again once.
+            guard let session = job.session, !ending.contains(id), pickedUp.insert(id).inserted else {
+                let again = pickedUp.contains(id) ? "\n\nOby picked its session up once, and it was cut off again." : ""
+                return finish(id, .failed, summary + again)
+            }
+            Logger.jobs.notice("job \(id, privacy: .public): \(summary, privacy: .public) Picking its session up again.")
+            job.step = "Picking up where \(job.agentName) was cut off"
+            replace(job)
+            run(job, prompt: Self.cutOff, resume: session)
         }
     }
+
+    /// What an agent that was cut off mid-turn hears when its session picks up again.
+    static let cutOff = "You were cut off mid-turn. Continue where you left off, then finish with a short summary as asked."
 
     /// Runs the job's check, if it has one, then ends the job or sends the agent another round.
     /// `heard` is how many of the user's words the turn had taken in.
@@ -533,6 +562,7 @@ final class Desk {
         replace(job)
         agents[id] = nil
         ranHere[id] = nil
+        pickedUp.remove(id)
         ending.remove(id)
         onFinish(job)
     }
