@@ -482,7 +482,11 @@ private struct PlanCard: View {
             Grid(horizontalSpacing: 12, verticalSpacing: 12) {
                 GridRow {
                     tile("Agent · \(AgentModels.summary(account?.agent ?? draft.job.agent))") {
-                        Label(Job.agentNames[account?.agent ?? draft.job.agent] ?? "", systemImage: "asterisk")
+                        Label {
+                            Text(Job.agentNames[account?.agent ?? draft.job.agent] ?? "")
+                        } icon: {
+                            AgentMark(agent: account?.agent ?? draft.job.agent)
+                        }
                     }
                     tile(accounts.count > 1 ? "Account · click to change" : "Account · the one you have") {
                         if accounts.count > 1 {
@@ -738,7 +742,7 @@ private struct JobRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                Image(systemName: "asterisk").font(.system(size: 17, weight: .semibold)).frame(width: 22)
+                AgentMark(agent: job.agent).font(.system(size: 17, weight: .semibold)).frame(width: 22)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(job.heading).font(.system(size: 15, weight: .semibold)).lineLimit(1)
