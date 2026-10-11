@@ -41,7 +41,8 @@ nonisolated enum Conversation {
 
 /// What the brain is told before the user's words, so it can answer questions about the work and
 /// read follow-ups: the conversation so far, the jobs with their titles and stages, the inbox, and
-/// each account's usage. `text` holds only what Oby and the user wrote and what Swift knows;
+/// each account's usage. `text` holds only what Oby and the user wrote, what Swift knows and
+/// inbox headlines Swift checked (InboxRewriter);
 /// what agents wrote (results, steps, questions) is `quoted`, which reaches the brain as a quoted
 /// file it may read, never in a prompt (AGENTS.md).
 nonisolated struct Briefing: Equatable, Sendable {
@@ -138,7 +139,9 @@ nonisolated struct Briefing: Equatable, Sendable {
             case .review, .merge, .audit: "\(Self.line(item.text, cap: 160)) Options: \(item.options.joined(separator: " | "))."
             case .failed, .limit, .failure: "why is quoted in \(ClaudeBrain.quotedFile). Options: \(item.options.joined(separator: " | "))."
             }
-            lines.append("- \(Self.kind(item.kind)) for job \(item.job) (\(Self.line(item.title, cap: 60)), \(place)), waiting \(Self.elapsed(since: item.created, now: now)): \(what)")
+            // Its headline, in plain words that Swift checked (InboxRewriter): what it's about at a glance.
+            let headline = item.headline.map { "\"\(Self.line($0, cap: InboxRewrite.headlineLength))\", " } ?? ""
+            lines.append("- \(Self.kind(item.kind)) for job \(item.job) (\(Self.line(item.title, cap: 60)), \(place)), waiting \(Self.elapsed(since: item.created, now: now)): \(headline)\(what)")
         }
         if !failures.isEmpty {
             lines += ["", "## Failures this week, newest first", ""] + failureLines
@@ -198,6 +201,10 @@ nonisolated struct Briefing: Equatable, Sendable {
         for (_, item) in waiting where item.kind != .review {
             var lines = ["## \(Self.kind(item.kind)) for job \(item.job) (\(Self.line(item.title, cap: 60)))", Self.line(item.text, cap: 500)]
             if item.kind == .question, !item.options.isEmpty { lines.append("Options: " + item.options.map { Self.line($0, cap: 80) }.joined(separator: " | ")) }
+            if let happened = item.happened { lines.append("In short: " + Self.line(happened, cap: InboxRewrite.happenedLength)) }
+            if let recommended = item.recommended, item.options.indices.contains(recommended) {
+                lines.append("Oby recommends: \(Self.line(item.options[recommended], cap: 80))" + (item.why.map { ". " + Self.line($0, cap: InboxRewrite.whyLength) } ?? ""))
+            }
             sections.append(lines.joined(separator: "\n"))
         }
         for record in failures.prefix(Self.mostJobs) {

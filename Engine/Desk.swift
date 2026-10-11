@@ -61,6 +61,18 @@ final class Desk {
     private(set) var inbox: [InboxItem] = []
     /// Called with every inbox item that's added or changes, for the runner's event stream.
     var onInboxChange: (InboxItem) -> Void = { _ in }
+    /// Whether open inbox items are rewritten in plain words by the brain's model (`InboxRewriter`,
+    /// through `makeBrain`), in the background: an item comes at once with its text, and its
+    /// headline follows. Off until the runner turns it on, so a desk never calls a model by itself;
+    /// turning it on rewrites the open items that have none yet.
+    @ObservationIgnored var rewritesInbox = false {
+        didSet { if rewritesInbox { for item in inbox where item.isOpen && item.headline == nil { rewrite(item) } } }
+    }
+    /// How long a rewrite may take before the item keeps its text.
+    @ObservationIgnored var rewritePatience: TimeInterval = 20
+    /// Rewrites by item id and text, so the same item is never rewritten twice, and the ones under way.
+    private var rewrites: [String: InboxRewrite] = [:]
+    private var rewriting: Set<String> = []
 
     private let store: JobStore
     /// The repositories the brain and the Lead may choose from; `refresh` reads them, tests set them.
@@ -1277,12 +1289,58 @@ final class Desk {
             onInboxChange(inbox[index])
         }
         guard let need, !inbox.contains(where: { $0.id == need.id }) else { return }
-        inbox.append(need)
-        store.save(need)
-        onInboxChange(need)
+        add(need)
     }
 
-    func addIssueAudit(_ item: InboxItem) { inbox.append(item); store.save(item); onInboxChange(item) }
+    func addIssueAudit(_ item: InboxItem) { add(item) }
+
+    /// A new item: one open item per job, so a newer one settles the older, with no answer. Of the
+    /// items with no job, audits share one; failures keep one open per signature (Engine/Failures.swift).
+    /// Then it's rewritten in plain words, without waiting for it.
+    private func add(_ item: InboxItem) {
+        let shares = { (other: InboxItem) in
+            other.job == item.job && (!item.job.isEmpty || (item.kind == .audit && other.kind == .audit))
+        }
+        for index in inbox.indices where shares(inbox[index]) && inbox[index].isOpen && inbox[index].id != item.id {
+            inbox[index].done = .now
+            store.save(inbox[index])
+            onInboxChange(inbox[index])
+        }
+        inbox.append(item)
+        store.save(item)
+        onInboxChange(item)
+        rewrite(item)
+    }
+
+    /// Rewrites an open item in plain words in the background (`InboxRewriter`), once per id and
+    /// text, and applies it if the item still says the same; on failure it keeps its text.
+    private func rewrite(_ item: InboxItem) {
+        guard rewritesInbox, item.isOpen else { return }
+        let key = item.id + "\n" + item.text
+        if let cached = rewrites[key] { return apply(cached, to: item) }
+        guard !rewriting.contains(key) else { return }
+        rewriting.insert(key)
+        // The brain's model, on the least busy Claude account, as the brain thinks.
+        let thinker = AccountStore.route(accounts.accounts, agent: "claude")
+        let rewriter = InboxRewriter(adapters: makeBrain(thinker?.home, vault), timeout: rewritePatience)
+        Task {
+            let rewrite = await rewriter.rewrite(item)
+            rewriting.remove(key)
+            guard let rewrite else { return }
+            rewrites[key] = rewrite
+            apply(rewrite, to: item)
+        }
+    }
+
+    private func apply(_ rewrite: InboxRewrite, to item: InboxItem) {
+        guard let index = inbox.firstIndex(where: { $0.id == item.id && $0.text == item.text }) else { return }
+        inbox[index].headline = rewrite.headline
+        inbox[index].happened = rewrite.happened
+        inbox[index].recommended = rewrite.recommended
+        inbox[index].why = rewrite.why
+        store.save(inbox[index])
+        onInboxChange(inbox[index])
+    }
 
     func item(_ id: String) -> InboxItem? { inbox.first { $0.id == id } }
 

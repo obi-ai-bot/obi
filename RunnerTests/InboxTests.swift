@@ -409,8 +409,9 @@ final class InboxTests {
             let item = try #require(listed.first)
             #expect(item["id"] as? String == id && item["kind"] as? String == "failed" && item["job"] as? String == "failed")
             #expect(item["state"] as? String == "open" && item["options"] as? [String] == ["Try again", "Dismiss"])
-            for key in ["done", "later", "answer"] { #expect(item[key] is NSNull, "\(key)") }
-            #expect(Set(item.keys) == ["id", "kind", "job", "title", "text", "options", "created", "done", "later", "answer", "state"])
+            for key in ["done", "later", "answer", "headline", "happened", "recommended", "why"] { #expect(item[key] is NSNull, "\(key)") }
+            #expect(Set(item.keys) == ["id", "kind", "job", "title", "text", "options", "created", "done", "later", "answer", "state",
+                                       "headline", "happened", "recommended", "why"])
 
             #expect(try await answer("nowhere", #"{"done": true}"#).0 == .notFound)
             #expect(try await answer(id, #"{"answer": "x", "done": true}"#).0 == .unprocessableContent)

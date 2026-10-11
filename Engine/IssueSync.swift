@@ -434,7 +434,9 @@ final class IssueSync {
         if changed > 0 || !failures.isEmpty {
             let line = "Issue audit: fixed drift on \(changed) issue(s)." + (failures.isEmpty ? "" : " " + failures.joined(separator: "; ").replacingOccurrences(of: "\n", with: " "))
             let safe = (try? desk.vault.forAgent(line)) ?? "Issue audit failed: couldn't read the vault."
-            desk.addIssueAudit(InboxItem(id: auditID, kind: .audit, job: "", title: "Daily issue audit", text: safe, options: [], created: now, outgoing: outgoing.sorted { $0.date < $1.date }))
+            // Drift it fixed by itself needs nothing from the user: that report arrives done.
+            desk.addIssueAudit(InboxItem(id: auditID, kind: .audit, job: "", title: "Daily issue audit", text: safe, options: [], created: now,
+                                         done: failures.isEmpty ? now : nil, outgoing: outgoing.sorted { $0.date < $1.date }))
         }
     }
 }

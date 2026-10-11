@@ -212,6 +212,8 @@ struct IssueSyncTests {
         #expect(fake.labels == ["feature"] && fake.column == "In progress")
         #expect(fake.notes.isEmpty && !fake.calls.contains { $0.prefix(2) == ["issue", "comment"] })
         #expect(desk.inbox.count == 1 && desk.inbox.first?.text == "Issue audit: fixed drift on 1 issue(s).")
+        // It fixed the drift by itself and nothing failed: the report arrives done.
+        #expect(desk.inbox.first?.done == day)
         #expect(desk.issueJobs.first(where: { $0.id == original.id })?.outgoing?.count == 1)
         let count = fake.calls.count
         await desk.issueSync.audit(now: day)

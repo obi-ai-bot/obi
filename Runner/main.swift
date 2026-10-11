@@ -65,6 +65,8 @@ desk.failureLog.enabled = true
 // Macs that follow the runner take its merge checks (Engine/Checks.swift), and the Apple checks
 // agents ask for with `oby-check apple` (Engine/AppleChecks.swift), which runs this executable.
 desk.queuesMacChecks = true
+// Inbox items get a headline in plain words from the brain's cheap model (Engine/Inbox.swift).
+desk.rewritesInbox = true
 do {
     let executable = URL(filePath: (try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/self/exe"))
                          ?? Bundle.main.executablePath ?? CommandLine.arguments[0])
