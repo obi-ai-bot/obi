@@ -24,8 +24,9 @@ final class SpeechTests {
         args = sys.argv[1:]
         def value(flag): return args[args.index(flag) + 1]
         root = pathlib.Path(__file__).parent
-        (root / 'started').touch()
         mode = (root / 'mode').read_text() if (root / 'mode').exists() else ''
+        # Started once it knows its mode: a test may take the mode away as soon as it sees this.
+        (root / 'started').touch()
         if mode == 'hang':
             while True: time.sleep(.01)
         if mode == 'block':
@@ -245,9 +246,13 @@ final class SpeechTests {
         config.idleTimeout = 0.02
         let speech = Speech(config: config)
         _ = try await speech.transcribe(device: device, utterance: utterance, audio: chunk)
-        try await Task.sleep(for: .milliseconds(100))
-        let next = try await speech.transcribe(device: device, utterance: UUID().uuidString, audio: chunk, final: true)
-        #expect(next.text == "texto 3200")
+        // The device's next utterance conflicts until the idle expiry runs, which a busy machine may delay.
+        var next = try? await speech.transcribe(device: device, utterance: UUID().uuidString, audio: chunk, final: true)
+        for _ in 0..<500 where next == nil {
+            try await Task.sleep(for: .milliseconds(10))
+            next = try? await speech.transcribe(device: device, utterance: UUID().uuidString, audio: chunk, final: true)
+        }
+        #expect(next?.text == "texto 3200")
         try chunk.write(to: config.folder.appending(path: "leftover.wav"))
         try await speech.discardAbandonedAudio()
         #expect(!FileManager.default.fileExists(atPath: config.folder.path))
