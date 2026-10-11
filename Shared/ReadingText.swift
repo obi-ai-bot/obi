@@ -86,24 +86,47 @@ struct ReadingText: View {
     let text: String
     var secondary: Bool
     var weight: Font.Weight?
+    /// How its paragraphs line up: leading, or centered where the screen centers its text.
+    var alignment: HorizontalAlignment
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
 
-    init(_ text: String, secondary: Bool = false, weight: Font.Weight? = nil) {
+    init(_ text: String, secondary: Bool = false, weight: Font.Weight? = nil, alignment: HorizontalAlignment = .leading) {
         self.text = text
         self.secondary = secondary
         self.weight = weight
+        self.alignment = alignment
     }
 
     var body: some View {
         let reading = Reading.current
         let code = reading.code(scale: scale)
-        VStack(alignment: .leading, spacing: reading.paragraphGap * (reading.style == nil ? 1 : scale)) {
-            ForEach(Array(Reading.paragraphs(text).enumerated()), id: \.offset) { _, paragraph in
-                Text(Reading.markdown(paragraph, code: code)).fontWeight(weight).fixedSize(horizontal: false, vertical: true)
+        Column(width: reading.column) {
+            VStack(alignment: alignment, spacing: reading.paragraphGap * (reading.style == nil ? 1 : scale)) {
+                ForEach(Array(Reading.paragraphs(text).enumerated()), id: \.offset) { _, paragraph in
+                    Text(Reading.markdown(paragraph, code: code)).fontWeight(weight).fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .modifier(ReadingStyle(role: secondary ? .secondary : .prose))
-        .frame(maxWidth: reading.column, alignment: .leading)
+    }
+}
+
+/// No wider than the reading column, and no wider than its text either: a bubble or a button
+/// around it keeps hugging its words.
+private struct Column: Layout {
+    let width: CGFloat
+
+    private func proposal(_ proposal: ProposedViewSize) -> ProposedViewSize {
+        let wide = proposal.width.map { min($0, width) } ?? (width.isFinite ? width : nil)
+        return ProposedViewSize(width: wide, height: proposal.height)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        subviews.first?.sizeThatFits(self.proposal(proposal)) ?? .zero
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: self.proposal(ProposedViewSize(bounds.size)))
     }
 }
 

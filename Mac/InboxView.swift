@@ -65,7 +65,7 @@ struct IslandInbox: View {
             ForEach(Array(entry.item.options.prefix(9).enumerated()), id: \.offset) { index, option in
                 Button { settle(entry, answer: option) } label: {
                     HStack {
-                        Text(option).fontWeight(.medium).readingText()
+                        ReadingText(option, weight: .medium)
                         Spacer(minLength: 8)
                         Text("⌘\(index + 1)").font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.4))
                     }

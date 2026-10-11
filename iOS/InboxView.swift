@@ -44,7 +44,7 @@ struct InboxSection: View {
             ReadingText(item.text, weight: .semibold)
             ForEach(item.options, id: \.self) { option in
                 Button { settle(item, answer: option) } label: {
-                    Text(option).fontWeight(.medium).readingText()
+                    ReadingText(option, weight: .medium)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16).padding(.vertical, 12)
                         .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))

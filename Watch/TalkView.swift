@@ -353,7 +353,9 @@ struct QuestionCard: View {
         VStack(alignment: .leading, spacing: 8) {
             ReadingText(question.text, weight: .semibold)
             ForEach(question.options, id: \.self) { option in
-                Button(option) { watch.answer(option, said: said, question: question) }
+                Button { watch.answer(option, said: said, question: question) } label: {
+                    ReadingText(option).frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             Button("Cancel") { watch.cancel() }
         }

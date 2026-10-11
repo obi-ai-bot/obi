@@ -543,7 +543,7 @@ private struct OpenIsland: View {
             case .question(let said, let question):
                 ForEach(question.options, id: \.self) { option in
                     Button { desk.answer(option, said: said, question: question.text) } label: {
-                        Text(option).fontWeight(.medium).readingText()
+                        ReadingText(option, weight: .medium)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 16).padding(.vertical, 11)
                             .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -823,10 +823,7 @@ private struct ConversationThread: View {
         let yours = turn.who == .user
         return HStack {
             if yours { Spacer(minLength: 60) }
-            Text(turn.text)
-                .fontWeight(yours ? .regular : .medium)
-                .readingText()
-                .fixedSize(horizontal: false, vertical: true)
+            ReadingText(turn.text, weight: yours ? .regular : .medium)
                 .textSelection(.enabled)
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .background(Color.white.opacity(yours ? 0.16 : 0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))

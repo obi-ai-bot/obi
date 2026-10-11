@@ -45,7 +45,7 @@ struct JobScreen: View {
                         DisclosureGroup("You told the agent (\(notes.count))") {
                             VStack(alignment: .leading, spacing: 10) {
                                 ForEach(notes.indices, id: \.self) { index in
-                                    Label(notes[index], systemImage: "text.bubble").readingText()
+                                    Label { ReadingText(notes[index]) } icon: { Image(systemName: "text.bubble") }.readingText()
                                 }
                             }.padding(.top, 8)
                         }
