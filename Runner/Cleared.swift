@@ -1,8 +1,5 @@
 import Foundation
 @testable import ObyEngine
-#if canImport(OSLog)
-import OSLog
-#endif
 
 /// When the user last pressed Clear done, on the iPhone or the Mac (`POST /v1/clear`). Both apps
 /// hide the jobs that finished by then, so clearing on one clears on both; the runner keeps every

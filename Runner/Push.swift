@@ -2,9 +2,6 @@ import Crypto
 import Foundation
 import HTTPTypes
 @testable import ObyEngine
-#if canImport(OSLog)
-import OSLog
-#endif
 
 /// Push to the iPhone, through Apple's push service: the Live Activity keeps the Lock Screen and
 /// Dynamic Island in step with the jobs while Oby is suspended, and an alert says when a job needs

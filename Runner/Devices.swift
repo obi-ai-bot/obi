@@ -2,9 +2,6 @@ import Crypto
 import Foundation
 import HTTPTypes
 @testable import ObyEngine
-#if canImport(OSLog)
-import OSLog
-#endif
 
 /// The phones that may approve publishing, each by its Secure Enclave key, kept in `devices.json`
 /// with the approvals already used, so none works twice. The runner has no Touch ID: a phone's

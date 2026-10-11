@@ -1,9 +1,6 @@
 import Foundation
 import Hummingbird
 @testable import ObyEngine
-#if canImport(OSLog)
-import OSLog
-#endif
 
 // The runner: Oby's engine as a service on an always-on machine, answering only its owner,
 // on 127.0.0.1, where `tailscale serve` publishes it to the tailnet.
