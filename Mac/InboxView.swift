@@ -3,11 +3,14 @@ import SwiftUI
 /// The island's Inbox, at the top of the list: what only you can answer, from the runner's jobs
 /// and this Mac's, the longest-waiting first (docs/pipeline-cases.md, I.1). The first one is open,
 /// as a decision card (Shared/DecisionCard.swift): its answers are on ⌘1 to ⌘3, your own words
-/// go too, Later puts it off for an hour and Done lets it go. Once it's settled, the next one
-/// opens. Answered on the iPhone, it goes from here too.
+/// go too, Later puts it off for an hour and Done lets it go; Open job opens its job's screen, where
+/// a runner's job publishes too. Every kind the iPhone settles settles here, the same way. Once it's
+/// settled, the next one opens. Answered on the iPhone, it goes from here too.
 struct IslandInbox: View {
     let desk: Desk
     let feed: RunnerFeed
+    /// Opens the item's job: its id, and whether it's this Mac's own.
+    var onOpen: (_ job: String, _ local: Bool) -> Void = { _, _ in }
     /// The item open now (an Entry's id), or nil for the longest-waiting one.
     @State private var opened: String?
     /// Why the last answer didn't go through, until the next one does.
@@ -82,6 +85,10 @@ struct IslandInbox: View {
                     .help("Put it off for an hour")
                 Button("Done") { settle(entry, done: true) }
                     .help("Let it go without answering")
+                if !item.job.isEmpty {
+                    Button("Open job") { onOpen(item.job, entry.local) }
+                        .help("The job's screen: its result, Publish and Dismiss")
+                }
                 if let problem {
                     Text(problem).foregroundStyle(.red).lineLimit(2)
                 }

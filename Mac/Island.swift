@@ -29,6 +29,8 @@ final class IslandModel {
     var notice: String?
     /// The runner's job a notification opened the island on, until the island closes.
     var focus: String?
+    /// The runner's job whose alert's Publish was clicked: its screen starts publishing, once.
+    var publishing: String?
 
     init(desk: Desk, feed: RunnerFeed) {
         self.desk = desk
@@ -152,9 +154,10 @@ final class IslandController {
         }
     }
 
-    /// A notification was clicked: the island opens on its job.
-    func open(job id: String) {
+    /// A notification was clicked: the island opens on its job, and its Publish publishes it.
+    func open(job id: String, publish: Bool = false) {
         model.focus = id
+        model.publishing = publish ? id : nil
         open()
     }
 
@@ -168,6 +171,7 @@ final class IslandController {
     func close() {
         guard model.state == .open else { return }
         model.focus = nil
+        model.publishing = nil
         set(.compact)
         // Hand the keyboard back to the app you were in.
         if panel.isKeyWindow { NSWorkspace.shared.frontmostApplication?.activate() }
@@ -553,7 +557,7 @@ private struct OpenIsland: View {
                     if !groups.isEmpty || IslandInbox.waits(desk: desk, feed: feed) {
                         scrolling {
                             VStack(alignment: .leading, spacing: 14) {
-                                IslandInbox(desk: desk, feed: feed)
+                                IslandInbox(desk: desk, feed: feed, onOpen: { selected = Row.id($0, local: $1) })
                                 list
                             }
                         }
@@ -635,20 +639,29 @@ private struct OpenIsland: View {
         }
     }
 
-    /// The job's screen, with the same stages as the iPhone's. Publishing a runner's job needs the
-    /// iPhone's device key, so only this Mac's own jobs offer Publish here.
+    /// The job's screen, with the same stages as the iPhone's. Both kinds publish here after Touch
+    /// ID: this Mac's own jobs with Oby's sentence, the runner's with the runner's, signed by this
+    /// Mac's key (Mac/MacDevice.swift). A Mac without Touch ID leaves the runner's to the iPhone.
     @ViewBuilder private func screen(_ row: Row) -> some View {
         if let host = row.host {
-            JobView(job: row.job, place: host, account: nil, onStop: { stop(row) }, onPublish: nil,
-                    onMessage: { text in if let runner = feed.runner { feed.apply(try await runner.tell(row.job.id, text)) } },
+            let id = row.job.id
+            JobView(job: row.job, place: host, account: nil, onStop: { stop(row) },
+                    publishing: feed.device.key.isAvailable
+                        ? JobView.Publishing(action: { try await feed.publishAction(id) }, publish: { try await feed.publish(id, action: $0) })
+                        : nil,
+                    onMessage: { text in if let runner = feed.runner { feed.apply(try await runner.tell(id, text)) } },
                     onDismiss: { try await dismiss(row) },
-                    extras: feed.extras[row.job.id],
-                    onMode: { try await feed.setMode(row.job.id, $0) },
-                    onPermission: { try await feed.answer(row.job.id, $0, message: $1) })
+                    extras: feed.extras[id],
+                    onMode: { try await feed.setMode(id, $0) },
+                    onPermission: { try await feed.answer(id, $0, message: $1) },
+                    publishNow: model.publishing == id,
+                    onPublishNow: { model.publishing = nil })
         } else {
             let job = row.job
             JobView(job: job, place: "This Mac", account: desk.accounts.accounts.first { $0.account.id == job.account }?.account.name,
-                    onStop: { stop(row) }, onPublish: { try await desk.publish(job.id, approve: Publish.touchID) },
+                    onStop: { stop(row) },
+                    publishing: JobView.Publishing(action: { Publish.action(for: job, base: job.base ?? "") },
+                                                   publish: { _ in _ = try await desk.publish(job.id, approve: Publish.touchID) }),
                     onMessage: { try desk.message(job.id, $0) }, onDismiss: { try await dismiss(row) })
         }
     }

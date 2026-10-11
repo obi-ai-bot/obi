@@ -2,9 +2,8 @@ import SwiftUI
 
 /// One job, opened from the island's list: the same screen as the iPhone's (iOS/JobScreen.swift),
 /// in the island's own style. What its agent waits for (a decision card), its stages, the result
-/// (Publish after Touch ID for this Mac's own jobs, Dismiss for one that needs you), what you
-/// asked, its details, what you told the agent, Stop, and a line to tell the agent more. A
-/// runner's job has a Mode menu too.
+/// (Publish after Touch ID, Dismiss for one that needs you), what you asked, its details, what you
+/// told the agent, Stop, and a line to tell the agent more. A runner's job has a Mode menu too.
 struct JobView: View {
     let job: Job
     /// Where it runs: the runner's name, like "tetrix-lab", or "This Mac".
@@ -12,8 +11,8 @@ struct JobView: View {
     /// The account's name, when this Mac knows it (its own accounts), else nil and the id shows.
     let account: String?
     let onStop: () -> Void
-    /// Nil where this Mac can't publish: a runner's job needs the iPhone's Face ID.
-    let onPublish: (() async throws -> Void)?
+    /// Nil where this Mac can't publish: a runner's job, on a Mac without Touch ID.
+    let publishing: Publishing?
     let onMessage: (String) async throws -> Void
     let onDismiss: () async throws -> Void
     /// What the runner says about its job that Engine's Job doesn't read yet; nil for this Mac's own.
@@ -22,13 +21,25 @@ struct JobView: View {
     var onMode: ((RunnerMode) async throws -> Void)? = nil
     /// Allow, Always allow or Deny, with words for a deny; nil for this Mac's own jobs.
     var onPermission: ((RunnerPermission.Decision, String?) async throws -> Void)? = nil
+    /// The job's alert's Publish opened this screen: it shows the sentence and asks for Touch ID now.
+    var publishNow = false
+    /// Called as that starts, so it starts once.
+    var onPublishNow: () -> Void = {}
     @State private var busy = false
     @State private var problem: String?
-    @State private var confirming = false
+    /// The exact sentence Publish would carry out, shown before Touch ID approves it, or nil.
+    @State private var action: String?
     @State private var note = ""
     @State private var telling = false
     @State private var noteProblem: String?
     @State private var requestExpanded = false
+
+    /// Publishing by hand: what it would do, in the words shown and approved (the runner's own,
+    /// for its jobs), and doing exactly that, after Touch ID.
+    struct Publishing {
+        var action: () async throws -> String
+        var publish: (String) async throws -> Void
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -58,7 +69,7 @@ struct JobView: View {
                     .buttonStyle(.plain)
                     .disabled(busy)
             }
-            if let problem, !confirming {
+            if let problem, action == nil {
                 Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(3)
             }
             if job.status == .running || (!job.isActive && job.session != nil) {
@@ -66,6 +77,8 @@ struct JobView: View {
             }
         }
         .padding(.horizontal, 4)
+        // Not a task tied to publishNow: starting clears it, which would cancel the publish.
+        .onChange(of: publishNow, initial: true) { if publishNow { Task { await publishFromNotification() } } }
     }
 
     private var header: some View {
@@ -197,25 +210,25 @@ struct JobView: View {
         }
     }
 
-    /// Oby's own publish failed: Publish by hand, after Oby shows exactly what that does. A
-    /// runner's job is published from the iPhone instead.
+    /// Oby's own publish failed, or new commits wait: Publish by hand, after Oby shows exactly
+    /// what that does (for a runner's job, the runner's sentence, unchanged).
     @ViewBuilder private var publishActions: some View {
         if let reason = job.publishError {
             Text(reason).font(.system(size: 12)).foregroundStyle(.orange).lineLimit(3)
         }
-        if onPublish == nil {
+        if publishing == nil {
             HStack(spacing: 10) {
                 Text("Publish from your iPhone").font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
                 dismissButton
             }
-        } else if confirming {
+        } else if let action {
             VStack(alignment: .leading, spacing: 8) {
-                ReadingText(Publish.action(for: job, base: job.base ?? ""), weight: .medium)
+                ReadingText(action, weight: .medium)
                 if let problem {
                     Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(3)
                 }
                 HStack(spacing: 8) {
-                    Button(action: publish) {
+                    Button { publish(action) } label: {
                         Label(busy ? "Publishing…" : "Publish with Touch ID", systemImage: "touchid")
                             .font(.system(size: 13, weight: .semibold)).foregroundStyle(.black)
                             .padding(.horizontal, 14).frame(height: 30)
@@ -223,15 +236,16 @@ struct JobView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(busy)
-                    Button { confirming = false; problem = nil } label: { pill("Not now") }
+                    Button { self.action = nil; problem = nil } label: { pill("Not now") }
                         .buttonStyle(.plain)
                         .disabled(busy)
                 }
             }
         } else {
             HStack(spacing: 10) {
-                Button { confirming = true } label: { pill(job.published == nil ? "Publish" : "Publish the new commits") }
+                Button(action: ask) { pill(job.published == nil ? "Publish" : "Publish the new commits") }
                     .buttonStyle(.plain)
+                    .disabled(busy)
                 dismissButton
             }
         }
@@ -295,12 +309,32 @@ struct JobView: View {
         }
     }
 
-    private func publish() {
+    /// What Publish would do, to show before anything goes out.
+    private func ask() {
+        guard let publishing else { return }
+        Task { await run { action = try await publishing.action() } }
+    }
+
+    /// Exactly the sentence shown goes to Touch ID and out; a cancel sends nothing.
+    private func publish(_ action: String) {
+        guard let publishing else { return }
         Task {
             await run {
-                try await onPublish?()
-                confirming = false
+                try await publishing.publish(action)
+                self.action = nil
             }
+        }
+    }
+
+    /// The alert's Publish, as on the iPhone: the sentence shows, and Touch ID asks with it.
+    private func publishFromNotification() async {
+        onPublishNow()
+        guard let publishing, job.canPublish, !busy else { return }
+        await run {
+            let action = try await publishing.action()
+            self.action = action
+            try await publishing.publish(action)
+            self.action = nil
         }
     }
 

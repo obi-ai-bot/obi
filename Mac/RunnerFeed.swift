@@ -57,6 +57,8 @@ final class RunnerFeed {
     private(set) var models: ModelSettings?
     /// Merge checks this Mac runs for the runner (Settings › Runner, on by default).
     let checks = MacChecks()
+    /// This Mac's Touch ID key, registered on every connection: with it, the runner's jobs publish from here.
+    let device = MacDevice()
     /// A job's notice just changed to something that needs the user: the notch's heads-up.
     @ObservationIgnored var onNotice: (Job, Notice) -> Void = { _, _ in }
 
@@ -114,6 +116,7 @@ final class RunnerFeed {
             host = nil
             clearedAt = nil
             notified = nil
+            device.reset()
         }
         self.url = url
         connection = .connecting
@@ -156,6 +159,7 @@ final class RunnerFeed {
                         wait = 1
                         Self.ask()
                         checks.look(runner)
+                        register(runner)
                     case .job(let job, let extras):
                         if let extras { self.extras[job.id] = extras }
                         apply(job)
@@ -175,6 +179,37 @@ final class RunnerFeed {
             try? await Task.sleep(for: .seconds(wait))
             wait = min(wait * 2, 30)
         }
+    }
+
+    /// Registers this Mac's publishing key, as the iPhone does on each connection. A runner whose
+    /// pairing is closed answers 403: Settings › Runner shows its line, with Try again.
+    func register(_ runner: Runner? = nil) {
+        guard let runner = runner ?? self.runner else { return }
+        Task {
+            do { try await device.register(with: runner) } catch {
+                Logger.feed.error("registering this Mac failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// The runner's exact sentence for publishing a job: Publish shows it, and Touch ID approves it.
+    func publishAction(_ id: String) async throws -> String {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to publish it.") }
+        return try await runner.publishAction(id)
+    }
+
+    /// Publishes a runner's job with that sentence, after Touch ID; the runner pushes and opens the pull request.
+    @discardableResult
+    func publish(_ id: String, action: String) async throws -> URL {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to publish it.") }
+        let url = try await device.publish(id, action: action, with: runner)
+        // Its event brings the rest; until then it's published here too.
+        if var job = jobs.first(where: { $0.id == id }) {
+            job.published = url.absoluteString
+            job.publishError = nil
+            apply(job)
+        }
+        return url
     }
 
     /// Clear done: the runner records the time, and the island here and Home on the iPhone hide
@@ -316,12 +351,16 @@ final class RunnerFeed {
     /// so a newer notice replaces the older one.
     static let jobKey = "job"
 
-    /// The runner's categories: "ready" for a job waiting for Publish, "job" for the rest. The Mac
-    /// can't publish a runner's job (that's the iPhone's Face ID), so both only open it.
+    /// The "ready" alert's Publish: the island opens on the job, shows the runner's sentence, and asks for Touch ID.
+    static let publishButton = "publish"
+
+    /// The runner's categories: "ready" for a job waiting for Publish, with Publish and Open, as the
+    /// iPhone's; "job" for the rest, which only opens it.
     static func registerCategories() {
         let open = UNNotificationAction(identifier: "open", title: "Open", options: [.foreground])
+        let publish = UNNotificationAction(identifier: publishButton, title: "Publish with Touch ID", options: [.foreground])
         UNUserNotificationCenter.current().setNotificationCategories([
-            UNNotificationCategory(identifier: "ready", actions: [open], intentIdentifiers: []),
+            UNNotificationCategory(identifier: "ready", actions: [publish, open], intentIdentifiers: []),
             UNNotificationCategory(identifier: "job", actions: [open], intentIdentifiers: []),
         ])
     }
