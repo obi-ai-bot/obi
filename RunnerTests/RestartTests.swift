@@ -126,6 +126,24 @@ struct RestartTests {
         #expect(made.agents.last?.agent.prompt == pending + "\n\nGo on")
     }
 
+    @Test func theRunnersOwnUpdatesDontCountAsACrashLoop() async throws {
+        try await start("updating")
+        // Three merges into dev within 30 minutes: three planned restarts.
+        var current = desk
+        for _ in 0..<3 {
+            current.quit(planned: true)
+            current = restart()
+        }
+        #expect(made.agents.count == 4 && made.agents.last?.resume == "updating-session")
+        #expect(current.job("updating")?.status == .running && current.inbox.filter(\.isOpen).isEmpty)
+        // Crashes still count: picked up twice, the third leaves it interrupted.
+        _ = restart()
+        _ = restart()
+        #expect(made.agents.count == 6)
+        let third = restart()
+        #expect(made.agents.count == 6 && third.job("updating")?.status == .interrupted)
+    }
+
     @Test func aQueuedJobStartsAfterTheRestart() async throws {
         let store = JobStore(url: folder.appending(path: "oby.sqlite"))
         var queued = job

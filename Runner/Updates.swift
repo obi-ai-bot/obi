@@ -132,8 +132,9 @@ final class Updates {
             return fail("install", head: commit)
         }
         status.phase = "restarting"
-        // The jobs and the messages their agents were about to get are on disk: the new runner picks them up.
-        desk.quit()
+        // The jobs and the messages their agents were about to get are on disk: the new runner picks
+        // them up, and this planned restart doesn't count towards a crash loop.
+        desk.quit(planned: true)
         restart()
     }
 

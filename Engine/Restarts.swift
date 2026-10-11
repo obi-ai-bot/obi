@@ -21,6 +21,8 @@ final class Restarts {
     struct Entry: Codable {
         var message: String?
         var resumed: [Date]?
+        /// The runner restarted on purpose (its own update) while this job ran: not a crash.
+        var planned: Bool?
     }
 
     let file: URL
@@ -55,9 +57,22 @@ final class Restarts {
         save()
     }
 
+    /// The runner is about to restart on purpose (its own update): picking these jobs up again
+    /// doesn't count towards a crash loop.
+    func planRestart(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        for id in ids { entries[id, default: Entry()].planned = true }
+        save()
+    }
+
     /// Whether the job may be picked up again `now`: not when it was twice within `window` already
-    /// (the runner is crashing in a loop). Counts this time when it may.
+    /// (the runner is crashing in a loop). Counts this time when it may, unless the restart was planned.
     func pickUp(_ id: String, now: Date = .now) -> Bool {
+        if entries[id]?.planned == true {
+            entries[id]?.planned = nil
+            save()
+            return true
+        }
         let recent = (entries[id]?.resumed ?? []).filter { now.timeIntervalSince($0) < Self.window }
         guard recent.count < Self.most else { return false }
         entries[id, default: Entry()].resumed = recent + [now]

@@ -920,8 +920,10 @@ final class Desk {
 
     /// Oby is quitting: agents end now, and their jobs show as interrupted next time (the runner's
     /// carry on, `resumeAfterRestart`). Returns once what they started is gone too, at most
-    /// `Halt.dropping` from now.
-    func quit() {
+    /// `Halt.dropping` from now. `planned` (the runner's own update) isn't counted as a crash when
+    /// its jobs are picked up again.
+    func quit(planned: Bool = false) {
+        if planned { restarts?.planRestart(active.map(\.id)) }
         for (id, agent) in agents {
             agent.kill()
             // On the runner it stays queued or running on disk, its message with it: the next start picks it up.
