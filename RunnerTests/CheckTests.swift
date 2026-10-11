@@ -86,6 +86,8 @@ struct CheckTests {
             made.merged.append(check)
         }
         desk.onCheckChange = { [made] in made.events.append($0) }
+        // As the runner's desk: Macs take its checks.
+        desk.queuesMacChecks = true
     }
 
     /// The fix job on issue 75 whose pull request Oby reviews, checks and merges.
@@ -366,6 +368,65 @@ struct CheckTests {
         #expect(stopped.mergeNeedsYou && stopped.needsYou && desk.inbox.last?.kind == .merge && desk.inbox.last?.isOpen == true)
     }
 
+    @Test func aCheckTheMacCouldNotRunIsTheUsersToRunAgainNotTheAuthors() async throws {
+        let check = try await approved()
+        _ = desk.nextMacCheck(mac: "Studio")
+        let problem = "iPhone app with Watch, and iOSTests couldn't run on this Mac (exit 70): Unable to find a destination"
+        var steps = steps
+        steps[2].passed = false
+        let ended = try desk.macCheckEnded(check.id, MacCheck.Report(passed: false, steps: steps, failures: [], problem: problem))
+        #expect(ended.state == .error && ended.problem == problem)
+        try await Task.sleep(for: .milliseconds(100))
+        var job = try #require(desk.job("author"))
+        // Nothing posted, nothing handed to the author, and it needs you.
+        #expect(made.comments.isEmpty && made.agents.count == 2 && made.quoted.isEmpty && job.status == .done)
+        #expect(job.mergeNeedsYou && job.needsYou && Push.notice(for: job) == .merge)
+        #expect(job.pipeline.stages.last?.state == .failed && job.pipeline.stages.last?.detail == "Mac check couldn't run"
+                && job.pipeline.stages.last?.reason == problem)
+        let item = try #require(desk.inbox.last { $0.isOpen })
+        #expect(item.kind == .merge && item.text == problem && item.options == [Inbox.tryAgain, Inbox.dismiss])
+        // Try again: the same commit is queued again, using up no round.
+        _ = try desk.settle(item.id, .answer(Inbox.tryAgain))
+        job = try #require(desk.job("author"))
+        let again = try #require(job.macCheck)
+        #expect(again.state == .queued && again.head == Self.head && again.round == 1 && again.id != check.id && made.events.last == again)
+        #expect(!job.needsYou && job.pipeline.stages.last?.detail == "Waiting for a Mac check")
+    }
+
+    @Test func aRoundForTheCheckThatPushesNothingNewNeedsYouAndCanBeCheckedAgain() async throws {
+        let check = try await approved()
+        _ = desk.nextMacCheck(mac: "Studio")
+        var failing = steps
+        failing[1].passed = false
+        try desk.macCheckEnded(check.id, MacCheck.Report(passed: false, steps: failing, failures: ["blocksASecret()"]))
+        try await until("the author runs again") { desk.job("author")?.status == .running && made.agents.count == 3 }
+        #expect(desk.job("author")?.macCheck?.handedOff == true && desk.job("author")?.needsYou == false)
+        // The agent decides the code was fine: no new commit, nothing to publish or review.
+        try await endRound(try #require(made.agents.last?.agent), "The test passes here; nothing to change.")
+        var job = try #require(desk.job("author"))
+        #expect(job.status == .done && job.pushedHead == Self.head && job.reviewing == nil)
+        #expect(job.checkStop == MacCheck.nothingNewLine && job.mergeNeedsYou && job.needsYou)
+        let item = try #require(desk.inbox.last { $0.isOpen })
+        #expect(item.kind == .merge && item.options == [Inbox.tryAgain, Inbox.dismiss] && item.text.hasSuffix(MacCheck.nothingNewLine))
+        // Try again checks the same commit once more, as the same round.
+        _ = try desk.settle(item.id, .answer(Inbox.tryAgain))
+        job = try #require(desk.job("author"))
+        #expect(job.macCheck?.state == .queued && job.macCheck?.head == Self.head && job.macCheck?.round == 1 && job.macCheck?.handedOff == nil)
+        #expect(!job.needsYou)
+    }
+
+    @Test func theMacsOwnDeskQueuesNoChecksAndLeavesItReadyToMerge() async throws {
+        desk.queuesMacChecks = false
+        desk.dispatch(Desk.Draft(said: "fix oby #75", reply: "", job: author, guessed: false))
+        try await until("the author runs") { desk.job("author")?.status == .running }
+        try await endRound(try #require(made.agents.last?.agent))
+        try await approve()
+        try await Task.sleep(for: .milliseconds(100))
+        let job = try #require(desk.job("author"))
+        #expect(job.macCheck == nil && job.mergeError == nil && made.events.isEmpty && !job.needsYou)
+        #expect(job.pipeline.stages.last?.state == .current && job.pipeline.stages.last?.detail == "Ready to merge")
+    }
+
     // MARK: Recovering
 
     /// A job whose check passed, saved as the runner left it.
@@ -544,10 +605,45 @@ struct CheckTests {
         #expect(MacCheck.folder(odd).lastPathComponent == "ab12cd34")
     }
 
-    @Test func aCheckThatCannotRunReportsAFailure() async {
+    @Test func aCheckThatCannotRunIsTheMacsProblemNotTheCodes() async {
         let odd = MacCheck(id: "ab12cd34", job: "j", repo: "deskree-inc/oby", pr: 80, branch: "oby/fix-75", base: "dev", head: "--upload-pack=x", round: 1)
         let report = await MacCheck.run(odd, commands: [])
-        #expect(!report.passed && report.steps.map(\.name) == ["Check out the pull request"] && report.log == "That isn't a check Oby can run.")
+        #expect(!report.passed && report.steps.map(\.name) == ["Check out the pull request"] && report.log == nil)
+        #expect(report.problem == "Couldn't check out the pull request: That isn't a check Oby can run.")
+    }
+
+    @Test func aFailedStepIsTheCodesOnlyWhenTheToolsSaySo() {
+        let commands = MacCheck.commands(cache: URL(filePath: "/cache"))
+        let (swift, mac, phone) = (commands[0], commands[1], commands[2])
+        // Failing tests, compiler errors, or xcodebuild's own "build or tests failed" (65): the author's to fix.
+        #expect(MacCheck.problem(swift, status: 1, output: "✘ Test a() failed after 0.1 seconds.", timedOut: false, named: true) == nil)
+        #expect(MacCheck.problem(swift, status: 1, output: "/x/A.swift:3:5: error: cannot find 'foo' in scope", timedOut: false, named: false) == nil)
+        #expect(MacCheck.problem(swift, status: 1, output: "error: Exited with unexpected signal code 11", timedOut: false, named: false) == nil)
+        #expect(MacCheck.problem(mac, status: 65, output: "** TEST FAILED **", timedOut: false, named: false) == nil)
+        #expect(MacCheck.problem(swift, status: 1, output: "", timedOut: true, named: true) == nil)
+        // A hang, a missing tool, a missing simulator or Xcode failing: the Mac's, for the user to run again.
+        #expect(MacCheck.problem(swift, status: 15, output: "Building…", timedOut: true, named: false)
+                == "Runner tests (swift test) was stopped after 30 minutes without naming a failing test.")
+        #expect(MacCheck.problem(mac, status: 127, output: "env: xcodebuild: No such file or directory", timedOut: false, named: false)
+                == "Mac app and MacTests couldn't start: xcodebuild isn't installed on this Mac.")
+        let simulator = "xcodebuild: error: Unable to find a destination matching the provided destination specifier:\n\t\t{ platform:iOS Simulator, OS:latest, name:iPhone 17 }"
+        #expect(MacCheck.problem(phone, status: 70, output: simulator, timedOut: false, named: false)?
+            .hasPrefix("iPhone app with Watch, and iOSTests couldn't run on this Mac (exit 70): xcodebuild: error: Unable to find a destination") == true)
+        // The runner keeps a problem to one line, and a problem fails the check.
+        let kept = MacCheck.trimmed(MacCheck.Report(passed: true, steps: steps, failures: [], problem: "Xcode broke\nbadly"))
+        #expect(!kept.passed && kept.problem == "Xcode broke")
+    }
+
+    @Test func aStepThatHangsIsEndedWithWhatItStartedAndNothingWaitsOnItsOutput() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let done = await MacCheck.execute(["sh", "-c", "echo hello; exit 3"], in: folder, env: [:], timeout: 30)
+        #expect(done.status == 3 && done.output == "hello\n" && !done.timedOut)
+        // A child that ignores TERM and would hold a pipe open: the step still ends, soon after its timeout.
+        let start = ContinuousClock.now
+        let hung = await MacCheck.execute(["sh", "-c", "trap '' TERM; echo started; sleep 30 & sleep 30"], in: folder, env: [:], timeout: 0.5)
+        #expect(hung.timedOut && hung.output.hasPrefix("started"))
+        #expect(ContinuousClock.now - start < .seconds(8))
     }
 
     // MARK: The API

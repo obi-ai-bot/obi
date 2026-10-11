@@ -106,6 +106,9 @@ final class Desk {
     var onCheckChange: (MacCheck) -> Void = { _ in }
     /// Jobs whose Mac check result is being posted and merged or handed back (`finishCheck`), once at a time.
     @ObservationIgnored var finishingChecks: Set<String> = []
+    /// Whether an approval queues a Mac check: on the runner, which Macs ask for checks. The Mac's
+    /// own desk has no one to take them, so its approved jobs wait for a person to merge them.
+    @ObservationIgnored var queuesMacChecks = false
     /// What everything on its way to an agent is checked against (Engine/Vault.swift): prompts,
     /// messages, files, reviews and environments. Tests put in their own.
     @ObservationIgnored var vault = Vault.shared

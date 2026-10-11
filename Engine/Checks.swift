@@ -14,7 +14,9 @@ import OSLog
 /// squash-merges it into dev and deletes the branch. Never into main. Failed: the failing tests go
 /// back to the author's agent as its next round, quoted in a file.
 nonisolated struct MacCheck: Codable, Equatable, Sendable {
-    enum State: String, Codable, Sendable { case queued, running, passed, failed }
+    /// `error`: the Mac couldn't run the check (its checkout, the vault, Xcode or a simulator, a
+    /// step that hung): nothing the author's code can fix, so it's the user's to run again.
+    enum State: String, Codable, Sendable { case queued, running, passed, failed, error }
 
     /// One step the Mac ran, and how long it took.
     struct Step: Codable, Equatable, Sendable {
@@ -31,6 +33,9 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         var failures: [String]
         /// The end of what the failing steps printed, for the author's agent. Never stored or posted.
         var log: String?
+        /// Why the Mac couldn't run the check, or nil when it could: then the check didn't fail, it
+        /// didn't run, and nothing goes to the author.
+        var problem: String?
     }
 
     var id: String
@@ -55,6 +60,10 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// The pull request comment with the results, or nil with `postError` saying why there's none.
     var comment: String?
     var postError: String?
+    /// Why the Mac couldn't run it (`State.error`), or nil.
+    var problem: String?
+    /// Its failing tests went to the author's agent as a round (`Desk.checkFailed`).
+    var handedOff: Bool?
     /// How many times the runner tried to merge after it passed, and whether the last try failed on
     /// something that may pass later (`gh`, the network, the scan not running): `Desk.resumeChecks`
     /// tries those again.
@@ -68,12 +77,22 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// A Mac that took a check and said nothing for this long went away: the next Mac to ask gets it.
     static let lease: TimeInterval = 2 * 3600
     static let stopLine = "The Mac check failed \(maxRounds) times. Take it from here."
+    /// A failed check whose round for the author ended without a new commit to check.
+    static let nothingNewLine = "The agent's round for it pushed no new commit. Try again to check the same commit, or take it from here."
     /// A failed check whose fix Oby could never review: its reviews are used up.
     static let reviewsUsedLine = "Oby reviewed it \(Review.maxRounds) times already, so a fix can't merge. Take it from here."
     /// How many times the runner tries a merge that failed on something that may pass later.
     static let maxTries = 3
 
-    var label: String { state == .passed ? "Passed" : state == .failed ? "Failed" : state == .running ? "Running" : "Queued" }
+    var label: String {
+        switch state {
+        case .queued: "Queued"
+        case .running: "Running"
+        case .passed: "Passed"
+        case .failed: "Failed"
+        case .error: "Couldn't run"
+        }
+    }
     var macName: String { mac ?? "a Mac" }
 
     /// Why it failed, in one line: "2 tests failed on Studio: A, B", or the step that failed.
@@ -130,8 +149,9 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         }
         report.failures = Array(report.failures.map { one($0, 300) }.filter { !$0.isEmpty }.prefix(50))
         report.log = report.log.map { String($0.suffix(8000)) }
-        // A step that failed fails the check, whatever the Mac said.
-        if report.steps.isEmpty || report.steps.contains(where: { !$0.passed }) { report.passed = false }
+        report.problem = report.problem.map { one($0, 500) }.flatMap { $0.isEmpty ? nil : $0 }
+        // A step that failed fails the check, whatever the Mac said, and so does one that couldn't run.
+        if report.steps.isEmpty || report.steps.contains(where: { !$0.passed }) || report.problem != nil { report.passed = false }
         return report
     }
 
@@ -374,32 +394,107 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             worktree = try await checkout(check)
         } catch {
             return Report(passed: false, steps: [Step(name: "Check out the pull request", passed: false, seconds: 0)], failures: [],
-                          log: error.localizedDescription)
+                          problem: "Couldn't check out the pull request: \(error.localizedDescription)")
         }
         let env: [String: String?]
         do {
             env = try Agents.overrides()
         } catch {
             await remove(check)
-            return Report(passed: false, steps: [Step(name: "Read the vault", passed: false, seconds: 0)], failures: [], log: error.localizedDescription)
+            return Report(passed: false, steps: [Step(name: "Read the vault", passed: false, seconds: 0)], failures: [],
+                          problem: "Couldn't read the vault: \(error.localizedDescription)")
         }
-        var steps: [Step] = [], failures: [String] = [], logs: [String] = []
+        var steps: [Step] = [], failures: [String] = [], logs: [String] = [], problems: [String] = []
         for command in commands ?? Self.commands(cache: Workspace.root.appending(path: "checks/cache")) {
             let start = Date.now
-            let result = try? await Shell.run(command.arguments, in: worktree, env: env, timeout: command.timeout)
+            let result = await execute(command.arguments, in: worktree, env: env, timeout: command.timeout)
             let seconds = Int(Date.now.timeIntervalSince(start))
-            let passed = result?.status == 0
+            let passed = result.status == 0 && !result.timedOut
             steps.append(Step(name: command.name, passed: passed, seconds: seconds))
             Logger.jobs.notice("check \(check.id, privacy: .public): \(command.name, privacy: .public) \(passed ? "passed" : "failed", privacy: .public) in \(seconds, privacy: .public)s")
             guard !passed else { continue }
-            let output = result.map { String(decoding: $0.out, as: UTF8.self) + "\n" + $0.err } ?? "Oby couldn't run it."
-            for name in Self.failures(in: output) where !failures.contains(name) { failures.append(name) }
-            let timedOut = Double(seconds) >= command.timeout - 1 ? " (stopped after \(Int(command.timeout / 60)) minutes)" : ""
-            logs.append("\(command.name)\(timedOut):\n\(excerpt(output))")
+            let named = Self.failures(in: result.output)
+            for name in named where !failures.contains(name) { failures.append(name) }
+            if let problem = problem(command, status: result.status, output: result.output, timedOut: result.timedOut, named: !named.isEmpty) {
+                problems.append(problem)
+            } else {
+                logs.append("\(command.name):\n\(excerpt(result.output))")
+            }
         }
         await remove(check)
+        // Something the code can't fix kept a step from running: the user runs it again; the author gets nothing.
+        let problem = problems.isEmpty ? nil : problems.joined(separator: " ")
         return trimmed(Report(passed: steps.allSatisfy(\.passed), steps: steps, failures: failures,
-                              log: logs.isEmpty ? nil : logs.joined(separator: "\n\n")))
+                              log: logs.isEmpty ? nil : logs.joined(separator: "\n\n"), problem: problem))
+    }
+
+    /// Why a failed step says nothing about the code, or nil when the code failed it: it named failing
+    /// tests, the compiler reported errors, or xcodebuild said its build or tests failed (exit 65).
+    /// Anything else is the Mac's: a step that hung until its timeout, a tool that isn't there
+    /// (exit 127), or xcodebuild failing otherwise (no such simulator, Xcode itself).
+    static func problem(_ command: Command, status: Int32, output: String, timedOut: Bool, named: Bool) -> String? {
+        if timedOut { return named ? nil : "\(command.name) was stopped after \(Int(command.timeout / 60)) minutes without naming a failing test." }
+        if named { return nil }
+        if status == 127 { return "\(command.name) couldn't start: \(command.arguments.first ?? "the tool") isn't installed on this Mac." }
+        let compiler = output.split(separator: "\n").contains { $0.contains(": error:") || $0.hasPrefix("error: ") }
+        let xcodebuild = command.arguments.first == "xcodebuild"
+        if xcodebuild ? status == 65 : compiler { return nil }
+        let said = output.split(separator: "\n").last { $0.contains("error") || $0.contains("Unable to find") }
+            ?? output.split(separator: "\n").last ?? ""
+        return "\(command.name) couldn't run on this Mac (exit \(status)): \(said.trimmingCharacters(in: .whitespaces).prefix(200))"
+    }
+
+    /// Runs one step to its end or its timeout, with what it prints going to a file, not a pipe: a
+    /// process it left behind can't keep Oby waiting for the end of its output. At the timeout,
+    /// the step's whole process group ends (`Halt.end`: TERM, then KILL), and Oby stops waiting a
+    /// few seconds later whatever is left.
+    @concurrent static func execute(_ arguments: [String], in directory: URL, env: [String: String?], timeout: TimeInterval) async -> (status: Int32, output: String, timedOut: Bool) {
+        let log = FileManager.default.temporaryDirectory.appending(path: "oby-check-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: log) }
+        guard FileManager.default.createFile(atPath: log.path, contents: nil), let file = try? FileHandle(forWritingTo: log) else {
+            return (127, "Oby couldn't write the step's log.", false)
+        }
+        defer { try? file.close() }
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/env")
+        process.arguments = arguments
+        process.currentDirectoryURL = directory
+        var environment = Shell.environment
+        for (key, value) in env { environment[key] = value }
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = file
+        process.standardError = file
+        final class Ending: @unchecked Sendable {
+            let lock = NSLock()
+            var done: CheckedContinuation<Bool, Never>?
+            var timedOut = false
+            func finish() {
+                lock.lock()
+                let done = self.done
+                self.done = nil
+                lock.unlock()
+                done?.resume(returning: timedOut)
+            }
+        }
+        let ending = Ending()
+        let timedOut = await withCheckedContinuation { (done: CheckedContinuation<Bool, Never>) in
+            ending.done = done
+            process.terminationHandler = { _ in ending.finish() }
+            do { try process.run() } catch { return ending.finish() }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                guard process.isRunning else { return }
+                ending.lock.lock()
+                ending.timedOut = true
+                ending.lock.unlock()
+                Halt.end(process)
+                // A process that can't be ended doesn't keep the Mac busy for good.
+                DispatchQueue.global().asyncAfter(deadline: .now() + 5) { ending.finish() }
+            }
+        }
+        let status = process.isRunning ? -1 : process.terminationStatus
+        let output = String(decoding: (try? Data(contentsOf: log)) ?? Data(), as: UTF8.self)
+        return (status, output, timedOut)
     }
 }
 
@@ -412,6 +507,8 @@ extension Job {
     /// (its reviews are used up, Review.maxRounds), so a fix could never merge.
     nonisolated var checkStop: String? {
         guard let check = macCheck, check.state == .failed else { return nil }
+        // Its round came and went, and the pull request still has the commit that failed.
+        if check.handedOff == true { return MacCheck.nothingNewLine }
         if check.round >= MacCheck.maxRounds { return MacCheck.stopLine }
         if (review?.round ?? 0) >= Review.maxRounds { return MacCheck.reviewsUsedLine }
         return nil
@@ -423,19 +520,22 @@ extension Job {
     /// you, alerts and the inbox count.
     nonisolated var mergeNeedsYou: Bool {
         guard status == .done, dismissed == nil, published != nil, (pullRequest?.state ?? .open) == .open, review?.verdict == .approved,
-              reviewing == nil, let check = macCheck, check.head == pushedHead, check.state == .passed || check.state == .failed else { return false }
-        return mergeError != nil || checkStop != nil
+              reviewing == nil, let check = macCheck, check.head == pushedHead, check.state != .queued, check.state != .running else { return false }
+        return mergeError != nil || checkStop != nil || check.state == .error
     }
 
     /// The Merged stage while the pull request is open and Oby's review approved it.
     nonisolated var mergeProgress: (state: JobStage.State, detail: String, reason: String?) {
         if let mergeError { return (.failed, "Not merged", mergeError) }
-        guard let check = macCheck, check.head == pushedHead else { return (.current, "Waiting for a Mac check", nil) }
+        // Nothing queued: where nothing runs merge checks (the Mac's own desk), a person merges it.
+        guard let check = macCheck else { return (.current, "Ready to merge", nil) }
+        guard check.head == pushedHead else { return (.current, "Waiting for a Mac check", nil) }
         switch check.state {
         case .queued: return (.current, "Waiting for a Mac check", nil)
         case .running: return (.current, "Checking on \(check.macName)", nil)
         case .passed: return (.current, "Mac check passed · merging", nil)
         case .failed: return (.failed, "Mac check failed", check.failureLine + (checkStop.map { " " + $0 } ?? ""))
+        case .error: return (.failed, "Mac check couldn't run", check.problem ?? "The Mac couldn't run it.")
         }
     }
 }
@@ -444,6 +544,8 @@ extension Desk {
     /// Oby's review `review` approved `id`'s pull request (Engine/Review.swift): the commit it read
     /// waits for a Mac to check it, when it's still the pull request's head.
     func reviewApproved(_ id: String, review: String) {
+        // Only where a Mac takes checks: the runner. The Mac's own jobs wait for a person to merge them.
+        guard queuesMacChecks else { return }
         Task {
             let read = await reviewedHead(review)
             guard var author = job(id), author.review?.job == review, author.review?.verdict == .approved, !author.isActive else { return }
@@ -491,10 +593,11 @@ extension Desk {
         guard var author = jobs.first(where: { $0.macCheck?.id == id }), var check = author.macCheck else { throw MacCheck.Unknown() }
         guard check.state == .running || check.state == .queued else { throw Shell.Failure(message: "That check has its result already.") }
         let report = MacCheck.trimmed(report)
-        check.state = report.passed ? .passed : .failed
+        check.state = report.problem != nil ? .error : report.passed ? .passed : .failed
         check.finished = now
         check.steps = report.steps
         check.failures = report.failures
+        check.problem = report.problem
         author.macCheck = check
         replace(author)
         onCheckChange(check)
@@ -511,6 +614,7 @@ extension Desk {
     func finishCheck(_ id: String, log: String?) async {
         guard finishingChecks.insert(id).inserted else { return }
         defer { finishingChecks.remove(id) }
+        // A check the Mac couldn't run has no results to post or hand on: it needs the user.
         guard let author = job(id), var check = author.macCheck, check.state == .passed || check.state == .failed,
               !author.isActive, check.head == author.pushedHead else { return }
         if check.comment == nil && check.postError == nil {
@@ -547,11 +651,20 @@ extension Desk {
     }
 
     /// Try again on a merge that stopped (the inbox, `Desk.settle`): a passed check is merged
-    /// again, and a failed one that couldn't reach the author is handed to it again.
+    /// again, a failed one that couldn't reach the author is handed to it again, and one the Mac
+    /// couldn't run, or whose round brought no new commit, is checked again on the same commit.
     func retryMerge(_ id: String) throws {
-        guard var job = job(id), job.mergeError != nil, let check = job.macCheck, check.state == .passed || check.state == .failed,
-              check.head == job.pushedHead, !job.isActive else { throw Shell.Failure(message: "Nothing to merge again.") }
+        guard var job = job(id), job.mergeNeedsYou, var check = job.macCheck, !job.isActive else { throw Shell.Failure(message: "Nothing to merge again.") }
         job.mergeError = nil
+        if check.state == .error || check.handedOff == true {
+            // The same commit, the same round: a check that didn't run, or ran on unchanged code, uses none up.
+            check = MacCheck(id: String(UUID().uuidString.prefix(8)).lowercased(), job: check.job, repo: check.repo, pr: check.pr,
+                             branch: check.branch, base: check.base, head: check.head, round: check.round)
+            job.macCheck = check
+            replace(job)
+            return onCheckChange(check)
+        }
+        guard check.state == .passed || check.state == .failed && job.checkStop == nil else { throw Shell.Failure(message: "Nothing to merge again.") }
         job.macCheck?.tries = 0
         replace(job)
         Task { await finishCheck(id, log: nil) }
@@ -622,6 +735,7 @@ extension Desk {
         }
         var again = Review.round(author)
         again.step = "Working on the Mac check"
+        again.macCheck?.handedOff = true
         replace(again)
         run(again, prompt: MacCheck.roundPrompt(again, file: file), resume: session)
     }

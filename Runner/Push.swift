@@ -333,7 +333,7 @@ final class Push {
         case .ready: job.publishError ?? state.line
         case .review: Review.stopLine
         case .question: job.question?.text ?? state.line
-        case .merge: job.mergeError ?? job.macCheck.map { $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? state.line
+        case .merge: job.mergeError ?? job.macCheck.map { $0.problem ?? $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? state.line
         case .failed, .interrupted: state.line
         }
         let aps: [String: any Encodable] = ["alert": ["title": title, "body": body], "sound": "default",

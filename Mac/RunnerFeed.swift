@@ -247,7 +247,7 @@ final class RunnerFeed {
         if notice == .ready { return job.publishError ?? line ?? "Done" }
         if notice == .review { return Review.stopLine }
         if notice == .question, let question = job.question { return question.text }
-        if notice == .merge { return job.mergeError ?? job.macCheck.map { $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? "Not merged" }
+        if notice == .merge { return job.mergeError ?? job.macCheck.map { $0.problem ?? $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? "Not merged" }
         return line ?? job.status.rawValue.capitalized
     }
 

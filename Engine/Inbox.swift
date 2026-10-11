@@ -74,7 +74,11 @@ nonisolated enum Inbox {
         if job.mergeNeedsYou, let check = job.macCheck {
             // A merge that failed can be tried again; each try that fails is its own item.
             if let error = job.mergeError { return item(.merge, "merge-\(check.id)-\(check.tries ?? 0)", error, [tryAgain, dismiss]) }
-            return item(.merge, "merge-\(check.id)-stopped", check.failureLine + (job.checkStop.map { " " + $0 } ?? ""), [dismiss])
+            // The Mac couldn't run it, or its round brought nothing new: check the same commit again.
+            if check.state == .error { return item(.merge, "merge-\(check.id)-error", check.problem ?? "The Mac couldn't run the check.", [tryAgain, dismiss]) }
+            let text = check.failureLine + (job.checkStop.map { " " + $0 } ?? "")
+            if check.handedOff == true { return item(.merge, "merge-\(check.id)-nothing-new", text, [tryAgain, dismiss]) }
+            return item(.merge, "merge-\(check.id)-stopped", text, [dismiss])
         }
         guard job.status == .failed || job.status == .interrupted else { return nil }
         let line = job.summary.split(separator: "\n").first.map(String.init) ?? job.status.rawValue.capitalized
