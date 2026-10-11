@@ -95,7 +95,7 @@ struct PaceTests {
         #expect(Review.reviewer([state("mine"), codex], for: author) == nil)
     }
 
-    @Test func onlyAJobSentByNameGoesToAReservedAccount() throws {
+    @Test func onlyAJobSentByNameGoesToAReservedAccount() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
         let accounts = AccountStore(root: folder)
@@ -107,9 +107,9 @@ struct PaceTests {
                                          epic: nil, kind: .fix, title: nil, task: "Fix it", inputs: [], rounds: 1, check: nil, complexity: .routine)
             return Planner.Result(plan: Plan(action: .dispatch, reply: "", dispatches: [dispatch], question: nil), by: "claude")
         }
-        #expect(desk.card(for: plan(account: "auto"), said: "fix it")
+        #expect(await desk.card(for: plan(account: "auto"), said: "fix it")
                 == .reply("No Claude Code account is signed in with room to spare. Check Settings › Accounts."))
-        guard case .plan(let drafts) = desk.card(for: plan(account: "Default"), said: "fix it on Default") else {
+        guard case .plan(let drafts) = await desk.card(for: plan(account: "Default"), said: "fix it on Default") else {
             Issue.record("expected a plan")
             return
         }
@@ -119,7 +119,7 @@ struct PaceTests {
         let context = BrainContext(accounts: ["auto": ["auto", "Default"], "claude": ["auto", "Default"]], repos: ["deskree-inc/oby"])
         let rules = Rules.plan("fix oby #12", context: context)
         #expect(rules.dispatches.map { "\($0.agent)/\($0.account)" } == ["auto/auto"] && rules.problems(in: context, canary: "7f3a9c").isEmpty)
-        #expect(desk.card(for: Planner.Result(plan: rules, by: "rules"), said: "fix oby #12")
+        #expect(await desk.card(for: Planner.Result(plan: rules, by: "rules"), said: "fix oby #12")
                 == .reply("No coding tool account is signed in with room to spare. Check Settings › Accounts."))
         // Without "auto" on offer it names what the context has, and the plan still checks out.
         let named = BrainContext(accounts: ["claude": ["default"]], repos: ["deskree-inc/oby"])
