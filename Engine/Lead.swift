@@ -210,33 +210,6 @@ nonisolated enum Lead {
 
     // MARK: The claim
 
-    /// Claims the issue a job just started on, with Oby's own gh (case 1.3): assigns it to the
-    /// user, adds `status:in-progress`, notes the branch in a comment, and moves it to In progress
-    /// on the board. Each step that fails is said; the rest still happen. Returns one line for the job.
-    static func claim(_ job: Job, board: Board?) async throws -> String {
-        guard let issue = job.issue else { return "" }
-        var done: [String] = []
-        var failed: [String] = []
-        let step = { (what: String, argv: [String]) async in
-            do { try await Shell.ok(argv); done.append(what) } catch { failed.append("\(what) failed: \(error.localizedDescription)") }
-        }
-        await step("assigned to you", ["gh", "issue", "edit", "\(issue)", "-R", job.repo, "--add-assignee", "@me"])
-        await step("labeled status:in-progress", ["gh", "issue", "edit", "\(issue)", "-R", job.repo, "--add-label", "status:in-progress"])
-        do {
-            let note = try await claimNote(job)
-            await step("branch noted", ["gh", "issue", "comment", "\(issue)", "-R", job.repo, "--body", note])
-        } catch {
-            failed.append("branch noted failed: \(error.localizedDescription)")
-        }
-        if let board, let item = board.items.first(where: { $0.repo == job.repo && $0.number == issue }) {
-            await step("moved to In progress", ["gh", "project", "item-edit", "\(board.number)", "--owner", board.owner, "--url", item.url,
-                                                "--field", "Status", "--value", "In progress"])
-        }
-        var line = done.isEmpty ? "Not claimed" : "Claimed: " + done.joined(separator: ", ")
-        if !failed.isEmpty { line += (done.isEmpty ? ": " : "; ") + failed.joined(separator: "; ") }
-        return line + "."
-    }
-
     /// The comment that notes the job's branch on its issue, after the secret scan: the branch's
     /// name comes from a plan. Throws, naming where, when the scan finds something or can't run.
     static func claimNote(_ job: Job, vault: Vault = .shared) async throws -> String {
@@ -304,14 +277,24 @@ nonisolated struct Board: Equatable, Sendable {
     /// the repositories' owners', its items in board order, then for each repository on it the
     /// open issues (so closed ones drop out, with labels, assignees and milestone as GitHub has
     /// them now) and the open pull requests that close them.
-    static func read(title: String = Lead.boardTitle, repos: [String]) async throws -> Board {
-        let user = (try? await Shell.ok(["gh", "api", "user", "-q", ".login"])) ?? ""
+    static func read(title: String = Lead.boardTitle, repos: [String],
+                     gh: ([String]) async throws -> String = { args in
+                         do { return try await Shell.ok(args) }
+                         catch { throw Shell.Failure(message: IssueSync.projectError(error.localizedDescription)) }
+                     }) async throws -> Board {
+        let user = (try? await gh(["gh", "api", "user", "-q", ".login"])) ?? ""
         var owners = ["@me"]
         for owner in repos.compactMap({ $0.split(separator: "/").first.map(String.init) }) where owner != user && !owners.contains(owner) { owners.append(owner) }
         var found: (number: Int, owner: String)?
         for owner in owners {
-            guard let text = try? await Shell.ok(["gh", "project", "list", "--owner", owner, "--format", "json", "--limit", "100"]),
-                  let json = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+            let text: String
+            do { text = try await gh(["gh", "project", "list", "--owner", owner, "--format", "json", "--limit", "100"]) }
+            catch {
+                let message = IssueSync.projectError(error.localizedDescription)
+                if message == IssueSync.scopeFix { throw Shell.Failure(message: message) }
+                continue
+            }
+            guard let json = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
                   let projects = json["projects"] as? [[String: Any]] else { continue }
             if let project = projects.first(where: { Self.sameTitle($0["title"] as? String ?? "", title) }), let number = Self.int(project["number"]) {
                 found = (number, owner)
@@ -319,7 +302,7 @@ nonisolated struct Board: Equatable, Sendable {
             }
         }
         guard let found else { throw Shell.Failure(message: "no project called \"\(title)\" for \(owners.joined(separator: ", "))") }
-        let list = try await Shell.ok(["gh", "project", "item-list", "\(found.number)", "--owner", found.owner, "--format", "json", "--limit", "500"])
+        let list = try await gh(["gh", "project", "item-list", "\(found.number)", "--owner", found.owner, "--format", "json", "--limit", "500"])
         guard let json = try? JSONSerialization.jsonObject(with: Data(list.utf8)) as? [String: Any], let items = json["items"] as? [[String: Any]] else {
             throw Shell.Failure(message: "gh project item-list returned no items")
         }
@@ -331,7 +314,7 @@ nonisolated struct Board: Equatable, Sendable {
         }
         var open: [String: BoardItem] = [:]
         for repo in Set(ordered.map(\.repo)) {
-            let issues = try await Shell.ok(["gh", "issue", "list", "-R", repo, "--state", "open", "--limit", "1000",
+            let issues = try await gh(["gh", "issue", "list", "-R", repo, "--state", "open", "--limit", "1000",
                                              "--json", "number,title,url,labels,assignees,milestone"])
             for issue in (try? JSONSerialization.jsonObject(with: Data(issues.utf8))) as? [[String: Any]] ?? [] {
                 guard let number = Self.int(issue["number"]) else { continue }
@@ -340,7 +323,7 @@ nonisolated struct Board: Equatable, Sendable {
                     labels: Self.names(issue["labels"], key: "name"), milestone: (issue["milestone"] as? [String: Any])?["title"] as? String,
                     assignees: Self.names(issue["assignees"], key: "login"))
             }
-            let pulls = (try? await Shell.ok(["gh", "pr", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,closingIssuesReferences"])) ?? "[]"
+            let pulls = (try? await gh(["gh", "pr", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,closingIssuesReferences"])) ?? "[]"
             for pull in (try? JSONSerialization.jsonObject(with: Data(pulls.utf8))) as? [[String: Any]] ?? [] {
                 guard let pr = Self.int(pull["number"]) else { continue }
                 for closed in pull["closingIssuesReferences"] as? [[String: Any]] ?? [] {

@@ -42,11 +42,12 @@ final class Desk {
     /// Called with every inbox item that's added or changes, for the runner's event stream.
     var onInboxChange: (InboxItem) -> Void = { _ in }
 
-    private let store: JobStore
+    let store: JobStore
     /// The repositories the brain and the Lead may choose from; `refresh` reads them, tests set them.
     var repos: [String] = []
     /// The roadmap board as the Lead last read it (Engine/Lead.swift), for claims.
     private var board: Board?
+    @ObservationIgnored lazy var issueSync = IssueSync(desk: self)
     /// Jobs ready to run that wait for an earlier job touching the same files to end (case 2.1), in order.
     private var waiting: [Job] = []
     /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
@@ -103,7 +104,7 @@ final class Desk {
     /// Claude account whose home is given, and claims an issue when a job starts on it. Tests put in their own.
     @ObservationIgnored var readBoard: (_ repos: [String]) async throws -> Board = { try await Board.read(repos: $0) }
     @ObservationIgnored var makeLead: (_ home: String?) -> [any LeadAdapter] = Lead.adapters
-    @ObservationIgnored var claim: (Job, Board?) async throws -> String = Lead.claim
+    @ObservationIgnored var claim: (Job, Board?) async throws -> String = { _, _ in "" }
     /// Where each goal's context files go: `leads/<goal>/.oby/context/`.
     @ObservationIgnored var leadRoot = Workspace.root.appending(path: "leads")
 
@@ -638,24 +639,7 @@ final class Desk {
         job.step = "Starting \(job.agentName)"
         replace(job)
         run(job, prompt: Prompts.agent(job))
-        // A job the Lead started claims its issue (case 1.3): assigned to the user, status:in-progress
-        // with the branch, In progress on the board. The job says how it went.
-        if job.lead != nil, job.issue != nil {
-            let board = board
-            Task {
-                var line: String
-                do {
-                    line = try await claim(job, board)
-                } catch {
-                    line = "Not claimed: \(error.localizedDescription)"
-                }
-                if line.isEmpty { return }
-                Logger.jobs.notice("job \(job.id, privacy: .public): \(line, privacy: .public)")
-                guard var latest = self.job(job.id) else { return }
-                latest.claim = line
-                replace(latest)
-            }
-        }
+        claimIssue(job, board: board)
     }
 
     /// Starts the job's agent in its worktree: a new session, or the job's own picked up again.
@@ -964,7 +948,7 @@ final class Desk {
         if let status { latest.pullRequest = status }
         latest.pullRequestError = error
         if job(id) != nil { replace(latest) }
-        else { store.save(latest); onJobChange(latest) }
+        else { store.save(latest); onJobChange(latest); issueSync.observe(latest) }
     }
 
     func replace(_ job: Job, save: Bool = true) {
@@ -972,6 +956,7 @@ final class Desk {
         jobs[index] = job
         if save { store.save(job) }
         onJobChange(job)
+        issueSync.observe(job)
         // A step changes nothing the user must answer.
         if save { syncInbox(job) }
     }
@@ -1000,6 +985,8 @@ final class Desk {
         store.save(need)
         onInboxChange(need)
     }
+
+    func addIssueAudit(_ item: InboxItem) { inbox.append(item); store.save(item); onInboxChange(item) }
 
     func item(_ id: String) -> InboxItem? { inbox.first { $0.id == id } }
 

@@ -19,6 +19,8 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         case failed
         /// The job's account hit its usage limit, and no other account had room.
         case limit
+        /// One line from the runner's daily issue and board reconciliation.
+        case audit
     }
 
     /// The job, what it needs and when it came: the same need never comes twice, even once it's done.

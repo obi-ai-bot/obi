@@ -28,6 +28,7 @@ do {
 }
 
 let desk = Desk()
+desk.issueSync.enabled = true
 let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: "devices.json")),
               push: Push(desk: desk, folder: Workspace.root.appending(path: "apns")),
               cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")))
@@ -52,6 +53,14 @@ Task {
         await pullRequests.poll()
         do { try await Task.sleep(for: .seconds(PullRequests.interval)) }
         catch { return }
+    }
+}
+
+// Persisted audit IDs ensure one daily report, including across runner restarts.
+Task {
+    while !Task.isCancelled {
+        await desk.issueSync.audit()
+        try? await Task.sleep(for: .seconds(3600))
     }
 }
 

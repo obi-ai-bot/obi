@@ -634,7 +634,7 @@ nonisolated enum Publish {
             \(request)
 
             \(check)
-            - Secret scan: clean.\(job.issue.map { "\n\nCloses #\($0)" } ?? "")
+            - Secret scan: clean.\(IssueSync.prReference(job))
 
             by Oby: Oby opened this pull request after the check passed and the secret scan was clean. A person reviews it before it merges.
             """

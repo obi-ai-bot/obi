@@ -261,6 +261,7 @@ extension InboxItem {
         case "question": "Question"
         case "review": "Out of reviews"
         case "limit": "Out of usage"
+        case "audit": "Issue audit"
         default: "Failed"
         }
         return "\(label) · \(title) · \(Elapsed.waiting(since: created, now: now))"

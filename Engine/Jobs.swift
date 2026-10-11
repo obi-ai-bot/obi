@@ -1092,6 +1092,7 @@ nonisolated enum Prompts {
             lines.append("You may take up to \(job.maxRounds) rounds. End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.")
         }
         lines.append("Finish with a short summary. Its first line is one sentence the user will see in the notch.")
+        if job.issue != nil { lines.append(IssueSync.coverageInstruction) }
         lines.append(Inbox.howToAsk)
         return lines.joined(separator: "\n\n")
     }
