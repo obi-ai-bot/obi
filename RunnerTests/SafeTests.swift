@@ -329,18 +329,22 @@ struct HaltTests {
         let process = Process()
         process.executableURL = URL(filePath: "/bin/sh")
         process.arguments = ["-c", "trap '' TERM; sleep 30 & echo $! > '\(child.path)'; wait"]
+        // When it really ended, not when this test, waiting on a busy main actor, gets to see it.
+        let ended = Ended()
+        process.terminationHandler = { _ in ended.mark() }
         let group = try ProcessGroup.run(process)
         for _ in 0..<200 where (try? String(contentsOf: child, encoding: .utf8))?.isEmpty ?? true { try await Task.sleep(for: .milliseconds(10)) }
         let sleeper = try #require(Int32((try String(contentsOf: child, encoding: .utf8)).trimmingCharacters(in: .whitespacesAndNewlines)))
         defer { _ = kill(sleeper, SIGKILL) }
 
-        // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt.
-        let start = ContinuousClock.now
+        // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt, which gets the rest of the 2 seconds.
         try await Task.sleep(for: .seconds(Halt.grace))
+        let start = ContinuousClock.now
         group.end(after: Halt.stopping)
-        for _ in 0..<200 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<500 where ended.at == nil { try await Task.sleep(for: .milliseconds(10)) }
+        let end = try #require(ended.at)
         #expect(!process.isRunning)
-        #expect(ContinuousClock.now - start < .seconds(2))
+        #expect(end - start < .seconds(2) - .seconds(Halt.grace))
         // What it started ends too: it's in the agent's process group.
         for _ in 0..<100 where kill(sleeper, 0) == 0 { try await Task.sleep(for: .milliseconds(10)) }
         #expect(kill(sleeper, 0) != 0)
@@ -459,4 +463,12 @@ struct HaltTests {
         #expect(ContinuousClock.now - start < .seconds(10))
         #expect(try await gone(mark))
     }
+}
+
+/// When a process ended, from its termination handler's thread.
+final class Ended: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant: ContinuousClock.Instant?
+    var at: ContinuousClock.Instant? { lock.withLock { instant } }
+    func mark() { lock.withLock { instant = .now } }
 }
