@@ -61,6 +61,9 @@ final class API {
         router.post("v1/jobs/:id/stop") { _, context in try await self.stop(context.parameters.require("id")) }
         router.post("v1/stop-all") { _, _ in await self.stopAll() }
         router.post("v1/jobs/:id/dismiss") { _, context in try await self.dismiss(context.parameters.require("id")) }
+        router.post("v1/jobs/:id/move") { request, context in
+            try await self.move(context.parameters.require("id"), try await Self.decode(MoveRequest.self, from: request))
+        }
         router.post("v1/jobs/:id/messages") { request, context in
             try await self.message(context.parameters.require("id"), try await Self.decode(NewMessage.self, from: request))
         }
@@ -218,6 +221,17 @@ final class API {
             throw APIError(.conflict, error.localizedDescription)
         }
         return Self.json(JobJSON(job: try known(id)))
+    }
+
+    /// Moves a job to another tool, account or model (Engine/Move.swift): a queued one starts
+    /// there, a running one starts its round over there, a finished one's next round runs there.
+    func move(_ id: String, _ request: MoveRequest) throws -> Response {
+        _ = try known(id)
+        do {
+            return Self.json(JobJSON(job: try desk.move(id, to: MoveTarget(agent: request.agent, account: request.account, model: request.model), why: request.why)))
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
     }
 
     /// Words for the job's agent: a running job hears them now, a finished one runs again.
@@ -658,7 +672,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves }
 
     private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou }
 
@@ -708,8 +722,9 @@ struct JobJSON: Encodable {
         if job.appleCheck == nil { try nulls.encodeNil(forKey: .appleCheck) }
         if job.appleRan == nil { try nulls.encodeNil(forKey: .appleRan) }
         if job.tetrix == nil { try nulls.encodeNil(forKey: .tetrix) }
-        // What went out is always a list: empty before anything did.
+        // What went out and where it moved are always lists: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
+        if job.moves == nil { try nulls.encode([Job.Move](), forKey: .moves) }
     }
 }
 
@@ -972,6 +987,15 @@ struct NotificationToken: Decodable {
     var token: String
     var topic: String
     var environment: String
+}
+
+/// Where `POST /v1/jobs/{id}/move` moves the job: each key optional, at least one of the first three.
+struct MoveRequest: Decodable {
+    var agent: String?
+    var account: String?
+    var model: String?
+    /// Why, in the user's words: the agent that takes it over hears it.
+    var why: String?
 }
 
 struct NewMessage: Decodable {
