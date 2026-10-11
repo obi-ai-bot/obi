@@ -118,6 +118,8 @@ final class Desk {
     }
     /// The limits every job is held to (case 3.1). Tests put in their own.
     @ObservationIgnored var limits = JobLimits()
+    /// `oby-check apple` as the runner installed it, or nil (Engine/AppleChecks.swift). Tests put in their own.
+    @ObservationIgnored var appleTool: () -> AppleCheck.Tool? = { AppleCheck.installed }
     /// Runs a job's check in its worktree with `env` (no vault secret), ending it after `timeout`
     /// seconds. Tests put in their own.
     @ObservationIgnored var runCheck: (_ id: String, _ command: String, _ timeout: TimeInterval, _ env: [String: String?]) async -> Rounds.Check = { id, command, timeout, env in
@@ -1012,14 +1014,19 @@ final class Desk {
             job.step = "Checking: \(command)"
             replace(job)
             // The check runs the agent's code: it gets no variable that holds a vault secret, and doesn't run when the vault can't be read.
+            // It has the agent's `oby-check apple`, waiting for the Mac up to the check's time limit (#68).
             let env: [String: String?]
             do {
                 env = try Agents.overrides(vault: vault)
+                    .merging(AppleCheck.environment(worktree: Workspace.worktree(id), tool: appleTool(), wait: limits.testRun)) { $1 }
             } catch {
                 agent.end()
                 return finish(id, .failed, "The check didn't run: \(error.localizedDescription)")
             }
+            let started = Date.now
             var result = await runCheck(id, command, limits.testRun, env)
+            // An Apple check no Mac took didn't fail: the Apple apps weren't built.
+            if !result.passed { result.appleUnbuilt = appleUnbuilt(id, since: started) }
             // Stopped while the check ran.
             guard var latest = self.job(id), latest.isActive else { return }
             // Oby compares the tests with where the branch started too: weakening them fails the round (case 3.2).
@@ -1332,6 +1339,8 @@ nonisolated enum Rounds {
         /// The failing tests' ids, read from all of the output before it's cut to its end; nil to
         /// read them from `output`.
         var failing: [String]? = nil
+        /// It failed because the Apple check it asked for found no Mac (`Desk.appleUnbuilt`), not on the agent's code.
+        var appleUnbuilt = false
 
         var succeeded: Bool { passed && problems.isEmpty }
     }
@@ -1374,9 +1383,11 @@ nonisolated enum Rounds {
         let rounds = "\(job.maxRounds) round\(job.maxRounds == 1 ? "" : "s")"
         if failed { return .finish(.failed, summary) }
         if let check {
-            if check.succeeded {
-                let notes = check.notes.isEmpty ? "" : "\n\nChanged in the existing tests, for review:\n" + check.notes.map { "- " + $0 }.joined(separator: "\n")
-                return .finish(.done, summary + "\n\nChecked: `\(check.command)` passed." + notes)
+            let notes = check.notes.isEmpty ? "" : "\n\nChanged in the existing tests, for review:\n" + check.notes.map { "- " + $0 }.joined(separator: "\n")
+            if check.succeeded { return .finish(.done, summary + "\n\nChecked: `\(check.command)` passed." + notes) }
+            // No Mac took its Apple check (#68): nothing another round could fix, and not the same failure twice.
+            if check.appleUnbuilt, check.problems.isEmpty {
+                return .finish(.done, summary + "\n\n`\(check.command)` didn't finish: " + AppleCheck.unbuiltLine + notes)
             }
             if let previous, Fingerprint.of(check) == previous { return .hold("the same failure twice in a row", summary) }
             if last {

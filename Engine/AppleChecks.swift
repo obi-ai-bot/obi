@@ -43,6 +43,14 @@ nonisolated enum AppleCheck {
     static let maxPerJob = 20
     static let noMacLine = "No Mac took the Apple check within a minute: Oby on the user's Mac has to be open and following the runner, with Settings › Runner › \"Build and test agents' work on this Mac\" on. Carry on without it, and say in your summary that the Apple apps weren't built."
     static let staleLine = "No Mac took the Apple check within an hour. Carry on without it, and say in your summary that the Apple apps weren't built."
+    /// A job's final check (`Desk.afterTurn`) waits for a Mac up to its time limit instead (#68):
+    /// `oby-check apple` stops waiting this long before the check is ended, and the runner gives up
+    /// on a Mac taking it twice as long before, so the command still prints why.
+    static let margin: TimeInterval = 30
+    static let unbuiltLine = "No Mac took the Apple check before the job's check ran out of time, so the Apple apps weren't built. Oby's Mac check before merging builds and tests them."
+
+    /// How long a final check's Apple check may wait for a Mac, for a check that may take `timeout`.
+    static func finalWait(_ timeout: TimeInterval) -> TimeInterval { max(0, timeout - 2 * margin) }
 
     /// Writes `oby-check` into `root`/bin, a script that runs `executable check`, for the runner's
     /// API on `port`. The runner keeps the result in `installed`.
@@ -59,32 +67,46 @@ nonisolated enum AppleCheck {
 
     // MARK: Who may ask
 
-    /// Each job's token for the API, made when its agent first starts and kept while the runner
-    /// runs: it lets that job's agent ask for its own Apple checks, and nothing else.
-    private static let tokens = Mutex<[String: String]>([:])
+    /// Who asks with a token: a job's agent, or its final check (`final`).
+    struct Asker: Hashable, Sendable {
+        var job: String
+        var final = false
+    }
 
-    static func token(for job: String) -> String {
+    /// Each job's tokens for the API, made when its agent or its final check first starts and kept
+    /// while the runner runs: they let that job ask for its own Apple checks, and nothing else.
+    private static let tokens = Mutex<[Asker: String]>([:])
+
+    static func token(for job: String, final: Bool = false) -> String {
         tokens.withLock { tokens in
-            if let token = tokens[job] { return token }
+            let asker = Asker(job: job, final: final)
+            if let token = tokens[asker] { return token }
             let token = (UUID().uuidString + UUID().uuidString).replacing("-", with: "").lowercased()
-            tokens[job] = token
+            tokens[asker] = token
             return token
         }
     }
 
-    /// The job whose token this is, or nil.
-    static func job(forToken token: String) -> String? {
+    /// Who this token is, or nil.
+    static func asker(forToken token: String) -> Asker? {
         guard !token.isEmpty else { return nil }
         return tokens.withLock { $0.first { $0.value == token }?.key }
     }
 
+    /// The job whose token this is, or nil.
+    static func job(forToken token: String) -> String? { asker(forToken: token)?.job }
+
     /// What an agent working in `worktree` gets for the command: its folder first on PATH, the API
     /// and the job's token. Nothing where the runner offers no command, or outside a job's worktree.
-    static func environment(worktree: URL?, tool: Tool? = installed, path: String? = Shell.environment["PATH"]) -> [String: String?] {
+    /// `wait`: for the job's final check (`Desk.afterTurn`), the most it may take: the command gets
+    /// the final check's token and waits for the result up to then (`OBY_CHECK_WAIT`), not 2 minutes.
+    static func environment(worktree: URL?, tool: Tool? = installed, path: String? = Shell.environment["PATH"], wait: TimeInterval? = nil) -> [String: String?] {
         guard let tool, let worktree, worktree.deletingLastPathComponent().standardizedFileURL.path
                 == Workspace.root.appending(path: "jobs").standardizedFileURL.path else { return [:] }
-        return ["PATH": tool.folder.path + (path.map { ":" + $0 } ?? ""), "OBY_CHECK_URL": tool.url,
-                "OBY_CHECK_TOKEN": token(for: worktree.lastPathComponent)]
+        var environment: [String: String?] = ["PATH": tool.folder.path + (path.map { ":" + $0 } ?? ""), "OBY_CHECK_URL": tool.url,
+                                              "OBY_CHECK_TOKEN": token(for: worktree.lastPathComponent, final: wait != nil)]
+        if let wait { environment["OBY_CHECK_WAIT"] = String(max(1, Int(wait - margin))) }
+        return environment
     }
 
     // MARK: The agent's prompt
@@ -227,20 +249,28 @@ nonisolated enum AppleCheck {
 
 extension Desk {
     /// Whether agents here have `oby-check apple`: on the runner, once it installed the command.
-    var offersAppleChecks: Bool { queuesMacChecks && AppleCheck.installed != nil }
+    var offersAppleChecks: Bool { queuesMacChecks && appleTool() != nil }
 
     /// An agent's `oby-check apple`: an Apple check of job `id`'s worktree commit, queued for a Mac.
     /// Asking again for the same commit picks up the same check, unless it couldn't run. Throws,
     /// saying why, when the job isn't running, the commit can't be read, or the job asked for
-    /// `AppleCheck.maxPerJob` already.
-    func askAppleCheck(_ id: String, now: Date = .now) async throws -> MacCheck {
+    /// `AppleCheck.maxPerJob` already. `final`: the job's final check asks (`Desk.afterTurn`), so the
+    /// check waits for a Mac up to the final check's time limit (`MacCheck.finalCheck`).
+    func askAppleCheck(_ id: String, final: Bool = false, now: Date = .now) async throws -> MacCheck {
         guard queuesMacChecks else { throw Shell.Failure(message: "Only the runner sends Apple checks to a Mac.") }
         guard job(id)?.isActive == true else { throw Shell.Failure(message: "Oby checks only a job that's running.") }
         guard let head = await worktreeHead(id), head.wholeMatch(of: /[0-9a-f]{40}/) != nil else {
             throw Shell.Failure(message: "Oby can't tell which commit the worktree is on. Commit your changes first.")
         }
         guard var job = job(id), job.isActive else { throw Shell.Failure(message: "Oby checks only a job that's running.") }
-        if let check = job.appleCheck, check.head == head, check.state != .error { return check }
+        if var check = job.appleCheck, check.head == head, check.state != .error {
+            // The agent's own check, still waiting for a Mac when the final check asks: it waits as long as the final check now.
+            guard final, check.state == .queued else { return check }
+            check.finalCheck = now
+            job.appleCheck = check
+            replace(job)
+            return check
+        }
         let round = (job.appleCheck?.round ?? 0) + 1
         guard round <= AppleCheck.maxPerJob else {
             throw Shell.Failure(message: "This job asked for \(AppleCheck.maxPerJob) Apple checks already. Say in your summary what still fails.")
@@ -248,6 +278,7 @@ extension Desk {
         var check = MacCheck(id: String(UUID().uuidString.prefix(8)).lowercased(), job: id, repo: job.repo, pr: Review.pullRequest(of: job) ?? 0,
                              branch: job.branch, base: job.base ?? MacCheck.into, head: head, round: round, created: now)
         check.kind = .apple
+        if final { check.finalCheck = now }
         // What the check it replaces printed goes, unless the reviewer may still read it.
         if let old = job.appleCheck, old.id != job.appleRan?.id { appleLogs[old.id] = nil }
         job.appleCheck = check
@@ -259,18 +290,44 @@ extension Desk {
 
     /// Job `id`'s latest Apple check as its agent sees it, or nil. A queued one that no Mac took
     /// within `AppleCheck.unclaimed` while none was busy, or within `AppleCheck.stale` at all,
-    /// didn't run (`error`).
+    /// didn't run (`error`). One a job's final check asked for waits for a Mac, busy or not, up to
+    /// `AppleCheck.finalWait` of the check's time limit.
     func appleCheck(_ id: String, now: Date = .now) -> MacCheck? {
         guard var job = job(id), var check = job.appleCheck else { return nil }
+        guard check.state == .queued else { return check }
         let waited = now.timeIntervalSince(check.created)
-        guard check.state == .queued, waited > AppleCheck.stale || waited > AppleCheck.unclaimed && busyMac(now: now) == nil else { return check }
+        if let asked = check.finalCheck {
+            guard now.timeIntervalSince(asked) > AppleCheck.finalWait(limits.testRun) else { return check }
+            check.problem = AppleCheck.unbuiltLine
+        } else {
+            guard waited > AppleCheck.stale || waited > AppleCheck.unclaimed && busyMac(now: now) == nil else { return check }
+            check.problem = waited > AppleCheck.stale ? AppleCheck.staleLine : AppleCheck.noMacLine
+        }
         check.state = .error
         check.finished = now
-        check.problem = waited > AppleCheck.stale ? AppleCheck.staleLine : AppleCheck.noMacLine
         job.appleCheck = check
         replace(job)
         onCheckChange(check)
         return check
+    }
+
+    /// Whether job `id`'s final check, which started at `since`, asked for an Apple check that no Mac
+    /// took (#68): then the check didn't fail, the Apple apps weren't built. One still queued is
+    /// withdrawn, since nothing waits for it any more.
+    func appleUnbuilt(_ id: String, since: Date, now: Date = .now) -> Bool {
+        guard var job = job(id), var check = job.appleCheck, let asked = check.finalCheck, asked >= since, check.started == nil else { return false }
+        switch check.state {
+        case .queued:
+            check.state = .error
+            check.finished = now
+            check.problem = AppleCheck.unbuiltLine
+            job.appleCheck = check
+            replace(job)
+            onCheckChange(check)
+            return true
+        case .error: return true
+        case .running, .passed, .failed: return false
+        }
     }
 
     /// A check a Mac is running now, Apple or merge, or nil.

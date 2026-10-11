@@ -13,11 +13,12 @@ struct AppleCheckTests {
     final class Agent: AgentRun {
         var onEvent: (AgentEvent) -> Void = { _ in }
         var prompt = ""
+        var sent: [String] = []
         func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
             self.prompt = prompt
             self.onEvent = onEvent
         }
-        func send(_ text: String) {}
+        func send(_ text: String) { sent.append(text) }
         func end() {}
         func stop() {}
         func kill() {}
@@ -30,6 +31,8 @@ struct AppleCheckTests {
         var head: String? = AppleCheckTests.head
         var events: [MacCheck] = []
         var reviews: [String] = []
+        /// What the job's final check was given to run with.
+        var env: [String: String?] = [:]
     }
 
     nonisolated static let head = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
@@ -89,8 +92,10 @@ struct AppleCheckTests {
         #expect(condition(), Comment(rawValue: what))
     }
 
-    /// The author, running.
-    func running() async throws {
+    /// The author, running, with `check` as its final check.
+    func running(check: String? = nil) async throws {
+        var author = author
+        author.check = check
         desk.dispatch(Desk.Draft(said: "build oby #118", reply: "", job: author, guessed: false))
         try await until("the author runs") { desk.job("apple118")?.status == .running }
     }
@@ -212,6 +217,120 @@ struct AppleCheckTests {
         #expect(none.state == .error && none.problem == AppleCheck.noMacLine && made.events.last == none)
         #expect(AppleCheck.report(none, log: nil) == "The Apple check of commit aaaabbbbcccc couldn't run: " + AppleCheck.noMacLine)
         #expect(desk.nextMacCheck(mac: "Studio", kinds: [.apple]) == nil)
+    }
+
+    // MARK: A job's final check (#68)
+
+    let tool = AppleCheck.Tool(folder: URL(filePath: "/oby/bin"), executable: URL(filePath: "/oby/oby-runner"), url: "http://127.0.0.1:7777")
+
+    @Test func theFinalCheckRunsObyCheckAppleWithTheAgentsEnvironmentAndWaitsForTheMac() async throws {
+        desk.appleTool = { [tool] in tool }
+        desk.integrity = { _ in Integrity.Report() }
+        let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
+        let (desk, made, steps) = (desk, made, steps)
+        desk.runCheck = { id, command, timeout, env in
+            made.env = env
+            // `oby-check apple` asks with the token it was given: the final check's, which waits for a Mac past a minute.
+            let token = (env["OBY_CHECK_TOKEN"] ?? nil) ?? ""
+            _ = try? await api.appleCheck("Bearer " + token, ask: true)
+            guard let check = desk.job(id)?.appleCheck, check.finalCheck != nil,
+                  desk.appleCheck(id, now: check.created + AppleCheck.unclaimed + 1)?.state == .queued,
+                  desk.nextMacCheck(mac: "Studio", kinds: [.merge, .apple])?.id == check.id,
+                  (try? desk.macCheckEnded(check.id, MacCheck.Report(passed: true, steps: steps.map { MacCheck.Step(name: $0.name, passed: true, seconds: 1) },
+                                                                    failures: []))) != nil
+            else { return Rounds.Check(command: command, passed: false, output: "oby-check: not found") }
+            return Rounds.Check(command: command, passed: true, output: "Apple check passed on Studio.")
+        }
+        try await running(check: "oby-check apple")
+        let agent = try #require(made.agents.last?.agent)
+        agent.onEvent(.turnEnded(summary: "Shown on the iPhone.", failed: false))
+        try await until("the job ends") { desk.job("apple118")?.isActive == false }
+
+        // PATH with the command's folder first, the runner's API, and the job's final-check token.
+        let path = try #require(made.env["PATH"] ?? nil)
+        #expect(path.hasPrefix("/oby/bin:") && made.env["OBY_CHECK_URL"] == "http://127.0.0.1:7777")
+        let token = try #require(made.env["OBY_CHECK_TOKEN"] ?? nil)
+        #expect(AppleCheck.asker(forToken: token) == AppleCheck.Asker(job: "apple118", final: true) && token != AppleCheck.token(for: "apple118"))
+        // oby-check waits up to the check's time limit, less the time to say how it went.
+        #expect(made.env["OBY_CHECK_WAIT"] == String(Int(desk.limits.testRun - AppleCheck.margin)))
+        #expect(CheckCommand.wait(["apple"], default: 1170) == 1170 && CheckCommand.wait(["apple", "--wait", "60"], default: 1170) == 60)
+        let ended = try #require(desk.job("apple118"))
+        #expect(ended.status == .done && ended.summary.contains("Checked: `oby-check apple` passed.") && ended.appleRan?.state == .passed)
+        #expect(agent.sent.isEmpty)
+    }
+
+    @Test func aQueuedAppleCheckIsTakenBeforeAWaitingMergeCheck() async throws {
+        // Another job's pull request, approved, its merge check waiting for the Mac.
+        var other = author
+        other.id = "merge80"
+        other.issue = 80
+        other.branch = "oby/fix-80"
+        desk.dispatch(Desk.Draft(said: "fix oby #80", reply: "", job: other, guessed: false))
+        try await until("the other job runs") { desk.job("merge80")?.status == .running }
+        desk.stop("merge80")
+        try await until("the other job ended") { desk.job("merge80")?.isActive == false }
+        other = try #require(desk.job("merge80"))
+        other.outgoing = [Outgoing(action: .push, repo: other.repo, id: Self.next, branch: other.branch)]
+        var merge = MacCheck(id: "ab12cd34", job: "merge80", repo: other.repo, pr: 80, branch: other.branch, base: "dev", head: Self.next, round: 1)
+        merge.created = .now - 300
+        other.macCheck = merge
+        desk.replace(other)
+
+        // The Mac is busy with a third pull request's merge check when the author's final check asks.
+        try await running(check: "oby-check apple")
+        var busy = try #require(desk.job("apple118"))
+        var running = MacCheck(id: "ef56ab78", job: "apple118", repo: busy.repo, pr: 79, branch: "oby/fix-79", base: "dev", head: Self.head, round: 1)
+        running.state = .running
+        running.started = .now
+        running.mac = "Studio"
+        busy.macCheck = running
+        desk.replace(busy)
+        let check = try await desk.askAppleCheck("apple118", final: true)
+        #expect(check.finalCheck == check.created && desk.busyMac()?.id == running.id)
+        // It waits for the Mac, past a minute, and with the Mac free too, up to the check's time limit.
+        #expect(desk.appleCheck("apple118", now: check.created + AppleCheck.unclaimed + 1)?.state == .queued)
+        busy = try #require(desk.job("apple118"))
+        busy.macCheck = nil
+        desk.replace(busy)
+        #expect(desk.appleCheck("apple118", now: check.created + AppleCheck.finalWait(desk.limits.testRun) - 1)?.state == .queued)
+
+        // Free again, the Mac takes the Apple check first, though the merge check waited longer; then the merge check.
+        let first = try #require(desk.nextMacCheck(mac: "Studio", kinds: [.merge, .apple]))
+        #expect(first.id == check.id && first.isApple)
+        let second = try #require(desk.nextMacCheck(mac: "Studio", kinds: [.merge, .apple]))
+        #expect(second.id == merge.id && !second.isApple)
+    }
+
+    @Test func aFinalCheckWithNoMacEndsTheJobDoneWithoutTheSameFailureLimit() async throws {
+        desk.appleTool = { [tool] in tool }
+        desk.integrity = { _ in Integrity.Report() }
+        let output = "Apple check 1a2b3c4d of commit 1a2b3c4d5e6f is queued, waiting for a Mac.\nThe Apple check of commit 1a2b3c4d5e6f couldn't run: " + AppleCheck.unbuiltLine
+        let desk = desk
+        desk.runCheck = { id, command, _, _ in
+            // No Mac takes it: it's still queued when the check ends.
+            _ = try? await desk.askAppleCheck(id, final: true)
+            return Rounds.Check(command: command, passed: false, output: output)
+        }
+        try await running(check: "oby-check apple")
+        let agent = try #require(made.agents.last?.agent)
+        agent.onEvent(.turnEnded(summary: "Shown on the iPhone.", failed: false))
+        try await until("the job ends") { desk.job("apple118")?.isActive == false }
+        let ended = try #require(desk.job("apple118"))
+        // Done, with no round asked for and no limit: the merge stage's Mac check builds the apps.
+        #expect(ended.status == .done && ended.limit == nil && agent.sent.isEmpty)
+        #expect(ended.summary.contains("`oby-check apple` didn't finish: " + AppleCheck.unbuiltLine))
+        // The check nobody waits for any more is withdrawn, so no Mac takes it.
+        #expect(ended.appleCheck?.state == .error && ended.appleCheck?.problem == AppleCheck.unbuiltLine)
+        #expect(desk.nextMacCheck(mac: "Studio", kinds: [.apple]) == nil)
+
+        // The same output as the round before isn't the same failure twice when no Mac took it.
+        var check = Rounds.Check(command: "oby-check apple", passed: false, output: output)
+        check.appleUnbuilt = true
+        let next = Rounds.next(author, summary: "Again.", failed: false, check: check, previous: Fingerprint.of(check))
+        #expect(next == .finish(.done, "Again.\n\n`oby-check apple` didn't finish: " + AppleCheck.unbuiltLine))
+        check.appleUnbuilt = false
+        #expect(Rounds.next(author, summary: "Again.", failed: false, check: check, previous: Fingerprint.of(check))
+                == .hold("the same failure twice in a row", "Again."))
     }
 
     // MARK: oby-check apple and the API

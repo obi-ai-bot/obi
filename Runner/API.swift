@@ -285,15 +285,17 @@ final class API {
     }
 
     /// An agent asks for an Apple check of its worktree's commit (`ask`), or where its latest one
-    /// is (Engine/AppleChecks.swift). Only with its job's token, while the job runs.
+    /// is (Engine/AppleChecks.swift). Only with its job's token (its agent's, or its final check's), while the job runs.
     func appleCheck(_ authorization: String?, ask: Bool) async throws -> Response {
         let token = authorization.flatMap { $0.hasPrefix("Bearer ") ? String($0.dropFirst("Bearer ".count)) : nil } ?? ""
-        guard let id = AppleCheck.job(forToken: token) else {
+        guard let asker = AppleCheck.asker(forToken: token) else {
             throw APIError(.unauthorized, "oby-check works only inside an Oby job on the runner.")
         }
+        let id = asker.job
         if ask {
             do {
-                _ = try await desk.askAppleCheck(id)
+                // The job's final check waits for a Mac longer than its agent does (#68).
+                _ = try await desk.askAppleCheck(id, final: asker.final)
             } catch {
                 throw APIError(.conflict, error.localizedDescription)
             }

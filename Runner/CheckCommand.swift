@@ -7,8 +7,8 @@ import FoundationNetworking
 /// to have the user's Mac build and test the Apple apps at its worktree's commit
 /// (Engine/AppleChecks.swift). It asks the runner on `OBY_CHECK_URL` with its job's
 /// `OBY_CHECK_TOKEN`, then waits, saying where the check is, up to `--wait` seconds in all,
-/// requests to the runner included: 110 by default, under a 2-minute command timeout. Asking again
-/// picks up the same check.
+/// requests to the runner included: 110 by default, under a 2-minute command timeout, or
+/// `OBY_CHECK_WAIT` when a job's final check runs it (#68). Asking again picks up the same check.
 /// Exits 0 when everything passed, 1 when something failed, 2 when the check couldn't run (no Mac
 /// took it, the Mac couldn't, no runner), 3 when it's still running, 64 for a wrong command line.
 enum CheckCommand {
@@ -43,7 +43,7 @@ enum CheckCommand {
                     sleep: (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                     uncommitted: () async -> Bool = { CheckCommand.uncommitted() },
                     print out: (String) -> Void = { Swift.print($0) }) async -> Int32 {
-        guard let wait = Self.wait(arguments) else {
+        guard let wait = Self.wait(arguments, default: environment["OBY_CHECK_WAIT"].flatMap { Int($0) }) else {
             out(usage)
             return 64
         }
@@ -100,10 +100,11 @@ enum CheckCommand {
     }
 
     /// How long to wait, from the command line, or nil when it isn't `apple [--wait SECONDS]`.
-    static func wait(_ arguments: [String]) -> Int? {
+    /// Without `--wait`, `default` (from `OBY_CHECK_WAIT`), within 1 to `maxWait`, or `defaultWait`.
+    static func wait(_ arguments: [String], default given: Int? = nil) -> Int? {
         guard arguments.first == "apple" else { return nil }
         switch arguments.count {
-        case 1: return defaultWait
+        case 1: return given.map { min(max($0, 1), maxWait) } ?? defaultWait
         case 3 where arguments[1] == "--wait": return Int(arguments[2]).flatMap { (1...maxWait).contains($0) ? $0 : nil }
         default: return nil
         }

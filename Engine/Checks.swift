@@ -74,6 +74,9 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     var transient: Bool?
     /// Nil on merge checks, and on checks from before Apple checks.
     var kind: Kind?
+    /// When a job's final check asked for this Apple check (`Desk.afterTurn`), or nil when only its
+    /// agent did: from then it waits for a Mac up to the final check's time limit (#68).
+    var finalCheck: Date?
 
     var isApple: Bool { kind == .apple }
 
