@@ -31,7 +31,7 @@ struct TalkButton: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel("Stop and send")
                 }
-            } else if holding || (watch.reachable && recorder.allowed != false && !watch.useDictation) {
+            } else if holding || (watch.canTalk && recorder.allowed != false && !watch.useDictation) {
                 circle(recorder.listening ? "waveform" : "mic.fill")
                     .gesture(DragGesture(minimumDistance: 0)
                         .updating($pressing) { _, pressing, _ in pressing = true }
@@ -52,7 +52,7 @@ struct TalkButton: View {
                             // Both release signals may arrive in either order. Finish is idempotent;
                             // navigation, lost reachability and scene interruptions still discard.
                             if !locked {
-                                if scenePhase == .active, watch.reachable, watch.talk == .recording { finish() }
+                                if scenePhase == .active, watch.canTalk, watch.talk == .recording { finish() }
                                 else { abort() }
                             }
                         }
@@ -76,7 +76,8 @@ struct TalkButton: View {
         .onChange(of: watch.talk) { if watch.talk != .recording, holding { abort() } }
         .onChange(of: scenePhase) { if scenePhase != .active { abort() } }
         .onChange(of: watch.reachable) {
-            if !watch.reachable, holding {
+            // A paired watch keeps talking to the runner instead.
+            if !watch.reachable, !watch.paired, holding {
                 abort()
                 watch.useDictation = true
                 watch.talk = .reply("Your iPhone isn't in reach. Tap the mic to dictate instead.")

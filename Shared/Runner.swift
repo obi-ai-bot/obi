@@ -599,6 +599,26 @@ nonisolated struct Runner: Sendable {
     }
     #endif
 
+    #if os(iOS)
+    /// The Apple Watches paired with the runner, for its Watch API.
+    func watches() async throws -> [PairedWatch] { try await call("GET", "v1/watches") }
+
+    /// Pairs a watch's key, approved with Face ID, and hands the runner the Access service token
+    /// for its vault. Answers the watch's id and the Watch API's address.
+    func pairWatch(name: String, publicKey: Data, clientID: String, clientSecret: String, approval: PairingApproval) async throws -> (id: String, url: URL) {
+        struct Body: Encodable { var name: String; var publicKey: String; var accessClientId: String; var accessClientSecret: String; var approval: PairingApproval }
+        struct Answer: Decodable { var id: String; var url: URL }
+        let answer: Answer = try await call("POST", "v1/watches", body: Body(name: name, publicKey: publicKey.base64EncodedString(),
+                                                                          accessClientId: clientID, accessClientSecret: clientSecret, approval: approval))
+        return (answer.id, answer.url)
+    }
+
+    func removeWatch(_ id: String) async throws {
+        struct Answer: Decodable { var removed: String }
+        let _: Answer = try await call("DELETE", "v1/watches/\(id)")
+    }
+    #endif
+
     func register(name: String, publicKey: Data) async throws -> String {
         struct Body: Encodable { var name: String; var publicKey: String }
         struct Answer: Decodable { var id: String }
@@ -717,6 +737,15 @@ nonisolated struct Runner: Sendable {
                           status: http.statusCode)
     }
 }
+
+#if os(iOS)
+/// A watch paired with the runner, as `GET /v1/watches` lists it.
+nonisolated struct PairedWatch: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var name: String
+    var registered: Date
+}
+#endif
 
 /// The job `POST /v1/jobs` sends back. Swift leaves nils out, but a missing check keeps the plan's,
 /// so no check and the usual model go as null.

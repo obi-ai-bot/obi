@@ -2,7 +2,8 @@ import Foundation
 
 // What the iPhone and the Apple Watch say to each other over WatchConnectivity
 // (iOS/WatchRelay.swift and Watch/Watch.swift). The watch can't reach the tailnet, so the phone
-// keeps the jobs on it and carries out what it asks. Messages are dictionaries of property-list
+// keeps the jobs on it and carries out what it asks; out of the phone's reach, a paired watch
+// calls the runner's Watch API through a Cloudflare Tunnel instead (Watch/WatchLink.swift). Messages are dictionaries of property-list
 // values; the typed parts travel as JSON made with Runner.encoder.
 #if os(iOS) || os(watchOS)
 /// The jobs the phone keeps on the watch, as the application context: the ones the watch shows,
@@ -49,6 +50,7 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 /// - `dispatch`: `draft`; answered with `job`.
 /// - `tell`: `job` (its id) and `text`; answered with `job`.
 /// - `stop`: `job` (its id); answered with `job`.
+/// - `dismiss`: `job` (its id); answered with `job`.
 /// - `publishAction`: `job` (its id); answered with `action`.
 /// - `publish`: `job` (its id) and `action`; answered with `ok`, then a `published` message.
 ///
@@ -58,9 +60,15 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 /// - `planned`: `request` and `said`, with `plan` (a RelayedPlan) or `error`.
 /// - `published`: `job` (its id), with `url`, `pending` (Face ID waits on the phone) or `error`.
 ///
+/// From the phone, answered in the reply (iOS/WatchPairing.swift):
+/// - `pairKey`: nothing; answered with `publicKey` (the watch's Secure Enclave key, X9.63) and `name`.
+/// - `paired`: `watch` (its id on the runner), `url` (the Watch API's address), `clientId` and
+///   `clientSecret` (the Cloudflare Access service token); answered with `ok`.
+/// - `unpaired`: `watch`; the watch forgets its pairing if it's that one; answered with `ok`.
+///
 /// Any reply may carry `error` instead of what was asked for.
 nonisolated enum WatchWire {
-    enum Kind: String { case refresh, voice, voiceStart, voiceChunk, voiceEnd, voiceCancel, transcript, plan, dispatch, tell, stop, publishAction, publish, planned, published }
+    enum Kind: String { case refresh, voice, voiceStart, voiceChunk, voiceEnd, voiceCancel, transcript, plan, dispatch, tell, stop, dismiss, publishAction, publish, planned, published, pairKey, paired, unpaired }
 
     static let kind = "kind"
     static let ok = "ok"
@@ -80,6 +88,11 @@ nonisolated enum WatchWire {
     static let url = "url"
     static let pending = "pending"
     static let plan = "plan"
+    static let publicKey = "publicKey"
+    static let name = "name"
+    static let watch = "watch"
+    static let clientID = "clientId"
+    static let clientSecret = "clientSecret"
 
     /// What WatchConnectivity carries in one message or context, with room to spare.
     static let limit = 60_000

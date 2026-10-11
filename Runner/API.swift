@@ -322,8 +322,10 @@ final class API {
 
     /// A Live Activity push token from the phone. `push` says whether the runner will push.
     func activity(_ token: Push.Token) throws -> Response {
-        guard token.kind != "alert" else { throw APIError(.unprocessableContent, "kind is update or start.") }
+        guard ["update", "start"].contains(token.kind) else { throw APIError(.unprocessableContent, "kind is update or start.") }
         guard let push else { return Self.json(["push": false]) }
+        var token = token
+        token.watch = nil
         return Self.json(["push": try push.register(token)])
     }
 
@@ -374,7 +376,7 @@ final class API {
         return job
     }
 
-    private func publishable(_ id: String) throws -> (Job, String) {
+    func publishable(_ id: String) throws -> (Job, String) {
         let job = try known(id)
         guard job.canPublish, let base = job.base else {
             throw APIError(.conflict, job.status != .done ? "Nothing to publish: the job hasn't finished." :

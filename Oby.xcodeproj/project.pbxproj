@@ -168,6 +168,13 @@
 			);
 			target = 0B1E0C0A0000000000AD0007 /* ObyWatch */;
 		};
+		0B1E0C0A0000000000AE0006 /* Exceptions for "Shared" folder in "ObyWatchWidget" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Character.swift,
+			);
+			target = 0B1E0C0A0000000000AE0007 /* ObyWatchWidget */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -190,6 +197,7 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				0B1E0C0A0000000000AD0006 /* Exceptions for "Shared" folder in "ObyWatch" target */,
+				0B1E0C0A0000000000AE0006 /* Exceptions for "Shared" folder in "ObyWatchWidget" target */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -446,6 +454,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				0B1E0C0A0000000000AD0004 /* Watch */,
+				0B1E0C0A000000000000C1 /* Shared */,
 			);
 			name = ObyWatchWidget;
 			productName = ObyWatchWidget;
@@ -1102,6 +1111,7 @@
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens while you hold the mic button or slide up to lock listening, for up to 60 seconds. Your iPhone writes down your request.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(OBY_IPHONE_BUNDLE_ID)";
+				INFOPLIST_KEY_WKRunsIndependentlyOfCompanionApp = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -1137,6 +1147,7 @@
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens while you hold the mic button or slide up to lock listening, for up to 60 seconds. Your iPhone writes down your request.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(OBY_IPHONE_BUNDLE_ID)";
+				INFOPLIST_KEY_WKRunsIndependentlyOfCompanionApp = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

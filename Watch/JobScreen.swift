@@ -39,6 +39,11 @@ struct JobScreen: View {
                         }
                         .disabled(busy)
                     }
+                    if job.needsYou {
+                        Button("Dismiss") {
+                            Task { await run { try await watch.dismiss(job.id) } }
+                        }.disabled(busy)
+                    }
                     if job.isActive {
                         Button("Stop job", role: .destructive) {
                             Task { await run { try await watch.stop(job.id) } }

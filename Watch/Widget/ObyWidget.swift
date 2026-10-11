@@ -7,8 +7,9 @@ struct ObyWatchWidgets: WidgetBundle {
 }
 
 /// The complications and the Smart Stack: how many things need you, with Oby in a still pose
-/// (calm, busy, or waving). The watch app saves what to show when the phone sends the job list
-/// and reloads this; nothing here asks for a refresh on its own.
+/// (calm, busy, or waving). The watch app saves what to show when the job list arrives and
+/// reloads this. On a paired watch the runner also sends a WidgetKit push when the counts change
+/// (docs/runner-api.md): then this fetches the jobs from the Watch API itself, phone or not.
 struct NeedsYouWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: Glance.kind, provider: GlanceProvider()) { entry in
@@ -18,6 +19,17 @@ struct NeedsYouWidget: Widget {
         .configurationDisplayName("Oby")
         .description("How many things need you.")
         .supportedFamilies([.accessoryCircular, .accessoryRectangular, .accessoryInline, .accessoryCorner])
+        .pushHandler(GlancePushHandler.self)
+    }
+}
+
+/// The complications' push token, issued or rotated, goes to the app group and straight to the
+/// runner when the watch is paired; the app tries again whenever it runs until the runner has it.
+struct GlancePushHandler: WidgetPushHandler {
+    func pushTokenDidChange(_ pushInfo: WidgetPushInfo, widgets: [WidgetInfo]) {
+        Glance.issued(pushInfo.token)
+        guard let link = WatchLink.saved else { return }
+        Task { _ = await Glance.uploadWidgetToken(link, attempts: 3) }
     }
 }
 
@@ -40,8 +52,22 @@ struct GlanceProvider: TimelineProvider {
         completion(GlanceEntry(date: .now, glance: context.isPreview ? .sample : .stored))
     }
 
+    /// The runner's jobs when the watch is paired, else what the app saved.
     func getTimeline(in context: Context, completion: @escaping (Timeline<GlanceEntry>) -> Void) {
-        completion(Timeline(entries: [GlanceEntry(date: .now, glance: .stored)], policy: .never))
+        guard let link = WatchLink.saved else {
+            completion(Timeline(entries: [GlanceEntry(date: .now, glance: .stored)], policy: .never))
+            return
+        }
+        Task {
+            var glance = Glance.stored
+            if let jobs = try? await link.jobs() {
+                glance = Glance.of(jobs)
+                _ = Glance.save(glance)
+            }
+            // A token the runner hasn't accepted yet gets another try.
+            _ = await Glance.uploadWidgetToken(link, attempts: 1)
+            completion(Timeline(entries: [GlanceEntry(date: .now, glance: glance)], policy: .never))
+        }
     }
 }
 
