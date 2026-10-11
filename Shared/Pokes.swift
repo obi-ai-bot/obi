@@ -3,7 +3,7 @@ import Foundation
 /// Tapping Oby on the watch, by Character/oby.html's rule: a tap within 6 seconds of the last one
 /// counts up, and 6 seconds without one starts the count again. Taps 1 to 3 startle him, the 4th
 /// and 5th annoy him, and from the 6th on he ignores you (each tap starts that again).
-struct Pokes {
+nonisolated struct Pokes {
     /// What Oby plays for a tap; the raw value names its frames (Watch/README.md).
     enum Reaction: String, CaseIterable {
         case poked, annoyed, ignoring
