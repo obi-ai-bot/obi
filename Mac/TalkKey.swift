@@ -31,10 +31,10 @@ final class TalkKey {
     private static let spaceCode: Int64 = 49
     private static let escapeCode: Int64 = 53
 
-    /// Installs the tap, or asks for Accessibility once and tries again until it's granted.
+    /// Installs the tap, or tries again until Accessibility is allowed. Oby asks for it in first
+    /// launch's fn step, with its reason, and never by itself.
     func start() {
         guard tap == nil, retry == nil, !install() else { return }
-        AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
         retry = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.install() else { return }

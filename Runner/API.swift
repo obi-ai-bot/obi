@@ -448,7 +448,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing }
 
     private enum Derived: String, CodingKey { case pipeline, title }
 
@@ -486,6 +486,9 @@ struct JobJSON: Encodable {
         if job.review == nil { try nulls.encodeNil(forKey: .review) }
         if job.reviewError == nil { try nulls.encodeNil(forKey: .reviewError) }
         if job.reviewOf == nil { try nulls.encodeNil(forKey: .reviewOf) }
+        if job.files == nil { try nulls.encodeNil(forKey: .files) }
+        if job.lead == nil { try nulls.encodeNil(forKey: .lead) }
+        if job.claim == nil { try nulls.encodeNil(forKey: .claim) }
         // What went out is always a list: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
     }

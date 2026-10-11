@@ -36,12 +36,6 @@ jobs:
           xcodebuild -version
           xcrun simctl list devices available iPhone
 
-      # The project shares only the ObyPhone and ObyWatch schemes; MacTests need one for the Mac app.
-      - name: Add the Oby scheme
-        run: |
-          scheme=Oby.xcodeproj/xcshareddata/xcschemes/Oby.xcscheme
-          [ -e "$scheme" ] || cp .github/ci/Oby.xcscheme "$scheme"
-
       - name: Mac app and MacTests
         run: |
           set -o pipefail

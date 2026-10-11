@@ -38,7 +38,12 @@ final class Desk {
     var onJobChange: (Job) -> Void = { _ in }
 
     private let store: JobStore
-    private var repos: [String] = []
+    /// The repositories the brain and the Lead may choose from; `refresh` reads them, tests set them.
+    var repos: [String] = []
+    /// The roadmap board as the Lead last read it (Engine/Lead.swift), for claims.
+    private var board: Board?
+    /// Jobs ready to run that wait for an earlier job touching the same files to end (case 2.1), in order.
+    private var waiting: [Job] = []
     /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
     private var drafts: [Draft] = []
     private var agents: [String: any AgentRun] = [:]
@@ -82,6 +87,13 @@ final class Desk {
     /// secret scan, and quotes it as a file for the author's next round. Tests put in their own.
     @ObservationIgnored var postReview: (_ author: Job, _ body: String) async throws -> URL = Review.post
     @ObservationIgnored var quoteReview: (_ author: Job, _ file: String, _ text: String) throws -> Void = Review.quote
+    /// The Lead (Engine/Lead.swift): reads the roadmap board before a turn, runs the turn on the
+    /// Claude account whose home is given, and claims an issue when a job starts on it. Tests put in their own.
+    @ObservationIgnored var readBoard: (_ repos: [String]) async throws -> Board = { try await Board.read(repos: $0) }
+    @ObservationIgnored var makeLead: (_ home: String?) -> [any LeadAdapter] = Lead.adapters
+    @ObservationIgnored var claim: (Job, Board?) async throws -> String = Lead.claim
+    /// Where each goal's context files go: `leads/<goal>/.oby/context/`.
+    @ObservationIgnored var leadRoot = Workspace.root.appending(path: "leads")
 
     init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))) {
         self.accounts = accounts
@@ -130,10 +142,14 @@ final class Desk {
     }
 
     /// What the brain makes of the user's words: a plan, a question or a reply. Takes 3–20 seconds.
+    /// A vague goal ("work on the roadmap") goes to the Lead instead, when a Claude account is
+    /// signed in: it starts the jobs itself and answers with a reply or a question.
     func plan(_ said: String) async -> Talk {
         if repos.isEmpty { await refresh() }
-        // The brain thinks with the least busy Claude account too, so a busy one doesn't slow it.
-        let brain = ClaudeBrain(home: AccountStore.route(accounts.accounts, agent: "claude")?.home)
+        // The brain and the Lead think with the least busy Claude account too, so a busy one doesn't slow them.
+        let thinker = AccountStore.route(accounts.accounts, agent: "claude")
+        if Lead.leads(said), let thinker { return await lead(said, account: thinker) }
+        let brain = ClaudeBrain(home: thinker?.home)
         var result = await Planner(adapters: [brain]).plan(said, context: brainContext)
         record(BrainTurn(said: said, by: result.by, plan: result.plan, refused: result.refused))
         var epics: [Int: Int] = [:]
@@ -154,6 +170,100 @@ final class Desk {
     func record(_ turn: BrainTurn) {
         Logger.brain.notice("\(turn.line, privacy: .public)")
         store.save(turn)
+    }
+
+    /// Every turn of the Lead too, in the same table.
+    func record(_ turn: LeadTurn) {
+        Logger.brain.notice("\(turn.line, privacy: .public)")
+        store.save(turn)
+    }
+
+    // MARK: The Lead
+
+    /// One Lead turn for the user's words (Engine/Lead.swift): Swift reads the board, builds the
+    /// skipped list and writes the context files; the Lead answers a typed plan; Swift checks it
+    /// and starts its jobs right away, routed across the accounts with room. Nothing to confirm.
+    func lead(_ said: String, account thinker: Account) async -> Talk {
+        let goal = String(UUID().uuidString.prefix(8)).lowercased()
+        let board: Board
+        do {
+            board = try await readBoard(repos)
+        } catch {
+            record(LeadTurn(goal: goal, said: said, by: "none", refused: ["the board couldn't be read: \(error.localizedDescription)"]))
+            return .reply("Oby couldn't read the roadmap: \(error.localizedDescription)")
+        }
+        self.board = board
+        let skipped = Lead.skipped(board.items, jobs: jobs, user: board.user)
+        let directory = leadRoot.appending(path: goal)
+        var checkouts: [String: String] = [:]
+        for repo in Set(repos + board.items.map(\.repo)) where FileManager.default.fileExists(atPath: Workspace.clone(repo).appending(path: ".git").path) {
+            checkouts[repo] = Workspace.clone(repo).path
+        }
+        do {
+            try Lead.writeContext(roadmap: Lead.roadmap(board, skipped: skipped, checkouts: checkouts), jobs: Lead.jobsList(jobs), to: directory)
+        } catch {
+            record(LeadTurn(goal: goal, said: said, by: "none", refused: ["the context couldn't be written: \(error.localizedDescription)"], skipped: skipped))
+            return .reply("Oby couldn't write the Lead's context: \(error.localizedDescription)")
+        }
+        var context = LeadContext(repos: Array(Set(repos + board.items.map(\.repo))).sorted())
+        context.workable = Set(board.items.map { "\($0.repo)#\($0.number)" })
+        for item in skipped {
+            context.refused["\(item.repo)#\(item.number)"] = item.reason
+            context.workable.remove("\(item.repo)#\(item.number)")
+        }
+        // Issues off the board with a running job are refused too.
+        for job in jobs where job.isActive && job.pr == nil {
+            guard let issue = job.issue, context.refused["\(job.repo)#\(issue)"] == nil else { continue }
+            context.refused["\(job.repo)#\(issue)"] = "job \(job.id) is \(job.status.rawValue) on it"
+        }
+        var adapters = makeLead(thinker.home)
+        for index in adapters.indices { if var claude = adapters[index] as? ClaudeLead { claude.checkouts = Array(checkouts.values); adapters[index] = claude } }
+        let result = await LeadPlanner(adapters: adapters).plan(said, context: context, in: directory)
+        Lead.prune(leadRoot)
+        var turn = LeadTurn(goal: goal, said: said, by: result.by, plan: result.plan, refused: result.refused, skipped: skipped)
+        guard let plan = result.plan else {
+            record(turn)
+            // The last reason, without the refused plan's JSON after it.
+            var why = result.refused.last ?? "no Claude account answered"
+            if let end = why.range(of: "): ") { why = String(why[..<end.lowerBound]) + ")" }
+            return .reply("The Lead couldn't plan that (\(why.prefix(200))). Try saying it another way.")
+        }
+        switch plan.action {
+        case .askUser:
+            record(turn)
+            return plan.question.map { .question(said: said, $0) } ?? .reply(plan.reply)
+        case .reply:
+            record(turn)
+            return .reply(plan.reply.isEmpty ? "Nothing to start." : plan.reply)
+        case .startJobs:
+            var states = accounts.accounts
+            var started: [Job] = []
+            var taken: [Int] = []
+            var unrouted = 0
+            for brief in plan.jobs {
+                // The turn took a while: a repeated request (the Mac and the iPhone, a retry after the
+                // app gave up waiting) may have started a job on this issue meanwhile.
+                if let job = Lead.taken(brief, by: jobs) {
+                    taken.append(brief.issue)
+                    turn.refused.append("#\(brief.issue) not started: job \(job.id) is \(job.status.rawValue) on it already")
+                    continue
+                }
+                guard let account = AccountStore.pick(&states, agent: nil) else { unrouted += 1; continue }
+                started.append(enqueue(Lead.job(brief, said: said, goal: goal, account: account)))
+            }
+            turn.started = started.map(\.id)
+            record(turn)
+            guard !started.isEmpty else {
+                if !taken.isEmpty, unrouted == 0 { return .reply("Nothing new to start: " + taken.map { "#\($0)" }.joined(separator: ", ") + " already \(taken.count == 1 ? "has" : "have") a job.") }
+                return .reply("No account is signed in with room to spare. Check Settings › Accounts.")
+            }
+            var text = "Started \(started.count) job\(started.count == 1 ? "" : "s"): "
+                + started.map { "\($0.heading) (#\($0.issue ?? 0))" }.joined(separator: ", ") + "."
+            if !taken.isEmpty { text += " " + taken.map { "#\($0)" }.joined(separator: ", ") + " already \(taken.count == 1 ? "has" : "have") a job." }
+            if unrouted > 0 { text += " \(unrouted) more had no account with room." }
+            if !skipped.isEmpty { text += " Skipped \(skipped.count) on the board." }
+            return .reply(text)
+        }
     }
 
     /// An epic becomes one job per open sub-issue (10 at most): GitHub's sub-issues, otherwise the
@@ -263,12 +373,46 @@ final class Desk {
                 let prepared = try await ready.value
                 // Stopped while Oby was getting the repository ready.
                 guard self.job(prepared.id)?.status == .queued else { return }
-                start(prepared)
+                startOrWait(prepared)
             } catch {
                 finish(job.id, .failed, "Couldn't get \(job.repoName) ready: \(error.localizedDescription)")
             }
         }
         return job
+    }
+
+    /// A job that's ready runs now, unless an earlier active job expects to touch the same files
+    /// (case 2.1): then it waits, queued, until that job ends.
+    private func startOrWait(_ prepared: Job) {
+        guard let blocker = blocker(of: prepared) else { return start(prepared) }
+        var job = prepared
+        job.step = "Waiting for \(blocker.heading) (\(blocker.id)): both touch \(Self.overlap(prepared, blocker).joined(separator: ", "))"
+        replace(job)
+        waiting.append(job)
+    }
+
+    /// The earlier job (older in the list, queued or running) this one would collide with, if any.
+    private func blocker(of job: Job) -> Job? {
+        guard let index = jobs.firstIndex(where: { $0.id == job.id }) else { return nil }
+        return jobs[(index + 1)...].first { $0.isActive && !Self.overlap(job, $0).isEmpty }
+    }
+
+    /// A job ended: the waiting jobs it was blocking run now, in order, unless another blocks them.
+    private func releaseWaiting() {
+        for waiter in waiting {
+            guard let latest = job(waiter.id), latest.status == .queued, blocker(of: latest) == nil else { continue }
+            waiting.removeAll { $0.id == waiter.id }
+            start(latest)
+        }
+    }
+
+    /// The files two jobs would both touch: the same repository, and a path of one that is the
+    /// other's or inside a folder the other names (ending in `/`). Empty when either has no list.
+    nonisolated static func overlap(_ a: Job, _ b: Job) -> [String] {
+        guard a.repo == b.repo, let ours = a.files, let theirs = b.files else { return [] }
+        var shared: [String] = []
+        for path in ours where theirs.contains(where: { Lead.same(path, $0) }) && !shared.contains(path) { shared.append(path) }
+        return shared
     }
 
     /// Dispatches one of the latest plans, by its job's id, with the user's changes (the runner's API).
@@ -436,6 +580,24 @@ final class Desk {
         job.step = "Starting \(job.agentName)"
         replace(job)
         run(job, prompt: Prompts.agent(job))
+        // A job the Lead started claims its issue (case 1.3): assigned to the user, status:in-progress
+        // with the branch, In progress on the board. The job says how it went.
+        if job.lead != nil, job.issue != nil {
+            let board = board
+            Task {
+                var line: String
+                do {
+                    line = try await claim(job, board)
+                } catch {
+                    line = "Not claimed: \(error.localizedDescription)"
+                }
+                if line.isEmpty { return }
+                Logger.jobs.notice("job \(job.id, privacy: .public): \(line, privacy: .public)")
+                guard var latest = self.job(job.id) else { return }
+                latest.claim = line
+                replace(latest)
+            }
+        }
     }
 
     /// Starts the job's agent in its worktree: a new session, or the job's own picked up again.
@@ -666,10 +828,13 @@ final class Desk {
         asked.remove(id)
         roundMessage[id] = nil
         handoffs[id] = nil
+        waiting.removeAll { $0.id == id }
         // Oby reviews what was just published, and a review that ended reaches its author (Engine/Review.swift).
         if published != nil { reviewPublished(job) }
         if job.reviewOf != nil { reviewEnded(job) }
         onFinish(job)
+        // A job that waited on this one for the same files runs now (case 2.1).
+        releaseWaiting()
     }
 
     /// What publishing `id` reports as it goes. A job publishing as it ends is `stoppable`: once
