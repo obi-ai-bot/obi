@@ -1,0 +1,272 @@
+import Foundation
+import Testing
+@testable import ObyEngine
+@testable import oby_runner
+
+// F17, secrets Oby uses but never shows (#60), slice one: the runner's vault file, the secret scan
+// learning every value in each encoding, and values kept out of lists, errors and logs.
+
+/// A vault in a folder of its own, and a value made at runtime, so this file holds no secret.
+private func scratch() -> (vault: Vault, store: FileVault, folder: URL) {
+    let folder = FileManager.default.temporaryDirectory.appending(path: "oby-vault-\(UUID().uuidString)/vault")
+    let store = FileVault(folder: folder)
+    return (Vault(store: store), store, folder)
+}
+
+/// Characters every encoding treats differently: `/`, `+`, `=`, `?`, `&`, a space and a non-ASCII one.
+private func secret() -> String { "tok/\(UUID().uuidString.prefix(12))+a=b?c&d é" }
+
+private func status(_ url: URL) throws -> stat {
+    var info = stat()
+    try #require(lstat(url.path, &info) == 0)
+    return info
+}
+
+private func mode(_ url: URL) throws -> mode_t { try status(url).st_mode & 0o777 }
+
+/// Every encoded copy of `value` the scan and redaction must catch, by how it's labelled.
+private func copies(of value: String) -> [(how: String, text: String)] {
+    let data = Data(value.utf8)
+    let hex = data.map { String(format: "%02x", $0) }.joined()
+    let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+    return [
+        ("", value),
+        ("base64", data.base64EncodedString()),
+        ("base64", Fake.base64URL(value)),
+        // In the middle of a longer encoded string, at each offset.
+        ("base64", Fake.base64("x" + value + "tail")),
+        ("base64", Fake.base64("xy" + value)),
+        ("base64", Fake.base64("TOKEN=" + value + "\n")),
+        ("hex", hex),
+        ("hex", hex.uppercased()),
+        ("URL-encoded", value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""),
+        ("URL-encoded", Fake.percent(value)),
+        ("URL-encoded", Fake.percent(value).lowercased()),
+    ]
+}
+
+struct VaultStorageTests {
+    @Test func theFileIsReadableOnlyByTheRunnersUser() throws {
+        let (vault, store, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        #expect(try vault.names().isEmpty)
+        let value = secret()
+        try vault.add(value, as: "staging-api-key")
+        #expect(try mode(folder) == 0o700)
+        #expect(try mode(store.file) == 0o600)
+        #expect(try status(store.file).st_uid == geteuid())
+        // Saved in one rename: no copy left beside it.
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path) == ["secrets.json"])
+        #expect(try vault.use("staging-api-key") { $0 } == value)
+
+        // Replaced and removed, still 0600.
+        try vault.add("another-value-1234", as: "staging-api-key")
+        try vault.add(secret(), as: "npm-token")
+        #expect(try mode(store.file) == 0o600)
+        #expect(try vault.names() == ["npm-token", "staging-api-key"])
+        try vault.remove("staging-api-key")
+        #expect(try vault.names() == ["npm-token"])
+        #expect(try mode(store.file) == 0o600)
+    }
+
+    @Test func aVaultOthersCanReadIsntRead() throws {
+        let (vault, store, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let value = secret()
+        try vault.add(value, as: "npm-token")
+
+        chmod(store.file.path, 0o644)
+        var error = #expect(throws: Shell.Failure.self) { try FileVault(folder: folder).names() }
+        #expect(error?.message.contains("mode 644") == true)
+        #expect(error?.message.contains(value) == false)
+        // Nor saved over: the scan can't run until it's fixed.
+        #expect(throws: Shell.Failure.self) { try vault.add(secret(), as: "other-token") }
+        #expect(throws: Shell.Failure.self) { try Vault(store: store).leaks() }
+        chmod(store.file.path, 0o600)
+
+        chmod(folder.path, 0o755)
+        error = #expect(throws: Shell.Failure.self) { try FileVault(folder: folder).names() }
+        #expect(error?.message.contains("chmod 700") == true)
+        chmod(folder.path, 0o700)
+        #expect(try FileVault(folder: folder).names() == ["npm-token"])
+
+        // A link in place of the file isn't followed.
+        let elsewhere = folder.deletingLastPathComponent().appending(path: "elsewhere.json")
+        try FileManager.default.moveItem(at: store.file, to: elsewhere)
+        try FileManager.default.createSymbolicLink(at: store.file, withDestinationURL: elsewhere)
+        #expect(throws: Shell.Failure.self) { try FileVault(folder: folder).names() }
+    }
+
+    @Test func namesAndValuesAreChecked() throws {
+        let (vault, _, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        for name in ["", "has space", "new\nline", "../up", "-dash-first", String(repeating: "a", count: 65)] {
+            #expect(throws: Shell.Failure.self, Comment(rawValue: name)) { try vault.add(secret(), as: name) }
+        }
+        let short = "abc1234"
+        let error = #expect(throws: Shell.Failure.self) { try vault.add(short, as: "short") }
+        #expect(error?.message.contains(short) == false)
+        #expect(throws: Shell.Failure.self) { try vault.add("          ", as: "blank") }
+        // A pasted value's trailing newline isn't part of it.
+        try vault.add("pasted-value-123\n", as: "pasted")
+        #expect(try vault.use("pasted") { $0 } == "pasted-value-123")
+        #expect(throws: Shell.Failure.self) { try vault.use("missing") { $0 } }
+    }
+
+    /// The vault is in OBY_HOME, which every agent's bubblewrap covers; a bind that would show it again gets it covered too.
+    @Test func agentsCantSeeTheVault() {
+        let vault = Vault.folder.path
+        #expect(vault.hasPrefix(Workspace.root.path))
+        let args = Agents.sandboxed(["env"], in: nil, own: nil, bubblewrap: true)
+        let hidden = args.indices.contains { args[$0] == "--tmpfs" && args.indices.contains($0 + 1) && args[$0 + 1] == Workspace.root.path }
+        #expect(hidden)
+        #expect(!args.contains(vault))
+        let showing = Agents.sandboxed(["env"], in: nil, own: nil, reading: [Workspace.root.path], bubblewrap: true)
+        let end = showing.firstIndex(of: "--") ?? showing.endIndex
+        #expect(Array(showing[(end - 2)..<end]) == ["--tmpfs", vault])
+    }
+}
+
+struct VaultScanTests {
+    @Test func redactionTakesOutEveryEncoding() throws {
+        let value = secret()
+        let leaks = Leaks(["staging-api-key": value])
+        for copy in copies(of: value) {
+            let line = "curl -H 'Authorization: \(copy.text)' https://api.example.com"
+            let redacted = leaks.redact(line)
+            #expect(redacted.contains("[vault: staging-api-key]"), Comment(rawValue: copy.how))
+            #expect(!redacted.contains(copy.text), Comment(rawValue: copy.how))
+            #expect(redacted.hasPrefix("curl -H 'Authorization: ") && redacted.hasSuffix("' https://api.example.com"))
+        }
+        // A key over several lines: each line on its own too.
+        let key = "line-one-of-the-key\nline-two-of-the-key"
+        #expect(!Leaks(["deploy-key": key]).redact("got line-two-of-the-key").contains("line-two"))
+        #expect(Leaks.empty.redact("nothing to take out") == "nothing to take out")
+    }
+
+    @Test func everyEncodingIsBlockedNamingTheSecret() throws {
+        let value = secret()
+        let leaks = Leaks(["staging-api-key": value])
+        for copy in copies(of: value) {
+            let rule = "vault secret staging-api-key" + (copy.how.isEmpty ? "" : ", \(copy.how)")
+            #expect(Publish.matches("data: \(copy.text)", leaks: leaks) == [rule], Comment(rawValue: copy.how))
+        }
+        // Encoded twice, and wrapped over lines as `base64` does.
+        #expect(Publish.matches("blob \(Fake.base64(Fake.hex(value)))", leaks: leaks) == ["vault secret staging-api-key, hex in base64"])
+        let wrapped = Fake.base64("export STAGING_KEY=" + value + "\nexport MORE=1\n" + String(repeating: "padding ", count: 8)).chunks(20)
+        let text = (["config:"] + wrapped).joined(separator: "\n")
+        #expect(Publish.findings(inText: text, named: "pull request description", leaks: leaks).contains {
+            $0.line == 2 && $0.rule.hasPrefix("vault secret staging-api-key")
+        })
+        // Ordinary text isn't.
+        for line in ["let token = vault.use(\"staging-api-key\")", Fake.base64("staging-api-key"), Fake.hex("tok/"), UUID().uuidString] {
+            #expect(Publish.matches(line, leaks: leaks).isEmpty, Comment(rawValue: line))
+        }
+    }
+
+    @Test func anOutgoingTextOrDiffWithASecretIsBlocked() async throws {
+        let (vault, _, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let value = secret()
+        try vault.add(value, as: "npm-token")
+        let leaks = try vault.leaks()
+        let findings = try await Publish.scan(texts: [("pull request title", "fix: the build"),
+                                                      ("pull request description", "Done.\nUsed \(Fake.base64(value)) to test it."),
+                                                      ("commit message", "fix: the build\n\n\(Fake.percent(value))")], vault: vault)
+        #expect(findings.contains(Publish.Finding(file: "pull request description", line: 2, rule: "vault secret npm-token, base64")))
+        #expect(findings.contains(Publish.Finding(file: "commit message", line: 3, rule: "vault secret npm-token, URL-encoded")))
+        #expect(!findings.contains { $0.file == "pull request title" })
+        // What the notch says names the secret and where, never the value.
+        let said = Publish.blocked(by: findings)
+        for copy in copies(of: value) { #expect(!said.contains(copy.text)) }
+        #expect(said.contains("npm-token"))
+
+        let diff = """
+            diff --git a/test/setup.js b/test/setup.js
+            --- a/test/setup.js
+            +++ b/test/setup.js
+            @@ -1,1 +1,2 @@
+             const api = require('./api')
+            +api.token = "\(Fake.hex(value))"
+            """
+        #expect(Publish.findings(inDiff: diff, leaks: leaks) == [Publish.Finding(file: "test/setup.js", line: 2, rule: "vault secret npm-token, hex")])
+
+        // The vault learns a secret as it's added and forgets it as it's removed.
+        let later = secret()
+        try vault.add(later, as: "later-token")
+        #expect(try await Publish.scan(texts: [("comment", "see \(later)")], vault: vault) == [Publish.Finding(file: "comment", line: 1, rule: "vault secret later-token")])
+        try vault.remove("later-token")
+        #expect(try await Publish.scan(texts: [("comment", "see \(later)")], vault: vault).isEmpty)
+        // Added by `oby-runner vault add`, another process, while the service runs.
+        let elsewhere = secret()
+        try Vault(store: FileVault(folder: folder)).add(elsewhere, as: "added-elsewhere")
+        #expect(try await Publish.scan(texts: [("comment", "see \(elsewhere)")], vault: vault)
+                == [Publish.Finding(file: "comment", line: 1, rule: "vault secret added-elsewhere")])
+    }
+
+    @Test func aVaultTheScanCantReadBlocksPublishing() async throws {
+        let (vault, store, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        try vault.add(secret(), as: "npm-token")
+        chmod(store.file.path, 0o640)
+        await #expect(throws: Shell.Failure.self) { try await Publish.scan(texts: [("comment", "fine")], vault: Vault(store: store)) }
+        let error = await #expect(throws: Shell.Failure.self) {
+            try await Publish.scan(FileManager.default.temporaryDirectory, base: "main", vault: Vault(store: store))
+        }
+        #expect(error?.message.hasPrefix("Not published: the secret scan couldn't read the vault") == true)
+    }
+
+    /// Wherever a base64 run starts, the value's own characters are in it.
+    @Test func base64IsFoundAtAnyOffset() {
+        let value = secret()
+        let needles = Leaks.base64(Array(value.utf8))
+        #expect(needles.count == 3)
+        for prefix in 0..<7 {
+            for suffix in 0..<4 {
+                let encoded = Fake.base64(String(repeating: "p", count: prefix) + value + String(repeating: "s", count: suffix))
+                #expect(needles.contains { encoded.contains($0) }, "prefix \(prefix), suffix \(suffix)")
+            }
+        }
+    }
+}
+
+struct VaultNeverShownTests {
+    @Test func listsAndTheCommandShowNamesOnly() throws {
+        let (vault, store, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let value = secret()
+        var out: [String] = [], err: [String] = []
+        let run = { (arguments: [String], input: String?) in
+            VaultCommand.run(arguments, vault: vault, read: { input }, say: { out.append($0) }, fail: { err.append($0) })
+        }
+        #expect(run(["add", "staging-api-key"], value + "\n") == 0)
+        #expect(run(["add", "npm-token"], secret()) == 0)
+        #expect(run(["list"], nil) == 0)
+        #expect(out == ["Saved staging-api-key.", "Saved npm-token.", "npm-token", "staging-api-key"])
+        #expect(try vault.names() == ["npm-token", "staging-api-key"])
+        #expect(try store.value("staging-api-key") == value)
+        // A value never comes as an argument, and errors don't repeat it.
+        #expect(run(["add", "staging-api-key", value], nil) == 2)
+        #expect(run(["add", "bad name"], value) == 1)
+        #expect(run(["add", "no-value"], nil) == 1)
+        #expect(run(["remove", "npm-token"], nil) == 0)
+        #expect(run(["list"], nil) == 0)
+        #expect(out.last == "staging-api-key")
+        #expect(run([], nil) == 2)
+        for line in out + err {
+            for copy in copies(of: value) { #expect(!line.contains(copy.text), Comment(rawValue: line)) }
+        }
+    }
+
+    #if !canImport(OSLog)
+    @Test func logLinesLeaveSecretsOut() {
+        let value = secret()
+        let leaks = Leaks(["staging-api-key": value])
+        let logger = Logger(subsystem: "com.deskree.oby", category: "test")
+        let line = logger.line("error", "call failed: \("401 for token \(value), sent as \(Fake.base64(value))", privacy: .public)", leaks: leaks)
+        #expect(line == "error [test] call failed: 401 for token [vault: staging-api-key], sent as [vault: staging-api-key]\n")
+        // Private values stay out, as in OSLog.
+        #expect(logger.line("notice", "token \(value)", leaks: nil) == "notice [test] token <private>\n")
+    }
+    #endif
+}

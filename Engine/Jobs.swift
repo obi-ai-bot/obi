@@ -733,7 +733,7 @@ nonisolated enum Agents {
 
     /// On Linux, `argv` inside bubblewrap. Agents run as the runner's Unix user, so home is empty but
     /// for `tools`, git's settings (read-only) and the job's own account, and so is all of `OBY_HOME`:
-    /// no gh token, APNs key, ssh key, other account, or anything else the user keeps there. Nothing
+    /// no gh token, APNs key, ssh key, vault, other account, or anything else the user keeps there. Nothing
     /// else an agent writes lasts, so it can't leave behind a program or a git config that the runner
     /// runs later outside the box. Writable for real: the worktree, the git data it commits to, and
     /// `own`, the job's account home (nil for none).
@@ -779,6 +779,11 @@ nonisolated enum Agents {
         if let own { args += ["--bind", own, own] }
         // The default Claude account keeps ~/.claude.json with ~/.claude.
         if own == "\(home)/.claude" { args += ["--bind-try", "\(home)/.claude.json", "\(home)/.claude.json"] }
+        // The vault is in OBY_HOME, hidden above: a bind that shows its folder again gets it covered.
+        let vault = Vault.folder.path
+        if ([worktree?.path, own].compactMap { $0 } + reading).contains(where: { vault == $0 || vault.hasPrefix($0 + "/") }) {
+            args += ["--tmpfs", vault]
+        }
         return args + ["--"] + argv
     }
 }

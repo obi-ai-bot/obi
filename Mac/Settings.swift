@@ -124,6 +124,72 @@ struct AccountsSettingsView: View {
     }
 }
 
+/// Settings › Vault: the secrets Oby keeps in the keychain, by name. Never their values: a value
+/// is typed once, into a secure field that empties when it's saved.
+struct VaultSettingsView: View {
+    let vault: Vault
+    @State private var names: [String] = []
+    @State private var name = ""
+    @State private var value = ""
+    @State private var removing: String?
+    @State private var problem: String?
+
+    var body: some View {
+        Form {
+            Section("Secrets") {
+                if names.isEmpty {
+                    Text("No secrets yet.").foregroundStyle(.secondary)
+                }
+                ForEach(names, id: \.self) { name in
+                    HStack {
+                        Label(name, systemImage: "key")
+                        Spacer()
+                        Button("Remove", role: .destructive) { removing = name }
+                    }
+                }
+            }
+            Section("Add a secret") {
+                TextField("Name", text: $name, prompt: Text("staging-api-key"))
+                SecureField("Value", text: $value)
+                Button("Add Secret") {
+                    attempt {
+                        try vault.add(value, as: name.trimmingCharacters(in: .whitespaces))
+                        name = ""
+                        value = ""
+                    }
+                }
+                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || value.isEmpty)
+            }
+            Text("Oby uses a secret only in its own calls, for a connection you made. No agent sees it, and the secret scan stops anything outgoing that holds it, plain or encoded.")
+                .font(.caption).foregroundStyle(.secondary)
+            if let problem {
+                Text(problem).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
+        .onAppear { attempt {} }
+        .confirmationDialog("Remove \(removing ?? "this secret")?",
+                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            presenting: removing) { name in
+            Button("Remove", role: .destructive) { attempt { try vault.remove(name) } }
+        } message: { _ in
+            Text("Oby deletes it from the keychain.")
+        }
+    }
+
+    /// Runs `action`, then lists the names again.
+    private func attempt(_ action: () throws -> Void) {
+        do {
+            try action()
+            names = try vault.names()
+            problem = nil
+        } catch {
+            problem = error.localizedDescription
+        }
+    }
+}
+
 /// Settings › Models: which model and effort Claude Code and Codex jobs use.
 struct ModelsSettingsView: View {
     @AppStorage("claude.model") private var claudeModel = AgentModels.defaults["claude.model"] ?? ""

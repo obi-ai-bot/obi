@@ -170,26 +170,26 @@ nonisolated enum Publish {
         return (files, lines)
     }
 
-    /// What the built-in scanner finds in a diff, each place once.
-    static func findings(inDiff diff: String) -> [Finding] {
+    /// What the built-in scanner finds in a diff, each place once, with the vault's secrets in `leaks`.
+    static func findings(inDiff diff: String, leaks: Leaks = .empty) -> [Finding] {
         let (files, lines) = parse(diff)
         let named = files.compactMap { file in secretFile(file).map { Finding(file: file, line: nil, rule: $0) } }
-        let found = lines.flatMap { line in matches(line.text).map { Finding(file: line.file, line: line.number, rule: $0) } }
+        let found = lines.flatMap { line in matches(line.text, leaks: leaks).map { Finding(file: line.file, line: line.number, rule: $0) } }
         var seen = Set<Finding>()
-        return (named + found + wrapped(lines)).filter { seen.insert($0).inserted }
+        return (named + found + wrapped(lines, leaks: leaks)).filter { seen.insert($0).inserted }
     }
 
     /// Base64 or hex wrapped over several lines (`base64` and `openssl` wrap at 76 or 64): runs of
     /// adjacent lines in one file that hold nothing else, joined, with the end of the line before
     /// (`token = QUtJ…`), and found at the run's first line.
-    static func wrapped(_ lines: [Line]) -> [Finding] {
+    static func wrapped(_ lines: [Line], leaks: Leaks = .empty) -> [Finding] {
         let trim = CharacterSet.whitespaces.union(CharacterSet(charactersIn: "\"',\\"))
         var found: [Finding] = []
         var run: [Line] = [], lead = ""
         func flush() {
             if run.count + (lead.isEmpty ? 0 : 1) > 1, let first = run.first {
                 let joined = lead + run.map { $0.text.trimmingCharacters(in: trim) }.joined()
-                found += matches(joined).map { Finding(file: first.file, line: first.number, rule: $0) }
+                found += matches(joined, leaks: leaks).map { Finding(file: first.file, line: first.number, rule: $0) }
             }
             run = []
             lead = ""
@@ -218,12 +218,13 @@ nonisolated enum Publish {
     }
 
     /// The rules a line breaks, by name: in plain text, else in a base64, hex or URL-encoded copy
-    /// ("GitHub token, base64").
-    static func matches(_ text: String) -> [String] {
+    /// ("GitHub token, base64"), and the vault's secrets it holds, first ("vault secret npm-token, hex").
+    static func matches(_ text: String, leaks: Leaks = .empty) -> [String] {
+        let vault = leaks.found(in: text)
         let plain = rules.filter { text.contains($0.pattern) }.map(\.name)
-        guard plain.isEmpty else { return plain }
+        guard plain.isEmpty else { return vault + plain }
         var seen = Set<String>()
-        return decoded(text).flatMap { how, text in
+        return vault + decoded(text).flatMap { how, text in
             rules.filter { text.contains($0.pattern) }.map { "\($0.name), \(how)" }
         }.filter { seen.insert($0).inserted }
     }
@@ -298,10 +299,11 @@ nonisolated enum Publish {
 
     /// What the built-in rules find in text Oby is about to post (a pull request's title or
     /// description, a comment, commit messages), each line under `name`.
-    static func findings(inText text: String, named name: String) -> [Finding] {
+    static func findings(inText text: String, named name: String, leaks: Leaks = .empty) -> [Finding] {
         let lines = lines(of: text, named: name)
         var seen = Set<Finding>()
-        return (lines.flatMap { line in matches(line.text).map { Finding(file: name, line: line.number, rule: $0) } } + wrapped(lines))
+        return (lines.flatMap { line in matches(line.text, leaks: leaks).map { Finding(file: name, line: line.number, rule: $0) } }
+                + wrapped(lines, leaks: leaks))
             .filter { seen.insert($0).inserted }
     }
 
@@ -312,18 +314,26 @@ nonisolated enum Publish {
         }
     }
 
-    /// Scans each text Oby is about to post, by name: the built-in rules, and gitleaks when it's
-    /// installed. Throws when the scan can't run: then nothing goes out.
-    static func scan(texts: [(name: String, text: String)]) async throws -> [Finding] {
+    /// Scans each text Oby is about to post, by name: the built-in rules, the vault's secrets, and
+    /// gitleaks when it's installed. Throws when the scan can't run (the vault can't be read, too): then nothing goes out.
+    static func scan(texts: [(name: String, text: String)], vault: Vault = .shared) async throws -> [Finding] {
+        let leaks = try vault.leaks()
         let lines = texts.flatMap { lines(of: $0.text, named: $0.name) }
-        let found = texts.flatMap { findings(inText: $0.text, named: $0.name) }
+        let found = texts.flatMap { findings(inText: $0.text, named: $0.name, leaks: leaks) }
         var seen = Set<Finding>()
         return (found + (try await gitleaks(lines))).filter { seen.insert($0).inserted }
     }
 
     /// Scans what publishing would send: each commit up to `head` that isn't on origin/<base>,
-    /// and the diff they add up to. If the scan can't run, it throws and nothing is published.
-    static func scan(_ worktree: URL, base: String, head: String = "HEAD") async throws -> [Finding] {
+    /// and the diff they add up to, for the built-in rules and the vault's secrets. If the scan
+    /// can't run, it throws and nothing is published.
+    static func scan(_ worktree: URL, base: String, head: String = "HEAD", vault: Vault = .shared) async throws -> [Finding] {
+        let leaks: Leaks
+        do {
+            leaks = try vault.leaks()
+        } catch {
+            throw Shell.Failure(message: "Not published: the secret scan couldn't read the vault (\(error.localizedDescription)).")
+        }
         // --text and --no-textconv: no attribute or driver can hide what the push sends.
         let options = ["--no-color", "--no-ext-diff", "--no-textconv", "--text", "--diff-filter=d", "--src-prefix=a/", "--dst-prefix=b/"]
         let since = "refs/remotes/origin/\(base)"
@@ -335,7 +345,7 @@ nonisolated enum Publish {
         } catch {
             throw Shell.Failure(message: "Not published: the secret scan couldn't read the changes (\(error.localizedDescription)).")
         }
-        return findings(inDiff: diff) + (try await gitleaks(parse(diff).lines))
+        return findings(inDiff: diff, leaks: leaks) + (try await gitleaks(parse(diff).lines))
     }
 
     /// gitleaks on the same added lines when it's installed. The built-in scanner runs either way.

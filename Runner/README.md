@@ -41,10 +41,24 @@ Put the owner's Tailscale login in place of `you@example.com` (`tailscale status
 | Variable | What it is |
 | --- | --- |
 | `OBY_OWNER` | The owner's Tailscale login. Required. |
-| `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs, and the brain's latest 200 turns), `accounts.json`, `devices.json` (the phones that may approve publishing; to add one, `touch $OBY_HOME/pairing` and open the app within 10 minutes), `cleared.json` (when Clear done was last pressed, on any app), `apns/` (the APNs key and the phones' Live Activity tokens), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
+| `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs, and the brain's latest 200 turns), `accounts.json`, `devices.json` (the phones that may approve publishing; to add one, `touch $OBY_HOME/pairing` and open the app within 10 minutes), `cleared.json` (when Clear done was last pressed, on any app), `apns/` (the APNs key and the phones' Live Activity tokens), `vault/` (the secrets Oby uses but never shows), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
 | `OBY_PORT` | The port on `127.0.0.1`. 7777 by default. |
 
 The models and efforts the app picks in Settings › Models are kept in `~/.config/oby-runner.plist`.
+
+## Vault
+
+Secrets for connections you make (an API token for a service) live in `vault/secrets.json` in `OBY_HOME`: the folder is 0700 and the file 0600, owned by the runner's user. Agents never see it: all of `OBY_HOME` is empty in their bubblewrap. The secret scan learns every value, plain, base64, hex and URL-encoded, and nothing outgoing that holds one is published; the runner's log lines have them taken out. If the file or its folder is readable by anyone else, or owned by someone else, the runner doesn't read it, and nothing is published until it's fixed.
+
+Run these as the runner's user, with its `OBY_HOME`. The value comes on stdin (typed without echo, or piped), never as an argument, and nothing prints it:
+
+```sh
+OBY_HOME=/srv/nvme/oby oby-runner vault add staging-api-key
+OBY_HOME=/srv/nvme/oby oby-runner vault list
+OBY_HOME=/srv/nvme/oby oby-runner vault remove staging-api-key
+```
+
+The running service sees the change at its next scan.
 
 ## Live Activity push
 
