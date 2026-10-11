@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsScreen: View {
     @Environment(Phone.self) private var phone
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("voice.language") private var speechLanguage = "system"
     @State private var address = ""
     @State private var options: ModelOptions?
     @State private var models: ModelSettings?
@@ -23,6 +24,16 @@ struct SettingsScreen: View {
                     Text("Runner")
                 } footer: {
                     Text("The runner does the work while your Mac is closed. It answers only your Tailscale login, so this iPhone needs Tailscale on.")
+                }
+
+                Section("Voice") {
+                    Toggle("Speak replies to spoken requests", isOn: Binding(get: { phone.speakReplies }, set: { phone.speakReplies = $0 }))
+                    Picker("Speech language", selection: $speechLanguage) {
+                        Text("iPhone language").tag("system")
+                        Text("English").tag("en-US")
+                        Text("Português (Brasil)").tag("pt-BR")
+                        Text("Português (Portugal)").tag("pt-PT")
+                    }
                 }
 
                 Section("Accounts on the runner") {
