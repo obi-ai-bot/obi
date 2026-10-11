@@ -1026,7 +1026,7 @@ final class Desk {
             let started = Date.now
             var result = await runCheck(id, command, limits.testRun, env)
             // No Mac took the Apple check it asked for (#68): the Apple apps weren't built, and the
-            // rest of the command still decides. When it failed, it runs again with `oby-check` skipped.
+            // rest of the command still decides. When it failed, it runs again without `oby-check`'s build.
             if appleUnbuilt(id, since: started) {
                 if !result.passed, var again = self.job(id), again.isActive {
                     again.step = "Checking without the Apple build: \(command)"
@@ -1348,7 +1348,7 @@ nonisolated enum Rounds {
         /// read them from `output`.
         var failing: [String]? = nil
         /// No Mac took the Apple check it asked for (`Desk.appleUnbuilt`): it ran, or ran again, with
-        /// `oby-check` skipped, so it passed without the Apple build.
+        /// `oby-check` passing over the build, so it passed without the Apple build.
         var appleUnbuilt = false
 
         var succeeded: Bool { passed && problems.isEmpty }

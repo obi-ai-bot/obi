@@ -311,13 +311,13 @@ struct AppleCheckTests {
     }
 
     /// A final check of `oby-check apple && swift test` that no Mac takes: it runs again with
-    /// `oby-check` skipped, and then `swift test` passes (`passes`) or fails. Notes each run's environment.
+    /// `oby-check` passing over the build, and then `swift test` passes (`passes`) or fails. Notes each run's environment.
     func noMac(passes: Bool, runs: Made) {
         desk.appleTool = { [tool] in tool }
         desk.integrity = { _ in Integrity.Report() }
         let desk = desk
         desk.runCheck = { id, command, _, env in
-            runs.events.append(MacCheck(id: env[AppleCheck.skipVariable] == "1" ? "skipped" : "asked", job: id, repo: "", pr: 0, branch: "", base: "",
+            runs.events.append(MacCheck(id: env[AppleCheck.skipVariable] == "1" ? "without" : "asked", job: id, repo: "", pr: 0, branch: "", base: "",
                                         head: "", round: 1))
             guard env[AppleCheck.skipVariable] == "1" else {
                 // No Mac takes it: it's still queued when oby-check gives up.
@@ -337,8 +337,8 @@ struct AppleCheckTests {
         agent.onEvent(.turnEnded(summary: "Shown on the iPhone.", failed: false))
         try await until("the job ends") { desk.job("apple118")?.isActive == false }
         let ended = try #require(desk.job("apple118"))
-        // Run again with oby-check skipped, the rest passed: done, with no round asked for and no limit.
-        #expect(runs.events.map(\.id) == ["asked", "skipped"])
+        // Run again without oby-check's build, the rest passed: done, with no round asked for and no limit.
+        #expect(runs.events.map(\.id) == ["asked", "without"])
         #expect(ended.status == .done && ended.limit == nil && agent.sent.isEmpty)
         #expect(ended.summary.contains("Checked: `oby-check apple && swift test` passed without its Apple build. " + AppleCheck.unbuiltLine))
         // The check nobody waits for any more is withdrawn, so no Mac takes it.
@@ -368,7 +368,7 @@ struct AppleCheckTests {
         agent.onEvent(.turnEnded(summary: "Shown on the iPhone.", failed: false))
         // Failing Swift tests aren't hidden behind the missing Mac: the agent gets them as its next round.
         try await until("the agent gets another round") { agent.sent.count == 1 }
-        #expect(runs.events.map(\.id) == ["asked", "skipped"])
+        #expect(runs.events.map(\.id) == ["asked", "without"])
         #expect(desk.job("apple118")?.status == .running && desk.job("apple118")?.round == 2)
         #expect(agent.sent.first?.contains("✘ Test sync() failed after 0.2 seconds.") == true)
     }
