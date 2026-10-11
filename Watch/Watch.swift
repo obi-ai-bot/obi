@@ -34,7 +34,11 @@ final class Watch: NSObject {
     private(set) var level = 0.0
     /// A failed live connection offers the system's input on the next tap.
     var useDictation = false
-    @ObservationIgnored private var voiceInput: AsyncStream<Data>.Continuation?
+    /// The hold's audio not yet sent. It can hold the whole hold: a slow phone delays the words
+    /// rather than dropping the request.
+    @ObservationIgnored private var voiceBacklog = Data()
+    /// Wakes the sender when audio arrives; finished when the hold ends.
+    @ObservationIgnored private var voiceInput: AsyncStream<Void>.Continuation?
     @ObservationIgnored private var voiceTask: Task<Void, Never>?
     /// The job a notification asked to open; Home opens it.
     var opening: String?
@@ -175,8 +179,8 @@ final class Watch: NSObject {
 
     // MARK: Talking to Oby
 
-    /// One ordered, acknowledged stream per hold. Buffering is bounded: a slow connection
-    /// fails explicitly rather than silently dropping words or retaining unbounded audio.
+    /// One ordered, acknowledged stream per hold. Each chunk waits for the phone's reply; when
+    /// the phone is slow, the backlog goes in bigger chunks (up to `chunkLimit`) to catch up.
     func beginVoice(sampleRate: Double) {
         useDictation = false
         let id = UUID().uuidString
@@ -184,7 +188,8 @@ final class Watch: NSObject {
         words = ""
         level = 0
         talk = .recording
-        let (stream, input) = AsyncStream.makeStream(of: Data.self, bufferingPolicy: .bufferingOldest(16))
+        voiceBacklog = Data()
+        let (stream, input) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
         voiceInput = input
         voiceTask = Task {
             do {
@@ -192,15 +197,9 @@ final class Watch: NSObject {
                 _ = try await request([WatchWire.kind: WatchWire.Kind.voiceStart.rawValue,
                                        WatchWire.request: id, WatchWire.sampleRate: sampleRate])
                 var sequence = 0
-                for await audio in stream {
-                    try Task.checkCancellation()
-                    guard asking == id else { return }
-                    _ = try await request([WatchWire.kind: WatchWire.Kind.voiceChunk.rawValue,
-                                           WatchWire.request: id, WatchWire.sequence: sequence,
-                                           WatchWire.audio: audio])
-                    sequence += 1
-                }
-                try Task.checkCancellation()
+                for await _ in stream { try await sendBacklog(id, sequence: &sequence) }
+                // The stream finishes on release; the last of the audio may have come with it.
+                try await sendBacklog(id, sequence: &sequence)
                 guard asking == id else { return }
                 let reply = try await request([WatchWire.kind: WatchWire.Kind.voiceEnd.rawValue,
                                                WatchWire.request: id, WatchWire.sequence: sequence])
@@ -212,7 +211,9 @@ final class Watch: NSObject {
                 if talk == .sending { talk = .thinking(said) }
             } catch {
                 guard asking == id, !Task.isCancelled else { return }
-                let connectionFailed = !reachable || (error as NSError).domain == WCErrorDomain
+                // The session may know the phone is gone before its reachability update arrives.
+                let connectionFailed = !reachable || !WCSession.default.isReachable
+                    || (error as NSError).domain == WCErrorDomain
                 cancel()
                 useDictation = connectionFailed
                 talk = .reply(error.localizedDescription + (connectionFailed ? " Tap the mic to dictate instead." : ""))
@@ -220,14 +221,28 @@ final class Watch: NSObject {
         }
     }
 
+    /// Sends what's waiting, in order, each chunk after the phone acknowledged the last.
+    private func sendBacklog(_ id: String, sequence: inout Int) async throws {
+        while true {
+            try Task.checkCancellation()
+            guard asking == id else { throw CancellationError() }
+            guard !voiceBacklog.isEmpty else { return }
+            let audio = Data(voiceBacklog.prefix(WatchWire.chunkLimit))
+            voiceBacklog.removeFirst(audio.count)
+            _ = try await request([WatchWire.kind: WatchWire.Kind.voiceChunk.rawValue,
+                                   WatchWire.request: id, WatchWire.sequence: sequence,
+                                   WatchWire.audio: audio])
+            sequence += 1
+        }
+    }
+
     func stream(_ audio: Data, level: Double) {
         guard talk == .recording, let input = voiceInput else { return }
         self.level = level
-        if case .dropped = input.yield(audio) {
-            cancel()
-            useDictation = true
-            talk = .reply("Your iPhone couldn't keep up. Tap the mic to dictate instead.")
-        }
+        // The recorder stops at the limit; this only bounds a runaway (16 s of audio, ~512 KB).
+        guard voiceBacklog.count + audio.count <= Int(WatchWire.voiceSampleRate) * WatchWire.voiceSampleBytes * (WatchWire.voiceSeconds + 1) else { return }
+        voiceBacklog.append(audio)
+        input.yield()
     }
 
     func endVoice() {
@@ -264,6 +279,7 @@ final class Watch: NSObject {
         voiceInput = nil
         voiceTask?.cancel()
         voiceTask = nil
+        voiceBacklog = Data()
         words = ""
         level = 0
         talk = .none

@@ -421,13 +421,20 @@ private final class LiveWatchSpeech {
             }
         }
         background = live.background
-        // Also close if the watch vanishes without an end/cancel packet. Covers finalization too.
-        live.expiry = Task { [weak live] in
+        live.armExpiry()
+        return live
+    }
+
+    /// Closes the stream if the watch vanishes without an end/cancel packet: 30 seconds with no
+    /// new chunk, counted again on each one, so a slow connection doesn't cut a long hold.
+    /// Finalization gets its own 30 seconds.
+    private func armExpiry() {
+        expiry?.cancel()
+        expiry = Task { [weak self] in
             try? await Task.sleep(for: .seconds(30))
             guard !Task.isCancelled else { return }
-            live?.cancel()
+            self?.cancel()
         }
-        return live
     }
 
     func append(_ audio: Data, sequence: Int) throws {
@@ -446,6 +453,7 @@ private final class LiveWatchSpeech {
         try convert(buffer)
         frames += count
         nextSequence += 1
+        armExpiry()
     }
 
     /// A persistent converter preserves resampling across chunk boundaries; drain it at end.
@@ -481,6 +489,7 @@ private final class LiveWatchSpeech {
             throw RunnerError(message: "The watch's audio stream was interrupted. Try again.")
         }
         ending = true
+        armExpiry()
         defer { cleanup() }
         do {
             try convert(nil)

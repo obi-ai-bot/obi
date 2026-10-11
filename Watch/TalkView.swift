@@ -1,4 +1,5 @@
 import AVFoundation
+import Synchronization
 import SwiftUI
 
 /// A stable bottom-row control, including while a reply is pending. A new hold replaces it.
@@ -19,11 +20,11 @@ struct TalkButton: View {
                     .onChange(of: pressing) { if pressing { start() } else { release() } }
                     .accessibilityLabel("Hold to talk")
             } else {
+                // The shown answer stays until something is submitted: closing dictation keeps it.
                 TextFieldLink(prompt: Text("What should Oby do?")) { circle("mic.fill") }
                     onSubmit: { watch.cancel(); watch.ask($0) }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Dictate to Oby")
-                    .simultaneousGesture(TapGesture().onEnded { watch.cancel() })
             }
         }
         .sensoryFeedback(trigger: holding) { _, held in held ? .start : .stop }
@@ -149,7 +150,7 @@ struct TalkView: View {
     }
 }
 
-/// Mono 16 kHz Int16 PCM (WatchWire), batched into 1/4-second messages. No audio file stays on the watch.
+/// Mono 16 kHz Int16 PCM (WatchWire), delivered in 1/4-second pieces. No audio file stays on the watch.
 @Observable
 final class Recorder {
     static let limit = WatchWire.voiceSeconds
@@ -159,6 +160,9 @@ final class Recorder {
     private var began: Date?
     private var ticking: Task<Void, Never>?
     private var generation: UUID?
+    /// Filled on the audio thread, emptied on the main actor. Tagged with its hold, so closing the
+    /// mic can take what was captured but not yet received, and a late callback can't leak into the next hold.
+    nonisolated private let captured = Mutex<(hold: UUID?, audio: Data)>((nil, Data()))
     private var pending = Data()
     private var chunkBytes = 0
     private var deliver: ((Data, Double) -> Void)?
@@ -191,6 +195,7 @@ final class Recorder {
             nonisolated(unsafe) let converter = made
             let id = UUID()
             generation = id
+            captured.withLock { $0 = (id, Data()) }
             chunkBytes = min(WatchWire.chunkLimit, Int(WatchWire.voiceSampleRate * 0.25) * WatchWire.voiceSampleBytes)
             self.deliver = deliver
             self.engine = engine
@@ -201,7 +206,7 @@ final class Recorder {
                 for index in 0..<count { power += samples[index] * samples[index] }
                 let level = min(1, Double(sqrt(power / Float(max(1, count)))) * 8)
                 // Converted and copied before AVAudioEngine reuses its buffer. Nothing from the audio
-                // callback touches observed state; stale callbacks are rejected by the generation below.
+                // callback touches observed state; stale callbacks are rejected by their hold.
                 let capacity = AVAudioFrameCount(ceil(Double(count) * wire.sampleRate / format.sampleRate)) + 32
                 guard let output = AVAudioPCMBuffer(pcmFormat: wire, frameCapacity: capacity) else { return }
                 var supplied = false
@@ -215,7 +220,12 @@ final class Recorder {
                 guard status != .error, error == nil, output.frameLength > 0,
                       let converted = output.int16ChannelData?[0] else { return }
                 let audio = Data(bytes: converted, count: Int(output.frameLength) * WatchWire.voiceSampleBytes)
-                Task { @MainActor in self.receive(audio, level: level, generation: id) }
+                let current = self.captured.withLock { state in
+                    guard state.hold == id else { return false }
+                    state.audio.append(audio)
+                    return true
+                }
+                if current { Task { @MainActor in self.receive(level: level, generation: id) } }
             }
             engine.prepare()
             try engine.start()
@@ -227,7 +237,7 @@ final class Recorder {
                     guard !Task.isCancelled else { return }
                     seconds += 1
                     // Close independently of view updates at the limit.
-                    if seconds == Self.limit { closeMicrophone() }
+                    if seconds == Self.limit { pending.append(closeMicrophone()) }
                 }
             }
             return WatchWire.voiceSampleRate
@@ -238,10 +248,10 @@ final class Recorder {
         }
     }
 
-    private func receive(_ audio: Data, level: Double, generation: UUID) {
+    private func receive(level: Double, generation: UUID) {
         guard self.generation == generation else { return }
         self.level = level
-        pending.append(audio)
+        pending.append(take())
         while pending.count >= chunkBytes {
             deliver?(Data(pending.prefix(chunkBytes)), level)
             pending.removeFirst(chunkBytes)
@@ -250,19 +260,34 @@ final class Recorder {
 
     func stop() -> TimeInterval {
         let heard = began.map { min(Date.now.timeIntervalSince($0), Double(Self.limit)) } ?? 0
-        closeMicrophone()
+        // Audio captured before the release but not yet received is the end of the last word.
+        pending.append(closeMicrophone())
         if !pending.isEmpty { deliver?(pending, level) }
         cancel()
         return heard
     }
 
-    private func closeMicrophone() {
+    private func take() -> Data {
+        captured.withLock { state in
+            defer { state.audio = Data() }
+            return state.audio
+        }
+    }
+
+    /// Returns what was captured and not yet received; later callbacks are dropped.
+    @discardableResult
+    private func closeMicrophone() -> Data {
         generation = nil
-        guard let engine else { return }
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
-        self.engine = nil
-        try? AVAudioSession.sharedInstance().setActive(false)
+        if let engine {
+            engine.stop()
+            engine.inputNode.removeTap(onBus: 0)
+            self.engine = nil
+            try? AVAudioSession.sharedInstance().setActive(false)
+        }
+        return captured.withLock { state in
+            defer { state = (nil, Data()) }
+            return state.audio
+        }
     }
 
     func cancel() {
@@ -289,6 +314,14 @@ struct PlanCard: View {
             } else {
                 Text("Oby will start \(drafts.count) jobs.").font(.headline)
             }
+            if drafts.contains(where: \.guessed) {
+                Label("The brain didn't answer: this plan is a guess.", systemImage: "exclamationmark.triangle")
+                    .font(.caption2).foregroundStyle(.orange)
+            }
+            // First, so it's on screen without the crown on the smallest watch; details follow.
+            Button(sending ? "Dispatching…" : drafts.count == 1 ? "Dispatch" : "Dispatch all \(drafts.count)", action: dispatch)
+                .tint(.accentColor).buttonStyle(.borderedProminent).disabled(sending)
+            if let problem { Text(problem).font(.caption2).foregroundStyle(.red) }
             ForEach(drafts, id: \.job.id) { draft in
                 VStack(alignment: .leading, spacing: 1) {
                     if drafts.count > 1 { Text(draft.job.heading).font(.footnote.weight(.semibold)).lineLimit(2) }
@@ -302,13 +335,6 @@ struct PlanCard: View {
                     }
                 }
             }
-            if drafts.contains(where: \.guessed) {
-                Label("The brain didn't answer: this plan is a guess.", systemImage: "exclamationmark.triangle")
-                    .font(.caption2).foregroundStyle(.orange)
-            }
-            if let problem { Text(problem).font(.caption2).foregroundStyle(.red) }
-            Button(sending ? "Dispatching…" : drafts.count == 1 ? "Dispatch" : "Dispatch all \(drafts.count)", action: dispatch)
-                .tint(.accentColor).buttonStyle(.borderedProminent).disabled(sending)
             Button("Cancel") { watch.cancel() }.disabled(sending)
         }
     }
