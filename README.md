@@ -150,7 +150,7 @@ The rules I live by:
 - **Nothing goes out that didn't pass.** A pull request opens by itself only once the job's check passed and the secret scan is clean, and it waits for a review before it merges. Every review and comment is shown first and confirmed with Touch ID.
 - **I check for secrets** in everything I’m about to send, and I stop if I find one.
 - **Every job has limits** on time and cost, and **⌃⌥⌘.** stops all of them at once.
-- **I only listen while you hold fn.**
+- **I only listen while you hold fn** (or Control-Option), or after fn + Space until you press fn again.
 - **No usage data leaves your Mac** unless you turn it on.
 
 ## Say hi in two minutes

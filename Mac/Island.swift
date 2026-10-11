@@ -2,13 +2,15 @@ import AppKit
 import SwiftUI
 import WebKit
 
-enum IslandState { case compact, peek, open }
+enum IslandState { case compact, peek, open, listening }
 
 /// The island's state and its geometry, measured from the screen Oby lives on.
 @Observable
 final class IslandModel {
     let desk: Desk
     let feed: RunnerFeed
+    /// What you say while you hold fn.
+    let voice = Voice()
     var state: IslandState = .compact
     /// The notch's size, or zero on a screen without one.
     var notch: CGSize = .zero
@@ -50,7 +52,7 @@ final class IslandModel {
         switch state {
         case .compact: return CGSize(width: base, height: top)
         case .peek: return CGSize(width: base + (peekLine == Summary.quiet ? 140 : 320), height: top + 6)
-        case .open: return CGSize(width: 600, height: openHeight)
+        case .open, .listening: return CGSize(width: 600, height: openHeight)
         }
     }
 
@@ -58,7 +60,7 @@ final class IslandModel {
         switch state {
         case .compact: 12
         case .peek: 18
-        case .open: 32
+        case .open, .listening: 32
         }
     }
 
@@ -67,7 +69,7 @@ final class IslandModel {
         switch state {
         case .compact, .peek: CGRect(x: 8, y: -3, width: top + 6, height: top + 6)
         // Oby's body sits low in its frame (room to jump), so the frame starts under the notch.
-        case .open: CGRect(x: 14, y: top - 14, width: 136, height: 136)
+        case .open, .listening: CGRect(x: 14, y: top - 14, width: 136, height: 136)
         }
     }
 
@@ -81,11 +83,15 @@ final class IslandController {
     let feed = RunnerFeed()
     let model: IslandModel
     let character = ObyCharacter()
+    let talkKey = TalkKey()
     private let panel = NotchPanel()
     private var timer: Timer?
     private var lastMouse: CGPoint?
     private var clickMonitor: Any?
     private var noticeTask: Task<Void, Never>?
+    /// Every repository the user pushed to lately: names the voice listens for. Fetched when you
+    /// first talk, and again each time until it works.
+    private var repos: [String] = []
 
     init() { model = IslandModel(desk: desk, feed: feed) }
 
@@ -101,6 +107,9 @@ final class IslandController {
         feed.onNotice = { [weak self] job, notice in self?.notify(RunnerFeed.title(notice, for: job), happy: notice == .ready && job.publishError == nil) }
         feed.start()
         Task { await desk.refresh() }
+        talkKey.on = { [weak self] in self?.talk($0) }
+        talkKey.start()
+        model.voice.prepare()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.place() }
         }
@@ -141,9 +150,52 @@ final class IslandController {
         character.pause(state == .compact)
     }
 
+    /// The talk key: the island listens while it's held, and what you said goes to the planner as if typed.
+    private func talk(_ event: TalkKey.Event) {
+        let voice = model.voice
+        switch event {
+        case .start(let key):
+            noticeTask?.cancel()
+            model.notice = nil
+            // Your own jobs' repositories first: they're the ones you're likeliest to name.
+            voice.start(key: key, context: Voice.context(repos: desk.jobs.map(\.repo) + repos))
+            if repos.isEmpty { Task { repos = (try? await Workspace.knownRepos()) ?? [] } }
+            set(.listening)
+        case .handsFree:
+            voice.handsFree = true
+        case .send:
+            let key = voice.key
+            voice.finish { [weak self] said in self?.heard(said, key: key) }
+        case .cancel:
+            voice.cancel()
+            stopListening()
+        }
+    }
+
+    private func heard(_ said: String, key: TalkKey.Key) {
+        if !said.isEmpty { desk.ask(said) }
+        // Talking again already: that's what the island shows.
+        guard model.voice.phase == .idle, model.state == .listening else { return }
+        if said.isEmpty {
+            let problem = model.voice.problem
+            stopListening()
+            notify(problem ?? "Oby didn't catch that", happy: false)
+        } else {
+            open()
+            // Not in the voice's queue: the alert waits for you, and talking mustn't.
+            if key == .fn { Task { GlobeKey.guideOnce() } }
+        }
+    }
+
+    private func stopListening() {
+        guard model.state == .listening else { return }
+        set(.compact)
+        if panel.isKeyWindow { NSWorkspace.shared.frontmostApplication?.activate() }
+    }
+
     /// A job ended, or a runner's job needs you: say so in one line, with a face to match.
     private func notify(_ line: String, happy: Bool) {
-        guard model.state != .open else { return }
+        guard model.state != .open, model.state != .listening else { return }
         model.notice = line
         set(.peek)
         character.play(happy ? "Agree" : "Confused")
@@ -222,6 +274,7 @@ struct IslandView: View {
     let onClose: () -> Void
 
     private var mood: String {
+        if model.state == .listening { return "listening" }
         if case .thinking = model.desk.talk { return "thinking" }
         return model.working == 0 ? "idle" : "working"
     }
@@ -267,6 +320,14 @@ struct IslandView: View {
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { model.openHeight = $0 }
                     .transition(.opacity)
             }
+
+            if model.state == .listening {
+                ListeningIsland(voice: model.voice, characterWidth: frame.maxX, top: model.contentTop)
+                    .frame(width: size.width)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { model.openHeight = $0 }
+                    .transition(.opacity)
+            }
         }
         .foregroundStyle(.white)
         .frame(width: size.width, height: size.height, alignment: .topLeading)
@@ -281,6 +342,63 @@ struct IslandView: View {
         .animation(.spring(response: 0.42, dampingFraction: 0.8), value: model.openHeight)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onChange(of: mood, initial: true) { character.mood = mood }
+    }
+}
+
+/// While you hold fn: the waveform, your words as you say them, and how to send.
+private struct ListeningIsland: View {
+    let voice: Voice
+    let characterWidth: CGFloat
+    let top: CGFloat
+
+    private var keyName: String { voice.key == .fn ? "fn" : "Control-Option" }
+
+    private var hint: String {
+        switch voice.phase {
+        case .finishing: "Writing it down…"
+        case _ where voice.handsFree: "Press \(keyName) to send · Oby listens until you do"
+        default: "Let go of \(keyName) to send · Oby only listens while you hold it"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 14) {
+                Text("LISTENING").font(.system(size: 12, weight: .semibold)).kerning(1).foregroundStyle(.white.opacity(0.55))
+                Waveform(levels: voice.levels)
+            }
+            if let problem = voice.problem {
+                Text(problem).font(.system(size: 15, weight: .medium)).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(voice.words.isEmpty ? "Say what you need…" : voice.words)
+                    .font(.system(size: 19, weight: .medium))
+                    .foregroundStyle(.white.opacity(voice.words.isEmpty ? 0.45 : 1))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(hint).font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
+        }
+        .frame(maxWidth: .infinity, minHeight: 120, alignment: .leading)
+        .padding(.leading, characterWidth + 12)
+        .padding(.trailing, 28)
+        .padding(.top, top + 6)
+        .padding(.bottom, 24)
+    }
+}
+
+/// The microphone's loudness, one bar per moment, newest on the right.
+private struct Waveform: View {
+    let levels: [Float]
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(levels.indices, id: \.self) { index in
+                Capsule().frame(width: 3, height: 3 + 15 * CGFloat(levels[index]))
+            }
+        }
+        .frame(height: 18)
+        .animation(.linear(duration: 0.08), value: levels)
+        .accessibilityHidden(true)
     }
 }
 
