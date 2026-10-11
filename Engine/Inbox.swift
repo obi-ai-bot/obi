@@ -85,7 +85,11 @@ nonisolated enum Inbox {
             if check.state == .error { return item(.merge, "merge-\(check.id)-error", check.problem ?? "The Mac couldn't run the check.", [tryAgain, dismiss]) }
             let text = check.failureLine + (job.checkStop.map { " " + $0 } ?? "")
             if check.handedOff == true { return item(.merge, "merge-\(check.id)-nothing-new", text, [tryAgain, dismiss]) }
-            return item(.merge, "merge-\(check.id)-stopped", text, [dismiss])
+            // Never a dead end: check the same commit again, and when tests failed after Oby's last
+            // review, hand them to the author with one more review of the fix allowed.
+            let named = !(check.failures ?? []).isEmpty
+            let options = named && job.checkStop == MacCheck.reviewsUsedLine ? [oneMoreRound, tryAgain, dismiss] : [tryAgain, dismiss]
+            return item(.merge, "merge-\(check.id)-stopped", text, options)
         }
         guard job.status == .failed || job.status == .interrupted else { return nil }
         let line = job.summary.split(separator: "\n").first.map(String.init) ?? job.status.rawValue.capitalized

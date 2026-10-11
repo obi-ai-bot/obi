@@ -1304,6 +1304,7 @@ final class Desk {
             switch (item.kind, text) {
             case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss), (.merge, Inbox.dismiss): try dismiss(item.job)
             case (.merge, Inbox.tryAgain): try retryMerge(item.job)
+            case (.merge, Inbox.oneMoreRound): try oneMoreMergeRound(item.job)
             case (.failed, Inbox.tryAgain), (.limit, Inbox.tryAgain), (.failed, Inbox.oneMoreRound): try message(item.job, Inbox.tryAgainMessage)
             case (.review, Inbox.oneMoreRound): try message(item.job, reviewAgain(item.job))
             default: try message(item.job, text)

@@ -489,8 +489,8 @@ extension Desk {
     func reviewPublished(_ job: Job) {
         guard job.reviewOf == nil, job.reviewing == nil, let pr = Review.pullRequest(of: job) else { return }
         var author = job
-        guard (job.review?.round ?? 0) < Review.maxRounds else {
-            author.reviewError = "Oby reviewed it \(Review.maxRounds) times already: a person reviews it from here."
+        guard (job.review?.round ?? 0) < job.reviewCap else {
+            author.reviewError = "Oby reviewed it \(job.reviewCap) times already: a person reviews it from here."
             return replace(author)
         }
         guard let account = Review.reviewer(accounts.accounts, for: job) else {

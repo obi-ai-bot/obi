@@ -630,7 +630,8 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
                 let result = await execute(command.bundled(at: bundle).arguments, in: worktree, env: env, timeout: command.timeout)
                 let seconds = Int(Date.now.timeIntervalSince(start))
                 let read = (result.status != 0 || result.timedOut) && command.xcodebuild ? await summary(of: bundle) : nil
-                return Attempt(status: result.status, output: result.output, timedOut: result.timedOut, summary: read, seconds: seconds)
+                return Attempt(status: result.status, output: result.output, timedOut: result.timedOut, summary: read,
+                               bundled: FileManager.default.fileExists(atPath: bundle.path), seconds: seconds)
             } reset: {
                 Logger.jobs.notice("check \(check.id, privacy: .public): \(command.name, privacy: .public) hit the Mac's own trouble; running it again")
                 await reset(derived: cache.appending(path: "DerivedData"))
@@ -660,6 +661,9 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// test tooling on the Mac. Read from xcodebuild's output or its result bundle's summary.
     enum Trouble: String, CaseIterable, Sendable {
         case hung, lostConnection, boot, install, daemon
+        /// Neither a result bundle nor a failing test, from a build that didn't fail: nothing says
+        /// the code failed (PR #140's iPhone step ended after 1011 seconds like that).
+        case noResults
 
         func line(simulator: Bool) -> String {
             switch self {
@@ -668,6 +672,8 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             case .boot: "the iPhone simulator failed to boot"
             case .install: simulator ? "the app couldn't be installed on the iPhone simulator" : "the test host couldn't be installed"
             case .daemon: "the test daemon never got ready"
+            case .noResults: simulator ? "the iPhone app's tests ended without a result bundle or a failing test"
+                : "the Mac app's tests ended without a result bundle or a failing test"
             }
         }
 
@@ -679,6 +685,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             case .install: [/(?:failed|unable) to install/, /could not be installed/, /mach error -308/, /ipc\/mig\)? server died/]
             case .daemon: [/(?:testmanagerd|test daemon).{0,80}(?:not ready|never|timed out)/,
                            /timed out (?:while )?waiting for (?:the )?(?:testmanagerd|test daemon)/]
+            case .noResults: []
             }
         }
 
@@ -696,6 +703,8 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         var timedOut: Bool
         /// Its result bundle's summary (`xcresulttool get test-results summary`), when it failed and has one.
         var summary: Data?
+        /// It wrote a result bundle.
+        var bundled: Bool
         var seconds: Int
     }
 
@@ -712,26 +721,26 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     }
 
     /// Whose a failed run is. Failing tests the result bundle names (else the output) are the
-    /// code's, unless all they say is the Mac's trouble; with none, a trouble that the output or
-    /// the bundle shows (xcodebuild only) is the Mac's; then `problem` decides.
+    /// code's, unless all they say is the Mac's trouble, and so is a build that failed. Otherwise,
+    /// for xcodebuild, with no failing test: a trouble the output or the bundle shows, or no
+    /// result bundle at all, is the Mac's; then `problem` decides.
     static func verdict(_ command: Command, _ run: Attempt) -> Verdict {
         if run.status == 0, !run.timedOut { return .passed }
         let bundled = run.summary.map(failingTests(summary:)) ?? []
         let said = messages(in: run.output)
         var named = bundled.isEmpty ? failures(in: run.output).map { FailingTest(test: $0, message: said[$0] ?? "") } : bundled
-        // A build the compiler stopped is the code's, whatever else its output quotes.
-        if command.xcodebuild, !run.output.split(separator: "\n").contains(where: sourceError) {
+        // A build that failed is the code's, whatever else its output quotes.
+        if command.xcodebuild, !buildFailed(run.output) {
             let troubled = named.compactMap { Trouble.in($0.message) }
             named.removeAll { Trouble.in($0.message) != nil }
             if named.isEmpty, let trouble = troubled.first ?? Trouble.in(run.output)
                 ?? run.summary.flatMap({ Trouble.in(String(decoding: $0, as: UTF8.self)) }) {
                 return .trouble(trouble)
             }
+            if named.isEmpty, !run.bundled { return .trouble(.noResults) }
         }
         if run.timedOut {
-            let lines = run.output.split(separator: "\n", omittingEmptySubsequences: false).suffix(40).joined(separator: "\n")
-            let log = "Oby stopped it after \(Int(command.timeout / 60)) minutes" + (lastStarted(in: run.output).map { "; the last test that started was \($0)" } ?? "")
-                + ". What it printed last:\n" + lines.trimmingCharacters(in: .whitespacesAndNewlines)
+            let log = stoppedLog(command, run.output)
             if let problem = problem(command, status: run.status, output: run.output, timedOut: true, named: !named.isEmpty) {
                 return .problem(problem, log: log)
             }
@@ -740,6 +749,24 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         if !named.isEmpty { return .failed(named, log: nil) }
         if let problem = problem(command, status: run.status, output: run.output, timedOut: false, named: false) { return .problem(problem, log: nil) }
         return .failed([], log: excerpt(run.output))
+    }
+
+    /// What a step stopped at its timeout leaves for whoever reads it: the last test that started, and the last 40 lines.
+    static func stoppedLog(_ command: Command, _ output: String) -> String {
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: false).suffix(40).joined(separator: "\n")
+        return "Oby stopped it after \(Int(command.timeout / 60)) minutes" + (lastStarted(in: output).map { "; the last test that started was \($0)" } ?? "")
+            + ". What it printed last:\n" + lines.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// A build that failed: a compiler or linker error, or xcodebuild's `** BUILD FAILED **`.
+    static func buildFailed(_ output: String) -> Bool {
+        output.contains("BUILD FAILED **") || output.contains("linker command failed") || output.split(separator: "\n").contains(where: sourceError)
+    }
+
+    /// The last line of `output` that says what went wrong, or else its last line, up to 200 characters.
+    static func said(_ output: String) -> String {
+        let said = output.split(separator: "\n").last { $0.contains("error") || $0.contains("Unable to find") } ?? output.split(separator: "\n").last ?? ""
+        return String(said.trimmingCharacters(in: .whitespaces).prefix(200))
     }
 
     /// What one step reported, and what goes to the author (`log`) or the user (`problem`).
@@ -772,8 +799,13 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             step.failing = tests.isEmpty ? nil : tests
             return Outcome(step: step, log: log)
         case let .trouble(trouble):
-            return Outcome(step: step, problem: couldNotRun + trouble.line(simulator: command.simulator)
-                           + ", and again after Oby restarted the simulators and ran \(command.name) once more.")
+            // How the second run ended, when that's more than the trouble says.
+            let ended = run.timedOut
+                ? " It was stopped after \(Int(command.timeout / 60)) minutes" + (lastStarted(in: run.output).map { "; the last test that started was \($0)" } ?? "") + "."
+                : trouble == .noResults ? " xcodebuild exited \(run.status): \(said(run.output))" : ""
+            return Outcome(step: step, log: run.timedOut ? stoppedLog(command, run.output) : nil,
+                           problem: couldNotRun + trouble.line(simulator: command.simulator)
+                           + ", and again after Oby restarted the simulators and ran \(command.name) once more." + ended)
         case let .problem(problem, log):
             return Outcome(step: step, log: log, problem: problem)
         }
@@ -818,9 +850,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         let compiler = output.split(separator: "\n").contains { $0.contains(": error:") || $0.hasPrefix("error: ") }
         let xcodebuild = command.arguments.first == "xcodebuild"
         if xcodebuild ? status == 65 : compiler { return nil }
-        let said = output.split(separator: "\n").last { $0.contains("error") || $0.contains("Unable to find") }
-            ?? output.split(separator: "\n").last ?? ""
-        return "\(command.name) couldn't run on this Mac (exit \(status)): \(said.trimmingCharacters(in: .whitespaces).prefix(200))"
+        return "\(command.name) couldn't run on this Mac (exit \(status)): \(said(output))"
     }
 
     /// Runs one step to its end or its timeout, with what it prints going to a file, not a pipe: a
@@ -891,7 +921,7 @@ extension Job {
         // Its round came and went, and the pull request still has the commit that failed.
         if check.handedOff == true { return MacCheck.nothingNewLine }
         if check.round >= MacCheck.maxRounds { return MacCheck.stopLine }
-        if (review?.round ?? 0) >= Review.maxRounds { return MacCheck.reviewsUsedLine }
+        if (review?.round ?? 0) >= reviewCap { return MacCheck.reviewsUsedLine }
         return nil
     }
 
@@ -1041,11 +1071,13 @@ extension Desk {
 
     /// Try again on a merge that stopped (the inbox, `Desk.settle`): a passed check is merged
     /// again, a failed one that couldn't reach the author is handed to it again, and one the Mac
-    /// couldn't run, or whose round brought no new commit, is checked again on the same commit.
+    /// couldn't run, whose round brought no new commit, or that failed with no round left, is
+    /// checked again on the same commit.
     func retryMerge(_ id: String) throws {
         guard var job = job(id), job.mergeNeedsYou, var check = job.macCheck, !job.isActive else { throw Shell.Failure(message: "Nothing to merge again.") }
+        let stopped = check.state == .failed && job.checkStop != nil
         job.mergeError = nil
-        if check.state == .error || check.handedOff == true {
+        if check.state == .error || check.handedOff == true || stopped {
             // The same commit, the same round: a check that didn't run, or ran on unchanged code, uses none up.
             check = MacCheck(id: String(UUID().uuidString.prefix(8)).lowercased(), job: check.job, repo: check.repo, pr: check.pr,
                              branch: check.branch, base: check.base, head: check.head, round: check.round)
@@ -1055,6 +1087,19 @@ extension Desk {
         }
         guard check.state == .passed || check.state == .failed && job.checkStop == nil else { throw Shell.Failure(message: "Nothing to merge again.") }
         job.macCheck?.tries = 0
+        replace(job)
+        Task { await finishCheck(id, log: nil) }
+    }
+
+    /// One more round on a merge whose check failed, naming tests, after Oby's reviews were used
+    /// up (the inbox, `Desk.settle`): Oby may review the fix once more (`Job.extraReviews`), and the
+    /// failing tests go to the author as its next round.
+    func oneMoreMergeRound(_ id: String) throws {
+        guard var job = job(id), job.mergeNeedsYou, job.mergeError == nil, let check = job.macCheck, !job.isActive,
+              check.state == .failed, !(check.failures ?? []).isEmpty, job.checkStop == MacCheck.reviewsUsedLine else {
+            throw Shell.Failure(message: "There's no failed check to hand on.")
+        }
+        job.extraReviews = max(0, (job.review?.round ?? 0) + 1 - Review.maxRounds)
         replace(job)
         Task { await finishCheck(id, log: nil) }
     }
