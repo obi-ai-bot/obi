@@ -19,6 +19,31 @@ final class Phone {
         case offline(String)
     }
 
+    let voice = PhoneVoice()
+    @ObservationIgnored private let speaker = PhoneSpeaker()
+    @ObservationIgnored private var planning: Task<Void, Never>?
+    @ObservationIgnored private var spoken = false
+    var speakReplies = UserDefaults.standard.object(forKey: "voice.speakReplies") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(speakReplies, forKey: "voice.speakReplies")
+            if !speakReplies { speaker.stop() }
+        }
+    }
+
+    func holdMic() {
+        guard !voice.held, !voice.finishing else { return }
+        cancel()
+        voice.start(context: PhoneSpeech.context(repos: jobs.map(\.repo))) { [weak self] in self?.ask($0, spoken: true) }
+    }
+
+    func releaseMic() { voice.release() }
+
+    func cancelVoice() {
+        spoken = false
+        voice.cancel()
+        speaker.stop()
+    }
+
     var runnerURL: URL {
         didSet {
             UserDefaults.standard.set(runnerURL, forKey: "runner.url")
@@ -170,9 +195,11 @@ final class Phone {
 
     // MARK: Planning
 
-    func ask(_ words: String) {
+    func ask(_ words: String, spoken: Bool = false) {
         let said = words.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !said.isEmpty else { return }
+        cancelVoice()
+        self.spoken = spoken
         plan(said, answer: nil)
     }
 
@@ -181,11 +208,19 @@ final class Phone {
         plan(said, answer: (question.text, option))
     }
 
-    func cancel() { talk = .none }
+    func cancel() {
+        planning?.cancel()
+        planning = nil
+        spoken = false
+        speaker.stop()
+        talk = .none
+    }
 
     private func plan(_ said: String, answer: (question: String, option: String)?) {
+        planning?.cancel()
+        speaker.stop()
         talk = .thinking(said)
-        Task {
+        planning = Task {
             let result: Talk
             do {
                 switch try await runner.plan(said, answer: answer) {
@@ -198,7 +233,16 @@ final class Phone {
                 result = .reply(error.localizedDescription)
             }
             // Cancelled or replaced while the brain was thinking.
-            if talk == .thinking(said) { talk = result }
+            guard !Task.isCancelled else { return }
+            talk = result
+            if spoken, speakReplies {
+                switch result {
+                case .reply(let text): speaker.say(text)
+                case .question(_, let question): speaker.say(question.text)
+                case .plan(let drafts): speaker.say(drafts.map(\.reply).joined(separator: " "))
+                default: break
+                }
+            }
         }
     }
 

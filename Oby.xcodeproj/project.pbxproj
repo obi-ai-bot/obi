@@ -917,7 +917,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Oby asks for Face ID before it publishes anything for you.";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Oby writes down what you said to your watch, on this iPhone, to plan it.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens while you hold the mic button or slide up to lock listening, for up to 60 seconds.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Oby writes down your iPhone and Apple Watch speech on this iPhone to plan your request.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -959,7 +960,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Oby asks for Face ID before it publishes anything for you.";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Oby writes down what you said to your watch, on this iPhone, to plan it.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens while you hold the mic button or slide up to lock listening, for up to 60 seconds.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Oby writes down your iPhone and Apple Watch speech on this iPhone to plan your request.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -1106,7 +1108,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Watch/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens only while you hold the talk button, and your iPhone writes down what you said.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens while you hold the mic button or slide up to lock listening, for up to 60 seconds. Your iPhone writes down your request.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(OBY_IPHONE_BUNDLE_ID)";
 				INFOPLIST_KEY_WKRunsIndependentlyOfCompanionApp = YES;
@@ -1142,7 +1144,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Watch/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens only while you hold the talk button, and your iPhone writes down what you said.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens while you hold the mic button or slide up to lock listening, for up to 60 seconds. Your iPhone writes down your request.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(OBY_IPHONE_BUNDLE_ID)";
 				INFOPLIST_KEY_WKRunsIndependentlyOfCompanionApp = YES;

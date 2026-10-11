@@ -5,6 +5,8 @@ import SwiftUI
 struct HomeView: View {
     @Environment(Watch.self) private var watch
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var locked = false
+    @State private var listening = false
     @State private var path: [Screen] = []
 
     enum Screen: Hashable {
@@ -25,7 +27,7 @@ struct HomeView: View {
                 // square there. Working keeps its dots. Both give the body ~half the width.
                 let trim: CGFloat = loop == .working ? 0 : 0.32
                 let fraction: CGFloat = loop == .working ? (quiet ? 0.64 : 0.38) : (quiet ? 0.76 : 0.44)
-                let space = max(0, min(height * (quiet ? 0.68 : 0.30), height - mic - 12 - (quiet ? 0 : 44)))
+                let space = max(0, min(height * (quiet ? 0.68 : 0.30), height - mic - 12 - (quiet ? 18 : 44)))
                 let side = min(width * fraction, space / (1 - trim))
                 VStack(spacing: 6) {
                     Button { watch.leaveHome(); path.append(.jobs) } label: {
@@ -48,12 +50,16 @@ struct HomeView: View {
                     .accessibilityValue(watch.loaded ? watch.line : "")
                     .accessibilityHint("Shows the jobs")
                     if watch.talk != .none {
-                        TalkView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                        TalkView(locked: locked, listening: listening).frame(maxWidth: .infinity, maxHeight: .infinity)
                             .transition(.opacity)
                     } else {
                         Spacer(minLength: 0)
                     }
-                    TalkButton(size: mic)
+                    if quiet {
+                        Text("Hold to talk").font(.caption2).foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                    }
+                    TalkButton(size: mic, locked: $locked, listening: $listening)
                 }
                 .frame(width: width, height: height)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: watch.talk == .none)

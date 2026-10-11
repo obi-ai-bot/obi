@@ -16,7 +16,7 @@ struct RunnerJobsTests {
         #expect(decoded[1].heading == "In oby, count the Swift files in Engine/ and tell me in one line".prefix(59) + "…")
         #expect(decoded[1].doneLine == "There are 8 Swift files in `Engine/`.")
 
-        // The tag's name; the Mac skips the runner's accounts, which aren't Engine's.
+        // The tag's name, and the runner's accounts read into Engine's AccountState (Shared/Runner.swift).
         let status = #"{"accounts":[{"agent":"claude","fiveHour":0.53,"id":"default","label":"Team","name":"Deskree","running":0,"sevenDay":0.09,"signedIn":true}],"models":{"claude":{"effort":"xhigh","model":"claude-opus-5-5"},"codex":{"effort":"high","model":"gpt-6.1-sol"}},"runner":{"host":"tetrix-lab","version":"0.2.0"}}"#
         #expect(try Runner.decoder.decode(RunnerStatus.self, from: Data(status.utf8)).runner.host == "tetrix-lab")
     }

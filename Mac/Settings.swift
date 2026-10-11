@@ -8,6 +8,10 @@ struct SettingsView: View {
     @State private var problem: String?
     /// The always-on runner whose jobs the island lists and RunnerFeed follows; empty turns that off.
     @AppStorage("runnerURL") private var runnerURL = ""
+    /// Oby reads its reply out loud when you talked to it (Mac/Speech.swift).
+    @AppStorage(Speaker.setting) private var speaks = true
+    /// Merge checks on this Mac (Mac/MacChecks.swift).
+    @AppStorage(MacChecks.setting) private var runMergeChecks = true
 
     var body: some View {
         Form {
@@ -24,9 +28,17 @@ struct SettingsView: View {
             if let problem {
                 Text(problem).font(.caption).foregroundStyle(.red)
             }
+            Section("Voice") {
+                Toggle("Oby speaks its replies", isOn: $speaks)
+                Text("When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer until you press fn or say “stop”. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Runner") {
                 TextField("URL", text: $runnerURL, prompt: Text(Runner.defaultURL.absoluteString))
                 Text("The island lists the jobs running there too, and Oby tells you when one needs you. Leave it empty to turn this off.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Run merge checks on this Mac", isOn: $runMergeChecks)
+                Text("When Oby's review approves a pull request, this Mac runs its tests and builds the Mac and iPhone apps, one at a time, before Oby merges it into dev.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -217,7 +229,7 @@ struct ModelsSettingsView: View {
                     ForEach(codexEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
                 }
             }
-            Text("New jobs use these. Oby's planner stays on Haiku: it only writes the plan card, so it should be quick.")
+            Text("New jobs use these. Oby's brain stays on Haiku: it plans and answers in the conversation, so it should be quick.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
