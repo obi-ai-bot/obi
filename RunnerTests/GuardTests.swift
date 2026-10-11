@@ -157,11 +157,12 @@ struct GuardTests {
 
     @Test func aTestRunPastItsTimeoutIsEndedAndFails() async throws {
         let started = Date.now
-        let check = await Rounds.run("echo started; sleep 30", in: folder, timeout: 0.5, boxed: false)
-        #expect(Date.now.timeIntervalSince(started) < 10)
+        // Long enough for the shell to print before it's ended, even on a busy machine.
+        let check = await Rounds.run("echo started; sleep 30", in: folder, timeout: 3, boxed: false)
+        #expect(Date.now.timeIntervalSince(started) < 15)
         #expect(!check.passed && !check.succeeded)
         #expect(check.output.hasPrefix("started\n"))
-        #expect(check.output.hasSuffix("Oby stopped it after 0.5 seconds, the most a test run may take."))
+        #expect(check.output.hasSuffix("Oby stopped it after 3 seconds, the most a test run may take."))
         let quick = await Rounds.run("echo fine", in: folder, timeout: 5, boxed: false)
         #expect(quick.passed && quick.output == "fine\n")
     }

@@ -311,18 +311,22 @@ struct HaltTests {
         let process = Process()
         process.executableURL = URL(filePath: "/bin/sh")
         process.arguments = ["-c", "trap '' TERM; sleep 30 & echo $! > '\(child.path)'; wait"]
+        // When it really ended, not when this test, waiting on a busy main actor, gets to see it.
+        let ended = Ended()
+        process.terminationHandler = { _ in ended.mark() }
         try process.run()
         for _ in 0..<200 where (try? String(contentsOf: child, encoding: .utf8))?.isEmpty ?? true { try await Task.sleep(for: .milliseconds(10)) }
         let sleeper = try #require(Int32((try String(contentsOf: child, encoding: .utf8)).trimmingCharacters(in: .whitespacesAndNewlines)))
 
-        // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt.
-        let start = ContinuousClock.now
+        // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt, which gets the rest of the 2 seconds.
         let leads = getpgid(process.processIdentifier) == process.processIdentifier
         try await Task.sleep(for: .seconds(Halt.grace))
+        let start = ContinuousClock.now
         Halt.end(process)
-        for _ in 0..<200 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<500 where ended.at == nil { try await Task.sleep(for: .milliseconds(10)) }
+        let end = try #require(ended.at)
         #expect(!process.isRunning)
-        #expect(ContinuousClock.now - start < .seconds(2))
+        #expect(end - start < .seconds(2) - .seconds(Halt.grace))
         // What it started ends too, when it leads its own process group.
         if leads {
             for _ in 0..<100 where kill(sleeper, 0) == 0 { try await Task.sleep(for: .milliseconds(10)) }
@@ -360,4 +364,12 @@ struct HaltTests {
         #expect(await !alive())
         #expect(ContinuousClock.now - start < .seconds(2) - .seconds(Halt.grace))
     }
+}
+
+/// When a process ended, from its termination handler's thread.
+final class Ended: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant: ContinuousClock.Instant?
+    var at: ContinuousClock.Instant? { lock.withLock { instant } }
+    func mark() { lock.withLock { instant = .now } }
 }

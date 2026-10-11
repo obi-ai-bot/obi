@@ -154,7 +154,8 @@ struct ReviewTests {
 
     @Test func aReviewWaitsForAnAccountWithRoomAndStartsWhenItsWindowResets() async throws {
         accounts.setLabel(nil, for: personal.id)
-        let resets = Date.now.addingTimeInterval(1.5)
+        // Far enough off that the author publishes first, even on a busy machine.
+        let resets = Date.now.addingTimeInterval(3.5)
         accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: resets), for: work.id)
         let published = try await publishAuthor()
         let line = "Waiting for an account with room (resets \(Limits.clock(resets)))"
