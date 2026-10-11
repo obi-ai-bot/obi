@@ -10,7 +10,9 @@ import CoreGraphics
 /// action (emoji, dictation) doesn't fire, if macOS lets an event tap stop it (see `GlobeKey`).
 final class TalkKey {
     enum Key { case fn, controlOption }
-    enum Event { case start(Key), handsFree, send, cancel }
+    /// `press` comes the moment a talk key goes down, before anything else is known (it may turn
+    /// out to be a shortcut): Oby stops speaking on it.
+    enum Event { case press(Key), start(Key), handsFree, send, cancel }
 
     var on: (Event) -> Void = { _ in }
 
@@ -100,7 +102,17 @@ final class TalkKey {
         }
     }
 
+    /// Oby spoke its reply in hands-free mode and listens again for yours: the next press of
+    /// either key sends, as after fn + Space, and Escape cancels.
+    func listenAgain() {
+        wait?.cancel()
+        held = nil
+        talking = true
+        handsFree = true
+    }
+
     private func press(_ key: Key) {
+        on(.press(key))
         // Hands-free ends at the next press, of either key.
         if handsFree { stop(.send); return }
         guard held == nil, !talking else { return }

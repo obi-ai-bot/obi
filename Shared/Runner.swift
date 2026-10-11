@@ -334,15 +334,39 @@ nonisolated struct ModelOptions: Codable, Equatable, Sendable {
     var codex: Tool
 }
 
-nonisolated struct RunnerStatus: Codable, Equatable, Sendable {
+#if os(iOS) || os(watchOS)
+/// The runner's accounts as the API sends them: the iPhone's own wire type.
+typealias RunnerAccount = Account
+#else
+/// On the Mac the runner's accounts are read into Engine's own AccountState (the runner keeps
+/// their `payer` and `home` to itself), so the brain can tell their usage too (Engine/Conversation.swift).
+typealias RunnerAccount = AccountState
+
+extension AccountState: Decodable {
+    private enum Keys: String, CodingKey { case id, agent, name, label, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil }
+
+    init(from decoder: any Decoder) throws {
+        let keys = try decoder.container(keyedBy: Keys.self)
+        self.init(account: Account(id: try keys.decode(String.self, forKey: .id), agent: try keys.decode(String.self, forKey: .agent),
+                                   name: try keys.decode(String.self, forKey: .name), payer: "", home: nil),
+                  label: try keys.decodeIfPresent(String.self, forKey: .label),
+                  fiveHour: try keys.decodeIfPresent(Double.self, forKey: .fiveHour),
+                  sevenDay: try keys.decodeIfPresent(Double.self, forKey: .sevenDay),
+                  fiveHourResets: try keys.decodeIfPresent(Date.self, forKey: .fiveHourResets),
+                  sevenDayResets: try keys.decodeIfPresent(Date.self, forKey: .sevenDayResets),
+                  running: try keys.decodeIfPresent(Int.self, forKey: .running) ?? 0,
+                  fullUntil: try keys.decodeIfPresent(Date.self, forKey: .fullUntil))
+    }
+}
+#endif
+
+nonisolated struct RunnerStatus: Decodable, Equatable, Sendable {
     struct Runner: Codable, Equatable, Sendable {
         var version: String
         var host: String
     }
     var runner: Runner
-    #if os(iOS) || os(watchOS)
-    var accounts: [Account]
-    #endif
+    var accounts: [RunnerAccount]
     var models: ModelSettings
     /// When Clear done was last pressed, on any app, or nil (docs/runner-api.md). Older runners don't send it.
     var clearedAt: Date?
@@ -365,7 +389,7 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     /// arrives after this, so applying it over the fetched lists loses nothing.
     case connected
     case job(Job)
-    case accounts([Account])
+    case accounts([RunnerAccount])
     /// Clear done was pressed, here or on another app: jobs that finished by then are hidden.
     case cleared(Date)
     /// An inbox item came, was answered, done or put off, here or on another app.
@@ -670,7 +694,7 @@ nonisolated struct EventParser {
             let json = Data(data.utf8)
             switch name {
             case "job": return (try? Runner.decoder.decode(Job.self, from: json)).map(RunnerEvent.job)
-            case "accounts": return (try? Runner.decoder.decode([Account].self, from: json)).map(RunnerEvent.accounts)
+            case "accounts": return (try? Runner.decoder.decode([RunnerAccount].self, from: json)).map(RunnerEvent.accounts)
             case "clear": return (try? Runner.decoder.decode(ClearedAt.self, from: json)).map { .cleared($0.clearedAt) }
             case "inbox": return (try? Runner.decoder.decode(InboxItem.self, from: json)).map(RunnerEvent.inbox)
             default: return nil

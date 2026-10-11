@@ -1173,8 +1173,9 @@ nonisolated final class JobStore {
         // ponytail: the job as JSON next to its id and time; add columns when something needs to query them.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS turns (created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
-        // The inbox (Engine/Inbox.swift), the same way.
+        // The inbox (Engine/Inbox.swift) and the conversation (Engine/Conversation.swift), the same way.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
+        sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS conversation (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
     }
 
     deinit { sqlite3_close(db) }
