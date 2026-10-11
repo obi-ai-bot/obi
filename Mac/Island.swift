@@ -247,6 +247,10 @@ final class IslandController {
     }
 
     private func heard(_ said: String, key: TalkKey.Key) {
+        // A bare "stop" or "never mind" ends the turn and the hands-free listening, and no job
+        // with it: Desk.ask sends nothing to the brain for it, so nothing is spoken and nothing
+        // listens again.
+        if Conversation.cancels(said) { handsFreeAsk = false }
         if !said.isEmpty { desk.ask(said, spoken: true) }
         // Talking again already: that's what the island shows.
         guard model.voice.phase == .idle, model.state == .listening else { return }

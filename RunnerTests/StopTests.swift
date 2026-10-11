@@ -16,7 +16,7 @@ struct StopEverythingTests {
         func kill() {}
     }
 
-    let stop = Planner.Result(plan: Plan(action: .stopAgent, reply: "Oby will stop all running work.", dispatches: [], question: nil), by: "claude")
+    let stop = Planner.Result(plan: Plan(action: .stopAgent, reply: "Oby will stop all running work.", dispatches: [], question: nil, all: true), by: "claude")
 
     func draft(_ id: String) -> Desk.Draft {
         var job = job

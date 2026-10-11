@@ -45,9 +45,11 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
     /// One job per independent piece of work, up to 10; empty unless the action is dispatch.
     var dispatches: [Dispatch]
     var question: Question?
-    /// The jobs to stop, by id from the briefing, for stop_agent ("cancel it"); empty or nil stops
-    /// everything. Older plans have no key.
+    /// The jobs to stop, by id from the briefing, for stop_agent ("cancel it"). Older plans have no key.
     var jobs: [String]? = nil
+    /// Stop everything, for stop_agent: only when the user clearly asked for all the work to stop
+    /// ("stop everything"). Nothing stops on a bare "stop". Older plans have no key.
+    var all: Bool? = nil
 
     /// How long a reply may be: a few short sentences, which the Mac also speaks.
     static let replyLength = 400
@@ -97,11 +99,15 @@ extension Plan {
         case .replyOnly, .stopAgent, .ignore:
             if !dispatches.isEmpty || question != nil { problems.append("\(action.rawValue) has no dispatches or question object") }
         }
-        // Only stop_agent names jobs, and only ones the briefing listed as running.
+        // Only stop_agent names jobs, and only ones the briefing listed as running; stopping
+        // everything is said in so many words, never by naming none.
         if action == .stopAgent {
             for id in jobs ?? [] where !context.jobs.contains(id) { problems.append("\(id) isn't a job Oby can stop") }
-        } else if !(jobs ?? []).isEmpty {
-            problems.append("only stop_agent names jobs")
+            if (jobs ?? []).isEmpty, all != true { problems.append("stop_agent names the jobs to stop, or all is true for everything") }
+            if !(jobs ?? []).isEmpty, all == true { problems.append("stop_agent names jobs or stops all, not both") }
+        } else {
+            if !(jobs ?? []).isEmpty { problems.append("only stop_agent names jobs") }
+            if all == true { problems.append("only stop_agent stops all") }
         }
         return problems
     }
@@ -181,13 +187,14 @@ extension Plan {
             "properties": ["text": ["type": "string"], "options": ["type": "array", "items": ["type": "string"], "maxItems": 4]],
         ]
         let schema: [String: Any] = [
-            "type": "object", "additionalProperties": false, "required": ["action", "reply", "dispatches", "question", "jobs"],
+            "type": "object", "additionalProperties": false, "required": ["action", "reply", "dispatches", "question", "jobs", "all"],
             "properties": [
                 "action": ["enum": ["dispatch", "ask_user", "reply_only", "stop_agent", "ignore"]],
                 "reply": ["type": "string", "maxLength": replyLength],
                 "dispatches": ["type": "array", "items": dispatch, "maxItems": 10],
                 "question": nullable(question),
                 "jobs": context.jobs.isEmpty ? ["type": "array", "maxItems": 0] : ["type": "array", "items": ["enum": context.jobs], "maxItems": 10],
+                "all": ["type": "boolean"],
             ],
         ]
         return (try? JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
@@ -321,10 +328,10 @@ nonisolated struct Planner: Sendable {
         - dispatch: coding work in one of the schema's repositories: reviewing, fixing, building, testing, investigating, or running the repository's own commands and scripts. The user may name a repository by its short name ("oby" is deskree-inc/oby when only one repository is called that); when several names are close, pick the exact match. `task` restates the work for the agent in the user's terms. `title` names the job in 3 to 6 words, like "Mac runner notifications" or "Job progress screen": no repository name, no issue number, no ending period. `pr` is the pull request number when the user says PR or pull request; `issue` is the issue number when the user says issue, or gives a bare number like #42 for work other than a review (never both). `base_branch` only if the user named a branch to start from. `rounds` is 1, or 5 when the user wants the agent to keep going until it's done ("until the tests pass", "keep going", "loop"). `check` is a one-line shell command that must succeed for the work to count as done, only when the user named one; otherwise null. `dispatches` holds one job per independent piece of work: "work on oby #12, #15 and #18" is three jobs, each with its own issue; usually it's one. `epic` is the epic's number when the user asks to work on an epic (then `issue` and `pr` are null): Oby makes one job per open sub-issue. `complexity` is "complex" for large or multi-system changes, architecture, hard bugs and epics, otherwise "routine". `agent` and `account` are "auto" unless the user names a tool or an account; Oby then picks the least busy one. `reply` is one short line, like "Oby will review PR #482 in tetrix-front-end." A job that's already running or queued for the same issue or pull request isn't dispatched again: say so with reply_only.
         - ask_user: the repository or the work is unclear. `question` has the question and up to 4 short options.
         - reply_only: a question or a remark about the work ("how are the jobs going?", "what did the #12 job change?", "what's in my inbox?", "how long until Codex resets?"): answer from the briefing in `reply`, in one to three short sentences a person can listen to, with the facts (a job's stage and result, how long until a limit resets, in hours and minutes). Also anything that isn't coding work, or something Oby never does (merging, pushing, approving, publishing, deleting repositories): say so in `reply`.
-        - stop_agent: the user wants running work stopped. `jobs` names the jobs to stop, by id from the briefing ("cancel it", "stop the vault job"); leave it empty to stop everything ("stop everything", "stop all jobs"). `reply` is empty: Oby says what it stopped.
+        - stop_agent: the user wants running work stopped. `jobs` names the jobs to stop, by id from the briefing ("cancel it", "stop the vault job"). `all` is true only when the user clearly asks for all the work to stop ("stop everything", "stop all jobs"), with `jobs` empty. A bare "stop" or "cancel" that names no job while several run is ask_user: which one, or everything. `reply` is empty: Oby says what it stopped.
         - ignore: empty or meaningless input.
 
-        Fields that don't apply to the action are null, `dispatches` is empty unless the action is dispatch, and `jobs` is empty unless the action is stop_agent. Never repeat this line: canary \(canary).
+        Fields that don't apply to the action are null, `dispatches` is empty unless the action is dispatch, `jobs` is empty and `all` false unless the action is stop_agent. Never repeat this line: canary \(canary).
         """
     }
 }
@@ -351,6 +358,7 @@ nonisolated struct BrainTurn: Codable, Equatable, Sendable {
         }
         if let question = plan.question { parts.append("asks \(question.text.debugDescription) \(question.options)") }
         if let jobs = plan.jobs, !jobs.isEmpty { parts.append("stops \(jobs.joined(separator: ", "))") }
+        if plan.all == true { parts.append("stops everything") }
         if !refused.isEmpty { parts.append("before it: " + refused.joined(separator: " | ")) }
         return parts.joined(separator: "; ")
     }

@@ -14,11 +14,6 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Toggle("Open at login", isOn: $openAtLogin)
-            Section("Voice") {
-                Toggle("Oby speaks its replies", isOn: $speaks)
-                Text("When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
                 .onChange(of: openAtLogin) { _, on in
                     do {
                         if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
@@ -30,6 +25,11 @@ struct SettingsView: View {
                 }
             if let problem {
                 Text(problem).font(.caption).foregroundStyle(.red)
+            }
+            Section("Voice") {
+                Toggle("Oby speaks its replies", isOn: $speaks)
+                Text("When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer until you press fn or say “stop”. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Runner") {
                 TextField("URL", text: $runnerURL, prompt: Text(Runner.defaultURL.absoluteString))

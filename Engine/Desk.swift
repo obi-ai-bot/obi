@@ -186,12 +186,14 @@ final class Desk {
     /// The user said something: it joins the thread, and Oby thinks. The answer joins the thread
     /// too, or the island hears why not within `patience`. `shown` is what the thread shows when
     /// the brain gets more (an answer with its question). `spoken`: the user talked, so the Mac
-    /// speaks the reply. While Oby thinks, "never mind" or "stop" cancels the turn; any other
-    /// words replace it.
+    /// speaks the reply. A bare "never mind", "stop" or "cancel" never reaches the brain: it ends
+    /// the turn under way (its words leave the thread) and otherwise does nothing, so no job stops
+    /// on a word; stopping work takes a job's name or "stop everything". Any other words replace
+    /// the turn under way.
     func ask(_ words: String, shown: String? = nil, spoken: Bool = false) {
         let said = words.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !said.isEmpty else { return }
-        if case .thinking = talk, Conversation.cancels(said) { return cancel() }
+        if Conversation.cancels(said) { return cancel() }
         cancel()
         asking += 1
         let mine = asking
@@ -233,9 +235,11 @@ final class Desk {
 
     /// One exchange for the runner's API: the user's words and Oby's answer join the thread, and
     /// the brain reads `turns` as the conversation so far (the client's, when it sent them, else
-    /// the runner's own).
+    /// the runner's own). A bare cancel word is answered with nothing. The plan acts unless the
+    /// request's task was cancelled meanwhile; a client that merely stopped waiting can't be told apart.
     func converse(_ said: String, shown: String? = nil, turns given: [Turn]? = nil) async -> Talk {
-        let talk = await plan(said, turns: given)
+        guard !Conversation.cancels(said) else { return .none }
+        let talk = await plan(said, turns: given) { !Task.isCancelled }
         add(Turn(who: .user, text: shown ?? said))
         if let reply = Self.reply(in: talk) { add(Turn(who: .oby, text: reply)) }
         return talk
@@ -486,9 +490,11 @@ final class Desk {
         case .askUser:
             return plan.question.map { .question(said: said, $0) } ?? .reply(plan.reply)
         case .stopAgent:
-            // The jobs the brain named ("cancel it"), here or elsewhere; else everything, here and
-            // elsewhere. What was stopped, not the brain's reply: it doesn't know what was running.
+            // The jobs the brain named ("cancel it"), here or elsewhere; or everything, here and
+            // elsewhere, only when the user asked for all of it in so many words. What was
+            // stopped, not the brain's reply: it doesn't know what was running.
             let named = plan.jobs ?? []
+            guard !named.isEmpty || plan.all == true else { return .reply("Say which job to stop, or “stop everything”.") }
             let others = Dictionary(elsewhere().flatMap(\.jobs).filter(\.isActive).map { ($0.id, $0) }) { first, _ in first }
             var here: [Job] = []
             var away: [Job] = []

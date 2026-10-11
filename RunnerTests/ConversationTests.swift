@@ -54,8 +54,9 @@ struct ConversationTests {
         #"{"action":"reply_only","reply":"\#(text)","question":null,"dispatches":[],"jobs":[]}"#
     }
 
+    /// A stop of the jobs named, or of everything when none are.
     static func stop(_ ids: [String]) -> String {
-        #"{"action":"stop_agent","reply":"","question":null,"dispatches":[],"jobs":[\#(ids.map { "\"\($0)\"" }.joined(separator: ","))]}"#
+        #"{"action":"stop_agent","reply":"","question":null,"dispatches":[],"jobs":[\#(ids.map { "\"\($0)\"" }.joined(separator: ","))],"all":\#(ids.isEmpty)}"#
     }
 
     init() throws {
@@ -200,12 +201,23 @@ struct ConversationTests {
         var dispatch = try Plan.decode(Data(Self.reply("ok").utf8))
         dispatch.jobs = ["ab12cd34"]
         #expect(dispatch.problems(in: context, canary: "zq9") == ["only stop_agent names jobs"])
+        // Stopping everything is said in so many words, never by naming no job.
+        #expect(try Plan.decode(Data(Self.stop([]).utf8)).problems(in: context, canary: "zq9").isEmpty)
+        var bare = try Plan.decode(Data(Self.stop([]).utf8))
+        bare.all = false
+        #expect(bare.problems(in: context, canary: "zq9") == ["stop_agent names the jobs to stop, or all is true for everything"])
+        var both = try Plan.decode(Data(Self.stop(["ab12cd34"]).utf8))
+        both.all = true
+        #expect(both.problems(in: context, canary: "zq9") == ["stop_agent names jobs or stops all, not both"])
+        dispatch.jobs = nil
+        dispatch.all = true
+        #expect(dispatch.problems(in: context, canary: "zq9") == ["only stop_agent stops all"])
         // Older plans have no jobs key; the schema offers only the briefing's running jobs.
         #expect(try Plan.decode(Data(#"{"action":"ignore","reply":"","question":null,"dispatches":[]}"#.utf8)).jobs == nil)
         let schema = try #require(JSONSerialization.jsonObject(with: Plan.schema(for: context)) as? [String: Any])
         let jobs = try #require((schema["properties"] as? [String: Any])?["jobs"] as? [String: Any])
         #expect((jobs["items"] as? [String: Any])?["enum"] as? [String] == ["ab12cd34"])
-        #expect((schema["required"] as? [String])?.contains("jobs") == true)
+        #expect((schema["required"] as? [String])?.contains("jobs") == true && (schema["required"] as? [String])?.contains("all") == true)
         let none = try #require(JSONSerialization.jsonObject(with: Plan.schema(for: BrainContext(accounts: [:], repos: []))) as? [String: Any])
         #expect(((none["properties"] as? [String: Any])?["jobs"] as? [String: Any])?["maxItems"] as? Int == 0)
         let long = Plan(action: .replyOnly, reply: String(repeating: "x", count: Plan.replyLength + 1), dispatches: [], question: nil)
@@ -276,6 +288,11 @@ struct ConversationTests {
         desk.elsewhere = { [] }
         let late = Planner.Result(plan: try Plan.decode(Data(Self.stop(["fa5a5a5a"]).utf8)), by: "fake")
         #expect(await desk.card(for: late, said: "stop it") == .reply("That job isn't running any more."))
+        // A stop that names nothing and doesn't say everything stops nothing (Swift refuses it
+        // from the brain; a plan from elsewhere gets the same answer).
+        var bare = try Plan.decode(Data(Self.stop([]).utf8))
+        bare.all = false
+        #expect(await desk.card(for: Planner.Result(plan: bare, by: "fake"), said: "stop") == .reply("Say which job to stop, or “stop everything”."))
     }
 
     /// "Stop everything" stops the runner's jobs too, and counts only what did stop.
@@ -412,7 +429,7 @@ struct ConversationTests {
         #expect(store().conversation().map(\.text) == ["quick one", "Quick."])
     }
 
-    @Test func neverMindCancelsOnlyWhileThinking() async throws {
+    @Test func neverMindAndStopEndTheTurnAndStopNoJob() async throws {
         brain.slow = { $0.contains("slow one") ? .milliseconds(300) : .zero }
         desk.ask("slow one")
         desk.ask("never mind")
@@ -421,11 +438,17 @@ struct ConversationTests {
         try await Task.sleep(for: .milliseconds(100))
         // "Never mind" never reached the brain, and the answer it was for changed nothing.
         #expect(desk.talk == .none && desk.turns.isEmpty && brain.prompts.count == 1)
-        // Not thinking: "stop" is for the brain.
+        // Not thinking either: a bare "stop" never reaches the brain, and no job stops on it.
+        desk.enqueue(vaultJob())
+        try await until("the job runs") { desk.jobs.first?.status == .running }
         brain.plans = [Self.stop([])]
-        desk.ask("stop")
-        try await until("the brain answers") { desk.talk == .reply("Nothing is running.") }
-        #expect(desk.turns.map(\.text) == ["stop", "Nothing is running."])
+        for words in ["stop", "Cancel.", "never mind"] {
+            desk.ask(words)
+            #expect(desk.talk == .none && desk.turns.isEmpty, "\(words)")
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(desk.jobs.first?.status == .running && brain.prompts.count == 1)
+        #expect(await desk.converse("stop") == .none && desk.jobs.first?.status == .running && brain.prompts.count == 1)
     }
 
     @Test func aTurnThatTakesTooLongEndsWithAReply() async throws {

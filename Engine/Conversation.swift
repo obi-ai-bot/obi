@@ -30,9 +30,9 @@ nonisolated enum Conversation {
     /// What the island says when the brain took too long: the turn ends, never stuck on Thinking.
     static let timedOut = "Oby didn't answer in time. Try again."
 
-    /// Words that cancel the turn under way instead of starting one: "never mind", "stop",
-    /// "cancel", "forget it", with any punctuation after them. Only while Oby is thinking; at any
-    /// other time "stop" is for the brain, which stops the jobs.
+    /// Words that end the turn under way instead of starting one: "never mind", "stop", "cancel",
+    /// "forget it", with any punctuation after them. They never reach the brain, so no job stops
+    /// on a bare word: "stop the vault job" or "stop everything" do that.
     static func cancels(_ said: String) -> Bool {
         let words = said.lowercased().replacing(/[^a-z' ]+/, with: " ").split(separator: " ").joined(separator: " ")
         return ["never mind", "nevermind", "stop", "cancel", "cancel that", "forget it", "no wait", "wait", "nothing", "leave it"].contains(words)

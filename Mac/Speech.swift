@@ -40,13 +40,14 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     /// Quiet, now.
     func stop() {
         guard let utterance = current else { return }
-        ended(utterance, heard: false)
+        ended(ObjectIdentifier(utterance), heard: false)
         synthesizer.stopSpeaking(at: .immediate)
     }
 
-    private func ended(_ utterance: AVSpeechUtterance, heard: Bool) {
-        guard utterance === current else { return }
-        current = nil
+    /// `id` is the utterance that ended, by identity: only the current one counts.
+    private func ended(_ id: ObjectIdentifier, heard: Bool) {
+        guard let current, ObjectIdentifier(current) == id else { return }
+        self.current = nil
         speaking = false
         let done = self.done
         self.done = nil
@@ -63,11 +64,14 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         return voices.min { rank($0) < rank($1) } ?? AVSpeechSynthesisVoice(language: "en-US")
     }()
 
+    // The utterance isn't Sendable, so only its identity crosses to the main actor.
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.ended(utterance, heard: true) }
+        let id = ObjectIdentifier(utterance)
+        Task { @MainActor in self.ended(id, heard: true) }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.ended(utterance, heard: false) }
+        let id = ObjectIdentifier(utterance)
+        Task { @MainActor in self.ended(id, heard: false) }
     }
 }
