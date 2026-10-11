@@ -554,6 +554,8 @@ final class Desk {
                                     : "\(job.agentName) is wrapping up. Tell it again once it's done.")
             }
             replace(Self.heard(job, text))
+            // Words between turns (while the check runs) start a turn: it gets a round timer too.
+            if roundTimers[id] == nil { timeRound(id) }
             agent.send(text)
         } else {
             guard let session = job.session else { throw Shell.Failure(message: "This job never started, so there's no session to pick up.") }
@@ -973,6 +975,9 @@ nonisolated enum Rounds {
         var problems: [String] = []
         /// Other changes to existing tests, said when the job ends, for review.
         var notes: [String] = []
+        /// The failing tests' ids, read from all of the output before it's cut to its end; nil to
+        /// read them from `output`.
+        var failing: [String]? = nil
 
         var succeeded: Bool { passed && problems.isEmpty }
     }
@@ -992,7 +997,8 @@ nonisolated enum Rounds {
                                           env: Agents.overrides, timeout: timeout)
         var output = result.map { String(decoding: $0.out, as: UTF8.self) + $0.err } ?? "Oby couldn't run it."
         if result?.timedOut == true { output += "\n\nOby stopped it after \(JobLimits.span(timeout)), the most a test run may take." }
-        return Check(command: command, passed: result?.status == 0 && result?.timedOut == false, output: String(output.suffix(4000)))
+        return Check(command: command, passed: result?.status == 0 && result?.timedOut == false, output: String(output.suffix(4000)),
+                     failing: Fingerprint.failingTests(output))
     }
 
     /// The summary of a job stopped at a limit.

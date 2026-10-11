@@ -33,7 +33,7 @@ nonisolated enum Fingerprint {
     static let tail = 20
 
     static func of(_ check: Rounds.Check) -> String {
-        (failingTests(check.output) + ["--"] + normalized(check.output) + ["--"] + check.problems).joined(separator: "\n")
+        ((check.failing ?? failingTests(check.output)) + ["--"] + normalized(check.output) + ["--"] + check.problems).joined(separator: "\n")
     }
 
     /// The ids of the tests the output says failed, sorted, from the common runners' formats:
@@ -88,6 +88,10 @@ nonisolated enum Integrity {
         var new: String?
         var added: [String] = []
         var removed: [String] = []
+        /// The whole file before and after, for the build files whose test settings span lines
+        /// (Package.swift); nil otherwise.
+        var before: String?
+        var after: String?
     }
 
     struct Report: Equatable, Sendable {
@@ -108,18 +112,41 @@ nonisolated enum Integrity {
     /// closed: when git can't say, that's the problem.
     static func check(worktree: URL, against ref: String) async -> Report {
         let git = ["git", "-c", "core.quotePath=false", "-C", worktree.path]
-        guard let base = try? await Shell.ok(git + ["merge-base", ref, "HEAD"]),
-              let diff = try? await Shell.run(git + ["diff", "--no-color", "--no-ext-diff", "-U0", "-M", base]), diff.status == 0 else {
+        // A commit recorded when the work started is compared with as it is: a merge base moves
+        // when the agent moves HEAD. A ref (older jobs) is compared from where the branch left it.
+        let fixed = ref.contains(/^[0-9a-f]{40}$/)
+        guard let base = fixed ? ref : try? await Shell.ok(git + ["merge-base", ref, "HEAD"]) else {
             return Report(problems: ["Oby couldn't compare the tests with \(ref)"])
         }
-        var changes = self.changes(String(decoding: diff.out, as: UTF8.self))
-        // Files the agent made and didn't commit count too: they're in the worktree the check ran in.
-        let untracked = ((try? await Shell.ok(git + ["ls-files", "--others", "--exclude-standard"])) ?? "").split(separator: "\n").map(String.init)
+        // Nothing the agent wrote gets a say in what the diff shows: no text conversion or external
+        // diff, binary files as text, and the attributes from the commit compared with.
+        let env: [String: String?] = ["GIT_ATTR_SOURCE": base]
+        let diff = git + ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U0", "-M", base]
+        func diffed(_ arguments: [String], reading after: (String) async -> String?) async -> [Change]? {
+            guard let result = try? await Shell.run(diff + arguments, env: env), result.status == 0 else { return nil }
+            var changes = self.changes(String(decoding: result.out, as: UTF8.self))
+            for index in changes.indices where testSetting(in: changes[index].new ?? changes[index].old ?? "") != nil {
+                if let old = changes[index].old { changes[index].before = try? await Shell.ok(git + ["show", "\(base):\(old)"], env: env) }
+                if let new = changes[index].new { changes[index].after = await after(new) }
+            }
+            return changes
+        }
+        // The commits, which are what Publish sends (tree to tree, so no filter runs), and the
+        // worktree the check ran in, with what the agent didn't commit.
+        guard let committed = await diffed(["HEAD"], reading: { try? await Shell.ok(git + ["show", "HEAD:\($0)"], env: env) }),
+              var working = await diffed([], reading: { try? String(contentsOf: worktree.appending(path: $0), encoding: .utf8) }) else {
+            return Report(problems: ["Oby couldn't compare the tests with \(ref)"])
+        }
+        let untracked = ((try? await Shell.ok(git + ["ls-files", "--others", "--exclude-standard"], env: env)) ?? "").split(separator: "\n").map(String.init)
         for path in untracked where isTest(path) || isConfig(path) {
             let text = (try? String(contentsOf: worktree.appending(path: path), encoding: .utf8)) ?? ""
-            changes.append(Change(old: nil, new: path, added: text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)))
+            working.append(Change(old: nil, new: path, added: text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)))
         }
-        return report(changes)
+        let both = [report(committed), report(working)]
+        var merged = Report()
+        for line in both.flatMap(\.problems) where !merged.problems.contains(line) { merged.problems.append(line) }
+        for line in both.flatMap(\.notes) where !merged.notes.contains(line) { merged.notes.append(line) }
+        return merged
     }
 
     /// The files a `git diff -U0 -M` names, with their added and removed lines.
@@ -163,7 +190,11 @@ nonisolated enum Integrity {
             }
             if let file = change.new ?? change.old, let setting = testSetting(in: file) {
                 let changed = (file.hasSuffix("Package.swift") ? [] : change.added) + change.removed
-                if let line = changed.first(where: { $0.contains(setting) }) {
+                let targets = testTargets(in: change.before ?? "")
+                if let gone = targets.first(where: { !testTargets(in: change.after ?? "").contains($0) }) {
+                    let name = gone.firstMatch(of: /name:\s*"([^"]*)"/).map { "the test target \($0.1)" } ?? "a test target"
+                    report.problems.append("changes \(name) in \(file)")
+                } else if targets.isEmpty, let line = changed.first(where: { $0.contains(setting) }) {
                     report.problems.append("changes the test settings in \(file): \(line.trimmingCharacters(in: .whitespaces).prefix(80))")
                 }
             }
@@ -177,7 +208,7 @@ nonisolated enum Integrity {
                     else { report.problems.append("moves the test file \(old) out of the tests, to \(new)") }
                 }
                 if change.new != nil {
-                    let lost = change.removed.count(where: { $0.contains(assertion) }) - change.added.count(where: { $0.contains(assertion) })
+                    let lost = change.removed.count(where: asserts) - change.added.count(where: asserts)
                     if lost > 0 {
                         report.problems.append("removes \(lost) assertion\(lost == 1 ? "" : "s") from \(change.new ?? old)")
                     } else if change.removed.contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
@@ -207,6 +238,29 @@ nonisolated enum Integrity {
         }
     }
 
+    /// A line that really asserts: not commented out, and not one that can't fail (`#expect(true)`).
+    static func asserts(_ line: String) -> Bool {
+        line.contains(assertion) && !line.contains(/^\s*(?:\/\/|\/\*|\*|#(?:\s|$|#|!)|--\s)/) && !line.contains(trivial)
+    }
+
+    /// Each `.testTarget(…)` in a Package.swift, with its spaces squeezed: which tests SwiftPM
+    /// finds and runs, however many lines it spans (`exclude:`, `sources:`, `path:`).
+    static func testTargets(in package: String) -> [String] {
+        var targets: [String] = []
+        var rest = package[...]
+        while let start = rest.range(of: ".testTarget(") {
+            var depth = 0
+            var end = start.upperBound
+            for index in rest[start.lowerBound...].indices {
+                if rest[index] == "(" { depth += 1 }
+                if rest[index] == ")" { depth -= 1; if depth == 0 { end = rest.index(after: index); break } }
+            }
+            targets.append(String(rest[start.lowerBound..<end]).replacing(/\s+/, with: " "))
+            rest = rest[end...]
+        }
+        return targets
+    }
+
     /// A test file: in a folder of tests (`tests/`, `__tests__/`, `RunnerTests/`), or named like one.
     static func isTest(_ path: String) -> Bool {
         path.contains(/(?:^|\/)(?:tests?|__tests__|specs?|[A-Za-z0-9_]*Tests?)\//)
@@ -224,6 +278,9 @@ nonisolated enum Integrity {
 
     /// A line that asserts, in the common frameworks.
     static let assertion = /#expect\b|#require\b|\bXCT(?:Assert\w*|Fail|Unwrap)\b|\bexpect\s*\(|\bassert\w*\s*[(\s!]|\bt\.(?:Error|Errorf|Fatal|Fatalf|Fail)\b|\bshould\b|\.to(?:Be|Equal|Have)\w*\(/
+
+    /// An assertion that can't fail.
+    static let trivial = /#(?:expect|require)\s*\(\s*true\s*\)|\bXCTAssert(?:True)?\s*\(\s*true\s*[,)]|\bXCTAssertFalse\s*\(\s*false\s*[,)]|\bassert\s*\(?\s*(?:true|True|1)\s*\)?\s*$|\bexpect\s*\(\s*true\s*\)\.toBe(?:Truthy)?\(\s*(?:true)?\s*\)/
 
     /// A line that declares a test: Swift Testing and XCTest, Jest and Vitest, pytest, Go, Rust, JUnit, RSpec.
     static let declaration = /^\s*(?:@Test\b|#\[(?:\w+::)?test\]|(?:(?:public|private|internal|async|override)\s+)*(?:func|def)\s+(?:test|Test)\w*\s*\(|(?:it|test)(?:\.\w+)*\s*\(|it\s+['"])/
