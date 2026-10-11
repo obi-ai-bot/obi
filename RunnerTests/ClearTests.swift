@@ -112,11 +112,16 @@ final class ClearTests {
         var outOfRounds = done
         outOfRounds.published = "https://github.com/deskree-inc/oby/pull/80"
         outOfRounds.review = Review(verdict: .changesRequested, job: "rev4", agent: "codex", account: "Work", round: Review.maxRounds)
-        for job in [ready, failed, interrupted, outOfRounds] {
+        var stranded = ready
+        stranded.published = "https://github.com/deskree-inc/oby/pull/80"
+        stranded.pushed = 1
+        stranded.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: now - 120, checkedAt: now - 90)
+        #expect(stranded.stranded)
+        for job in [ready, failed, interrupted, outOfRounds, stranded] {
             #expect(job.needsYou && lists(job), Comment(rawValue: "\(job.status) \(job.dismissed == nil)"))
         }
         // Dismissed, they go with the rest of what finished by the clear.
-        for var job in [ready, failed, interrupted, outOfRounds] {
+        for var job in [ready, failed, interrupted, outOfRounds, stranded] {
             job.dismissed = now - 30
             #expect(!job.needsYou && !lists(job), Comment(rawValue: "\(job.status) \(job.dismissed == nil)"))
         }

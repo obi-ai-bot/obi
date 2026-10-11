@@ -294,10 +294,21 @@ struct ReviewTests {
         #expect(job.canPublish && job.needsYou && Push.notice(for: job) == .ready)
         job.pullRequest = PullRequestStatus(state: .open, base: "dev", checkedAt: .now)
         #expect(job.canPublish)
+        #expect(!job.stranded)
+        // Ready to publish when its pull request merged or closed: nothing is offered to publish,
+        // and it still needs you, so it stays listed after Clear done until you Dismiss it.
         for state in [PullRequestStatus.State.closed, .merged] {
             job.pullRequest = PullRequestStatus(state: state, base: "dev", checkedAt: .now)
-            #expect(!job.canPublish, Comment(rawValue: state.rawValue))
+            #expect(!job.canPublish && job.stranded && job.needsYou, Comment(rawValue: state.rawValue))
+            // No alert of its own yet: Push has no notice for it.
+            #expect(Push.notice(for: job) == nil)
         }
+        var dismissed = job
+        dismissed.dismissed = .now
+        #expect(dismissed.stranded && !dismissed.needsYou)
+        // Everything it made went out before the merge: nothing needs you.
+        job.pushed = 3
+        #expect(!job.stranded && !job.needsYou)
     }
 
     @Test func aRoundWithCommitsForAClosedPullRequestFails() {

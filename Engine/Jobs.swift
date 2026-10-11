@@ -96,9 +96,17 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var reviewNeedsYou: Bool {
         status == .done && published != nil && (review?.stopsHere ?? false) && (pullRequest?.state ?? .open) == .open
     }
-    /// Waiting for Publish (its own publish failed), failed, interrupted, or out of review rounds:
-    /// what an alert is sent for, what Home counts, and what Dismiss takes. Not once dismissed.
-    var needsYou: Bool { dismissed == nil && (canPublish || status == .failed || status == .interrupted || reviewNeedsYou) }
+    /// Done with commits its pull request will never take: it was merged or closed before they
+    /// went out (a round that commits after that fails instead, `ending`).
+    var stranded: Bool {
+        status == .done && published != nil && unpublished > 0 && reviewOf == nil
+            && (pullRequest.map { $0.state != .open } ?? false)
+    }
+    /// Waiting for Publish (its own publish failed), failed, interrupted, out of review rounds, or
+    /// with commits its pull request won't take: what an alert is sent for, what Home counts, what
+    /// Clear done keeps, and what Dismiss takes. Not once dismissed.
+    // ponytail: Push has no alert for `stranded` yet (Push.notice is nil for it): the app lists it under Needs you.
+    var needsYou: Bool { dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou) }
     var agentName: String { Job.agentNames[agent] ?? agent }
     static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }

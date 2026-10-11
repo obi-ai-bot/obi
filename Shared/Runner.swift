@@ -92,9 +92,15 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
             && (pullRequest?.state ?? "OPEN") == "OPEN"
     }
 
-    /// Waiting for Publish (the runner's own publish failed), failed, interrupted or out of review
-    /// rounds, and not dismissed: what the runner sends an alert for, and what Dismiss takes.
-    var needsYou: Bool { dismissed == nil && (canPublish || status == .failed || status == .interrupted || reviewNeedsYou) }
+    /// Done with commits its pull request won't take: merged or closed before they went out (as Engine's `Job.stranded`).
+    var stranded: Bool {
+        status == .done && published != nil && unpublished > 0 && reviewOf == nil
+            && (pullRequest.map { $0.state != "OPEN" } ?? false)
+    }
+
+    /// Waiting for Publish (the runner's own publish failed), failed, interrupted, out of review
+    /// rounds or stranded, and not dismissed: what the runner sends an alert for, and what Dismiss takes.
+    var needsYou: Bool { dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou) }
 
     /// "Round 2 of 5 · Fable 5.1", or empty for a one-round job on the usual model.
     var extras: String {
@@ -359,6 +365,7 @@ nonisolated enum NeedsYou {
             count(needing.count { $0.status == .failed }, "failed", "failed"),
             count(needing.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
             count(needing.count(where: \.reviewNeedsYou), "needs your review", "need your review"),
+            count(needing.count(where: \.stranded), "wasn't published", "weren't published"),
         ].compactMap(\.self)
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
