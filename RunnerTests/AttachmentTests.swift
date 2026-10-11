@@ -49,7 +49,7 @@ struct AttachmentTests {
     @Test func prepareCopiesTheAttachmentsIntoTheInputs() throws {
         let (worktree, screenshot, clipboard) = try worktree()
         let job = job(attachments: [screenshot.path, clipboard.path])
-        #expect(Attachments.copy(job, into: worktree) == [screenshot.path, clipboard.path])
+        #expect(try Attachments.copy(job, into: worktree) == [screenshot.path, clipboard.path])
         #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/screenshot-1a2b3c.png")) == png)
         #expect(FileManager.default.fileExists(atPath: worktree.appending(path: ".oby/inputs/clipboard-4d5e6f.txt").path))
         #expect(Attachments.inputs(job) == [".oby/inputs/screenshot-1a2b3c.png", ".oby/inputs/clipboard-4d5e6f.txt"])
@@ -59,13 +59,13 @@ struct AttachmentTests {
     @Test func aMissingAttachmentIsLeftOut() throws {
         let (worktree, screenshot, clipboard) = try worktree()
         try FileManager.default.removeItem(at: clipboard)
-        #expect(Attachments.copy(job(attachments: [screenshot.path, clipboard.path]), into: worktree) == [screenshot.path])
-        #expect(Attachments.copy(job(attachments: [clipboard.path]), into: worktree) == nil)
+        #expect(try Attachments.copy(job(attachments: [screenshot.path, clipboard.path]), into: worktree) == [screenshot.path])
+        #expect(try Attachments.copy(job(attachments: [clipboard.path]), into: worktree) == nil)
     }
 
     @Test func aNewClaudeSessionStartsWithTheImages() throws {
         let (worktree, screenshot, clipboard) = try worktree()
-        _ = Attachments.copy(job(attachments: [screenshot.path, clipboard.path]), into: worktree)
+        _ = try Attachments.copy(job(attachments: [screenshot.path, clipboard.path]), into: worktree)
         // The issue's quote is in the inputs too, and isn't an image.
         try Data("# Issue #12, quoted".utf8).write(to: worktree.appending(path: ".oby/inputs/issue-12.md"))
 

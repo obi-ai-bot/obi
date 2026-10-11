@@ -2,9 +2,6 @@ import Crypto
 import Foundation
 import HTTPTypes
 @testable import ObyEngine
-#if canImport(OSLog)
-import OSLog
-#endif
 
 /// Push to the iPhone, through Apple's push service: the Live Activity keeps the Lock Screen and
 /// Dynamic Island in step with the jobs while Oby is suspended, and an alert says when a job needs
@@ -222,9 +219,17 @@ final class Push {
         await deliver(body, to: token, type: "liveactivity", priority: priority, now: now)
     }
 
-    /// Sends one push; a token Apple no longer takes is dropped.
-    private func deliver(_ body: Data, to token: Token, type: String, priority: Int, collapse: String? = nil, now: Date) async {
+    /// Sends one push, the vault's secrets taken out first (none goes when the vault can't be read);
+    /// a token Apple no longer takes is dropped.
+    private func deliver(_ raw: Data, to token: Token, type: String, priority: Int, collapse: String? = nil, now: Date) async {
         guard let signer else { return }
+        let body: Data
+        do {
+            body = try Vault.shared.scrubbed(raw)
+        } catch {
+            Logger.runner.error("push held: the secret scan can't read the vault (\(error.localizedDescription, privacy: .public))")
+            return
+        }
         // Apple takes a provider token for an hour, and refuses new ones more often than every 20 minutes.
         let bearer: String
         if let jwt, now.timeIntervalSince(jwt.made) < 50 * 60 {

@@ -184,13 +184,23 @@ nonisolated struct ClaudeBrain: BrainAdapter {
     let name = "claude"
     /// The Claude account to think with (its `CLAUDE_CONFIG_DIR`), or nil for the default login.
     var home: String?
+    var vault = Vault.shared
 
-    /// No GitHub token, and no claude.ai connectors even if --strict-mcp-config stopped keeping them out.
-    var environment: [String: String?] {
+    /// No GitHub token, no claude.ai connectors even if --strict-mcp-config stopped keeping them
+    /// out, and none of Oby's variables (`base`) that hold a vault secret. Throws when the vault can't be read.
+    func environment(base: [String: String] = Shell.environment) throws -> [String: String?] {
         Agents.noConnectors.merging(["GH_TOKEN": nil, "GITHUB_TOKEN": nil, "CLAUDE_CONFIG_DIR": home]) { $1 }
+            .merging(Agents.withheld(base, leaks: try vault.forAgents())) { $1 }
+    }
+
+    /// What the brain is given: both prompts with the vault's secrets taken out, and its environment.
+    /// Throws when the vault can't be read: then the brain isn't asked.
+    func request(system: String, user: String, base: [String: String] = Shell.environment) throws -> (system: String, user: String, env: [String: String?]) {
+        (try vault.forAgent(system), try vault.forAgent(user), try environment(base: base))
     }
 
     func complete(system: String, user: String, schema: Data, timeout: TimeInterval) async throws -> Data {
+        let (system, user, environment) = try request(system: system, user: user)
         // An empty working directory, and no GitHub token in its environment.
         let directory = FileManager.default.temporaryDirectory.appending(path: "oby-brain-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

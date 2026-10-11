@@ -94,6 +94,9 @@ final class Desk {
     /// secret scan, and quotes it as a file for the author's next round. Tests put in their own.
     @ObservationIgnored var postReview: (_ author: Job, _ body: String) async throws -> URL = Review.post
     @ObservationIgnored var quoteReview: (_ author: Job, _ file: String, _ text: String) throws -> Void = Review.quote
+    /// What everything on its way to an agent is checked against (Engine/Vault.swift): prompts,
+    /// messages, files, reviews and environments. Tests put in their own.
+    @ObservationIgnored var vault = Vault.shared
     /// The Lead (Engine/Lead.swift): reads the roadmap board before a turn, runs the turn on the
     /// Claude account whose home is given, and claims an issue when a job starts on it. Tests put in their own.
     @ObservationIgnored var readBoard: (_ repos: [String]) async throws -> Board = { try await Board.read(repos: $0) }
@@ -171,7 +174,7 @@ final class Desk {
         // The brain and the Lead think with the least busy Claude account too, so a busy one doesn't slow them.
         let thinker = AccountStore.route(accounts.accounts, agent: "claude")
         if Lead.leads(said), let thinker { return await lead(said, account: thinker) }
-        let brain = ClaudeBrain(home: thinker?.home)
+        let brain = ClaudeBrain(home: thinker?.home, vault: vault)
         var result = await Planner(adapters: [brain]).plan(said, context: brainContext)
         record(BrainTurn(said: said, by: result.by, plan: result.plan, refused: result.refused))
         var epics: [Int: Int] = [:]
@@ -222,7 +225,7 @@ final class Desk {
             checkouts[repo] = Workspace.clone(repo).path
         }
         do {
-            try Lead.writeContext(roadmap: Lead.roadmap(board, skipped: skipped, checkouts: checkouts), jobs: Lead.jobsList(jobs), to: directory)
+            try Lead.writeContext(roadmap: Lead.roadmap(board, skipped: skipped, checkouts: checkouts), jobs: Lead.jobsList(jobs), to: directory, vault: vault)
         } catch {
             record(LeadTurn(goal: goal, said: said, by: "none", refused: ["the context couldn't be written: \(error.localizedDescription)"], skipped: skipped))
             return .reply("Oby couldn't write the Lead's context: \(error.localizedDescription)")
@@ -550,10 +553,13 @@ final class Desk {
                 throw Shell.Failure(message: job.status == .queued ? "\(job.agentName) hasn't started yet. Tell it again in a moment."
                                     : "\(job.agentName) is wrapping up. Tell it again once it's done.")
             }
+            let said = try vault.forAgent(text)
             replace(Self.heard(job, text))
-            agent.send(text)
+            agent.send(said)
         } else {
             guard let session = job.session else { throw Shell.Failure(message: "This job never started, so there's no session to pick up.") }
+            // Nothing is picked up while the vault can't be read: the user hears why.
+            _ = try vault.forAgents()
             let resumed = Self.resumed(job, text)
             replace(resumed)
             if let author = resumed.reviewOf { reconnect(review: id, to: author) }
@@ -639,13 +645,21 @@ final class Desk {
 
     /// Starts the job's agent in its worktree: a new session, or the job's own picked up again.
     func run(_ job: Job, prompt: String, resume: String? = nil) {
+        // No vault secret reaches an agent, even one the user typed into the request; and when the
+        // vault can't be read, no agent starts, and the job says why.
+        let said: String
+        do {
+            said = try vault.forAgent(prompt)
+        } catch {
+            return finish(job.id, .failed, "\(job.agentName) didn't start: \(error.localizedDescription)")
+        }
         let home = accounts.state(job.account)?.account.home.map { URL(filePath: $0) }
         guard let agent = makeAgent(job, home, resume) else { return finish(job.id, .failed, "\(job.agentName) can't run jobs yet.") }
         agents[job.id] = agent
         ranHere[job.id] = job.commits ?? 0
         do {
             // Only the job's current agent speaks for it: one that was stopped or ended may still report.
-            try agent.start(prompt: prompt) { [weak self, weak agent] event in
+            try agent.start(prompt: said) { [weak self, weak agent] event in
                 guard let self, let agent, self.agents[job.id] === agent else { return }
                 self.handle(event, job: job.id)
             }
@@ -764,8 +778,16 @@ final class Desk {
             job.step = "Checking: \(command)"
             replace(job)
             let worktree = Workspace.worktree(id)
+            // The check runs the agent's code: it gets no variable that holds a vault secret, and doesn't run when the vault can't be read.
+            let env: [String: String?]
+            do {
+                env = try Agents.overrides(vault: vault)
+            } catch {
+                agent.end()
+                return finish(id, .failed, "The check didn't run: \(error.localizedDescription)")
+            }
             let result = try? await Shell.run(Agents.sandboxed(["sh", "-c", command], in: worktree, own: nil), in: worktree,
-                                              env: Agents.overrides, timeout: 1200)
+                                              env: env, timeout: 1200)
             let output = result.map { String(decoding: $0.out, as: UTF8.self) + $0.err } ?? "Oby couldn't run it."
             check = Rounds.Check(command: command, passed: result?.status == 0, output: String(output.suffix(4000)))
             // Stopped while the check ran.
@@ -779,12 +801,19 @@ final class Desk {
             agent.end()
             finish(id, status, text)
         case let .again(message):
+            let said: String
+            do {
+                said = try vault.forAgent(message)
+            } catch {
+                agent.end()
+                return finish(id, .failed, error.localizedDescription)
+            }
             job.round = job.currentRound + 1
             job.phase = .work
             job.step = "Round \(job.currentRound) of \(job.maxRounds)"
             replace(job)
             roundMessage[id] = message
-            agent.send(message)
+            agent.send(said)
         }
     }
 
