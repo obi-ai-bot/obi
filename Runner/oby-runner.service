@@ -8,6 +8,8 @@ ExecStart=%h/.local/bin/oby-runner
 Environment=OBY_HOME=/srv/nvme/oby
 Environment=OBY_OWNER=OWNER_LOGIN
 Environment=OBY_PORT=7777
+# The Oby by Deskree GitHub app; its key is ~/.config/oby/github-app.pem (Runner/README.md).
+Environment=OBY_GITHUB_APP_ID=5276623
 Restart=on-failure
 RestartSec=5
 

@@ -222,10 +222,12 @@ nonisolated struct ClaudeBrain: BrainAdapter {
     var home: String?
     var vault = Vault.shared
 
-    /// No GitHub token, no claude.ai connectors even if --strict-mcp-config stopped keeping them
-    /// out, and none of Oby's variables (`base`) that hold a vault secret. Throws when the vault can't be read.
+    /// No GitHub token nor the GitHub app's settings, no claude.ai connectors even if
+    /// --strict-mcp-config stopped keeping them out, and none of Oby's variables (`base`) that hold
+    /// a vault secret. Throws when the vault can't be read.
     func environment(base: [String: String] = Shell.environment) throws -> [String: String?] {
         Agents.noConnectors.merging(["GH_TOKEN": nil, "GITHUB_TOKEN": nil, "CLAUDE_CONFIG_DIR": home]) { $1 }
+            .merging(GitHubApp.variables.map { ($0, String?.none) }) { $1 }
             .merging(Agents.withheld(base, leaks: try vault.forAgents())) { $1 }
     }
 

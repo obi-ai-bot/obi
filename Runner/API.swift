@@ -95,7 +95,8 @@ final class API {
 
     func status() -> Response {
         Self.json(Status(runner: .init(version: Self.version, host: ProcessInfo.processInfo.hostName),
-                         accounts: accounts, models: .current, clearedAt: cleared.at))
+                         accounts: accounts, models: .current, clearedAt: cleared.at,
+                         github: (GitHubApp.inUse ? GitHubActor.app : .owner).rawValue))
     }
 
     /// Clear done, on the iPhone or the Mac: the runner records now, answers it, and tells every
@@ -554,8 +555,10 @@ struct Status: Encodable {
     var models: Models
     /// When Clear done was last pressed, or null: the API promises the key either way.
     var clearedAt: Date?
+    /// Who the runner's own GitHub calls act as: "app" (Oby by Deskree) or "owner" (the owner's gh login).
+    var github: String = GitHubActor.owner.rawValue
 
-    private enum Keys: String, CodingKey { case runner, accounts, models, clearedAt }
+    private enum Keys: String, CodingKey { case runner, accounts, models, clearedAt, github }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -563,6 +566,7 @@ struct Status: Encodable {
         try keys.encode(accounts, forKey: .accounts)
         try keys.encode(models, forKey: .models)
         try keys.encode(clearedAt, forKey: .clearedAt)
+        try keys.encode(github, forKey: .github)
     }
 }
 

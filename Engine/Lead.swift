@@ -279,7 +279,7 @@ nonisolated struct Board: Equatable, Sendable {
     /// them now) and the open pull requests that close them.
     static func read(title: String = Lead.boardTitle, repos: [String],
                      gh: ([String]) async throws -> String = { args in
-                         do { return try await Shell.ok(args) }
+                         do { return try await Shell.ok(args, as: .app) }
                          catch { throw Shell.Failure(message: args.dropFirst().first == "project" ? IssueSync.projectError(error.localizedDescription) : error.localizedDescription) }
                      }) async throws -> Board {
         let user = (try? await gh(["gh", "api", "user", "-q", ".login"])) ?? ""

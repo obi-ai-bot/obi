@@ -16,7 +16,7 @@ final class IssueSync {
     let store: JobStore
     var enabled = false
     var gh: ([String]) async throws -> String = { args in
-        do { return try await Shell.ok(["gh"] + args, env: ["GH_PROMPT_DISABLED": "1"]) }
+        do { return try await Shell.ok(["gh"] + args, env: ["GH_PROMPT_DISABLED": "1"], as: .app) }
         catch { throw Shell.Failure(message: args.first == "project" ? IssueSync.projectError(error.localizedDescription) : error.localizedDescription) }
     }
     var scan: ([(name: String, text: String)]) async throws -> Void

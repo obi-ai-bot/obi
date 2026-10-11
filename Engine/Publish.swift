@@ -622,7 +622,7 @@ nonisolated enum Publish {
         try body(for: job).write(to: file, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: file) }
         let open = try await Shell.ok(["gh", "pr", "list", "-R", job.repo, "--head", job.branch, "--state", "open",
-                                       "--json", "url", "--jq", ".[0].url // empty"])
+                                       "--json", "url", "--jq", ".[0].url // empty"], as: .app)
         if !open.isEmpty, let url = URL(string: open) {
             // The commits are on it already; a description that didn't update isn't worth failing for.
             let edited = (try? await Shell.ok(["gh", "pr", "edit", open, "-R", job.repo, "--body-file", file.path])) != nil

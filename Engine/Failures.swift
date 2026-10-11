@@ -265,7 +265,7 @@ final class Failures {
         ClaudeLead(model: Lead.provenModel, home: home, checkouts: checkouts, vault: vault)
     }
     /// The runner's own gh login, for the `oby-failure` issues. Tests put in their own.
-    var gh: ([String]) async throws -> String = { try await Shell.ok(["gh"] + $0, env: ["GH_PROMPT_DISABLED": "1"]) }
+    var gh: ([String]) async throws -> String = { try await Shell.ok(["gh"] + $0, env: ["GH_PROMPT_DISABLED": "1"], as: .app) }
     /// The secret scan of everything that goes out. Throws when it finds something or can't run.
     var scan: ([(name: String, text: String)]) async throws -> Void
     /// Where the post-mortems' evidence and the fix jobs' briefs are written.

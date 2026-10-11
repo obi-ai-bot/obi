@@ -228,7 +228,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         let file = FileManager.default.temporaryDirectory.appending(path: "oby-check-\(UUID().uuidString).md")
         try body.write(to: file, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: file) }
-        let said = try await Shell.ok(["gh", "pr", "comment", "\(pr)", "-R", author.repo, "--body-file", file.path])
+        let said = try await Shell.ok(["gh", "pr", "comment", "\(pr)", "-R", author.repo, "--body-file", file.path], as: .app)
         guard let url = said.split(separator: "\n").last.flatMap({ URL(string: String($0)) }) else {
             throw Shell.Failure(message: "gh posted no comment: \(said)")
         }
@@ -251,28 +251,46 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         return try await Publish.scan(worktree, base: base, head: head)
     }
 
-    /// Squash-merges the pull request into dev and deletes its branch, with the runner's gh login:
-    /// only while GitHub says it's open, into dev, with the checked commit as its head.
+    /// Squash-merges the pull request into dev and deletes its branch, as the GitHub app (the
+    /// owner's gh login without one), through GitHub's REST API: only while GitHub says it's open,
+    /// into dev, with the checked commit as its head.
     static func merge(_ job: Job, _ check: MacCheck) async throws {
         // Outside any checkout, so gh touches no local branch.
         let away = FileManager.default.temporaryDirectory
         let env: [String: String?] = ["GH_PROMPT_DISABLED": "1"]
-        let view = try await Shell.ok(["gh", "pr", "view", "\(check.pr)", "-R", job.repo, "--json", "state,baseRefName,headRefOid"], in: away, env: env)
+        let pull = "repos/\(job.repo)/pulls/\(check.pr)"
+        let view = try await Shell.ok(["gh", "api", pull], in: away, env: env, as: .app)
         if let why = mismatch(Data(view.utf8), check) { throw Shell.Failure(message: why) }
-        try await Shell.ok(["gh", "pr", "merge", "\(check.pr)", "-R", job.repo, "--squash", "--delete-branch",
-                            "--match-head-commit", check.head], in: away, env: env)
+        try await Shell.ok(["gh", "api", "-X", "PUT", "\(pull)/merge", "-f", "merge_method=squash", "-f", "sha=\(check.head)"],
+                           in: away, env: env, as: .app)
+        // Only a branch in this repository; it's merged already, so a branch left over isn't a failed merge.
+        guard let branch = headBranch(Data(view.utf8), repo: job.repo) else { return }
+        do {
+            try await Shell.ok(["gh", "api", "-X", "DELETE", "repos/\(job.repo)/git/refs/heads/\(branch)"], in: away, env: env, as: .app)
+        } catch {
+            Logger.jobs.error("merged #\(check.pr, privacy: .public), but its branch stays: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
-    /// Why the pull request as GitHub has it (`gh pr view --json state,baseRefName,headRefOid`)
-    /// isn't the one checked, or nil when it is: open, into dev, with the checked head.
+    /// Why the pull request as GitHub's REST API has it (`GET repos/{o}/{r}/pulls/{n}`) isn't the
+    /// one checked, or nil when it is: open, into dev, with the checked head.
     static func mismatch(_ view: Data, _ check: MacCheck) -> String? {
         guard let info = try? JSONSerialization.jsonObject(with: view) as? [String: Any] else { return "gh said something else about the pull request." }
-        guard info["state"] as? String == "OPEN" else { return "the pull request isn't open." }
-        guard let base = info["baseRefName"] as? String, base == into else {
-            return "the pull request goes into \(info["baseRefName"] as? String ?? "another branch"), and Oby merges only into \(into)."
+        guard info["state"] as? String == "open", info["merged"] as? Bool != true else { return "the pull request isn't open." }
+        let base = (info["base"] as? [String: Any])?["ref"] as? String
+        guard let base, base == into else {
+            return "the pull request goes into \(base ?? "another branch"), and Oby merges only into \(into)."
         }
-        guard info["headRefOid"] as? String == check.head else { return "the pull request's head moved since the Mac checked it." }
+        guard (info["head"] as? [String: Any])?["sha"] as? String == check.head else { return "the pull request's head moved since the Mac checked it." }
         return nil
+    }
+
+    /// The pull request's head branch, when it's in `repo` itself rather than a fork.
+    static func headBranch(_ view: Data, repo: String) -> String? {
+        guard let info = try? JSONSerialization.jsonObject(with: view) as? [String: Any],
+              let head = info["head"] as? [String: Any], let branch = head["ref"] as? String, !branch.isEmpty,
+              ((head["repo"] as? [String: Any])?["full_name"] as? String)?.lowercased() == repo.lowercased() else { return nil }
+        return branch
     }
 
     // MARK: The author's next round

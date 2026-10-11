@@ -612,11 +612,15 @@ struct CheckTests {
         #expect(refusal { $0.macCheck?.pr = 81 } == "Not merged: the check is of another pull request.")
 
         // GitHub's own word, right before the merge.
-        let view = { (state: String, base: String, head: String) in Data(#"{"state":"\#(state)","baseRefName":"\#(base)","headRefOid":"\#(head)"}"#.utf8) }
-        #expect(MacCheck.mismatch(view("OPEN", "dev", Self.head), check) == nil)
-        #expect(MacCheck.mismatch(view("OPEN", "main", Self.head), check) == "the pull request goes into main, and Oby merges only into dev.")
-        #expect(MacCheck.mismatch(view("OPEN", "dev", Self.next), check) == "the pull request's head moved since the Mac checked it.")
-        #expect(MacCheck.mismatch(view("MERGED", "dev", Self.head), check) == "the pull request isn't open.")
+        let view = { (state: String, base: String, head: String) in
+            Data(#"{"state":"\#(state)","merged":false,"base":{"ref":"\#(base)"},"head":{"sha":"\#(head)","ref":"oby/fix","repo":{"full_name":"deskree-inc/oby"}}}"#.utf8)
+        }
+        #expect(MacCheck.mismatch(view("open", "dev", Self.head), check) == nil)
+        #expect(MacCheck.mismatch(view("open", "main", Self.head), check) == "the pull request goes into main, and Oby merges only into dev.")
+        #expect(MacCheck.mismatch(view("open", "dev", Self.next), check) == "the pull request's head moved since the Mac checked it.")
+        #expect(MacCheck.mismatch(view("closed", "dev", Self.head), check) == "the pull request isn't open.")
+        #expect(MacCheck.headBranch(view("open", "dev", Self.head), repo: "deskree-inc/oby") == "oby/fix")
+        #expect(MacCheck.headBranch(view("open", "dev", Self.head), repo: "someone/fork") == nil)
         #expect(MacCheck.mismatch(Data("nope".utf8), check) != nil)
     }
 
