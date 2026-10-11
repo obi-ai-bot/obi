@@ -36,7 +36,7 @@ struct CodexTests {
         #expect(plan["sandbox"] as? String == "read-only" && plan["approvalPolicy"] as? String == "untrusted")
         let approval = message(#"{"id": 3, "method": "item/commandExecution/requestApproval", "params": {"threadId": "t", "turnId": "u", "command": "/bin/zsh -lc 'swift test'"}}"#)
         #expect(CodexRPC.call(approval, files: [:]) == ToolCall(request: "3", tool: "Bash", command: "swift test"))
-        #expect(Permissions.decide(ToolCall(request: "3", tool: "Bash", command: "swift test"), mode: .ask, rules: [], worktree: worktree) == .ask)
+        #expect(PermissionPolicy.decide(ToolCall(request: "3", tool: "Bash", command: "swift test"), mode: .ask, rules: [], worktree: worktree) == .ask)
     }
 
     @Test func commandSteps() {
