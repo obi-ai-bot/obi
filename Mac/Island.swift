@@ -11,6 +11,8 @@ final class IslandModel {
     let feed: RunnerFeed
     /// What you say while you hold fn.
     let voice = Voice()
+    /// What goes with the next request: screenshots, what you copied.
+    let tray = Tray()
     var state: IslandState = .compact
     /// The notch's size, or zero on a screen without one.
     var notch: CGSize = .zero
@@ -423,6 +425,7 @@ private struct OpenIsland: View {
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
+    private var tray: Tray { model.tray }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -450,14 +453,16 @@ private struct OpenIsland: View {
 
             switch desk.talk {
             case .plan(let drafts) where drafts.count == 1:
+                TrayRow(tray: tray)
                 PlanCard(draft: drafts[0], accounts: desk.accounts.accounts.filter(\.signedIn),
-                         onDispatch: { desk.dispatch($0) },
-                         onEdit: { text = drafts[0].said; desk.cancel(); typing = true },
+                         onDispatch: { desk.dispatch(tray.attach($0)); tray.clear() },
+                         onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
                          onCancel: { desk.cancel() })
             case .plan(let drafts):
+                TrayRow(tray: tray)
                 PlansCard(drafts: drafts, accounts: desk.accounts.accounts.filter(\.signedIn),
-                          onDispatch: { for draft in $0 { desk.dispatch(draft) } },
-                          onEdit: { text = drafts[0].said; desk.cancel(); typing = true },
+                          onDispatch: { for draft in $0 { desk.dispatch(tray.attach(draft)) }; tray.clear() },
+                          onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
                           onCancel: { desk.cancel() })
             case .question(let said, let question):
                 ForEach(question.options, id: \.self) { option in
@@ -629,12 +634,34 @@ private struct OpenIsland: View {
     }
 
     private var field: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TrayRow(tray: tray)
+            fieldCapsule
+        }
+    }
+
+    private var fieldCapsule: some View {
         HStack(spacing: 8) {
             TextField("Type a task, like “Review oby PR #12”", text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 15))
                 .focused($typing)
                 .onSubmit(send)
+            Button(action: tray.pasteClipboard) {
+                Image(systemName: "doc.on.clipboard").font(.system(size: 14, weight: .semibold))
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .help("Attach what you copied")
+            .accessibilityLabel("Attach the clipboard")
+            Button(action: screenshot) {
+                Image(systemName: "camera").font(.system(size: 14, weight: .semibold))
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .disabled(tray.capturing)
+            .help("Show Oby your screen: drag over part of it, or click for all of it")
+            .accessibilityLabel("Attach a screenshot")
             Button(action: send) {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 15, weight: .bold))
@@ -654,8 +681,23 @@ private struct OpenIsland: View {
 
     private func send() {
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        desk.ask(text)
+        // The chips stay until Dispatch, which hands them to the jobs.
+        desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text)
         text = ""
+    }
+
+    /// Your words without the line about the chips, to edit them: it's added again when you send.
+    private func typed(_ said: String) -> String {
+        said.range(of: "\n\n(The user attached ").map { String(said[..<$0.lowerBound]) } ?? said
+    }
+
+    /// The camera: the overlay takes the keyboard while you pick, so the field takes it back after.
+    private func screenshot() {
+        Task {
+            await tray.screenshot()
+            NSApp.windows.first { $0 is NotchPanel }?.makeKey()
+            typing = true
+        }
     }
 }
 
