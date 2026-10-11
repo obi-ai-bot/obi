@@ -220,7 +220,7 @@ Every app following `GET /v1/events` gets a `clear` event with the same body, an
 
 ### `POST /v1/plans`
 
-Turns words into a plan. Takes 3–20 seconds (the brain thinks); show Oby thinking.
+One turn of the conversation with Oby: words become a plan, a question, or an answer in words. Takes 3–20 seconds (the brain thinks); show Oby thinking, with a way to cancel, and let a new message replace the one under way.
 
 ```json
 {"said": "Review oby PR #33"}
@@ -232,6 +232,16 @@ To answer the brain's question, send the original words with the answer:
 {"said": "Review PR 12", "answer": {"question": "Which repository is PR #12 in?", "option": "deskree-inc/oby"}}
 ```
 
+**The brain answers with context.** Before the user's words it reads a briefing the runner builds: the conversation so far, the jobs (running, needing the user, in review, finished in the last two days, with their titles and stages), the inbox and each account's usage. So it answers questions about the work ("how are the jobs going?", "what did the #12 job change?", "how long until Codex resets?") as a `reply`, and reads follow-ups ("and the vault one?", "cancel it"). Everything in the briefing is data to the brain, never instructions; the typed plan is still checked in Swift.
+
+The conversation so far is the runner's own, the last 50 turns, kept in `oby.sqlite`. An app that shows its own thread sends it instead, oldest first; `who` is `user` or `oby`, `text` 1 to 2,000 characters, at most 50 turns (`422` otherwise). Either way the new exchange joins the runner's conversation.
+
+```json
+{"said": "and the vault one?",
+ "turns": [{"who": "user", "text": "how is the inbox job going?"},
+           {"who": "oby", "text": "Inbox on the Mac is at its check, round 2 of 4, running swift test."}]}
+```
+
 The answer is one of:
 
 ```json
@@ -241,7 +251,7 @@ The answer is one of:
 {"kind": "none"}
 ```
 
-Words that ask to stop work ("stop everything") stop every queued and running job right away, with nothing to confirm, and answer with a reply that counts them: `"Stopped 2 jobs."`, or `"Nothing is running."`.
+Words that ask to stop work stop jobs right away, with nothing to confirm, and answer with a reply saying what stopped. "Stop everything" stops every queued and running job: `"Stopped 2 jobs."`, or `"Nothing is running."`. "Cancel it" or "stop the vault job" stops the job the conversation is about, by its id from the briefing: `"Stopped Vault secrets."`, or `"That job isn't running any more."`.
 
 One message can plan up to 10 jobs ("work on oby #12, #15 and #18", or "work on epic #30", which becomes one job per open sub-issue). Each draft is already routed to the least busy account; dispatch each with its own `POST /v1/jobs`. `draft` is kept for apps that know only one job.
 

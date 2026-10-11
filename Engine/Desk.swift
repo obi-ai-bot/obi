@@ -28,12 +28,31 @@ final class Desk {
     }
 
     var talk: Talk = .none
+    /// The conversation (Engine/Conversation.swift): what the user said and what Oby answered,
+    /// oldest first, the last `Conversation.kept`. The island's thread, and the brain's memory.
+    private(set) var turns: [Turn]
     private(set) var jobs: [Job] {
         didSet { accounts.countRunning(jobs) }
     }
     let accounts: AccountStore
     /// Called when a job ends, for the notch's one line.
     var onFinish: (Job) -> Void = { _ in }
+    /// Called with Oby's reply when a turn of `ask` ends, and whether the user spoke it (the Mac
+    /// then speaks the reply). Not for a turn that was cancelled or replaced.
+    var onReply: (_ text: String, _ spoken: Bool) -> Void = { _, _ in }
+    /// Jobs and inbox items elsewhere for the brain's briefing: the runner's, on the Mac.
+    @ObservationIgnored var elsewhere: () -> [Briefing.Place] = { [] }
+    /// Stops jobs elsewhere, by id, when the brain names one of them.
+    @ObservationIgnored var stopElsewhere: ([String]) -> Void = { _ in }
+    /// The brain's adapters, on the Claude account whose home is given. Tests put in their own.
+    @ObservationIgnored var makeBrain: (_ home: String?, Vault) -> [any BrainAdapter] = { [ClaudeBrain(home: $0, vault: $1)] }
+    /// How long `ask` waits for an answer before the turn ends with `Conversation.timedOut`, so
+    /// the island never stays on Thinking. A Lead goal gets twice this.
+    @ObservationIgnored var patience: Duration = .seconds(45)
+    /// Counts asks: a result from a turn that was cancelled or replaced is ignored.
+    private var asking = 0
+    /// The user's turn waiting for its answer, in `turns`, or nil.
+    private var pending: String?
     /// Called with every job that's added or changes, for the runner's event stream.
     var onJobChange: (Job) -> Void = { _ in }
     /// What only the user can answer (Engine/Inbox.swift), oldest first, done ones too: the same
@@ -110,6 +129,7 @@ final class Desk {
         self.store = store
         jobs = store.recent()
         inbox = store.inbox()
+        turns = store.conversation()
         // The jobs open inbox items are about, however old: answering one needs its job.
         // A review item's One more round quotes the review, so that job comes too.
         let asking = Set(inbox.filter(\.isOpen).map(\.job)).subtracting(jobs.map(\.id))
@@ -143,39 +163,124 @@ final class Desk {
         startWaitingReviews()
     }
 
-    /// The brain picks "auto" or an account by name; Swift turns that into a real account.
-    private var brainContext: BrainContext {
+    /// The brain picks "auto" or an account by name; Swift turns that into a real account. With
+    /// the briefing: these `turns` (the conversation so far), the jobs here and elsewhere, the
+    /// inbox and the accounts.
+    func brainContext(turns: [Turn]) -> BrainContext {
         let signedIn = accounts.accounts.filter(\.signedIn).map(\.account)
         let known = signedIn.isEmpty ? accounts.accounts.map(\.account) : signedIn
         var choices = ["auto": ["auto"] + known.map(\.name)]
         for (agent, list) in Dictionary(grouping: known, by: \.agent) { choices[agent] = ["auto"] + list.map(\.name) }
-        return BrainContext(accounts: choices, repos: repos)
+        let briefing = briefing(turns: turns)
+        return BrainContext(accounts: choices, repos: repos, briefing: briefing.text, jobs: briefing.stoppable)
+    }
+
+    /// What the brain is told before the user's words (Engine/Conversation.swift).
+    func briefing(turns: [Turn]) -> Briefing {
+        Briefing(turns: turns, places: [Briefing.Place(name: "this Mac", jobs: jobs, inbox: inbox)] + elsewhere(), accounts: accounts.accounts)
+    }
+
+    // MARK: The conversation
+
+    /// The user said something: it joins the thread, and Oby thinks. The answer joins the thread
+    /// too, or the island hears why not within `patience`. `shown` is what the thread shows when
+    /// the brain gets more (an answer with its question). `spoken`: the user talked, so the Mac
+    /// speaks the reply. While Oby thinks, "never mind" or "stop" cancels the turn; any other
+    /// words replace it.
+    func ask(_ words: String, shown: String? = nil, spoken: Bool = false) {
+        let said = words.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !said.isEmpty else { return }
+        if case .thinking = talk, Conversation.cancels(said) { return cancel() }
+        cancel()
+        asking += 1
+        let mine = asking
+        let turn = Turn(who: .user, text: shown ?? said)
+        pending = turn.id
+        add(turn)
+        talk = .thinking(said)
+        let limit = Lead.leads(said) ? patience * 2 : patience
+        Task {
+            let result = await Self.within(limit) { await self.plan(said) } ?? .reply(Conversation.timedOut)
+            // Cancelled or replaced while the brain was thinking.
+            guard asking == mine else { return }
+            pending = nil
+            talk = result
+            if let reply = Self.reply(in: result) {
+                add(Turn(who: .oby, text: reply))
+                onReply(reply, spoken)
+            }
+        }
+    }
+
+    /// Drops the turn under way: its words leave the thread, and its answer, when it comes, is
+    /// ignored. Also takes a plan's card down.
+    func cancel() {
+        asking += 1
+        if let pending {
+            remove(pending)
+            self.pending = nil
+        }
+        talk = .none
+    }
+
+    /// One exchange for the runner's API: the user's words and Oby's answer join the thread, and
+    /// the brain reads `turns` as the conversation so far (the client's, when it sent them, else
+    /// the runner's own).
+    func converse(_ said: String, shown: String? = nil, turns given: [Turn]? = nil) async -> Talk {
+        let talk = await plan(said, turns: given)
+        add(Turn(who: .user, text: shown ?? said))
+        if let reply = Self.reply(in: talk) { add(Turn(who: .oby, text: reply)) }
+        return talk
+    }
+
+    /// What Oby says for a talk, as the thread shows it and the Mac speaks it: a plan's line,
+    /// the question, or the reply. Nothing for nothing.
+    static func reply(in talk: Talk) -> String? {
+        switch talk {
+        case .plan(let drafts): drafts.first?.reply
+        case .question(_, let question): question.text
+        case .reply(let text): text
+        case .none, .thinking: nil
+        }
+    }
+
+    private func add(_ turn: Turn) {
+        turns.append(turn)
+        if turns.count > Conversation.kept { turns.removeFirst(turns.count - Conversation.kept) }
+        store.save(turn)
+    }
+
+    private func remove(_ id: String) {
+        turns.removeAll { $0.id == id }
+        store.delete(turn: id)
+    }
+
+    /// Runs `work`, waiting for it at most `limit`: its result, or nil when it took too long.
+    /// The work goes on by itself; whoever asked has moved on.
+    private static func within(_ limit: Duration, _ work: @escaping () async -> Talk) async -> Talk? {
+        let (first, done) = AsyncStream.makeStream(of: Talk?.self)
+        Task { done.yield(await work()) }
+        Task {
+            try? await Task.sleep(for: limit)
+            done.yield(nil)
+        }
+        for await result in first { return result }
+        return nil
     }
 
     // MARK: Planning
 
-    func ask(_ words: String) {
-        let said = words.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !said.isEmpty else { return }
-        talk = .thinking(said)
-        Task {
-            let result = await plan(said)
-            // Cancelled or replaced while the brain was thinking.
-            guard talk == .thinking(said) else { return }
-            talk = result
-        }
-    }
-
     /// What the brain makes of the user's words: a plan, a question or a reply. Takes 3–20 seconds.
     /// A vague goal ("work on the roadmap") goes to the Lead instead, when a Claude account is
-    /// signed in: it starts the jobs itself and answers with a reply or a question.
-    func plan(_ said: String) async -> Talk {
+    /// signed in: it starts the jobs itself and answers with a reply or a question. The brain reads
+    /// `turns` as the conversation so far: the thread's, but for the words waiting for this answer.
+    func plan(_ said: String, turns given: [Turn]? = nil) async -> Talk {
         if repos.isEmpty { await refresh() }
         // The brain and the Lead think with the least busy Claude account too, so a busy one doesn't slow them.
         let thinker = AccountStore.route(accounts.accounts, agent: "claude")
         if Lead.leads(said), let thinker { return await lead(said, account: thinker) }
-        let brain = ClaudeBrain(home: thinker?.home, vault: vault)
-        var result = await Planner(adapters: [brain]).plan(said, context: brainContext)
+        let context = brainContext(turns: given ?? turns.filter { $0.id != pending })
+        var result = await Planner(adapters: makeBrain(thinker?.home, vault)).plan(said, context: context)
         record(BrainTurn(said: said, by: result.by, plan: result.plan, refused: result.refused))
         var epics: [Int: Int] = [:]
         (result.plan.dispatches, epics) = await Self.expandEpics(result.plan.dispatches)
@@ -313,17 +418,16 @@ final class Desk {
         return (jobs, epics)
     }
 
-    /// The user picked one of the brain's options: plan again with the answer.
+    /// The user picked one of the brain's options: plan again with the answer. The thread shows
+    /// the option alone; the brain gets the question too.
     func answer(_ option: String, said: String, question: String) {
-        ask(Self.answered(said, question: question, option: option))
+        ask(Self.answered(said, question: question, option: option), shown: option)
     }
 
     /// The user's words with the brain's question and the option they picked, to plan again.
     nonisolated static func answered(_ said: String, question: String, option: String) -> String {
         "\(said)\n\n(Oby asked: \(question) The user answered: \(option))"
     }
-
-    func cancel() { talk = .none }
 
     /// What the user sees for the brain's plan. Stopping happens here: there's nothing to confirm.
     func card(for result: Planner.Result, said: String) -> Talk {
@@ -360,9 +464,28 @@ final class Desk {
         case .askUser:
             return plan.question.map { .question(said: said, $0) } ?? .reply(plan.reply)
         case .stopAgent:
-            // The count, not the brain's reply: it doesn't know what was running.
-            let stopped = stopAll()
-            return .reply(stopped == 0 ? "Nothing is running." : "Stopped \(stopped) job\(stopped == 1 ? "" : "s").")
+            // The jobs the brain named ("cancel it"), here or elsewhere; else everything. What
+            // was stopped, not the brain's reply: it doesn't know what was running.
+            let named = plan.jobs ?? []
+            guard !named.isEmpty else {
+                let stopped = stopAll()
+                return .reply(stopped == 0 ? "Nothing is running." : "Stopped \(stopped) job\(stopped == 1 ? "" : "s").")
+            }
+            var titles: [String] = []
+            var away: [String] = []
+            let others = Dictionary(elsewhere().flatMap(\.jobs).map { ($0.id, $0) }) { first, _ in first }
+            for id in named {
+                if let job = job(id) {
+                    guard job.isActive else { continue }
+                    stop(id)
+                    titles.append(job.heading)
+                } else if let job = others[id], job.isActive {
+                    away.append(id)
+                    titles.append(job.heading)
+                }
+            }
+            if !away.isEmpty { stopElsewhere(away) }
+            return .reply(titles.isEmpty ? "That job isn't running any more." : "Stopped \(titles.joined(separator: ", ")).")
         case .replyOnly, .ignore:
             return plan.reply.isEmpty ? .none : .reply(plan.reply)
         }

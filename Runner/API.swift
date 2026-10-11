@@ -41,7 +41,7 @@ final class API {
         let router = Router()
         router.add(middleware: Gate(owner: owner))
         router.get("v1/status") { _, _ in await self.status() }
-        router.post("v1/plans") { request, _ in await self.plan(try await Self.decode(PlanRequest.self, from: request)) }
+        router.post("v1/plans") { request, _ in try await self.plan(try await Self.decode(PlanRequest.self, from: request)) }
         router.post("v1/jobs") { request, _ in try await self.dispatch(try await Self.decode(DispatchRequest.self, from: request)) }
         router.get("v1/jobs") { request, _ in await self.jobs(limit: request.uri.queryParameters.get("limit", as: Int.self) ?? 50) }
         router.get("v1/jobs/:id") { _, context in try await self.job(context.parameters.require("id")) }
@@ -92,11 +92,27 @@ final class API {
         return Self.json(answer)
     }
 
-    func plan(_ request: PlanRequest) async -> Response {
+    /// One turn of the conversation. The client may send the recent turns it shows; the brain
+    /// reads them as the conversation so far, else the runner's own. Either way the exchange joins
+    /// the runner's conversation.
+    func plan(_ request: PlanRequest) async throws -> Response {
         let words = request.said.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !words.isEmpty else { return Self.json(PlanAnswer(.none)) }
+        let turns = try request.turns.map(Self.turns)
         let said = request.answer.map { Desk.answered(words, question: $0.question, option: $0.option) } ?? words
-        return Self.json(PlanAnswer(await desk.plan(said)))
+        return Self.json(PlanAnswer(await desk.converse(said, shown: request.answer?.option, turns: turns)))
+    }
+
+    /// The client's recent turns, checked: at most `Conversation.kept`, each from the user or Oby,
+    /// with 1 to 2,000 characters.
+    nonisolated static func turns(_ sent: [PlanRequest.Turn]) throws -> [Turn] {
+        guard sent.count <= Conversation.kept else { throw APIError(.unprocessableContent, "turns holds at most \(Conversation.kept) turns.") }
+        return try sent.map { turn in
+            guard let who = Turn.Who(rawValue: turn.who) else { throw APIError(.unprocessableContent, "A turn's who is user or oby.") }
+            let text = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard (1...2000).contains(text.count) else { throw APIError(.unprocessableContent, "A turn's text is 1 to 2,000 characters.") }
+            return Turn(who: who, text: text)
+        }
     }
 
     func dispatch(_ request: DispatchRequest) throws -> Response {
@@ -646,8 +662,16 @@ struct PlanRequest: Decodable {
         var option: String
     }
 
+    /// One recent turn as the client shows it: `who` is `user` or `oby`.
+    struct Turn: Decodable {
+        var who: String
+        var text: String
+    }
+
     var said: String
     var answer: Answer?
+    /// The conversation so far, oldest first, or nil for the runner's own.
+    var turns: [Turn]?
 }
 
 /// Only what the user may change on a plan, and the plan's job id; the rest comes from the plan.

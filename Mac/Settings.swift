@@ -8,10 +8,17 @@ struct SettingsView: View {
     @State private var problem: String?
     /// The always-on runner whose jobs the island lists and RunnerFeed follows; empty turns that off.
     @AppStorage("runnerURL") private var runnerURL = ""
+    /// Oby reads its reply out loud when you talked to it (Mac/Speech.swift).
+    @AppStorage(Speaker.setting) private var speaks = true
 
     var body: some View {
         Form {
             Toggle("Open at login", isOn: $openAtLogin)
+            Section("Voice") {
+                Toggle("Oby speaks its replies", isOn: $speaks)
+                Text("When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
                 .onChange(of: openAtLogin) { _, on in
                     do {
                         if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
@@ -217,7 +224,7 @@ struct ModelsSettingsView: View {
                     ForEach(codexEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
                 }
             }
-            Text("New jobs use these. Oby's planner stays on Haiku: it only writes the plan card, so it should be quick.")
+            Text("New jobs use these. Oby's brain stays on Haiku: it plans and answers in the conversation, so it should be quick.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
