@@ -875,7 +875,9 @@ final class Desk {
             if let author = resumed.reviewOf { reconnect(review: id, to: author) }
             asked.insert(id)
             roundMessage[id] = nil
-            run(resumed, prompt: text, resume: session)
+            // One the runner kept going down with still has the message it was about to get: it comes first.
+            let pending = restarts?.message(id)
+            run(resumed, prompt: [pending, text].compactMap { $0 }.joined(separator: "\n\n"), resume: session)
         }
     }
 

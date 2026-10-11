@@ -119,6 +119,11 @@ struct RestartTests {
         let fourth = restart()
         #expect(made.agents.count == 3 && fourth.job("looping")?.status == .interrupted)
         #expect(fourth.inbox.filter { $0.job == "looping" }.count == 1)
+        // Telling it something carries on in its session, with the message it was about to get first.
+        let pending = try #require(fourth.restarts?.message("looping"))
+        try fourth.message("looping", "Go on")
+        #expect(made.agents.count == 4 && made.agents.last?.resume == "looping-session")
+        #expect(made.agents.last?.agent.prompt == pending + "\n\nGo on")
     }
 
     @Test func aQueuedJobStartsAfterTheRestart() async throws {
