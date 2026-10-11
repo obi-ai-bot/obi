@@ -3,7 +3,7 @@ import ApplicationServices
 import SwiftUI
 import WebKit
 
-enum IslandState { case compact, peek, open, listening }
+nonisolated enum IslandState { case compact, peek, open, listening }
 
 /// The island's state and its geometry, measured from the screen Oby lives on.
 @Observable
@@ -17,8 +17,10 @@ final class IslandModel {
     /// What goes with the next request: screenshots, what you copied.
     let tray = Tray()
     var state: IslandState = .compact
-    /// The notch's size, or zero on a screen without one.
-    var notch: CGSize = .zero
+    /// The camera's cutout, from the screen's top-left corner, or nil on a screen without one.
+    var notch: CGRect?
+    /// The width of the screen Oby lives on: the island is centered on it.
+    var screenWidth: CGFloat = 0
     /// The menu bar's height, used for the pill on screens without a notch.
     var barHeight: CGFloat = 24
     /// The open island's height, measured from its content.
@@ -46,39 +48,15 @@ final class IslandModel {
         Summary.line(working: working, needs: NeedsYou.line((desk.jobs + feed.jobs).filter { lists($0) }))
     }
 
-    private let wing: CGFloat = 52
-    private var top: CGFloat { notch == .zero ? barHeight : notch.height }
-
     /// What peeking shows next to Oby's name: a job that just ended, else the summary.
     var peekLine: String { notice ?? summary }
 
-    var size: CGSize {
-        let base = notch == .zero ? 180 : notch.width + 2 * wing
-        switch state {
-        case .compact: return CGSize(width: base, height: top)
-        case .peek: return CGSize(width: base + (peekLine == Summary.quiet ? 140 : 320), height: top + 6)
-        case .open, .listening: return CGSize(width: 600, height: openHeight)
-        }
+    /// Where everything sits inside the island now (Mac/IslandLayout.swift).
+    var layout: IslandLayout {
+        IslandLayout.of(state, screenWidth: screenWidth, notch: notch, barHeight: barHeight, line: peekLine, openHeight: openHeight)
     }
 
-    var radius: CGFloat {
-        switch state {
-        case .compact: 12
-        case .peek: 18
-        case .open, .listening: 32
-        }
-    }
-
-    /// Where Oby sits inside the island, from its top-left corner.
-    var characterFrame: CGRect {
-        switch state {
-        case .compact, .peek: CGRect(x: 8, y: -3, width: top + 6, height: top + 6)
-        // Oby's body sits low in its frame (room to jump), so the frame starts under the notch.
-        case .open, .listening: CGRect(x: 14, y: top - 14, width: 136, height: 136)
-        }
-    }
-
-    var contentTop: CGFloat { top }
+    var size: CGSize { layout.size }
 }
 
 /// Pins the island to the top center of the screen with the notch (or the main screen),
@@ -291,10 +269,11 @@ final class IslandController {
     private func place() {
         guard let screen else { return }
         if screen.safeAreaInsets.top > 0, let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
-            model.notch = CGSize(width: screen.frame.width - left.width - right.width, height: screen.safeAreaInsets.top)
+            model.notch = CGRect(x: left.width, y: 0, width: screen.frame.width - left.width - right.width, height: screen.safeAreaInsets.top)
         } else {
-            model.notch = .zero
+            model.notch = nil
         }
+        model.screenWidth = screen.frame.width
         let bar = screen.frame.maxY - screen.visibleFrame.maxY
         model.barHeight = bar > 0 ? bar : NSStatusBar.system.thickness
         let size = CGSize(width: 720, height: 760)
@@ -321,7 +300,7 @@ final class IslandController {
         lastMouse = mouse
         // oby.html reads the pointer relative to its own frame, which is tiny here: scale the
         // distance from Oby so far-away pointers turn the head a little, not all the way round.
-        let frame = model.characterFrame
+        let frame = model.layout.character
         let x = max(-1, min(1, (mouse.x - (island.minX + frame.midX)) / 420))
         let y = max(-1, min(1, ((island.maxY - frame.midY) - mouse.y) / 260))
         character.point(at: CGPoint(x: (x + 1) / 2 * frame.width, y: (y + 1) / 2 * frame.height))
@@ -358,9 +337,10 @@ struct IslandView: View {
     }
 
     var body: some View {
-        let size = model.size
-        let frame = model.characterFrame
-        let shape = UnevenRoundedRectangle(bottomLeadingRadius: model.radius, bottomTrailingRadius: model.radius, style: .continuous)
+        let layout = model.layout
+        let size = layout.size
+        let frame = layout.character
+        let shape = UnevenRoundedRectangle(bottomLeadingRadius: layout.radius, bottomTrailingRadius: layout.radius, style: .continuous)
 
         ZStack(alignment: .topLeading) {
             WebView(character.page)
@@ -370,29 +350,24 @@ struct IslandView: View {
                 .offset(x: frame.minX, y: frame.minY)
                 .accessibilityLabel("Oby")
 
-            // Agents working on this Mac and on the runner.
-            if model.state == .compact, model.working > 0 {
+            // Agents working on this Mac and on the runner, in the right wing.
+            if let count = layout.count, model.working > 0 {
                 Text("\(model.working)")
                     .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                    .frame(width: size.width - 16, height: size.height, alignment: .trailing)
+                    .frame(width: count.width, height: count.height, alignment: .trailing)
+                    .offset(x: count.minX, y: count.minY)
                     .accessibilityLabel(model.working == 1 ? "1 agent running" : "\(model.working) agents running")
             }
 
-            if model.state == .peek {
-                HStack(spacing: 12) {
-                    Text("Oby").font(.system(size: 12, weight: .semibold))
-                        .padding(.leading, frame.maxX + 4)
-                    Spacer(minLength: 0)
-                    Text(model.peekLine).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.6))
-                        .lineLimit(1)
-                        .padding(.trailing, 14)
-                }
-                .frame(width: size.width, height: size.height)
-                .transition(.opacity)
+            if let line = layout.line {
+                peek(below: layout.lineBelow)
+                    .frame(width: line.width, height: line.height)
+                    .offset(x: line.minX, y: line.minY)
+                    .transition(.opacity)
             }
 
             if model.state == .open {
-                OpenIsland(model: model, characterWidth: frame.maxX, top: model.contentTop, onClose: onClose)
+                OpenIsland(model: model, characterWidth: frame.maxX, insets: layout.insets ?? EdgeInsets(), onClose: onClose)
                     .frame(width: size.width)
                     .fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { model.openHeight = $0 }
@@ -400,7 +375,7 @@ struct IslandView: View {
             }
 
             if model.state == .listening {
-                ListeningIsland(voice: model.voice, characterWidth: frame.maxX, top: model.contentTop)
+                ListeningIsland(voice: model.voice, insets: layout.insets ?? EdgeInsets())
                     .frame(width: size.width)
                     .fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { model.openHeight = $0 }
@@ -421,13 +396,26 @@ struct IslandView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onChange(of: mood, initial: true) { character.mood = mood }
     }
+
+    /// "Oby" and the hover line: under the camera, centered, on a screen with a notch; else Oby's
+    /// name beside it and the line trailing.
+    @ViewBuilder private func peek(below: Bool) -> some View {
+        let name = Text("Oby").font(.system(size: 12, weight: .semibold)).layoutPriority(1)
+        let line = Text(model.peekLine).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.6))
+            .lineLimit(1).truncationMode(.tail)
+        if below {
+            HStack(spacing: 8) { name; line }
+        } else {
+            HStack(spacing: 12) { name; Spacer(minLength: 0); line }
+        }
+    }
 }
 
 /// While you hold fn: the waveform, your words as you say them, and how to send.
 private struct ListeningIsland: View {
     let voice: Voice
-    let characterWidth: CGFloat
-    let top: CGFloat
+    /// From the island's edges (IslandLayout): the words start below the camera.
+    let insets: EdgeInsets
 
     private var keyName: String { voice.key == .fn ? "fn" : "Control-Option" }
 
@@ -457,10 +445,7 @@ private struct ListeningIsland: View {
             Text(hint).font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
         }
         .frame(maxWidth: .infinity, minHeight: 120, alignment: .leading)
-        .padding(.leading, characterWidth + 12)
-        .padding(.trailing, 28)
-        .padding(.top, top + 6)
-        .padding(.bottom, 24)
+        .padding(insets)
     }
 }
 
@@ -486,7 +471,8 @@ private struct Waveform: View {
 private struct OpenIsland: View {
     let model: IslandModel
     let characterWidth: CGFloat
-    let top: CGFloat
+    /// From the island's edges (IslandLayout): the words start below the camera.
+    let insets: EdgeInsets
     let onClose: () -> Void
     @State private var text = ""
     @FocusState private var typing: Bool
@@ -588,9 +574,7 @@ private struct OpenIsland: View {
                 }
             }
         }
-        .padding(.top, top + 10)
-        .padding(.horizontal, 22)
-        .padding(.bottom, 22)
+        .padding(insets)
         // Escape cancels the turn Oby is thinking about first, then leaves a job's screen, then closes the island.
         .onExitCommand {
             if thinking { desk.cancel() } else if selected != nil { selected = nil } else { onClose() }
