@@ -40,8 +40,7 @@ final class SpeechTests {
         (root / 'args.json').write_text(json.dumps(record))
         pathlib.Path(value('--output-file') + '.txt').write_text('texto ' + str(len(audio)-44) + '\n')
         """#
-        try fake.write(to: cli, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: cli.path)
+        try executable(fake, at: cli)
         config = Speech.Config(cli: cli, fastModel: folder.appending(path: "fast.bin"),
                                finalModel: folder.appending(path: "large.bin"), folder: folder.appending(path: "audio"),
                                threads: 7, names: ["oby", "tetrix", "deskree-inc/repo"])
@@ -77,9 +76,7 @@ final class SpeechTests {
             with (root / 'downloads').open('a') as log: log.write('download\n')
         """#
         for tool in ["git", "cmake", "curl", "c++", "flock"] {
-            let path = bin.appending(path: tool)
-            try stub.write(to: path, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path.path)
+            try executable(stub, at: bin.appending(path: tool))
         }
         let script = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appending(path: "Runner/scripts/setup-whisper.sh")
         var environment = ProcessInfo.processInfo.environment
