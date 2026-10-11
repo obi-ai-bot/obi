@@ -93,10 +93,11 @@ final class Desk {
     private var ending: Set<String> = []
     /// Jobs that ended done and are counting their commits and publishing.
     private var finishing: Set<String> = []
-    /// Jobs whose agent this run of Oby started, with the commits each had then. Only they publish
-    /// by themselves, and only with commits made since: a job that ended before Oby started never
-    /// does, and one whose own publish failed isn't retried (Publish by hand is).
-    private var ranHere: [String: Int] = [:]
+    /// Jobs whose agent this run of Oby started, with the commits each had then and how many of them
+    /// weren't on its pull request. Only they publish by themselves, and only with commits made (or
+    /// rebased) since: a job that ended before Oby started never does, and one whose own publish
+    /// failed isn't retried (Publish by hand is).
+    private var ranHere: [String: (commits: Int, unpublished: Int)] = [:]
     /// Jobs whose agent was cut off mid-turn and picked up again: that happens once, then the job fails.
     private var pickedUp: Set<String> = []
     /// Jobs running again for the user's words (`message` on a finished job): that round is theirs,
@@ -127,6 +128,18 @@ final class Desk {
     /// How many commits the job's worktree has beyond `since`, or nil when git can't say. Tests put in their own.
     @ObservationIgnored var countCommits: (_ id: String, _ since: String) async -> Int? = { id, since in
         (try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-list", "--count", "\(since)..HEAD"])).flatMap { Int($0) }
+    }
+    /// How many commits the job's worktree has beyond `since` that `pushed` (the commit Oby pushed
+    /// last) doesn't: the new ones, or all of them after a rebase. Nil when git can't say. Tests put in their own.
+    @ObservationIgnored var countUnpushed: (_ id: String, _ since: String, _ pushed: String) async -> Int? = { id, since, pushed in
+        (try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-list", "--count", "HEAD", "^\(since)", "^\(pushed)"])).flatMap { Int($0) }
+    }
+    /// Brings origin/<base> up to date from GitHub in the job's clone, before a rebase round, and
+    /// returns the commit it's at. Tests put in their own.
+    @ObservationIgnored var fetchBase: (_ job: Job, _ base: String) async throws -> String = { job, base in
+        let worktree = Workspace.worktree(job.id)
+        try await Publish.fetch(base, of: job, into: worktree)
+        return try await Shell.ok(["git", "-C", worktree.path, "rev-parse", "--verify", "refs/remotes/origin/\(base)^{commit}"])
     }
     /// The limits every job is held to (case 3.1). Tests put in their own.
     @ObservationIgnored var limits = JobLimits()
@@ -882,7 +895,7 @@ final class Desk {
         let home = accounts.state(job.account)?.account.home.map { URL(filePath: $0) }
         guard let agent = makeAgent(job, home, resume) else { return finish(job.id, .failed, "\(job.agentName) can't run jobs yet.") }
         agents[job.id] = agent
-        ranHere[job.id] = job.commits ?? 0
+        ranHere[job.id] = (job.commits ?? 0, job.unpublished)
         (agent as? ClaudeAgent)?.maxTurns = limits.maxTurns
         // A new round, or one done over on another account: its own timer. The job's cap runs from
         // its first round until it ends.
@@ -1137,15 +1150,18 @@ final class Desk {
             let commits = await countCommits(id, "refs/remotes/origin/\(base)")
             // A pull request's branch has its own commits beyond the base: only the ones after its head are the job's.
             let made = job.pr == nil ? commits : await countCommits(id, "refs/oby/pr-\(job.pr ?? 0)")
+            let pushed = await stillPushed(job, base: base, commits: commits)
             await noteTetrixStamps(id)
             guard var running = self.job(id), running.isActive else { return }
             // The job as it would end, which is what gets published.
             var ended = running
             (ended.status, ended.summary) = Job.ending(ended, status, summary, made: made, asked: asked.contains(id))
             ended.commits = commits
-            guard ended.canPublish, let before = ranHere[id], (commits ?? 0) > before else {
+            ended.pushed = pushed
+            guard ended.canPublish, let before = ranHere[id], (commits ?? 0) > before.commits || ended.unpublished > before.unpublished else {
                 // Still waiting for Publish by hand: why its own publish failed still holds.
-                return end(id, status, summary, commits: commits, made: made, publishError: ended.canPublish ? ended.publishError : nil)
+                return end(id, status, summary, commits: commits, pushed: pushed, made: made,
+                           publishError: ended.canPublish ? ended.publishError : nil)
             }
             running.phase = .publish
             running.publishStep = .scan
@@ -1153,21 +1169,31 @@ final class Desk {
             replace(running)
             do {
                 let url = try await publishOnItsOwn(ended, base, hooks(id, stoppable: true))
-                end(id, status, summary, commits: commits, made: made, published: url)
+                end(id, status, summary, commits: commits, pushed: pushed, made: made, published: url)
             } catch let merged as Publish.AlreadyOnBase {
                 // Merged already (a squash merge changes the hashes): nothing is left to publish.
                 end(id, status, (merged.errorDescription ?? "Not published.") + "\n\n" + ended.summary, commits: 0, made: made)
             } catch let blocked as Publish.Blocked {
-                end(id, .failed, (blocked.errorDescription ?? "Not published.") + "\n\n" + ended.summary, commits: commits, made: made)
+                end(id, .failed, (blocked.errorDescription ?? "Not published.") + "\n\n" + ended.summary, commits: commits, pushed: pushed, made: made)
             } catch {
-                end(id, status, summary, commits: commits, made: made, publishError: error.localizedDescription)
+                end(id, status, summary, commits: commits, pushed: pushed, made: made, publishError: error.localizedDescription)
             }
         }
     }
 
-    /// `commits`: beyond the base, what Publish would push. `made`: the ones this job made.
-    /// `published`: the pull request it just published to, or `publishError`, why it couldn't.
-    private func end(_ id: String, _ status: Job.Status, _ summary: String, commits: Int? = nil, made: Int? = nil,
+    /// How many of the job's `commits` beyond `base` its pull request has: those in the commit Oby
+    /// pushed last. A rebase rewrites them, so then it's none, and they're published again. The
+    /// count from its last publish when there's no pushed commit to compare with or git can't say.
+    private func stillPushed(_ job: Job, base: String, commits: Int?) async -> Int? {
+        guard job.published != nil, let head = job.pushedHead, let commits,
+              let unpushed = await countUnpushed(job.id, "refs/remotes/origin/\(base)", head) else { return job.pushed }
+        return max(0, commits - unpushed)
+    }
+
+    /// `commits`: beyond the base, what Publish would push, and `pushed`, how many of them its pull
+    /// request has. `made`: the ones this job made. `published`: the pull request it just published
+    /// to, or `publishError`, why it couldn't.
+    private func end(_ id: String, _ status: Job.Status, _ summary: String, commits: Int? = nil, pushed: Int? = nil, made: Int? = nil,
                      published: URL? = nil, publishError: String? = nil) {
         guard var job = job(id) else { return }
         guard job.isActive else {
@@ -1188,11 +1214,14 @@ final class Desk {
         // What it asked Tetrix and saved there. Not on a review, whose last line is its verdict.
         if job.reviewOf == nil, let tetrix = TetrixUse.report(job) { job.summary += "\n\n" + tetrix }
         job.commits = commits
-        // After commits, so it counts them as pushed.
+        if let pushed { job.pushed = pushed }
+        // After commits, so it counts them as pushed. A new head starts its review, check and merge
+        // over: why the last merge stopped (a conflict a rebase resolved) is past.
         if let published {
             job.pullRequest = nil
             job.pullRequestError = nil
             job.published = published.absoluteString
+            job.mergeError = nil
         }
         job.publishError = publishError
         job.step = ""

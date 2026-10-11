@@ -39,7 +39,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The pull request Oby opened for it. Publishing (by itself when the job ends, or Desk.publish)
     /// also notes how many commits went out, so later rounds' commits can follow.
     var published: String? { didSet { if published != nil { pushed = commits } } }
-    /// Commits on the pull request when Oby last published, or nil before then.
+    /// How many of `commits` its pull request has: all of them when Oby last published, fewer once
+    /// a round rebased the branch (the rewritten ones are new), or nil before then.
     var pushed: Int?
     /// Why Oby couldn't publish it by itself (push or pull request failed), or nil. Publishing by
     /// hand is offered then.
@@ -103,6 +104,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// and why Oby couldn't check or merge it, or nil.
     var macCheck: MacCheck?
     var mergeError: String?
+    /// The base's commit Oby last had the agent rebase onto because the pull request conflicted
+    /// with it (`Desk.rebaseConflicted`): one rebase round per commit of the base. Nil before then.
+    var rebasedOnto: String?
     /// The latest Apple build and test its agent asked for mid-round (`oby-check apple`,
     /// Engine/AppleChecks.swift), or nil.
     var appleCheck: MacCheck?
