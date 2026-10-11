@@ -65,6 +65,13 @@ final class Desk {
     private var roundMessage: [String: String] = [:]
     /// How each job moved between accounts when one hit its limit, oldest first: the report says so.
     private var handoffs: [String: [String]] = [:]
+    /// Each running job's round timer and job cap (case 3.1): one ending first holds the job.
+    private var roundTimers: [String: Task<Void, Never>] = [:]
+    private var jobTimers: [String: Task<Void, Never>] = [:]
+    /// The fingerprint of each looping job's last failing round (Engine/Guards.swift).
+    private var failures: [String: String] = [:]
+    /// How many actions in a row Oby denied each running job.
+    private var denials: [String: Int] = [:]
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
     /// Gets a job's worktree ready, and makes its agent (nil for a tool that can't run jobs yet). Tests put in their own.
@@ -73,6 +80,18 @@ final class Desk {
     /// How many commits the job's worktree has beyond `since`, or nil when git can't say. Tests put in their own.
     @ObservationIgnored var countCommits: (_ id: String, _ since: String) async -> Int? = { id, since in
         (try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-list", "--count", "\(since)..HEAD"])).flatMap { Int($0) }
+    }
+    /// The limits every job is held to (case 3.1). Tests put in their own.
+    @ObservationIgnored var limits = JobLimits()
+    /// Runs a job's check in its worktree, ending it after `timeout` seconds. Tests put in their own.
+    @ObservationIgnored var runCheck: (_ id: String, _ command: String, _ timeout: TimeInterval) async -> Rounds.Check = { id, command, timeout in
+        await Rounds.run(command, in: Workspace.worktree(id), timeout: timeout)
+    }
+    /// What a job's work does to the tests since its branch started (case 3.2): one line per
+    /// problem, none when they're intact. Tests put in their own.
+    @ObservationIgnored var integrity: (Job) async -> [String] = { job in
+        guard let ref = Integrity.ref(job) else { return [] }
+        return await Integrity.check(worktree: Workspace.worktree(job.id), against: ref)
     }
     /// Publishes a job that ended done with commits, with no one to approve it: the check passed
     /// and the secret scan gates it (case 4.1). Tests put in their own.
@@ -562,6 +581,7 @@ final class Desk {
         job.dismissed = nil
         job.round = job.currentRound + 1
         if let rounds = job.rounds { job.rounds = rounds + 1 }
+        job.limit = nil
         return job
     }
 
@@ -609,6 +629,13 @@ final class Desk {
         guard let agent = makeAgent(job, home, resume) else { return finish(job.id, .failed, "\(job.agentName) can't run jobs yet.") }
         agents[job.id] = agent
         ranHere[job.id] = job.commits ?? 0
+        (agent as? ClaudeAgent)?.maxTurns = limits.maxTurns
+        // A new round, or one done over on another account: its own timer. The job's cap runs from
+        // its first round until it ends.
+        timeRound(job.id)
+        if jobTimers[job.id] == nil {
+            jobTimers[job.id] = after(limits.job) { [weak self] in self?.hold(job.id, "the job ran past \(JobLimits.span($0))") }
+        }
         do {
             // Only the job's current agent speaks for it: one that was stopped or ended may still report.
             try agent.start(prompt: prompt) { [weak self, weak agent] event in
@@ -650,7 +677,15 @@ final class Desk {
             // Its turn died on the account's limit. One that's finishing after its last turn is left to end.
             guard !ending.contains(id) else { return }
             moveOn(job, resets: resets)
+        case .permission(let denied):
+            guard let denied else { denials[id] = nil; return }
+            let count = (denials[id] ?? 0) + 1
+            denials[id] = count
+            if count >= limits.denials { hold(id, "\(count) actions in a row were denied", "The last one: \(denied)") }
+        case .maxTurns(let turns):
+            hold(id, "\(job.agentName) took its \(turns ?? limits.maxTurns) turns in one round")
         case .turnEnded(let summary, let failed):
+            roundTimers.removeValue(forKey: id)?.cancel()
             job.summaries = (job.summaries ?? []) + [summary]
             replace(job)
             // One turn and no check: the job ends when the agent does, after any background work.
@@ -721,29 +756,63 @@ final class Desk {
             job.phase = .check
             job.step = "Checking: \(command)"
             replace(job)
-            let worktree = Workspace.worktree(id)
-            let result = try? await Shell.run(Agents.sandboxed(["sh", "-c", command], in: worktree, own: nil), in: worktree,
-                                              env: Agents.overrides, timeout: 1200)
-            let output = result.map { String(decoding: $0.out, as: UTF8.self) + $0.err } ?? "Oby couldn't run it."
-            check = Rounds.Check(command: command, passed: result?.status == 0, output: String(output.suffix(4000)))
+            var result = await runCheck(id, command, limits.testRun)
             // Stopped while the check ran.
-            guard let latest = self.job(id), latest.isActive else { return }
-            job = latest
+            guard var latest = self.job(id), latest.isActive else { return }
+            // Oby compares the tests with where the branch started too: weakening them fails the round (case 3.2).
+            latest.step = "Comparing the tests with \(Integrity.ref(latest).map { $0.replacing("refs/remotes/", with: "") } ?? "the base")"
+            replace(latest, save: false)
+            result.problems = await integrity(latest)
+            guard let checked = self.job(id), checked.isActive else { return }
+            job = checked
+            check = result
         }
         // The user spoke since the turn ended: the agent took it up, and that turn decides.
         guard (job.notes?.count ?? 0) == heard else { return }
-        switch Rounds.next(job, summary: summary, failed: failed, check: check) {
+        switch Rounds.next(job, summary: summary, failed: failed, check: check, previous: failures[id]) {
         case let .finish(status, text):
             agent.end()
             finish(id, status, text)
         case let .again(message):
+            failures[id] = check.map(Fingerprint.of)
             job.round = job.currentRound + 1
             job.phase = .work
             job.step = "Round \(job.currentRound) of \(job.maxRounds)"
             replace(job)
             roundMessage[id] = message
+            timeRound(id)
             agent.send(message)
+        case let .hold(limit, text):
+            hold(id, limit, text)
         }
+    }
+
+    /// Starts the job's round timer over.
+    private func timeRound(_ id: String) {
+        roundTimers[id]?.cancel()
+        roundTimers[id] = after(limits.round) { [weak self] in self?.hold(id, "the round ran past \(JobLimits.span($0))") }
+    }
+
+    /// Calls `then` with `seconds` once they've passed, unless the task is cancelled first.
+    private func after(_ seconds: TimeInterval, _ then: @escaping (TimeInterval) -> Void) -> Task<Void, Never> {
+        Task {
+            try? await Task.sleep(for: .seconds(seconds))
+            if !Task.isCancelled { then(seconds) }
+        }
+    }
+
+    /// The job stopped at one of Oby's limits (case 3.1): its agent is stopped, and it ends
+    /// `failed` with the limit, keeping its branch and pushing nothing. One more round is possible:
+    /// telling it something runs one. `summary` is what to add, else the agent's last round summary.
+    /// Not once it's publishing: that's past every round.
+    private func hold(_ id: String, _ limit: String, _ summary: String? = nil) {
+        guard var job = job(id), job.isActive, !finishing.contains(id) else { return }
+        Logger.jobs.notice("job \(id, privacy: .public) stopped at a limit: \(limit, privacy: .public)")
+        let agent = agents[id]
+        job.limit = limit
+        replace(job, save: false)
+        end(id, .failed, Rounds.held(limit, summary: summary ?? job.summaries?.last))
+        agent?.stop()
     }
 
     /// Ends the job. A job that's done counts its commits first, so one that should have committed
@@ -831,6 +900,10 @@ final class Desk {
         asked.remove(id)
         roundMessage[id] = nil
         handoffs[id] = nil
+        roundTimers.removeValue(forKey: id)?.cancel()
+        jobTimers.removeValue(forKey: id)?.cancel()
+        failures[id] = nil
+        denials[id] = nil
         waiting.removeAll { $0.id == id }
         // Oby reviews what was just published, and a review that ended reaches its author (Engine/Review.swift).
         if published != nil { reviewPublished(job) }
@@ -891,12 +964,34 @@ nonisolated enum Rounds {
         var passed: Bool
         /// The end of what the command printed: what the agent needs to fix it.
         var output: String
+        /// What the work does to the tests (Integrity): any of these fails the round, even when the command passed.
+        var problems: [String] = []
+
+        var succeeded: Bool { passed && problems.isEmpty }
     }
 
     enum Next: Equatable {
         case finish(Job.Status, String)
         /// Another round, with this message to the agent.
         case again(String)
+        /// Stop at a limit (case 3.1): the limit, and the summary to end with.
+        case hold(String, String)
+    }
+
+    /// Runs a check in the worktree, as Oby's agents run (in bubblewrap on Linux) but with no
+    /// account, and ends it after `timeout` seconds: then it fails, saying so.
+    static func run(_ command: String, in worktree: URL, timeout: TimeInterval, boxed: Bool = Agents.bubblewrap) async -> Check {
+        let result = try? await Shell.run(Agents.sandboxed(["sh", "-c", command], in: worktree, own: nil, bubblewrap: boxed), in: worktree,
+                                          env: Agents.overrides, timeout: timeout)
+        var output = result.map { String(decoding: $0.out, as: UTF8.self) + $0.err } ?? "Oby couldn't run it."
+        if result?.timedOut == true { output += "\n\nOby stopped it after \(JobLimits.span(timeout)), the most a test run may take." }
+        return Check(command: command, passed: result?.status == 0 && result?.timedOut == false, output: String(output.suffix(4000)))
+    }
+
+    /// The summary of a job stopped at a limit.
+    static func held(_ limit: String, summary: String?) -> String {
+        "Stopped at a limit: \(limit). The branch is kept and nothing was pushed; one more round is possible."
+            + (summary.map { $0.isEmpty ? "" : "\n\n" + $0 } ?? "")
     }
 
     enum Verdict: Equatable {
@@ -904,20 +999,32 @@ nonisolated enum Rounds {
         case notMet(String)
     }
 
-    static func next(_ job: Job, summary: String, failed: Bool, check: Check?) -> Next {
+    /// `previous` is the fingerprint of the round before's failure, if it failed: the same failure
+    /// again stops the job (no progress).
+    static func next(_ job: Job, summary: String, failed: Bool, check: Check?, previous: String? = nil) -> Next {
         let last = job.currentRound >= job.maxRounds
         let rounds = "\(job.maxRounds) round\(job.maxRounds == 1 ? "" : "s")"
         if failed { return .finish(.failed, summary) }
         if let check {
-            if check.passed { return .finish(.done, summary + "\n\nChecked: `\(check.command)` passed.") }
-            if last { return .finish(.failed, "`\(check.command)` still fails after \(rounds).\n\n" + summary) }
-            return .again("Oby ran `\(check.command)` and it failed:\n\n```\n\(check.output)\n```\n\nFix it, run it again yourself, and finish with a short summary.")
+            if check.succeeded { return .finish(.done, summary + "\n\nChecked: `\(check.command)` passed.") }
+            if let previous, Fingerprint.of(check) == previous { return .hold("the same failure twice in a row", summary) }
+            if last {
+                return .hold(check.passed ? "the tests are still weakened after \(rounds)" : "`\(check.command)` still fails after \(rounds)", summary)
+            }
+            var parts: [String] = []
+            if !check.passed { parts.append("Oby ran `\(check.command)` and it failed:\n\n```\n\(check.output)\n```") }
+            if !check.problems.isEmpty {
+                parts.append("Oby compared the tests with where this branch started, and this work weakens them:\n\n"
+                             + check.problems.map { "- " + $0 }.joined(separator: "\n")
+                             + "\n\nPut the existing tests, skip markers and test or CI config back as they were. New tests are welcome.")
+            }
+            return .again(parts.joined(separator: "\n\n") + "\n\nFix it, run `\(check.command)` again yourself, and finish with a short summary.")
         }
         switch verdict(summary) {
         // No verdict line: take the agent at its word rather than loop on a missing line.
         case .met, nil: return .finish(.done, summary)
         case .notMet(let left):
-            if last { return .finish(.failed, "Not finished after \(rounds): \(left)\n\n" + summary) }
+            if last { return .hold("not finished after \(rounds): \(left)", summary) }
             return .again("Keep going: \(left)")
         }
     }

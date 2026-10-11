@@ -55,6 +55,7 @@ This document is the contract between the runner and its clients. Change it in t
   "files": null,
   "lead": null,
   "claim": null,
+  "limit": null,
   "outgoing": [],
   "title": "Review oby #33",
   "pipeline": {
@@ -96,7 +97,16 @@ This document is the contract between the runner and its clients. Change it in t
 - `rounds`: how many rounds the agent may take (1 means no loop); `round`: the one it's on.
 - `check`: a one-line command that must succeed for the work to count as done.
   - After each round the runner runs it in the job's worktree. If it fails and rounds are left, the agent gets another round with the command's output.
+  - A run of the check that takes more than 10 minutes is ended, and fails; its output ends with `Oby stopped it after 10 minutes, the most a test run may take.`
+  - Test integrity: after the check, the runner compares the worktree (committed or not) with where the branch started (`base` on origin, or the pull request's head) and fails the round when the work deletes, moves or edits an existing test file, adds a skip marker (`.disabled(`, `.enabled(if:`, `XCTSkip`, `it.skip`, `@pytest.mark.skip`, `t.Skip(`, `#[ignore]`…), lowers the number of tests declared, or touches test or CI config (`.github/workflows/`, `jest.config.*`, `pytest.ini`, `conftest.py`…). New tests are fine. The agent's next round lists what's wrong, even when the command passed. When git can't say, the round fails too.
   - Without a check and with more than one round, the agent's own last line decides: `GOAL MET`, or `GOAL NOT MET: …`, which means another round.
+- `limit`: the limit the runner stopped the job at, or null. The runner holds every job to its limits itself; no prompt states them:
+  - a round's turn may take 15 minutes, a whole job 45 minutes (every round and check included);
+  - Claude Code runs with `--max-turns 200` for each round (Codex has no such switch: the timer alone holds it);
+  - rounds run out (the Lead's jobs get 4: one attempt and three fix rounds);
+  - no progress: the same failure twice in a row (the failing tests' ids plus the last 20 lines of the check's output, with times, durations, addresses and ids taken out), or 3 actions in a row the runner denied.
+
+  Such a job is `failed` with `limit` set (like `"the same failure twice in a row"` or ``"`swift test` still fails after 4 rounds"``), keeps its branch and pushes nothing. Its `summary` starts with `Stopped at a limit: <limit>. The branch is kept and nothing was pushed; one more round is possible.` and the notch says `Stopped at a limit: <title>`. One more round: `POST /v1/jobs/{id}/messages`, which clears `limit`. Older runners don't send this key.
 - `model`: a stronger model the user chose for this job, or null for the one in Settings › Models.
 - `notes`: what the user told the agent along the way (`POST /v1/jobs/{id}/messages`), oldest first, or null.
 - `title`: what to call the job in rows, the job screen, the notch and alerts. It's the brain's short title (3 to 6 words, like `"Mac runner notifications"`), which every planned dispatch gets and the job keeps. Jobs without one (the rules' plans when the brain is down, an epic's sub-issue jobs, jobs from before titles) get `"<Kind> <repo name> #<number>"` when `pr` or `issue` is set, otherwise the first line of `task` (falling back to `request`), capped at 60 characters. It's always a string; older runners don't send it, so clients fall back the same way. Show "Round 2 of 5" when `rounds` is above 1.

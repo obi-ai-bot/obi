@@ -6,6 +6,8 @@ nonisolated enum Shell {
         var status: Int32
         var out: Data
         var err: String
+        /// It ran past its timeout and Oby ended it.
+        var timedOut = false
         var text: String { String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
@@ -57,7 +59,9 @@ nonisolated enum Shell {
                 process.standardError = stderr
                 do { try process.run() } catch { done.resume(throwing: error); return }
 
-                let kill = DispatchWorkItem { process.terminate() }
+                // Past the timeout, the whole process group ends, so a tool it started can't hold the pipes open.
+                let expired = Collected()
+                let kill = DispatchWorkItem { expired.data = Data([1]); Halt.end(process) }
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: kill)
                 // Read stderr on its own thread so a chatty tool can't fill the pipe and stall.
                 let err = Collected()
@@ -69,7 +73,8 @@ nonisolated enum Shell {
                 reading.wait()
                 process.waitUntilExit()
                 kill.cancel()
-                done.resume(returning: Output(status: process.terminationStatus, out: out, err: String(decoding: err.data, as: UTF8.self)))
+                done.resume(returning: Output(status: process.terminationStatus, out: out, err: String(decoding: err.data, as: UTF8.self),
+                                              timedOut: !expired.data.isEmpty))
             }
         }
     }

@@ -128,9 +128,11 @@ final class CodexAgent: AgentRun {
         switch CodexRPC.answer(request, files: files, worktree: worktree) {
         case .accept:
             server.reply(id, ["decision": "accept"])
+            onEvent(.permission(denied: nil))
         case let .decline(reason):
             Logger.jobs.notice("declined \(request["method"] as? String ?? "", privacy: .public): \(reason, privacy: .public)")
             server.reply(id, ["decision": "decline"])
+            onEvent(.permission(denied: reason))
             // The decision has no room for a reason, so it reaches Codex as a word from Oby.
             let params = request["params"] as? [String: Any] ?? [:]
             if let thread = params["threadId"] as? String, let turn = params["turnId"] as? String {

@@ -86,6 +86,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Files the user attached to the request (a screenshot, what they copied), as paths on this
     /// machine. Workspace.prepare copies them into the worktree's .oby/inputs.
     var attachments: [String]?
+    /// The limit Oby stopped the job at (case 3.1, Engine/Guards.swift), like "the same failure twice
+    /// in a row", or nil. Such a job is `failed`, keeps its branch and pushed nothing; one more round
+    /// is possible, by telling it something.
+    var limit: String?
 
     var maxRounds: Int { rounds ?? 1 }
     var currentRound: Int { round ?? 1 }
@@ -150,7 +154,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         switch status {
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done: \(heading)"
         case .failed:
-            summary.hasPrefix("Nothing committed:") ? "Nothing committed: \(heading)"
+            limit != nil ? "Stopped at a limit: \(heading)"
+                : summary.hasPrefix("Nothing committed:") ? "Nothing committed: \(heading)"
                 : summary.hasPrefix("Not published:") ? "Not published: \(heading)" : "Couldn't finish: \(heading)"
         case .stopped: "Stopped: \(heading)"
         case .interrupted: "Interrupted: \(heading)"
@@ -204,6 +209,10 @@ nonisolated enum AgentEvent: Equatable, Sendable {
     /// The agent's process ended mid-turn, without a result: the summary says how it ended. Its
     /// session can be picked up again.
     case cutOff(summary: String)
+    /// Oby answered a permission prompt: nil when it allowed the action, else why it denied it.
+    case permission(denied: String?)
+    /// Claude Code took its `--max-turns` in this round (how many it says it took), without finishing.
+    case maxTurns(Int?)
 
     /// A reset time as the tools send it: seconds since 1970 (milliseconds are taken too).
     nonisolated static func epoch(_ value: Any?) -> Date? {
@@ -254,6 +263,8 @@ final class ClaudeAgent: AgentRun {
     private let configDirectory: URL?
     /// This job's model, or nil for Settings › Models.
     var model: String?
+    /// The most turns it takes for one message (`JobLimits.maxTurns`), or nil for no limit.
+    var maxTurns: Int?
     private var onEvent: (AgentEvent) -> Void = { _ in }
     private var finished = false
     /// The latest turn's result. The job ends when Claude Code exits, not when a turn ends.
@@ -275,7 +286,7 @@ final class ClaudeAgent: AgentRun {
     }
 
     /// The command line and environment Claude Code starts with.
-    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?) -> (arguments: [String], environment: [String: String]) {
+    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil) -> (arguments: [String], environment: [String: String]) {
         // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
         // mcpServers (Tetrix) stay; only its claude.ai connectors are off.
         let arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
@@ -283,6 +294,7 @@ final class ClaudeAgent: AgentRun {
                              // Only the account's own settings: a repo's .claude/settings.json could allow tools past Oby.
                              "--setting-sources", "user",
                              "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
+                            + (maxTurns.map { ["--max-turns", String($0)] } ?? [])
                             + (resume.map { ["--resume", $0] } ?? []),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude")
         let environment = Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 })
@@ -292,7 +304,7 @@ final class ClaudeAgent: AgentRun {
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
         self.onEvent = onEvent
         process.executableURL = URL(filePath: "/usr/bin/env")
-        let launch = Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume)
+        let launch = Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns)
         process.arguments = launch.arguments
         process.environment = launch.environment
         process.currentDirectoryURL = worktree
@@ -383,12 +395,14 @@ final class ClaudeAgent: AgentRun {
             return
         }
         if let (id, tool, toolInput) = StreamJSON.permission(message) {
-            if let reason = Policy.deny(tool: tool, input: toolInput, worktree: worktree) {
-                Logger.jobs.notice("denied \(tool, privacy: .public): \(reason, privacy: .public)")
-                answer(id, ["behavior": "deny", "message": reason])
+            let denied = Policy.deny(tool: tool, input: toolInput, worktree: worktree)
+            if let denied {
+                Logger.jobs.notice("denied \(tool, privacy: .public): \(denied, privacy: .public)")
+                answer(id, ["behavior": "deny", "message": denied])
             } else {
                 answer(id, ["behavior": "allow", "updatedInput": toolInput])
             }
+            onEvent(.permission(denied: denied))
             return
         }
         for event in StreamJSON.events(message) {
@@ -499,6 +513,8 @@ nonisolated enum StreamJSON {
                 events.append(.limit(resets: at.map { Date(timeIntervalSince1970: $0) }))
             }
             return events
+        case "result" where message["subtype"] as? String == "error_max_turns":
+            return [.maxTurns((message["num_turns"] as? Int))]
         case "result":
             let failed = message["is_error"] as? Bool ?? (message["subtype"] as? String != "success")
             let text = (message["result"] as? String) ?? ""
