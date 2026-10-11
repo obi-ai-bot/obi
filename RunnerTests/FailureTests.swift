@@ -152,6 +152,12 @@ struct FailureTests {
         log.observe(test.job("stopped") { $0.status = .stopped })
         log.observe(test.job("old") { $0.status = .failed; $0.finished = .now.addingTimeInterval(-3 * 86_400) })
         #expect(test.triggers(of: "named").isEmpty && test.triggers(of: "stopped").isEmpty && test.triggers(of: "old").isEmpty)
+        // An Apple check no Mac took (#157) isn't the Mac failing: the agent carries on without it.
+        log.observe(test.job("nomac") { var check = test.check("c5", .error); check.kind = .apple; check.problem = AppleCheck.noMacLine; $0.appleCheck = check })
+        #expect(test.triggers(of: "nomac").isEmpty)
+        // One a Mac took and couldn't run is.
+        log.observe(test.job("macerror") { var check = test.check("c6", .error); check.kind = .apple; check.started = .now; check.problem = "The simulator hung."; $0.appleCheck = check })
+        #expect(test.triggers(of: "macerror") == [.checkError])
 
         // The evidence: the summary, the step, the check, and the record outlives the job list.
         let record = try #require(log.store.failures().first { $0.job == "mac" })
@@ -159,7 +165,7 @@ struct FailureTests {
         #expect(record.evidence.step.contains("Stage"))
         #expect(record.postMortem == nil && (record.tries ?? 0) == 0)
         let reopened = JobStore(url: test.folder.appending(path: "oby.sqlite"))
-        #expect(reopened.failures().count == cases.count)
+        #expect(reopened.failures().count == cases.count + 1)
     }
 
     @Test func jobsThatFailHitALimitOrAreLeftInterruptedAreRecorded() async throws {
