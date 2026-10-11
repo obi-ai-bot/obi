@@ -1,227 +1,259 @@
 import AVFoundation
 import SwiftUI
 
-/// Hold to talk, on Home: the microphone is open only while the button is held. The recording
-/// goes to the iPhone, which writes it down (SpeechAnalyzer) and asks the brain; the plan comes
-/// back in Home's sheet (TalkView) to dispatch with one tap. Without the phone in reach, or
-/// without the microphone, the button dictates instead; the request waits for the phone if it must.
+/// A stable bottom-row control, including while a reply is pending. A new hold replaces it.
 struct TalkButton: View {
     @Environment(Watch.self) private var watch
     @Environment(\.scenePhase) private var scenePhase
-    /// Home's sheet, brought back when an ask is already under way (one waiting for the phone).
-    @Binding var talking: Bool
+    let size: CGFloat
     @State private var recorder = Recorder()
-    /// True only while the finger is down: SwiftUI resets it when the gesture ends or is
-    /// cancelled, so every hold has a release.
     @GestureState private var pressing = false
     @State private var holding = false
 
     var body: some View {
         Group {
-            if watch.talk != .none, !holding {
-                // An ask is under way (one waiting for the phone, its sheet closed): it comes back.
-                Button { talking = true } label: { circle("mic.fill") }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Show the request")
-            } else if holding || (watch.reachable && recorder.allowed != false) {
-                // Drawn while held too, so the gesture that opened the mic is still there to close it.
+            if holding || (watch.reachable && recorder.allowed != false && !watch.useDictation) {
                 circle(holding ? "waveform" : "mic.fill")
-                    .gesture(
-                        // Pressed and released, wherever the finger goes: the mic follows the hold.
-                        DragGesture(minimumDistance: 0)
-                            .updating($pressing) { _, pressing, _ in pressing = true }
-                    )
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .updating($pressing) { _, pressing, _ in pressing = true })
                     .onChange(of: pressing) { if pressing { start() } else { release() } }
                     .accessibilityLabel("Hold to talk")
             } else {
-                TextFieldLink(prompt: Text("What should Oby do?")) {
-                    circle("mic.fill")
-                } onSubmit: { watch.ask($0) }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Dictate to Oby")
+                TextFieldLink(prompt: Text("What should Oby do?")) { circle("mic.fill") }
+                    onSubmit: { watch.cancel(); watch.ask($0) }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dictate to Oby")
+                    .simultaneousGesture(TapGesture().onEnded { watch.cancel() })
             }
         }
         .sensoryFeedback(trigger: holding) { _, held in held ? .start : .stop }
-        // At the limit the recorder stops itself: the wrist is told to let go.
         .sensoryFeedback(.warning, trigger: recorder.seconds) { _, seconds in seconds >= Recorder.limit }
-        // The permission is asked here, before any hold, so a hold starts the mic at once or not at all.
         .task { await recorder.prepare() }
-        // A hold the gesture never ends (the screen left, the app went inactive) is a release.
-        .onChange(of: scenePhase) { if scenePhase != .active { release() } }
-        // The phone went out of reach mid-hold: there's nowhere to send it, so the mic closes.
-        .onChange(of: watch.reachable) { if !watch.reachable { release() } }
-        .onDisappear {
-            release()
-            // Whatever state the talk is in, the microphone doesn't outlive the screen.
-            recorder.cancel()
+        .onChange(of: recorder.seconds) { if recorder.seconds >= Recorder.limit { release() } }
+        .onChange(of: watch.talk) { if watch.talk != .recording, holding { abort() } }
+        .onChange(of: scenePhase) { if scenePhase != .active { abort() } }
+        .onChange(of: watch.reachable) {
+            if !watch.reachable, holding {
+                abort()
+                watch.useDictation = true
+                watch.talk = .reply("Your iPhone isn't in reach. Tap the mic to dictate instead.")
+            }
         }
+        .onDisappear { abort() }
     }
 
     private func circle(_ symbol: String) -> some View {
         Image(systemName: symbol)
             .font(.title3.weight(.semibold))
             .foregroundStyle(.white)
-            .frame(width: 56, height: 56)
+            .frame(width: size, height: size)
             .background(holding ? Color.red : Color.accentColor, in: Circle())
-            .scaleEffect(holding ? 1.08 : 1)
-            .animation(.snappy, value: holding)
     }
 
-    /// Synchronous: nothing waits between the hold and the microphone, so a release always finds
-    /// the recorder it has to stop.
     private func start() {
-        guard !holding, watch.talk == .none else { return }
-        holding = true
+        guard !holding else { return }
+        watch.cancel()
         do {
-            try recorder.start()
-            watch.talk = .recording
+            // No await between the press and capture: a release can always close the mic.
+            let rate = try recorder.start { audio, level in watch.stream(audio, level: level) }
+            watch.beginVoice(sampleRate: rate)
+            holding = true
         } catch {
-            holding = false
+            recorder.cancel()
+            if recorder.allowed == true { watch.useDictation = true }
             watch.talk = .reply(error.localizedDescription)
         }
     }
 
-    /// The hold ended, however it ended: the microphone closes now. The recording is sent only
-    /// when the talk is still the one it was made for (a notification tapped meanwhile cancels it).
     private func release() {
         guard holding else { return }
         holding = false
-        if watch.talk == .recording { stop() } else { recorder.cancel() }
+        let heard = recorder.stop()
+        if watch.talk == .recording {
+            if heard >= 0.4 { watch.endVoice() }
+            else {
+                watch.cancel()
+                watch.talk = .reply("Hold the button while you talk.")
+            }
+        }
     }
 
-    private func stop() {
-        guard let audio = recorder.stop() else {
-            // Too short to send: the sheet says why ("Hold the button while you talk.").
-            if let problem = recorder.problem { watch.talk = .reply(problem) } else { watch.talk = .none }
-            return
+    private func abort() {
+        recorder.cancel()
+        if holding {
+            holding = false
+            if watch.talk == .recording { watch.cancel() }
         }
-        guard audio.count <= WatchWire.limit else {
-            watch.talk = .reply("That was too long for the watch. Keep it under \(Recorder.limit) seconds.")
-            return
-        }
-        watch.voice(audio)
     }
 }
 
-/// Home's sheet for a talk under way: sending, thinking, waiting for the phone, then the plan to
-/// dispatch with one tap, a question from the brain, or its reply.
+/// Lives below Oby on Home; the ScrollView takes the crown naturally. Replies stay until Done,
+/// dispatch, or the next hold. No sheet takes the microphone away.
 struct TalkView: View {
     @Environment(Watch.self) private var watch
 
     var body: some View {
-        switch watch.talk {
-        case .none, .recording:
-            // The sheet is on its way out.
-            EmptyView()
-        case .sending:
-            VStack(spacing: 8) {
-                ProgressView()
-                Text("Sending to your iPhone…").font(.footnote).multilineTextAlignment(.center)
-            }
-        case .thinking(let said):
-            waiting("Thinking…", said: said)
-        case .queued(let said):
-            waiting("Your iPhone isn't in reach. Oby plans it when it is.", said: said)
-        case .plan(let drafts):
-            ScrollView { PlanCard(drafts: drafts) }
-        case .question(let said, let question):
-            ScrollView { QuestionCard(said: said, question: question) }
-        case .reply(let text):
+        ScrollViewReader { scroll in
             ScrollView {
-                VStack(spacing: 10) {
-                    Text(text).font(.footnote).multilineTextAlignment(.center)
-                    Button("Done") { watch.cancel() }
+                VStack(alignment: .leading, spacing: 8) {
+                    switch watch.talk {
+                    case .none:
+                        EmptyView()
+                    case .recording:
+                        HStack(alignment: .center, spacing: 3) {
+                            ForEach(0..<9) { index in
+                                Capsule().fill(Color.accentColor)
+                                    .frame(width: 4, height: 3 + 15 * max(0, watch.level - Double(abs(index - 4)) * 0.08))
+                            }
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 20)
+                        .accessibilityLabel("Microphone level")
+                        Text(watch.words.isEmpty ? "…" : watch.words)
+                            .font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityLabel(watch.words.isEmpty ? "Listening" : watch.words)
+                    case .sending:
+                        ProgressView().frame(maxWidth: .infinity)
+                        if !watch.words.isEmpty { Text(watch.words).font(.footnote) }
+                        Button("Cancel") { watch.cancel() }
+                    case .thinking(let said):
+                        waiting(said)
+                    case .queued(let said):
+                        Text("Your iPhone isn't in reach. Oby plans it when it is.").font(.footnote)
+                        Text(said).font(.footnote)
+                        Button("Dismiss") { watch.cancel() }
+                    case .plan(let drafts):
+                        PlanCard(drafts: drafts)
+                    case .question(let said, let question):
+                        QuestionCard(said: said, question: question)
+                    case .reply(let text):
+                        Text(text).font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
+                        Button("Done") { watch.cancel() }
+                    }
                 }
+                .padding(8)
+                Color.clear.frame(height: 1).id("live-end")
+            }
+            .onChange(of: watch.words) {
+                if watch.talk == .recording { scroll.scrollTo("live-end", anchor: .bottom) }
             }
         }
+        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private func waiting(_ title: String, said: String) -> some View {
-        VStack(spacing: 8) {
-            ProgressView()
-            Text(title).font(.footnote).multilineTextAlignment(.center)
-            Text("“\(said)”").font(.caption2).foregroundStyle(.secondary).lineLimit(3).multilineTextAlignment(.center)
+    private func waiting(_ said: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ProgressView().frame(maxWidth: .infinity)
+            Text(said).font(.footnote)
             Button("Cancel") { watch.cancel() }
         }
     }
 }
 
-/// AAC, mono, 16 kHz: small enough for WatchConnectivity, clear enough for speech.
+/// Mono Float32 PCM, batched into roughly 1/4-second messages. No audio file stays on the watch.
 @Observable
 final class Recorder {
-    /// Longer wouldn't fit in one message to the phone.
-    static let limit = 15
-
-    /// How long the hold has lasted, up to the limit, where the counter stops.
+    static let limit = WatchWire.voiceSeconds
     private(set) var seconds = 0
-    var problem: String?
-    /// Whether the microphone may be used; nil until the user has answered.
     private(set) var allowed: Bool?
-    private var recorder: AVAudioRecorder?
-    /// When the recording began. The length is measured from here: once the recorder has stopped
-    /// itself at the limit, it reports no time of its own.
+    private var engine: AVAudioEngine?
     private var began: Date?
     private var ticking: Task<Void, Never>?
-    private let file = FileManager.default.temporaryDirectory.appending(path: "talk.m4a")
+    private var generation: UUID?
+    private var pending = Data()
+    private var chunkBytes = 0
+    private var deliver: ((Data, Double) -> Void)?
+    private var level = 0.0
 
-    /// Asks for the microphone, once, before any hold.
-    func prepare() async {
-        allowed = await AVAudioApplication.requestRecordPermission()
-    }
+    func prepare() async { allowed = await AVAudioApplication.requestRecordPermission() }
 
-    func start() throws {
+    func start(deliver: @escaping (Data, Double) -> Void) throws -> Double {
         guard allowed == true else {
-            throw RunnerError(message: allowed == nil ? "One moment: Oby is asking for the microphone." : "Oby needs the microphone to hear you. Allow it in Settings.")
+            throw RunnerError(message: allowed == nil ? "One moment: Oby is asking for the microphone." : "Allow Oby's microphone in Settings, or tap to dictate.")
         }
+        cancel()
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.record, mode: .default)
         try session.setActive(true)
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 16_000,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 24_000,
-        ]
-        let recorder = try AVAudioRecorder(url: file, settings: settings)
-        // The recorder stops itself at the limit; what it recorded until then is kept and sent on release.
-        guard recorder.record(forDuration: TimeInterval(Self.limit)) else {
-            throw RunnerError(message: "The microphone didn't start.")
-        }
-        self.recorder = recorder
-        began = .now
-        problem = nil
-        seconds = 0
-        ticking = Task {
-            while !Task.isCancelled, seconds < Self.limit {
-                try? await Task.sleep(for: .seconds(1))
-                if !Task.isCancelled { seconds += 1 }
+        do {
+            let engine = AVAudioEngine()
+            let input = engine.inputNode
+            let format = input.outputFormat(forBus: 0)
+            guard format.sampleRate > 0, format.channelCount > 0,
+                  format.commonFormat == .pcmFormatFloat32,
+                  format.channelCount == 1 || !format.isInterleaved else {
+                throw RunnerError(message: "The microphone's audio format isn't available.")
             }
+            let id = UUID()
+            generation = id
+            chunkBytes = min(WatchWire.chunkLimit, Int(format.sampleRate * 0.25) * MemoryLayout<Float>.size)
+            self.deliver = deliver
+            self.engine = engine
+            input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
+                guard let samples = buffer.floatChannelData?[0] else { return }
+                // Copy before AVAudioEngine reuses its buffer. Nothing from the audio callback
+                // touches observed state; stale callbacks are rejected by the generation below.
+                let count = Int(buffer.frameLength)
+                let audio = Data(bytes: samples, count: count * MemoryLayout<Float>.size)
+                var power: Float = 0
+                for index in 0..<count { power += samples[index] * samples[index] }
+                let level = min(1, Double(sqrt(power / Float(max(1, count)))) * 8)
+                Task { @MainActor in self.receive(audio, level: level, generation: id) }
+            }
+            engine.prepare()
+            try engine.start()
+            began = .now
+            seconds = 0
+            ticking = Task {
+                while !Task.isCancelled, seconds < Self.limit {
+                    try? await Task.sleep(for: .seconds(1))
+                    guard !Task.isCancelled else { return }
+                    seconds += 1
+                    // Close independently of view updates at the limit.
+                    if seconds == Self.limit { closeMicrophone() }
+                }
+            }
+            return format.sampleRate
+        } catch {
+            cancel()
+            try? session.setActive(false)
+            throw error
         }
     }
 
-    /// Stops and hands over the recording, or nil when there's too little to send.
-    func stop() -> Data? {
-        guard let began else { cancel(); return nil }
-        let heard = min(Date.now.timeIntervalSince(began), TimeInterval(Self.limit))
+    private func receive(_ audio: Data, level: Double, generation: UUID) {
+        guard self.generation == generation else { return }
+        self.level = level
+        pending.append(audio)
+        while pending.count >= chunkBytes {
+            deliver?(Data(pending.prefix(chunkBytes)), level)
+            pending.removeFirst(chunkBytes)
+        }
+    }
+
+    func stop() -> TimeInterval {
+        let heard = began.map { min(Date.now.timeIntervalSince($0), Double(Self.limit)) } ?? 0
+        closeMicrophone()
+        if !pending.isEmpty { deliver?(pending, level) }
         cancel()
-        // Handed over, the recording doesn't stay on the watch.
-        defer { try? FileManager.default.removeItem(at: file) }
-        guard heard >= 0.4, let data = try? Data(contentsOf: file), !data.isEmpty else {
-            problem = "Hold the button while you talk."
-            return nil
-        }
-        return data
+        return heard
     }
 
-    /// Closes the microphone, whatever was going on. Safe to call again.
+    private func closeMicrophone() {
+        generation = nil
+        guard let engine else { return }
+        engine.stop()
+        engine.inputNode.removeTap(onBus: 0)
+        self.engine = nil
+        try? AVAudioSession.sharedInstance().setActive(false)
+    }
+
     func cancel() {
+        closeMicrophone()
         ticking?.cancel()
         ticking = nil
         began = nil
-        guard let recorder else { return }
-        recorder.stop()
-        self.recorder = nil
-        try? AVAudioSession.sharedInstance().setActive(false)
+        pending.removeAll(keepingCapacity: false)
+        deliver = nil
     }
 }
 

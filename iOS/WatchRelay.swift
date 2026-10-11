@@ -18,6 +18,9 @@ final class WatchRelay: NSObject {
     static let shared = WatchRelay()
 
     private var phone: Phone?
+    private var liveVoice: LiveWatchSpeech?
+    private var preparingVoice: String?
+    private var planning: [String: Task<Void, Never>] = [:]
     private var session: WCSession? { WCSession.isSupported() ? WCSession.default : nil }
 
     /// Called once, when the app launches, so the session is up before the watch's first message.
@@ -143,15 +146,53 @@ final class WatchRelay: NSObject {
                 guard let audio = message[WatchWire.audio] as? Data else { return bad }
                 let said = try await Self.transcribe(audio)
                 guard !said.isEmpty else { return [WatchWire.error: "Oby didn't catch that."] }
-                Task { await self.inBackground("plan") { await self.plan(said, answer: nil, request: request) } }
+                startPlan(said, answer: nil, request: request)
                 return [WatchWire.text: said]
+            case .voiceStart:
+                guard !request.isEmpty, let rate = message[WatchWire.sampleRate] as? Double,
+                      rate.isFinite, (8_000...192_000).contains(rate) else { return bad }
+                liveVoice?.cancel()
+                liveVoice = nil
+                preparingVoice = request
+                defer { if preparingVoice == request { preparingVoice = nil } }
+                let live = try await LiveWatchSpeech.make(request: request, sampleRate: rate) { [weak self] text in
+                    // Live words have no meaning after this hold: never queue them.
+                    guard let self, self.liveVoice?.request == request,
+                          let session = self.session, session.isReachable else { return }
+                    session.sendMessage([WatchWire.kind: WatchWire.Kind.transcript.rawValue,
+                                         WatchWire.request: request, WatchWire.text: text], replyHandler: nil, errorHandler: nil)
+                }
+                guard preparingVoice == request else { live.cancel(); return bad }
+                liveVoice = live
+                return [WatchWire.ok: true]
+            case .voiceChunk:
+                guard let live = liveVoice, live.request == request,
+                      let sequence = message[WatchWire.sequence] as? Int,
+                      let audio = message[WatchWire.audio] as? Data else { return bad }
+                do { try live.append(audio, sequence: sequence) }
+                catch { live.cancel(); liveVoice = nil; throw error }
+                return [WatchWire.ok: true]
+            case .voiceEnd:
+                guard let live = liveVoice, live.request == request,
+                      let sequence = message[WatchWire.sequence] as? Int else { return bad }
+                defer { if liveVoice === live { liveVoice = nil } }
+                let said = try await live.finish(sequence: sequence)
+                guard liveVoice === live, !live.cancelled else { return bad }
+                guard !said.isEmpty else { return [WatchWire.error: "Oby didn't catch that."] }
+                startPlan(said, answer: nil, request: request)
+                return [WatchWire.text: said]
+            case .voiceCancel:
+                if preparingVoice == request { preparingVoice = nil }
+                if liveVoice?.request == request { liveVoice?.cancel(); liveVoice = nil }
+                planning.removeValue(forKey: request)?.cancel()
+                return [WatchWire.ok: true]
             case .plan:
                 guard let said = message[WatchWire.said] as? String else { return bad }
                 var answer: (question: String, option: String)?
                 if let question = message[WatchWire.question] as? String, let option = message[WatchWire.option] as? String {
                     answer = (question, option)
                 }
-                Task { await self.inBackground("plan") { await self.plan(said, answer: answer, request: request) } }
+                startPlan(said, answer: answer, request: request)
                 return [WatchWire.ok: true]
             case .dispatch:
                 guard let data = message[WatchWire.draft] as? Data else { return bad }
@@ -177,11 +218,19 @@ final class WatchRelay: NSObject {
                 guard let id = message[WatchWire.job] as? String, let action = message[WatchWire.action] as? String else { return bad }
                 Task { await self.inBackground("publish") { await self.publish(id, action: action) } }
                 return [WatchWire.ok: true]
-            case .planned, .published:
+            case .transcript, .planned, .published:
                 return bad
             }
         } catch {
             return [WatchWire.error: error.localizedDescription]
+        }
+    }
+
+    private func startPlan(_ said: String, answer: (question: String, option: String)?, request: String) {
+        planning[request]?.cancel()
+        planning[request] = Task {
+            defer { planning[request] = nil }
+            await inBackground("plan") { await plan(said, answer: answer, request: request) }
         }
     }
 
@@ -195,6 +244,7 @@ final class WatchRelay: NSObject {
         } catch {
             message[WatchWire.error] = error.localizedDescription
         }
+        guard !Task.isCancelled else { return }
         send(message)
     }
 
@@ -255,6 +305,10 @@ final class WatchRelay: NSObject {
         session.sendMessage(message, replyHandler: nil) { _ in session.transferUserInfo(message) }
     }
 
+    fileprivate func inBackgroundForSpeechModel(_ work: () async -> Void) async {
+        await inBackground("speech model", work)
+    }
+
     // MARK: Spoken on the watch, written here
 
     /// SpeechAnalyzer on device, in the phone's language. The first time, the speech model has to
@@ -285,6 +339,166 @@ final class WatchRelay: NSObject {
         }
         let written = try await text
         return String(written.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// One on-device analyzer for a hold. Input and result streams live independently; an explicit
+/// end finalizes them. Expiration, cancellation and a lost sender close them without planning.
+@MainActor
+private final class LiveWatchSpeech {
+    let request: String
+    private let sourceFormat: AVAudioFormat
+    private let analyzerFormat: AVAudioFormat
+    private let converter: AVAudioConverter
+    private let analyzer: SpeechAnalyzer
+    private let input: AsyncStream<AnalyzerInput>.Continuation
+    private var results: Task<String, Error>?
+    private var expiry: Task<Void, Never>?
+    private var background = UIBackgroundTaskIdentifier.invalid
+    private var nextSequence = 0
+    private var frames = 0
+    private var ending = false
+    private(set) var cancelled = false
+
+    private init(request: String, sourceFormat: AVAudioFormat, analyzerFormat: AVAudioFormat,
+                 converter: AVAudioConverter, analyzer: SpeechAnalyzer,
+                 input: AsyncStream<AnalyzerInput>.Continuation) {
+        self.request = request
+        self.sourceFormat = sourceFormat
+        self.analyzerFormat = analyzerFormat
+        self.converter = converter
+        self.analyzer = analyzer
+        self.input = input
+    }
+
+    static func make(request: String, sampleRate: Double, partial: @escaping (String) -> Void) async throws -> LiveWatchSpeech {
+        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: .current) else {
+            throw RunnerError(message: "Your iPhone can't transcribe this language yet.")
+        }
+        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [],
+                                           reportingOptions: [.volatileResults], attributeOptions: [])
+        if await AssetInventory.status(forModules: [transcriber]) != .installed {
+            if let download = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                Task { @MainActor in
+                    await WatchRelay.shared.inBackgroundForSpeechModel { try? await download.downloadAndInstall() }
+                }
+            }
+            throw RunnerError(message: "Your iPhone is getting the speech model. Try again in a minute.")
+        }
+        guard let source = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
+                                         channels: 1, interleaved: false),
+              let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]),
+              let converter = AVAudioConverter(from: source, to: format) else {
+            throw RunnerError(message: "Your iPhone can't use the watch's audio format.")
+        }
+        converter.primeMethod = .none
+        let (stream, input) = AsyncStream.makeStream(of: AnalyzerInput.self, bufferingPolicy: .bufferingOldest(64))
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        let live = LiveWatchSpeech(request: request, sourceFormat: source, analyzerFormat: format,
+                                   converter: converter, analyzer: analyzer, input: input)
+        live.results = Task {
+            var finalized = AttributedString()
+            var volatile = AttributedString()
+            for try await result in transcriber.results {
+                try Task.checkCancellation()
+                if result.isFinal { finalized += result.text; volatile = AttributedString() }
+                else { volatile = result.text }
+                partial(String((finalized + volatile).characters).trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            return String(finalized.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        do { try await analyzer.start(inputSequence: stream) }
+        catch { live.cancel(); throw error }
+        live.background = UIApplication.shared.beginBackgroundTask(withName: "watch live speech") { [weak live] in
+            Task { @MainActor in live?.cancel() }
+        }
+        // Also close if the watch vanishes without an end/cancel packet. Covers finalization too.
+        live.expiry = Task { [weak live] in
+            try? await Task.sleep(for: .seconds(30))
+            guard !Task.isCancelled else { return }
+            live?.cancel()
+        }
+        return live
+    }
+
+    func append(_ audio: Data, sequence: Int) throws {
+        guard !cancelled, !ending, sequence == nextSequence, !audio.isEmpty,
+              audio.count <= WatchWire.chunkLimit, audio.count.isMultiple(of: MemoryLayout<Float>.size) else {
+            throw RunnerError(message: "The watch's audio stream was interrupted. Try again.")
+        }
+        let count = audio.count / MemoryLayout<Float>.size
+        guard frames + count <= Int(sourceFormat.sampleRate * Double(WatchWire.voiceSeconds + 1)),
+              let buffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: AVAudioFrameCount(count)),
+              let samples = buffer.floatChannelData?[0] else {
+            throw RunnerError(message: "The watch's audio stream was too long.")
+        }
+        buffer.frameLength = AVAudioFrameCount(count)
+        audio.copyBytes(to: UnsafeMutableRawBufferPointer(start: samples, count: audio.count))
+        try convert(buffer)
+        frames += count
+        nextSequence += 1
+    }
+
+    /// A persistent converter preserves resampling across chunk boundaries; drain it at end.
+    private func convert(_ buffer: AVAudioPCMBuffer?) throws {
+        let capacity = buffer.map { Int(ceil(Double($0.frameLength) * analyzerFormat.sampleRate / sourceFormat.sampleRate)) + 32 } ?? 1024
+        var supplied = false
+        while true {
+            guard let output = AVAudioPCMBuffer(pcmFormat: analyzerFormat, frameCapacity: AVAudioFrameCount(capacity)) else {
+                throw RunnerError(message: "Your iPhone couldn't convert the watch's audio.")
+            }
+            var error: NSError?
+            let status = converter.convert(to: output, error: &error) { _, status in
+                guard let buffer else { status.pointee = .endOfStream; return nil }
+                if supplied { status.pointee = .noDataNow; return nil }
+                supplied = true
+                status.pointee = .haveData
+                return buffer
+            }
+            if let error { throw error }
+            if status == .error { throw RunnerError(message: "Your iPhone couldn't convert the watch's audio.") }
+            if output.frameLength > 0 {
+                if case .dropped = input.yield(AnalyzerInput(buffer: output)) {
+                    throw RunnerError(message: "Your iPhone couldn't keep up with the audio.")
+                }
+            }
+            if status != .haveData { return }
+        }
+    }
+
+    func finish(sequence: Int) async throws -> String {
+        guard !cancelled, !ending, sequence == nextSequence else {
+            cancel()
+            throw RunnerError(message: "The watch's audio stream was interrupted. Try again.")
+        }
+        ending = true
+        defer { cleanup() }
+        do {
+            try convert(nil)
+            input.finish()
+            try await analyzer.finalizeAndFinishThroughEndOfInput()
+            let text = try await results?.value ?? ""
+            guard !cancelled else { throw CancellationError() }
+            return text
+        } catch { cancel(); throw error }
+    }
+
+    func cancel() {
+        guard !cancelled else { return }
+        cancelled = true
+        input.finish()
+        results?.cancel()
+        Task { await analyzer.cancelAndFinishNow() }
+        cleanup()
+    }
+
+    private func cleanup() {
+        expiry?.cancel()
+        expiry = nil
+        if background != .invalid {
+            UIApplication.shared.endBackgroundTask(background)
+            background = .invalid
+        }
     }
 }
 

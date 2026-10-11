@@ -30,6 +30,12 @@ final class Watch: NSObject {
     /// The phone is near and answers now. Without it, requests queue until it is.
     private(set) var reachable = false
     var talk: Talk = .none
+    private(set) var words = ""
+    private(set) var level = 0.0
+    /// A failed live connection offers the system's input on the next tap.
+    var useDictation = false
+    @ObservationIgnored private var voiceInput: AsyncStream<Data>.Continuation?
+    @ObservationIgnored private var voiceTask: Task<Void, Never>?
     /// The job a notification asked to open; Home opens it.
     var opening: String?
     /// The job whose notification's Publish was tapped; its screen asks for the crown once it's ready.
@@ -126,16 +132,18 @@ final class Watch: NSObject {
     }
 
     func dispatch(_ draft: Draft) async throws {
+        let previous = talk
         try apply(try await request([WatchWire.kind: WatchWire.Kind.dispatch.rawValue, WatchWire.draft: try Runner.encoder.encode(draft)]))
-        talk = .none
+        if talk == previous { talk = .none }
     }
 
     /// One dispatch per draft, in order; a draft whose job is here already was sent before.
     func dispatch(all drafts: [Draft]) async throws {
+        let previous = talk
         for draft in drafts where !jobs.contains(where: { $0.id == draft.job.id }) {
             try apply(try await request([WatchWire.kind: WatchWire.Kind.dispatch.rawValue, WatchWire.draft: try Runner.encoder.encode(draft)]))
         }
-        talk = .none
+        if talk == previous { talk = .none }
     }
 
     func stop(_ id: String) async throws {
@@ -167,20 +175,65 @@ final class Watch: NSObject {
 
     // MARK: Talking to Oby
 
-    /// A recording made while the talk button was held: the phone writes it down and plans it.
-    func voice(_ audio: Data) {
-        let request = UUID().uuidString
-        asking = request
-        talk = .sending
-        Task {
+    /// One ordered, acknowledged stream per hold. Buffering is bounded: a slow connection
+    /// fails explicitly rather than silently dropping words or retaining unbounded audio.
+    func beginVoice(sampleRate: Double) {
+        let id = UUID().uuidString
+        asking = id
+        words = ""
+        level = 0
+        talk = .recording
+        let (stream, input) = AsyncStream.makeStream(of: Data.self, bufferingPolicy: .bufferingOldest(16))
+        voiceInput = input
+        voiceTask = Task {
             do {
-                let reply = try await self.request([WatchWire.kind: WatchWire.Kind.voice.rawValue, WatchWire.audio: audio, WatchWire.request: request])
-                guard let said = reply[WatchWire.text] as? String else { throw RunnerError(message: "Your iPhone sent nothing back.") }
+                try Task.checkCancellation()
+                _ = try await request([WatchWire.kind: WatchWire.Kind.voiceStart.rawValue,
+                                       WatchWire.request: id, WatchWire.sampleRate: sampleRate])
+                var sequence = 0
+                for await audio in stream {
+                    try Task.checkCancellation()
+                    guard asking == id else { return }
+                    _ = try await request([WatchWire.kind: WatchWire.Kind.voiceChunk.rawValue,
+                                           WatchWire.request: id, WatchWire.sequence: sequence,
+                                           WatchWire.audio: audio])
+                    sequence += 1
+                }
+                try Task.checkCancellation()
+                guard asking == id else { return }
+                let reply = try await request([WatchWire.kind: WatchWire.Kind.voiceEnd.rawValue,
+                                               WatchWire.request: id, WatchWire.sequence: sequence])
+                guard asking == id else { return }
+                guard let said = reply[WatchWire.text] as? String else {
+                    throw RunnerError(message: "Your iPhone sent no final words back.")
+                }
+                words = said
                 if talk == .sending { talk = .thinking(said) }
             } catch {
-                if talk == .sending { talk = .reply(error.localizedDescription) }
+                guard asking == id, !Task.isCancelled else { return }
+                cancel()
+                useDictation = true
+                talk = .reply("\(error.localizedDescription) Tap the mic to dictate instead.")
             }
         }
+    }
+
+    func stream(_ audio: Data, level: Double) {
+        guard talk == .recording, let input = voiceInput else { return }
+        self.level = level
+        if case .dropped = input.yield(audio) {
+            cancel()
+            useDictation = true
+            talk = .reply("Your iPhone couldn't keep up. Tap the mic to dictate instead.")
+        }
+    }
+
+    func endVoice() {
+        guard talk == .recording else { return }
+        talk = .sending
+        level = 0
+        voiceInput?.finish()
+        voiceInput = nil
     }
 
     /// Dictated or typed.
@@ -196,8 +249,24 @@ final class Watch: NSObject {
     }
 
     func cancel() {
+        let id = asking
         asking = nil
+        voiceInput?.finish()
+        voiceInput = nil
+        voiceTask?.cancel()
+        voiceTask = nil
+        words = ""
+        level = 0
         talk = .none
+        if let id {
+            for transfer in WCSession.default.outstandingUserInfoTransfers
+                where transfer.userInfo[WatchWire.request] as? String == id {
+                transfer.cancel()
+            }
+        }
+        if let id, reachable {
+            Task { _ = try? await request([WatchWire.kind: WatchWire.Kind.voiceCancel.rawValue, WatchWire.request: id]) }
+        }
     }
 
     private func plan(_ said: String, answer: (question: String, option: String)?) {
@@ -218,7 +287,7 @@ final class Watch: NSObject {
             do {
                 _ = try await self.request(message)
             } catch {
-                if talk == .thinking(said) { talk = .reply(error.localizedDescription) }
+                if asking == request, talk == .thinking(said) { talk = .reply(error.localizedDescription) }
             }
         }
     }
@@ -227,6 +296,11 @@ final class Watch: NSObject {
     private func take(_ message: [String: Any]) {
         guard let kind = (message[WatchWire.kind] as? String).flatMap(WatchWire.Kind.init(rawValue:)) else { return }
         switch kind {
+        case .transcript:
+            guard let id = message[WatchWire.request] as? String, id == asking,
+                  talk == .recording || talk == .sending,
+                  let text = message[WatchWire.text] as? String else { return }
+            words = text
         case .planned:
             guard let request = message[WatchWire.request] as? String, request == asking else { return }
             asking = nil
@@ -272,6 +346,7 @@ extension Watch: WCSessionDelegate {
         Task { @MainActor in
             self.load(context)
             self.reachable = reachable
+            if reachable { self.useDictation = false }
             self.refresh()
             self.finishDelivered()
         }
@@ -281,6 +356,7 @@ extension Watch: WCSessionDelegate {
         let reachable = session.isReachable
         Task { @MainActor in
             self.reachable = reachable
+            if reachable { self.useDictation = false }
             self.refresh()
         }
     }
