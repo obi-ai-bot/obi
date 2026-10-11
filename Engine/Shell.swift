@@ -98,7 +98,10 @@ nonisolated enum Shell {
     static func ok(_ arguments: [String], in directory: URL? = nil, env: [String: String?] = [:]) async throws -> String {
         let result = try await run(arguments, in: directory, env: env)
         guard result.status == 0 else {
-            let said = result.err.split(separator: "\n").last.map(String.init) ?? "exit \(result.status)"
+            // gh project puts the missing-scopes diagnostic before its final refresh hint.
+            let project = Array(arguments.prefix(2)) == ["gh", "project"]
+            let full = [result.text, result.err].filter { !$0.isEmpty }.joined(separator: "\n")
+            let said = project && !full.isEmpty ? full : result.err.split(separator: "\n").last.map(String.init) ?? "exit \(result.status)"
             throw Failure(message: "\(arguments.prefix(2).joined(separator: " ")): \(said)")
         }
         return result.text

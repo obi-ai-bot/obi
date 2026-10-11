@@ -132,7 +132,7 @@ nonisolated struct Briefing: Equatable, Sendable {
             let what = switch item.kind {
             // What the agent asked, and its options, are its own words: in the quoted file.
             case .question: "the question and its options are quoted in \(ClaudeBrain.quotedFile)"
-            case .review, .merge: "\(Self.line(item.text, cap: 160)) Options: \(item.options.joined(separator: " | "))."
+            case .review, .merge, .audit: "\(Self.line(item.text, cap: 160)) Options: \(item.options.joined(separator: " | "))."
             case .failed, .limit: "why is quoted in \(ClaudeBrain.quotedFile). Options: \(item.options.joined(separator: " | "))."
             }
             lines.append("- \(Self.kind(item.kind)) for job \(item.job) (\(Self.line(item.title, cap: 60)), \(place)), waiting \(Self.elapsed(since: item.created, now: now)): \(what)")
@@ -236,6 +236,7 @@ nonisolated struct Briefing: Equatable, Sendable {
         case .failed: "Failed"
         case .limit: "Out of usage"
         case .merge: "Merge stopped"
+        case .audit: "Issue audit"
         }
     }
 

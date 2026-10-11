@@ -278,6 +278,7 @@ extension InboxItem {
         case "question": "Question"
         case "review": "Out of reviews"
         case "limit": "Out of usage"
+        case "audit": "Issue audit"
         case "merge": "Not merged"
         default: "Failed"
         }

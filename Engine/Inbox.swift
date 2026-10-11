@@ -19,6 +19,8 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         case failed
         /// The job's account hit its usage limit, and no other account had room.
         case limit
+        /// One line from the runner's daily issue and board reconciliation.
+        case audit
         /// Oby's merge stopped: it couldn't merge, or the Mac check failed with no round left (`Job.mergeNeedsYou`).
         case merge
     }
@@ -40,6 +42,8 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
     var later: Date?
     /// What the user answered, or nil (done without an answer, or settled by itself).
     var answer: String?
+    /// Audit mutations without creating an artificial job; nil for older records.
+    var outgoing: [Outgoing]?
 
     var isOpen: Bool { done == nil }
 

@@ -75,7 +75,7 @@ struct InboxSection: View {
                 Button("Done") { settle(item, done: true) }
                     .accessibilityHint("Lets it go without answering")
                 Spacer()
-                NavigationLink("Open job", value: item.job)
+                if !item.job.isEmpty { NavigationLink("Open job", value: item.job) }
             }
             .font(.subheadline)
             if let problem {

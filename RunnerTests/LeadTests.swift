@@ -67,9 +67,14 @@ struct LeadTests {
             return agent
         }
         desk.readBoard = { [board] _ in board }
-        desk.claim = { [made] job, board in
-            made.claims.append(job)
-            return "Claimed: assigned to you, labeled status:in-progress, branch noted, moved to In progress (board \(board?.number ?? 0))."
+        desk.issueSync.enabled = true
+        desk.issueSync.auditURL = folder.appending(path: "issue-audit.json")
+        desk.issueSync.scan = { _ in }
+        desk.issueSync.gh = { [made, weak desk] args in
+            if args.contains("--add-assignee"), let number = Int(args[2]), let job = desk?.issueJobs.first(where: { $0.issue == number && $0.isActive }) { made.claims.append(job) }
+            if args.prefix(2) == ["issue", "view"] { return "{\"labels\":[],\"body\":\"\"}" }
+            if args.prefix(2) == ["project", "list"] { return "{\"projects\":[]}" }
+            return ""
         }
     }
 
@@ -287,7 +292,7 @@ struct LeadTests {
         // Each issue is claimed when its job starts, and the job says so.
         try await until("both issues are claimed") { made.claims.count == 2 && desk.jobs.allSatisfy { $0.claim != nil } }
         #expect(Set(made.claims.map(\.issue)) == [7, 12] && made.claims.allSatisfy { $0.branch.hasPrefix("oby/build-") })
-        #expect(desk.job(seven.id)?.claim == "Claimed: assigned to you, labeled status:in-progress, branch noted, moved to In progress (board 1).")
+        #expect(desk.job(seven.id)?.claim == "Claimed: assigned to you, labeled status:in-progress, branch noted.")
         // The turn is in the turns table, with the skipped list and what it started.
         let store = JobStore(url: folder.appending(path: "oby.sqlite"))
         let turn = try #require(store.leadTurns().first)

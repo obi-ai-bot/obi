@@ -40,6 +40,7 @@ catch {
     exit(1)
 }
 let desk = Desk()
+desk.issueSync.enabled = true
 // Macs that follow the runner take its merge checks (Engine/Checks.swift), and the Apple checks
 // agents ask for with `oby-check apple` (Engine/AppleChecks.swift), which runs this executable.
 desk.queuesMacChecks = true
@@ -74,6 +75,14 @@ Task {
         await pullRequests.poll()
         do { try await Task.sleep(for: .seconds(PullRequests.interval)) }
         catch { return }
+    }
+}
+
+// Persisted audit IDs ensure one daily report, including across runner restarts.
+Task {
+    while !Task.isCancelled {
+        await desk.issueSync.audit()
+        try? await Task.sleep(for: .seconds(3600))
     }
 }
 

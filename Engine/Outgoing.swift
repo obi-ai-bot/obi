@@ -24,6 +24,8 @@ nonisolated struct Outgoing: Codable, Equatable, Sendable {
     /// The branch a push went to, or the one a merge deleted; nil for the rest.
     var branch: String?
     var date = Date.now
+    /// Opaque issue-sync idempotency marker; never the comment or question itself.
+    var sync: String?
 
     /// One line of the report: "Pushed 1a2b3c4 to oby/fix-75 in deskree-inc/oby".
     var line: String {

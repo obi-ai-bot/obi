@@ -101,7 +101,7 @@ final class IslandController {
     /// The last words sent were hands-free (fn + Space): once Oby has spoken its reply, it listens again.
     private var handsFreeAsk = false
 
-    init() { model = IslandModel(desk: desk, feed: feed) }
+    init() { desk.issueSync.enabled = true; model = IslandModel(desk: desk, feed: feed) }
 
     func start() {
         panel.contentView = NSHostingView(rootView: IslandView(

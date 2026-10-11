@@ -694,7 +694,7 @@ struct AppleCheckAnswer: Encodable {
 struct InboxJSON: Encodable {
     var item: InboxItem
 
-    private enum Keys: String, CodingKey { case id, kind, job, title, text, options, created, done, later, answer, state }
+    private enum Keys: String, CodingKey { case id, kind, job, title, text, options, created, done, later, answer, state, outgoing }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -708,6 +708,7 @@ struct InboxJSON: Encodable {
         try keys.encode(item.done, forKey: .done)
         try keys.encode(item.later, forKey: .later)
         try keys.encode(item.answer, forKey: .answer)
+        try keys.encodeIfPresent(item.outgoing, forKey: .outgoing)
         try keys.encode(item.done != nil ? "done" : item.waiting() ? "open" : "later", forKey: .state)
     }
 }

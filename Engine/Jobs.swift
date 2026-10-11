@@ -1132,6 +1132,7 @@ nonisolated enum Prompts {
         }
         if apple, let line = AppleCheck.agentLine(job) { lines.append(line) }
         lines.append("Finish with a short summary. Its first line is one sentence the user will see in the notch.")
+        if job.issue != nil { lines.append(IssueSync.coverageInstruction) }
         lines.append(Inbox.howToAsk)
         return lines.joined(separator: "\n\n")
     }
