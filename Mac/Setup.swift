@@ -212,11 +212,19 @@ enum ModelPicks {
         return 1
     }
 
-    /// An everyday model (Sonnet 5.5 for Claude Code), else the smallest. Cursor's "auto" only if
-    /// it's all there is: that's Cursor choosing, not a model.
+    /// A model smaller than the complex jobs': an everyday one (Sonnet 5.5 for Claude Code) when
+    /// there's a strong one above it. When there isn't (Codex, whose stronger Astra needs asking),
+    /// complex jobs take the first everyday model, so routine jobs go one smaller: a small model,
+    /// else a later everyday one (lists put the newest first). Cursor's "auto" only if it's all
+    /// there is: that's Cursor choosing, not a model.
     nonisolated static func routine(_ models: [String]) -> String? {
         let models = models == ["auto"] ? models : models.filter { $0 != "auto" }
-        return models.first { size($0) == 1 } ?? models.min { size($0) < size($1) }
+        let everyday = models.filter { size($0) == 1 }
+        if !models.contains(where: { size($0) == 2 }) {
+            if let small = models.first(where: { size($0) == 0 }) { return small }
+            if everyday.count > 1 { return everyday.last }
+        }
+        return everyday.first ?? models.min { size($0) < size($1) }
     }
 
     /// The strongest model short of the ones that need asking (Opus 5.5 for Claude Code).
@@ -225,7 +233,7 @@ enum ModelPicks {
         return (allowed.isEmpty ? models : allowed).max { size($0) < size($1) }
     }
 
-    /// The Lead thinks with the best planner connected, on its everyday model.
+    /// The Lead thinks with the best planner connected, on its routine model.
     nonisolated static func lead(_ models: [String: [String]]) -> (agent: String, model: String)? {
         for agent in planners {
             if let model = routine(models[agent] ?? []) { return (agent, model) }
