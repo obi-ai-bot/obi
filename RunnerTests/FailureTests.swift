@@ -516,7 +516,22 @@ struct FailureTests {
         log.observe(test.job("again") { $0.status = .failed })
         await log.drain()
         #expect(test.github.created.count == 1 && test.github.edits.count == 1)
-        #expect(log.store.failures().first { $0.job == "again" }?.fixedBy == "https://github.com/deskree-inc/oby/pull/81")
+        let again = try #require(log.store.failures().first { $0.job == "again" })
+        #expect(again.fixedBy == "https://github.com/deskree-inc/oby/pull/81" && again.fixedAt == desk.job("fixer")?.pullRequest?.mergedAt)
+
+        // Still coming back more than 7 days after the fix merged: the fix didn't work, and the
+        // mark doesn't carry over from the records in between.
+        for day in [6.0, 8.0] {
+            let later = Date.now.addingTimeInterval(day * 86_400)
+            log.now = { later }
+            log.observe(test.job("day\(Int(day))") { $0.status = .failed; $0.finished = later })
+            await log.drain()
+        }
+        #expect(log.store.failures().first { $0.job == "day6" }?.fixedBy != nil)
+        let late = try #require(log.store.failures().first { $0.job == "day8" })
+        #expect(late.fixedBy == nil && late.issue == "https://github.com/deskree-inc/oby/issues/201")
+        #expect(test.github.created.count == 2)
+        #expect(log.underway(late) == nil)
     }
 
     @Test func theAPIListsFailuresAndFixesThem() async throws {

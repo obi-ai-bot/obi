@@ -90,8 +90,10 @@ nonisolated struct FailureRecord: Codable, Identifiable, Equatable, Sendable {
     var issueError: String?
     /// The fix job Fix it started, or nil.
     var fix: String?
-    /// The fix pull request merged into dev it was recorded against instead of an issue (#197), or nil.
+    /// The fix pull request merged into dev it was recorded against instead of an issue (#197), or
+    /// nil, and when that fix merged: the mark counts for `Failures.week` from then, never longer.
     var fixedBy: String?
+    var fixedAt: Date?
 
     var isIntervention: Bool { trigger == .handMerge || trigger == .outsideCommit }
 }
@@ -616,7 +618,8 @@ final class Failures {
         }
         Lead.prune(root.appending(path: "studies"))
         var latest = store.failure(record.id) ?? record
-        (latest.tries, latest.postMortem, latest.studyError, latest.fixedBy) = (record.tries, record.postMortem, record.studyError, record.fixedBy)
+        (latest.tries, latest.postMortem, latest.studyError) = (record.tries, record.postMortem, record.studyError)
+        (latest.fixedBy, latest.fixedAt) = (record.fixedBy, record.fixedAt)
         store.save(latest)
         if latest.postMortem != nil { await act(latest) }
         return true
@@ -818,7 +821,7 @@ final class Failures {
             target = known.issues.first { $0.number == same.number }?.signature
         case .pullRequest:
             guard let fix = known.fixes.first(where: { $0.number == same.number }) else { return }
-            record.fixedBy = fix.url
+            (record.fixedBy, record.fixedAt) = (fix.url, fix.mergedAt ?? now())
             target = store.failures().first { Self.issueNumber($0.issue).map(fix.closes.contains) == true }?.postMortem?.signature
         }
         let aliases = store.failureAliases()
@@ -842,19 +845,28 @@ final class Failures {
         job.repo == repo && job.reviewOf == nil && (jobs.contains(job.id) || job.issue.map(issues.contains) == true)
     }
 
-    /// The fix pull request merged into dev in the last 7 days that handles `signature`'s cause, or
-    /// nil: one a post-mortem matched, or the merged fix of one of its issues, Oby's or GitHub's.
-    private func fixedBy(_ signature: String) -> String? {
+    /// The fix `record` is against, while it merged into dev less than 7 days ago.
+    private func fix(of record: FailureRecord) -> (url: String, at: Date)? {
+        guard let url = record.fixedBy, let at = record.fixedAt, now().timeIntervalSince(at) < Self.week else { return nil }
+        return (url, at)
+    }
+
+    /// The fix pull request merged into dev in the last 7 days that handles `signature`'s cause, and
+    /// when it merged, or nil: one a post-mortem matched, or the merged fix of one of its issues,
+    /// Oby's or GitHub's. The 7 days run from the merge, so a fix that didn't work stops hiding its
+    /// cause however often it comes back.
+    private func fixedBy(_ signature: String) -> (url: String, at: Date)? {
         let records = records(of: signature)
-        if let url = records.lazy.compactMap(\.fixedBy).first { return url }
+        if let fix = records.lazy.compactMap({ self.fix(of: $0) }).first { return fix }
         let issues = Set(records.compactMap { Self.issueNumber($0.issue) })
         let since = now().addingTimeInterval(-Self.week)
-        let merged = desk?.jobs.first {
-            Self.fixes($0, issues: issues, jobs: Set(records.compactMap(\.fix))) && $0.pullRequest?.state == .merged
-                && ($0.pullRequest?.mergedAt ?? .distantPast) >= since && $0.published != nil
+        for job in desk?.jobs ?? [] where Self.fixes(job, issues: issues, jobs: Set(records.compactMap(\.fix))) && job.pullRequest?.state == .merged {
+            if let url = job.published, let at = job.pullRequest?.mergedAt, at >= since { return (url, at) }
         }
-        if let merged { return merged.published }
-        return lastKnown.fixes.first { !issues.isDisjoint(with: $0.closes) }?.url
+        for fix in lastKnown.fixes where !issues.isDisjoint(with: fix.closes) {
+            if let at = fix.mergedAt, at >= since { return (fix.url, at) }
+        }
+        return nil
     }
 
     /// Why Fix it starts nothing for `record`: a job fixing its cause now, its pull request open, or
@@ -869,7 +881,7 @@ final class Failures {
         if let job = related.first(where: \.isActive) { return "Already being fixed by job \(job.id)." }
         let open = related.first { $0.published != nil && $0.dismissed == nil && ($0.pullRequest == nil || $0.pullRequest?.state == .open) }
         if let open, let number = Review.pullRequest(of: open) { return "Already being fixed by #\(number), its pull request open." }
-        guard let url = record.fixedBy ?? fixedBy(signature) else { return nil }
+        guard let url = (fix(of: record) ?? fixedBy(signature))?.url else { return nil }
         return "Fixed by #\(URL(string: url)?.lastPathComponent ?? url) on \(MacCheck.into)."
     }
 
@@ -915,7 +927,7 @@ final class Failures {
                 try await post(["issue", "edit", "\(number)", "-R", Self.repo], body: Self.closed(about["body"] as? String ?? "", line: line), texts: [])
                 _ = try await gh(["issue", "close", "\(number)", "-R", Self.repo, "--reason", "completed"])
                 Logger.jobs.notice("failures: closed #\(number, privacy: .public), fixed by #\(pr, privacy: .public)")
-                fixed(issue: number, by: job.published ?? "https://github.com/\(Self.repo)/pull/\(pr)")
+                fixed(issue: number, by: job.published ?? "https://github.com/\(Self.repo)/pull/\(pr)", at: job.pullRequest?.mergedAt ?? now())
             }
             return true
         } catch {
@@ -930,14 +942,14 @@ final class Failures {
         return (kept + [line]).joined(separator: "\n\n")
     }
 
-    /// The issue's records are against the fix, and their signatures' open inbox items are done.
-    private func fixed(issue: Int, by url: String) {
+    /// The issue's records are against the fix, merged `at`, and their signatures' open inbox items are done.
+    private func fixed(issue: Int, by url: String, at: Date) {
         let aliases = store.failureAliases()
         var titles = Set<String>()
         for var record in store.failures() where Self.issueNumber(record.issue) == issue {
             if let signature = record.postMortem?.signature { titles.insert("Oby failure: " + Self.canonical(signature, aliases)) }
             guard record.fixedBy == nil else { continue }
-            record.fixedBy = url
+            (record.fixedBy, record.fixedAt) = (url, at)
             store.save(record)
         }
         for item in desk?.inbox ?? [] where item.isOpen && item.kind == .failure && titles.contains(item.title) {
@@ -980,10 +992,10 @@ final class Failures {
         var record = record
         record.acted = true
         let signature = Self.canonical(postMortem.signature, store.failureAliases())
-        if record.fixedBy == nil { record.fixedBy = fixedBy(signature) }
+        if fix(of: record) == nil, let fix = fixedBy(signature) { (record.fixedBy, record.fixedAt) = fix }
         store.save(record)
         if let id = record.job { report(id, postMortem) }
-        if let fix = record.fixedBy {
+        if let fix = fix(of: record)?.url {
             Logger.jobs.notice("failure \(record.id, privacy: .public): \(signature, privacy: .public) is fixed on \(MacCheck.into, privacy: .public) by \(fix, privacy: .public)")
             return
         }

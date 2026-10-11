@@ -682,7 +682,7 @@ struct JobJSON: Encodable {
 struct FailureJSON: Encodable {
     var record: FailureRecord
 
-    private enum Nullable: String, CodingKey { case job, repo, rounds, postMortem, studyError, issue, issueError, fix, fixedBy }
+    private enum Nullable: String, CodingKey { case job, repo, rounds, postMortem, studyError, issue, issueError, fix, fixedBy, fixedAt }
     private enum Derived: String, CodingKey { case intervention, tries, acted }
 
     func encode(to encoder: any Encoder) throws {
@@ -701,6 +701,7 @@ struct FailureJSON: Encodable {
         if record.issueError == nil { try nulls.encodeNil(forKey: .issueError) }
         if record.fix == nil { try nulls.encodeNil(forKey: .fix) }
         if record.fixedBy == nil { try nulls.encodeNil(forKey: .fixedBy) }
+        if record.fixedAt == nil { try nulls.encodeNil(forKey: .fixedAt) }
     }
 }
 
