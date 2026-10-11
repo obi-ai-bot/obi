@@ -41,6 +41,8 @@ catch {
 }
 let desk = Desk()
 desk.issueSync.enabled = true
+// Every failure is recorded, studied and acted on (Engine/Failures.swift).
+desk.failureLog.enabled = true
 // Macs that follow the runner take its merge checks (Engine/Checks.swift), and the Apple checks
 // agents ask for with `oby-check apple` (Engine/AppleChecks.swift), which runs this executable.
 desk.queuesMacChecks = true
@@ -83,6 +85,15 @@ Task {
     while !Task.isCancelled {
         await desk.issueSync.audit()
         try? await Task.sleep(for: .seconds(3600))
+    }
+}
+
+// What a restart left interrupted, steps past their limit, the brain falling back to rules, and
+// the post-mortems still to do: every minute.
+Task {
+    while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(60))
+        desk.failureLog.sweep()
     }
 }
 

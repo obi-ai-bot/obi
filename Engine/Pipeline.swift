@@ -30,6 +30,9 @@ nonisolated struct PullRequestStatus: Codable, Equatable, Sendable {
     var base: String
     var mergedAt: Date?
     var checkedAt: Date
+    /// The pull request's head commit as GitHub has it, or nil (older observations): one Oby didn't
+    /// push is an intervention (Engine/Failures.swift).
+    var head: String? = nil
 }
 
 extension Job {

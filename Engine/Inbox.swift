@@ -23,6 +23,8 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         case audit
         /// Oby's merge stopped: it couldn't merge, or the Mac check failed with no round left (`Job.mergeNeedsYou`).
         case merge
+        /// A failure's post-mortem found an Oby bug or a repeat (Engine/Failures.swift): Fix it starts the fix job.
+        case failure
     }
 
     /// The job, what it needs and when it came: the same need never comes twice, even once it's done.

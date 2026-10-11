@@ -68,6 +68,9 @@ final class API {
             try await self.answer(context.parameters.require("id"), try await Self.decode(InboxAnswer.self, from: request))
         }
         router.get("v1/events") { _, _ in await self.events() }
+        router.get("v1/failures") { request, _ in await self.failures(limit: request.uri.queryParameters.get("limit", as: Int.self) ?? 50) }
+        router.get("v1/failures/:id") { _, context in try await self.failure(context.parameters.require("id")) }
+        router.post("v1/failures/:id/fix") { _, context in try await self.fix(context.parameters.require("id")) }
         router.get("v1/checks/next") { request, _ in
             await self.nextCheck(mac: request.uri.queryParameters.get("mac").map { String($0) },
                                  kinds: request.uri.queryParameters.get("kinds").map { String($0) })
@@ -229,9 +232,32 @@ final class API {
         default: throw APIError(.unprocessableContent, "Send one of answer, done or later.")
         }
         do {
+            // Fix it, or Dismiss, on a failure's item (Engine/Failures.swift).
+            if item.kind == .failure, case .answer(let words) = how { return Self.json(InboxJSON(item: try desk.failureLog.answer(id, words))) }
             return Self.json(InboxJSON(item: try desk.settle(id, how)))
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+    }
+
+    /// The failure records, newest first, with their post-mortems (Engine/Failures.swift).
+    func failures(limit: Int) -> Response {
+        Self.json(desk.failureLog.store.failures(limit: max(0, limit)).map(FailureJSON.init))
+    }
+
+    func failure(_ id: String) throws -> Response {
+        guard let record = desk.failureLog.store.failure(id) else { throw APIError(.notFound, "There's no failure \(id).") }
+        return Self.json(FailureJSON(record: record))
+    }
+
+    /// Fix it: the fix job starts in Oby's repository, with the post-mortem as its brief.
+    func fix(_ id: String) throws -> Response {
+        do {
+            return Self.json(JobJSON(job: try desk.failureLog.fix(id)), status: .created)
+        } catch let unknown as Failures.Unknown {
+            throw APIError(.notFound, unknown.localizedDescription)
+        } catch {
+            throw APIError(.conflict, error.localizedDescription)
         }
     }
 
@@ -636,6 +662,31 @@ struct JobJSON: Encodable {
         if job.appleRan == nil { try nulls.encodeNil(forKey: .appleRan) }
         // What went out is always a list: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
+    }
+}
+
+/// A failure record with every key the API promises, null where Swift would leave one out.
+struct FailureJSON: Encodable {
+    var record: FailureRecord
+
+    private enum Nullable: String, CodingKey { case job, repo, rounds, postMortem, studyError, issue, issueError, fix }
+    private enum Derived: String, CodingKey { case intervention, tries, acted }
+
+    func encode(to encoder: any Encoder) throws {
+        try record.encode(to: encoder)
+        var derived = encoder.container(keyedBy: Derived.self)
+        try derived.encode(record.isIntervention, forKey: .intervention)
+        try derived.encode(record.tries ?? 0, forKey: .tries)
+        try derived.encode(record.acted ?? false, forKey: .acted)
+        var nulls = encoder.container(keyedBy: Nullable.self)
+        if record.job == nil { try nulls.encodeNil(forKey: .job) }
+        if record.repo == nil { try nulls.encodeNil(forKey: .repo) }
+        if record.rounds == nil { try nulls.encodeNil(forKey: .rounds) }
+        if record.postMortem == nil { try nulls.encodeNil(forKey: .postMortem) }
+        if record.studyError == nil { try nulls.encodeNil(forKey: .studyError) }
+        if record.issue == nil { try nulls.encodeNil(forKey: .issue) }
+        if record.issueError == nil { try nulls.encodeNil(forKey: .issueError) }
+        if record.fix == nil { try nulls.encodeNil(forKey: .fix) }
     }
 }
 
