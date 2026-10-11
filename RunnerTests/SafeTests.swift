@@ -422,7 +422,7 @@ struct HaltTests {
     }
 
     /// A leftover that says `leftover` on the output if it ends by itself, after its sleep: output
-    /// without it was cut by the kill, however slow the machine (a stopwatch failed at 13 s, #193).
+    /// without it was cut by the kill, however slow the machine (#193).
     func leftover(_ mark: String) -> String { "\(mark) && echo leftover & echo started" }
 
     /// The agent ended by itself, but a tool it started still runs and holds its output: that's
@@ -435,8 +435,10 @@ struct HaltTests {
         process.arguments = ["-c", leftover(mark)]
         process.standardOutput = out
         _ = try ProcessGroup.run(process)
+        let start = ContinuousClock.now
         let read = try await Task.detached { try out.fileHandleForReading.readToEnd() }.value
         #expect(read.map { String(decoding: $0, as: UTF8.self) } == "started\n")
+        #expect(ContinuousClock.now - start < .seconds(10))
         #expect(try await gone(mark))
     }
 
@@ -444,8 +446,10 @@ struct HaltTests {
     @Test(.timeLimit(.minutes(1)))
     func aChecksLeftoversDontHoldItsOutput() async throws {
         let mark = mark()
+        let start = ContinuousClock.now
         let result = try await Shell.run(["sh", "-c", leftover(mark)])
         #expect(result.text == "started" && result.status == 0)
+        #expect(ContinuousClock.now - start < .seconds(10))
         #expect(try await gone(mark))
     }
 
