@@ -88,8 +88,8 @@ nonisolated enum Publish {
         if left == 0 { throw AlreadyOnBase(base: base) }
         let findings = try await scan(worktree, base: base, head: head)
         if !findings.isEmpty { throw Blocked(findings: findings) }
-        // Everything else that goes out: the commits' messages, and the pull request's title and description.
-        guard let messages = await git(["log", "--no-merges", "--format=%B", "refs/remotes/origin/\(base)..\(head)"]),
+        // Everything else that goes out: every commit's message, merges too, and the pull request's title and description.
+        guard let messages = await git(["log", "--format=%B", "refs/remotes/origin/\(base)..\(head)"]),
               let subjects = await git(["log", "--reverse", "--no-merges", "--format=%s", "refs/remotes/origin/\(base)..\(head)"]) else {
             throw Shell.Failure(message: "Not published: the secret scan couldn't read the commit messages.")
         }
@@ -176,7 +176,45 @@ nonisolated enum Publish {
         let named = files.compactMap { file in secretFile(file).map { Finding(file: file, line: nil, rule: $0) } }
         let found = lines.flatMap { line in matches(line.text).map { Finding(file: line.file, line: line.number, rule: $0) } }
         var seen = Set<Finding>()
-        return (named + found).filter { seen.insert($0).inserted }
+        return (named + found + wrapped(lines)).filter { seen.insert($0).inserted }
+    }
+
+    /// Base64 or hex wrapped over several lines (`base64` and `openssl` wrap at 76 or 64): runs of
+    /// adjacent lines in one file that hold nothing else, joined, with the end of the line before
+    /// (`token = QUtJ…`), and found at the run's first line.
+    static func wrapped(_ lines: [Line]) -> [Finding] {
+        let trim = CharacterSet.whitespaces.union(CharacterSet(charactersIn: "\"',\\"))
+        var found: [Finding] = []
+        var run: [Line] = [], lead = ""
+        func flush() {
+            if run.count + (lead.isEmpty ? 0 : 1) > 1, let first = run.first {
+                let joined = lead + run.map { $0.text.trimmingCharacters(in: trim) }.joined()
+                found += matches(joined).map { Finding(file: first.file, line: first.number, rule: $0) }
+            }
+            run = []
+            lead = ""
+        }
+        var previous: Line?
+        for line in lines {
+            let text = line.text.trimmingCharacters(in: trim)
+            let encoded = !text.isEmpty && text.wholeMatch(of: /[A-Za-z0-9+\/=_-]+/) != nil
+            let adjacent = previous.map { $0.file == line.file && $0.number + 1 == line.number } ?? false
+            if encoded, adjacent, !run.isEmpty {
+                run.append(line)
+            } else {
+                flush()
+                if encoded {
+                    run = [line]
+                    // The first part may end the line before, after `=` or `:`.
+                    if adjacent, let previous, let tail = previous.text.trimmingCharacters(in: trim).firstMatch(of: /[A-Za-z0-9+\/_-]{8,}$/) {
+                        lead = String(tail.output)
+                    }
+                }
+            }
+            previous = line
+        }
+        flush()
+        return found
     }
 
     /// The rules a line breaks, by name: in plain text, else in a base64, hex or URL-encoded copy
@@ -195,8 +233,10 @@ nonisolated enum Publish {
     static func decoded(_ text: String, depth: Int = 2) -> [(how: String, text: String)] {
         guard depth > 0 else { return [] }
         var found: [(how: String, text: String)] = []
-        if text.contains(/%[0-9A-Fa-f]{2}/), let plain = text.removingPercentEncoding, plain != text {
-            found.append(("URL-encoded", plain))
+        // Each run of %XX on its own, so one stray % (`50%`) doesn't hide the rest of the line.
+        if text.contains("%") {
+            let plain = text.replacing(/(?:%[0-9A-Fa-f]{2})+/) { percent($0.output) }
+            if plain != text { found.append(("URL-encoded", plain)) }
         }
         for run in text.matches(of: /[A-Za-z0-9+\/_-]{16,}={0,2}/) {
             if let plain = base64(run.output) { found.append(("base64", plain)) }
@@ -206,7 +246,31 @@ nonisolated enum Publish {
             let tries = run.output.count.isMultiple(of: 2) ? [run.output] : [run.output.dropFirst(), run.output.dropLast()]
             found += tries.compactMap { hex($0).map { ("hex", $0) } }
         }
+        // Hex written as escapes: \x41\x4b… or 0x41, 0x4b, …
+        for run in text.matches(of: /(?:\\x[0-9A-Fa-f]{2}){8,}|(?:0x[0-9A-Fa-f]{2}[\s,]*){8,}/) {
+            let digits = run.output.matches(of: /(?:\\x|0x)([0-9A-Fa-f]{2})/).map(\.output.1).joined()
+            if let plain = hex(Substring(digits)) { found.append(("hex", plain)) }
+        }
+        // What a run of letters that isn't an encoding decodes to has no stretch a rule could match:
+        // skipping it keeps long lines (minified code, lockfiles) quick.
+        found = found.filter { readable($0.text) }
         return found + found.flatMap { how, plain in decoded(plain, depth: depth - 1).map { ("\($0.how) in \(how)", $0.text) } }
+    }
+
+    /// Text with 15 printable ASCII characters in a row: the shortest any rule matches.
+    static func readable(_ text: String) -> Bool {
+        var row = 0
+        for byte in text.utf8 {
+            row = (0x20...0x7E).contains(byte) ? row + 1 : 0
+            if row >= 15 { return true }
+        }
+        return false
+    }
+
+    /// `%41%4B…` as text.
+    static func percent(_ run: Substring) -> String {
+        let bytes = run.split(separator: "%").compactMap { UInt8($0, radix: 16) }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     /// Base64, standard or URL-safe, padded or not, as text (bytes that aren't UTF-8 become �, so a
@@ -235,7 +299,10 @@ nonisolated enum Publish {
     /// What the built-in rules find in text Oby is about to post (a pull request's title or
     /// description, a comment, commit messages), each line under `name`.
     static func findings(inText text: String, named name: String) -> [Finding] {
-        lines(of: text, named: name).flatMap { line in matches(line.text).map { Finding(file: name, line: line.number, rule: $0) } }
+        let lines = lines(of: text, named: name)
+        var seen = Set<Finding>()
+        return (lines.flatMap { line in matches(line.text).map { Finding(file: name, line: line.number, rule: $0) } } + wrapped(lines))
+            .filter { seen.insert($0).inserted }
     }
 
     /// Text Oby is about to post, as numbered lines under `name`.

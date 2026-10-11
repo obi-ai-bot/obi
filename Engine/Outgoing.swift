@@ -7,7 +7,14 @@ import OSLog
 /// comment. The job's report lists them, oldest first, and the log keeps one line each. Ids only
 /// (the commit, the URL), never what was sent.
 nonisolated struct Outgoing: Codable, Equatable, Sendable {
-    enum Action: String, Codable, Sendable { case push, pullRequest, pullRequestEdit, comment }
+    /// What went out. A struct rather than an enum, so an app built before a new action still reads the job.
+    struct Action: RawRepresentable, Codable, Hashable, Sendable {
+        var rawValue: String
+        static let push = Action(rawValue: "push")
+        static let pullRequest = Action(rawValue: "pullRequest")
+        static let pullRequestEdit = Action(rawValue: "pullRequestEdit")
+        static let comment = Action(rawValue: "comment")
+    }
 
     var action: Action
     var repo: String
@@ -24,6 +31,7 @@ nonisolated struct Outgoing: Codable, Equatable, Sendable {
         case .pullRequest: "Opened pull request \(id)"
         case .pullRequestEdit: "Updated the description of \(id)"
         case .comment: "Commented \(id)"
+        default: "\(action.rawValue) \(id)"
         }
     }
 }

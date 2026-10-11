@@ -139,7 +139,6 @@ final class API {
         return Self.json(JobJSON(job: desk.job(id) ?? job))
     }
 
-    /// The user lets go of a job that needs them: it then needs nothing. No signature: nothing goes out.
     /// Stop all (⌃⌥⌘. on the Mac, the iPhone's Stop all): every queued and running job stops now,
     /// its agent ends within 2 seconds, and nothing it left half-done is published. Answers with the
     /// jobs it stopped.
@@ -149,6 +148,7 @@ final class API {
         return Self.json(StoppedAll(stopped: ids.count, jobs: ids.compactMap { desk.job($0) }.map { JobJSON(job: $0) }))
     }
 
+    /// The user lets go of a job that needs them: it then needs nothing. No signature: nothing goes out.
     func dismiss(_ id: String) throws -> Response {
         _ = try known(id)
         do {

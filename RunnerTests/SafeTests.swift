@@ -23,6 +23,13 @@ enum Fake {
     static func percent(_ text: String) -> String { text.utf8.map { String(format: "%%%02X", $0) }.joined() }
 }
 
+extension String {
+    /// The string in pieces of `size` characters, the last one shorter.
+    func chunks(_ size: Int) -> [String] {
+        stride(from: 0, to: count, by: size).map { String(dropFirst($0).prefix(size)) }
+    }
+}
+
 struct EncodedSecretTests {
     @Test func base64HexAndURLEncodedCopiesAreCaught() {
         #expect(Publish.matches("let token = \"\(Fake.base64(Fake.aws))\"") == ["AWS access key, base64"])
@@ -34,6 +41,35 @@ struct EncodedSecretTests {
         #expect(Publish.matches("blob \(Fake.base64(Fake.hex(Fake.aws)))") == ["AWS access key, hex in base64"])
         // A plain match is named plainly, once.
         #expect(Publish.matches("key \(Fake.aws)") == ["AWS access key"])
+    }
+
+    /// What review 1 found: a stray %, hex as escapes, and base64 wrapped over lines.
+    @Test func escapesAStrayPercentAndWrappedBase64AreCaught() {
+        #expect(Publish.matches("https://example.com/?discount=50%&k=\(Fake.percent(Fake.aws))") == ["AWS access key, URL-encoded"])
+        let escaped = Fake.hex(Fake.aws).chunks(2).map { "\\x\($0)" }.joined()
+        #expect(Publish.matches("let key = \"\(escaped)\"") == ["AWS access key, hex"])
+        let bytes = Fake.hex(Fake.github).chunks(2).map { "0x\($0)" }.joined(separator: ", ")
+        #expect(Publish.matches("static const char key[] = { \(bytes) };") == ["GitHub token, hex"])
+
+        // As `base64` wraps it, at 76: the token straddles the lines.
+        let wrapped = Fake.base64("export GITHUB_TOKEN=" + Fake.github + "\nexport OTHER=1\n").chunks(76)
+        #expect(wrapped.count > 1)
+        let text = (["# config", "data: |"] + wrapped.map { "  " + $0 } + ["done"]).joined(separator: "\n")
+        #expect(Publish.findings(inText: text, named: "comment") == [Publish.Finding(file: "comment", line: 3, rule: "GitHub token, base64")])
+        // Its first part at the end of the line before.
+        let led = (["token = \"" + wrapped[0] + "\""] + wrapped.dropFirst().map { "\"" + $0 + "\"" }).joined(separator: "\n")
+        #expect(Publish.findings(inText: led, named: "comment").contains { $0.line == 2 && $0.rule == "GitHub token, base64" })
+        // In a diff, only lines next to each other in one file are joined.
+        let diff = """
+            diff --git a/k.yml b/k.yml
+            --- a/k.yml
+            +++ b/k.yml
+            @@ -1,0 +1,\(wrapped.count) @@
+            \(wrapped.map { "+" + $0 }.joined(separator: "\n"))
+            """
+        #expect(Publish.findings(inDiff: diff) == [Publish.Finding(file: "k.yml", line: 1, rule: "GitHub token, base64")])
+        let apart = Publish.wrapped(wrapped.enumerated().map { Publish.Line(file: "k.yml", number: $0.offset * 2 + 1, text: $0.element) })
+        #expect(apart.isEmpty)
     }
 
     @Test func ordinaryCodeIsClean() {
@@ -235,6 +271,9 @@ final class StopAllTests {
         let outgoing = json["outgoing"] as? [[String: Any]] ?? []
         #expect(outgoing.compactMap { $0["action"] as? String } == ["push", "pullRequest"])
         #expect(outgoing.first?["id"] as? String == "1a2b3c4d5e" && outgoing.first?["branch"] as? String == "oby/fix-7-sent")
+        // An action this build doesn't know still reads (an older Mac, a newer runner).
+        let future = try JSONDecoder().decode(Outgoing.self, from: Data(#"{"action":"merge","repo":"deskree-inc/oby","id":"https://github.com/deskree-inc/oby/pull/80","date":0}"#.utf8))
+        #expect(future.line == "merge https://github.com/deskree-inc/oby/pull/80")
         // Nothing sent yet: an empty list, never missing.
         #expect((object(try API.encode(JobJSON(job: job)))["outgoing"] as? [Any])?.isEmpty == true)
     }
