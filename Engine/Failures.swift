@@ -349,7 +349,8 @@ final class Failures {
         for check in [job.macCheck, job.appleCheck, job.appleRan].compactMap({ $0 }) where !checks.contains(where: { $0.id == check.id }) { checks.append(check) }
         for check in checks {
             let kind = check.isApple ? "Apple" : "merge"
-            if check.state == .error { add(.checkError, check.id, "The Mac couldn't run its \(kind) check.", at: check.finished ?? check.created) }
+            // Recovery is still under way: only exhausted retries warrant a post-mortem.
+            if check.state == .error, !check.awaitsSimulatorRetry { add(.checkError, check.id, "The Mac couldn't run its \(kind) check.", at: check.finished ?? check.created) }
             if check.state == .failed, (check.failures ?? []).isEmpty { add(.unnamedFailure, check.id, "Its \(kind) check failed without naming a test.", at: check.finished ?? check.created) }
         }
         if job.mergeError != nil, let check = job.macCheck {

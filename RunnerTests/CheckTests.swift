@@ -755,6 +755,8 @@ struct CheckTests {
 
     @Test func aSimulatorHangWaitsThenChecksTheSameCommitWithoutAnAgentRound() async throws {
         let check = try await approved()
+        // Record real observer results, with no signed-in account to study them in this test.
+        let failures = try FailureTests(signedIn: false)
         let now = Date.now
         _ = desk.nextMacCheck(mac: "Studio", now: now)
         var failed = steps
@@ -763,6 +765,8 @@ struct CheckTests {
         let ended = try desk.macCheckEnded(check.id, report, now: now)
         #expect(ended.state == .error && ended.problem == MacCheck.simulatorProblem)
         #expect(desk.job("author")?.mergeNeedsYou == false)
+        failures.desk.failureLog.observe(try #require(desk.job("author")))
+        #expect(failures.desk.failureLog.store.failures().isEmpty)
         await desk.finishCheck("author", log: report.log)
         #expect(made.agents.count == 2 && made.comments.isEmpty && made.merged.isEmpty)
         #expect(desk.nextMacCheck(mac: "Laptop", now: now + 599) == nil)
@@ -772,10 +776,13 @@ struct CheckTests {
             #expect(retried.head == check.head && retried.round == check.round && retried.id == check.id)
             #expect(retried.simulatorRetries == attempt && retried.problem == nil && retried.finished == nil)
             _ = try desk.macCheckEnded(check.id, report, now: time)
+            failures.desk.failureLog.observe(try #require(desk.job("author")))
+            #expect(failures.triggers(of: "author") == (attempt < 2 ? [] : [.checkError]))
         }
         #expect(desk.nextMacCheck(mac: "Laptop", now: now + 1800) == nil)
         #expect(desk.job("author")?.mergeNeedsYou == true)
         #expect(made.agents.count == 2 && made.comments.isEmpty)
+        #expect(failures.desk.failureLog.store.failures().count == 1)
     }
 
     @Test func aStepThatHangsIsEndedWithWhatItStartedAndNothingWaitsOnItsOutput() async throws {
