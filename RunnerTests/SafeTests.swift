@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import HTTPTypes
 import Hummingbird
 import HummingbirdTesting
@@ -311,18 +312,22 @@ struct HaltTests {
         let process = Process()
         process.executableURL = URL(filePath: "/bin/sh")
         process.arguments = ["-c", "trap '' TERM; sleep 30 & echo $! > '\(child.path)'; wait"]
+        // When it really ended, noted off the main actor, so a busy test run doesn't count against Halt.
+        let ended = Mutex<ContinuousClock.Instant?>(nil)
+        process.terminationHandler = { _ in ended.withLock { $0 = .now } }
         try process.run()
         for _ in 0..<200 where (try? String(contentsOf: child, encoding: .utf8))?.isEmpty ?? true { try await Task.sleep(for: .milliseconds(10)) }
         let sleeper = try #require(Int32((try String(contentsOf: child, encoding: .utf8)).trimmingCharacters(in: .whitespacesAndNewlines)))
 
-        // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt.
-        let start = ContinuousClock.now
+        // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt, all within 2 seconds.
         let leads = getpgid(process.processIdentifier) == process.processIdentifier
         try await Task.sleep(for: .seconds(Halt.grace))
+        let halted = ContinuousClock.now
         Halt.end(process)
-        for _ in 0..<200 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<500 where ended.withLock({ $0 }) == nil { try await Task.sleep(for: .milliseconds(10)) }
         #expect(!process.isRunning)
-        #expect(ContinuousClock.now - start < .seconds(2))
+        let end = try #require(ended.withLock { $0 })
+        #expect(end - halted < .seconds(2 - Halt.grace))
         // What it started ends too, when it leads its own process group.
         if leads {
             for _ in 0..<100 where kill(sleeper, 0) == 0 { try await Task.sleep(for: .milliseconds(10)) }
