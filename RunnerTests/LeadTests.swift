@@ -68,6 +68,7 @@ struct LeadTests {
         }
         desk.readBoard = { [board] _ in board }
         desk.issueSync.enabled = true
+        desk.issueSync.auditURL = folder.appending(path: "issue-audit.json")
         desk.issueSync.scan = { _ in }
         desk.issueSync.gh = { [made, weak desk] args in
             if args.contains("--add-assignee"), let number = Int(args[2]), let job = desk?.issueJobs.first(where: { $0.issue == number && $0.isActive }) { made.claims.append(job) }

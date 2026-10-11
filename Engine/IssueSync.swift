@@ -7,7 +7,9 @@ final class IssueSync {
     nonisolated static let scopeFix = "Runner gh login lacks read:project or project scope; run gh auth refresh -s read:project,project on the runner"
     nonisolated static func projectError(_ text: String) -> String {
         let lower = text.lowercased()
-        return lower.contains("scope") && (lower.contains("read:project") || lower.contains("'project'") || lower.contains("scope project")) ? scopeFix : text
+        return lower.split(separator: "\n").contains { line in
+            line.contains("scope") && (line.contains("read:project") || line.contains("'project'") || line.contains("[project]") || line.contains("scope project"))
+        } ? scopeFix : text
     }
 
     weak var desk: Desk?
@@ -20,9 +22,17 @@ final class IssueSync {
     var scan: ([(name: String, text: String)]) async throws -> Void
     private var tail: Task<Void, Never>?
     private var seen: [String: String] = [:]
+    var now: () -> Date = { .now }
+    private struct Retry: Codable { var transition: String; var failures: Int; var after: Date }
     var auditURL = Workspace.root.appending(path: "issue-audit.json")
-    private struct AuditState: Codable { var day: String?; var outgoing: [Outgoing] = [] }
+    private struct AuditState: Codable {
+        var day: String?
+        var outgoing: [Outgoing] = []
+        var retries: [String: Retry]?
+        var baseline: Set<String>?
+    }
     private var auditState = AuditState()
+    private var stateLoaded = false
     private var auditing = false
     private struct Project { var id: String; var number: Int; var owner: String; var fields: [[String: Any]]; var items: [[String: Any]] }
     private var project: Project?
@@ -72,10 +82,6 @@ final class IssueSync {
         String(key.utf8.reduce(UInt64(14695981039346656037)) { ($0 ^ UInt64($1)) &* 1099511628211 }, radix: 16)
     }
 
-    nonisolated static func prReference(_ job: Job) -> String {
-        job.issue.map { "\n\nPart of #\($0)" } ?? ""
-    }
-
     /// Ambiguous feature references remain unlinked; numbers must name an open issue.
     static func inferred(_ job: Job, issues: [[String: Any]]) -> Int? {
         let open = Set(issues.compactMap { $0["number"] as? Int })
@@ -98,14 +104,33 @@ final class IssueSync {
 
     func observe(_ job: Job) {
         guard enabled, job.status != .queued, let event = Self.event(job), seen[job.id] != event.key else { return }
+        loadState()
+        let transition = Self.marker(event.key)
+        if let retry = auditState.retries?[job.id], retry.transition == transition {
+            guard retry.failures < 4, now() >= retry.after else { return }
+        }
         seen[job.id] = event.key
         let previous = tail
         tail = Task { [weak self] in
             await previous?.value
             guard let self else { return }
-            do { try await sync(job, event: event) }
-            catch { recordError(job.id, error); if seen[job.id] == event.key { seen[job.id] = nil } }
+            do {
+                try await sync(job, event: event)
+                if auditState.retries?.removeValue(forKey: job.id) != nil { try? saveAuditState() }
+            } catch {
+                let old = auditState.retries?[job.id]
+                let failures = (old?.transition == transition ? old?.failures ?? 0 : 0) + 1
+                if auditState.retries == nil { auditState.retries = [:] }
+                auditState.retries?[job.id] = Retry(transition: transition, failures: failures, after: now().addingTimeInterval(Self.retryDelay(failures)))
+                try? saveAuditState()
+                recordError(job.id, error)
+                if seen[job.id] == event.key { seen[job.id] = nil }
+            }
         }
+    }
+
+    static func retryDelay(_ failures: Int) -> TimeInterval {
+        min(3600, 60 * pow(2, Double(min(max(0, failures - 1), 6))))
     }
 
     func drain() async { await tail?.value }
@@ -159,15 +184,36 @@ final class IssueSync {
     @discardableResult
     private func comment(_ note: String, job: Job, key: String) async throws -> Bool {
         // Durable outgoing entries also prevent duplicates after a partial transition/restart.
-        if desk?.issueJobs.first(where: { $0.id == job.id })?.outgoing?.contains(where: { $0.action == .comment && $0.sync == Self.marker(key) }) == true { return false }
-        if auditState.outgoing.contains(where: { $0.repo == job.repo && $0.id.hasPrefix("https://github.com/\(job.repo)/issues/\(job.issue!)") && $0.action == .comment && $0.sync == Self.marker(key) }) { return false }
+        let url = "https://github.com/\(job.repo)/issues/\(job.issue!)"
+        if auditState.baseline?.contains(Self.marker(url + key)) == true { return false }
+        let outgoing = (desk?.issueJobs.flatMap { $0.outgoing ?? [] } ?? []) + auditState.outgoing
+        if outgoing.contains(where: { $0.repo == job.repo && Self.commentBelongs($0.id, to: url) && $0.action == .comment && $0.sync == Self.marker(key) }) { return false }
         try await bodyFile(note, args: ["issue", "comment", "\(job.issue!)", "-R", job.repo], job: job, action: "comment", marker: key)
         return true
+    }
+
+    static func commentBelongs(_ id: String, to issueURL: String) -> Bool {
+        id == issueURL || id == issueURL + " (comment)" || id.hasPrefix(issueURL + "#issuecomment-")
+    }
+
+    /// The job named by the issue's latest start comment, whichever Desk (the runner, the Mac) posted it.
+    private func claimant(_ number: Int, repo: String) async throws -> String? {
+        let row = try await json(["issue", "view", "\(number)", "-R", repo, "--json", "comments"]) as? [String: Any]
+        return (row?["comments"] as? [[String: Any]] ?? []).compactMap { comment in
+            (comment["body"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                .wholeMatch(of: /Oby is working on .* \(job ([A-Za-z0-9._-]+)\)\./).map { String($0.1) }
+        }.last
     }
 
     private func labels(_ row: [String: Any], status: String?, job: Job) async throws -> Bool {
         let current = Board.names(row["labels"], key: "name").filter { $0.hasPrefix("status:") }
         guard Set(current) != Set(status.map { [$0] } ?? []) else { return false }
+        // Work on another Desk (the Mac's) is invisible here: only the Desk whose job claimed
+        // the issue last takes its running or blocked status away; otherwise the labels stay.
+        let held = ["status:in-progress", "status:blocked"]
+        if !held.contains(status ?? ""), current.contains(where: held.contains) {
+            guard let id = try await claimant(job.issue!, repo: job.repo), desk?.issueJobs.contains(where: { $0.id == id }) == true else { return false }
+        }
         var args = ["issue", "edit", "\(job.issue!)", "-R", job.repo]
         for label in current where label != status { args += ["--remove-label", label] }
         if let status, !current.contains(status) { args += ["--add-label", status] }
@@ -315,6 +361,12 @@ final class IssueSync {
         try JSONEncoder().encode(auditState).write(to: auditURL, options: .atomic)
     }
 
+    private func loadState() {
+        guard !stateLoaded else { return }
+        if let data = try? Data(contentsOf: auditURL), let state = try? JSONDecoder().decode(AuditState.self, from: data) { auditState = state }
+        stateLoaded = true
+    }
+
     /// Called hourly by the runner; a separate ledger keeps quiet days out of the inbox.
     func audit(now: Date = .now) async {
         guard enabled else { return }
@@ -331,7 +383,7 @@ final class IssueSync {
     private func auditRun(now: Date) async {
         guard enabled, let desk else { return }
         let auditID = "issue-audit-\(Int(now.timeIntervalSince1970 / 86400))"
-        if let data = try? Data(contentsOf: auditURL), let state = try? JSONDecoder().decode(AuditState.self, from: data) { auditState = state }
+        loadState()
         guard auditState.day != auditID else { return }
         if desk.repos.isEmpty { desk.repos = (try? await Workspace.knownRepos()) ?? [] }
         guard !desk.repos.isEmpty || !desk.issueJobs.isEmpty else { return }
@@ -344,6 +396,8 @@ final class IssueSync {
         do { roadmap = try await self.roadmap() }
         catch { roadmap = nil; failures.append(error.localizedDescription) }
         let jobs = desk.issueJobs
+        let firstAudit = auditState.baseline == nil
+        if roadmap != nil && firstAudit { auditState.baseline = [] }
         let urls = Set((roadmap?.items ?? []).compactMap { ($0["content"] as? [String: Any])?["url"] as? String })
         let repos = Set(urls.compactMap { url -> String? in
             guard let parts = URLComponents(string: url), parts.host == "github.com" else { return nil }
@@ -360,13 +414,13 @@ final class IssueSync {
                     guard let number = row["number"] as? Int, urls.contains("https://github.com/\(repo)/issues/\(number)") else { continue }
                     do {
                         let related = jobs.filter { $0.repo == repo && $0.issue == number && $0.reviewOf == nil }.sorted { $0.created > $1.created }
+                        // Another Desk (including the Mac) may own work absent from this runner.
+                        guard !related.isEmpty else { continue }
                         let pr = prs.first { pr in
                             let reference = Job(id: "pr", request: "", agent: "runner", account: "", repo: repo, branch: pr["headRefName"] as? String ?? "", base: nil, pr: nil, kind: .investigate, task: pr["body"] as? String ?? "", title: pr["title"] as? String)
                             return (pr["closingIssuesReferences"] as? [[String: Any]] ?? []).contains { $0["number"] as? Int == number && ($0["url"] as? String ?? "https://github.com/\(repo)/issues/\(number)") == "https://github.com/\(repo)/issues/\(number)" } || related.contains { $0.branch == pr["headRefName"] as? String } || Self.inferred(reference, issues: issues) == number
                         }
-                        var fallback = Job(id: auditID + "-\(repo.replacingOccurrences(of: "/", with: "-"))-\(number)", request: "Daily issue audit", agent: "runner", account: "", repo: repo, branch: "", base: nil, pr: nil, kind: .investigate, task: "Daily issue audit")
-                        fallback.status = .done
-                        var job = related.first(where: { $0.isActive || $0.waitsForAnswer || $0.needsYou }) ?? related.first ?? fallback
+                        var job = related.first(where: { $0.isActive || $0.waitsForAnswer || $0.needsYou }) ?? related[0]
                         job.issue = number
                         var status = Self.event(job)?.status
                         if !job.isActive && !job.waitsForAnswer && !job.needsYou {
@@ -374,10 +428,10 @@ final class IssueSync {
                             status = pr != nil ? "status:in-review" : merged ? (Self.remainingBuild(row["body"] as? String ?? "") ? "status:in-progress" : "status:needs-test") : (Board.names(row["labels"], key: "name").contains("status:needs-test") ? "status:needs-test" : nil)
                         }
                         var commented = false
-                        if let url = pr?["url"] as? String { commented = try await comment("Oby's pull request for this issue: \(url).", job: job, key: "pr:\(url)") }
-                        if job.isActive || job.waitsForAnswer || job.needsYou, let event = Self.event(job), let note = event.note {
-                            let posted = try await comment(note, job: job, key: event.key)
-                            commented = posted || commented
+                        if let url = pr?["url"] as? String, related.contains(where: { $0.published == url }) {
+                            let key = "pr:\(url)"
+                            if firstAudit { auditState.baseline?.insert(Self.marker("https://github.com/\(repo)/issues/\(number)" + key)) }
+                            else { commented = try await comment("Oby's pull request for this issue: \(url).", job: job, key: key) }
                         }
                         let labeled = try await labels(row, status: status, job: job)
                         let moved = try await board(status: status, job: job)

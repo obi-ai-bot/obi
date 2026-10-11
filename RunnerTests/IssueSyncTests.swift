@@ -19,16 +19,18 @@ struct IssueSyncTests {
         var extraItems: [[String: Any]] = []
         var repositoryFailure: String?
         var projectTitle = Lead.boardTitle
-        let issueURL = "https://github.com/deskree-inc/oby/issues/116"
+        var number = 116
+        var issueURL: String { "https://github.com/deskree-inc/oby/issues/\(number)" }
 
         func encode(_ object: Any) throws -> String { String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self) }
-        var row: [String: Any] { ["number": 116, "title": "Issues always current", "body": body, "labels": labels.map { ["name": $0] }, "url": issueURL, "state": "OPEN"] }
+        var row: [String: Any] { ["number": number, "title": "Issues always current", "body": body, "labels": labels.map { ["name": $0] }, "url": issueURL, "state": "OPEN"] }
         func run(_ args: [String]) async throws -> String {
             calls.append(args)
             let command = Array(args.prefix(2))
             if args.first == "issue", ["edit", "comment"].contains(args[1]), let repositoryFailure { throw Shell.Failure(message: repositoryFailure) }
             if args.first == "project", scopeFailure { throw Shell.Failure(message: "missing required scope read:project") }
             switch command {
+            case ["issue", "view"] where args.last == "comments": return try encode(["comments": notes.map { ["body": $0] }])
             case ["issue", "view"]: return try encode(row)
             case ["issue", "list"]: return try encode([row] + extraIssues)
             case ["pr", "list"]: return try encode(openPRs)
@@ -155,6 +157,7 @@ struct IssueSyncTests {
         await send(job, to: desk)
         #expect(desk.issueJobs.first?.claim?.contains(IssueSync.scopeFix) == true)
         fake.scopeFailure = false
+        desk.issueSync.now = { Date.now.addingTimeInterval(61) }
         desk.issueSync.observe(job)
         await desk.issueSync.drain()
         #expect(fake.calls.contains { $0.contains("cursor=next") })
@@ -189,6 +192,7 @@ struct IssueSyncTests {
         desk.issueSync.store.save(job)
         fake.labels = ["status:in-progress", "feature"]
         fake.column = "In progress"
+        fake.notes = [IssueSync.event(original)!.note!]
         let day = Date(timeIntervalSince1970: 1_800_000_000)
         await desk.issueSync.audit(now: day)
         #expect(fake.labels == ["feature"] && fake.column == "In progress")
@@ -199,7 +203,7 @@ struct IssueSyncTests {
         #expect(fake.calls.count == count)
     }
 
-    @Test func dailyAuditFindsOpenPRWithoutAJob() async throws {
+    @Test func dailyAuditLeavesUnownedIssuesAndManualPRsAlone() async throws {
         let (desk, fake, original) = try fixture()
         var job = original
         job.status = .done
@@ -210,10 +214,10 @@ struct IssueSyncTests {
         desk.issueSync.store.save(job)
         fake.openPRs = [["url": "https://github.com/deskree-inc/oby/pull/117", "headRefName": "manual-branch", "closingIssuesReferences": [["number": 116, "url": fake.issueURL]]]]
         await desk.issueSync.audit()
-        #expect(fake.labels.contains("status:in-review") && fake.column == "In review")
-        #expect(fake.notes.first?.contains("/pull/117") == true)
+        #expect(fake.labels == ["status:needs-test", "feature"] && fake.column == "Todo")
+        #expect(fake.notes.isEmpty && fake.mutations.isEmpty)
         #expect(desk.issueJobs.count == 1)
-        #expect(desk.inbox.first?.job == "" && desk.inbox.first?.outgoing?.count == 3)
+        #expect(desk.inbox.isEmpty)
     }
 
     @Test func unknownChecklistCoverageIsNotGuessed() {
@@ -317,11 +321,11 @@ struct IssueSyncTests {
         #expect(desk.inbox.isEmpty && desk.issueJobs.count == 1 && fake.mutations.isEmpty)
     }
 
-    @Test func auditReadsProjectOnceAndDoesNotRepeatOrphanComments() async throws {
+    @Test func auditReadsProjectOnceAndDoesNotCommentOnManualPRs() async throws {
         let (desk, fake, original) = try fixture()
         var idle = original
         idle.status = .done
-        idle.issue = nil
+        idle.issue = 116
         idle.branch = "unrelated"
         idle.task = "Unrelated"
         desk.issueSync.store.save(idle)
@@ -334,7 +338,7 @@ struct IssueSyncTests {
         #expect(fake.calls.filter { $0.prefix(2) == ["project", "field-list"] }.count == 1)
         #expect(fake.calls.filter { $0.prefix(2) == ["api", "graphql"] }.count == 2)
         await desk.issueSync.audit(now: day.addingTimeInterval(86400))
-        #expect(fake.notes.count == 1 && desk.inbox.count == 1 && desk.issueJobs.count == 1)
+        #expect(fake.notes.isEmpty && desk.inbox.count == 1 && desk.issueJobs.count == 1)
     }
 
     @Test func repositoryPermissionErrorsKeepTheirActualCause() async throws {
@@ -345,5 +349,177 @@ struct IssueSyncTests {
         #expect(desk.issueJobs.first?.claim == "Issue sync: \(failure)")
         #expect(IssueSync.projectError(failure) == failure)
         #expect(IssueSync.projectError("missing required scopes [read:project]") == IssueSync.scopeFix)
+    }
+
+    @Test func realGhMultilineScopeDiagnosticReachesSyncAndLead() async throws {
+        let (desk, _, job) = try fixture()
+        let folder = try temporaryFolder()
+        let executable = folder.appending(path: "gh")
+        let diagnostic = "error: your authentication token is missing required scopes [read:project]\nTo request it, run: gh auth refresh -s read:project"
+        try "#!/bin/sh\nprintf '%s\\n' 'error: your authentication token is missing required scopes [read:project]' 'To request it, run: gh auth refresh -s read:project' >&2\nexit 1\n".write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let environment: [String: String?] = ["PATH": folder.path + ":/usr/bin:/bin"]
+        let raw = await #expect(throws: Shell.Failure.self) { try await Shell.ok(["gh", "project", "list"], env: environment) }
+        #expect(raw?.localizedDescription.contains(diagnostic) == true)
+        desk.issueSync.gh = { args in
+            if args.first == "project" { return try await Shell.ok(["gh"] + args, env: environment) }
+            if args.prefix(2) == ["issue", "view"] { return "{\"labels\":[],\"body\":\"\"}" }
+            return ""
+        }
+        await send(job, to: desk)
+        #expect(desk.issueJobs.first?.claim == "Issue sync: \(IssueSync.scopeFix)")
+        let lead = await #expect(throws: Shell.Failure.self) {
+            try await Board.read(repos: [job.repo], gh: { try await Shell.ok($0, env: environment) })
+        }
+        #expect(lead?.localizedDescription == IssueSync.scopeFix)
+    }
+
+    @Test func failedTransitionsBackOffStopAndSurviveRestart() async throws {
+        let (desk, fake, original) = try fixture()
+        var time = Date(timeIntervalSince1970: 1_800_000_000)
+        desk.issueSync.now = { time }
+        fake.scopeFailure = true
+        await send(original, to: desk)
+        var count = fake.calls.count
+        var step = original
+        for index in 0..<20 {
+            step.step = "Agent step \(index)"
+            desk.issueSync.observe(step)
+            await desk.issueSync.drain()
+        }
+        #expect(fake.calls.count == count)
+        for delay in [60.0, 120.0, 240.0] {
+            time = time.addingTimeInterval(delay - 1)
+            desk.issueSync.observe(step)
+            await desk.issueSync.drain()
+            #expect(fake.calls.count == count)
+            time = time.addingTimeInterval(1)
+            desk.issueSync.observe(step)
+            await desk.issueSync.drain()
+            #expect(fake.calls.count > count)
+            count = fake.calls.count
+        }
+        time = time.addingTimeInterval(86400)
+        let restarted = IssueSync(desk: desk, store: desk.issueSync.store)
+        restarted.enabled = true
+        restarted.auditURL = desk.issueSync.auditURL
+        restarted.gh = fake.run
+        restarted.now = { time }
+        restarted.observe(step)
+        await restarted.drain()
+        #expect(fake.calls.count == count)
+        step.question = Plan.Question(text: "Which target?", options: [])
+        restarted.observe(step)
+        await restarted.drain()
+        #expect(fake.calls.count > count)
+        #expect(IssueSync.retryDelay(1) == 60 && IssueSync.retryDelay(2) == 120 && IssueSync.retryDelay(99) == 3600)
+    }
+
+    @Test func auditBootstrapsQuietlyAndDeduplicatesOwnedPRsAcrossJobsAndRestarts() async throws {
+        let (desk, fake, original) = try fixture()
+        var job = original
+        job.status = .done
+        job.published = "https://github.com/deskree-inc/oby/pull/117"
+        desk.issueSync.store.save(job)
+        fake.openPRs = [["url": job.published!, "closingIssuesReferences": [["number": 116, "url": fake.issueURL]]]]
+        let day = Date(timeIntervalSince1970: 1_800_000_000)
+        await desk.issueSync.audit(now: day)
+        #expect(fake.notes.isEmpty && fake.labels.contains("status:in-review") && fake.column == "In review")
+        await desk.issueSync.audit(now: day.addingTimeInterval(86400))
+        #expect(fake.notes.isEmpty)
+        job = desk.issueJobs.first!
+        job.published = "https://github.com/deskree-inc/oby/pull/118"
+        desk.issueSync.store.save(job)
+        fake.openPRs = [["url": job.published!, "closingIssuesReferences": [["number": 116, "url": fake.issueURL]]]]
+        await desk.issueSync.audit(now: day.addingTimeInterval(2 * 86400))
+        #expect(fake.notes.count == 1 && fake.notes[0].contains("/pull/118"))
+        var duplicate = job
+        duplicate.id = "another-author-job"
+        duplicate.created = job.created.addingTimeInterval(1)
+        duplicate.outgoing = nil
+        desk.issueSync.store.save(duplicate)
+        let restarted = IssueSync(desk: desk, store: desk.issueSync.store)
+        restarted.enabled = true
+        restarted.auditURL = desk.issueSync.auditURL
+        restarted.gh = fake.run
+        await restarted.audit(now: day.addingTimeInterval(3 * 86400))
+        #expect(fake.notes.count == 1)
+    }
+
+    @Test func firstAuditRepairsRunningStatusWithoutBranchComments() async throws {
+        let (desk, fake, _) = try fixture()
+        await desk.issueSync.audit()
+        #expect(fake.labels.contains("status:in-progress") && fake.column == "In progress")
+        #expect(fake.notes.isEmpty)
+    }
+
+    @Test func issueOneDoesNotDeduplicateAgainstTwelveOrThirteen() async throws {
+        let (desk, fake, original) = try fixture()
+        var job = original
+        job.id = "issue-one"
+        job.issue = 1
+        job.branch = "oby/build-1"
+        fake.number = 1
+        let key = try #require(IssueSync.event(job)?.key)
+        let outgoing = [12, 13].map { number in
+            Outgoing(action: .comment, repo: job.repo, id: "https://github.com/\(job.repo)/issues/\(number)#issuecomment-9", sync: IssueSync.marker(key))
+        }
+        let entries = try JSONSerialization.jsonObject(with: JSONEncoder().encode(outgoing))
+        try JSONSerialization.data(withJSONObject: ["outgoing": entries]).write(to: desk.issueSync.auditURL)
+        await send(job, to: desk)
+        #expect(fake.notes.count == 1)
+        #expect(!IssueSync.commentBelongs(outgoing[0].id, to: fake.issueURL))
+        #expect(!IssueSync.commentBelongs("https://github.com/\(job.repo)/issues/13 (comment)", to: fake.issueURL))
+        let restarted = IssueSync(desk: desk, store: desk.issueSync.store)
+        restarted.enabled = true
+        restarted.auditURL = desk.issueSync.auditURL
+        restarted.gh = fake.run
+        restarted.observe(job)
+        await restarted.drain()
+        #expect(fake.notes.count == 1)
+    }
+
+    @Test func runnerAuditPreservesWorkOwnedByTheMacDesk() async throws {
+        let (mac, fake, macJob) = try fixture()
+        await send(macJob, to: mac)
+        let (runner, _, original) = try fixture()
+        var unrelated = original
+        unrelated.issue = nil
+        unrelated.branch = "unrelated"
+        unrelated.task = "Unrelated work"
+        runner.issueSync.store.save(unrelated)
+        runner.issueSync.gh = fake.run
+        let count = fake.mutations.count
+        await runner.issueSync.audit()
+        #expect(mac.issueJobs.first?.status == .running)
+        #expect(fake.labels.contains("status:in-progress") && fake.column == "In progress")
+        #expect(fake.mutations.count == count && runner.inbox.isEmpty)
+    }
+
+    @Test func runnerKeepsRunningStatusWhileTheMacHoldsTheLatestClaim() async throws {
+        let (runner, fake, original) = try fixture()
+        await send(original, to: runner)
+        let (mac, _, stale) = try fixture()
+        var unrelated = stale
+        unrelated.issue = nil
+        unrelated.status = .done
+        mac.issueSync.store.save(unrelated)
+        mac.issueSync.gh = fake.run
+        var macJob = original
+        macJob.id = "mac-job"
+        macJob.branch = "oby/fix-116"
+        macJob.started = Date(timeIntervalSince1970: 5678)
+        await send(macJob, to: mac)
+        #expect(fake.notes.last?.contains("(job mac-job)") == true)
+        var done = runner.issueJobs.first { $0.id == original.id }!
+        done.status = .done
+        await send(done, to: runner)
+        #expect(fake.labels.contains("status:in-progress"))
+        await runner.issueSync.audit()
+        #expect(fake.labels.contains("status:in-progress") && fake.column == "In progress" && runner.inbox.isEmpty)
+        macJob = mac.issueJobs.first { $0.id == "mac-job" }!
+        macJob.status = .done
+        await send(macJob, to: mac)
+        #expect(!fake.labels.contains("status:in-progress"))
     }
 }
