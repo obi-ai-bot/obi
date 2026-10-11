@@ -149,6 +149,11 @@ final class Desk {
     @ObservationIgnored var mergePullRequest: (_ job: Job, _ check: MacCheck) async throws -> Void = MacCheck.merge
     /// Called with every Mac check that's queued, taken or ends, for the runner's event stream.
     var onCheckChange: (MacCheck) -> Void = { _ in }
+    /// Xcode Cloud recovery uses the runner's git, never the author's agent credentials.
+    @ObservationIgnored var mergeCloudBase: (Job) async throws -> Bool = { job in
+        try await XcodeCloud.mergeDev(job) { try await Shell.run($0, env: ["GIT_TERMINAL_PROMPT": "0"], timeout: 120) }
+    }
+    @ObservationIgnored var cloudRecovering: Set<String> = []
     /// Jobs whose Mac check result is being posted and merged or handed back (`finishCheck`), once at a time.
     @ObservationIgnored var finishingChecks: Set<String> = []
     /// Whether an approval queues a Mac check: on the runner, which Macs ask for checks. The Mac's
@@ -754,6 +759,7 @@ final class Desk {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Tell the agent something of 1 to 2,000 characters.") }
         guard let job = job(id) else { throw Shell.Failure(message: "There's no job \(id).") }
+        guard !cloudRecovering.contains(id) else { throw Shell.Failure(message: "Oby is preparing the Xcode Cloud recovery. Try again shortly.") }
         if job.isActive {
             guard let agent = agents[id], !ending.contains(id) else {
                 throw Shell.Failure(message: job.status == .queued ? "\(job.agentName) hasn't started yet. Tell it again in a moment."
@@ -1183,6 +1189,7 @@ final class Desk {
         // Oby reviews what was just published, and a review that ended reaches its author (Engine/Review.swift).
         if published != nil { reviewPublished(job) }
         if job.reviewOf != nil { reviewEnded(job) }
+        if job.cloudWillRetry { Task { await recoverCloud(id) } }
         onFinish(job)
         // A job that waited on this one for the same files runs now (case 2.1).
         releaseWaiting()
@@ -1211,6 +1218,14 @@ final class Desk {
         return all.values.filter {
             $0.published != nil && ($0.pullRequest == nil || $0.pullRequest?.state == .open)
         }.sorted { $0.id < $1.id }
+    }
+
+    /// Older followed jobs must be live before recovery can start their agent.
+    func loadFollowedJob(_ id: String) -> Job? {
+        if let live = job(id) { return live }
+        guard let saved = store.recent(-1).first(where: { $0.id == id }) else { return nil }
+        jobs.append(saved)
+        return saved
     }
 
     /// Apply only the observation to the latest job: it may have resumed while gh was running.
@@ -1276,6 +1291,10 @@ final class Desk {
             guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Answer with 1 to 2,000 characters.") }
             switch (item.kind, text) {
             case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss), (.merge, Inbox.dismiss): try dismiss(item.job)
+            case (.failed, Inbox.oneMoreRound) where job(item.job)?.cloudNeedsYou == true:
+                try message(item.job, cloudAgain(item.job))
+            case (.failed, Inbox.askOby) where job(item.job)?.cloudNeedsYou == true:
+                try message(item.job, cloudAgain(item.job, ask: true))
             case (.merge, Inbox.tryAgain): try retryMerge(item.job)
             case (.failed, Inbox.tryAgain), (.limit, Inbox.tryAgain), (.failed, Inbox.oneMoreRound): try message(item.job, Inbox.tryAgainMessage)
             case (.review, Inbox.oneMoreRound): try message(item.job, reviewAgain(item.job))

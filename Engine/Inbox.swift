@@ -50,6 +50,7 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
 nonisolated enum Inbox {
     /// What a failed job's item offers: run it again from where it was, or let it go.
     static let tryAgain = "Try again"
+    static let askOby = "Ask Oby"
     static let dismiss = "Dismiss"
     /// What an item out of review rounds, or for a job Oby stopped at one of its limits (case 3.1),
     /// offers besides Dismiss.
@@ -69,6 +70,10 @@ nonisolated enum Inbox {
             return item(.question, "question-\(job.notes?.count ?? 0)", question.text, question.options)
         }
         guard !job.isActive else { return nil }
+        if job.cloudNeedsYou, let cloud = job.xcodeCloud {
+            return item(.failed, "cloud-\(cloud.head)-\(cloud.rounds)-\(cloud.conflicts)-\(job.currentRound)",
+                        cloud.problem ?? "Xcode Cloud still fails. Take it from here.", [oneMoreRound, dismiss, askOby])
+        }
         if job.reviewNeedsYou, let review = job.review {
             return item(.review, "review-\(review.job)", Review.stopLine, [oneMoreRound, dismiss])
         }
@@ -81,6 +86,7 @@ nonisolated enum Inbox {
             if check.handedOff == true { return item(.merge, "merge-\(check.id)-nothing-new", text, [tryAgain, dismiss]) }
             return item(.merge, "merge-\(check.id)-stopped", text, [dismiss])
         }
+        if job.cloudWillRetry { return nil }
         guard job.status == .failed || job.status == .interrupted else { return nil }
         let line = job.summary.split(separator: "\n").first.map(String.init) ?? job.status.rawValue.capitalized
         // Each failure its own: a retry that fails within the same second is another round.

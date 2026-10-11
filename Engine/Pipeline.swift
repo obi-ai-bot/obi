@@ -2,7 +2,7 @@ import Foundation
 
 /// A stable wire format: clients render these stages; Engine alone derives them.
 nonisolated struct JobStage: Codable, Equatable, Identifiable, Sendable {
-    enum ID: String, Codable, Sendable { case prepare, work, check, publish, review, merged }
+    enum ID: String, Codable, Sendable { case prepare, work, check, publish, review, cloud, merged }
     enum State: String, Codable, Sendable { case done, current, upcoming, failed, skipped }
     var id: ID
     var title: String
@@ -30,6 +30,7 @@ nonisolated struct PullRequestStatus: Codable, Equatable, Sendable {
     var base: String
     var mergedAt: Date?
     var checkedAt: Date
+    var head: String?
 }
 
 extension Job {
@@ -51,6 +52,9 @@ extension Job {
         stages += [Stage(id: .publish, title: "Publish", state: .upcoming, detail: "Secret scan, push and pull request"),
                    Stage(id: .review, title: "Review", state: .upcoming, detail: "Waiting for review"),
                    Stage(id: .merged, title: "Merged into \(pullRequest?.base ?? base ?? "dev")", state: .upcoming)]
+        if xcodeCloud != nil {
+            stages.insert(Stage(id: .cloud, title: "Xcode Cloud", state: .upcoming), at: stages.count - 1)
+        }
         func set(_ id: Stage.ID, _ state: Stage.State, detail: String? = nil, reason: String? = nil) {
             guard let index = stages.firstIndex(where: { $0.id == id }) else { return }
             stages[index].state = state
@@ -124,6 +128,13 @@ extension Job {
                     }
                 }
             }
+        }
+        if let cloud = xcodeCloud, published != nil {
+            let current = cloud.head == (pullRequest?.head ?? pushedHead)
+            let state: Stage.State = current && cloud.state == .passed && xcodeCloudError == nil ? .done
+                : current && cloud.state == .failed ? .failed : .current
+            set(.cloud, state, detail: state == .done ? "Passed" : state == .failed ? "Failed" : "Pending",
+                reason: xcodeCloudError ?? (state == .failed ? cloud.problem ?? cloud.details : nil))
         }
         // The user let it go: nothing is published, reviewed or merged. A pull request from an
         // earlier round keeps its own progress; a failed publish keeps its reason.

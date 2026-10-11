@@ -62,11 +62,13 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Oby's merge stopped where a person takes over (the runner derives it, docs/runner-api.md "Mac
     /// check"), or nil from older runners.
     var stoppedMerge: Bool?
+    /// Xcode Cloud recovery stopped; newer runners derive this.
+    var cloudNeedsYou: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
-             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question
+             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, cloudNeedsYou
         case stoppedMerge = "mergeNeedsYou"
     }
 
@@ -127,7 +129,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// rounds, stranded or its merge stopped, and not dismissed: what the runner sends an alert for,
     /// and what Dismiss takes.
     var needsYou: Bool {
-        dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou || mergeNeedsYou)
+        dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou || mergeNeedsYou || cloudNeedsYou == true)
     }
 
     /// "Round 2 of 5 · Fable 5.1", or empty for a one-round job on the usual model.

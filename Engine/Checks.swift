@@ -137,6 +137,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             return "Not merged: the check is of another pull request."
         }
         guard check.head == job.pushedHead, job.unpublished == 0 else { return "Not merged: the pull request has commits the Mac didn't check." }
+        if job.cloudWaiting { return "Not merged: Xcode Cloud hasn't passed on this commit." }
         return nil
     }
 
@@ -249,6 +250,10 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         let env: [String: String?] = ["GH_PROMPT_DISABLED": "1"]
         let view = try await Shell.ok(["gh", "pr", "view", "\(check.pr)", "-R", job.repo, "--json", "state,baseRefName,headRefOid"], in: away, env: env)
         if let why = mismatch(Data(view.utf8), check) { throw Shell.Failure(message: why) }
+        let cloud = try await XcodeCloud.read(job, head: check.head)
+        if cloud?.state != .passed && (cloud != nil || job.xcodeCloud != nil) {
+            throw XcodeCloud.Waiting()
+        }
         try await Shell.ok(["gh", "pr", "merge", "\(check.pr)", "-R", job.repo, "--squash", "--delete-branch",
                             "--match-head-commit", check.head], in: away, env: env)
     }
@@ -565,6 +570,7 @@ extension Job {
 
     /// The Merged stage while the pull request is open and Oby's review approved it.
     nonisolated var mergeProgress: (state: JobStage.State, detail: String, reason: String?) {
+        if cloudWaiting { return (.current, "Waiting for Xcode Cloud", nil) }
         if let mergeError { return (.failed, "Not merged", mergeError) }
         // Nothing queued: where nothing runs merge checks (the Mac's own desk), a person merges it.
         guard let check = macCheck else { return (.current, "Ready to merge", nil) }
@@ -718,6 +724,7 @@ extension Desk {
     /// dev and deletes its branch. The job's report lists the merge, and Merged completes.
     func mergeChecked(_ id: String) async {
         guard var job = job(id), let check = job.macCheck else { return }
+        if job.cloudWaiting { return }
         if let why = MacCheck.refusal(job) {
             job.mergeError = why
             job.macCheck?.transient = false
@@ -735,10 +742,15 @@ extension Desk {
             transient = true
         }
         guard var latest = self.job(id), latest.macCheck?.id == check.id else { return }
+        if latest.cloudWaiting { return }
         if problem == nil, let why = MacCheck.refusal(latest) { problem = why }
         if problem == nil {
             do {
                 try await mergePullRequest(latest, check)
+            } catch is XcodeCloud.Waiting {
+                guard var current = self.job(id), current.macCheck?.id == check.id else { return }
+                current.macCheck?.tries = check.tries
+                return replace(current)
             } catch {
                 problem = "Not merged: \(error.localizedDescription)"
                 transient = true

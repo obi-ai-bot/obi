@@ -96,6 +96,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// What the agent asked the user at the end of its turn (`QUESTION: …`, Inbox.question), or
     /// nil. The job waits for the answer, which reaches the agent as its next message.
     var question: Plan.Question?
+    /// Xcode Cloud's latest result and recovery budget, and a failed refresh.
+    var xcodeCloud: XcodeCloud?
+    var xcodeCloudError: String?
     /// The latest check of its pull request on the user's Mac before a merge (Engine/Checks.swift),
     /// and why Oby couldn't check or merge it, or nil.
     var macCheck: MacCheck?
@@ -136,7 +139,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Clear done keeps, and what Dismiss takes. Not once dismissed.
     // ponytail: Push has no alert for `stranded` yet (Push.notice is nil for it): the app lists it under Needs you.
     var needsYou: Bool {
-        dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou || mergeNeedsYou)
+        dismissed == nil && (canPublish || stranded || (status == .failed && !cloudWillRetry) || status == .interrupted || reviewNeedsYou || mergeNeedsYou || cloudNeedsYou)
     }
     var agentName: String { Job.agentNames[agent] ?? agent }
     static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
