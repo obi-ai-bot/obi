@@ -5,15 +5,14 @@ import Observation
 import Speech
 import UIKit
 
-/// Owns the microphone for a held touch or an explicitly locked recording. Async preparation
-/// checks the hold before opening it. Release or Stop closes hardware before finalizing words.
+/// Owns one tap-to-dictate session. Stop closes hardware before finalizing the draft.
+/// Cancelling invalidates late results so keyboard edits always win.
 @MainActor @Observable
 final class PhoneVoice {
-    private(set) var held = false
+    private(set) var active = false
     private(set) var finishing = false
     private(set) var listening = false
-    private(set) var locked = false
-    private(set) var words = ""
+    private(set) var level: Float = 0
     private(set) var problem: String?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var work: Task<Void, Never>?
@@ -21,7 +20,7 @@ final class PhoneVoice {
     @ObservationIgnored private var speech: PhoneSpeech?
     @ObservationIgnored private var buffers: AsyncStream<AVAudioPCMBuffer>.Continuation?
     @ObservationIgnored private var feeding: Task<Void, Never>?
-    @ObservationIgnored private var done: ((String) -> Void)?
+    @ObservationIgnored private var update: ((String) -> Void)?
     @ObservationIgnored private var timeout: Task<Void, Never>?
     @ObservationIgnored private var audioObservers: [NSObjectProtocol] = []
 
@@ -58,18 +57,16 @@ final class PhoneVoice {
     }
 
     private func interrupted() {
-        guard held else { return }
-        fail(RunnerError(message: "Listening was interrupted. Hold the mic to try again."), token: generation)
+        guard active else { return }
+        fail(RunnerError(message: "Listening was interrupted. Tap the mic to try again."), token: generation)
     }
 
-    func start(context: [String], done: @escaping (String) -> Void) {
-        guard !held, !finishing else { return }
+    func start(context: [String], update: @escaping (String) -> Void) {
+        guard !active, !finishing else { return }
         cancel()
-        held = true
-        self.done = done
-        words = ""
+        active = true
+        self.update = update
         problem = nil
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         let token = generation
         work = Task {
             do {
@@ -77,18 +74,19 @@ final class PhoneVoice {
                 guard ["NSMicrophoneUsageDescription", "NSSpeechRecognitionUsageDescription"].allSatisfy({
                     !(Bundle.main.object(forInfoDictionaryKey: $0) as? String ?? "").isEmpty
                 }) else { throw RunnerError(message: "Voice input isn't available in this build. You can still type.") }
-                // Request each permission separately. A release during either prompt never opens audio.
+                // Request each permission separately. Stopping during either prompt never opens audio.
                 let microphone = await AVAudioApplication.requestRecordPermission()
+                guard active, generation == token else { return }
                 let recognition = await withCheckedContinuation { continuation in
                     SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
                 }
-                guard held, generation == token else { return }
+                guard active, generation == token else { return }
                 guard microphone, recognition else {
                     throw RunnerError(message: "Allow Microphone and Speech Recognition for Oby in Settings to talk. You can still type.")
                 }
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.record, mode: .measurement)
-                // Lock feedback happens while capturing; iOS otherwise suppresses haptics.
+                // Give light start feedback after capture begins.
                 try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
                 try session.setActive(true)
                 let engine = AVAudioEngine()
@@ -96,12 +94,12 @@ final class PhoneVoice {
                 let speech = try await PhoneSpeech.make(request: UUID().uuidString, sampleRate: source.sampleRate,
                                                         sourceFormat: source, context: context,
                                                         onCancel: { [weak self] in
-                    self?.fail(RunnerError(message: "Listening was interrupted. Hold the mic to try again."), token: token)
+                    self?.fail(RunnerError(message: "Listening was interrupted. Tap the mic to try again."), token: token)
                 }) { [weak self] words in
                     guard let self, self.generation == token else { return }
-                    self.words = words
+                    self.update?(words)
                 }
-                guard held, generation == token else {
+                guard active, generation == token else {
                     speech.cancel()
                     return
                 }
@@ -113,6 +111,12 @@ final class PhoneVoice {
                 feeding = Task {
                     for await buffer in stream {
                         guard !Task.isCancelled, generation == token else { return }
+                        if listening, let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 {
+                            var sum: Float = 0
+                            for index in 0..<Int(buffer.frameLength) { sum += samples[index] * samples[index] }
+                            let rms = sqrt(sum / Float(buffer.frameLength))
+                            level = max(0, min(1, (20 * log10(max(rms, 0.00001)) + 55) / 55))
+                        }
                         do { try speech.append(buffer) }
                         catch { fail(error, token: token); return }
                     }
@@ -136,6 +140,7 @@ final class PhoneVoice {
                 engine.prepare()
                 try engine.start()
                 listening = true
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 timeout = Task {
                     try? await Task.sleep(for: .seconds(60))
                     guard !Task.isCancelled, generation == token else { return }
@@ -145,30 +150,15 @@ final class PhoneVoice {
         }
     }
 
-    func lock() {
-        guard listening, held, !locked else { return }
-        locked = true
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-    }
-
-    func release() {
-        guard !locked else { return }
-        finish()
-    }
-
-    /// Stop (or the 60-second limit) sends, including when the touch already ended after locking.
+    /// Stop and the 60-second limit keep words in the draft; neither submits a request.
     func finish() {
-        guard held else { return }
-        let done = self.done
-        self.done = nil
-        held = false
-        locked = false
+        guard active else { return }
+        active = false
         stopMicrophone()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        // Preparation still pending: cancel it, and discard this hold.
+        // Preparation still pending: invalidate it before it can open the microphone.
         guard let speech else {
             cancel()
-            problem = "Hold to talk. Release to send."
             return
         }
         finishing = true
@@ -181,32 +171,27 @@ final class PhoneVoice {
                 guard generation == token else { return }
                 self.speech = nil
                 finishing = false
-                words = ""
-                if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    problem = "Hold to talk. Release to send."
-                } else { done?(transcript) }
+                if !transcript.isEmpty { update?(transcript) }
+                update = nil
             } catch { fail(error, token: token) }
         }
     }
 
     func cancel() {
-        let wasHeld = held
         generation += 1
-        held = false
-        locked = false
-        done = nil
+        active = false
+        update = nil
         finishing = false
         stopMicrophone()
-        if wasHeld { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
         work?.cancel()
         feeding?.cancel()
         speech?.cancel()
         speech = nil
-        words = ""
     }
 
     private func stopMicrophone() {
         listening = false
+        level = 0
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
         engine = nil

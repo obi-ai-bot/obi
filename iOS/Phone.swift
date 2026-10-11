@@ -30,13 +30,11 @@ final class Phone {
         }
     }
 
-    func holdMic() {
-        guard !voice.held, !voice.finishing else { return }
+    func dictate(update: @escaping (String) -> Void) {
+        guard !voice.active, !voice.finishing else { return }
         cancel()
-        voice.start(context: PhoneSpeech.context(repos: jobs.map(\.repo))) { [weak self] in self?.ask($0, spoken: true) }
+        voice.start(context: PhoneSpeech.context(repos: jobs.map(\.repo)), update: update)
     }
-
-    func releaseMic() { voice.release() }
 
     func cancelVoice() {
         spoken = false

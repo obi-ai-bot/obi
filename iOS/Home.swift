@@ -7,6 +7,8 @@ struct HomeView: View {
     @Environment(\.scenePhase) private var scenePhase
     let character: ObyCharacter
     @State private var text = ""
+    @State private var selection: TextSelection?
+    @State private var dictated = false
     @State private var settings = false
     @FocusState private var typing: Bool
     /// The scroll view's height, so an empty Home can put Oby in the middle of it.
@@ -77,7 +79,12 @@ struct HomeView: View {
             .sheet(isPresented: sheetShown) { sheet }
             .sheet(isPresented: $settings) { SettingsScreen() }
             .onDisappear { phone.cancelVoice() }
-            .onChange(of: scenePhase) { if scenePhase != .active { phone.cancelVoice() } }
+            .onChange(of: scenePhase) {
+                // Permission prompts make preparation inactive; they must not abort the first tap.
+                if scenePhase == .background || (scenePhase == .inactive && phone.voice.listening) {
+                    phone.voice.finish()
+                }
+            }
             .onChange(of: settings) { if settings { phone.cancelVoice() } }
             .onChange(of: path) { if !path.isEmpty { phone.cancelVoice() } }
             .onChange(of: phone.opening, initial: true) {
@@ -181,38 +188,21 @@ struct HomeView: View {
 
     private var field: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if phone.voice.held || phone.voice.finishing {
-                if phone.voice.listening {
-                    Label(phone.voice.locked ? "Listening · Locked" : "Slide up to lock", systemImage: phone.voice.locked ? "lock.fill" : "arrow.up")
-                        .font(.caption).padding(.horizontal, 12)
-                    if phone.voice.locked {
-                        HStack {
-                            Button("Cancel") { phone.cancelVoice() }
-                            Spacer()
-                            Button("Stop and send") { phone.voice.finish() }
-                        }.padding(.horizontal, 12)
-                    } else {
-                        Text("Slide left to cancel").font(.caption).padding(.horizontal, 12)
-                    }
-                }
-                Text(phone.voice.words.isEmpty ? (phone.voice.finishing ? "Writing down…" : phone.voice.listening ? "Listening…" : "Getting ready…") : phone.voice.words)
-                    .font(.subheadline).padding(.horizontal, 12)
-                    .accessibilityAddTraits(.updatesFrequently)
+            if phone.voice.active || phone.voice.finishing {
+                Text(phone.voice.finishing ? "Writing down…" : phone.voice.listening ? "Listening…" : "Getting ready…")
+                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12)
             }
             if let problem = phone.voice.problem {
                 Text(problem).font(.footnote).foregroundStyle(.red).padding(.horizontal, 12)
             }
             HStack(spacing: 8) {
-                TextField("Type a task, like “Review oby PR #12”", text: $text, axis: .vertical)
+                TextField("Type a task, like “Review oby PR #12”", text: draftText, selection: $selection, axis: .vertical)
                     .lineLimit(1...4)
                     .focused($typing)
                     .submitLabel(.send)
                     .onSubmit(send)
-                HoldMic(listening: phone.voice.listening, locked: phone.voice.locked, enabled: !phone.voice.finishing,
-                        start: { typing = false; phone.holdMic() }, lock: { phone.voice.lock(); return phone.voice.locked },
-                        release: { phone.releaseMic() }, cancel: { phone.cancelVoice() },
-                        stop: { phone.voice.finish() })
-                    .frame(width: 44, height: 44)
+                DictationMic(active: phone.voice.active, listening: phone.voice.listening,
+                             finishing: phone.voice.finishing, level: phone.voice.level, toggle: toggleDictation)
                 Button(action: send) {
                     Image(systemName: "arrow.up")
                         .font(.body.weight(.bold))
@@ -233,10 +223,39 @@ struct HomeView: View {
         .background(Color(uiColor: .systemGroupedBackground))
     }
 
+    /// Only keyboard edits use this setter; recognition updates the state directly.
+    private var draftText: Binding<String> {
+        Binding { text } set: { edited in
+            guard edited != text else { return }
+            // Freeze the latest live words before accepting edits, including during finalization.
+            phone.voice.cancel()
+            text = edited
+            if edited.isEmpty { dictated = false }
+        }
+    }
+
+    private func toggleDictation() {
+        if phone.voice.active {
+            phone.voice.finish()
+        } else {
+            typing = false
+            let prefix = text
+            let separator = prefix.isEmpty || prefix.last?.isWhitespace == true ? "" : " "
+            phone.dictate { words in
+                guard !words.isEmpty else { return }
+                text = prefix + separator + words
+                dictated = true
+                selection = TextSelection(insertionPoint: text.endIndex)
+            }
+        }
+    }
+
     private func send() {
-        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        phone.ask(text)
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        phone.ask(text, spoken: dictated)
         text = ""
+        selection = nil
+        dictated = false
         typing = false
     }
 
@@ -301,6 +320,9 @@ struct HomeView: View {
 
     /// Edit on a plan card: its words go back in the field.
     private func edit(_ said: String) {
+        phone.voice.cancel()
+        dictated = false
+        selection = nil
         text = said
         phone.cancel()
         typing = true
