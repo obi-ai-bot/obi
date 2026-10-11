@@ -545,7 +545,7 @@ Publishes by hand, for a job whose own publish failed, after the user approved o
 
 ### `GET /v1/checks/next?mac=Studio&kinds=merge,apple`
 
-For a Mac that runs checks. Answers `{"check": { …Mac check }}` with the oldest queued check, now `running` and that Mac's (`mac` is the query's name, up to 100 characters, or `a Mac`), or `{"check": null}` when none waits. `kinds` lists what the Mac takes, `merge`, `apple` or both; without it, merge checks only (Macs from before Apple checks). Apple checks come first: an agent waits on them. A merge check whose job runs again or pushed a newer commit isn't handed out, nor an Apple check whose job ended. A Mac that took a check and reported nothing for 2 hours went away: the next Mac to ask gets it again. Ask when a `check` event says one is `queued`, on every (re)connection, and every 10 minutes.
+For a Mac that runs checks. Answers `{"check": { …Mac check }}` with the oldest queued check, now `running` and that Mac's (`mac` is the query's name, up to 100 characters, or `a Mac`), or `{"check": null}` when none waits. `kinds` lists what the Mac takes, `merge`, `apple` or both; without it, merge checks only (Macs from before Apple checks). Apple checks come first: an agent waits on them. A merge check whose job runs again or pushed a newer commit isn't handed out, nor an Apple check whose job ended. A Mac that took a check and reported nothing for 3 hours 20 minutes (every step to its timeout, each xcodebuild step twice, and half an hour more) went away: the next Mac to ask gets it again. Ask when a `check` event says one is `queued`, on every (re)connection, and every 10 minutes.
 
 ### `GET /v1/checks/{id}/bundle`
 

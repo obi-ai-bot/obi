@@ -102,7 +102,10 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// How many failed checks go back to the author before a person takes over.
     static let maxRounds = 3
     /// A Mac that took a check and said nothing for this long went away: the next Mac to ask gets it.
-    static let lease: TimeInterval = 2 * 3600
+    /// Longer than the longest check can take: every step to its timeout, each xcodebuild step twice
+    /// (the Mac's own trouble runs it again, `step`), and half an hour for the checkout, the resets
+    /// and the result bundles. 3 hours 20 minutes today.
+    static let lease: TimeInterval = commands(cache: URL(filePath: "/")).reduce(30 * 60) { $0 + $1.timeout * ($1.xcodebuild ? 2 : 1) }
     static let stopLine = "The Mac check failed \(maxRounds) times. Take it from here."
     /// A failed check whose round for the author ended without a new commit to check.
     static let nothingNewLine = "The agent's round for it pushed no new commit. Try again to check the same commit, or take it from here."
@@ -847,8 +850,8 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         var named = bundled.isEmpty ? failures(in: run.output).map { FailingTest(test: $0, message: said[$0] ?? "") } : bundled
         // A build that failed is the code's, whatever else its output quotes.
         if command.xcodebuild, !buildFailed(run.output) {
-            let troubled = named.compactMap { Trouble.in($0.message) }
-            named.removeAll { Trouble.in($0.message) != nil }
+            let troubled = named.compactMap(diagnostic)
+            named.removeAll { diagnostic($0) != nil }
             if named.isEmpty, let trouble = troubled.first ?? Trouble.in(run.output)
                 ?? run.summary.flatMap({ Trouble.in(String(decoding: $0, as: UTF8.self)) }) {
                 return .trouble(trouble)
@@ -866,6 +869,17 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         if let problem = problem(command, status: run.status, output: run.output, timedOut: false, named: false) { return .problem(problem, log: nil) }
         return .failed([], log: excerpt(run.output))
     }
+
+    /// The Mac's trouble a "failure" in the result bundle is, when it's the test tooling's own
+    /// report rather than a test's: it names no test function (just the target, like `iOSTests`),
+    /// and isn't an assertion. A test's assertion that quotes "Failed to install" is still the code's.
+    static func diagnostic(_ failure: FailingTest) -> Trouble? {
+        guard !failure.test.contains("("), !failure.message.contains(assertion) else { return nil }
+        return Trouble.in(failure.message)
+    }
+
+    /// What a failing assertion's message starts or reads like: XCTest's, Swift Testing's, or an issue recorded by hand.
+    static var assertion: Regex<Substring> { /XCTAssert|XCTFail|XCTUnwrap|Expectation failed|Issue recorded|#expect|#require|failed: \(/ }
 
     /// What a step stopped at its timeout leaves for whoever reads it: the last test that started, and the last 40 lines.
     static func stoppedLog(_ command: Command, _ output: String) -> String {

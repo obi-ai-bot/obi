@@ -164,6 +164,10 @@ struct CheckTests {
         #expect(desk.job("author")?.macCheck == taken && made.events.last == taken)
         #expect(desk.job("author")?.pipeline.stages.last?.detail == "Checking on Studio")
         #expect(desk.nextMacCheck(mac: "Laptop", now: now + 60) == nil)
+        // The lease outlasts the longest check: every step to its timeout, each xcodebuild step twice.
+        let longest = MacCheck.commands(cache: URL(filePath: "/")).reduce(0) { $0 + $1.timeout * ($1.xcodebuild ? 2 : 1) }
+        #expect(MacCheck.lease > longest && longest == 170 * 60)
+        #expect(desk.nextMacCheck(mac: "Laptop", now: now + longest) == nil)
         // A Mac that went quiet past the lease: the next one to ask gets it.
         let again = try #require(desk.nextMacCheck(mac: "Laptop", now: now + MacCheck.lease + 1))
         #expect(again.id == check.id && again.mac == "Laptop")
@@ -813,6 +817,13 @@ struct CheckTests {
         let failed = MacCheck.verdict(phone, attempt(65, "Lost connection to the test manager service.\n** TEST FAILED **", summary: real))
         #expect(failed == .failed([MacCheck.FailingTest(test: "iOSTests/JobRowTests/testTitle()", message: "XCTAssertEqual failed: (\"a\") is not equal to (\"b\"); XCTAssertTrue failed"),
                                    MacCheck.FailingTest(test: "iOSTests/testBadge()", message: "Expectation failed: 1 == 2\nsecond line")], log: nil))
+        // A test's own assertion that quotes an infrastructure phrase is the code's, and so is any failure of a test function.
+        let quoting = summary([("iOSTests/InstallTests/testMessage()", "iOSTests", "testMessage()", "XCTAssertEqual failed: (\"Failed to install\") is not equal to (\"ok\")")])
+        #expect(MacCheck.verdict(phone, attempt(65, "** TEST FAILED **", summary: quoting))
+                == .failed([MacCheck.FailingTest(test: "iOSTests/InstallTests/testMessage()", message: "XCTAssertEqual failed: (\"Failed to install\") is not equal to (\"ok\")")], log: nil))
+        #expect(MacCheck.diagnostic(MacCheck.FailingTest(test: "iOSTests/testInstall()", message: "Failed to install the app")) == nil)
+        #expect(MacCheck.diagnostic(MacCheck.FailingTest(test: "iOSTests", message: "Expectation failed: hung before establishing connection")) == nil)
+        #expect(MacCheck.diagnostic(MacCheck.FailingTest(test: "iOSTests", message: "Failed to install or launch the test runner.")) == .install)
         // Without a bundle, the output names them, and Swift Testing's issues are their messages.
         let swiftTest = "✘ Test blocksASecret() recorded an issue at PublishTests.swift:12:9: Expectation failed: 1 == 2\n✘ Test blocksASecret() failed after 0.002 seconds with 1 issue."
         #expect(MacCheck.verdict(swift, attempt(1, swiftTest)) == .failed([MacCheck.FailingTest(test: "blocksASecret()", message: "PublishTests.swift:12:9: Expectation failed: 1 == 2")], log: nil))
