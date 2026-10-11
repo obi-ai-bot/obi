@@ -318,6 +318,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         guard let squash = squash(Data(view.utf8), commits: Data(commits.utf8), pr: check.pr) else {
             throw Shell.Failure(message: "gh said something else about the pull request's commits.")
         }
+        try await scan(squash)
         do {
             try await Shell.ok(["gh", "api", "-X", "PUT", "\(pull)/merge", "-f", "merge_method=squash", "-f", "sha=\(check.head)",
                                 "-f", "commit_title=\(squash.title)", "-f", "commit_message=\(squash.message)"],
@@ -373,6 +374,19 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             ? messages[0].split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).dropFirst().joined().trimmingCharacters(in: .whitespacesAndNewlines)
             : messages.map { "* " + $0.trimmingCharacters(in: .whitespacesAndNewlines) }.joined(separator: "\n\n")
         return (unclosing(title) + " (#\(pr))", message)
+    }
+
+    /// The secret scan of the squash commit's title and message, the built-in rules and the vault's
+    /// secrets as they are now: the title may have changed on GitHub since publishing, and the
+    /// vault may know a secret it didn't then. Throws on a finding, and when the scan can't run.
+    static func scan(_ squash: (title: String, message: String), vault: Vault = .shared) async throws {
+        let findings: [Publish.Finding]
+        do {
+            findings = try await Publish.scan(texts: [("squash commit title", squash.title), ("squash commit message", squash.message)], vault: vault)
+        } catch {
+            throw Shell.Failure(message: "the secret scan of the squash commit couldn't run (\(error.localizedDescription)).")
+        }
+        if !findings.isEmpty { throw Shell.Failure(message: "possible secret in " + places(findings) + ".") }
     }
 
     /// `text` with GitHub's closing keywords before an issue ("Closes #116", "fixes o/r#3",
