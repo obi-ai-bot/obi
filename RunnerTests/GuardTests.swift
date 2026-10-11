@@ -425,10 +425,8 @@ struct GuardTests {
         var fix = job
         fix.check = "swift test"
         fix.rounds = 4
-        guard case let .again(message) = Rounds.next(fix, summary: "swift test passes.", failed: false, check: check) else {
-            Issue.record("the job should get another round")
-            return
-        }
+        var message = ""
+        if case let .again(said) = Rounds.next(fix, summary: "swift test passes.", failed: false, check: check) { message = said }
         #expect(message.contains("The tests that failed, from all of what it printed (its end above may not show them):\n\n```\n"
                                  + "aRace(): RunnerTests.swift:12:9: Expectation failed: done\n```"))
         #expect(MacCheck.failures(in: "✘ Test aRace() failed after 0.3 seconds with 1 issue.\n✘ Test run with 457 tests in 57 suites failed after 49.639 seconds with 2 issues.") == ["aRace()"])
