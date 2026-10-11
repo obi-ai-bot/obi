@@ -1435,6 +1435,8 @@ nonisolated enum Rounds {
         /// The failing tests' ids, read from all of the output before it's cut to its end; nil to
         /// read them from `output`.
         var failing: [String]? = nil
+        /// What each failing test said, by its id (`MacCheck.messages`), read from all of the output too.
+        var said: [String: String] = [:]
         /// No Mac took the Apple check it asked for (`Desk.appleUnbuilt`): it ran, or ran again, with
         /// `oby-check` passing over the build, so it passed without the Apple build.
         var appleUnbuilt = false
@@ -1463,7 +1465,15 @@ nonisolated enum Rounds {
             output += "\n\nOby stopped it after \(JobLimits.span(timeout)), the most a test run may take.\(last)"
         }
         return Check(command: command, passed: result?.status == 0 && result?.timedOut == false, output: String(output.suffix(4000)),
-                     failing: Fingerprint.failingTests(output))
+                     failing: Fingerprint.failingTests(output), said: MacCheck.messages(in: output))
+    }
+
+    /// The failing tests, each with what it said, at most 20 of them: the output's end the agent
+    /// gets may hold none of them (#185), as `swift test` prints its summary and the build's warnings last.
+    static func failingTests(_ check: Check) -> [String] {
+        let ids = check.failing ?? Fingerprint.failingTests(check.output)
+        let named = ids.prefix(20).map { id in check.said[id].map { "\(id): \(String($0.prefix(300)))" } ?? id }
+        return named + (ids.count > 20 ? ["and \(ids.count - 20) more"] : [])
     }
 
     /// The summary of a job stopped at a limit.
@@ -1495,7 +1505,14 @@ nonisolated enum Rounds {
                 return .hold(check.passed ? "the tests are still weakened after \(rounds)" : "`\(check.command)` still fails after \(rounds)", summary)
             }
             var parts: [String] = []
-            if !check.passed { parts.append("Oby ran `\(check.command)` and it failed:\n\n```\n\(check.output)\n```") }
+            if !check.passed {
+                parts.append("Oby ran `\(check.command)` and it failed:\n\n```\n\(check.output)\n```")
+                let tests = failingTests(check)
+                if !tests.isEmpty {
+                    parts.append("The tests that failed, from all of what it printed (its end above may not show them):\n\n```\n"
+                                 + tests.joined(separator: "\n") + "\n```")
+                }
+            }
             if !check.problems.isEmpty {
                 parts.append("Oby compared the tests with where this branch started, and this work weakens them:\n\n"
                              + check.problems.map { "- " + $0 }.joined(separator: "\n")

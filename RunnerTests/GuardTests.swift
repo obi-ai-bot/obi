@@ -411,6 +411,29 @@ struct GuardTests {
         #expect(Fingerprint.of(first) != Fingerprint.of(second))
     }
 
+    /// #185: the end of `swift test`'s output was all passing tests, the summary and build warnings,
+    /// so the next round never heard which tests failed and ran out of time looking.
+    @Test func theNextRoundNamesTheFailingTestsTheOutputsEndLeftOut() async throws {
+        let printed = ["✘ Test aRace() recorded an issue at RunnerTests.swift:12:9: Expectation failed: done",
+                       "✘ Test aRace() failed after 0.3 seconds with 1 issue."]
+            + (1...200).map { "✔ Test passing\($0)() passed after 0.001 seconds." }
+            + ["✘ Test run with 457 tests in 57 suites failed after 49.639 seconds with 2 issues."]
+        try printed.joined(separator: "\n").write(to: folder.appending(path: "printed.txt"), atomically: true, encoding: .utf8)
+        let check = await Rounds.run("cat printed.txt; echo 'warning: found 1 file(s) which are unhandled' >&2; exit 1",
+                                     in: folder, timeout: 10, env: [:], boxed: false)
+        #expect(!check.output.contains("aRace") && check.failing == ["aRace()"])
+        var fix = job
+        fix.check = "swift test"
+        fix.rounds = 4
+        guard case let .again(message) = Rounds.next(fix, summary: "swift test passes.", failed: false, check: check) else {
+            Issue.record("the job should get another round")
+            return
+        }
+        #expect(message.contains("The tests that failed, from all of what it printed (its end above may not show them):\n\n```\n"
+                                 + "aRace(): RunnerTests.swift:12:9: Expectation failed: done\n```"))
+        #expect(MacCheck.failures(in: "✘ Test aRace() failed after 0.3 seconds with 1 issue.\n✘ Test run with 457 tests in 57 suites failed after 49.639 seconds with 2 issues.") == ["aRace()"])
+    }
+
     @Test func wordsSentWhileTheCheckRunsStartATimedTurn() async throws {
         desk.limits.round = 0.3
         desk.runCheck = { _, command, _, _ in

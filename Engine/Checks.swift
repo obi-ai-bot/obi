@@ -587,7 +587,10 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         var names: [String] = []
         for line in output.split(separator: "\n") {
             let name: Substring
-            if let match = line.firstMatch(of: /✘ Test (.+?) failed after\s/) {
+            // Swift Testing's summary, `✘ Test run with 457 tests in 57 suites failed`, names no test.
+            if line.contains(/✘ Test run with \d+ tests?\b/) {
+                continue
+            } else if let match = line.firstMatch(of: /✘ Test (.+?) failed after\s/) {
                 name = match.1
             } else if let match = line.firstMatch(of: /Test [Cc]ase '(.+?)' failed/) {
                 name = match.1
