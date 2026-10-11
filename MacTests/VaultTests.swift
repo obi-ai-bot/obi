@@ -24,4 +24,14 @@ struct KeychainVaultTests {
         #expect(try vault.names() == ["npm-token"])
         #expect(try store.value("staging-api-key") == nil)
     }
+
+    /// On the Mac too, a log line goes to OSLog with the vault's secrets taken out: `Logger` is Oby's own.
+    @Test func theMacsLogLeavesSecretsOut() throws {
+        let store = KeychainVault(service: "com.deskree.oby.vault.tests-\(UUID().uuidString)")
+        let vault = Vault(store: store)
+        defer { for name in (try? store.names()) ?? [] { try? store.remove(name) } }
+        let value = "tok/\(UUID().uuidString)+a=b"
+        try vault.add(value, as: "staging-api-key")
+        #expect(Logger.jobs.text("gh said 401 for \(value, privacy: .public)", vault: vault) == "gh said 401 for [vault: staging-api-key]")
+    }
 }

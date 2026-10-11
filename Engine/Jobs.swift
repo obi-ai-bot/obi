@@ -275,7 +275,7 @@ final class ClaudeAgent: AgentRun {
     }
 
     /// The command line and environment Claude Code starts with.
-    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?) -> (arguments: [String], environment: [String: String]) {
+    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?) throws -> (arguments: [String], environment: [String: String]) {
         // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
         // mcpServers (Tetrix) stay; only its claude.ai connectors are off.
         let arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
@@ -285,14 +285,14 @@ final class ClaudeAgent: AgentRun {
                              "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
                             + (resume.map { ["--resume", $0] } ?? []),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude")
-        let environment = Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 })
+        let environment = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 })
         return (arguments, environment)
     }
 
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
         self.onEvent = onEvent
         process.executableURL = URL(filePath: "/usr/bin/env")
-        let launch = Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume)
+        let launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume)
         process.arguments = launch.arguments
         process.environment = launch.environment
         process.currentDirectoryURL = worktree
@@ -538,10 +538,24 @@ nonisolated enum Attachments {
 
     /// Copies the job's attachments into the worktree's .oby/inputs, under their own names, and
     /// returns the ones it copied: a file that's gone (kept too long) is left out, not the job.
-    static func copy(_ job: Job, into worktree: URL) -> [String]? {
-        let copied = (job.attachments ?? []).filter { path in
+    /// Text goes with the vault's secrets taken out; a binary file (a screenshot) can't be, so one
+    /// that holds a secret stops the job, naming it. Throws when the vault can't be read.
+    static func copy(_ job: Job, into worktree: URL, vault: Vault = .shared) throws -> [String]? {
+        let leaks = try vault.forAgents()
+        var copied: [String] = []
+        for path in job.attachments ?? [] {
             let file = URL(filePath: path)
-            return (try? FileManager.default.copyItem(at: file, to: worktree.appending(path: ".oby/inputs/\(file.lastPathComponent)"))) != nil
+            guard let data = try? Data(contentsOf: file) else { continue }
+            let target = worktree.appending(path: ".oby/inputs/\(file.lastPathComponent)")
+            if let text = String(data: data, encoding: .utf8) {
+                try Data(leaks.redact(text).utf8).write(to: target)
+            } else {
+                if let name = leaks.hits(in: String(decoding: data, as: UTF8.self)).first?.name {
+                    throw Shell.Failure(message: "The attachment \(file.lastPathComponent) holds the vault secret \(name): it isn't handed to the agent.")
+                }
+                try data.write(to: target)
+            }
+            copied.append(path)
         }
         return copied.isEmpty ? nil : copied
     }
@@ -668,12 +682,13 @@ nonisolated enum Policy {
     }
 }
 
-/// What every agent process gets: the user's PATH, no Claude or Anthropic variables, and no
-/// GitHub login, so nothing an agent runs can publish as the user.
+/// What every agent process gets: the user's PATH, no Claude or Anthropic variables, no GitHub
+/// login, so nothing an agent runs can publish as the user, and no variable that holds one of the
+/// vault's secrets. Throws when the vault can't be read: then no agent starts.
 nonisolated enum Agents {
-    static func environment(_ extra: [String: String?]) -> [String: String] {
-        var env = Shell.environment
-        for (key, value) in overrides.merging(extra, uniquingKeysWith: { $1 }) { env[key] = value }
+    static func environment(_ extra: [String: String?], vault: Vault = .shared, base: [String: String] = Shell.environment) throws -> [String: String] {
+        var env = base
+        for (key, value) in try overrides(vault: vault, base: base).merging(extra, uniquingKeysWith: { $1 }) { env[key] = value }
         return env
     }
 
@@ -682,11 +697,12 @@ nonisolated enum Agents {
     /// switch is Claude Code's own (checked in 2.1.296: "0", "false", "no" or "off" turn it off).
     static let noConnectors: [String: String?] = ["ENABLE_CLAUDEAI_MCP_SERVERS": "false"]
 
-    /// What changes from Oby's own environment, also for the checks Oby runs in a job's worktree:
-    /// a variable of Oby's own that holds one of the vault's secrets (`export STAGING_API_KEY=…` in
-    /// the service's environment) doesn't pass through either.
-    static var overrides: [String: String?] {
-        overrides(identity: identity.withLock { $0 }).merging(withheld(Shell.environment, leaks: Vault.shared.redacting())) { $1 }
+    /// What changes from Oby's own environment (`base`), also for the checks Oby runs in a job's
+    /// worktree: a variable of Oby's own that holds one of the vault's secrets (`export
+    /// STAGING_API_KEY=…` in the service's environment) doesn't pass through either. Throws when
+    /// the vault can't be read.
+    static func overrides(vault: Vault = .shared, base: [String: String] = Shell.environment) throws -> [String: String?] {
+        overrides(identity: identity.withLock { $0 }).merging(withheld(base, leaks: try vault.forAgents())) { $1 }
     }
 
     /// The variables in `env` that hold one of the vault's secrets, plain or encoded, each as a removal.
@@ -923,15 +939,25 @@ nonisolated enum Workspace {
         }
         let worktree = worktree(job.id)
         try await git(["worktree", "add", "--quiet", "-b", job.branch, worktree.path, start])
+        return try inputs(job, pullRequest: pullRequest, issue: issue, in: worktree)
+    }
+
+    /// Writes what the agent reads in `.oby/inputs`: the job's attachments, and its pull request or
+    /// issue quoted from GitHub, each with the vault's secrets taken out. Throws, and the job fails
+    /// saying why, when the vault can't be read.
+    static func inputs(_ job: Job, pullRequest: Data?, issue: Data?, in worktree: URL, vault: Vault = .shared) throws -> Job {
+        var job = job
         try FileManager.default.createDirectory(at: worktree.appending(path: ".oby/inputs"), withIntermediateDirectories: true)
-        job.attachments = Attachments.copy(job, into: worktree)
+        job.attachments = try Attachments.copy(job, into: worktree, vault: vault)
 
         if let pr = job.pr, let pullRequest, let info = try? JSONSerialization.jsonObject(with: pullRequest) as? [String: Any] {
             job.base = info["baseRefName"] as? String ?? job.base
-            try Prompts.quoted("Pull request", pr, info).write(to: worktree.appending(path: ".oby/inputs/pr-\(pr).md"), atomically: true, encoding: .utf8)
+            try vault.forAgent(Prompts.quoted("Pull request", pr, info))
+                .write(to: worktree.appending(path: ".oby/inputs/pr-\(pr).md"), atomically: true, encoding: .utf8)
         }
         if let number = job.issue, let issue, let info = try? JSONSerialization.jsonObject(with: issue) as? [String: Any] {
-            try Prompts.quoted("Issue", number, info).write(to: worktree.appending(path: ".oby/inputs/issue-\(number).md"), atomically: true, encoding: .utf8)
+            try vault.forAgent(Prompts.quoted("Issue", number, info))
+                .write(to: worktree.appending(path: ".oby/inputs/issue-\(number).md"), atomically: true, encoding: .utf8)
         }
         return job
     }

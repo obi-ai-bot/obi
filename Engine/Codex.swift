@@ -195,7 +195,7 @@ final class CodexServer {
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = Agents.sandboxed(["codex", "app-server"], in: directory, own: home?.path ?? "\(Agents.home)/.codex")
         process.currentDirectoryURL = directory
-        process.environment = Agents.environment(["CODEX_HOME": home?.path])
+        process.environment = try Agents.environment(["CODEX_HOME": home?.path])
         process.standardInput = input
         process.standardOutput = output
         process.standardError = log.flatMap { try? FileHandle(forWritingTo: $0) } ?? FileHandle.nullDevice

@@ -48,7 +48,12 @@ The models and efforts the app picks in Settings › Models are kept in `~/.conf
 
 ## Vault
 
-Secrets for connections you make (an API token for a service) live in `vault/secrets.json` in `OBY_HOME`: the folder is 0700 and the file 0600, owned by the runner's user. Agents never see it: all of `OBY_HOME` is empty in their bubblewrap. The secret scan learns every value, plain, base64, hex and URL-encoded, and nothing outgoing that holds one is published; the runner's log lines, its API's answers and events, and the pushes to the phone have them taken out, and so do agents' prompts, the reviews handed to them and their environment. If the file or its folder is readable by anyone else, or owned by someone else, the runner doesn't read it, and nothing is published (and no push, API answer or event goes to the apps) until it's fixed.
+Secrets for connections you make (an API token for a service) live in `vault/secrets.json` in `OBY_HOME`: the folder is 0700 and the file 0600, owned by the runner's user. Agents never see it: all of `OBY_HOME` is empty in their bubblewrap.
+
+- **Nothing outgoing holds one.** The secret scan learns every value, plain, base64, hex and URL-encoded. A publish is blocked when one is in a file of any commit it pushes (each file read whole, merges too), a hunk, a file's name, a commit message, the branch's name, or the pull request; so are review comments and the comment that claims an issue.
+- **No agent gets one.** The brain, the Lead and every job's agent get prompts, messages, quoted issues and pull requests, attachments, the Lead's context files and reviews with the values taken out, and no variable of the runner's environment that holds one. A binary attachment that holds one stops the job.
+- **Nothing shown or logged holds one.** Log lines (the runner's journal and the Mac's OSLog), the API's answers and events, and the pushes to the phone have them taken out.
+- **Fail closed.** If the file or its folder is readable by anyone else, or owned by someone else, the runner doesn't read it: until it's fixed nothing is published, no agent starts or is told anything (the job says why), and no push, API answer or event goes to the apps.
 
 Run these as the runner's user, with its `OBY_HOME`. The value comes on stdin (typed without echo, or piped), never as an argument, and nothing prints it:
 

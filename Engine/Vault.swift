@@ -103,6 +103,23 @@ nonisolated final class Vault: Sendable {
         }
     }
 
+    /// What text and environments on their way to an agent (the brain, the Lead, a job's agent) are
+    /// checked against. Throws, saying why, when the vault can't be read: then no prompt, message,
+    /// file, review or environment goes to an agent, and the job says why.
+    func forAgents() throws -> Leaks {
+        do {
+            return try leaks()
+        } catch {
+            throw Shell.Failure(message: "The vault can't be read (\(error.localizedDescription)): nothing goes to an agent until it's fixed.")
+        }
+    }
+
+    /// `text` as an agent may get it: the vault's secrets, plain or encoded, taken out. Throws when
+    /// the vault can't be read.
+    func forAgent(_ text: String) throws -> String {
+        try forAgents().redact(text)
+    }
+
     /// What to redact log lines with: the vault as it is now, or the latest values known when it
     /// can't be read.
     func redacting() -> Leaks {

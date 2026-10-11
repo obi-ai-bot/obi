@@ -365,7 +365,6 @@ struct VaultNeverShownTests {
         }
     }
 
-    #if !canImport(OSLog)
     @Test func logLinesLeaveSecretsOut() throws {
         let (vault, store, folder) = scratch()
         defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
@@ -387,7 +386,6 @@ struct VaultNeverShownTests {
         // Private values stay out, as in OSLog.
         #expect(logger.line("notice", "token \(value)", vault: vault) == "notice [test] token <private>\n")
     }
-    #endif
 }
 
 @MainActor
@@ -508,5 +506,261 @@ struct VaultReachTests {
         #expect(finding.redacted(by: leaks) == Publish.Finding(file: "notes/[vault: short-key].txt", line: 3, rule: "gitleaks generic-api-key"))
         #expect(!Publish.blocked(by: [finding.redacted(by: leaks)]).contains("abcdefgh"))
         #expect(finding.redacted(by: .empty) == finding)
+    }
+}
+
+/// Review 4: the brain and the Lead, the files agents read, failing closed, the Mac's log, every
+/// blob a push sends, and branch names and claim comments.
+struct VaultAgentTests {
+    /// (1) The brain and the Lead get the user's words without the vault's secrets, and none of
+    /// Oby's variables that hold one.
+    @Test func theBrainAndTheLeadGetRedactedTextAndNoVaultVariable() throws {
+        let (vault, store, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let value = secret()
+        try vault.add(value, as: "staging-api-key")
+        let base = ["STAGING_API_KEY": value, "HEXED": Fake.hex(value), "PATH": "/usr/bin:/bin"]
+
+        let brain = try ClaudeBrain(vault: vault).request(system: "Plan it.", user: "test staging with \(value)", base: base)
+        #expect(brain.user == "test staging with [vault: staging-api-key]")
+        #expect(brain.env["STAGING_API_KEY"] == .some(nil) && brain.env["HEXED"] == .some(nil))
+        #expect(brain.env["PATH"] == nil)
+
+        let lead = try ClaudeLead(model: "opus", vault: vault).request(system: "Lead.", user: "The user said:\n\(Fake.base64(value))", base: base)
+        #expect(lead.user == "The user said:\n[vault: staging-api-key]")
+        #expect(!lead.env.keys.contains("STAGING_API_KEY") && !lead.env.keys.contains("HEXED"))
+        #expect(lead.env["PATH"] == .some("/usr/bin:/bin"))
+
+        // (3) When the vault can't be read, neither is asked.
+        chmod(store.file.path, 0o644)
+        #expect(throws: Shell.Failure.self) { try ClaudeBrain(vault: vault).request(system: "s", user: "u", base: base) }
+        #expect(throws: Shell.Failure.self) { try ClaudeLead(model: "opus", vault: vault).request(system: "s", user: "u", base: base) }
+    }
+
+    @Test func theBrainIsntRunWhenTheVaultCantBeRead() async throws {
+        let (vault, store, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        try vault.add(secret(), as: "staging-api-key")
+        chmod(store.file.path, 0o644)
+        let error = await #expect(throws: Shell.Failure.self) {
+            try await ClaudeBrain(vault: vault).complete(system: "s", user: "u", schema: Data("{}".utf8), timeout: 5)
+        }
+        #expect(error?.message.contains("nothing goes to an agent") == true)
+    }
+
+    /// (2) The Lead's context files, a job's quoted issue and pull request, and its attachments are
+    /// written without the vault's secrets.
+    @Test func filesAgentsReadAreRedactedBeforeTheyreWritten() throws {
+        let (vault, store, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let value = secret()
+        try vault.add(value, as: "staging-api-key")
+        let directory = try temporaryFolder()
+
+        try Lead.writeContext(roadmap: "# Roadmap\n| 1 | uses \(value) |", jobs: "| job | \(Fake.percent(value)) |", to: directory, vault: vault)
+        for file in ["roadmap.md", "jobs.md"] {
+            let text = try String(contentsOf: directory.appending(path: ".oby/context/\(file)"), encoding: .utf8)
+            for copy in copies(of: value) { #expect(!text.contains(copy.text), Comment(rawValue: file)) }
+            #expect(text.contains("[vault: staging-api-key]"))
+        }
+
+        let worktree = try temporaryFolder()
+        let notes = directory.appending(path: "notes-1a2b3c.txt"), shot = directory.appending(path: "screenshot-1a2b3c.png")
+        try "the key is \(value)\n".write(to: notes, atomically: true, encoding: .utf8)
+        try Data([0x89, 0x50, 0x4E, 0x47, 0xFF, 0xFE]).write(to: shot)
+        var work = job
+        work.pr = nil
+        work.issue = 12
+        work.attachments = [notes.path, shot.path]
+        let issue = try JSONSerialization.data(withJSONObject: [
+            "url": "https://github.com/deskree-inc/oby/issues/12", "author": ["login": "someone"],
+            "title": "Staging", "body": "Use \(value) to log in.", "comments": [["author": ["login": "other"], "body": Fake.hex(value)]],
+        ])
+        let prepared = try Workspace.inputs(work, pullRequest: nil, issue: issue, in: worktree, vault: vault)
+        #expect(prepared.attachments == [notes.path, shot.path])
+        for file in ["issue-12.md", "notes-1a2b3c.txt"] {
+            let text = try String(contentsOf: worktree.appending(path: ".oby/inputs/\(file)"), encoding: .utf8)
+            for copy in copies(of: value) { #expect(!text.contains(copy.text), Comment(rawValue: file)) }
+            #expect(text.contains("[vault: staging-api-key]"), Comment(rawValue: file))
+        }
+        #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/screenshot-1a2b3c.png")) == Data([0x89, 0x50, 0x4E, 0x47, 0xFF, 0xFE]))
+
+        // A binary file that holds a secret can't be redacted: it stops the job, naming the secret.
+        try (Data([0xFF, 0xFE]) + Data(value.utf8) + Data([0x00])).write(to: shot)
+        let error = #expect(throws: Shell.Failure.self) { try Attachments.copy(work, into: worktree, vault: vault) }
+        #expect(error?.message.contains("staging-api-key") == true && error?.message.contains(value) == false)
+
+        // (3) When the vault can't be read, no file is written.
+        chmod(store.file.path, 0o644)
+        let other = try temporaryFolder()
+        #expect(throws: Shell.Failure.self) { try Lead.writeContext(roadmap: "r", jobs: "j", to: other, vault: vault) }
+        #expect(!FileManager.default.fileExists(atPath: other.appending(path: ".oby/context").path))
+        #expect(throws: Shell.Failure.self) { try Workspace.inputs(work, pullRequest: nil, issue: issue, in: other, vault: vault) }
+        #expect(!FileManager.default.fileExists(atPath: other.appending(path: ".oby/inputs/issue-12.md").path))
+    }
+
+    /// (4) The Mac's log goes through the same `text` as the runner's: OSLog gets it redacted.
+    @Test func everyLogLineIsRedactedBeforeItsWritten() throws {
+        let (vault, _, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let value = secret()
+        try vault.add(value, as: "staging-api-key")
+        let said = Logger.jobs.text("job 1: \("gh said 401 for \(value)", privacy: .public)", vault: vault)
+        #expect(said == "job 1: gh said 401 for [vault: staging-api-key]")
+        #expect(Logger.jobs.text("job 1: \(value)", vault: vault) == "job 1: <private>")
+    }
+
+    /// (5) The scan reads every file each pushed commit has whole: a value over lines whose first
+    /// line was there already shows in no hunk.
+    @Test func everyNewFileInThePushIsScannedWhole() async throws {
+        let (vault, _, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        try vault.add("aaaa!\nbbbb?", as: "two-lines")
+        let repo = try temporaryFolder()
+        let git = { (arguments: [String]) in try await AlreadyOnBaseTests.git(arguments, in: repo) }
+        try await Shell.ok(["git", "-C", repo.path, "init", "--quiet", "-b", "dev"])
+        try "intro\naaaa!\n".write(to: repo.appending(path: "notes.txt"), atomically: true, encoding: .utf8)
+        try await git(["add", "notes.txt"])
+        try await git(["commit", "--quiet", "-m", "notes"])
+        try await git(["update-ref", "refs/remotes/origin/dev", "dev"])
+        try await git(["switch", "--quiet", "-c", "oby/fix-4"])
+        try "intro\naaaa!\nbbbb?\n".write(to: repo.appending(path: "notes.txt"), atomically: true, encoding: .utf8)
+        try await git(["commit", "--quiet", "-am", "more notes"])
+        try "intro\n".write(to: repo.appending(path: "notes.txt"), atomically: true, encoding: .utf8)
+        try await git(["commit", "--quiet", "-am", "fewer notes"])
+
+        let leaks = try vault.leaks()
+        // The hunks alone miss it: the first line was there already.
+        let diff = try await Shell.ok(["git", "-C", repo.path, "log", "-p", "--format=", "refs/remotes/origin/dev..oby/fix-4"])
+        #expect(Publish.findings(inDiff: diff, leaks: leaks).isEmpty)
+        #expect(try await Publish.blobFindings(repo, since: "refs/remotes/origin/dev", head: "oby/fix-4", leaks: leaks)
+                == [Publish.Finding(file: "notes.txt", line: 2, rule: "vault secret two-lines")])
+        #expect(try await Publish.scan(repo, base: "dev", head: "oby/fix-4", vault: vault)
+                .contains(Publish.Finding(file: "notes.txt", line: 2, rule: "vault secret two-lines")))
+        // With an empty vault nothing is read whole.
+        #expect(try await Publish.blobFindings(repo, since: "refs/remotes/origin/dev", head: "oby/fix-4", leaks: .empty).isEmpty)
+    }
+
+    /// (5) A secret a merge brought in and a later commit took out is in a blob the push sends.
+    @Test func aBlobAMergeBroughtInIsScanned() async throws {
+        let (vault, _, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let value = secret()
+        try vault.add(value, as: "staging-api-key")
+        let repo = try temporaryFolder()
+        let git = { (arguments: [String]) in try await AlreadyOnBaseTests.git(arguments, in: repo) }
+        try await Shell.ok(["git", "-C", repo.path, "init", "--quiet", "-b", "dev"])
+        try await AlreadyOnBaseTests.commit("README.md", in: repo)
+        try await git(["update-ref", "refs/remotes/origin/dev", "dev"])
+        try await git(["switch", "--quiet", "-c", "side"])
+        try await AlreadyOnBaseTests.commit("side.txt", in: repo)
+        try await git(["switch", "--quiet", "-c", "oby/fix-5", "dev"])
+        try await git(["merge", "--quiet", "--no-ff", "--no-commit", "side"])
+        try "key: \(Fake.base64(value))\n".write(to: repo.appending(path: "config.yml"), atomically: true, encoding: .utf8)
+        try await git(["add", "config.yml"])
+        try await git(["commit", "--quiet", "-m", "Merge side"])
+        try await git(["rm", "--quiet", "config.yml"])
+        try await git(["commit", "--quiet", "-m", "remove config"])
+        #expect(try await Publish.blobFindings(repo, since: "refs/remotes/origin/dev", head: "oby/fix-5", leaks: vault.leaks())
+                == [Publish.Finding(file: "config.yml", line: 1, rule: "vault secret staging-api-key, base64")])
+    }
+
+    /// (6) The branch's name goes out with a push and in the claim comment: both are scanned first.
+    @Test func branchNamesAndClaimCommentsAreScanned() async throws {
+        let (vault, _, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        try vault.add("branchsecret123", as: "branch-key")
+        var leaky = job
+        leaky.branch = "oby/fix-branchsecret123"
+        let findings = try await Publish.scan(texts: Publish.outgoing(leaky, messages: "fix: it", title: "fix: it"), vault: vault)
+        #expect(findings.contains(Publish.Finding(file: "branch name", line: 1, rule: "vault secret branch-key")))
+        #expect(!Publish.blocked(by: findings).contains("branchsecret123"))
+        let error = await #expect(throws: Shell.Failure.self) { try await Lead.claimNote(leaky, vault: vault) }
+        #expect(error?.message.hasPrefix("Not posted: possible secret in claim comment:1 (vault secret branch-key)") == true)
+        #expect(error?.message.contains("branchsecret123") == false)
+        #expect(try await Lead.claimNote(job, vault: vault) == "Oby is working on this on the branch `\(job.branch)` (job \(job.id)).")
+    }
+}
+
+/// (3) The desk fails closed: when the vault can't be read, no agent starts, no message or check
+/// goes, and the job says why.
+@MainActor
+final class VaultClosedDeskTests {
+    final class Agent: AgentRun {
+        var onEvent: (AgentEvent) -> Void = { _ in }
+        var prompts: [String] = []
+        var sent: [String] = []
+        func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
+            prompts.append(prompt)
+            self.onEvent = onEvent
+        }
+        func send(_ text: String) { sent.append(text) }
+        func end() {}
+        func stop() {}
+        func kill() {}
+    }
+
+    let folder: URL
+    let desk: Desk
+    let agent = Agent()
+    let vault: Vault
+    let store: FileVault
+    let value = secret()
+
+    init() throws {
+        folder = try temporaryFolder()
+        store = FileVault(folder: folder.appending(path: "vault"))
+        vault = Vault(store: store)
+        try vault.add(value, as: "staging-api-key")
+        desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        desk.makeAgent = { [agent] _, _, _ in agent }
+        desk.prepare = { $0 }
+        desk.countCommits = { _, _ in 1 }
+        desk.vault = vault
+    }
+
+    deinit { try? FileManager.default.removeItem(at: folder) }
+
+    func dispatch(_ id: String, check: String? = nil) async throws {
+        var work = job
+        work.id = id
+        work.kind = .fix
+        work.pr = nil
+        work.issue = 7
+        work.base = "dev"
+        work.branch = "oby/fix-7-\(id)"
+        work.task = "Run the staging tests with \(value)."
+        work.check = check
+        desk.dispatch(Desk.Draft(said: "work on oby #7", reply: "", job: work, guessed: false))
+        for _ in 0..<500 where desk.job(id)?.status == .queued { try await Task.sleep(for: .milliseconds(10)) }
+    }
+
+    @Test func theAgentGetsTheTaskWithoutTheSecret() async throws {
+        try await dispatch("open")
+        let prompt = try #require(agent.prompts.first)
+        #expect(!prompt.contains(value) && prompt.contains("Run the staging tests with [vault: staging-api-key]."))
+        try desk.message("open", "and use \(Fake.base64(value)) too")
+        #expect(agent.sent == ["and use [vault: staging-api-key] too"])
+    }
+
+    @Test func noAgentStartsAndTheJobSaysWhy() async throws {
+        chmod(store.file.path, 0o644)
+        try await dispatch("closed")
+        let ended = try #require(desk.job("closed"))
+        #expect(agent.prompts.isEmpty)
+        #expect(ended.status == .failed && ended.summary.contains("The vault can't be read"))
+    }
+
+    @Test func noMessageOrCheckGoesOnceTheVaultCantBeRead() async throws {
+        try await dispatch("later", check: "true")
+        #expect(agent.prompts.count == 1)
+        chmod(store.file.path, 0o644)
+        #expect(throws: Shell.Failure.self) { try self.desk.message("later", "keep going") }
+        #expect(agent.sent.isEmpty)
+        agent.onEvent(.turnEnded(summary: "done", failed: false))
+        for _ in 0..<500 where desk.job("later")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
+        let ended = try #require(desk.job("later"))
+        #expect(ended.status == .failed && ended.summary.contains("The check didn't run: The vault can't be read"))
+        #expect(agent.sent.isEmpty)
     }
 }

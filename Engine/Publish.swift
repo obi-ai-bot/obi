@@ -99,7 +99,7 @@ nonisolated enum Publish {
             throw Shell.Failure(message: "Not published: the secret scan couldn't read the commit messages.")
         }
         let title = title(for: job, subjects: subjects.split(separator: "\n").map(String.init))
-        let texts = [("commit message", messages), ("pull request title", title), ("pull request description", body(for: job))]
+        let texts = outgoing(job, messages: messages, title: title)
         let said: [Finding]
         do {
             said = try await scan(texts: texts)
@@ -117,6 +117,12 @@ nonisolated enum Publish {
         let (url, sent) = try await pullRequest(job, base: base, title: title)
         if let sent { hooks.sent(Outgoing(action: sent, repo: job.repo, id: url.absoluteString)) }
         return url
+    }
+
+    /// Everything a publish sends besides the files: the branch's name, every commit's message, and
+    /// the pull request's title and description.
+    static func outgoing(_ job: Job, messages: String, title: String) -> [(name: String, text: String)] {
+        [("branch name", job.branch), ("commit message", messages), ("pull request title", title), ("pull request description", body(for: job))]
     }
 
     /// Why Oby won't publish this job, or nil to go ahead.
@@ -408,8 +414,77 @@ nonisolated enum Publish {
         } catch {
             throw Shell.Failure(message: "Not published: the secret scan couldn't read the changes (\(error.localizedDescription)).")
         }
+        let blobs: [Finding]
+        do {
+            blobs = try await blobFindings(worktree, since: since, head: head, leaks: leaks)
+        } catch {
+            throw Shell.Failure(message: "Not published: the secret scan couldn't read the commits' files (\(error.localizedDescription)).")
+        }
         // gitleaks names files as the diff does: a vault secret in a name is redacted there too.
-        return findings(inDiff: diff, leaks: leaks) + (try await gitleaks(parse(diff).lines)).map { $0.redacted(by: leaks) }
+        var seen = Set<Finding>()
+        return (findings(inDiff: diff, leaks: leaks) + blobs.map { $0.redacted(by: leaks) }
+                + (try await gitleaks(parse(diff).lines)).map { $0.redacted(by: leaks) }).filter { seen.insert($0).inserted }
+    }
+
+    /// The biggest file the vault scan reads whole; a bigger one is a finding, so it isn't pushed unscanned.
+    static let biggestBlob = 32 << 20
+
+    /// The vault's secrets in every file the push sends that `since` doesn't have, each read whole
+    /// (every version, in every commit, merges too): a value over lines, next to a line that was
+    /// there already, or one a merge brought in and a later commit took out, is in a file even when
+    /// no hunk shows it. Throws when git can't say.
+    static func blobFindings(_ worktree: URL, since: String, head: String, leaks: Leaks) async throws -> [Finding] {
+        guard !leaks.isEmpty else { return [] }
+        let git = ["git", "-C", worktree.path, "-c", "core.quotePath=false"]
+        // "<sha> <path>" for every tree and file; a commit has no path.
+        var paths: [String: String] = [:], order: [String] = []
+        for line in try await Shell.ok(git + ["rev-list", "--objects", "\(since)..\(head)"]).split(separator: "\n") {
+            guard let space = line.firstIndex(of: " ") else { continue }
+            let sha = String(line[..<space]), path = String(line[line.index(after: space)...])
+            if !path.isEmpty, paths[sha] == nil {
+                paths[sha] = path
+                order.append(sha)
+            }
+        }
+        guard !order.isEmpty else { return [] }
+        let checked = try await Shell.run(git + ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+                                          input: Data((order.joined(separator: "\n") + "\n").utf8))
+        guard checked.status == 0 else { throw Shell.Failure(message: "git cat-file: \(checked.err)") }
+        var findings: [Finding] = [], blobs: [String] = []
+        for line in String(decoding: checked.out, as: UTF8.self).split(separator: "\n") {
+            let parts = line.split(separator: " ")
+            guard parts.count == 3, parts[1] == "blob", let size = Int(parts[2]), let path = paths[String(parts[0])] else { continue }
+            if size > biggestBlob {
+                findings.append(Finding(file: path, line: nil, rule: "too big for the vault scan"))
+            } else {
+                blobs.append(String(parts[0]))
+            }
+        }
+        guard !blobs.isEmpty else { return findings }
+        let read = try await Shell.run(git + ["cat-file", "--batch"], input: Data((blobs.joined(separator: "\n") + "\n").utf8))
+        guard read.status == 0 else { throw Shell.Failure(message: "git cat-file: \(read.err)") }
+        // Each: "<sha> blob <size>\n", the bytes, "\n".
+        var rest = read.out[...]
+        while let newline = rest.firstIndex(of: 10) {
+            let header = String(decoding: rest[rest.startIndex..<newline], as: UTF8.self).split(separator: " ")
+            guard header.count == 3, let size = Int(header[2]), let path = paths[String(header[0])] else {
+                throw Shell.Failure(message: "git cat-file answered something else")
+            }
+            let start = rest.index(after: newline), end = start + size
+            guard end < rest.endIndex else { throw Shell.Failure(message: "git cat-file stopped short") }
+            findings += vaultFindings(inFile: String(decoding: rest[start..<end], as: UTF8.self), named: path, leaks: leaks)
+            rest = rest[(end + 1)...]
+        }
+        return findings
+    }
+
+    /// The vault's secrets in a whole file: on each line, encoded and wrapped over lines, and
+    /// values that span lines.
+    static func vaultFindings(inFile text: String, named name: String, leaks: Leaks) -> [Finding] {
+        let lines = lines(of: text, named: name)
+        return lines.flatMap { line in leaks.found(in: line.text).map { Finding(file: name, line: line.number, rule: $0) } }
+            + wrapped(lines, leaks: leaks).filter { $0.rule.hasPrefix("vault secret") }
+            + spanning(lines, leaks: leaks)
     }
 
     /// gitleaks on the same added lines when it's installed. The built-in scanner runs either way.
