@@ -198,10 +198,11 @@ struct GitHubAppTests {
 
     @Test func theRunnersOwnCallsActAsTheAppAndPublishingAsTheOwner() async throws {
         let github = GitHub()
-        let pull = #"{"state":"open","merged":false,"base":{"ref":"dev"},"head":{"sha":"\#(CheckTests.head)","ref":"oby/fix-151","repo":{"full_name":"deskree-inc/oby"}}}"#
+        let pull = #"{"title":"fix: it (#151)","state":"open","merged":false,"base":{"ref":"dev"},"head":{"sha":"\#(CheckTests.head)","ref":"oby/fix-151","repo":{"full_name":"deskree-inc/oby"}}}"#
         let ran = Ran { arguments, _ in
             let said: String = switch Array(arguments.prefix(3)) {
             case ["gh", "api", "repos/deskree-inc/oby/pulls/152"]: pull
+            case ["gh", "api", "repos/deskree-inc/oby/pulls/152/commits?per_page=100"]: #"[{"commit":{"message":"fix: it\n\nCloses #151"}}]"#
             case ["gh", "pr", "create"]: "https://github.com/deskree-inc/oby/pull/152"
             case ["gh", "pr", "comment"]: "https://github.com/deskree-inc/oby/pull/152#issuecomment-1"
             case ["gh", "pr", "view"]: #"{"state":"OPEN","reviewDecision":"","mergedAt":null,"baseRefName":"dev","headRefOid":"\#(CheckTests.head)"}"#
@@ -237,7 +238,9 @@ struct GitHubAppTests {
         #expect(ran.token(["gh", "pr", "list"]) == app)
         #expect(ran.token(["gh", "pr", "create"]) == .some(nil))
         #expect(ran.token(["gh", "api", "repos/deskree-inc/oby/pulls/152"]) == app)
-        #expect(ran.token(["gh", "api", "-X", "PUT", "repos/deskree-inc/oby/pulls/152/merge", "-f", "merge_method=squash", "-f", "sha=\(CheckTests.head)"]) == app)
+        #expect(ran.token(["gh", "api", "repos/deskree-inc/oby/pulls/152/commits?per_page=100"]) == app)
+        #expect(ran.token(["gh", "api", "-X", "PUT", "repos/deskree-inc/oby/pulls/152/merge", "-f", "merge_method=squash", "-f", "sha=\(CheckTests.head)",
+                           "-f", "commit_title=fix: it (#151) (#152)", "-f", "commit_message=Part of #151"]) == app)
         #expect(ran.token(["gh", "api", "-X", "DELETE", "repos/deskree-inc/oby/git/refs/heads/oby/fix-151"]) == app)
         let comments = ran.calls.withLock { $0 }.filter { $0.arguments.prefix(3) == ["gh", "pr", "comment"] }
         #expect(comments.count == 2 && comments.allSatisfy { $0.token == app })
