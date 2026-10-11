@@ -520,7 +520,7 @@ Fix it: starts the fix job (Failure record, above) and answers it, `201`, as `PO
 
 ### `GET /v1/jobs/{id}/publish`
 
-What publishing this job by hand would do, in one sentence: for a job whose own publish failed (`publishError`). The app shows exactly this before asking for Face ID.
+What publishing this job by hand would do, in one sentence: for a job whose own publish failed (`publishError`). The app shows exactly this before asking for Face ID (the iPhone) or Touch ID (the Mac).
 
 ```json
 {"action": "Push oby/fix-ab12cd to deskree-inc/oby and open a pull request into dev.", "base": "dev"}
@@ -534,14 +534,14 @@ How a push goes out, by itself or by hand: the runner reads the branch's head on
 
 ### `POST /v1/jobs/{id}/publish`
 
-Publishes by hand, for a job whose own publish failed, after the user approved on a registered device. The runner has no Touch ID, so the iPhone's Face ID stands in for it.
+Publishes by hand, for a job whose own publish failed, after the user approved on a registered device. The runner has no Touch ID of its own, so a registered device's stands in for it: the iPhone's Face ID, or the Mac's Touch ID (`Mac/MacDevice.swift`). Each has its own key (`Shared/DeviceKey.swift`); either one opens the same door.
 
 ```json
 {"device": "d7c1…", "action": "Push oby/fix-ab12cd to deskree-inc/oby and open a pull request into dev.",
  "signedAt": "2026-10-09T22:01:07Z", "signature": "MEUCIQ…"}
 ```
 
-- `signature`: ECDSA P-256 with SHA-256 (DER, base64) over the UTF-8 bytes of `"oby-publish\n<job id>\n<action>\n<signedAt>"`, made with the device's Secure Enclave key. The key's access control requires biometry (`.biometryCurrentSet`), so signing is what asks for Face ID.
+- `signature`: ECDSA P-256 with SHA-256 (DER, base64) over the UTF-8 bytes of `"oby-publish\n<job id>\n<action>\n<signedAt>"`, made with the device's Secure Enclave key. The key's access control requires biometry (`.biometryCurrentSet`), so signing is what asks for Face ID or Touch ID. A cancelled prompt signs nothing, so nothing is sent.
 - The runner checks:
   - the device is registered;
   - the signature;
@@ -594,16 +594,16 @@ For `oby-check apple` in an agent's sandbox, with `Authorization: Bearer <its jo
 
 ### `POST /v1/devices`
 
-Registers the phone's publishing key, once per device:
+Registers a device's publishing key, once per device: the iPhone's (named "iPhone") or a Mac's (named after the Mac, `Host.current().localizedName`):
 
 ```json
-{"name": "Wellington's iPhone", "publicKey": "BJ3x…"}
+{"name": "Wellington's MacBook Air", "publicKey": "BJ3x…"}
 ```
 
 `publicKey` is the P-256 public key, X9.63 (65 bytes, uncompressed), base64. It returns `{"id": "d7c1…"}`. Only the runner's owner can register (the tailnet header); the runner lists devices in its log.
 
 - A key the runner knows returns its id right away, so the app registers every time it connects.
-- A new key needs pairing open: the owner runs `touch $OBY_HOME/pairing` on the runner's machine, and the phone registers within 10 minutes. That key uses it up. Otherwise `403` with that one line to show.
+- A new key needs pairing open: the owner runs `touch $OBY_HOME/pairing` on the runner's machine, and the device registers within 10 minutes. That key uses it up, so the iPhone and the Mac each need it opened once. Otherwise `403` with that one line to show: the Mac shows it in Settings › Runner, with Try again.
 - Why: agents run on the runner's machine, so through its tailnet address they arrive with the owner's header. They can't touch `pairing`, because `OBY_HOME` is empty inside their bubblewrap.
 
 ### `POST /v1/activities`

@@ -85,9 +85,14 @@ struct RunnerSettingsView: View {
                 Text("Away from your iPhone, a paired watch reaches the runner through your Cloudflare Tunnel. Pair one in Oby's Settings on your iPhone, with Oby open on the watch: pairing asks for Face ID.")
             }
             Section {
-                LabeledContent("Publishing key", value: "On your iPhone, Face ID")
+                LabeledContent("Publishing key", value: feed.runner == nil ? "Off" : feed.device.status)
+                // The runner's own line (pairing is closed: how to open it), then Try again.
+                if feed.runner != nil, let problem = feed.device.problem {
+                    Text(problem).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                    Button("Try again") { feed.register() }
+                }
             } footer: {
-                Text("Oby opens a pull request by itself once a job's check passes and the secret scan is clean. Publishing by hand, when that failed, needs Face ID on your iPhone. Oby merges only into dev, once its review approves and your Mac's checks pass.")
+                Text("Oby opens a pull request by itself once a job's check passes and the secret scan is clean. When that failed, publish by hand here or on your iPhone: this Mac's key, like the iPhone's, signs only after Touch ID, and the runner learns it once, while pairing is open on it. Oby merges only into dev, once its review approves and your Mac's checks pass.")
             }
         }
         .formStyle(.grouped)

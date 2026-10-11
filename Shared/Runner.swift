@@ -692,8 +692,8 @@ nonisolated struct Runner: Sendable {
         return answer.action
     }
 
-    // Approvals come from the iPhone's Face ID key (iOS/DeviceKey.swift).
-    #if os(iOS)
+    // Approvals come from the iPhone's Face ID key or the Mac's Touch ID key (Shared/DeviceKey.swift).
+    #if os(iOS) || os(macOS)
     func publish(_ id: String, approval: Approval) async throws -> URL {
         struct Answer: Decodable { var url: URL }
         let answer: Answer = try await call("POST", "v1/jobs/\(id)/publish", body: approval)

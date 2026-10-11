@@ -60,10 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if !FirstLaunch.done { firstLaunch.show() }
     }
 
-    /// A click on a runner's alert opens the island on its job.
+    /// A click on a runner's alert opens the island on its job; its Publish starts publishing there.
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         guard let id = response.notification.request.content.userInfo[RunnerFeed.jobKey] as? String else { return }
-        island.open(job: id)
+        island.open(job: id, publish: response.actionIdentifier == RunnerFeed.publishButton)
     }
 
     /// While Oby runs (always, in the menu bar), the alert still shows, so it isn't missed.
