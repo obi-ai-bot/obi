@@ -1369,7 +1369,11 @@ nonisolated enum Rounds {
         let result = try? await Shell.run(Agents.sandboxed(["sh", "-c", command], in: worktree, own: nil, bubblewrap: boxed), in: worktree,
                                           env: env, timeout: timeout)
         var output = result.map { String(decoding: $0.out, as: UTF8.self) + $0.err } ?? "Oby couldn't run it."
-        if result?.timedOut == true { output += "\n\nOby stopped it after \(JobLimits.span(timeout)), the most a test run may take." }
+        if result?.timedOut == true {
+            // What the agent needs to find the hang: the test it was in, and the end of what it printed (below).
+            let last = MacCheck.lastStarted(in: output).map { " The last test that started: \($0)." } ?? ""
+            output += "\n\nOby stopped it after \(JobLimits.span(timeout)), the most a test run may take.\(last)"
+        }
         return Check(command: command, passed: result?.status == 0 && result?.timedOut == false, output: String(output.suffix(4000)),
                      failing: Fingerprint.failingTests(output))
     }

@@ -169,6 +169,13 @@ struct GuardTests {
         #expect(quick.passed && quick.output == "fine\n")
     }
 
+    @Test func aTestRunStoppedAtItsLimitNamesTheLastTestThatStarted() async {
+        let script = "echo '◇ Test quick() started.'; echo '◇ Test hangs() started.'; echo '✔ Test quick() passed after 0.001 seconds.'; sleep 30"
+        let check = await Rounds.run(script, in: folder, timeout: 3, env: [:], boxed: false)
+        #expect(!check.passed && check.output.hasPrefix("◇ Test quick() started.\n"))
+        #expect(check.output.hasSuffix("Oby stopped it after 3 seconds, the most a test run may take. The last test that started: hangs()."))
+    }
+
     @Test func claudeCodeGetsMaxTurns() throws {
         let launch = try ClaudeAgent.launch(worktree: folder, configDirectory: nil, model: "claude-opus-5-5", resume: "s1", maxTurns: JobLimits().maxTurns)
         let at = launch.arguments.firstIndex(of: "--max-turns")
