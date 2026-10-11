@@ -109,6 +109,7 @@ final class Watch: NSObject {
         } else if let link {
             Task { await fetch(link) }
         }
+        if paired { Task { await uploadWidgetToken() } }
     }
 
     private func load(_ dictionary: [String: Any]) {
@@ -552,9 +553,18 @@ final class Watch: NSObject {
         let topic = Bundle.main.bundleIdentifier ?? ""
         do {
             _ = try await link.registerPush(token, kind: "alert", topic: topic)
-            if let widget = Glance.widgetToken { _ = try await link.registerPush(widget, kind: "widget", topic: topic) }
         } catch {
-            Logger.watch.error("handing the runner the push tokens failed: \(error.localizedDescription, privacy: .public)")
+            Logger.watch.error("handing the runner the push token failed: \(error.localizedDescription, privacy: .public)")
+        }
+        await uploadWidgetToken()
+    }
+
+    /// The complications' token, until the runner has accepted the latest one (Shared/WidgetToken.swift).
+    private func uploadWidgetToken() async {
+        guard let link else { return }
+        Glance.appTopic = Bundle.main.bundleIdentifier ?? ""
+        if !(await Glance.uploadWidgetToken(link, attempts: 3)) {
+            Logger.watch.error("the runner hasn't taken the complications' push token yet; trying again next time")
         }
     }
 

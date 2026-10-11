@@ -206,10 +206,44 @@ extension Glance {
         return Glance(needs: needing.count, working: jobs.count(where: \.isActive), top: needing.first?.heading)
     }
 
-    /// The complications' WidgetKit push token, from the widget extension, for the app to hand the runner.
-    nonisolated static var widgetToken: Data? {
-        get { defaults?.data(forKey: "widgetToken") }
-        set { defaults?.set(newValue, forKey: "widgetToken") }
+    /// The complications' WidgetKit push token, as issued and as the runner accepted it, in the
+    /// app group the widget and the app share.
+    nonisolated static var widgetToken: WidgetToken {
+        get { defaults?.data(forKey: "widgetToken").flatMap { try? JSONDecoder().decode(WidgetToken.self, from: $0) } ?? WidgetToken() }
+        set { defaults?.set(try? JSONEncoder().encode(newValue), forKey: "widgetToken") }
+    }
+
+    /// WidgetKit issued or rotated the complications' token.
+    nonisolated static func issued(_ token: Data) {
+        var saved = widgetToken
+        saved.issued = token
+        widgetToken = saved
+    }
+
+    /// Hands the runner the complications' token if it hasn't accepted the latest one, trying
+    /// `attempts` times, a little longer between each. The widget does it when the token changes,
+    /// the app whenever it runs, so a token that couldn't go now goes later.
+    nonisolated static func uploadWidgetToken(_ link: WatchLink, attempts: Int) async -> Bool {
+        await WidgetToken.deliver(attempts: attempts, current: { widgetToken }, accept: { token in
+            var saved = widgetToken
+            if saved.issued == token { saved.accept(token) }
+            widgetToken = saved
+        }, send: { token in
+            _ = try await link.registerPush(token, kind: "widget", topic: appTopic)
+        }, wait: { failures in
+            try? await Task.sleep(for: .seconds(2 * failures))
+        })
+    }
+
+    /// The watch app's bundle ID, the topic WidgetKit pushes go to: the app's own when it runs
+    /// (it saves it for the widget), else the widget extension's without its last part.
+    nonisolated static var appTopic: String {
+        get {
+            if let saved = defaults?.string(forKey: "appTopic") { return saved }
+            let own = Bundle.main.bundleIdentifier ?? ""
+            return own.hasSuffix(".widget") ? String(own.dropLast(".widget".count)) : own
+        }
+        set { defaults?.set(newValue, forKey: "appTopic") }
     }
 }
 

@@ -66,11 +66,20 @@ struct StopEverythingTests {
         }
         func send(_ text: String) {}
         func end() {}
+        /// Oby's quit killed it.
+        var killed = false
         func stop() {
             let group = group
-            DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { group?.end(after: Halt.stopping) }
+            // Past the grace, as ClaudeAgent does; once Oby quit, it has exited and this never runs.
+            DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { [weak self] in
+                guard self?.killed != true else { return }
+                group?.end(after: Halt.stopping)
+            }
         }
-        func kill() { group?.end(after: Halt.dropping) }
+        func kill() {
+            killed = true
+            group?.end(after: Halt.dropping)
+        }
     }
 
     /// Quitting during a stopped agent's grace still ends it before Oby exits: its own stop never would.
@@ -88,12 +97,13 @@ struct StopEverythingTests {
         #expect(agent.process.isRunning)
 
         desk.stop("stopped")
-        let start = ContinuousClock.now
         desk.quit()
-        // Ended within quit, well before the grace its stop would have waited.
-        for _ in 0..<20 where agent.process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
+        // Quit itself ended it: its stop's own end never comes once Oby quit, so the process's end
+        // is quit's kill, however long a busy machine takes to show it.
+        #expect(agent.killed)
+        for _ in 0..<1000 where agent.process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
         #expect(!agent.process.isRunning)
-        #expect(ContinuousClock.now - start < .seconds(Halt.grace))
+        #expect(agent.process.terminationReason == .uncaughtSignal)
         #expect(desk.job("stopped")?.status == .stopped)
     }
 

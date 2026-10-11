@@ -136,7 +136,7 @@ final class WatchesTests {
     init() throws {
         folder = try temporaryFolder()
         vault = Vault(store: FileVault(folder: folder.appending(path: "vault")))
-        watches = Watches(file: folder.appending(path: "watches.json"), vault: vault, started: now - 600)
+        watches = Watches(file: folder.appending(path: "watches.json"), vault: vault)
     }
 
     deinit { try? FileManager.default.removeItem(at: folder) }
@@ -180,19 +180,45 @@ final class WatchesTests {
 
     @Test func aReplayAfterARestartFails() throws {
         let watch = try pair()
-        let request = try signed(watch)
+        // Signed a little ahead of the runner's clock, as a watch's clock may be.
+        let request = try signed(watch, time: now + 4)
         #expect(refusal(request) == nil)
-        // The nonces are gone with the old process; the time isn't.
-        let restarted = Watches(file: folder.appending(path: "watches.json"), vault: vault, started: now + 5)
-        #expect(throws: APIError.self) { try restarted.check(request, now: now + 10) }
-        #expect(throws: Never.self) { try restarted.check(try self.signed(watch, time: now + 10), now: now + 10) }
+        // The used nonces outlive the process: the same request fails after a restart, anywhere in its window.
+        for later in [now + 1, now + 60, now + 120] {
+            let restarted = Watches(file: folder.appending(path: "watches.json"), vault: vault)
+            #expect(throws: APIError.self) { try restarted.check(request, now: later) }
+        }
+        let restarted = Watches(file: folder.appending(path: "watches.json"), vault: vault)
+        #expect(throws: Never.self) { try restarted.check(try self.signed(watch, time: now + 10, nonce: "an0ther-n0nce-0123"), now: now + 10) }
     }
 
-    @Test func requestsExpireAfterTwoMinutes() throws {
+    @Test func requestsExpireAfterTwoMinutesAndCantBeSignedAhead() throws {
         let watch = try pair()
         #expect(refusal(try signed(watch, time: now - 121, nonce: "aaaaaaaaaaaaaaaa1")) == .unauthorized)
         #expect(refusal(try signed(watch, time: now + 121, nonce: "aaaaaaaaaaaaaaaa2")) == .unauthorized)
+        // A request from the future would outlive its nonce: only a few seconds of clock difference.
+        #expect(refusal(try signed(watch, time: now + 6, nonce: "aaaaaaaaaaaaaaaa4")) == .unauthorized)
+        #expect(refusal(try signed(watch, time: now + 5, nonce: "aaaaaaaaaaaaaaaa5")) == nil)
         #expect(refusal(try signed(watch, time: now - 119, nonce: "aaaaaaaaaaaaaaaa3")) == nil)
+    }
+
+    @Test func usedNoncesArePrivateAndGoOnceTheirWindowHasPassed() throws {
+        let watch = try pair()
+        #expect(refusal(try signed(watch, nonce: "first-n0nce-01234")) == nil)
+        let mode = try FileManager.default.attributesOfItem(atPath: watches.noncesFile.path)[.posixPermissions] as? Int
+        #expect(mode == 0o600)
+        #expect(String(decoding: try Data(contentsOf: watches.noncesFile), as: UTF8.self).contains("first-n0nce-01234"))
+        // Two minutes on, the first can't get in anyway: the next request takes it off the file.
+        #expect(refusal(try signed(watch, time: now + 121, nonce: "second-n0nce-0123"), at: now + 121) == nil)
+        let kept = String(decoding: try Data(contentsOf: watches.noncesFile), as: UTF8.self)
+        #expect(!kept.contains("first-n0nce-01234") && kept.contains("second-n0nce-0123"))
+    }
+
+    @Test func anUnreadableNoncesFileLetsNothingIn() throws {
+        let watch = try pair()
+        try Data("not json".utf8).write(to: watches.noncesFile)
+        let restarted = Watches(file: folder.appending(path: "watches.json"), vault: vault)
+        #expect(throws: APIError.self) { try restarted.check(try self.signed(watch), now: self.now) }
     }
 
     @Test func theSignatureCoversMethodPathAndBody() throws {
@@ -268,7 +294,7 @@ final class WatchAPITests {
         folder = try temporaryFolder()
         vault = Vault(store: FileVault(folder: folder.appending(path: "vault")))
         devices = Devices(file: folder.appending(path: "devices.json"))
-        watches = Watches(file: folder.appending(path: "watches.json"), vault: vault, started: .now - 600)
+        watches = Watches(file: folder.appending(path: "watches.json"), vault: vault)
         access = AccessFile(file: folder.appending(path: "watch.json"))
         try TestAccess.write(to: access.file)
     }

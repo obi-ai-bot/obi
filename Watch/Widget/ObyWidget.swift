@@ -23,10 +23,13 @@ struct NeedsYouWidget: Widget {
     }
 }
 
-/// The complications' push token goes to the app group; the watch app hands it to the runner.
+/// The complications' push token, issued or rotated, goes to the app group and straight to the
+/// runner when the watch is paired; the app tries again whenever it runs until the runner has it.
 struct GlancePushHandler: WidgetPushHandler {
     func pushTokenDidChange(_ pushInfo: WidgetPushInfo, widgets: [WidgetInfo]) {
-        Glance.widgetToken = pushInfo.token
+        Glance.issued(pushInfo.token)
+        guard let link = WatchLink.saved else { return }
+        Task { _ = await Glance.uploadWidgetToken(link, attempts: 3) }
     }
 }
 
@@ -61,6 +64,8 @@ struct GlanceProvider: TimelineProvider {
                 glance = Glance.of(jobs)
                 _ = Glance.save(glance)
             }
+            // A token the runner hasn't accepted yet gets another try.
+            _ = await Glance.uploadWidgetToken(link, attempts: 1)
             completion(Timeline(entries: [GlanceEntry(date: .now, glance: glance)], policy: .never))
         }
     }

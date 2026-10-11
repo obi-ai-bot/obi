@@ -36,22 +36,33 @@ final class Watches {
         static let tokenEntry = "watch-access-client-token"
     }
 
-    /// How far a request's time may be from the runner's.
+    /// How old a request may be.
     static let window: TimeInterval = 120
+    /// How far ahead of the runner's clock a request's time may be: a little, for clocks that differ.
+    static let ahead: TimeInterval = 5
 
     private let file: URL
     private let vault: Vault
     private(set) var watches: [Watch] = []
-    /// Each nonce used in the last two windows, by watch, with its request's time.
+    /// Each nonce used while its request's time is still within the window, by watch, with that
+    /// time. Kept in `watch-nonces.json` beside `watches.json` (0600), so a restart doesn't let a
+    /// request through again.
     private var nonces: [String: Date] = [:]
-    /// Nonces live in memory only: a request signed before the runner started is refused, so a
-    /// restart doesn't reopen the window for one already used.
-    private let started: Date
+    let noncesFile: URL
 
-    init(file: URL, vault: Vault = .shared, started: Date = .now) {
+    init(file: URL, vault: Vault = .shared) {
         self.file = file
         self.vault = vault
-        self.started = started
+        noncesFile = file.deletingLastPathComponent().appending(path: "watch-nonces.json")
+        if let data = try? Data(contentsOf: noncesFile) {
+            do {
+                nonces = try Self.decoder.decode([String: Date].self, from: data)
+            } catch {
+                // Unreadable, it can't say which were used: every Watch request is refused until it's fixed.
+                Logger.runner.error("can't read \(self.noncesFile.path, privacy: .public): no Watch request gets in until it's removed")
+                nonces = [Self.unreadable: .distantFuture]
+            }
+        }
         if let data = try? Data(contentsOf: file) {
             do {
                 watches = try Self.decoder.decode([Watch].self, from: data)
@@ -106,8 +117,8 @@ final class Watches {
     }
 
     /// Lets a request through once: from a paired Watch, signed by its key over exactly this
-    /// method, path, body, time and nonce, within two minutes of now and after the runner started,
-    /// with a nonce not used before. Returns the Watch's id.
+    /// method, path, body, time and nonce, at most two minutes old and a few seconds ahead, with a
+    /// nonce not used before (before a restart too). Returns the Watch's id.
     func check(_ request: Signed, now: Date = .now) throws -> String {
         guard let watch = watches.first(where: { $0.id == request.watch }), let key = Self.key(watch.publicKey) else {
             throw APIError(.unauthorized, "That Watch isn't paired with this runner.")
@@ -124,14 +135,46 @@ final class Watches {
             throw APIError(.unauthorized, "Oby-Time is the request's time, in seconds since 1970.")
         }
         let time = Date(timeIntervalSince1970: seconds)
-        guard abs(time.timeIntervalSince(now)) <= Self.window, time >= started.addingTimeInterval(-1) else {
+        guard now.timeIntervalSince(time) <= Self.window, time.timeIntervalSince(now) <= Self.ahead else {
             throw APIError(.unauthorized, "The request's time is too far from the runner's. Check the Watch's clock.")
         }
-        nonces = nonces.filter { now.timeIntervalSince($0.value) <= 2 * Self.window }
+        guard nonces[Self.unreadable] == nil else {
+            throw APIError(.serviceUnavailable, "The runner can't read which Watch requests were used: \(noncesFile.path).")
+        }
+        // A nonce goes once its request is too old to get in anyway.
+        var kept = nonces.filter { now.timeIntervalSince($0.value) <= Self.window }
         let used = "\(watch.id) \(request.nonce)"
-        guard nonces[used] == nil else { throw APIError(.unauthorized, "That request was already used.") }
-        nonces[used] = time
+        guard kept[used] == nil else { throw APIError(.unauthorized, "That request was already used.") }
+        kept[used] = time
+        // Saved before it's let through: a nonce the runner couldn't keep could work again after a restart.
+        try saveNonces(kept)
+        nonces = kept
         return watch.id
+    }
+
+    /// Stands in for every nonce while `watch-nonces.json` can't be read.
+    private static let unreadable = "unreadable"
+
+    /// `watch-nonces.json`, created 0600 before a byte is written, then renamed over the old one.
+    private func saveNonces(_ nonces: [String: Date]) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(nonces)
+        let temporary = noncesFile.deletingLastPathComponent().appending(path: ".watch-nonces-\(UUID().uuidString).json")
+        let fd = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw APIError(.serviceUnavailable, "The runner couldn't record the Watch's request (errno \(errno)).") }
+        do {
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            guard fchmod(fd, 0o600) == 0 else { throw APIError(.serviceUnavailable, "The runner couldn't record the Watch's request privately.") }
+            try handle.write(contentsOf: data)
+            try handle.close()
+            guard rename(temporary.path, noncesFile.path) == 0 else {
+                throw APIError(.serviceUnavailable, "The runner couldn't record the Watch's request (errno \(errno)).")
+            }
+        } catch {
+            unlink(temporary.path)
+            throw error as? APIError ?? APIError(.serviceUnavailable, "The runner couldn't record the Watch's request: \(error.localizedDescription)")
+        }
     }
 
     /// What the Watch signs: `"oby-watch\n<method>\n<path?query>\n<time>\n<nonce>\n<hex SHA-256 of the body>"`.

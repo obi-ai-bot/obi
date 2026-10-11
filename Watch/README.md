@@ -59,7 +59,7 @@ watchOS has no Tailscale or VPN, so a paired watch reaches the runner's Watch AP
 - **Publish** without the phone: the crown's full turn sends the runner's sentence back in a request signed by the watch's key; there's no Face ID on the watch, and the watch locks itself off the wrist.
 - **Stop** waits for the phone: the Watch API has none.
 - **Notifications:** the watch registers its own device token with the runner, which sends it the same alerts as the phone, with the same payload and collapse ID, so each shows once. A background push clears an alert once its job needs nothing.
-- **Complications:** the widget registers a WidgetKit push token (`GlancePushHandler`); the runner pushes when the counts change, and the widget fetches the jobs itself.
+- **Complications:** the widget gets a WidgetKit push token (`GlancePushHandler`) and uploads it to the runner itself whenever it's issued or rotated; until the runner accepts the latest one, the widget and the app try again whenever they run (`Shared/WidgetToken.swift`). The runner pushes when the counts change, and the widget fetches the jobs itself.
 - **Talking:** the hold's audio goes to the runner in pieces (`POST /v1/speech`); the runner can't write speech down yet and says so at the first piece, so the watch stops recording and the mic opens the system's dictation instead.
 
 ## Run it

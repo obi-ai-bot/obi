@@ -630,8 +630,8 @@ The Watch works without its iPhone. While the phone is in reach, the Watch goes 
   1. **`Cf-Access-Jwt-Assertion`**, which Access adds to every request it lets through: an RS256 JWT, checked against `keys` (by `kid`), with `audience` in `aud`, `iss` `https://<team>.cloudflareaccess.com`, and `exp`, `nbf` and `iat` current (a minute of clock difference allowed).
   2. **A signature from a paired Watch**, over the request:
      - `Oby-Watch`: the Watch's id from pairing.
-     - `Oby-Time`: when it was signed, in seconds since 1970. Within 2 minutes of the runner's clock, and not before the runner started.
-     - `Oby-Nonce`: 16 to 64 letters, digits, `-` or `_`, new for every request. A nonce the runner has seen from that Watch is refused, so a replayed request fails.
+     - `Oby-Time`: when it was signed, in seconds since 1970. At most 2 minutes behind the runner's clock and 5 seconds ahead of it.
+     - `Oby-Nonce`: 16 to 64 letters, digits, `-` or `_`, new for every request. A nonce the runner has seen from that Watch is refused, so a replayed request fails, after a restart too: the runner keeps used nonces in `$OBY_HOME/watch-nonces.json` (0600) until their request is too old to get in. When it can't save or read that file, Watch requests are `503`.
      - `Oby-Signature`: ECDSA P-256 with SHA-256 (DER, base64), by the Watch's Secure Enclave key, over the UTF-8 bytes of `"oby-watch\n<METHOD>\n<path and query, as sent>\n<Oby-Time>\n<Oby-Nonce>\n<hex SHA-256 of the body>"` (the body's hash is that of no bytes for a `GET`).
 - Answers and errors are as on the tailnet API, vault secrets taken out the same way.
 
