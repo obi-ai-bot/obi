@@ -304,8 +304,8 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
 
     /// Squash-merges the pull request into dev and deletes its branch, as the GitHub app (the
     /// owner's gh login without one), through GitHub's REST API: only while GitHub says it's open,
-    /// into dev, with the checked commit as its head. Throws `Conflict` when GitHub says it conflicts
-    /// with dev, before the merge or as the reason it failed.
+    /// into dev, with the checked commit as its head, and with Oby's own commit message (`squash`).
+    /// Throws `Conflict` when GitHub says it conflicts with dev, before the merge or as the reason it failed.
     static func merge(_ job: Job, _ check: MacCheck) async throws {
         // Outside any checkout, so gh touches no local branch.
         let away = FileManager.default.temporaryDirectory
@@ -314,8 +314,14 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         let view = try await Shell.ok(["gh", "api", pull], in: away, env: env, as: .app)
         if let why = mismatch(Data(view.utf8), check) { throw Shell.Failure(message: why) }
         if conflicted(Data(view.utf8)) { throw Conflict(base: into) }
+        let commits = try await Shell.ok(["gh", "api", "\(pull)/commits?per_page=100"], in: away, env: env, as: .app)
+        guard let squash = squash(Data(view.utf8), commits: Data(commits.utf8), pr: check.pr) else {
+            throw Shell.Failure(message: "gh said something else about the pull request's commits.")
+        }
+        try await scan(squash)
         do {
-            try await Shell.ok(["gh", "api", "-X", "PUT", "\(pull)/merge", "-f", "merge_method=squash", "-f", "sha=\(check.head)"],
+            try await Shell.ok(["gh", "api", "-X", "PUT", "\(pull)/merge", "-f", "merge_method=squash", "-f", "sha=\(check.head)",
+                                "-f", "commit_title=\(squash.title)", "-f", "commit_message=\(squash.message)"],
                                in: away, env: env, as: .app)
         } catch {
             // GitHub works out whether it's mergeable after it's asked: by now it may know.
@@ -351,6 +357,43 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     static func conflicted(_ view: Data) -> Bool {
         guard let info = try? JSONSerialization.jsonObject(with: view) as? [String: Any] else { return false }
         return info["mergeable_state"] as? String == "dirty" || info["mergeable"] as? Bool == false
+    }
+
+    /// The squash commit's title and message, as GitHub writes them by default: the pull request's
+    /// title and number, then what its commits say (`GET …/pulls/{n}/commits`). Oby passes them
+    /// itself, so nothing from the description lands in dev, whatever the repository's squash
+    /// setting: its `Closes #N` links the pull request to the issue, and an epic must not close
+    /// when dev reaches main (#167). A closing keyword in a commit reads "Part of" for the same
+    /// reason. Nil when GitHub said something else.
+    static func squash(_ view: Data, commits: Data, pr: Int) -> (title: String, message: String)? {
+        guard let info = try? JSONSerialization.jsonObject(with: view) as? [String: Any], let title = info["title"] as? String,
+              let list = try? JSONSerialization.jsonObject(with: commits) as? [[String: Any]] else { return nil }
+        let messages = list.compactMap { ($0["commit"] as? [String: Any])?["message"] as? String }.map(unclosing)
+        // One commit: its body, as GitHub does. More: each commit's message as a bullet.
+        let message = messages.count == 1
+            ? messages[0].split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).dropFirst().joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            : messages.map { "* " + $0.trimmingCharacters(in: .whitespacesAndNewlines) }.joined(separator: "\n\n")
+        return (unclosing(title) + " (#\(pr))", message)
+    }
+
+    /// The secret scan of the squash commit's title and message, the built-in rules and the vault's
+    /// secrets as they are now: the title may have changed on GitHub since publishing, and the
+    /// vault may know a secret it didn't then. Throws on a finding, and when the scan can't run.
+    static func scan(_ squash: (title: String, message: String), vault: Vault = .shared) async throws {
+        let findings: [Publish.Finding]
+        do {
+            findings = try await Publish.scan(texts: [("squash commit title", squash.title), ("squash commit message", squash.message)], vault: vault)
+        } catch {
+            throw Shell.Failure(message: "the secret scan of the squash commit couldn't run (\(error.localizedDescription)).")
+        }
+        if !findings.isEmpty { throw Shell.Failure(message: "possible secret in " + places(findings) + ".") }
+    }
+
+    /// `text` with GitHub's closing keywords before an issue ("Closes #116", "fixes o/r#3",
+    /// "Resolved: https://github.com/o/r/issues/3") as "Part of", so it closes nothing.
+    static func unclosing(_ text: String) -> String {
+        let keyword = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?(\s+(?:https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+|(?:[\w.-]+\/[\w.-]+)?#\d+))/
+        return text.replacing(keyword.ignoresCase()) { "Part of" + $0.output.1 }
     }
 
     /// The pull request's head branch, when it's in `repo` itself rather than a fork.

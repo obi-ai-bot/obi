@@ -16,6 +16,8 @@ import FoundationNetworking
 enum CheckCommand {
     /// One request to the runner: the method and path, and what it answered.
     typealias Send = @Sendable (_ method: String, _ path: String) async throws -> (status: Int, body: Data)
+    /// Waits `seconds`, then returns: the end of a request's time.
+    typealias Timer = @Sendable (_ seconds: TimeInterval) async throws -> Void
 
     static let usage = "usage: oby-check apple [--wait SECONDS]"
     static let skipLine = "No Mac took the Apple check, so Oby runs the job's check again without it: the Apple apps aren't built here, and the rest of the check decides."
@@ -40,10 +42,13 @@ enum CheckCommand {
         var message: String
     }
 
-    /// `now` and `sleep` are the clock it waits by. Tests put in their own.
+    /// `now` and `sleep` are the clock it waits by, and `timer` ends a request the runner doesn't
+    /// answer in the time left. Tests put in their own: a timer on the real clock would end a
+    /// request against a test's own clock.
     static func run(_ arguments: [String], environment: [String: String] = ProcessInfo.processInfo.environment, send: Send? = nil,
                     now: () -> Date = { Date.now },
                     sleep: (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
+                    timer: @escaping Timer = { try await Task.sleep(for: .seconds($0)) },
                     uncommitted: () async -> Bool = { CheckCommand.uncommitted() },
                     print out: (String) -> Void = { Swift.print($0) }) async -> Int32 {
         guard let wait = Self.wait(arguments, default: environment["OBY_CHECK_WAIT"].flatMap { Int($0) }) else {
@@ -67,7 +72,7 @@ enum CheckCommand {
         }
         var answer: Answer
         do {
-            guard let first = try await call(send, "POST", within: left()) else {
+            guard let first = try await call(send, "POST", within: left(), timer: timer) else {
                 out("The runner didn't answer within \(wait) seconds.")
                 return 2
             }
@@ -87,7 +92,7 @@ enum CheckCommand {
             guard left() > 0 else { return still(answer) }
             try? await sleep(min(TimeInterval(interval), left()))
             do {
-                guard left() > 0, let next = try await call(send, "GET", within: left()) else { return still(answer) }
+                guard left() > 0, let next = try await call(send, "GET", within: left(), timer: timer) else { return still(answer) }
                 answer = next
             } catch {
                 out((error as? Failure)?.message ?? "The runner didn't answer: \(error.localizedDescription)")
@@ -117,12 +122,13 @@ enum CheckCommand {
         }
     }
 
-    /// One request, given at most `seconds`: nil when the runner didn't answer in time.
-    static func call(_ send: @escaping Send, _ method: String, within seconds: TimeInterval) async throws -> Answer? {
+    /// One request, given at most `seconds` by `timer`: nil when the runner didn't answer in time.
+    static func call(_ send: @escaping Send, _ method: String, within seconds: TimeInterval,
+                     timer: @escaping Timer = { try await Task.sleep(for: .seconds($0)) }) async throws -> Answer? {
         let answered = try await withThrowingTaskGroup(of: (status: Int, body: Data)?.self) { group in
             group.addTask { try await send(method, path) }
             group.addTask {
-                try await Task.sleep(for: .seconds(max(0, seconds)))
+                try await timer(max(0, seconds))
                 return nil
             }
             defer { group.cancelAll() }

@@ -205,6 +205,19 @@ struct ReviewFindingsTests {
         }
     }
 
+    @Test func noReviewBlocksOnTheDescriptionObyWrites() {
+        // #167: two reviews blocked on the "Closes #116" Oby's template wrote, which no agent could change.
+        var followUp = Review.make(for: author(.changesRequested), pr: 80, account: account)
+        followUp.attachments = ["/tmp/oby-review-\(followUp.id)/review-1.md"]
+        var first = author(.approved)
+        first.review = nil
+        for review in [followUp, Review.make(for: first, pr: 80, account: account)] {
+            let prompt = Review.prompt(review)
+            #expect(prompt.contains("`Closes #N`") && prompt.contains("the agent can't change them from its branch"))
+            #expect(prompt.contains("nothing in the description lands in dev or closes an issue. Never block on the description."))
+        }
+    }
+
     @Test func theBlockingFindingsAreQuotedForTheFollowUp() throws {
         let previous = try #require(author(.changesRequested).review)
         let text = try #require(Review.previous(previous, summary: "Whole review.\n\nWorth doing later:\n- Rename", pr: 80))

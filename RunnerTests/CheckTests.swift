@@ -711,6 +711,33 @@ struct CheckTests {
         #expect(MacCheck.mismatch(Data("nope".utf8), check) != nil)
     }
 
+    @Test func theSquashClosesNoIssueWhateverTheDescriptionSays() throws {
+        // #167: the description ends "Closes #116" (an epic), and so might a commit.
+        let view = Data(#"{"title":"feat(runner): the runner deploys itself (#116)","body":"Summary.\n\nCloses #116"}"#.utf8)
+        let commits = Data(#"""
+            [{"commit":{"message":"feat(runner): deploy (#116)\n\nCloses #116, fixes deskree-inc/oby#7.\n\nCo-Authored-By: Claude"}},
+             {"commit":{"message":"fix(runner): Resolved: https://github.com/deskree-inc/oby/issues/8 and the prefix(3) fix"}}]
+            """#.utf8)
+        let squash = try #require(MacCheck.squash(view, commits: commits, pr: 142))
+        #expect(squash.title == "feat(runner): the runner deploys itself (#116) (#142)")
+        #expect(squash.message == """
+            * feat(runner): deploy (#116)
+
+            Part of #116, Part of deskree-inc/oby#7.
+
+            Co-Authored-By: Claude
+
+            * fix(runner): Part of https://github.com/deskree-inc/oby/issues/8 and the prefix(3) fix
+            """)
+        #expect(!squash.message.contains("Summary."))
+        // One commit: its body, as GitHub writes it.
+        let one = Data(#"[{"commit":{"message":"fix: it (#3)\n\nFixes #3."}}]"#.utf8)
+        #expect(MacCheck.squash(view, commits: one, pr: 4)?.message == "Part of #3.")
+        #expect(MacCheck.squash(view, commits: Data("nope".utf8), pr: 4) == nil)
+        // Words that only look like keywords stay.
+        #expect(MacCheck.unclosing("fix(engine): closes the gap; prefixes #2") == "fix(engine): closes the gap; prefixes #2")
+    }
+
     // MARK: On the Mac
 
     @Test func theMacReadsTheFailingTestsFromWhatTheToolsPrinted() {

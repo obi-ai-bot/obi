@@ -435,12 +435,13 @@ struct AppleCheckTests {
                                            print: { printed.append($0) }) == 1)
             #expect(printed.count == 2 && printed.last?.hasPrefix("Apple check failed on Studio") == true)
 
-            // A new commit no Mac takes yet: it says how to keep waiting.
+            // A new commit no Mac takes yet: it says how to keep waiting. Its requests get all the
+            // time they need, so a slow one on a busy machine doesn't end the wait early by the test's clock.
             await MainActor.run { made.head = AppleCheckTests.next }
             printed = []
             var clock = Date(timeIntervalSince1970: 0)
             #expect(await CheckCommand.run(["apple", "--wait", "12"], environment: environment, send: sender(token), now: { clock },
-                                           sleep: { clock += $0 }, uncommitted: { false },
+                                           sleep: { clock += $0 }, timer: { _ in try await Task.sleep(for: .seconds(3600)) }, uncommitted: { false },
                                            print: { printed.append($0) }) == 3)
             #expect(printed.last == "Still queued after 12 seconds. Run oby-check apple again to keep waiting: it picks up the same check.")
 
