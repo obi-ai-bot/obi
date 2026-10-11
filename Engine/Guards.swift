@@ -43,6 +43,8 @@ nonisolated enum Fingerprint {
         var ids = Set<String>()
         for line in output.split(separator: "\n").map(String.init) {
             let plain = line.replacing(/\x{1B}\[[0-9;]*[A-Za-z]/, with: "")
+            // Swift Testing's summary, `✘ Test run with 457 tests in 57 suites failed`, names no test.
+            if plain.contains(/✘ Test run with \d+ tests?\b/) { continue }
             if let match = plain.firstMatch(of: /✘ Test (.+?) (?:failed|recorded an issue)\b/) { ids.insert(String(match.1)) }
             else if let match = plain.firstMatch(of: /Test Case '(.+?)' failed/) { ids.insert(String(match.1)) }
             else if let match = plain.firstMatch(of: /^FAILED (\S+)/) { ids.insert(String(match.1)) }
