@@ -1327,6 +1327,9 @@ final class Desk {
     /// `heard` is how many of the user's words the turn had taken in.
     private func afterTurn(_ id: String, summary: String, failed: Bool, heard: Int) async {
         guard var job = job(id), job.isActive, let agent = agents[id] else { return }
+        // Still this turn's work: not cancelled (a newer turn, or the job moved to another agent),
+        // and the agent it's for still speaks for the job. Asked after every wait.
+        let current = { [weak self] in !Task.isCancelled && self?.agents[id] === agent }
         var check: Rounds.Check?
         if let command = job.check, !failed {
             job.phase = .check
@@ -1347,21 +1350,21 @@ final class Desk {
             // No Mac took the Apple check it asked for (#68): the Apple apps weren't built, and the
             // rest of the command still decides. When it failed, it runs again without `oby-check`'s build.
             if appleUnbuilt(id, since: started) {
-                if !result.passed, var again = self.job(id), again.isActive {
+                if !result.passed, current(), var again = self.job(id), again.isActive {
                     again.step = "Checking without the Apple build: \(command)"
                     replace(again, save: false)
                     result = await runCheck(id, command, limits.testRun, env.merging([AppleCheck.skipVariable: "1"]) { $1 })
                 }
                 result.appleUnbuilt = true
             }
-            // Stopped while the check ran.
-            guard var latest = self.job(id), latest.isActive else { return }
+            // Stopped or moved while the check ran.
+            guard current(), var latest = self.job(id), latest.isActive else { return }
             // Oby compares the tests with where the branch started too: weakening them fails the round (case 3.2).
             latest.step = "Comparing the tests with where the branch started"
             replace(latest, save: false)
             let report = await integrity(latest)
             (result.problems, result.notes) = (report.problems, report.notes)
-            guard let checked = self.job(id), checked.isActive else { return }
+            guard current(), let checked = self.job(id), checked.isActive else { return }
             job = checked
             check = result
         }
