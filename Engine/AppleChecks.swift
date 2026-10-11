@@ -289,7 +289,8 @@ extension Desk {
     }
 
     /// Job `id`'s latest Apple check as its agent sees it, or nil. A queued one that no Mac took
-    /// within `AppleCheck.unclaimed` while none was busy, or within `AppleCheck.stale` at all,
+    /// within `AppleCheck.unclaimed` while none was busy (counted from when a Mac last ended a
+    /// check, if that's later than it was queued), or within `AppleCheck.stale` at all,
     /// didn't run (`error`). One a job's final check asked for waits for a Mac, busy or not, up to
     /// `AppleCheck.finalWait` of the check's time limit.
     func appleCheck(_ id: String, now: Date = .now) -> MacCheck? {
@@ -300,7 +301,8 @@ extension Desk {
             guard now.timeIntervalSince(asked) > AppleCheck.finalWait(limits.testRun) else { return check }
             check.problem = AppleCheck.unbuiltLine
         } else {
-            guard waited > AppleCheck.stale || waited > AppleCheck.unclaimed && busyMac(now: now) == nil else { return check }
+            let idle = now.timeIntervalSince(max(check.created, macFreed() ?? check.created))
+            guard waited > AppleCheck.stale || idle > AppleCheck.unclaimed && busyMac(now: now) == nil else { return check }
             check.problem = waited > AppleCheck.stale ? AppleCheck.staleLine : AppleCheck.noMacLine
         }
         check.state = .error
@@ -328,6 +330,12 @@ extension Desk {
         case .error: return true
         case .running, .passed, .failed: return false
         }
+    }
+
+    /// When a Mac last ended a check it took, Apple or merge, or nil: a Mac that was busy asks for
+    /// the next one only then.
+    func macFreed() -> Date? {
+        jobs.flatMap { [$0.appleCheck, $0.appleRan, $0.macCheck] }.compactMap { $0 }.filter { $0.started != nil }.compactMap(\.finished).max()
     }
 
     /// A check a Mac is running now, Apple or merge, or nil.

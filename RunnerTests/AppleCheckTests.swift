@@ -203,6 +203,14 @@ struct AppleCheckTests {
         #expect(desk.appleCheck("apple118", now: check.created + 600)?.state == .queued)
         let busy = try #require(desk.busyMac(now: check.created + 600))
         #expect(AppleCheck.line(check, busy: busy) == "Apple check \(check.id) of commit 1a2b3c4d5e6f is queued: Studio is running another check first.")
+        // Once the Mac is free, its minute to take the check counts from then.
+        other = try #require(desk.job("apple118"))
+        other.macCheck?.state = .passed
+        other.macCheck?.finished = check.created + 600
+        desk.replace(other)
+        #expect(desk.appleCheck("apple118", now: check.created + 630)?.state == .queued)
+        other.macCheck = merge
+        desk.replace(other)
         let stale = try #require(desk.appleCheck("apple118", now: check.created + AppleCheck.stale + 1))
         #expect(stale.state == .error && stale.problem == AppleCheck.staleLine)
 
