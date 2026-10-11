@@ -30,7 +30,7 @@ struct AppleCheckTests {
         var agents: [(job: Job, agent: Agent)] = []
         var head: String? = AppleCheckTests.head
         var events: [MacCheck] = []
-        var reviews: [String] = []
+        var reviews: [CheckRun] = []
         /// What the job's final check was given to run with.
         var env: [String: String?] = [:]
     }
@@ -63,9 +63,9 @@ struct AppleCheckTests {
             hooks.sent(Outgoing(action: .push, repo: job.repo, id: AppleCheckTests.head, branch: job.branch))
             return url
         }
-        desk.postReview = { [made] _, body in
-            made.reviews.append(body)
-            return URL(string: "https://github.com/deskree-inc/oby/pull/81#issuecomment-1")!
+        desk.postReview = { [made] _, run in
+            made.reviews.append(run)
+            return URL(string: "https://github.com/deskree-inc/oby/runs/1")!
         }
         desk.quoteReview = { _, _, _ in }
         desk.reviewedHead = { _ in AppleCheckTests.head }

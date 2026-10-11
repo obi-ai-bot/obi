@@ -125,19 +125,19 @@ struct ReviewFindingsTests {
         #expect(Review.decide(before.replacing("VERDICT: CHANGES REQUESTED", with: "VERDICT: APPROVED")) == .approved)
     }
 
-    @Test func theCommentSaysWhenObyOverrulesTheLastLine() {
+    @Test func theCheckRunSaysWhenObyOverrulesTheLastLine() {
         let summary = "Fine.\n\nWorth doing later:\n- Rename it\n\nVERDICT: CHANGES REQUESTED"
         let approved = Review(verdict: .approved, job: "rev1", agent: "codex", account: "Work", round: 1)
-        let comment = Review.comment(approved, summary: summary)
-        #expect(comment.hasPrefix("### Oby review · Codex · Work: Approved"))
-        #expect(comment.contains("```\n\nOby counts this review as approved: the reviewer asked for changes, but nothing it found is blocking. The rest are follow-ups.\n\nby Oby:"))
+        let run = Review.checkRun(approved, summary: summary, head: CheckTests.head)
+        #expect(run.title == "Oby review · Codex · Work: Approved" && run.conclusion == .success)
+        #expect(run.summary.contains("```\n\nOby counts this review as approved: the reviewer asked for changes, but nothing it found is blocking. The rest are follow-ups.\n\nby Oby:"))
         var requested = approved
         requested.verdict = .changesRequested
-        #expect(Review.comment(requested, summary: "Bug.\n\nBlocking:\n- It crashes\n\nVERDICT: APPROVED")
+        #expect(Review.checkRun(requested, summary: "Bug.\n\nBlocking:\n- It crashes\n\nVERDICT: APPROVED", head: CheckTests.head).summary
             .contains("Oby counts this review as changes requested: the reviewer approved, but it listed blocking findings."))
         // They agree: nothing more.
         #expect(Review.overruled(approved, summary: "Fine.\n\nVERDICT: APPROVED") == nil)
-        #expect(Review.comment(approved, summary: "Fine.\n\nVERDICT: APPROVED").contains("```\n\nby Oby:"))
+        #expect(Review.checkRun(approved, summary: "Fine.\n\nVERDICT: APPROVED", head: CheckTests.head).summary.contains("```\n\nby Oby:"))
     }
 
     // MARK: Follow-ups in the report

@@ -30,8 +30,8 @@ struct CheckTests {
         /// The commit each publish pushes, in turn, and the one the review job read.
         var pushes: [String] = []
         var read: String?
-        var reviews: [String] = []
-        var comments: [String] = []
+        var reviews: [CheckRun] = []
+        var runs: [CheckRun] = []
         var quoted: [(file: String, text: String)] = []
         var scanned: [String] = []
         var findings: [Publish.Finding] = []
@@ -67,15 +67,15 @@ struct CheckTests {
             made.read = head
             return url
         }
-        desk.postReview = { [made] _, body in
-            made.reviews.append(body)
-            return URL(string: "https://github.com/deskree-inc/oby/pull/80#issuecomment-1")!
+        desk.postReview = { [made] _, run in
+            made.reviews.append(run)
+            return URL(string: "https://github.com/deskree-inc/oby/runs/1")!
         }
         desk.quoteReview = { [made] _, file, text in made.quoted.append((file, text)) }
         desk.reviewedHead = { [made] _ in made.read }
-        desk.postCheck = { [made] _, body in
-            made.comments.append(body)
-            return URL(string: "https://github.com/deskree-inc/oby/pull/80#issuecomment-\(made.comments.count + 1)")!
+        desk.postCheck = { [made] _, run in
+            made.runs.append(run)
+            return URL(string: "https://github.com/deskree-inc/oby/runs/\(made.runs.count + 1)")!
         }
         desk.scanForMerge = { [made] _, head in
             made.scanned.append(head)
@@ -122,7 +122,7 @@ struct CheckTests {
         let reviewer = try #require(made.agents.last)
         reviewer.agent.onEvent(.turnEnded(summary: summary, failed: false))
         reviewer.agent.onEvent(.finished(summary: summary, failed: false))
-        try await until("the review is on the author") { desk.job("author")?.review?.job == reviewer.job.id && desk.job("author")?.review?.comment != nil }
+        try await until("the review is on the author") { desk.job("author")?.review?.job == reviewer.job.id && desk.job("author")?.review?.checkRun != nil }
     }
 
     /// Dispatches the author, publishes it, and has Oby's review approve it: its check is queued.
@@ -223,16 +223,19 @@ struct CheckTests {
         #expect(ended.state == .passed && ended.steps == steps && ended.failures == [] && ended.finished != nil)
         try await until("it merges") { desk.job("author")?.pullRequest?.state == .merged }
         let merged = try #require(desk.job("author"))
-        // The results on the pull request, after the review's comment.
-        let comment = try #require(made.comments.first)
-        #expect(made.comments.count == 1 && comment.hasPrefix("### Oby Mac check · Studio: Passed\n\n| Step | Result | Time |"))
+        // The results on the pull request's commit as a check run, after the review's (#198).
+        let run = try #require(made.runs.first)
+        #expect(made.runs.count == 1 && run.name == "Oby Mac check" && run.head == Self.head && run.conclusion == .success)
+        #expect(run.title == "Oby Mac check · Studio: Passed" && run.summary.hasPrefix("| Step | Result | Time |"))
+        let comment = run.summary
         #expect(comment.contains("| Runner tests (swift test) | Passed | 2m 05s |") && comment.contains("| iPhone app with Watch, and iOSTests | Passed | 6m 52s |"))
         #expect(comment.contains("by Oby:") && comment.contains("commit 1a2b3c4d5e6f") && !comment.contains("Failing tests"))
-        #expect(merged.macCheck?.comment == "https://github.com/deskree-inc/oby/pull/80#issuecomment-2")
+        #expect(merged.macCheck?.checkRun == "https://github.com/deskree-inc/oby/runs/2" && merged.macCheck?.comment == nil)
+        #expect(made.reviews.map(\.name) == ["Oby review"] && made.reviews.first?.head == Self.head)
         // Scanned, then merged, the commit the Mac checked.
         #expect(made.scanned == [Self.head] && made.merged.map(\.id) == [check.id] && made.merged.first?.head == Self.head)
-        // The report lists the push, both comments and the merge.
-        #expect(merged.outgoing?.map(\.action) == [.push, .comment, .comment, .merge])
+        // The report lists the push, both check runs and the merge.
+        #expect(merged.outgoing?.map(\.action) == [.push, .checkRun, .checkRun, .merge])
         #expect(merged.outgoing?.last?.id == url.absoluteString && merged.outgoing?.last?.branch == "oby/fix-75")
         #expect(merged.sentLines?.hasSuffix("- Squash-merged https://github.com/deskree-inc/oby/pull/80 into dev and deleted oby/fix-75") == true)
         // Merged completes.
@@ -251,7 +254,7 @@ struct CheckTests {
         try await until("the scan stops it") { desk.job("author")?.mergeError != nil }
         var author = try #require(desk.job("author"))
         #expect(author.mergeError == "Not merged: possible secret in README.md:3 (AWS access key).")
-        #expect(made.merged.isEmpty && author.pullRequest?.state != .merged && author.outgoing?.last?.action == .comment)
+        #expect(made.merged.isEmpty && author.pullRequest?.state != .merged && author.outgoing?.last?.action == .checkRun)
         #expect(author.pipeline.stages.last?.state == .failed && author.pipeline.stages.last?.reason == author.mergeError)
 
         // gh refusing the merge says why too.
@@ -270,7 +273,7 @@ struct CheckTests {
         let ended = try desk.macCheckEnded(check.id, MacCheck.Report(passed: true, steps: steps, failures: []))
         #expect(ended.state == .passed && desk.job("author")?.macCheck?.state == .passed)
         try await Task.sleep(for: .milliseconds(100))
-        #expect(made.comments.isEmpty && made.merged.isEmpty && made.scanned.isEmpty)
+        #expect(made.runs.isEmpty && made.merged.isEmpty && made.scanned.isEmpty)
         #expect(desk.job("author")?.pipeline.stages.last?.detail == "Waiting for a Mac check")
         // And it's answered once.
         #expect(throws: (any Error).self) { try desk.macCheckEnded(check.id, MacCheck.Report(passed: false, steps: steps, failures: [])) }
@@ -301,8 +304,10 @@ struct CheckTests {
         #expect(quoted.text.contains("Failing tests:\n\n> MacTests.PublishTests/blocksASecret()"))
         #expect(quoted.text.contains("> PublishTests.swift:12: error: Expectation failed"))
         // And on the pull request, without the log.
-        let comment = try #require(made.comments.first)
-        #expect(comment.hasPrefix("### Oby Mac check · Studio: Failed") && comment.contains("| Mac app and MacTests | Failed | 5m 01s |"))
+        let run = try #require(made.runs.first)
+        #expect(run.title == "Oby Mac check · Studio: Failed" && run.conclusion == .failure)
+        let comment = run.summary
+        #expect(comment.contains("| Mac app and MacTests | Failed | 5m 01s |"))
         #expect(comment.contains("Failing tests:\n\n```\nMacTests.PublishTests/blocksASecret()\n```") && !comment.contains("Expectation failed"))
         #expect(made.merged.isEmpty && made.scanned.isEmpty)
 
@@ -389,7 +394,7 @@ struct CheckTests {
         var failing = steps
         failing[0].passed = false
         try desk.macCheckEnded(check.id, MacCheck.Report(passed: false, steps: failing, failures: ["blocksASecret()"]))
-        try await until("the results are posted") { desk.job("author")?.macCheck?.comment != nil }
+        try await until("the results are posted") { desk.job("author")?.macCheck?.checkRun != nil }
         try await Task.sleep(for: .milliseconds(50))
         let stopped = try #require(desk.job("author"))
         #expect(stopped.status == .done && made.agents.count == 2 && made.quoted.isEmpty)
@@ -465,8 +470,11 @@ struct CheckTests {
         #expect(ended.state == .error && ended.problem == problem)
         try await Task.sleep(for: .milliseconds(100))
         var job = try #require(desk.job("author"))
-        // Nothing posted, nothing handed to the author, and it needs you.
-        #expect(made.comments.isEmpty && made.agents.count == 2 && made.quoted.isEmpty && job.status == .done)
+        // A neutral check run, nothing handed to the author, and it needs you.
+        let run = try #require(made.runs.first)
+        #expect(made.runs.count == 1 && run.conclusion == .neutral && run.title == "Oby Mac check · Studio: Couldn't run")
+        #expect(run.summary.contains(problem) && run.summary.contains("it needs the user"))
+        #expect(made.agents.count == 2 && made.quoted.isEmpty && job.status == .done)
         #expect(job.mergeNeedsYou && job.needsYou && Push.notice(for: job) == .merge)
         #expect(job.pipeline.stages.last?.state == .failed && job.pipeline.stages.last?.detail == "Mac check couldn't run"
                 && job.pipeline.stages.last?.reason == problem)
@@ -534,9 +542,9 @@ struct CheckTests {
         let store = JobStore(url: folder.appending(path: "saved-\(UUID().uuidString).sqlite"))
         store.save(saved)
         let restarted = Desk(accounts: AccountStore(root: folder), store: store)
-        restarted.postCheck = { [made] _, body in
-            made.comments.append(body)
-            return URL(string: "https://github.com/deskree-inc/oby/pull/80#issuecomment-7")!
+        restarted.postCheck = { [made] _, run in
+            made.runs.append(run)
+            return URL(string: "https://github.com/deskree-inc/oby/runs/7")!
         }
         restarted.scanForMerge = { [made] _, head in
             made.scanned.append(head)
@@ -561,14 +569,14 @@ struct CheckTests {
             $0.session = "e6a24229"
             $0.macCheck?.state = .failed
             $0.macCheck?.failures = ["blocksASecret()"]
-            $0.macCheck?.comment = "https://github.com/deskree-inc/oby/pull/80#issuecomment-2"
+            $0.macCheck?.checkRun = "https://github.com/deskree-inc/oby/runs/2"
         }
         #expect(restarted.job("author")?.needsYou == false)
         restarted.resumeChecks()
         try await until("the author runs") { restarted.job("author")?.status == .running }
         let job = try #require(restarted.job("author"))
         #expect(job.macCheck?.handedOff == true && job.step == "Working on the Mac check")
-        #expect(made.comments.isEmpty && made.quoted.last?.file == "mac-check-1.md" && made.agents.last?.resume == "e6a24229")
+        #expect(made.runs.isEmpty && made.quoted.last?.file == "mac-check-1.md" && made.agents.last?.resume == "e6a24229")
         // Once handed on, a refresh leaves it be.
         restarted.resumeChecks()
         try await Task.sleep(for: .milliseconds(50))
@@ -597,7 +605,7 @@ struct CheckTests {
         let ended = try desk.macCheckEnded(check.id, MacCheck.Report(passed: true, steps: [steps[0]], failures: []))
         #expect(ended.state == .error)
         try await Task.sleep(for: .milliseconds(100))
-        #expect(made.merged.isEmpty && made.scanned.isEmpty && made.comments.isEmpty)
+        #expect(made.merged.isEmpty && made.scanned.isEmpty && made.runs.map(\.conclusion) == [.neutral])
     }
 
     @Test func checksRunWithAThrowawayObyHome() async throws {
@@ -619,15 +627,15 @@ struct CheckTests {
         restarted.resumeChecks()
         try await until("it merges") { restarted.job("author")?.pullRequest?.state == .merged }
         // Its results weren't posted before the restart: they are now, once.
-        #expect(made.comments.count == 1 && made.merged.count == 1)
-        #expect(restarted.job("author")?.outgoing?.map(\.action) == [.push, .comment, .merge])
+        #expect(made.runs.count == 1 && made.merged.count == 1)
+        #expect(restarted.job("author")?.outgoing?.map(\.action) == [.push, .checkRun, .merge])
         restarted.resumeChecks()
         try await Task.sleep(for: .milliseconds(50))
-        #expect(made.comments.count == 1 && made.merged.count == 1)
+        #expect(made.runs.count == 1 && made.merged.count == 1)
     }
 
     @Test func aMergeThatFailedOnGitHubIsTriedAgainAndTheInboxCanTooButASecretIsNot() async throws {
-        let restarted = passed { $0.macCheck?.comment = "https://github.com/deskree-inc/oby/pull/80#issuecomment-2" }
+        let restarted = passed { $0.macCheck?.checkRun = "https://github.com/deskree-inc/oby/runs/2" }
         made.mergeError = Shell.Failure(message: "gh: HTTP 502")
         restarted.resumeChecks()
         try await until("the merge fails") { restarted.job("author")?.mergeError != nil }
@@ -650,10 +658,10 @@ struct CheckTests {
         #expect(settled.done != nil && settled.answer == Inbox.tryAgain)
         try await until("it merges") { restarted.job("author")?.pullRequest?.state == .merged }
         job = try #require(restarted.job("author"))
-        #expect(job.mergeError == nil && !job.needsYou && made.merged.count == 1 && made.comments.isEmpty)
+        #expect(job.mergeError == nil && !job.needsYou && made.merged.count == 1 && made.runs.isEmpty)
 
         // A possible secret isn't tried again by itself.
-        let secret = passed { $0.macCheck?.comment = "https://github.com/deskree-inc/oby/pull/80#issuecomment-2" }
+        let secret = passed { $0.macCheck?.checkRun = "https://github.com/deskree-inc/oby/runs/2" }
         made.findings = [Publish.Finding(file: "README.md", line: 3, rule: "AWS access key")]
         secret.resumeChecks()
         try await until("the scan stops it") { secret.job("author")?.mergeError != nil }
@@ -1002,7 +1010,7 @@ struct CheckTests {
         var check = MacCheck.make(for: author, pr: 80, head: Self.head)
         check.state = .passed
         check.steps = [outcome.step]
-        #expect(MacCheck.comment(check).contains("| iPhone app with Watch, and iOSTests on iOS 26.5 (23F77) | Passed (second run) |"))
+        #expect(MacCheck.checkRun(check).summary.contains("| iPhone app with Watch, and iOSTests on iOS 26.5 (23F77) | Passed (second run) |"))
         #expect(MacCheck.stepLine(outcome.step).hasPrefix("- iPhone app with Watch, and iOSTests on iOS 26.5 (23F77): passed"))
         // Both hang: the check couldn't run, saying where it tried last, and neither counts as working.
         let both = await MacCheck.step(phone.on(new), retry: phone.on(old)) { _, _ in attempt(65, hungOutput) } reset: {}
@@ -1057,7 +1065,7 @@ struct CheckTests {
         #expect(quoted.contains("- iPhone app with Watch, and iOSTests: failed (6m 52s, on its second run)"))
         #expect(quoted.contains("Failing tests in Mac app and MacTests:\n\n> MacTests/PublishTests/blocksASecret(): Expectation failed: 1 == 2"))
         #expect(quoted.contains("Failing tests in iPhone app with Watch, and iOSTests:\n\n> iOSTests/JobRowTests/testTitle()"))
-        let comment = try #require(made.comments.first)
+        let comment = try #require(made.runs.first?.summary)
         #expect(comment.contains("| iPhone app with Watch, and iOSTests | Failed (second run) | 6m 52s |"))
         #expect(comment.contains("Failing tests in Mac app and MacTests:\n\n```\nMacTests/PublishTests/blocksASecret(): Expectation failed: 1 == 2\n```"))
         #expect(comment.contains("Failing tests in iPhone app with Watch, and iOSTests:\n\n```\niOSTests/JobRowTests/testTitle()\n```"))
@@ -1074,7 +1082,7 @@ struct CheckTests {
         #expect(ended.state == .error)
         try await Task.sleep(for: .milliseconds(100))
         let job = try #require(desk.job("author"))
-        #expect(made.comments.isEmpty && made.quoted.isEmpty && made.agents.count == 2 && job.macCheck?.handedOff == nil && job.mergeNeedsYou)
+        #expect(made.runs.map(\.conclusion) == [.neutral] && made.quoted.isEmpty && made.agents.count == 2 && job.macCheck?.handedOff == nil && job.mergeNeedsYou)
         #expect(job.pipeline.stages.last?.detail == "Mac check couldn't run"
                 && job.pipeline.stages.last?.reason?.hasPrefix("The iPhone simulator's test runner hung, and again") == true)
         let item = try #require(desk.inbox.last { $0.isOpen })
@@ -1115,9 +1123,9 @@ struct CheckTests {
         let store = JobStore(url: folder.appending(path: "api.sqlite"))
         store.save(queued)
         let desk = Desk(accounts: AccountStore(root: folder), store: store)
-        desk.postCheck = { [made] _, body in
-            made.comments.append(body)
-            return URL(string: "https://github.com/deskree-inc/oby/pull/80#issuecomment-9")!
+        desk.postCheck = { [made] _, run in
+            made.runs.append(run)
+            return URL(string: "https://github.com/deskree-inc/oby/runs/9")!
         }
         desk.quoteReview = { _, _, _ in }
         let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
@@ -1132,7 +1140,7 @@ struct CheckTests {
             }
             #expect(taken["id"] as? String == id && taken["state"] as? String == "running" && taken["mac"] as? String == "Studio Mac")
             #expect(taken["head"] as? String == Self.head && taken["pr"] as? Int == 80 && taken["base"] as? String == "dev" && taken["round"] as? Int == 1)
-            for key in ["finished", "steps", "failures", "comment", "postError"] { #expect(taken[key] is NSNull, "\(key)") }
+            for key in ["finished", "steps", "failures", "checkRun", "comment", "postError"] { #expect(taken[key] is NSNull, "\(key)") }
             try await client.execute(uri: "/v1/checks/next", method: .get, headers: owner) { response in
                 #expect(String(decoding: response.body.readableBytesView, as: UTF8.self) == #"{"check":null}"#)
             }
@@ -1164,7 +1172,7 @@ struct CheckTests {
         }
         #expect(heard.first?.contains(#""state":"running""#) == true && heard.last?.contains(#""state":"failed""#) == true)
         // The job had no session to pick up: it says why, rather than starting a round.
-        try await until("the comment is posted") { desk.job("author")?.mergeError != nil }
-        #expect(desk.job("author")?.mergeError == "The Mac check failed, but the job has no session to pick up." && made.comments.count == 1)
+        try await until("the check run is written") { desk.job("author")?.mergeError != nil }
+        #expect(desk.job("author")?.mergeError == "The Mac check failed, but the job has no session to pick up." && made.runs.count == 1)
     }
 }

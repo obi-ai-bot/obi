@@ -45,6 +45,19 @@ actor GitHubApp {
     nonisolated static var inUse: Bool { shared?.works == true }
     nonisolated var works: Bool { worked.withLock { $0 } }
 
+    /// Whether Oby's review and Mac check can go on pull requests as check runs (`/v1/status`'s
+    /// `checks`): "ok", "missing permission" until the owner grants the app Checks: Read and write,
+    /// or "no app" when calls go as the owner, who can't write check runs.
+    nonisolated static var checks: String { checks(shared) }
+    nonisolated static func checks(_ app: GitHubApp?) -> String {
+        guard let app, app.works else { return "no app" }
+        return app.writesChecks ? "ok" : "missing permission"
+    }
+    /// The installations GitHub listed have Checks: write, or the last check run Oby wrote went through.
+    nonisolated var writesChecks: Bool { checksWritable.withLock { $0 } }
+    /// A check run went through (true) or GitHub refused it for the permission (false).
+    nonisolated func wroteChecks(_ allowed: Bool) { checksWritable.withLock { $0 = allowed } }
+
     nonisolated let id: String
     /// RS256 over the JWT's signing input, with the app's key.
     private let sign: @Sendable (Data) throws -> Data
@@ -52,6 +65,7 @@ actor GitHubApp {
     private let send: @Sendable (_ method: String, _ path: String, _ bearer: String) async throws -> Answer
     private let now: @Sendable () -> Date
     private nonisolated let worked = Mutex(false)
+    private nonisolated let checksWritable = Mutex(false)
     /// The installations by account, lowercased, and when they were read.
     private var installations: [String: Int]?
     private var installationsRead = Date.distantPast
@@ -137,12 +151,15 @@ actor GitHubApp {
                 throw Shell.Failure(message: "GitHub answered \(answer.status)")
             }
             var found: [String: Int] = [:]
+            var checks = !rows.isEmpty
             for row in rows {
                 if let id = row["id"] as? Int, let account = row["account"] as? [String: Any], let login = account["login"] as? String {
                     found[login.lowercased()] = id
                 }
+                if (row["permissions"] as? [String: Any])?["checks"] as? String != "write" { checks = false }
             }
             installations = found
+            wroteChecks(checks)
             if found.isEmpty { worked.withLock { $0 = false } }
         } catch {
             worked.withLock { $0 = false }

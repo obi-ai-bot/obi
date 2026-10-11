@@ -256,7 +256,7 @@ final class InboxTests {
         let agent = Agent()
         desk.makeAgent = { _, _, _ in agent }
         desk.countCommits = { _, _ in 0 }
-        desk.postReview = { _, _ in URL(string: "https://github.com/deskree-inc/oby/pull/80#issuecomment-1")! }
+        desk.postReview = { _, _ in URL(string: "https://github.com/deskree-inc/oby/runs/1")! }
         let item = try #require(desk.inbox.first { $0.job == "rev1" })
         try desk.settle(item.id, .answer("Try again"))
         #expect(desk.job("author")?.reviewing == "rev1" && desk.job("author")?.reviewError == nil)

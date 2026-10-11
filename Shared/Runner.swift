@@ -180,6 +180,8 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     var account: String
     var round: Int
     var date: Date
+    /// The check run it went on the pull request as; `comment` from runners before check runs.
+    var checkRun: String?
     var comment: String?
     var postError: String?
 
@@ -188,7 +190,8 @@ nonisolated struct Review: Codable, Equatable, Sendable {
 
 /// Something the runner sent out for a job (docs/runner-api.md): ids only, never what was sent.
 nonisolated struct Outgoing: Codable, Equatable, Sendable {
-    /// "push", "pullRequest", "pullRequestEdit", "comment" or "merge"; a newer runner may send others.
+    /// "push", "pullRequest", "pullRequestEdit", "checkRun", "comment" (before check runs) or "merge";
+    /// a newer runner may send others.
     var action: String
     var repo: String
     var id: String
@@ -202,6 +205,7 @@ nonisolated struct Outgoing: Codable, Equatable, Sendable {
         case "pullRequest": "Opened pull request \(id)"
         case "pullRequestEdit": "Updated the description of \(id)"
         case "comment": "Commented \(id)"
+        case "checkRun": "Posted the check \(id)"
         case "merge": "Squash-merged \(id) into dev and deleted \(branch ?? "its branch")"
         default: "\(action) \(id)"
         }

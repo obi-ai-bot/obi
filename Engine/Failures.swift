@@ -659,7 +659,8 @@ final class Failures {
         if desk.job(id) != nil { desk.replace(job) } else { store.save(job); desk.onJobChange(job) }
     }
 
-    /// Opens the signature's `oby-failure` issue, or comments on the open one. Returns its URL.
+    /// Opens the signature's `oby-failure` issue, or brings the open one's body up to date: never a
+    /// comment, an assignee or a mention, which would email the owner (#198). Returns its URL.
     private func file(_ record: FailureRecord, _ postMortem: PostMortem, seen: Int) async throws -> String {
         let marker = "oby-failure-signature: \(postMortem.signature)"
         if !labeled {
@@ -671,8 +672,7 @@ final class Failures {
         let open = (try? JSONSerialization.jsonObject(with: Data(list.utf8))) as? [[String: Any]] ?? []
         let body = Self.issueBody(record, postMortem, seen: seen, marker: marker)
         if let issue = open.first(where: { ($0["body"] as? String)?.contains(marker) == true }), let number = issue["number"] as? Int, let url = issue["url"] as? String {
-            let note = "Seen again (\(seen) time\(seen == 1 ? "" : "s") in the last 7 days).\n\n" + body
-            try await post(["issue", "comment", "\(number)", "-R", Self.repo], body: note, texts: [])
+            try await post(["issue", "edit", "\(number)", "-R", Self.repo], body: body, texts: [])
             return url
         }
         let title = "Oby failure: \(postMortem.signature)"

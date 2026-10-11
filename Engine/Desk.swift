@@ -204,16 +204,16 @@ final class Desk {
     @ObservationIgnored var publishByHand: (Job, _ base: String, _ approve: (String) async throws -> Void, Publish.Hooks) async throws -> URL = {
         try await Publish.publish($0, base: $1, hooks: $3, approve: $2)
     }
-    /// Oby's review of a job's pull request (Engine/Review.swift): posts it as a comment, after the
+    /// Oby's review of a job's pull request (Engine/Review.swift): writes it as a check run, after the
     /// secret scan, and quotes it as a file for the author's next round. Tests put in their own.
-    @ObservationIgnored var postReview: (_ author: Job, _ body: String) async throws -> URL = Review.post
+    @ObservationIgnored var postReview: (_ author: Job, _ run: CheckRun) async throws -> URL = CheckRun.post
     @ObservationIgnored var quoteReview: (_ author: Job, _ file: String, _ text: String) throws -> Void = Review.quote
     /// Merge checks on the user's Mac (Engine/Checks.swift): the commit a review job read, the
-    /// results' comment, the secret scan of what a merge lands, and the merge. Tests put in their own.
+    /// results' check run, the secret scan of what a merge lands, and the merge. Tests put in their own.
     @ObservationIgnored var reviewedHead: (_ review: String) async -> String? = { id in
         try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-parse", "--verify", "HEAD^{commit}"])
     }
-    @ObservationIgnored var postCheck: (_ author: Job, _ body: String) async throws -> URL = MacCheck.post
+    @ObservationIgnored var postCheck: (_ author: Job, _ run: CheckRun) async throws -> URL = CheckRun.post
     @ObservationIgnored var scanForMerge: (_ job: Job, _ head: String) async throws -> [Publish.Finding] = MacCheck.scan
     @ObservationIgnored var mergePullRequest: (_ job: Job, _ check: MacCheck) async throws -> Void = MacCheck.merge
     /// Called with every Mac check that's queued, taken or ends, for the runner's event stream.
