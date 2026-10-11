@@ -115,11 +115,25 @@ final class SpeechTests {
         #expect(settings.cli.path == "/custom/cli" && settings.fastModel.path == "/custom/fast")
         #expect(settings.finalModel.path == "/custom/final" && settings.threads == 8)
         #expect(settings.names == ["oby", "tetrix", "owner/repo"])
+        #expect(Speech.Config.environment([:]).threads == 8)
+        #expect(Speech.Config.environment([:]).names == nil)
         #expect(Speech.Config.environment(["OBY_WHISPER_THREADS": "invalid"]).threads == 0)
         config.threads = 0
         let speech = Speech(config: config)
         let error = await #expect(throws: APIError.self) { try await speech.transcribe(device: self.device, utterance: self.utterance, audio: self.chunk) }
         #expect(error?.status == .notImplemented)
+    }
+
+    @Test func promptUsesShortNamesAndBoundsOverrides() {
+        config.names = nil
+        #expect(config.prompt(repos: ["deskree-inc/oby", "owner/blok", "other/blok"]) == "oby, tetrix, blok")
+        let long = config.prompt(repos: ["owner/" + String(repeating: "á", count: 1000)])
+        #expect(long.hasPrefix("oby, tetrix, á"))
+        #expect(long.utf8.count <= 512 && long.utf8.count >= 510)
+        config.names = [" custom ", "custom", "owner/special"]
+        #expect(config.prompt(repos: ["owner/ignored"]) == "custom, owner/special")
+        config.names = [String(repeating: "á", count: 1000)]
+        #expect(config.prompt(repos: []).utf8.count == 512)
     }
 
     @Test func partialAndFinalAccumulateAndChooseModels() async throws {
@@ -255,6 +269,8 @@ final class SpeechTests {
 
     @MainActor @Test func endpointIsOwnerGatedAndValidatesBinaryRequests() async throws {
         let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        desk.repos = ["deskree-inc/oby", "owner/blok"]
+        config.names = nil
         let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")), speech: Speech(config: config))
         let app = Application(router: api.router(owner: "owner"))
         let uri = "/v1/speech?device=\(device)&utterance=\(utterance)&final=true&language=en"
@@ -267,6 +283,12 @@ final class SpeechTests {
                 #expect(answer["text"] as? String == "texto 3200")
                 #expect(answer["final"] as? Bool == true)
             }
+            #expect(try record()["prompt"] as? String == "oby, tetrix, blok")
+            await MainActor.run { desk.repos = ["owner/updated"] }
+            try await client.execute(uri: uri, method: .post, headers: owner, body: ByteBuffer(bytes: chunk)) {
+                #expect($0.status == .ok)
+            }
+            #expect(try record()["prompt"] as? String == "oby, tetrix, updated")
             for bad in ["/v1/speech", uri.replacingOccurrences(of: "language=en", with: "language=xx")] {
                 try await client.execute(uri: bad, method: .post, headers: owner, body: ByteBuffer(bytes: chunk)) { #expect($0.status == .badRequest) }
             }

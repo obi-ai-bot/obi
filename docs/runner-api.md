@@ -482,13 +482,6 @@ Each tool's model and effort, as in `status.models`. `GET /v1/settings/models/op
  "codex": {"models": [{"id": "gpt-6-sol", "name": "GPT-6-Sol", "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]}]}}
 ```
 
-## What the runner never does
-
-- **Merge, force-push or push to main:** not for anyone, not even with an approval.
-- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comments that go out are Oby's own review of its own pull request, after the secret scan, and the Lead's claim on an issue a job starts on (the branch name, written by the runner); no GitHub review, approval or comment on anyone else's work.
-- **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
-- **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.
-
 ### `POST /v1/speech?device=<UUID>&utterance=<UUID>&final=false&language=auto`
 
 Transcribes one utterance on the runner's CPU using whisper.cpp, independently of the iPhone and of any agent. It uses the same owner gate as the other `/v1` endpoints. This is the speech service only; a Watch gateway can call it later.
@@ -515,7 +508,14 @@ The runner reads this configuration from its environment at startup (restart aft
 | `OBY_WHISPER_CLI` | `OBY_HOME/whisper/bin/whisper-cli` |
 | `OBY_WHISPER_FAST_MODEL` | `OBY_HOME/whisper/models/ggml-base-q5_1.bin` |
 | `OBY_WHISPER_FINAL_MODEL` | `OBY_HOME/whisper/models/ggml-large-v3-turbo.bin` |
-| `OBY_WHISPER_THREADS` | `16`, for tetrix-lab's 16 CPU cores |
-| `OBY_SPEECH_NAMES` | `oby,tetrix,deskree-inc/oby`; comma-separated product/repository names passed as Whisper's initial prompt. Set this to include the runner's repositories. |
+| `OBY_WHISPER_THREADS` | `8` per inference process, allowing two processes to share tetrix-lab's 16 CPU cores |
+| `OBY_SPEECH_NAMES` | Unset: `oby`, `tetrix` and the short names of the runner's current `Desk.repos` list. Set a comma-separated list to override these names. Duplicates are removed and the initial prompt is capped at 512 UTF-8 bytes, including for overrides. |
 
 No GPU is needed. Actual latency and English/Portuguese recognition quality still need checking on tetrix-lab with real Watch recordings.
+
+## What the runner never does
+
+- **Merge, force-push or push to main:** not for anyone, not even with an approval.
+- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comments that go out are Oby's own review of its own pull request, after the secret scan, and the Lead's claim on an issue a job starts on (the branch name, written by the runner); no GitHub review, approval or comment on anyone else's work.
+- **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
+- **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.

@@ -43,7 +43,7 @@ final class API {
         let router = Router()
         router.add(middleware: Gate(owner: owner))
         router.post("v1/speech") { request, _ in
-            try await Self.json(self.speech.handle(request))
+            try await Self.json(self.speech.handle(request, repos: self.desk.repos))
         }
         router.get("v1/status") { _, _ in await self.status() }
         router.post("v1/plans") { request, _ in await self.plan(try await Self.decode(PlanRequest.self, from: request)) }

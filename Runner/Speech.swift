@@ -14,8 +14,9 @@ actor Speech {
         var fastModel: URL
         var finalModel: URL
         var folder: URL
-        var threads: Int = 16
-        var names: [String] = ["oby", "tetrix"]
+        var threads: Int = 8
+        /// Optional owner override; otherwise use product names and the desk's current repositories.
+        var names: [String]?
         var timeout: Double = 120
         var idleTimeout: Double = 120
 
@@ -25,8 +26,23 @@ actor Speech {
                         fastModel: URL(filePath: env["OBY_WHISPER_FAST_MODEL"] ?? root.appending(path: "models/ggml-base-q5_1.bin").path),
                         finalModel: URL(filePath: env["OBY_WHISPER_FINAL_MODEL"] ?? root.appending(path: "models/ggml-large-v3-turbo.bin").path),
                         folder: root.appending(path: "audio"),
-                        threads: Int(env["OBY_WHISPER_THREADS"] ?? "16") ?? 0,
-                        names: (env["OBY_SPEECH_NAMES"] ?? "oby,tetrix,deskree-inc/oby").split(separator: ",").map(String.init))
+                        threads: Int(env["OBY_WHISPER_THREADS"] ?? "8") ?? 0,
+                        names: env["OBY_SPEECH_NAMES"].map { $0.split(separator: ",").map(String.init) })
+        }
+
+        func prompt(repos: [String]) -> String {
+            let words = names ?? (["oby", "tetrix"] + repos.compactMap { $0.split(separator: "/").last.map(String.init) })
+            var prompt = "", seen: Set<String> = []
+            for word in words {
+                let name = word.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty, seen.insert(name).inserted else { continue }
+                let next = (prompt.isEmpty ? "" : ", ") + name
+                for character in next {
+                    guard prompt.utf8.count + String(character).utf8.count <= 512 else { return prompt }
+                    prompt.append(character)
+                }
+            }
+            return prompt
         }
     }
 
@@ -57,7 +73,7 @@ actor Speech {
         }
     }
 
-    nonisolated func handle(_ request: Request) async throws -> Answer {
+    nonisolated func handle(_ request: Request, repos: [String]) async throws -> Answer {
         let query = request.uri.queryParameters
         guard let device = query.get("device"), UUID(uuidString: device) != nil,
               let utterance = query.get("utterance"), UUID(uuidString: utterance) != nil else {
@@ -79,11 +95,11 @@ actor Speech {
         }
         return try await transcribe(device: device.lowercased(), utterance: utterance.lowercased(),
                                     audio: Data(bytes.readableBytesView), wav: type.contains("wav"),
-                                    final: flag == "true", language: language)
+                                    final: flag == "true", language: language, repos: repos)
     }
 
     func transcribe(device: String, utterance: String, audio: Data, wav: Bool = false,
-                    final: Bool = false, language: String = "auto") async throws -> Answer {
+                    final: Bool = false, language: String = "auto", repos: [String] = []) async throws -> Answer {
         guard !busy.contains(device) else { throw APIError(.conflict, "This device already has a transcription running.") }
         guard busy.count < 2 else { throw APIError(.serviceUnavailable, "The speech service is busy. Try again later.") }
         guard config.threads > 0 else { throw APIError(.notImplemented, "OBY_WHISPER_THREADS must be positive.") }
@@ -114,9 +130,9 @@ actor Speech {
         busy.insert(device)
         defer { busy.remove(device) }
         do {
-            let config = config, fullAudio = session.pcm
+            let config = config, fullAudio = session.pcm, prompt = config.prompt(repos: repos)
             let text = try await Task.detached {
-                try Self.run(config: config, pcm: fullAudio, final: final, language: language)
+                try Self.run(config: config, pcm: fullAudio, final: final, language: language, prompt: prompt)
             }.value
             if final { sessions[device] = nil }
             else {
@@ -181,7 +197,7 @@ actor Speech {
         return values.isRegularFile == true && (values.fileSize ?? 0) > 0
     }
 
-    private static func run(config: Config, pcm: Data, final: Bool, language: String) throws -> String {
+    private static func run(config: Config, pcm: Data, final: Bool, language: String, prompt: String) throws -> String {
         let fm = FileManager.default
         try fm.createDirectory(at: config.folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let folder = config.folder.appending(path: UUID().uuidString)
@@ -195,7 +211,7 @@ actor Speech {
         process.currentDirectoryURL = folder
         process.arguments = ["--model", (final ? config.finalModel : config.fastModel).path,
                              "--threads", String(config.threads), "--language", language,
-                             "--prompt", config.names.joined(separator: ", "), "--no-gpu", "--no-prints",
+                             "--prompt", prompt, "--no-gpu", "--no-prints",
                              "--output-txt", "--output-file", output.path, "--file", audio.path]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
