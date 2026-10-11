@@ -171,7 +171,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     static let blocking = "Label each finding blocking or not. Blocking means a bug, a security or data-loss problem, or a requirement the user asked for that isn't met or a test that's broken: only blocking findings request changes. Everything else (style, naming, refactors, more tests, docs, ideas) is worth doing later, and doesn't."
 
     /// How every review ends, so `findings` and `decide` can read it.
-    static let finish = "Finish with your review. Its first line is one sentence the user will see in the notch. Then list your findings, one line each, under two headings: `Blocking:` and `Worth doing later:`. Leave out a heading with nothing under it. End with a last line that is exactly `VERDICT: APPROVED` or `VERDICT: CHANGES REQUESTED`: approved when nothing is blocking, changes requested when something is."
+    static let finish = "Finish with your review. Its first line is one sentence the user will see in the notch. Then list your findings, one line each, under two headings: `Blocking:` and `Worth doing later:`. Leave out a heading with nothing under it: never write `Blocking: none`, and don't list what you checked and found fine under either heading. End with a last line that is exactly `VERDICT: APPROVED` or `VERDICT: CHANGES REQUESTED`: approved when nothing is blocking, changes requested when something is."
 
     /// A review job that follows up an earlier review of the same pull request: the earlier review,
     /// the branch it read, and the file its blocking findings are quoted in (nil when it approved).
@@ -255,8 +255,10 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// items that label themselves `Blocking:` or `Worth doing later:`. A heading's list ends at a
     /// paragraph after a blank line, another heading, or the verdict. A heading counts by how it
     /// starts: "Blocking issues" is blocking. List items under no heading, or under one it doesn't
-    /// know, are `unsorted`. "None" isn't a finding. Nil when the review has neither heading nor
-    /// label: it didn't sort its findings.
+    /// know, are `unsorted`. "None" isn't a finding, and a heading whose content is "none" (after
+    /// its colon, or as its first item) has none: what follows it, until the next heading, is the
+    /// reviewer saying why ("Blocking: none." then what it checked). Nil when the review has
+    /// neither heading nor label: it didn't sort its findings.
     static func findings(_ summary: String) -> (blocking: [String], later: [String], unsorted: [String])? {
         var found: (blocking: [String], later: [String], unsorted: [String]) = ([], [], [])
         var sorted = false
@@ -265,14 +267,22 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         var section: Bool?
         var last: Bool?
         var blank = false
-        func add(_ text: String, blocking: Bool) {
+        // Nothing under the heading yet, and whether it said "none".
+        var fresh = false
+        var empty = false
+        /// Adds a finding; false when the text says there's none.
+        @discardableResult func add(_ text: String, blocking: Bool) -> Bool {
             let finding = text.trimmingCharacters(in: .whitespaces)
-            let bare = finding.lowercased().filter { !"`*_.!".contains($0) }.trimmingCharacters(in: .whitespaces)
+            let bare = finding.lowercased().filter { !"`*_.!".contains($0) }.trimmingCharacters(in: CharacterSet(charactersIn: " -–—:"))
             let none = bare.prefixMatch(of: /none\b/) != nil && !bare.hasPrefix("none of")
                 || ["nothing", "n/a", "no findings", "nothing blocking", "no blocking findings", "nothing to add"].contains(bare)
-            guard !finding.isEmpty, !none else { return last = nil }
+            guard !finding.isEmpty, !none else {
+                last = nil
+                return false
+            }
             if blocking { found.blocking.append(finding) } else { found.later.append(finding) }
             last = blocking
+            return true
         }
         for raw in summary.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = raw.trimmingCharacters(in: .whitespaces)
@@ -296,9 +306,15 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             // A heading, or an item that labels itself: the label ends with a colon, or is the whole line.
             if let blocking, head.count > 1 || head.first.map({ $0.contains("(") }) == true || plain.lowercased() == label {
                 sorted = true
-                if item == nil { section = blocking }
                 last = nil
-                if !rest.isEmpty { add(rest, blocking: blocking) }
+                guard item == nil else {
+                    fresh = false
+                    if !rest.isEmpty { add(rest, blocking: blocking) }
+                    continue
+                }
+                section = blocking
+                fresh = rest.isEmpty
+                empty = !rest.isEmpty && !add(rest, blocking: blocking)
                 continue
             }
             let indented = raw.first?.isWhitespace == true
@@ -313,12 +329,15 @@ nonisolated struct Review: Codable, Equatable, Sendable {
                 if item != nil { found.unsorted.append(text) }
                 continue
             }
+            // The heading said none: the rest is why.
+            if empty { continue }
             if item == nil, indented, let last {
                 // The item above, going on.
                 if last { found.blocking[found.blocking.count - 1] += " " + line } else { found.later[found.later.count - 1] += " " + line }
                 continue
             }
-            add(text, blocking: section)
+            empty = !add(text, blocking: section) && fresh
+            fresh = false
         }
         return sorted ? found : nil
     }
