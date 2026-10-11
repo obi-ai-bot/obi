@@ -1,6 +1,8 @@
 import Foundation
 import OSLog
 import WatchConnectivity
+import WatchKit
+import WidgetKit
 
 /// The watch's view of the runner, through the iPhone (iOS/WatchRelay.swift): the jobs the
 /// phone keeps here, and the requests it carries out. What they say to each other is in
@@ -41,6 +43,8 @@ final class Watch: NSObject {
         get { UserDefaults.standard.string(forKey: "watch.asking") }
         set { UserDefaults.standard.set(newValue, forKey: "watch.asking") }
     }
+    /// The system woke the app because the phone sent something; each ends once it's delivered.
+    @ObservationIgnored private var deliveries: [WKWatchConnectivityRefreshBackgroundTask] = []
 
     override init() {
         super.init()
@@ -91,6 +95,24 @@ final class Watch: NSObject {
         accounts = context.accounts
         host = context.host
         loaded = true
+        // The complications and the Smart Stack (Watch/Widget) draw from the app group.
+        if Glance.save(Glance(needs: needing.count, working: working.count, top: needing.first?.heading)) {
+            WidgetCenter.shared.reloadTimelines(ofKind: Glance.kind)
+        }
+    }
+
+    /// The phone sent the job list while the app wasn't in front: the session hands it to `load`,
+    /// which updates the complications, and the task ends once nothing more is pending.
+    func finishWhenDelivered(_ task: WKWatchConnectivityRefreshBackgroundTask) {
+        deliveries.append(task)
+        finishDelivered()
+    }
+
+    private func finishDelivered() {
+        let session = WCSession.default
+        guard !deliveries.isEmpty, session.activationState == .activated, !session.hasContentPending else { return }
+        for task in deliveries { task.setTaskCompletedWithSnapshot(false) }
+        deliveries.removeAll()
     }
 
     private func apply(_ job: Job) {
@@ -256,6 +278,7 @@ extension Watch: WCSessionDelegate {
             self.load(context)
             self.reachable = reachable
             self.refresh()
+            self.finishDelivered()
         }
     }
 
@@ -268,7 +291,10 @@ extension Watch: WCSessionDelegate {
     }
 
     nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
-        Task { @MainActor in self.load(applicationContext) }
+        Task { @MainActor in
+            self.load(applicationContext)
+            self.finishDelivered()
+        }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
@@ -276,7 +302,10 @@ extension Watch: WCSessionDelegate {
     }
 
     nonisolated func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
-        Task { @MainActor in self.take(userInfo) }
+        Task { @MainActor in
+            self.take(userInfo)
+            self.finishDelivered()
+        }
     }
 }
 
