@@ -198,7 +198,7 @@ final class CodexServer {
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = Agents.sandboxed(["codex", "app-server"], in: directory, own: home?.path ?? "\(Agents.home)/.codex")
         process.currentDirectoryURL = directory
-        process.environment = try Agents.environment(["CODEX_HOME": home?.path])
+        process.environment = try Agents.environment(AppleCheck.environment(worktree: directory).merging(["CODEX_HOME": home?.path]) { $1 })
         process.standardInput = input
         process.standardOutput = output
         process.standardError = log.flatMap { try? FileHandle(forWritingTo: $0) } ?? FileHandle.nullDevice

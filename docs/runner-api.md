@@ -8,7 +8,7 @@ This document is the contract between the runner and its clients. Change it in t
 
 - **Base URL:** `https://tetrix-lab.tail8de49b.ts.net:8443` (the app lets you change it). Everything is under `/v1`.
 - The runner listens on `127.0.0.1:7777` only. `tailscale serve --https=8443` publishes it on the tailnet with a real HTTPS certificate, so iOS needs no exceptions, and nothing is reachable from the internet. Port 443 on tetrix-lab belongs to the Tetrix stack's own proxy, so Oby uses 8443, one of the ports Tailscale serves HTTPS on.
-- **Who you are:** `tailscale serve` adds `Tailscale-User-Login` to every request. The runner answers only its owner's login (set when it's installed) and returns `401` to anyone else. The app sends no token and stores no secret for this.
+- **Who you are:** `tailscale serve` adds `Tailscale-User-Login` to every request. The runner answers only its owner's login (set when it's installed) and returns `401` to anyone else. The app sends no token and stores no secret for this. The one exception is `/v1/agent/…`, which agents call from their sandbox on the runner itself (`oby-check apple`, Apple check below): those requests carry their job's token instead, `Authorization: Bearer <token>`, and answer nothing else.
 - **JSON** everywhere, camelCase keys, dates as ISO 8601 strings (`2026-10-09T21:43:30Z`). Errors are `{"error": "One line a person can read."}` with a 4xx or 5xx status.
 - **No vault secret** in an answer or an event: every string has the vault's secrets, plain or encoded, taken out. When the runner can't read its vault, answers are `503` with the reason, and events aren't sent.
 
@@ -62,6 +62,8 @@ This document is the contract between the runner and its clients. Change it in t
   "question": null,
   "macCheck": null,
   "mergeError": null,
+  "appleCheck": null,
+  "appleRan": null,
   "mergeNeedsYou": false,
   "title": "Review oby #33",
   "pipeline": {
@@ -169,6 +171,7 @@ GitHub Actions doesn't run for deskree-inc/oby, so the user's Mac checks a pull 
  "comment": "https://github.com/deskree-inc/oby/pull/80#issuecomment-2", "postError": null}
 ```
 
+- `kind`: `merge` (this section) or `apple` (an agent's Apple check, below). Always sent; checks from before Apple checks are `merge`.
 - `job`: the author job. `head`: the commit checked. `round`: which of the job's checks it is (1 to 3).
 - `state`: `queued`, `running` (a Mac took it: `mac` is the name it gave, `started` when), `passed`, `failed`, or `error`: the Mac couldn't run it, and `problem` says why (its checkout or the vault failed, a tool or the simulator is missing, xcodebuild failed other than with a failing build or test, or a step was stopped at its timeout without naming a failing test). An `error` is nothing the code can fix: no comment is posted, nothing goes to the author, it needs you, and Try again checks the same commit again. `handedOff` is true once a failed check's tests went to the author as a round. `steps` and `failures` (the failing tests' names) come with the result; `comment` is the pull request comment with the results, or null with `postError` saying why there's none.
 - **On the Mac:** a clean worktree of `head`, detached, in Oby's own clone, then, one at a time and each with a timeout: `swift test` (30 minutes), the `Oby` scheme's build with `MacTests` (30 minutes), and the `ObyPhone` scheme (with `ObyWatch` embedded) with `iOSTests` on an iPhone 17 simulator (40 minutes), all signed ad hoc as docs/ci.md describes. Every step runs, so a failing check names everything that fails. A step writes to a file, not a pipe; at its timeout its whole process group is ended (TERM, then KILL), and the Mac stops waiting on it a few seconds later whatever is left, so a hung test can't keep the Mac busy. The commands get no GitHub login and no variable holding a vault secret, and a throwaway `OBY_HOME` (also as `TEST_RUNNER_OBY_HOME`, which xcodebuild hands to the test host without the prefix), so the MacTests host, an Oby itself, never opens the Mac's own `oby.sqlite` or marks its running jobs interrupted. They still run with the user's access to the Mac: Oby's review is the gate before pull request code runs there. The worktree is removed afterwards; build caches are kept between checks.
@@ -179,6 +182,17 @@ GitHub Actions doesn't run for deskree-inc/oby, so the user's Mac checks a pull 
 - **Failed:** the failing tests go to the author's agent as its next round, in the same session and worktree, quoted in a file (`.oby/inputs/mac-check-<round>.md`, with each step's result and the end of what the failing steps printed), never in the prompt. The job goes back to `running` with a new `round` and `step` `Working on the Mac check`; when it publishes the fix, Oby reviews it again, and an approval queues the next check. After the third failed check, or when Oby's reviews are used up (its 4th review was the one that approved, so a fix could never be reviewed), no round starts: the job stays `done` and the Merged stage says so. A round that ends with no new commit leaves the failed check on the pull request's head: that needs you too, and Try again checks the same commit again (as the same round).
 - **What needs you:** a merge that stopped, while the pull request is open, Oby's review approved the checked commit and the job isn't dismissed: `mergeError` set after the check, a check the Mac couldn't run (`error`), a failed check with no round left, or one whose round brought no new commit. It counts in what needs you, sends an alert (`Not merged: <title>`) and brings a `merge` inbox item.
 - **The Merged stage** while Oby's review approved it: `Waiting for a Mac check` (`current`), `Checking on Studio` (`current`), `Mac check passed · merging` (`current`), `Mac check failed` (`failed`, reason like `1 test failed on Studio: MacTests.PublishTests/blocksASecret()`, plus `The Mac check failed 3 times. Take it from here.` after the third), `Mac check couldn't run` (`failed`, reason `problem`), `Not merged` (`failed`, reason `mergeError`), then `done` once merged. Before a check is queued, and wherever none is (the Mac's own jobs, older ones), `Ready to merge`.
+
+### Apple check
+
+Agents run on the runner, which has no Xcode, so an agent that changes the Apple apps asks the user's Mac to build and test them mid-round (#118): `oby-check apple` in its sandbox. The runner queues an Apple check of the job's worktree commit (`HEAD`), a Mac check (above) with `kind` `apple`; a Mac that follows the runner with Settings › Runner › "Build and test agents' work on this Mac" on (the default) takes it before any merge check, fetches its commits from the runner (`GET /v1/checks/{id}/bundle`: they aren't on GitHub yet), and runs the `Oby` scheme with `MacTests` and the `ObyPhone` scheme (with `ObyWatch`) with `iOSTests`, as a merge check does, without `swift test` (the agent runs that on the runner). Same clean worktree, timeouts, ad hoc signing, throwaway `OBY_HOME` and no GitHub login or vault secret. Paths in what the failing steps printed are relative to the repository.
+
+- **On the job:** `appleCheck` is the job's latest Apple check, or null. `appleRan` is the latest one that ran (`passed` or `failed`), or null: it stays when the agent asks for a newer commit, so a newer check that can't run never hides one that did. `pr` is the job's pull request, or 0 before it has one; `round` counts the job's Apple checks (at most 20 per job). Nothing is posted on GitHub, merged or handed to another round: the result is for the agent waiting on it, and for the reviewer (Oby's review, below). What the failing steps printed is kept in memory only, for the agent and the reviewer, for the job's latest check and the latest that ran.
+- **Asking again** for the same commit picks up the same check (or its result), unless it couldn't run. A new commit is a new check; the old one's result, if a Mac still sends it, is answered `404`.
+- **Who takes it:** only a job that's running (`queued` or `running`) and only from a Mac that says it takes Apple checks (`kinds`, below). A Mac running another check finishes it first.
+- **No Mac:** a check no Mac took within a minute while no Mac was busy, or within an hour at all, is `error` with `problem` saying so, and the agent is told to carry on and say in its summary that the Apple apps weren't built.
+- **Security:** the Mac runs the agent's code (its build phases and tests) before Oby's review has read it, with the user's access to the Mac. The setting turns it off; a merge check still needs the review.
+- **Reviews:** when a job's pull request is reviewed, the reviewer gets the latest Apple build and test that ran (passed or failed), the job's Apple check (`appleCheck`, else `appleRan`) or its merge check, whichever ended last, quoted in `.oby/inputs/apple-check.md` with its commit (and whether it's the pull request's head), its steps, failing tests and, for an Apple check, the end of what the failing steps printed. It's told not to request changes because the code wasn't compiled.
 
 ### Inbox item
 
@@ -405,7 +419,7 @@ data: { …Mac check }
 - `accounts` comes when sign-ins, usage, reset times, running counts or `fullUntil` change.
 - `clear` comes when Clear done is pressed on any app (`POST /v1/clear`): hide the jobs that finished by `clearedAt`.
 - `inbox` comes with every inbox item that arrives or changes: answered, done or put off, on any app, or settled by itself. Replace the item with that `id`; one whose `state` is `done` leaves the inbox.
-- `check` comes when a Mac check (below) is queued, taken by a Mac or ends. A Mac that runs merge checks asks for one (`GET /v1/checks/next`) when one is `queued`; other apps can ignore it, since the job's own event carries `macCheck` too.
+- `check` comes when a Mac check or an Apple check (below) is queued, taken by a Mac or ends. A Mac that runs checks asks for one (`GET /v1/checks/next`) when one is `queued`; other apps can ignore it, since the job's own event carries `macCheck` and `appleCheck` too.
 - A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop. Fetch what you show (`GET /v1/status`, `GET /v1/jobs`, `GET /v1/inbox`; a runner older than the inbox answers `404` there, which means an empty inbox, and any other failure means try again) only once the events' response has arrived, and apply the events that came meanwhile over it: the runner follows a connection before it answers, so nothing that changes in between is lost.
 
 ### `GET /v1/inbox`
@@ -468,9 +482,13 @@ Publishes by hand, for a job whose own publish failed, after the user approved o
   - this signature hasn't been used before.
 - Then it runs Publish, as a job's own publish does: guards, the secret scan, push one pinned commit, then the pull request, ready for review (the one already open for the branch, if there is one). It returns `{"url": "https://github.com/…/pull/42"}`, or an error line (for example the scan's findings, never the secret).
 
-### `GET /v1/checks/next?mac=Studio`
+### `GET /v1/checks/next?mac=Studio&kinds=merge,apple`
 
-For a Mac that runs merge checks. Answers `{"check": { …Mac check }}` with the oldest queued check, now `running` and that Mac's (`mac` is the query's name, up to 100 characters, or `a Mac`), or `{"check": null}` when none waits. A check whose job runs again or pushed a newer commit isn't handed out. A Mac that took a check and reported nothing for 2 hours went away: the next Mac to ask gets it again. Ask when a `check` event says one is `queued`, on every (re)connection, and every 10 minutes.
+For a Mac that runs checks. Answers `{"check": { …Mac check }}` with the oldest queued check, now `running` and that Mac's (`mac` is the query's name, up to 100 characters, or `a Mac`), or `{"check": null}` when none waits. `kinds` lists what the Mac takes, `merge`, `apple` or both; without it, merge checks only (Macs from before Apple checks). Apple checks come first: an agent waits on them. A merge check whose job runs again or pushed a newer commit isn't handed out, nor an Apple check whose job ended. A Mac that took a check and reported nothing for 2 hours went away: the next Mac to ask gets it again. Ask when a `check` event says one is `queued`, on every (re)connection, and every 10 minutes.
+
+### `GET /v1/checks/{id}/bundle`
+
+For the Mac that took an Apple check: its commits as a git bundle (`application/octet-stream`) of the ref `refs/oby/apple-check-<id>`, holding the commits that aren't on `origin/<base>`. The Mac fetches `base` from GitHub first, then the bundle. Empty when the commit is on `base` already. `404` for a check the runner doesn't have, `409` for one no Mac has taken.
 
 ### `POST /v1/checks/{id}/result`
 
@@ -484,10 +502,26 @@ What the Mac found:
 ```
 
 - `problem` (optional): why the Mac couldn't run the check (one line, up to 500 characters). With it, the check is `error`, whatever else the result says.
-- A pass counts only when every step the Mac runs (`Runner tests (swift test)`, `Mac app and MacTests`, `iPhone app with Watch, and iOSTests`) is in `steps` and passed, and `failures` is empty. A failing test name fails the check; a pass that leaves out a step, or a failure that names nothing that failed, is the Mac's problem (`error`).
-- `log` (optional): the end of what the failing steps printed. It goes to the author's agent only, quoted, with the vault's secrets taken out; it's never stored or posted.
+- A pass counts only when every step the Mac runs (`Runner tests (swift test)`, `Mac app and MacTests`, `iPhone app with Watch, and iOSTests`; for an Apple check, the last two) is in `steps` and passed, and `failures` is empty. A failing test name fails the check; a pass that leaves out a step, or a failure that names nothing that failed, is the Mac's problem (`error`).
+- `log` (optional): the end of what the failing steps printed. It goes to the author's agent only (and, for an Apple check, its reviewer), with the vault's secrets taken out; it's never stored or posted.
 - The runner keeps at most 10 steps, 50 failing tests (each one line of up to 300 characters) and 8,000 characters of `log`. A failed step, or no steps, fails the check whatever `passed` says.
 - Answers `{"check": { …Mac check }}` with the result on it. `404` for a check the runner doesn't have, `409` for one no Mac has taken (`GET /v1/checks/next`) or that has its result already.
+
+### `POST /v1/agent/apple-check` and `GET /v1/agent/apple-check`
+
+For `oby-check apple` in an agent's sandbox, with `Authorization: Bearer <its job's token>` instead of a Tailscale login. The runner gives each job's agent its token (`OBY_CHECK_TOKEN`), the API's address (`OBY_CHECK_URL`, `http://127.0.0.1:7777`) and the command (first on `PATH`, a script in `OBY_HOME/bin` that runs `oby-runner check`, both shown read-only in bubblewrap). `POST` asks for an Apple check of the job's worktree commit (or picks up the one already asked for that commit); `GET` says where the job's latest one is. Both answer:
+
+```json
+{"check": { …Mac check, "kind": "apple" },
+ "line": "Apple check c0ffee12 of commit 1a2b3c4d5e6f is building and testing on Studio.",
+ "report": null}
+```
+
+- `line`: where it is, in one line: queued (`waiting for a Mac`, or `Studio is running another check first`), building and testing, or how it ended.
+- `report`: once it ended, what the command prints: each step with its time, the failing tests and the end of what the failing steps printed (the compiler's errors when there are any), with the vault's secrets taken out. For a check that couldn't run, why, followed by whatever the steps that did run found (one app's compiler errors still show when the other's simulator is missing). Null before then.
+- `401` without a job's token, `409` when the job isn't running, its worktree commit can't be read, it asked for 20 already, or the runner doesn't queue checks; `404` (`GET`) before the job asked for one; `503` when the vault can't be read.
+
+`oby-check apple [--wait SECONDS]` asks, prints `line` when it changes, polls every 5 seconds, and prints `report`. `--wait` (1 to 3,000; 110 by default, under a 2-minute command timeout) bounds the whole wait, the requests to the runner included: a request still unanswered at the deadline is dropped. It notes uncommitted changes, which aren't in the check. Exit status: `0` passed, `1` failed, `2` couldn't run (no Mac, the Mac's problem, no runner), `3` still running (run it again: it picks up the same check), `64` a wrong command line. Jobs whose Lead brief names `iOS/`, `Watch/`, `Mac/` or `Shared/`, or, without a brief, in a repository that has them, are told about it in their prompt.
 
 ### `POST /v1/devices`
 
@@ -597,6 +631,6 @@ No GPU is needed. Actual latency and English/Portuguese recognition quality stil
 
 - **Force-push or push to main:** not for anyone, not even with an approval.
 - **Merge, except into `dev` after the Mac check:** the runner squash-merges a pull request it opened only into `dev`, only when Oby's review approved it, the Mac check passed on the same commit and the secret scan is clean (Mac check, above). Never into `main`.
-- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comments that go out are Oby's own review of its own pull request and the Mac check's results on it, after the secret scan, and the Lead's claim on an issue a job starts on (the branch name, written by the runner); no GitHub review, approval or comment on anyone else's work.
+- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comments that go out are Oby's own review of its own pull request and the Mac check's results on it (an Apple check posts nothing), after the secret scan, and the Lead's claim on an issue a job starts on (the branch name, written by the runner); no GitHub review, approval or comment on anyone else's work.
 - **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
 - **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.

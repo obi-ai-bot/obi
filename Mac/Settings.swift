@@ -12,6 +12,8 @@ struct SettingsView: View {
     @AppStorage(Speaker.setting) private var speaks = true
     /// Merge checks on this Mac (Mac/MacChecks.swift).
     @AppStorage(MacChecks.setting) private var runMergeChecks = true
+    /// Apple checks agents ask for (Engine/AppleChecks.swift).
+    @AppStorage(MacChecks.appleSetting) private var runAppleChecks = true
 
     var body: some View {
         Form {
@@ -39,6 +41,9 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Run merge checks on this Mac", isOn: $runMergeChecks)
                 Text("When Oby's review approves a pull request, this Mac runs its tests and builds the Mac and iPhone apps, one at a time, before Oby merges it into dev.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Build and test agents' work on this Mac", isOn: $runAppleChecks)
+                Text("When an agent on the runner asks (oby-check apple), this Mac builds and tests the Mac and iPhone apps at its latest commit, before Oby's review has read it, and the agent gets the compiler's errors and failing tests.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
