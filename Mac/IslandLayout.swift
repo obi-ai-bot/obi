@@ -1,4 +1,6 @@
+import AppKit
 import CoreGraphics
+import CoreText
 import SwiftUI
 
 /// Where everything sits inside the island in one state, worked out from the screen alone so tests
@@ -17,6 +19,8 @@ nonisolated struct IslandLayout {
     var line: CGRect?
     /// The hover line has a row of its own under the camera, centered, instead of following Oby's name.
     var lineBelow = false
+    /// The hover line's lines: 1, or 2 when it doesn't fit in one (#191). Past the second, it's cut.
+    var lines = 1
     /// The open or listening island's content, as padding from the island's edges.
     var insets: EdgeInsets?
 
@@ -34,12 +38,19 @@ nonisolated struct IslandLayout {
     static let wing: CGFloat = 52
     /// The hover line's row under the camera.
     static let row: CGFloat = 20
+    /// What a second line of the hover line adds to its row and to the island.
+    static let lineHeight: CGFloat = 15
+    /// The most lines the hover line wraps to.
+    static let maxLines = 2
+
+    /// The space between "Oby" and the hover line, under the camera or beside Oby.
+    static func gap(below: Bool) -> CGFloat { below ? 8 : 12 }
 
     /// - Parameters:
     ///   - screenWidth: the width of the screen the island is centered on.
     ///   - notch: the camera's cutout from the screen's top-left corner, or nil.
     ///   - barHeight: the menu bar's height, for the pill on a screen without a notch.
-    ///   - line: what peeking shows next to Oby's name.
+    ///   - line: what peeking shows next to Oby's name, measured for the lines it wraps to.
     ///   - openHeight: the open island's height, measured from its content.
     static func of(_ state: IslandState, screenWidth: CGFloat, notch: CGRect?, barHeight: CGFloat,
                    line: String, openHeight: CGFloat) -> IslandLayout {
@@ -80,6 +91,30 @@ nonisolated struct IslandLayout {
         case .listening:
             layout.insets = EdgeInsets(top: top + 6, leading: layout.character.maxX + 12, bottom: 24, trailing: 28)
         }
+        // A line too long for its row takes a second one, and the island grows by it.
+        if let row = layout.line {
+            let room = row.width - Self.width(of: "Oby", weight: .semibold) - gap(below: layout.lineBelow)
+            layout.lines = min(maxLines, Self.lines(of: line, width: room))
+            let extra = CGFloat(layout.lines - 1) * lineHeight
+            layout.size.height += extra
+            layout.line?.size.height += extra
+        }
         return layout
+    }
+
+    /// The width of `text` in the hover row's 12-point system font, as Island.swift draws it.
+    static func width(of text: String, weight: NSFont.Weight) -> CGFloat {
+        ceil(NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: weight)]).size().width)
+    }
+
+    /// How many lines the hover line wraps to at `width`, in the font Island.swift draws it in.
+    static func lines(of text: String, width: CGFloat) -> Int {
+        guard !text.isEmpty, width > 0 else { return 1 }
+        let string = NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium)])
+        let setter = CTFramesetterCreateWithAttributedString(string)
+        // A point narrower than the row, so a line SwiftUI wraps is never counted as fitting.
+        let path = CGPath(rect: CGRect(x: 0, y: 0, width: max(1, width - 1), height: 10_000), transform: nil)
+        let frame = CTFramesetterCreateFrame(setter, CFRange(location: 0, length: 0), path, nil)
+        return max(1, CFArrayGetCount(CTFrameGetLines(frame)))
     }
 }
