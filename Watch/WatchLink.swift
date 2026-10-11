@@ -119,18 +119,23 @@ nonisolated struct WatchLink: Sendable {
         return answer.push
     }
 
-    /// One piece of a held recording. The runner answers `501` while it can't write speech down:
-    /// that's SpeechUnavailable.
-    func speech(request: String, sequence: Int, audio: Data) async throws {
-        let target = "v1/speech?request=\(request)&sequence=\(sequence)"
+    /// One piece of what the mic hears, answered with the whole transcript so far (it can change),
+    /// or nil when the runner sent none. `final` (its body may be empty) ends it with the final
+    /// words. The runner answers `501` while it can't write speech down: that's SpeechUnavailable.
+    func speech(request: String, sequence: Int, audio: Data, final: Bool = false) async throws -> String? {
+        let target = "v1/speech?request=\(request)&sequence=\(sequence)" + (final ? "&final=true" : "")
         var urlRequest = try signed("POST", target, body: audio)
         urlRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        // Whisper writes all of it down again for the final words.
+        if final { urlRequest.timeoutInterval = 60 }
         let (data, response) = try await URLSession.shared.data(for: urlRequest)
         if (response as? HTTPURLResponse)?.statusCode == 501 {
             struct Problem: Decodable { var error: String }
             throw SpeechUnavailable(message: (try? JSONDecoder().decode(Problem.self, from: data))?.error ?? "Speech-to-text isn't set up on the runner yet.")
         }
         try Runner.check(response, data)
+        struct Answer: Decodable { var text: String? }
+        return (try? JSONDecoder().decode(Answer.self, from: data))?.text
     }
 
     /// The runner's events while Oby is on screen; the caller ends it when Oby leaves the screen.

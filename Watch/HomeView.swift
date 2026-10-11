@@ -5,8 +5,6 @@ import SwiftUI
 struct HomeView: View {
     @Environment(Watch.self) private var watch
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var locked = false
-    @State private var listening = false
     @State private var path: [Screen] = []
 
     enum Screen: Hashable {
@@ -50,16 +48,16 @@ struct HomeView: View {
                     .accessibilityValue(watch.loaded ? watch.line : "")
                     .accessibilityHint("Shows the jobs")
                     if watch.talk != .none {
-                        TalkView(locked: locked, listening: listening).frame(maxWidth: .infinity, maxHeight: .infinity)
+                        TalkView().frame(maxWidth: .infinity, maxHeight: .infinity)
                             .transition(.opacity)
                     } else {
                         Spacer(minLength: 0)
                     }
                     if quiet {
-                        Text("Hold to talk").font(.caption2).foregroundStyle(.secondary)
+                        Text("Tap to talk").font(.caption2).foregroundStyle(.secondary)
                             .accessibilityHidden(true)
                     }
-                    TalkButton(size: mic, locked: $locked, listening: $listening)
+                    TalkButton(size: mic)
                 }
                 .frame(width: width, height: height)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: watch.talk == .none)
@@ -74,7 +72,7 @@ struct HomeView: View {
             .onChange(of: watch.opening, initial: true) {
                 guard let id = watch.opening else { return }
                 watch.opening = nil
-                // Stop a hold before its release can send it. Navigation keeps replies,
+                // Listening stops and keeps its words. Navigation keeps drafts, replies,
                 // plans and requests queued for the phone; it isn't a dismissal.
                 watch.leaveHome()
                 path = [.job(id)]

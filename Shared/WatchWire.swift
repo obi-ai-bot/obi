@@ -38,12 +38,14 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 /// - `refresh`: nothing; answered with `context`.
 /// - `voice`: `audio` (an AAC recording) and `request`; answered with `text` (what was said),
 ///   then the plan arrives as a `planned` message.
-/// - `voiceStart`: `request`, `sampleRate` (must be 16000); opens a live transcription (answered with `ok`).
+/// - `voiceStart`: `request`, `sampleRate` (must be 16000); opens a live transcription each time the
+///   watch's mic is tapped to listen (answered with `ok`).
 /// - `voiceChunk`: `request`, zero-based `sequence`, `audio` (mono signed little-endian Int16 PCM at 16 kHz);
 ///   acknowledged with `ok`. Each chunk is <= `chunkLimit`; chunks are sent in order, each after
 ///   the previous one's reply. The phone drops a stream that goes 30 seconds without a chunk.
-/// - `voiceEnd`: `request`, `sequence` (total chunks); finishes text, answered with `text`,
-///   then `planned`. Nothing is planned before this explicit end.
+/// - `voiceEnd`: `request`, `sequence` (total chunks); sent when the watch stops listening. Finishes
+///   the text, answered with `text` (empty when nothing was said). Nothing is planned: the watch keeps
+///   the words as a draft, and sends them as a `plan` when the user taps Send.
 /// - `voiceCancel`: `request`; drops live audio or a pending plan, answered with `ok`.
 /// - `plan`: `said` and `request`, with `question` and `option` to answer the brain; answered
 ///   with `ok`, then the plan arrives as a `planned` message.
@@ -56,7 +58,7 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 ///
 /// From the phone, as a message of its own (queued when the watch app isn't up):
 /// - `transcript`: `request`, `text` (the whole current transcript, replacing the last one).
-///   Ephemeral: never queued for delivery after the hold.
+///   Ephemeral: never queued for delivery after listening stops.
 /// - `planned`: `request` and `said`, with `plan` (a RelayedPlan) or `error`.
 /// - `published`: `job` (its id), with `url`, `pending` (Face ID waits on the phone) or `error`.
 ///
@@ -97,7 +99,8 @@ nonisolated enum WatchWire {
     /// What WatchConnectivity carries in one message or context, with room to spare.
     static let limit = 60_000
     /// Mono 16-bit PCM at 16 kHz: 32 KB/s, 6x less than 48 kHz Float32. The watch records in
-    /// 1/4-second pieces; when the phone falls behind, it sends the backlog up to 1 second a chunk.
+    /// 1/4-second pieces; when the phone or the runner falls behind, it sends the backlog up to
+    /// 1 second a chunk. Listening stops by itself after `voiceSeconds`.
     static let voiceSampleRate = 16_000.0
     static let voiceSampleBytes = 2
     static let chunkLimit = 32_000
