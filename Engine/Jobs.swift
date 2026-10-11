@@ -287,9 +287,15 @@ nonisolated final class ProcessGroup: Sendable {
     }
     private let state = Mutex(State())
 
-    /// Starts `process`.
+    /// Starts `process`, with no signal blocked. A process starts with the mask of the thread that
+    /// starts it, and Dispatch's workers block nearly every signal: agents on tetrix-lab never got
+    /// SIGTERM (2026-10-11), and only SIGKILL ended them.
     static func run(_ process: Process) throws -> ProcessGroup {
         let group = ProcessGroup()
+        var none = sigset_t(), kept = sigset_t()
+        sigemptyset(&none)
+        pthread_sigmask(SIG_SETMASK, &none, &kept)
+        defer { pthread_sigmask(SIG_SETMASK, &kept, nil) }
         try process.run()
         let pid = process.processIdentifier
         group.state.withLock { $0.target = getpgid(pid) == pid ? -pid : pid }

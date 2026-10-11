@@ -358,6 +358,26 @@ struct HaltTests {
         #expect(getpgid(process.processIdentifier) != getpgrp())
     }
 
+    /// Started from a Dispatch worker, which blocks nearly every signal, a process still blocks none:
+    /// SIGTERM reaches it.
+    @Test(.timeLimit(.minutes(1)))
+    func agentsStartedFromDispatchStillHearTerm() async throws {
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/sleep")
+        process.arguments = ["30"]
+        let group = try await withCheckedThrowingContinuation { (done: CheckedContinuation<ProcessGroup, any Error>) in
+            DispatchQueue.global().async { done.resume(with: Result { try ProcessGroup.run(process) }) }
+        }
+        #if os(Linux)
+        let status = try String(contentsOfFile: "/proc/\(process.processIdentifier)/status", encoding: .utf8)
+        #expect(status.split(separator: "\n").contains("SigBlk:\t0000000000000000"), "\(status)")
+        #endif
+        group.end(after: Halt.dropping)
+        for _ in 0..<100 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(!process.isRunning)
+        #expect(process.terminationReason == .uncaughtSignal && process.terminationStatus == SIGTERM)
+    }
+
     /// SIGTERM comes first, and the agent gets `after` seconds to end on it before SIGKILL.
     @Test(.timeLimit(.minutes(1)))
     func endingSaysTermFirst() async throws {

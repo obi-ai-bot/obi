@@ -47,6 +47,8 @@ final class Desk {
     /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
     private var drafts: [Draft] = []
     private var agents: [String: any AgentRun] = [:]
+    /// Agents told to stop whose own stop hasn't ended them yet (`Halt.grace`): quitting ends them too.
+    private var stopping: [ObjectIdentifier: any AgentRun] = [:]
     /// Jobs whose one turn ended: their agent is finishing and takes no more words.
     private var ending: Set<String> = []
     /// Jobs that ended done and are counting their commits and publishing.
@@ -497,7 +499,14 @@ final class Desk {
         // Out before the job ends, so it's ended by its own stop, after the grace for its turn.
         let agent = agents.removeValue(forKey: id)
         finish(id, .stopped, "Stopped by you.")
-        agent?.stop()
+        guard let agent else { return }
+        agent.stop()
+        let key = ObjectIdentifier(agent)
+        stopping[key] = agent
+        Task {
+            try? await Task.sleep(for: .seconds(Halt.grace + Halt.stopping))
+            stopping[key] = nil
+        }
     }
 
     /// The user lets go of a job that needs them (Publish, failed, interrupted): it stays as it
@@ -573,6 +582,9 @@ final class Desk {
             agent.kill()
             finish(id, .interrupted, "Oby quit while this was running.")
         }
+        // Stopped a moment ago: its stop would end it after the grace, which is past Oby's exit.
+        for agent in stopping.values { agent.kill() }
+        stopping = [:]
         Halt.settle()
     }
 
