@@ -89,6 +89,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// What the agent asked the user at the end of its turn (`QUESTION: …`, Inbox.question), or
     /// nil. The job waits for the answer, which reaches the agent as its next message.
     var question: Plan.Question?
+    /// The latest check of its pull request on the user's Mac before a merge (Engine/Checks.swift),
+    /// and why Oby couldn't check or merge it, or nil.
+    var macCheck: MacCheck?
+    var mergeError: String?
 
     var maxRounds: Int { rounds ?? 1 }
     /// Its agent asked the user something and waits for the answer: the inbox has it.

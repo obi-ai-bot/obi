@@ -56,10 +56,13 @@ struct ReviewTests {
             return agent
         }
         desk.countCommits = { _, _ in 2 }
-        desk.publishOnItsOwn = { [made, url] job, _, _ in
+        desk.publishOnItsOwn = { [made, url] job, _, hooks in
             made.published.append(job)
+            hooks.sent(Outgoing(action: .push, repo: job.repo, id: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", branch: job.branch))
             return url
         }
+        // The commit the review read is the one Oby pushed: an approval queues a Mac check (Engine/Checks.swift).
+        desk.reviewedHead = { _ in "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b" }
         desk.postReview = { [made] author, body in
             made.posted.append((author, body))
             if let error = made.postError { throw error }
@@ -367,10 +370,10 @@ struct ReviewTests {
         let body = try #require(made.posted.first?.body)
         #expect(body.hasPrefix("### Oby review · Codex · Work: Approved\n\n```\nThe change does what was asked and the tests cover it.\n\nVERDICT: APPROVED\n```"))
         #expect(body.contains("by Oby:"))
-        // Ready to merge, and nothing merges: no author round, no second review.
+        // It waits for a Mac check before it merges: no author round, no second review.
         let stages = reviewed.pipeline.stages
         #expect(stages.first { $0.id == .review }?.state == .done && stages.first { $0.id == .review }?.detail == "Approved by Oby")
-        #expect(stages.last?.state == .current && stages.last?.detail == "Ready to merge")
+        #expect(stages.last?.state == .current && stages.last?.detail == "Waiting for a Mac check")
         #expect(!reviewed.needsYou && Push.notice(for: reviewed) == nil)
         #expect(made.agents.count == 2 && made.quoted.isEmpty && made.published.count == 1)
         // GitHub's own decision wins once there is one.
@@ -413,7 +416,7 @@ struct ReviewTests {
         let approved = try await review("All good now.\n\nVERDICT: APPROVED")
         #expect(approved.review?.verdict == .approved && approved.review?.round == 2 && approved.pushed == 3)
         #expect(made.posted.count == 2 && made.posted.last?.body.contains("review 2 of at most 4") == true)
-        #expect(approved.pipeline.stages.last?.detail == "Ready to merge")
+        #expect(approved.pipeline.stages.last?.detail == "Waiting for a Mac check")
         #expect(desk.jobs.filter { $0.reviewOf == "author" }.count == 2)
     }
 
@@ -464,7 +467,7 @@ struct ReviewTests {
         _ = try await publishAuthor()
         made.postError = Shell.Failure(message: "Not posted: possible secret in the review at line 3 (AWS access key).")
         let reviewed = try await review("Hmm.\n\n- Remove the key\n\nVERDICT: CHANGES REQUESTED")
-        #expect(reviewed.review?.comment == nil && reviewed.outgoing == nil)
+        #expect(reviewed.review?.comment == nil && reviewed.outgoing?.map(\.action) == [.push])
         #expect(reviewed.review?.postError == "Not posted: possible secret in the review at line 3 (AWS access key).")
         try await until("the author runs again") { desk.job("author")?.status == .running }
         #expect(made.quoted.first?.text.contains("- Not posted on the pull request: Not posted: possible secret in the review at line 3 (AWS access key).") == true)

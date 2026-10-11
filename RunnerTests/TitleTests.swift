@@ -41,7 +41,7 @@ struct TitleTests {
 
         let decoded = object(try API.encode(JobJSON(job: titled)))
         #expect(decoded["title"] as? String == "Job progress screen")
-        #expect(decoded.count == 42)
+        #expect(decoded.count == 44)
         var done = titled
         done.status = .done
         #expect(titled.heading == "Job progress screen" && done.doneLine == "Done: Job progress screen")

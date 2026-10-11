@@ -94,6 +94,16 @@ final class Desk {
     /// secret scan, and quotes it as a file for the author's next round. Tests put in their own.
     @ObservationIgnored var postReview: (_ author: Job, _ body: String) async throws -> URL = Review.post
     @ObservationIgnored var quoteReview: (_ author: Job, _ file: String, _ text: String) throws -> Void = Review.quote
+    /// Merge checks on the user's Mac (Engine/Checks.swift): the commit a review job read, the
+    /// results' comment, the secret scan of what a merge lands, and the merge. Tests put in their own.
+    @ObservationIgnored var reviewedHead: (_ review: String) async -> String? = { id in
+        try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-parse", "--verify", "HEAD^{commit}"])
+    }
+    @ObservationIgnored var postCheck: (_ author: Job, _ body: String) async throws -> URL = MacCheck.post
+    @ObservationIgnored var scanForMerge: (_ job: Job, _ head: String) async throws -> [Publish.Finding] = MacCheck.scan
+    @ObservationIgnored var mergePullRequest: (_ job: Job, _ check: MacCheck) async throws -> Void = MacCheck.merge
+    /// Called with every Mac check that's queued, taken or ends, for the runner's event stream.
+    var onCheckChange: (MacCheck) -> Void = { _ in }
     /// What everything on its way to an agent is checked against (Engine/Vault.swift): prompts,
     /// messages, files, reviews and environments. Tests put in their own.
     @ObservationIgnored var vault = Vault.shared

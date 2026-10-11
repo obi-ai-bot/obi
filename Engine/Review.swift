@@ -11,8 +11,8 @@ import OSLog
 /// (GitHub won't let the user approve or request changes on their own pull request) and keeps it
 /// on the job. Changes requested go back to the author's agent as its next round, as a quoted
 /// file, never in the prompt; the round that publishes is reviewed again, `maxRounds` times at
-/// most, then the job stops and needs the user. Approved: the job shows it's ready to merge. Oby
-/// doesn't merge: nothing checks the Mac and iPhone builds yet.
+/// most, then the job stops and needs the user. Approved: the user's Mac checks the commit, and
+/// Oby merges it into dev when that passes (Engine/Checks.swift).
 nonisolated struct Review: Codable, Equatable, Sendable {
     enum Verdict: String, Codable, Sendable { case approved, changesRequested }
 
@@ -299,6 +299,7 @@ extension Desk {
         author.review = result
         author.reviewError = nil
         replace(author)
+        if verdict == .approved { reviewApproved(id, review: review.id) }
         Task {
             do {
                 let url = try await postReview(author, Review.comment(result, summary: review.summary)).absoluteString
