@@ -3,8 +3,9 @@ import Testing
 @testable import ObyEngine
 @testable import ObyShared
 
-/// Routing by the weekly limit: an account ahead of pace ranks lower, and at 80% of its week it's
-/// reserved for jobs the user sends to it by name. Settings' cards say so.
+/// Routing by the weekly limit: new work goes to accounts on pace, with the most weekly room per
+/// day left; reviews to accounts ahead of it; and at 80% of its week an account is reserved for
+/// jobs the user sends to it by name. Settings' cards say so.
 @MainActor
 struct PaceTests {
     /// Sunday 2026-10-11 12:00 UTC.
@@ -16,45 +17,129 @@ struct PaceTests {
     /// When the week resets with `gone` of it passed.
     func resets(_ gone: Double) -> Date { now.addingTimeInterval((1 - gone) * week) }
 
-    func state(_ id: String, _ agent: String = "claude", fiveHour: Double? = nil, sevenDay: Double? = nil,
+    func state(_ id: String, _ agent: String = "claude", name: String? = nil, fiveHour: Double? = nil, sevenDay: Double? = nil,
                gone: Double? = nil, running: Int = 0) -> AccountState {
-        AccountState(account: Account(id: id, agent: agent, name: id, payer: "", home: nil), label: "Max", fiveHour: fiveHour,
+        AccountState(account: Account(id: id, agent: agent, name: name ?? id, payer: "", home: nil), label: "Max", fiveHour: fiveHour,
                      sevenDay: sevenDay, sevenDayResets: gone.map(resets), running: running)
     }
 
-    func route(_ states: [AccountState], _ agent: String? = "claude") -> String? {
-        AccountStore.route(states, agent: agent, now: now)?.id
+    func route(_ states: [AccountState], _ agent: String? = "claude", for work: AccountStore.Work = .new) -> String? {
+        AccountStore.route(states, agent: agent, for: work, now: now)?.id
+    }
+
+    /// The accounts on 2026-10-11 at 19:29 UTC, when "Fix it" sent two failure fixes to Codex (#176).
+    var october11: [AccountState] {
+        [state("codex", "codex", name: "Deskree", sevenDay: 0.33, gone: 0.076),
+         state("deskree", name: "Deskree", sevenDay: 0.43, gone: 0.318, running: 4),
+         state("personal", name: "Personal", sevenDay: 0.75, gone: 0.414)]
     }
 
     // MARK: Ranking
 
-    @Test func anAccountAheadOfPaceRanksBelowOneOnPace() {
+    @Test func theMeasuresOfPace() {
         let personal = state("personal", sevenDay: 0.62, gone: 0.3)
         #expect(abs(personal.weekGone(at: now)! - 0.3) < 1e-9)
-        #expect(abs(personal.ahead(at: now) - 0.32) < 1e-9)
-        // Work has used more of its week, but its week is further along.
-        let work = state("work", sevenDay: 0.7, gone: 0.75)
-        #expect(work.ahead(at: now) == 0)
-        #expect(route([personal, work]) == "work")
-        // Without the reset time there's no pace to go by: the busier window decides.
-        #expect(route([state("personal", sevenDay: 0.62), work]) == "personal")
+        #expect(abs(personal.pace(at: now)! - 0.62 / 0.3) < 1e-9 && personal.isAhead(at: now))
+        // 38% left with 4.9 days to go.
+        #expect(abs(personal.roomPerDay(at: now)! - 0.38 / 4.9) < 1e-9)
+        #expect(!state("work", sevenDay: 0.7, gone: 0.75).isAhead(at: now))
+        // Unknown usage has no pace and no room; without a reset time, the whole week is left.
+        #expect(state("new").pace(at: now) == nil && state("new").roomPerDay(at: now) == nil && !state("new").isAhead(at: now))
+        #expect(state("a", sevenDay: 0.3).pace(at: now) == nil && abs(state("a", sevenDay: 0.3).roomPerDay(at: now)! - 0.1) < 1e-9)
+        // A week about to reset counts at least a quarter of a day left.
+        #expect(abs(state("a", sevenDay: 0.5, gone: 0.999).roomPerDay(at: now)! - 2) < 1e-9)
     }
 
-    @Test func furtherAheadRanksLower() {
-        // 0.62 + 0.32 against 0.5 + 0.2 against 0.45 + 0.15.
-        let accounts = [state("a", sevenDay: 0.62, gone: 0.3), state("b", sevenDay: 0.5, gone: 0.3), state("c", sevenDay: 0.45, gone: 0.3)]
-        #expect(route(accounts) == "c")
-        #expect(route(Array(accounts.prefix(2))) == "b")
-        let scores = accounts.map { AccountStore.score($0, now: now) }
-        #expect(scores == scores.sorted(by: >))
+    @Test func newWorkGoesToAnAccountOnPace() {
+        // Work has used more of its week, but its week is further along.
+        let personal = state("personal", sevenDay: 0.62, gone: 0.3)
+        let work = state("work", sevenDay: 0.7, gone: 0.75)
+        #expect(route([personal, work]) == "work")
+        // Work on pace with little room left still beats Personal ahead of pace with more.
+        #expect(route([state("personal", sevenDay: 0.35, gone: 0.3), state("work", sevenDay: 0.78, gone: 0.8)]) == "work")
+        // Only when none is on pace, the most room per day left.
+        #expect(route([state("a", sevenDay: 0.62, gone: 0.3), state("b", sevenDay: 0.5, gone: 0.3), state("c", sevenDay: 0.45, gone: 0.3)]) == "c")
+    }
+
+    @Test func theNumbersOfOctober11SendNewWorkToClaudeDeskree() {
+        let accounts = october11
+        #expect(accounts.allSatisfy { $0.isAhead(at: now) })
+        // A fix job, a dispatch and the Lead's picks (any tool), even with 4 jobs running on it.
+        #expect(route(accounts, nil) == "deskree")
+        var states = accounts
+        #expect(AccountStore.pick(&states, agent: nil, now: now)?.id == "deskree")
+        #expect(AccountStore.pick(&states, agent: nil, now: now)?.id == "deskree")
+        // Failover from Personal's limit.
+        var full = accounts
+        full[2].fullUntil = now.addingTimeInterval(3600)
+        #expect(AccountStore.next(full, agent: "claude", now: now)?.id == "deskree")
+        // From Claude · Deskree's, Personal (the same tool) before Codex.
+        full = accounts
+        full[1].fullUntil = now.addingTimeInterval(3600)
+        #expect(AccountStore.next(full, agent: "claude", now: now)?.id == "personal")
+        // It says why, once.
+        #expect(AccountStore.choose(accounts, agent: nil, now: now)?.why
+                == "On Claude Code · Deskree: most weekly room per day left (0.12/day), though 1.4× ahead of pace: none is on pace; "
+                + "Codex · Deskree is 2.3× ahead of pace.")
+    }
+
+    @Test func aReviewTakesAnAccountAheadOfPace() {
+        let ahead = state("ahead", sevenDay: 0.6, gone: 0.3)
+        let onPace = state("onPace", sevenDay: 0.2, gone: 0.5)
+        #expect(route([onPace, ahead], for: .review) == "ahead")
+        #expect(route([onPace, ahead]) == "onPace")
+        // Not one near its 5-hour limit, nor one reserved.
+        #expect(route([onPace, state("ahead", fiveHour: 0.96, sevenDay: 0.6, gone: 0.3)], for: .review) == "onPace")
+        #expect(route([onPace, state("ahead", sevenDay: 0.85, gone: 0.3)], for: .review) == "onPace")
+        // The other tool still comes first.
+        let author = Job(id: "author", request: "", agent: "claude", account: "mine", repo: "deskree-inc/oby",
+                         branch: "oby/fix-author", kind: .fix, task: "")
+        let codex = state("codex", "codex", sevenDay: 0.2, gone: 0.5)
+        #expect(Review.reviewer([state("mine"), ahead, codex], for: author, now: now)?.id == "codex")
+        #expect(Review.reviewer([state("mine"), onPace, ahead], for: author, now: now)?.id == "ahead")
+        #expect(Review.reviewer([state("mine"), onPace, ahead], for: author, now: now)?.why.contains("so a short review suits it") == true)
     }
 
     @Test func theFiveHourWindowStillCounts() {
-        // On pace for the week, but busy right now, against a little ahead and quiet.
-        #expect(route([state("busy", fiveHour: 0.9, sevenDay: 0.2, gone: 0.5), state("quiet", fiveHour: 0.1, sevenDay: 0.4, gone: 0.3)]) == "quiet")
+        // Similar weekly room: 85% of the 5-hour window loses to 20%.
+        #expect(route([state("busy", fiveHour: 0.85, sevenDay: 0.3, gone: 0.5), state("quiet", fiveHour: 0.2, sevenDay: 0.31, gone: 0.5)]) == "quiet")
+        // Even with more weekly room, or ahead of pace.
+        #expect(route([state("busy", fiveHour: 0.85, sevenDay: 0.1, gone: 0.5), state("quiet", fiveHour: 0.2, sevenDay: 0.6, gone: 0.3)]) == "quiet")
+        // Above 80% still takes work when every account is.
+        #expect(route([state("busy", fiveHour: 0.85, sevenDay: 0.3, gone: 0.5)]) == "busy")
         #expect(route([state("full", fiveHour: 0.95, sevenDay: 0.1, gone: 0.5)]) == nil)
-        // Running jobs still count too.
-        #expect(route([state("a", sevenDay: 0.4, gone: 0.3, running: 2), state("b", sevenDay: 0.4, gone: 0.3)]) == "b")
+    }
+
+    @Test func runningJobsOnlyBreakTies() {
+        // Within 0.01/day of each other, the fewer running jobs wins.
+        #expect(route([state("a", sevenDay: 0.4, gone: 0.5, running: 2), state("b", sevenDay: 0.41, gone: 0.5)]) == "b")
+        // Further apart, the room decides, however many are running.
+        #expect(route([state("a", sevenDay: 0.3, gone: 0.5, running: 6), state("b", sevenDay: 0.45, gone: 0.5)]) == "a")
+        // All even: list order.
+        #expect(route([state("a", sevenDay: 0.4, gone: 0.5), state("b", sevenDay: 0.4, gone: 0.5)]) == "a")
+    }
+
+    @Test func unknownUsageRanksAfterKnownOnPace() {
+        let fresh = state("fresh")
+        let onPace = state("onPace", sevenDay: 0.7, gone: 0.75)
+        #expect(route([fresh, onPace]) == "onPace")
+        // Before an account ahead of pace, for new work; after it, for a review.
+        let ahead = state("ahead", sevenDay: 0.6, gone: 0.3)
+        #expect(route([ahead, fresh]) == "fresh")
+        #expect(route([fresh, ahead], for: .review) == "ahead")
+        // Among unknown ones (right after a restart), the fewer running jobs, then list order.
+        #expect(route([state("a", running: 1), state("b")]) == "b")
+        #expect(route([state("a"), state("b")]) == "a")
+        #expect(AccountStore.choose([fresh], agent: nil, now: now)?.why == "On Claude Code · fresh: its usage isn't known yet.")
+    }
+
+    @Test func theFirstHoursOfAWeekDontFlipAnAccountAhead() {
+        // 5% used in the first 2% of the week counts against a seventh of it.
+        let early = state("early", sevenDay: 0.05, gone: 0.02)
+        #expect(!early.isAhead(at: now) && abs(early.pace(at: now)! - 0.35) < 1e-9)
+        #expect(route([state("ahead", sevenDay: 0.3, gone: 0.2), early]) == "early")
+        // 20% that early is ahead.
+        #expect(state("burning", sevenDay: 0.2, gone: 0.02).isAhead(at: now))
     }
 
     // MARK: The reserve
@@ -79,7 +164,7 @@ struct PaceTests {
     @Test func theReserveEndsWhenTheWeekResets() {
         let reserved = state("reserved", sevenDay: 0.85, gone: 0.9)
         let later = now.addingTimeInterval(0.1 * week)
-        #expect(!reserved.isReserved(at: later) && reserved.ahead(at: later) == 0)
+        #expect(!reserved.isReserved(at: later) && !reserved.isAhead(at: later))
         #expect(AccountStore.route([reserved], agent: "claude", now: later)?.id == "reserved")
         #expect(AccountStore.route([reserved], agent: "claude", now: later.addingTimeInterval(-1)) == nil)
         // Without a reset time it stays reserved.

@@ -25,6 +25,8 @@ final class Desk {
         var guessed: Bool
         /// A stronger model for complex work, offered on the card and used only if the user turns it on.
         var suggestedModel: String? = nil
+        /// The account routing chose and why, or nil when the user named it.
+        var route: AccountStore.Route? = nil
     }
 
     var talk: Talk = .none
@@ -138,7 +140,8 @@ final class Desk {
     /// The message that started a looping job's current round (the check's output, "Keep going"),
     /// for an agent that takes the round over; nil when the round began with the task or the user's words.
     private var roundMessage: [String: String] = [:]
-    /// How each job moved between accounts when one hit its limit, oldest first: the report says so.
+    /// Why routing chose each job's account, and how it moved between accounts when one hit its
+    /// limit, oldest first: the report says so.
     private var handoffs: [String: [String]] = [:]
     /// Each running job's round timer and job cap (case 3.1): one ending first holds the job.
     private var roundTimers: [String: Task<Void, Never>] = [:]
@@ -528,8 +531,8 @@ final class Desk {
                     turn.refused.append("#\(brief.issue) not started: job \(job.id) is \(job.status.rawValue) on it already")
                     continue
                 }
-                guard let account = AccountStore.pick(&states, agent: nil) else { unrouted += 1; continue }
-                started.append(enqueue(Lead.job(brief, said: said, goal: goal, account: account)))
+                guard let route = AccountStore.pick(&states, agent: nil) else { unrouted += 1; continue }
+                started.append(enqueue(Lead.job(brief, said: said, goal: goal, account: route.account), why: route.why))
             }
             turn.started = started.map(\.id)
             record(turn)
@@ -594,7 +597,8 @@ final class Desk {
                 if dispatch.account != "auto", named == nil {
                     return .reply("\(dispatch.account) isn't signed in. Sign in from Settings › Accounts.")
                 }
-                guard let account = named?.account ?? AccountStore.route(states, agent: agent) else {
+                let route = named == nil ? AccountStore.choose(states, agent: agent) : nil
+                guard let account = named?.account ?? route?.account else {
                     let tool = agent.map { Job.agentNames[$0] ?? $0 } ?? "coding tool"
                     return .reply("No \(tool) account is signed in with room to spare. Check Settings › Accounts.")
                 }
@@ -609,7 +613,7 @@ final class Desk {
                 job.check = dispatch.check
                 let reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
                 drafts.append(Draft(said: said, reply: reply, job: job, guessed: result.by == "rules",
-                                    suggestedModel: dispatch.complexity == .complex ? AgentModels.stronger[account.agent] : nil))
+                                    suggestedModel: dispatch.complexity == .complex ? AgentModels.stronger[account.agent] : nil, route: route))
             }
             return drafts.isEmpty ? .none : .plan(drafts)
         case .askUser:
@@ -655,12 +659,15 @@ final class Desk {
     func dispatch(_ draft: Draft) -> Job {
         talk = .none
         drafts.removeAll { $0.job.id == draft.job.id }
-        return enqueue(draft.job)
+        // Why routing chose its account, unless the user picked another on the card.
+        return enqueue(draft.job, why: draft.route.flatMap { $0.id == draft.job.account ? $0.why : nil })
     }
 
     /// Queues a job: its worktree gets ready, then its agent starts. Oby's own jobs (reviews) start here.
+    /// `why` says why routing chose its account, for its report.
     @discardableResult
-    func enqueue(_ job: Job) -> Job {
+    func enqueue(_ job: Job, why: String? = nil) -> Job {
+        if let why { handoffs[job.id, default: []].append(why) }
         var job = job
         job.phase = .prepare
         job.step = "Getting \(job.repoName) ready"
@@ -1091,15 +1098,16 @@ final class Desk {
         let agent = agents[id]
         agents[id] = nil
         agent?.kill()
-        guard let next = AccountStore.next(accounts.accounts, agent: job.agent) else {
+        guard let route = AccountStore.next(accounts.accounts, agent: job.agent) else {
             let first = accounts.accounts.filter(\.signedIn).compactMap(\.fullUntil).min()
             let soonest = first.map { " The first resets at \(Limits.clock($0))." } ?? ""
             Logger.jobs.error("job \(id, privacy: .public): \(from, privacy: .public) hit its limit, and no account has room")
             limited.insert(id)
             return finish(id, .failed, "\(from) hit its usage limit\(when), and no other account has room.\(soonest)")
         }
+        let next = route.account
         Logger.jobs.notice("job \(id, privacy: .public): \(from, privacy: .public) hit its limit\(when, privacy: .public); continuing on \(next.heading, privacy: .public)")
-        handoffs[id, default: []].append("\(from) hit its limit\(when); continued on \(next.heading).")
+        handoffs[id, default: []].append("\(from) hit its limit\(when); continued on \(next.heading): \(route.reason).")
         var moved = job
         moved.account = next.id
         moved.agent = next.agent
@@ -1300,7 +1308,7 @@ final class Desk {
         }
         (job.status, job.summary) = Job.ending(job, status, summary, made: made, asked: asked.contains(id))
         if job.status == .failed && status == .done { job.phase = .work }
-        // How it moved between accounts, for the report.
+        // Why it went to its account, and how it moved between accounts, for the report.
         if let moves = handoffs[id], !moves.isEmpty { job.summary += "\n\n" + moves.joined(separator: "\n") }
         // What it asked Tetrix and saved there. Not on a review, whose last line is its verdict.
         if job.reviewOf == nil, let tetrix = TetrixUse.report(job) { job.summary += "\n\n" + tetrix }

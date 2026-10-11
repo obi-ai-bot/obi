@@ -151,7 +151,7 @@ Every job response (list, detail, dispatch, stop, message, wait, plan and `job` 
 
 ### Oby's review
 
-When a job publishes (or pushes new commits to its pull request), the runner has the pull request reviewed by one of its own jobs, on a different account than the author's: it prefers the other tool (Claude Code reviews Codex's work, Codex reviews Claude Code's), takes only an account that's signed in with room on its limits (under 95% of its 5-hour window and under 80% of its weekly one, which keeps the rest for jobs the user sends to it by name), and runs it on that account's model from Settings › Models. With no such account, nothing reviews and `reviewError` says so.
+When a job publishes (or pushes new commits to its pull request), the runner has the pull request reviewed by one of its own jobs, on a different account than the author's: it prefers the other tool (Claude Code reviews Codex's work, Codex reviews Claude Code's), takes only an account that's signed in with room on its limits (under 95% of its 5-hour window and under 80% of its weekly one, which keeps the rest for jobs the user sends to it by name), preferring one running ahead of its weekly pace, since a review is short (Routing, under Account), and runs it on that account's model from Settings › Models. With no such account, nothing reviews and `reviewError` says so.
 
 - **The review job** is an ordinary `Job` in the list and the event stream: `kind` `review`, `pr` the published pull request's number, `branch` like `oby/review-80`, `task` the author's task, and `reviewOf` the author job's `id` (null on every other job). It reads the diff and the author's task, makes no commits and never publishes. Its `summary` is the review; its last line is the verdict (`VERDICT: APPROVED` or `VERDICT: CHANGES REQUESTED`).
 - **On the author job:** `reviewing` is the review job's `id` while it runs, else null. `review` is Oby's latest verdict, or null:
@@ -260,6 +260,15 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
 
 Accounts are signed in on the runner itself, through each tool's own login; the app only shows them. Settings shows one card per account, grouped by tool, with a bar per window, its reset time, and the running count.
 
+**Routing.** Oby budgets each subscription by its weekly pace, not just the 5-hour window: new work goes to accounts on pace, accounts running ahead of pace get reviews or nothing, and the account with the most weekly room per remaining day wins. Every automatic choice goes through it (the brain's dispatch, the Lead's picks, failure fixes, failover, reviews); a job named to an account skips it.
+
+- An account gets nothing while it's signed out, marked `fullUntil`, at 95% of its 5-hour window, or at 80% of its week (kept for jobs sent to it by name until `sevenDayResets`). Above 80% of its 5-hour window it gets work only when every account is.
+- **Room per remaining day:** `(1 − sevenDay) / daysLeft`, `daysLeft` from `sevenDayResets` (at least 0.25; 7 when null). Higher is better.
+- **Ahead of pace:** `sevenDay / max(weekGone, 1/7) > 1`, the share used over the share of the week gone: at this burn it runs out before its reset. The floor keeps the first hours of a week from swinging it.
+- **New work** takes an account on pace first, then one whose `sevenDay` is null (unknown, not 0%: Claude Code reports usage only during a job), then one ahead of pace. **A review** takes one ahead of pace first, then on pace, then unknown; the other tool still comes first.
+- Within those, the most room per day; within 0.01/day of it, the fewest `running`, then list order.
+- The job's report says why, once (a review's, whose last line is its verdict, in the runner's log): `On Claude Code · Deskree: most weekly room per day left (0.12/day), though 1.4× ahead of pace: none is on pace; Codex · Deskree is 2.3× ahead of pace.` After failover, the handoff says it: `Codex · Deskree hit its limit; continued on Claude Code · Default: its usage isn't known yet.`
+
 ### Draft
 
 What the plan card shows before anything runs:
@@ -348,7 +357,7 @@ The answer is one of:
 
 Words that ask to stop work stop jobs right away, with nothing to confirm, and answer once they have, with a reply saying what stopped. "Stop everything" or "stop all jobs" stops every queued and running job: `"Stopped 2 jobs."`, or `"Nothing is running."`. "Cancel it" or "stop the vault job" stops the job the conversation is about, by its id from the briefing: `"Stopped Vault secrets."`, or `"That job isn't running any more."`. The brain's plan says which (the jobs by id, or everything in so many words), and Swift refuses a stop that says neither; a stop that names no job while several run is answered with a question (which one, or everything?) or `"Say which job to stop, or “stop everything”."`. (On the Mac, whose brain also sees the runner's jobs, inbox and accounts, both reach the runner's jobs through `POST /v1/jobs/{id}/stop`, and a job the runner couldn't stop is said so: `"Couldn't stop Watch home: …"`.)
 
-One message can plan up to 10 jobs ("work on oby #12, #15 and #18", or "work on epic #30", which becomes one job per open sub-issue). Each draft is already routed to the least busy account; dispatch each with its own `POST /v1/jobs`. `draft` is kept for apps that know only one job.
+One message can plan up to 10 jobs ("work on oby #12, #15 and #18", or "work on epic #30", which becomes one job per open sub-issue). Each draft is already routed (Routing, under Account); dispatch each with its own `POST /v1/jobs`. `draft` is kept for apps that know only one job.
 
 #### The Lead: vague goals
 

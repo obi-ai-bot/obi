@@ -34,21 +34,23 @@ struct AccountsTests {
         #expect(route([state("a", sevenDay: 0.79)]) == "a")
     }
 
-    /// Without reset times (no pace), the score is the busier window plus 0.15 per running job; the lowest wins.
+    /// Without reset times (no pace), the most weekly room left wins; running jobs only break ties
+    /// (RunnerTests/PaceTests has the pace).
     @Test func routeBalancesUsageAndRunningJobs() {
-        // A running job (0.15) costs less than a nearly full window (0.9).
-        #expect(route([state("a", running: 1), state("b", running: 0, fiveHour: 0.9, sevenDay: 0.7)]) == "a")
-        // The busier window counts: 0.5 beats 0.75.
-        #expect(route([state("a", fiveHour: 0.5, sevenDay: 0.1), state("b", fiveHour: 0.2, sevenDay: 0.75)]) == "a")
+        // Under 80% of the 5-hour window first.
+        #expect(route([state("a", running: 1, sevenDay: 0.5), state("b", fiveHour: 0.9, sevenDay: 0.1)]) == "a")
+        // The more weekly room: 60% left beats 25%, whatever the 5-hour window under 80%.
+        #expect(route([state("a", fiveHour: 0.5, sevenDay: 0.4), state("b", fiveHour: 0.2, sevenDay: 0.75)]) == "a")
         #expect(route([state("a", fiveHour: 0.2, sevenDay: 0.6), state("b", fiveHour: 0.2, sevenDay: 0.3)]) == "b")
-        // Two running jobs (0.3) lose to a window at 0.25.
-        #expect(route([state("a", running: 2), state("b", fiveHour: 0.25)]) == "b")
+        // Running jobs break ties, and only ties.
+        #expect(route([state("a", running: 2, sevenDay: 0.3), state("b", sevenDay: 0.3)]) == "b")
+        #expect(route([state("a", running: 5, sevenDay: 0.3), state("b", sevenDay: 0.5)]) == "a")
     }
 
-    @Test func routeKeepsListOrderOnTiesAndCountsUnknownUsageAsZero() {
-        #expect(route([state("a", fiveHour: 0.3), state("b", fiveHour: 0.3), state("c", fiveHour: 0.3)]) == "a")
-        #expect(route([state("a", fiveHour: 0.1), state("b")]) == "b")
-        #expect(route([state("a"), state("b", fiveHour: 0, sevenDay: 0)]) == "a")
+    @Test func routeKeepsListOrderOnTiesAndRanksUnknownUsageAfterKnown() {
+        #expect(route([state("a", sevenDay: 0.3), state("b", sevenDay: 0.3), state("c", sevenDay: 0.3)]) == "a")
+        #expect(route([state("a"), state("b", fiveHour: 0, sevenDay: 0)]) == "b")
+        #expect(route([state("a", fiveHour: 0.1), state("b")]) == "a")
         #expect(route([state("a", "codex"), state("b")], nil) == "a")
     }
 

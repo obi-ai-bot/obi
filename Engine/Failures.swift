@@ -756,15 +756,16 @@ final class Failures {
     }
 
     /// Starts the fix job in Oby's repository, with the post-mortem and the evidence quoted in a
-    /// file as its brief, on the account with the most room. The signature's inbox items are done.
+    /// file as its brief, on the account routing chooses (`AccountStore.choose`). The signature's inbox items are done.
     @discardableResult
     func fix(_ id: String) throws -> Job {
         guard let desk, var record = store.failure(id) else { throw Unknown(id: id) }
         guard let postMortem = record.postMortem else { throw Shell.Failure(message: "Oby hasn't studied this failure yet.") }
         if let fixing = record.fix, let job = desk.job(fixing), job.isActive { throw Shell.Failure(message: "Job \(job.id) is fixing it already.") }
-        guard let account = AccountStore.route(desk.accounts.accounts, agent: nil, now: now()) else {
+        guard let route = AccountStore.choose(desk.accounts.accounts, agent: nil, now: now()) else {
             throw Shell.Failure(message: "No account is signed in with room to spare. Check Settings › Accounts.")
         }
+        let account = route.account
         let seen = store.failures(since: now().addingTimeInterval(-Self.week)).filter { $0.postMortem?.signature == postMortem.signature }.count
         let name = "failure-\(record.id).md"
         let briefs = root.appending(path: "briefs")
@@ -788,7 +789,7 @@ final class Failures {
         for item in desk.inbox where item.isOpen && item.kind == .failure && item.title == "Oby failure: \(postMortem.signature)" {
             _ = try? desk.settle(item.id, .done)
         }
-        return desk.enqueue(job)
+        return desk.enqueue(job, why: route.why)
     }
 
     /// What the fix job's agent is asked: Swift's words; the post-mortem stays in the file.
