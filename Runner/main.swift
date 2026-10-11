@@ -27,12 +27,18 @@ do {
     Logger.runner.error("vault: \(error.localizedDescription, privacy: .public). Nothing is published until it's fixed.")
 }
 
+let speech = Speech()
+do { try await speech.discardAbandonedAudio() }
+catch {
+    Logger.runner.error("Couldn't delete abandoned speech audio; refusing to start.")
+    exit(1)
+}
 let desk = Desk()
 // Macs that follow the runner take its merge checks (Engine/Checks.swift).
 desk.queuesMacChecks = true
 let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: "devices.json")),
               push: Push(desk: desk, folder: Workspace.root.appending(path: "apns")),
-              cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")))
+              cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")), speech: speech)
 
 // systemd stops the runner with SIGTERM: agents end now, and their jobs show as interrupted.
 // The sources live as long as the runner.
