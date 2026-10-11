@@ -72,7 +72,8 @@ struct LoopsTests {
         let checked = Prompts.agent(job(rounds: 5, check: "swift test"))
         #expect(checked.contains(".oby/inputs/issue-42.md") && checked.contains("`swift test` succeeds"))
         let goal = Prompts.agent(job(rounds: 3))
-        #expect(goal.contains("GOAL MET") && goal.contains("up to 3 rounds"))
+        // The prompt says how the goal is judged; the rounds are Swift's limit, never the prompt's (#105).
+        #expect(goal.contains("GOAL MET") && !goal.contains("up to 3 rounds"))
         #expect(!Prompts.agent(job()).contains("GOAL MET"))
     }
 
@@ -83,7 +84,7 @@ struct LoopsTests {
         }
         #expect(message.contains("1 test failed"))
         #expect(Rounds.next(job(rounds: 3, round: 3, check: "swift test"), summary: "Fixed it.", failed: false, check: failing)
-                == .finish(.failed, "`swift test` still fails after 3 rounds.\n\nFixed it."))
+                == .hold("`swift test` still fails after 3 rounds", "Fixed it."))
         let passing = Rounds.Check(command: "swift test", passed: true, output: "")
         #expect(Rounds.next(job(rounds: 3, round: 2, check: "swift test"), summary: "Fixed it.", failed: false, check: passing)
                 == .finish(.done, "Fixed it.\n\nChecked: `swift test` passed."))

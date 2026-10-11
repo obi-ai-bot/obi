@@ -86,9 +86,20 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Files the user attached to the request (a screenshot, what they copied), as paths on this
     /// machine. Workspace.prepare copies them into the worktree's .oby/inputs.
     var attachments: [String]?
+    /// The commit the work started from, recorded by Oby when it set the worktree up: what test
+    /// integrity compares with (Engine/Guards.swift). Nil before then, and on older jobs.
+    var startCommit: String?
+    /// The limit Oby stopped the job at (case 3.1, Engine/Guards.swift), like "the same failure twice
+    /// in a row", or nil. Such a job is `failed`, keeps its branch and pushed nothing; one more round
+    /// is possible, by telling it something.
+    var limit: String?
     /// What the agent asked the user at the end of its turn (`QUESTION: …`, Inbox.question), or
     /// nil. The job waits for the answer, which reaches the agent as its next message.
     var question: Plan.Question?
+    /// The latest check of its pull request on the user's Mac before a merge (Engine/Checks.swift),
+    /// and why Oby couldn't check or merge it, or nil.
+    var macCheck: MacCheck?
+    var mergeError: String?
 
     var maxRounds: Int { rounds ?? 1 }
     /// Its agent asked the user something and waits for the answer: the inbox has it.
@@ -120,11 +131,13 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         status == .done && published != nil && unpublished > 0 && reviewOf == nil
             && (pullRequest.map { $0.state != .open } ?? false)
     }
-    /// Waiting for Publish (its own publish failed), failed, interrupted, out of review rounds, or
-    /// with commits its pull request won't take: what an alert is sent for, what Home counts, what
+    /// Waiting for Publish (its own publish failed), failed, interrupted, out of review rounds,
+    /// with commits its pull request won't take, or its merge stopped (Engine/Checks.swift): what an alert is sent for, what Home counts, what
     /// Clear done keeps, and what Dismiss takes. Not once dismissed.
     // ponytail: Push has no alert for `stranded` yet (Push.notice is nil for it): the app lists it under Needs you.
-    var needsYou: Bool { dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou) }
+    var needsYou: Bool {
+        dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou || mergeNeedsYou)
+    }
     var agentName: String { Job.agentNames[agent] ?? agent }
     static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
@@ -155,7 +168,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         switch status {
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done: \(heading)"
         case .failed:
-            summary.hasPrefix("Nothing committed:") ? "Nothing committed: \(heading)"
+            limit != nil ? "Stopped at a limit: \(heading)"
+                : summary.hasPrefix("Nothing committed:") ? "Nothing committed: \(heading)"
                 : summary.hasPrefix("Not published:") ? "Not published: \(heading)" : "Couldn't finish: \(heading)"
         case .stopped: "Stopped: \(heading)"
         case .interrupted: "Interrupted: \(heading)"
@@ -209,6 +223,10 @@ nonisolated enum AgentEvent: Equatable, Sendable {
     /// The agent's process ended mid-turn, without a result: the summary says how it ended. Its
     /// session can be picked up again.
     case cutOff(summary: String)
+    /// Oby answered a permission prompt: nil when it allowed the action, else why it denied it.
+    case permission(denied: String?)
+    /// Claude Code used up its `--max-turns` in this round without finishing.
+    case maxTurns
 
     /// A reset time as the tools send it: seconds since 1970 (milliseconds are taken too).
     nonisolated static func epoch(_ value: Any?) -> Date? {
@@ -230,25 +248,116 @@ protocol AgentRun: AnyObject {
     func kill()
 }
 
-/// Ending an agent that was asked to stop: Stop all promises every agent ends within 2 seconds.
+/// Ending an agent with everything it started: SIGTERM to its process group, then SIGKILL.
+/// In bubblewrap the group holds the outer bwrap, the box's own bwrap (its pid 1) and the agent.
+/// What the agent's tools start in sessions of their own (Claude Code's commands) is only in the
+/// box, and ends with the box's pid 1, which only SIGKILL reaches from outside. Without
+/// --die-with-parent (Agents.sandboxed), nothing else ends the box: SIGTERM to the outer bwrap alone
+/// left agents running for hours (2026-10-11 on tetrix-lab).
 nonisolated enum Halt {
     /// How long an agent asked to stop gets to wrap up its turn before it's ended.
     static let grace: TimeInterval = 0.8
+    /// From SIGTERM to SIGKILL when Stop ends an agent: Stop all promises every agent ends within 2 seconds.
+    static let stopping: TimeInterval = 0.4
+    /// From SIGTERM to SIGKILL when an agent is dropped otherwise: moved to another account, its job
+    /// ended, a check timed out, Oby quitting.
+    static let dropping: TimeInterval = 3
 
-    /// Ends the process now: SIGTERM, then SIGKILL 0.4 seconds later. When it leads a process
-    /// group of its own (Foundation starts it in one), the whole group, so the tools it started end too.
-    static func end(_ process: Process) {
-        guard process.isRunning else { return }
-        let pid = process.processIdentifier
-        let target = getpgid(pid) == pid && pid != getpgrp() ? -pid : pid
+    /// Groups sent SIGTERM whose SIGKILL is still to come, and when it's due.
+    private static let pending = Mutex<[pid_t: ContinuousClock.Instant]>([:])
+
+    /// SIGTERM to `target` (a process group as -pgid, or one process) now, SIGKILL `after` seconds later.
+    static func end(_ target: pid_t, after: TimeInterval) {
+        pending.withLock { $0[target] = .now + .seconds(after) }
         _ = kill(target, SIGTERM)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { _ = kill(target, SIGKILL) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + after) {
+            if pending.withLock({ $0.removeValue(forKey: target) }) != nil { _ = kill(target, SIGKILL) }
+        }
+    }
+
+    /// Oby is quitting: waits for the SIGKILLs still to come (at most `dropping`), so nothing it
+    /// started outlives it. A group that's gone already isn't waited for.
+    static func settle() {
+        while true {
+            let due = pending.withLock { pending in
+                for (target, at) in pending where kill(target, 0) != 0 || at <= .now {
+                    pending[target] = nil
+                    _ = kill(target, SIGKILL)
+                }
+                return pending.isEmpty
+            }
+            if due { return }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+    }
+}
+
+/// A process Oby started, and the process group it leads: Foundation starts every process in a
+/// group of its own (posix_spawn's SETPGROUP, checked on Linux 2026-10-11), so no setsid goes in
+/// front, which would fork when it leads one already. Once the process ends, what's left of its
+/// group is killed, so nothing it started holds its output pipe open (a review sat running for 2.5
+/// hours on a test's leftover) or outlives it.
+/// Foundation on Linux hears of the end only once everything the process started has ended too (it
+/// watches a socket they all inherit), so the end is watched here, with waitid's WNOWAIT: the
+/// process stays for Foundation to reap, and its pid and group can't be reused until it does.
+nonisolated final class ProcessGroup: Sendable {
+    private struct State {
+        /// What's signalled: -pgid, or the process alone when it doesn't lead a group.
+        var target: pid_t?
+        var exited = false
+        /// `end` sent SIGTERM, and its SIGKILL is to come.
+        var ending = false
+    }
+    private let state = Mutex(State())
+
+    /// Starts `process`, with no signal blocked. A process starts with the mask of the thread that
+    /// starts it, and Dispatch's workers block nearly every signal: agents on tetrix-lab never got
+    /// SIGTERM (2026-10-11), and only SIGKILL ended them.
+    static func run(_ process: Process) throws -> ProcessGroup {
+        let group = ProcessGroup()
+        var none = sigset_t(), kept = sigset_t()
+        sigemptyset(&none)
+        pthread_sigmask(SIG_SETMASK, &none, &kept)
+        defer { pthread_sigmask(SIG_SETMASK, &kept, nil) }
+        try process.run()
+        let pid = process.processIdentifier
+        group.state.withLock { $0.target = getpgid(pid) == pid ? -pid : pid }
+        Thread.detachNewThread {
+            var info = siginfo_t()
+            // ECHILD: Foundation reaped it already (the Mac's does as soon as it ends).
+            while waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) == -1 && errno == EINTR {}
+            group.exited()
+        }
+        return group
+    }
+
+    /// The process ended: SIGKILL to what's left of its group, unless `end`'s own SIGKILL is to come,
+    /// after the grace it gave.
+    private func exited() {
+        let target = state.withLock { state -> pid_t? in
+            state.exited = true
+            return state.ending ? nil : state.target
+        }
+        if let target, target < 0 { _ = kill(target, SIGKILL) }
+    }
+
+    /// SIGTERM to the whole group now, SIGKILL `after` seconds later (`Halt`). Once: a second call,
+    /// or one after the process ended (its group is gone already), changes nothing.
+    func end(after: TimeInterval) {
+        let target = state.withLock { state -> pid_t? in
+            guard !state.ending, !state.exited, let target = state.target else { return nil }
+            state.ending = true
+            return target
+        }
+        if let target { Halt.end(target, after: after) }
     }
 }
 
 /// Claude Code, headless, speaking stream-json both ways (proven 2026-10-09).
 final class ClaudeAgent: AgentRun {
     private let process = Process()
+    /// Its process group, once it's started.
+    private var group: ProcessGroup?
     private let input = Pipe()
     private let output = Pipe()
     /// Writes to Claude Code's input, in order and off the main thread: a message with a screenshot
@@ -259,6 +368,8 @@ final class ClaudeAgent: AgentRun {
     private let configDirectory: URL?
     /// This job's model, or nil for Settings › Models.
     var model: String?
+    /// The most turns it takes for one message (`JobLimits.maxTurns`), or nil for no limit.
+    var maxTurns: Int?
     private var onEvent: (AgentEvent) -> Void = { _ in }
     private var finished = false
     /// The latest turn's result. The job ends when Claude Code exits, not when a turn ends.
@@ -280,7 +391,7 @@ final class ClaudeAgent: AgentRun {
     }
 
     /// The command line and environment Claude Code starts with.
-    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?) throws -> (arguments: [String], environment: [String: String]) {
+    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil) throws -> (arguments: [String], environment: [String: String]) {
         // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
         // mcpServers (Tetrix) stay; only its claude.ai connectors are off.
         let arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
@@ -288,6 +399,7 @@ final class ClaudeAgent: AgentRun {
                              // Only the account's own settings: a repo's .claude/settings.json could allow tools past Oby.
                              "--setting-sources", "user",
                              "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
+                            + (maxTurns.map { ["--max-turns", String($0)] } ?? [])
                             + (resume.map { ["--resume", $0] } ?? []),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude")
         let environment = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 })
@@ -297,7 +409,7 @@ final class ClaudeAgent: AgentRun {
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
         self.onEvent = onEvent
         process.executableURL = URL(filePath: "/usr/bin/env")
-        let launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume)
+        let launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns)
         process.arguments = launch.arguments
         process.environment = launch.environment
         process.currentDirectoryURL = worktree
@@ -306,7 +418,7 @@ final class ClaudeAgent: AgentRun {
         let log = worktree.appending(path: ".oby/agent.log")
         _ = FileManager.default.createFile(atPath: log.path, contents: nil)
         process.standardError = (try? FileHandle(forWritingTo: log)) ?? FileHandle.nullDevice
-        try process.run()
+        group = try ProcessGroup.run(process)
 
         Task {
             do {
@@ -373,12 +485,12 @@ final class ClaudeAgent: AgentRun {
         guard process.isRunning else { return }
         send(["type": "control_request", "request_id": UUID().uuidString, "request": ["subtype": "interrupt"]])
         end()
-        let process = process
-        DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { Halt.end(process) }
+        let group = group
+        DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { group?.end(after: Halt.stopping) }
     }
 
     func kill() {
-        if process.isRunning { process.terminate() }
+        group?.end(after: Halt.dropping)
     }
 
     private func handle(_ line: Data) {
@@ -388,12 +500,14 @@ final class ClaudeAgent: AgentRun {
             return
         }
         if let (id, tool, toolInput) = StreamJSON.permission(message) {
-            if let reason = Policy.deny(tool: tool, input: toolInput, worktree: worktree) {
-                Logger.jobs.notice("denied \(tool, privacy: .public): \(reason, privacy: .public)")
-                answer(id, ["behavior": "deny", "message": reason])
+            let denied = Policy.deny(tool: tool, input: toolInput, worktree: worktree)
+            if let denied {
+                Logger.jobs.notice("denied \(tool, privacy: .public): \(denied, privacy: .public)")
+                answer(id, ["behavior": "deny", "message": denied])
             } else {
                 answer(id, ["behavior": "allow", "updatedInput": toolInput])
             }
+            onEvent(.permission(denied: denied))
             return
         }
         for event in StreamJSON.events(message) {
@@ -504,6 +618,9 @@ nonisolated enum StreamJSON {
                 events.append(.limit(resets: at.map { Date(timeIntervalSince1970: $0) }))
             }
             return events
+        case "result" where message["subtype"] as? String == "error_max_turns":
+            // Its `num_turns` can say more than the limit (2 for `--max-turns 1`, checked in 2.1.296).
+            return [.maxTurns]
         case "result":
             let failed = message["is_error"] as? Bool ?? (message["subtype"] as? String != "success")
             let text = (message["result"] as? String) ?? ""
@@ -779,8 +896,8 @@ nonisolated enum Agents {
         let exists = { (path: String) in FileManager.default.fileExists(atPath: path) }
         // Never --die-with-parent: its death signal follows the thread that started bwrap, and Foundation
         // starts processes on Dispatch worker threads, which exit after about 5 s idle: agents died with
-        // SIGKILL mid-turn (proven 2026-10-10 on tetrix-lab). systemd ends them with the runner instead
-        // (KillMode=control-group).
+        // SIGKILL mid-turn (proven 2026-10-10 on tetrix-lab). Oby ends the box itself (Halt, ProcessGroup),
+        // and systemd ends them with the runner (KillMode=control-group).
         var args = ["bwrap", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
                     "--tmpfs", "/tmp", "--tmpfs", home]
         for folder in tools.map({ "\(home)/\($0)" }) where exists(folder) { args += ["--overlay-src", folder, "--tmp-overlay", folder] }
@@ -944,6 +1061,7 @@ nonisolated enum Workspace {
         }
         let worktree = worktree(job.id)
         try await git(["worktree", "add", "--quiet", "-b", job.branch, worktree.path, start])
+        job.startCommit = try await Shell.ok(["git", "-C", clone.path, "rev-parse", "--verify", "\(start)^{commit}"], env: ["GIT_NO_REPLACE_OBJECTS": "1"])
         return try inputs(job, pullRequest: pullRequest, issue: issue, in: worktree)
     }
 
@@ -998,7 +1116,7 @@ nonisolated enum Prompts {
         if let check = job.check {
             lines.append("The work counts as done only when `\(check)` succeeds in this directory; Oby runs it after you finish. Run it yourself first.")
         } else if job.maxRounds > 1 {
-            lines.append("You may take up to \(job.maxRounds) rounds. End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.")
+            lines.append("End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.")
         }
         lines.append("Finish with a short summary. Its first line is one sentence the user will see in the notch.")
         lines.append(Inbox.howToAsk)
@@ -1061,8 +1179,9 @@ nonisolated final class JobStore {
         // ponytail: the job as JSON next to its id and time; add columns when something needs to query them.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS turns (created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
-        // The inbox (Engine/Inbox.swift), the same way.
+        // The inbox (Engine/Inbox.swift) and the conversation (Engine/Conversation.swift), the same way.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
+        sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS conversation (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
     }
 
     deinit { sqlite3_close(db) }

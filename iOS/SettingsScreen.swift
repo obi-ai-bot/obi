@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsScreen: View {
     @Environment(Phone.self) private var phone
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("voice.language") private var speechLanguage = "system"
     @State private var address = ""
     @State private var options: ModelOptions?
     @State private var models: ModelSettings?
@@ -23,6 +24,16 @@ struct SettingsScreen: View {
                     Text("Runner")
                 } footer: {
                     Text("The runner does the work while your Mac is closed. It answers only your Tailscale login, so this iPhone needs Tailscale on.")
+                }
+
+                Section("Voice") {
+                    Toggle("Speak replies to spoken requests", isOn: Binding(get: { phone.speakReplies }, set: { phone.speakReplies = $0 }))
+                    Picker("Speech language", selection: $speechLanguage) {
+                        Text("iPhone language").tag("system")
+                        Text("English").tag("en-US")
+                        Text("Português (Brasil)").tag("pt-BR")
+                        Text("Português (Portugal)").tag("pt-PT")
+                    }
                 }
 
                 Section("Accounts on the runner") {
@@ -65,7 +76,7 @@ struct SettingsScreen: View {
                     LabeledContent("Publishing key", value: DeviceKey.isAvailable ? (phone.deviceID == nil ? "Not registered yet" : "Registered, Face ID") : "Needs a real iPhone")
                     if let problem { Text(problem).foregroundStyle(.red) }
                 } footer: {
-                    Text("Oby opens a pull request by itself once a job's check passes and the secret scan is clean. Publishing by hand, when that failed, needs Face ID on this iPhone. Oby never merges.")
+                    Text("Oby opens a pull request by itself once a job's check passes and the secret scan is clean. Publishing by hand, when that failed, needs Face ID on this iPhone. Oby merges only into dev, once its review approves and your Mac's checks pass.")
                 }
             }
             .navigationTitle("Settings")

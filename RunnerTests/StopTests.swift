@@ -16,7 +16,7 @@ struct StopEverythingTests {
         func kill() {}
     }
 
-    let stop = Planner.Result(plan: Plan(action: .stopAgent, reply: "Oby will stop all running work.", dispatches: [], question: nil), by: "claude")
+    let stop = Planner.Result(plan: Plan(action: .stopAgent, reply: "Oby will stop all running work.", dispatches: [], question: nil, all: true), by: "claude")
 
     func draft(_ id: String) -> Desk.Draft {
         var job = job
@@ -43,7 +43,7 @@ struct StopEverythingTests {
         #expect(desk.job("running")?.status == .running && agent.started == 1)
         #expect(desk.job("queued")?.status == .queued)
 
-        #expect(desk.card(for: stop, said: "stop everything") == .reply("Stopped 2 jobs."))
+        #expect(await desk.card(for: stop, said: "stop everything") == .reply("Stopped 2 jobs."))
         #expect(desk.job("running")?.status == .stopped && desk.job("queued")?.status == .stopped)
         #expect(desk.active.isEmpty && agent.stopped == 1)
 
@@ -52,7 +52,49 @@ struct StopEverythingTests {
         try await Task.sleep(for: .milliseconds(100))
         #expect(desk.job("queued")?.status == .stopped && agent.started == 1)
 
-        #expect(desk.card(for: stop, said: "stop everything") == .reply("Nothing is running."))
+        #expect(await desk.card(for: stop, said: "stop everything") == .reply("Nothing is running."))
+    }
+
+    /// An agent that's a real process, stopped and killed as ClaudeAgent does it.
+    final class Sleeper: AgentRun {
+        let process = Process()
+        var group: ProcessGroup?
+        func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
+            process.executableURL = URL(filePath: "/bin/sleep")
+            process.arguments = ["30"]
+            group = try ProcessGroup.run(process)
+        }
+        func send(_ text: String) {}
+        func end() {}
+        func stop() {
+            let group = group
+            DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { group?.end(after: Halt.stopping) }
+        }
+        func kill() { group?.end(after: Halt.dropping) }
+    }
+
+    /// Quitting during a stopped agent's grace still ends it before Oby exits: its own stop never would.
+    @Test(.timeLimit(.minutes(1)))
+    func quittingRightAfterStopEndsTheAgent() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        let agent = Sleeper()
+        defer { _ = kill(agent.process.processIdentifier, SIGKILL) }
+        desk.makeAgent = { _, _, _ in agent }
+        desk.prepare = { $0 }
+        desk.dispatch(draft("stopped"))
+        for _ in 0..<500 where desk.job("stopped")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(agent.process.isRunning)
+
+        desk.stop("stopped")
+        let start = ContinuousClock.now
+        desk.quit()
+        // Ended within quit, well before the grace its stop would have waited.
+        for _ in 0..<20 where agent.process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(!agent.process.isRunning)
+        #expect(ContinuousClock.now - start < .seconds(Halt.grace))
+        #expect(desk.job("stopped")?.status == .stopped)
     }
 
     @Test func oneJobIsOneJob() async throws {
@@ -66,6 +108,6 @@ struct StopEverythingTests {
             return job
         }
         desk.dispatch(draft("queued"))
-        #expect(desk.card(for: stop, said: "stop it") == .reply("Stopped 1 job."))
+        #expect(await desk.card(for: stop, said: "stop it") == .reply("Stopped 1 job."))
     }
 }

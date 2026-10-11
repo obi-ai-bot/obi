@@ -272,8 +272,8 @@ final class StopAllTests {
         #expect(outgoing.compactMap { $0["action"] as? String } == ["push", "pullRequest"])
         #expect(outgoing.first?["id"] as? String == "1a2b3c4d5e" && outgoing.first?["branch"] as? String == "oby/fix-7-sent")
         // An action this build doesn't know still reads (an older Mac, a newer runner).
-        let future = try JSONDecoder().decode(Outgoing.self, from: Data(#"{"action":"merge","repo":"deskree-inc/oby","id":"https://github.com/deskree-inc/oby/pull/80","date":0}"#.utf8))
-        #expect(future.line == "merge https://github.com/deskree-inc/oby/pull/80")
+        let future = try JSONDecoder().decode(Outgoing.self, from: Data(#"{"action":"release","repo":"deskree-inc/oby","id":"https://github.com/deskree-inc/oby/pull/80","date":0}"#.utf8))
+        #expect(future.line == "release https://github.com/deskree-inc/oby/pull/80")
         // Nothing sent yet: an empty list, never missing.
         #expect((object(try API.encode(JobJSON(job: job)))["outgoing"] as? [Any])?.isEmpty == true)
     }
@@ -301,63 +301,174 @@ final class StopAllTests {
     }
 }
 
-/// Halt: an agent that ignores SIGTERM, and what it started, still end within Stop all's 2 seconds.
-// Halt itself is nonisolated; shared main-actor fixture work must not delay its clock.
+/// Halt: an agent that ignores SIGTERM, and what it started, still end within Stop all's 2 seconds;
+/// what an agent leaves behind when it ends is killed with it.
 struct HaltTests {
-    @Test func anAgentThatIgnoresTermEndsWithinTwoSeconds() async throws {
+    /// Whether anything still runs whose command line names `mark`.
+    func alive(_ mark: String) async -> Bool { (try? await Shell.run(["pgrep", "-f", mark]))?.status == 0 }
+
+    /// Waits up to two seconds for nothing naming `mark` to be left.
+    func gone(_ mark: String) async throws -> Bool {
+        for _ in 0..<100 {
+            if await !alive(mark) { return true }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        return false
+    }
+
+    /// A sleep nobody else runs, to find it by: `sleep 31.123456`.
+    func mark() -> String { "sleep 31.\(Int.random(in: 100_000...999_999))" }
+
+    /// Inside an agent's box (a job's own `swift test`) this hung for 1.5 hours (2026-10-11): it runs
+    /// on the Mac and on the runner outside a job.
+    @Test(.disabled(if: insideBubblewrap, "inside an agent's bubblewrap"), .timeLimit(.minutes(1)))
+    func anAgentThatIgnoresTermEndsWithinTwoSeconds() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
         let child = folder.appending(path: "child.pid")
         let process = Process()
         process.executableURL = URL(filePath: "/bin/sh")
         process.arguments = ["-c", "trap '' TERM; sleep 30 & echo $! > '\(child.path)'; wait"]
-        try process.run()
+        // When it really ended, not when this test, waiting on a busy main actor, gets to see it.
+        let ended = Ended()
+        process.terminationHandler = { _ in ended.mark() }
+        let group = try ProcessGroup.run(process)
         for _ in 0..<200 where (try? String(contentsOf: child, encoding: .utf8))?.isEmpty ?? true { try await Task.sleep(for: .milliseconds(10)) }
         let sleeper = try #require(Int32((try String(contentsOf: child, encoding: .utf8)).trimmingCharacters(in: .whitespacesAndNewlines)))
+        defer { _ = kill(sleeper, SIGKILL) }
 
-        // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt.
-        let start = ContinuousClock.now
-        let leads = getpgid(process.processIdentifier) == process.processIdentifier
+        // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt, which gets the rest of the 2 seconds.
         try await Task.sleep(for: .seconds(Halt.grace))
-        Halt.end(process)
-        for _ in 0..<200 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
+        let start = ContinuousClock.now
+        group.end(after: Halt.stopping)
+        for _ in 0..<500 where ended.at == nil { try await Task.sleep(for: .milliseconds(10)) }
+        let end = try #require(ended.at)
         #expect(!process.isRunning)
-        #expect(ContinuousClock.now - start < .seconds(2))
-        // What it started ends too, when it leads its own process group.
-        if leads {
-            for _ in 0..<100 where kill(sleeper, 0) == 0 { try await Task.sleep(for: .milliseconds(10)) }
-            #expect(kill(sleeper, 0) != 0)
-        }
-        _ = kill(sleeper, SIGKILL)
+        #expect(end - start < .seconds(2) - .seconds(Halt.grace))
+        // What it started ends too: it's in the agent's process group.
+        for _ in 0..<100 where kill(sleeper, 0) == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(kill(sleeper, 0) != 0)
     }
 
-    /// On Linux agents run in bubblewrap (no --die-with-parent): Halt reaches inside the box too.
-    @Test func anAgentInBubblewrapEndsWithWhatItStarted() async throws {
-        // Only where bubblewrap can make its box (user namespaces allowed), as on the runner.
-        let box = ["bwrap", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]
-        guard (try? await Shell.run(box + ["true"]))?.status == 0 else { return }
-        let mark = "31.\(Int.random(in: 100_000...999_999))"
+    /// Every agent leads a process group of its own, which is how Halt reaches all it started.
+    @Test(.timeLimit(.minutes(1)))
+    func agentsLeadAProcessGroupOfTheirOwn() throws {
         let process = Process()
-        process.executableURL = URL(filePath: "/usr/bin/bwrap")
-        process.arguments = box.dropFirst() + ["sh", "-c", "trap '' TERM; sleep \(mark) & wait"]
-        try process.run()
-        // The box, the shell in it, and the sleep it started: every one names the mark.
-        func alive() async -> Bool { (try? await Shell.run(["pgrep", "-f", "sleep \(mark)"]))?.status == 0 }
+        process.executableURL = URL(filePath: "/bin/sleep")
+        process.arguments = ["5"]
+        let group = try ProcessGroup.run(process)
+        defer { group.end(after: 0) }
+        #expect(getpgid(process.processIdentifier) == process.processIdentifier)
+        #expect(getpgid(process.processIdentifier) != getpgrp())
+    }
+
+    /// Started from a Dispatch worker, which blocks nearly every signal, a process still blocks none:
+    /// SIGTERM reaches it.
+    @Test(.timeLimit(.minutes(1)))
+    func agentsStartedFromDispatchStillHearTerm() async throws {
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/sleep")
+        process.arguments = ["30"]
+        let group = try await withCheckedThrowingContinuation { (done: CheckedContinuation<ProcessGroup, any Error>) in
+            DispatchQueue.global().async { done.resume(with: Result { try ProcessGroup.run(process) }) }
+        }
+        #if os(Linux)
+        let status = try String(contentsOfFile: "/proc/\(process.processIdentifier)/status", encoding: .utf8)
+        #expect(status.split(separator: "\n").contains("SigBlk:\t0000000000000000"), "\(status)")
+        #endif
+        group.end(after: Halt.dropping)
+        for _ in 0..<100 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(!process.isRunning)
+        #expect(process.terminationReason == .uncaughtSignal && process.terminationStatus == SIGTERM)
+    }
+
+    /// SIGTERM comes first, and the agent gets `after` seconds to end on it before SIGKILL.
+    @Test(.timeLimit(.minutes(1)))
+    func endingSaysTermFirst() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let said = folder.appending(path: "said")
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/sh")
+        process.arguments = ["-c", "trap 'echo term > \"\(said.path)\"; exit 0' TERM; echo > \"\(said.path)\"; while :; do sleep 0.05; done"]
+        process.standardError = FileHandle.nullDevice
+        let group = try ProcessGroup.run(process)
+        for _ in 0..<200 where !FileManager.default.fileExists(atPath: said.path) { try await Task.sleep(for: .milliseconds(10)) }
+        group.end(after: Halt.dropping)
+        // A second end changes nothing.
+        group.end(after: 0)
+        for _ in 0..<300 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(!process.isRunning)
+        #expect(process.terminationReason == .exit && process.terminationStatus == 0)
+        #expect(try String(contentsOf: said, encoding: .utf8) == "term\n")
+    }
+
+    /// The agent ended by itself, but a tool it started still runs and holds its output: that's
+    /// killed, so reading the output ends (a review sat running for 2.5 hours on a test's leftover).
+    @Test(.timeLimit(.minutes(1)))
+    func whatAnAgentLeavesBehindDoesntHoldItsOutput() async throws {
+        let mark = mark()
+        let process = Process(), out = Pipe()
+        process.executableURL = URL(filePath: "/bin/sh")
+        process.arguments = ["-c", "\(mark) & echo started"]
+        process.standardOutput = out
+        _ = try ProcessGroup.run(process)
+        let start = ContinuousClock.now
+        let read = try await Task.detached { try out.fileHandleForReading.readToEnd() }.value
+        #expect(read.map { String(decoding: $0, as: UTF8.self) } == "started\n")
+        #expect(ContinuousClock.now - start < .seconds(10))
+        #expect(try await gone(mark))
+    }
+
+    /// The same for a check Oby runs: `Shell.run` returns when the command ends, not when its leftovers do.
+    @Test(.timeLimit(.minutes(1)))
+    func aChecksLeftoversDontHoldItsOutput() async throws {
+        let mark = mark()
+        let start = ContinuousClock.now
+        let result = try await Shell.run(["sh", "-c", "\(mark) & echo started"])
+        #expect(result.text == "started" && result.status == 0)
+        #expect(ContinuousClock.now - start < .seconds(10))
+        #expect(try await gone(mark))
+    }
+
+    /// On Linux agents run in bubblewrap (no --die-with-parent). A command the agent started in a
+    /// session of its own, as Claude Code starts them, that ignores SIGTERM ends with the box.
+    @Test(.enabled(if: bubblewrapRuns), .timeLimit(.minutes(1)))
+    func anAgentInBubblewrapEndsWithWhatItStarted() async throws {
+        let mark = mark()
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/env")
+        process.arguments = Agents.sandboxed(["sh", "-c", "setsid sh -c \"trap '' TERM; \(mark)\" & trap '' TERM; wait"], in: nil, own: nil)
+        let group = try ProcessGroup.run(process)
         var tries = 0
-        while await !alive(), tries < 200 { try await Task.sleep(for: .milliseconds(10)); tries += 1 }
-        #expect(await alive())
+        while await !alive(mark), tries < 200 { try await Task.sleep(for: .milliseconds(10)); tries += 1 }
+        #expect(await alive(mark))
 
         let start = ContinuousClock.now
-        Halt.end(process)
-        tries = 0
-        while tries < 200 {
-            let left = await alive()
-            if !process.isRunning && !left { break }
-            try await Task.sleep(for: .milliseconds(10))
-            tries += 1
-        }
+        group.end(after: Halt.stopping)
+        #expect(try await gone(mark))
+        for _ in 0..<100 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
         #expect(!process.isRunning)
-        #expect(await !alive())
         #expect(ContinuousClock.now - start < .seconds(2) - .seconds(Halt.grace))
     }
+
+    /// The agent in the box ended, but a command it started in a session of its own still runs:
+    /// the box's pid 1 waits for it, so it's killed, and the agent's output ends.
+    @Test(.enabled(if: bubblewrapRuns), .timeLimit(.minutes(1)))
+    func whatAnAgentLeavesInTheBoxDoesntHoldItsOutput() async throws {
+        let mark = mark()
+        let start = ContinuousClock.now
+        let result = try await Shell.run(Agents.sandboxed(["sh", "-c", "setsid \(mark) & echo started"], in: nil, own: nil))
+        #expect(result.text == "started")
+        #expect(ContinuousClock.now - start < .seconds(10))
+        #expect(try await gone(mark))
+    }
+}
+
+/// When a process ended, from its termination handler's thread.
+final class Ended: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant: ContinuousClock.Instant?
+    var at: ContinuousClock.Instant? { lock.withLock { instant } }
+    func mark() { lock.withLock { instant = .now } }
 }

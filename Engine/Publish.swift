@@ -7,7 +7,8 @@ import LocalAuthentication
 /// review. Guards, then a secret scan, then the approval; nothing is sent before it (only the base is fetched).
 /// A job that ends done with commits publishes by itself (the approval lets everything through);
 /// a job whose publish failed is published by hand, with Touch ID on the Mac or a phone's
-/// signature on the runner. Oby never merges, force-pushes or pushes to main for anyone.
+/// signature on the runner. Oby never force-pushes or pushes to main for anyone; it merges only
+/// into dev, after its review and the Mac check (Engine/Checks.swift).
 nonisolated enum Publish {
     /// The secret scan found something: nothing goes out, and the job fails naming where.
     struct Blocked: LocalizedError {
@@ -636,7 +637,7 @@ nonisolated enum Publish {
             \(check)
             - Secret scan: clean.\(job.issue.map { "\n\nCloses #\($0)" } ?? "")
 
-            by Oby: Oby opened this pull request after the check passed and the secret scan was clean. A person reviews it before it merges.
+            by Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
             """
     }
 

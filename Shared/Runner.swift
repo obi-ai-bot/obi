@@ -59,6 +59,19 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var outgoing: [Outgoing]?
     /// What its agent asked the user and waits for (the inbox has it), or nil. Older runners don't send it.
     var question: Question?
+    /// Oby's merge stopped where a person takes over (the runner derives it, docs/runner-api.md "Mac
+    /// check"), or nil from older runners.
+    var stoppedMerge: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
+             started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
+             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question
+        case stoppedMerge = "mergeNeedsYou"
+    }
+
+    /// Its merge stopped: it couldn't merge, or the Mac check failed with no round left.
+    var mergeNeedsYou: Bool { dismissed == nil && stoppedMerge == true }
 
     var isActive: Bool { status == .queued || status == .running }
     /// Its agent asked the user something and waits for the answer: its alert stays until then.
@@ -111,8 +124,11 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     }
 
     /// Waiting for Publish (the runner's own publish failed), failed, interrupted, out of review
-    /// rounds or stranded, and not dismissed: what the runner sends an alert for, and what Dismiss takes.
-    var needsYou: Bool { dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou) }
+    /// rounds, stranded or its merge stopped, and not dismissed: what the runner sends an alert for,
+    /// and what Dismiss takes.
+    var needsYou: Bool {
+        dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou || mergeNeedsYou)
+    }
 
     /// "Round 2 of 5 · Fable 5.1", or empty for a one-round job on the usual model.
     var extras: String {
@@ -165,7 +181,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
 
 /// Something the runner sent out for a job (docs/runner-api.md): ids only, never what was sent.
 nonisolated struct Outgoing: Codable, Equatable, Sendable {
-    /// "push", "pullRequest", "pullRequestEdit" or "comment"; a newer runner may send others.
+    /// "push", "pullRequest", "pullRequestEdit", "comment" or "merge"; a newer runner may send others.
     var action: String
     var repo: String
     var id: String
@@ -179,6 +195,7 @@ nonisolated struct Outgoing: Codable, Equatable, Sendable {
         case "pullRequest": "Opened pull request \(id)"
         case "pullRequestEdit": "Updated the description of \(id)"
         case "comment": "Commented \(id)"
+        case "merge": "Squash-merged \(id) into dev and deleted \(branch ?? "its branch")"
         default: "\(action) \(id)"
         }
     }
@@ -261,6 +278,7 @@ extension InboxItem {
         case "question": "Question"
         case "review": "Out of reviews"
         case "limit": "Out of usage"
+        case "merge": "Not merged"
         default: "Failed"
         }
         return "\(label) · \(title) · \(Elapsed.waiting(since: created, now: now))"
@@ -334,15 +352,39 @@ nonisolated struct ModelOptions: Codable, Equatable, Sendable {
     var codex: Tool
 }
 
-nonisolated struct RunnerStatus: Codable, Equatable, Sendable {
+#if os(iOS) || os(watchOS)
+/// The runner's accounts as the API sends them: the iPhone's own wire type.
+typealias RunnerAccount = Account
+#else
+/// On the Mac the runner's accounts are read into Engine's own AccountState (the runner keeps
+/// their `payer` and `home` to itself), so the brain can tell their usage too (Engine/Conversation.swift).
+typealias RunnerAccount = AccountState
+
+extension AccountState: Decodable {
+    private enum Keys: String, CodingKey { case id, agent, name, label, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil }
+
+    init(from decoder: any Decoder) throws {
+        let keys = try decoder.container(keyedBy: Keys.self)
+        self.init(account: Account(id: try keys.decode(String.self, forKey: .id), agent: try keys.decode(String.self, forKey: .agent),
+                                   name: try keys.decode(String.self, forKey: .name), payer: "", home: nil),
+                  label: try keys.decodeIfPresent(String.self, forKey: .label),
+                  fiveHour: try keys.decodeIfPresent(Double.self, forKey: .fiveHour),
+                  sevenDay: try keys.decodeIfPresent(Double.self, forKey: .sevenDay),
+                  fiveHourResets: try keys.decodeIfPresent(Date.self, forKey: .fiveHourResets),
+                  sevenDayResets: try keys.decodeIfPresent(Date.self, forKey: .sevenDayResets),
+                  running: try keys.decodeIfPresent(Int.self, forKey: .running) ?? 0,
+                  fullUntil: try keys.decodeIfPresent(Date.self, forKey: .fullUntil))
+    }
+}
+#endif
+
+nonisolated struct RunnerStatus: Decodable, Equatable, Sendable {
     struct Runner: Codable, Equatable, Sendable {
         var version: String
         var host: String
     }
     var runner: Runner
-    #if os(iOS) || os(watchOS)
-    var accounts: [Account]
-    #endif
+    var accounts: [RunnerAccount]
     var models: ModelSettings
     /// When Clear done was last pressed, on any app, or nil (docs/runner-api.md). Older runners don't send it.
     var clearedAt: Date?
@@ -365,11 +407,15 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     /// arrives after this, so applying it over the fetched lists loses nothing.
     case connected
     case job(Job)
-    case accounts([Account])
+    case accounts([RunnerAccount])
     /// Clear done was pressed, here or on another app: jobs that finished by then are hidden.
     case cleared(Date)
     /// An inbox item came, was answered, done or put off, here or on another app.
     case inbox(InboxItem)
+    #if os(macOS)
+    /// A merge check was queued, taken or ended (Engine/Checks.swift): a Mac that runs them asks for one.
+    case check(MacCheck)
+    #endif
 }
 
 extension Job {
@@ -450,6 +496,7 @@ nonisolated enum NeedsYou {
             count(needing.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
             count(needing.count(where: \.reviewNeedsYou), "needs your review", "need your review"),
             count(needing.count(where: \.stranded), "wasn't published", "weren't published"),
+            count(needing.count(where: \.mergeNeedsYou), "wasn't merged", "weren't merged"),
         ].compactMap(\.self)
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
@@ -558,6 +605,23 @@ nonisolated struct Runner: Sendable {
         let answer: Answer = try await call("POST", "v1/devices", body: Body(name: name, publicKey: publicKey.base64EncodedString()))
         return answer.id
     }
+
+    #if os(macOS)
+    /// The next merge check for this Mac to run, now this Mac's, or nil when none waits.
+    func nextCheck(mac: String) async throws -> MacCheck? {
+        struct Answer: Decodable { var check: MacCheck? }
+        let name = mac.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        let answer: Answer = try await call("GET", "v1/checks/next?mac=\(name)")
+        return answer.check
+    }
+
+    /// What this Mac found running a check it took.
+    func report(_ id: String, _ report: MacCheck.Report) async throws -> MacCheck {
+        struct Answer: Decodable { var check: MacCheck }
+        let answer: Answer = try await call("POST", "v1/checks/\(id)/result", body: report)
+        return answer.check
+    }
+    #endif
 
     /// Server-Sent Events until the connection drops; the caller reconnects.
     func events() -> AsyncThrowingStream<RunnerEvent, Error> {
@@ -670,9 +734,12 @@ nonisolated struct EventParser {
             let json = Data(data.utf8)
             switch name {
             case "job": return (try? Runner.decoder.decode(Job.self, from: json)).map(RunnerEvent.job)
-            case "accounts": return (try? Runner.decoder.decode([Account].self, from: json)).map(RunnerEvent.accounts)
+            case "accounts": return (try? Runner.decoder.decode([RunnerAccount].self, from: json)).map(RunnerEvent.accounts)
             case "clear": return (try? Runner.decoder.decode(ClearedAt.self, from: json)).map { .cleared($0.clearedAt) }
             case "inbox": return (try? Runner.decoder.decode(InboxItem.self, from: json)).map(RunnerEvent.inbox)
+            #if os(macOS)
+            case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
+            #endif
             default: return nil
             }
         }
