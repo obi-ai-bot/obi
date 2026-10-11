@@ -64,6 +64,8 @@ final class Push {
         case review
         /// Its agent asked the user something and waits for the answer (the inbox has it).
         case question
+        /// Oby's merge stopped: it couldn't merge, or the Mac check failed with no round left.
+        case merge
     }
 
     private struct Signer {
@@ -288,6 +290,7 @@ final class Push {
         guard job.needsYou else { return nil }
         if job.canPublish { return .ready }
         if job.reviewNeedsYou { return .review }
+        if job.mergeNeedsYou { return .merge }
         switch job.status {
         case .failed: return .failed
         case .interrupted: return .interrupted
@@ -323,12 +326,14 @@ final class Push {
         case .interrupted: "Interrupted: \(state.title)"
         case .review: "Changes requested: \(state.title)"
         case .question: "Question: \(state.title)"
+        case .merge: "Not merged: \(state.title)"
         }
         // Why its own publish failed, when that's what it needs; why Oby's review stopped.
         let body = switch notice {
         case .ready: job.publishError ?? state.line
         case .review: Review.stopLine
         case .question: job.question?.text ?? state.line
+        case .merge: job.mergeError ?? job.macCheck.map { $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? state.line
         case .failed, .interrupted: state.line
         }
         let aps: [String: any Encodable] = ["alert": ["title": title, "body": body], "sound": "default",

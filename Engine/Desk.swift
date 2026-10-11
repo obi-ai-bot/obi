@@ -104,6 +104,8 @@ final class Desk {
     @ObservationIgnored var mergePullRequest: (_ job: Job, _ check: MacCheck) async throws -> Void = MacCheck.merge
     /// Called with every Mac check that's queued, taken or ends, for the runner's event stream.
     var onCheckChange: (MacCheck) -> Void = { _ in }
+    /// Jobs whose Mac check result is being posted and merged or handed back (`finishCheck`), once at a time.
+    @ObservationIgnored var finishingChecks: Set<String> = []
     /// What everything on its way to an agent is checked against (Engine/Vault.swift): prompts,
     /// messages, files, reviews and environments. Tests put in their own.
     @ObservationIgnored var vault = Vault.shared
@@ -151,6 +153,8 @@ final class Desk {
         // Reviews that were waiting for an account with room when Oby last ran: start them now that
         // the sign-ins are known, or watch for room (also a five-minute safety net).
         startWaitingReviews()
+        // Merges a restart cut short, or that failed on something that may pass now (Engine/Checks.swift).
+        resumeChecks()
     }
 
     /// The brain picks "auto" or an account by name; Swift turns that into a real account.
@@ -1012,7 +1016,8 @@ final class Desk {
             let text = words.trimmingCharacters(in: .whitespacesAndNewlines)
             guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Answer with 1 to 2,000 characters.") }
             switch (item.kind, text) {
-            case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss): try dismiss(item.job)
+            case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss), (.merge, Inbox.dismiss): try dismiss(item.job)
+            case (.merge, Inbox.tryAgain): try retryMerge(item.job)
             case (.failed, Inbox.tryAgain), (.limit, Inbox.tryAgain): try message(item.job, Inbox.tryAgainMessage)
             case (.review, Inbox.oneMoreRound): try message(item.job, reviewAgain(item.job))
             default: try message(item.job, text)

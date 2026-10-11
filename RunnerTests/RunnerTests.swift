@@ -275,7 +275,7 @@ final class APITests {
         for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "check", "model", "notes", "pullRequest", "pullRequestError",
                     "dismissed", "reviewing", "review", "reviewError", "reviewOf", "files", "lead", "claim", "question", "macCheck", "mergeError"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 44)
+        #expect(decoded.count == 45)
         #expect(json.contains(#""outgoing":[]"#))
         #expect(decoded["pipeline"] is [String: Any])
         #expect(decoded["title"] as? String == "Review oby #33")

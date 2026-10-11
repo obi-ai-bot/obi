@@ -19,6 +19,8 @@ final class RunnerFeed {
         case review
         /// Its agent asked the user something and waits for the answer (the inbox has it).
         case question
+        /// Oby's merge stopped: it couldn't merge, or the Mac check failed with no round left.
+        case merge
     }
 
     private(set) var jobs: [Job] = [] {
@@ -205,6 +207,7 @@ final class RunnerFeed {
         guard job.needsYou else { return nil }
         if job.canPublish { return .ready }
         if job.reviewNeedsYou { return .review }
+        if job.mergeNeedsYou { return .merge }
         switch job.status {
         case .failed: return .failed
         case .interrupted: return .interrupted
@@ -234,6 +237,7 @@ final class RunnerFeed {
         case .interrupted: "Interrupted: \(job.heading)"
         case .review: "Changes requested: \(job.heading)"
         case .question: "Question: \(job.heading)"
+        case .merge: "Not merged: \(job.heading)"
         }
     }
 
@@ -243,6 +247,7 @@ final class RunnerFeed {
         if notice == .ready { return job.publishError ?? line ?? "Done" }
         if notice == .review { return Review.stopLine }
         if notice == .question, let question = job.question { return question.text }
+        if notice == .merge { return job.mergeError ?? job.macCheck.map { $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? "Not merged" }
         return line ?? job.status.rawValue.capitalized
     }
 

@@ -306,6 +306,152 @@ struct CheckTests {
         #expect(check.failureLine == "Mac app and MacTests failed on Studio.")
     }
 
+    @Test func aStoppedCheckNeedsYouAndSaysSoInTheInboxAndAlerts() throws {
+        var author = author
+        author.status = .done
+        author.published = url.absoluteString
+        author.outgoing = [Outgoing(action: .push, repo: author.repo, id: Self.head, branch: author.branch)]
+        author.review = Review(verdict: .approved, job: "r", agent: "codex", account: "Work", round: 1)
+        var check = MacCheck.make(for: author, pr: 80, head: Self.head)
+        check.round = MacCheck.maxRounds
+        check.state = .failed
+        check.mac = "Studio"
+        check.failures = ["A()"]
+        author.macCheck = check
+        // The third failed check: no more rounds, and it needs you.
+        #expect(author.checkStop == MacCheck.stopLine && author.mergeNeedsYou && author.needsYou)
+        #expect(Push.notice(for: author) == .merge)
+        let item = try #require(Inbox.need(of: author))
+        #expect(item.kind == .merge && item.options == [Inbox.dismiss] && item.text == "1 test failed on Studio: A() " + MacCheck.stopLine)
+        let alert = object(try Push.notification(.merge, for: author))
+        let aps = (alert["aps"] as? [String: Any])?["alert"] as? [String: Any]
+        #expect(aps?["body"] as? String == "1 test failed on Studio: A() " + MacCheck.stopLine)
+        #expect((aps?["title"] as? String)?.hasPrefix("Not merged: ") == true)
+        #expect(object(try API.encode(JobJSON(job: author)))["mergeNeedsYou"] as? Bool == true)
+        // A check with rounds left goes back to the author: nothing needs you.
+        author.macCheck?.round = 1
+        #expect(author.checkStop == nil && !author.mergeNeedsYou && !author.needsYou && Inbox.need(of: author) == nil)
+        // Oby's reviews are used up: a fix could never be reviewed, so a person takes it from here.
+        author.review?.round = Review.maxRounds
+        #expect(author.checkStop == MacCheck.reviewsUsedLine && author.mergeNeedsYou)
+        #expect(author.pipeline.stages.last?.reason == "1 test failed on Studio: A() " + MacCheck.reviewsUsedLine)
+        // A merge that failed can be tried again; dismissed, nothing needs you.
+        author.review?.round = 1
+        author.macCheck?.state = .passed
+        author.mergeError = "Not merged: gh: HTTP 502"
+        let retry = try #require(Inbox.need(of: author))
+        #expect(retry.kind == .merge && retry.options == [Inbox.tryAgain, Inbox.dismiss] && retry.text == "Not merged: gh: HTTP 502")
+        author.dismissed = .now
+        #expect(!author.mergeNeedsYou && !author.needsYou && Inbox.need(of: author) == nil)
+        // A refusal before any check (a job based on main) is information, not a dead end.
+        author.dismissed = nil
+        author.macCheck = nil
+        author.mergeError = "Not merged: Oby merges only into dev, never into main."
+        #expect(!author.mergeNeedsYou)
+    }
+
+    @Test func whenObysLastReviewApprovedAFailedCheckStopsInsteadOfARoundNoOneReviews() async throws {
+        let check = try await approved()
+        var job = try #require(desk.job("author"))
+        job.review?.round = Review.maxRounds
+        desk.replace(job)
+        _ = desk.nextMacCheck(mac: "Studio")
+        var failing = steps
+        failing[0].passed = false
+        try desk.macCheckEnded(check.id, MacCheck.Report(passed: false, steps: failing, failures: ["blocksASecret()"]))
+        try await until("the results are posted") { desk.job("author")?.macCheck?.comment != nil }
+        try await Task.sleep(for: .milliseconds(50))
+        let stopped = try #require(desk.job("author"))
+        #expect(stopped.status == .done && made.agents.count == 2 && made.quoted.isEmpty)
+        #expect(stopped.mergeNeedsYou && stopped.needsYou && desk.inbox.last?.kind == .merge && desk.inbox.last?.isOpen == true)
+    }
+
+    // MARK: Recovering
+
+    /// A job whose check passed, saved as the runner left it.
+    func passed(_ change: (inout Job) -> Void = { _ in }) -> Desk {
+        var saved = author
+        saved.status = .done
+        saved.commits = 2
+        saved.published = url.absoluteString
+        saved.outgoing = [Outgoing(action: .push, repo: saved.repo, id: Self.head, branch: saved.branch)]
+        saved.review = Review(verdict: .approved, job: "r", agent: "codex", account: "Work", round: 1)
+        saved.pullRequest = PullRequestStatus(state: .open, base: "dev", checkedAt: .now)
+        var check = MacCheck.make(for: saved, pr: 80, head: Self.head)
+        check.state = .passed
+        check.mac = "Studio"
+        check.steps = steps
+        saved.macCheck = check
+        change(&saved)
+        let store = JobStore(url: folder.appending(path: "saved-\(UUID().uuidString).sqlite"))
+        store.save(saved)
+        let restarted = Desk(accounts: AccountStore(root: folder), store: store)
+        restarted.postCheck = { [made] _, body in
+            made.comments.append(body)
+            return URL(string: "https://github.com/deskree-inc/oby/pull/80#issuecomment-7")!
+        }
+        restarted.scanForMerge = { [made] _, head in
+            made.scanned.append(head)
+            return made.findings
+        }
+        restarted.mergePullRequest = { [made] _, check in
+            if let error = made.mergeError { throw error }
+            made.merged.append(check)
+        }
+        return restarted
+    }
+
+    @Test func aMergeARestartCutShortIsFinishedWhenTheRunnerStartsAgain() async throws {
+        let restarted = passed()
+        #expect(restarted.job("author")?.pipeline.stages.last?.detail == "Mac check passed · merging")
+        restarted.resumeChecks()
+        try await until("it merges") { restarted.job("author")?.pullRequest?.state == .merged }
+        // Its results weren't posted before the restart: they are now, once.
+        #expect(made.comments.count == 1 && made.merged.count == 1)
+        #expect(restarted.job("author")?.outgoing?.map(\.action) == [.push, .comment, .merge])
+        restarted.resumeChecks()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(made.comments.count == 1 && made.merged.count == 1)
+    }
+
+    @Test func aMergeThatFailedOnGitHubIsTriedAgainAndTheInboxCanTooButASecretIsNot() async throws {
+        let restarted = passed { $0.macCheck?.comment = "https://github.com/deskree-inc/oby/pull/80#issuecomment-2" }
+        made.mergeError = Shell.Failure(message: "gh: HTTP 502")
+        restarted.resumeChecks()
+        try await until("the merge fails") { restarted.job("author")?.mergeError != nil }
+        var job = try #require(restarted.job("author"))
+        #expect(job.mergeError == "Not merged: gh: HTTP 502" && job.macCheck?.transient == true && job.macCheck?.tries == 1)
+        #expect(job.mergeNeedsYou && Push.notice(for: job) == .merge)
+        // Each refresh tries it again, up to MacCheck.maxTries.
+        for tries in 2...MacCheck.maxTries {
+            restarted.resumeChecks()
+            try await until("try \(tries)") { restarted.job("author")?.macCheck?.tries == tries && !restarted.finishingChecks.contains("author") }
+        }
+        restarted.resumeChecks()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(restarted.job("author")?.macCheck?.tries == MacCheck.maxTries)
+        // Try again from the inbox: GitHub is back, and it merges.
+        made.mergeError = nil
+        let item = try #require(restarted.inbox.last { $0.isOpen })
+        #expect(item.kind == .merge && item.options == [Inbox.tryAgain, Inbox.dismiss])
+        let settled = try restarted.settle(item.id, .answer(Inbox.tryAgain))
+        #expect(settled.done != nil && settled.answer == Inbox.tryAgain)
+        try await until("it merges") { restarted.job("author")?.pullRequest?.state == .merged }
+        job = try #require(restarted.job("author"))
+        #expect(job.mergeError == nil && !job.needsYou && made.merged.count == 1 && made.comments.isEmpty)
+
+        // A possible secret isn't tried again by itself.
+        let secret = passed { $0.macCheck?.comment = "https://github.com/deskree-inc/oby/pull/80#issuecomment-2" }
+        made.findings = [Publish.Finding(file: "README.md", line: 3, rule: "AWS access key")]
+        secret.resumeChecks()
+        try await until("the scan stops it") { secret.job("author")?.mergeError != nil }
+        #expect(secret.job("author")?.macCheck?.transient == false)
+        secret.resumeChecks()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(made.scanned.filter { $0 == Self.head }.count == MacCheck.maxTries + 2)
+        #expect(throws: (any Error).self) { try restarted.retryMerge("author") }
+    }
+
     // MARK: Never into main
 
     @Test func theMergeWaitsForEverythingAndNeverGoesIntoMain() {

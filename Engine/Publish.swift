@@ -637,7 +637,7 @@ nonisolated enum Publish {
             \(check)
             - Secret scan: clean.\(job.issue.map { "\n\nCloses #\($0)" } ?? "")
 
-            by Oby: Oby opened this pull request after the check passed and the secret scan was clean. A person reviews it before it merges.
+            by Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
             """
     }
 

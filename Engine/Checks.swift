@@ -55,6 +55,11 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// The pull request comment with the results, or nil with `postError` saying why there's none.
     var comment: String?
     var postError: String?
+    /// How many times the runner tried to merge after it passed, and whether the last try failed on
+    /// something that may pass later (`gh`, the network, the scan not running): `Desk.resumeChecks`
+    /// tries those again.
+    var tries: Int?
+    var transient: Bool?
 
     /// The only branch Oby merges into.
     static let into = "dev"
@@ -63,6 +68,10 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// A Mac that took a check and said nothing for this long went away: the next Mac to ask gets it.
     static let lease: TimeInterval = 2 * 3600
     static let stopLine = "The Mac check failed \(maxRounds) times. Take it from here."
+    /// A failed check whose fix Oby could never review: its reviews are used up.
+    static let reviewsUsedLine = "Oby reviewed it \(Review.maxRounds) times already, so a fix can't merge. Take it from here."
+    /// How many times the runner tries a merge that failed on something that may pass later.
+    static let maxTries = 3
 
     var label: String { state == .passed ? "Passed" : state == .failed ? "Failed" : state == .running ? "Running" : "Queued" }
     var macName: String { mac ?? "a Mac" }
@@ -398,6 +407,26 @@ extension Job {
     /// The last commit Oby pushed to the job's branch: its pull request's head, as Oby left it.
     nonisolated var pushedHead: String? { outgoing?.last { $0.action == .push && $0.branch == branch }?.id }
 
+    /// Why a failed Mac check goes back to no one, or nil when the author's agent gets another
+    /// round: the check failed `MacCheck.maxRounds` times, or Oby can't review the fix any more
+    /// (its reviews are used up, Review.maxRounds), so a fix could never merge.
+    nonisolated var checkStop: String? {
+        guard let check = macCheck, check.state == .failed else { return nil }
+        if check.round >= MacCheck.maxRounds { return MacCheck.stopLine }
+        if (review?.round ?? 0) >= Review.maxRounds { return MacCheck.reviewsUsedLine }
+        return nil
+    }
+
+    /// Oby's merge stopped where a person takes over, while the pull request is open and Oby's
+    /// review approved the commit the Mac checked: the merge failed (`mergeError`), or the check
+    /// failed with no round left for the author (`checkStop`). Not once you let it go. What needs
+    /// you, alerts and the inbox count.
+    nonisolated var mergeNeedsYou: Bool {
+        guard status == .done, dismissed == nil, published != nil, (pullRequest?.state ?? .open) == .open, review?.verdict == .approved,
+              reviewing == nil, let check = macCheck, check.head == pushedHead, check.state == .passed || check.state == .failed else { return false }
+        return mergeError != nil || checkStop != nil
+    }
+
     /// The Merged stage while the pull request is open and Oby's review approved it.
     nonisolated var mergeProgress: (state: JobStage.State, detail: String, reason: String?) {
         if let mergeError { return (.failed, "Not merged", mergeError) }
@@ -406,8 +435,7 @@ extension Job {
         case .queued: return (.current, "Waiting for a Mac check", nil)
         case .running: return (.current, "Checking on \(check.macName)", nil)
         case .passed: return (.current, "Mac check passed · merging", nil)
-        case .failed:
-            return (.failed, "Mac check failed", check.failureLine + (check.round >= MacCheck.maxRounds ? " " + MacCheck.stopLine : ""))
+        case .failed: return (.failed, "Mac check failed", check.failureLine + (checkStop.map { " " + $0 } ?? ""))
         }
     }
 }
@@ -456,8 +484,8 @@ extension Desk {
 
     /// A Mac reports check `id`. Its results go on the job and, while the job still waits for that
     /// commit, on the pull request as a comment; then passed merges, and failed goes back to the
-    /// author's agent as its next round. Throws `MacCheck.Unknown` for a check Oby doesn't have, and
-    /// a failure when it isn't running.
+    /// author's agent as its next round (`finishCheck`). Throws `MacCheck.Unknown` for a check Oby
+    /// doesn't have, and a failure when it isn't running.
     @discardableResult
     func macCheckEnded(_ id: String, _ report: MacCheck.Report, now: Date = .now) throws -> MacCheck {
         guard var author = jobs.first(where: { $0.macCheck?.id == id }), var check = author.macCheck else { throw MacCheck.Unknown() }
@@ -471,25 +499,62 @@ extension Desk {
         replace(author)
         onCheckChange(check)
         Logger.jobs.notice("job \(author.id, privacy: .public): Mac check \(id, privacy: .public) \(check.state.rawValue, privacy: .public) on \(check.macName, privacy: .public)")
-        // The job ran again or pushed since: these results are for a commit it moved on from.
-        guard !author.isActive, check.head == author.pushedHead else { return check }
         let jobID = author.id
-        Task {
-            var posted = check
+        Task { await finishCheck(jobID, log: report.log) }
+        return check
+    }
+
+    /// What follows a check's result, once at a time per job: its comment on the pull request when
+    /// it has none yet, then the merge when it passed, or the author's next round when it failed.
+    /// Nothing for results of a commit the job moved on from (it ran again, or pushed since).
+    /// `resumeChecks` calls it again for what a restart cut short.
+    func finishCheck(_ id: String, log: String?) async {
+        guard finishingChecks.insert(id).inserted else { return }
+        defer { finishingChecks.remove(id) }
+        guard let author = job(id), var check = author.macCheck, check.state == .passed || check.state == .failed,
+              !author.isActive, check.head == author.pushedHead else { return }
+        if check.comment == nil && check.postError == nil {
             do {
                 let url = try await postCheck(author, MacCheck.comment(check)).absoluteString
-                posted.comment = url
-                sent(jobID, Outgoing(action: .comment, repo: author.repo, id: url))
+                check.comment = url
+                sent(id, Outgoing(action: .comment, repo: author.repo, id: url))
             } catch {
-                posted.postError = error.localizedDescription
-                Logger.jobs.error("job \(jobID, privacy: .public): the check results weren't posted: \(error.localizedDescription, privacy: .public)")
+                check.postError = error.localizedDescription
+                Logger.jobs.error("job \(id, privacy: .public): the check results weren't posted: \(error.localizedDescription, privacy: .public)")
             }
-            guard var latest = self.job(jobID), latest.macCheck?.id == id else { return }
-            latest.macCheck = posted
+            guard var latest = self.job(id), latest.macCheck?.id == check.id else { return }
+            latest.macCheck?.comment = check.comment
+            latest.macCheck?.postError = check.postError
             replace(latest)
-            if posted.state == .passed { await mergeChecked(jobID) } else { checkFailed(jobID, log: report.log) }
         }
-        return check
+        if check.state == .passed { await mergeChecked(id) } else { checkFailed(id, log: log) }
+    }
+
+    /// After a restart, and every time the desk refreshes: a passed check whose job wasn't merged
+    /// is finished again, when nothing was tried yet (the runner stopped while it posted or merged)
+    /// or when the last try failed on something that may pass now (`gh`, the network, the scan
+    /// not running), `MacCheck.maxTries` times at most. A failed check whose results weren't posted
+    /// yet goes on to its comment and the author's round.
+    func resumeChecks() {
+        for job in jobs where job.status == .done && job.dismissed == nil && (job.pullRequest?.state ?? .open) == .open {
+            guard let check = job.macCheck, check.head == job.pushedHead, !finishingChecks.contains(job.id) else { continue }
+            let unposted = check.comment == nil && check.postError == nil
+            let again = job.mergeError == nil || check.transient == true && (check.tries ?? 0) < MacCheck.maxTries
+            guard check.state == .passed && again || check.state == .failed && unposted && job.mergeError == nil else { continue }
+            Logger.jobs.notice("job \(job.id, privacy: .public): finishing Mac check \(check.id, privacy: .public) again")
+            Task { await finishCheck(job.id, log: nil) }
+        }
+    }
+
+    /// Try again on a merge that stopped (the inbox, `Desk.settle`): a passed check is merged
+    /// again, and a failed one that couldn't reach the author is handed to it again.
+    func retryMerge(_ id: String) throws {
+        guard var job = job(id), job.mergeError != nil, let check = job.macCheck, check.state == .passed || check.state == .failed,
+              check.head == job.pushedHead, !job.isActive else { throw Shell.Failure(message: "Nothing to merge again.") }
+        job.mergeError = nil
+        job.macCheck?.tries = 0
+        replace(job)
+        Task { await finishCheck(id, log: nil) }
     }
 
     /// The Mac check passed: once the secret scan of what the merge lands is clean, and while
@@ -499,14 +564,19 @@ extension Desk {
         guard var job = job(id), let check = job.macCheck else { return }
         if let why = MacCheck.refusal(job) {
             job.mergeError = why
+            job.macCheck?.transient = false
             return replace(job)
         }
+        job.macCheck?.tries = (check.tries ?? 0) + 1
+        replace(job)
         var problem: String?
+        var transient = false
         do {
             let findings = try await scanForMerge(job, check.head)
             if !findings.isEmpty { problem = "Not merged: possible secret in " + MacCheck.places(findings) + "." }
         } catch {
             problem = "Not merged: the secret scan couldn't run (\(error.localizedDescription))."
+            transient = true
         }
         guard var latest = self.job(id), latest.macCheck?.id == check.id else { return }
         if problem == nil, let why = MacCheck.refusal(latest) { problem = why }
@@ -515,11 +585,13 @@ extension Desk {
                 try await mergePullRequest(latest, check)
             } catch {
                 problem = "Not merged: \(error.localizedDescription)"
+                transient = true
             }
         }
         if let problem {
             latest = self.job(id) ?? latest
             latest.mergeError = problem
+            latest.macCheck?.transient = transient
             Logger.jobs.error("job \(id, privacy: .public): \(problem, privacy: .public)")
             return replace(latest)
         }
@@ -533,10 +605,10 @@ extension Desk {
     }
 
     /// The Mac check failed: the failing tests go to the author's agent as its next round, in the
-    /// same session and worktree, quoted in a file, until `MacCheck.maxRounds` checks have failed.
+    /// same session and worktree, quoted in a file, until the job's `checkStop` says a person
+    /// takes it from here (then it needs you, `Job.mergeNeedsYou`).
     private func checkFailed(_ id: String, log: String?) {
-        guard var author = job(id), !author.isActive, let check = author.macCheck, check.state == .failed,
-              check.round < MacCheck.maxRounds else { return }
+        guard var author = job(id), !author.isActive, let check = author.macCheck, check.state == .failed, author.checkStop == nil else { return }
         guard let session = author.session else {
             author.mergeError = "The Mac check failed, but the job has no session to pick up."
             return replace(author)

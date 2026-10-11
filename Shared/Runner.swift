@@ -59,6 +59,19 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var outgoing: [Outgoing]?
     /// What its agent asked the user and waits for (the inbox has it), or nil. Older runners don't send it.
     var question: Question?
+    /// Oby's merge stopped where a person takes over (the runner derives it, docs/runner-api.md "Mac
+    /// check"), or nil from older runners.
+    var stoppedMerge: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
+             started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
+             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question
+        case stoppedMerge = "mergeNeedsYou"
+    }
+
+    /// Its merge stopped: it couldn't merge, or the Mac check failed with no round left.
+    var mergeNeedsYou: Bool { dismissed == nil && stoppedMerge == true }
 
     var isActive: Bool { status == .queued || status == .running }
     /// Its agent asked the user something and waits for the answer: its alert stays until then.
@@ -111,8 +124,11 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     }
 
     /// Waiting for Publish (the runner's own publish failed), failed, interrupted, out of review
-    /// rounds or stranded, and not dismissed: what the runner sends an alert for, and what Dismiss takes.
-    var needsYou: Bool { dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou) }
+    /// rounds, stranded or its merge stopped, and not dismissed: what the runner sends an alert for,
+    /// and what Dismiss takes.
+    var needsYou: Bool {
+        dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou || mergeNeedsYou)
+    }
 
     /// "Round 2 of 5 · Fable 5.1", or empty for a one-round job on the usual model.
     var extras: String {
@@ -262,6 +278,7 @@ extension InboxItem {
         case "question": "Question"
         case "review": "Out of reviews"
         case "limit": "Out of usage"
+        case "merge": "Not merged"
         default: "Failed"
         }
         return "\(label) · \(title) · \(Elapsed.waiting(since: created, now: now))"
@@ -455,6 +472,7 @@ nonisolated enum NeedsYou {
             count(needing.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
             count(needing.count(where: \.reviewNeedsYou), "needs your review", "need your review"),
             count(needing.count(where: \.stranded), "wasn't published", "weren't published"),
+            count(needing.count(where: \.mergeNeedsYou), "wasn't merged", "weren't merged"),
         ].compactMap(\.self)
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }

@@ -150,7 +150,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             \(summary)
             \(fence)
 
-            by Oby: \(review.agentName) reviewed this pull request on the \(review.account) account for Oby, review \(review.round) of at most \(maxRounds). GitHub doesn't let a pull request's own author approve it or request changes, so this comment stands in. A person reviews it before it merges.
+            by Oby: \(review.agentName) reviewed this pull request on the \(review.account) account for Oby, review \(review.round) of at most \(maxRounds). GitHub doesn't let a pull request's own author approve it or request changes, so this comment stands in. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
             """
     }
 

@@ -124,11 +124,13 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         status == .done && published != nil && unpublished > 0 && reviewOf == nil
             && (pullRequest.map { $0.state != .open } ?? false)
     }
-    /// Waiting for Publish (its own publish failed), failed, interrupted, out of review rounds, or
-    /// with commits its pull request won't take: what an alert is sent for, what Home counts, what
+    /// Waiting for Publish (its own publish failed), failed, interrupted, out of review rounds,
+    /// with commits its pull request won't take, or its merge stopped (Engine/Checks.swift): what an alert is sent for, what Home counts, what
     /// Clear done keeps, and what Dismiss takes. Not once dismissed.
     // ponytail: Push has no alert for `stranded` yet (Push.notice is nil for it): the app lists it under Needs you.
-    var needsYou: Bool { dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou) }
+    var needsYou: Bool {
+        dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou || mergeNeedsYou)
+    }
     var agentName: String { Job.agentNames[agent] ?? agent }
     static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }

@@ -11,8 +11,9 @@ final class MacChecks {
     /// Settings › Runner: "Run merge checks on this Mac", on by default.
     static let setting = "runMergeChecks"
     static var enabled: Bool { UserDefaults.standard.object(forKey: setting) as? Bool ?? true }
-    /// What this Mac calls itself in the check's results, like "Wellingtons-MacBook-Pro".
-    static var name: String {
+    /// What this Mac calls itself in the check's results, like "Wellingtons-MacBook-Pro". Off the
+    /// main actor: looking the host name up can block.
+    @concurrent static func name() async -> String {
         let host = ProcessInfo.processInfo.hostName
         return host.hasSuffix(".local") ? String(host.dropLast(".local".count)) : host
     }
@@ -32,7 +33,8 @@ final class MacChecks {
                 current = nil
             }
             do {
-                while Self.enabled, let check = try await runner.nextCheck(mac: Self.name) {
+                let name = await Self.name()
+                while Self.enabled, let check = try await runner.nextCheck(mac: name) {
                     current = check
                     Logger.feed.notice("check \(check.id, privacy: .public): pull request #\(check.pr, privacy: .public) at \(check.head, privacy: .public)")
                     let report = await MacCheck.run(check)
