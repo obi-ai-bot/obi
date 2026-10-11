@@ -313,6 +313,21 @@ struct PullRequestTextTests {
         #expect(plain.contains("- Check: none, the job had no check.") && !plain.contains("Closes"))
     }
 
+    @Test func aPullRequestDoesntCloseAnIssueWithAChecklist() {
+        // Like #116: an epic whose Build items merge one slice at a time.
+        let epic = "> **What you get.** Oby does it all.\n\n## Build\n\n- [x] **Landing**\n- [ ] **The runner deploys itself.**"
+        #expect(!Publish.closes(issue: epic))
+        #expect(!Publish.closes(issue: "## Build\n\n  - [X] Done already"))
+        #expect(Publish.closes(issue: "The Watch shows the wrong time.\n\n- It's an hour off.\n- [link](https://example.com)"))
+        var job = work
+        job.summaries = ["Fixed it."]
+        let body = Publish.body(for: job, closes: false)
+        #expect(body.contains("\n\nPart of #75\n\n") && !body.contains("Closes"))
+        // The secret scan checks that very description.
+        let scanned = Publish.outgoing(job, messages: "fix: it", title: "fix: it", closes: false).first { $0.name == "pull request description" }
+        #expect(scanned?.text == body)
+    }
+
     @Test func aPlantedKeyIsFoundWithItsFileAndLine() {
         // Built at runtime so this file holds no line the scan would flag.
         let key = "AKIA" + "ABCDEFGHIJKLMNOP"

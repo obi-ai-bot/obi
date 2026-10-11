@@ -58,7 +58,8 @@ catch {
     Logger.runner.error("Couldn't delete abandoned speech audio; refusing to start.")
     exit(1)
 }
-let desk = Desk()
+// Jobs that were queued or running when the runner went down carry on (Engine/Restarts.swift).
+let desk = Desk(restarts: Restarts(file: Workspace.root.appending(path: "restarts.json")))
 desk.issueSync.enabled = true
 // Every failure is recorded, studied and acted on (Engine/Failures.swift).
 desk.failureLog.enabled = true
@@ -78,7 +79,25 @@ let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: 
               push: Push(desk: desk, folder: Workspace.root.appending(path: "apns")),
               cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")), speech: speech)
 
-// systemd stops the runner with SIGTERM: agents end now, and their jobs show as interrupted.
+// The runner deploys itself after merges into dev (Runner/Updates.swift).
+let updates = Updates(desk: desk)
+api.updates = updates
+Task {
+    while !Task.isCancelled {
+        await updates.poll()
+        do { try await Task.sleep(for: .seconds(Updates.interval)) }
+        catch { return }
+    }
+}
+Task {
+    while !Task.isCancelled {
+        do { try await Task.sleep(for: .seconds(1)) }
+        catch { return }
+        updates.deployIfReady()
+    }
+}
+
+// systemd stops the runner with SIGTERM: agents end now, and their jobs carry on when it starts again.
 // The sources live as long as the runner.
 let stops = [SIGTERM, SIGINT].map { number in
     signal(number, SIG_IGN)
@@ -118,11 +137,14 @@ Task {
     }
 }
 
-// Who is signed in, and the repositories the brain may pick: now, then every five minutes.
+// Who is signed in, and the repositories the brain may pick: now, then every five minutes. After the
+// first, jobs the runner went down with carry on: their agents commit as the owner, on known accounts.
 Task {
+    await desk.refresh()
+    desk.resumeAfterRestart()
     while true {
-        await desk.refresh()
         try? await Task.sleep(for: .seconds(300))
+        await desk.refresh()
     }
 }
 Task {

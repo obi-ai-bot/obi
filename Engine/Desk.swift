@@ -74,6 +74,38 @@ final class Desk {
     private var rewrites: [String: InboxRewrite] = [:]
     private var rewriting: Set<String> = []
 
+    /// Runner updates pause every entry to an agent, including review and follow-up rounds.
+    @ObservationIgnored var drainingForUpdate = false
+    /// The messages held for agents while draining, with what `run` was given (the prompt's on disk too).
+    private var updateWaiting: [String: (job: Job, prompt: String, resume: String?, notice: String?)] = [:]
+    private var updatePreparing: Set<String> = []
+    var updateIsIdle: Bool {
+        active.allSatisfy { $0.status == .queued || updateWaiting[$0.id] != nil || $0.question != nil }
+            && updatePreparing.isEmpty && finishing.isEmpty && finishingChecks.isEmpty
+    }
+
+    func cancelUpdateDrain() {
+        drainingForUpdate = false
+        let waiting = updateWaiting
+        updateWaiting.removeAll()
+        for (id, held) in waiting where job(id)?.isActive == true {
+            run(held.job, prompt: held.prompt, resume: held.resume, notice: held.notice)
+        }
+        releaseWaiting()
+    }
+
+    /// The runner's journal (Engine/Restarts.swift), or nil on the Mac, where quitting leaves jobs interrupted.
+    @ObservationIgnored let restarts: Restarts?
+    /// Jobs that were queued or running when the runner went down, oldest first, for `resumeAfterRestart`.
+    @ObservationIgnored var wentDown: [String] = []
+
+    func updateFailed(_ item: InboxItem) {
+        guard !inbox.contains(where: { $0.id == item.id }) else { return }
+        inbox.append(item)
+        store.save(item)
+        onInboxChange(item)
+    }
+
     private let store: JobStore
     /// The repositories the brain and the Lead may choose from; `refresh` reads them, tests set them.
     var repos: [String] = []
@@ -207,23 +239,31 @@ final class Desk {
     /// Where each goal's context files go: `leads/<goal>/.oby/context/`.
     @ObservationIgnored var leadRoot = Workspace.root.appending(path: "leads")
 
-    init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))) {
+    init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite")), restarts: Restarts? = nil) {
         self.accounts = accounts
         self.store = store
+        self.restarts = restarts
         jobs = store.recent()
         inbox = store.inbox()
         turns = store.conversation()
         // The jobs open inbox items are about, however old: answering one needs its job.
         // A review item's One more round quotes the review, so that job comes too.
         let asking = Set(inbox.filter(\.isOpen).map(\.job)).subtracting(jobs.map(\.id))
-        if !asking.isEmpty {
+        if !asking.isEmpty || restarts != nil {
             let all = Dictionary(store.recent(-1).map { ($0.id, $0) }) { first, _ in first }
             let reviews = asking.compactMap { all[$0]?.review?.job }
-            let wanted = asking.union(reviews).subtracting(jobs.map(\.id))
+            // On the runner, every job that went down with it, however old, and the authors of the reviews among them.
+            let down = restarts == nil ? [] : all.values.filter(\.isActive)
+            let wanted = asking.union(reviews).union(down.map(\.id)).union(down.compactMap(\.reviewOf)).subtracting(jobs.map(\.id))
             jobs += all.values.filter { wanted.contains($0.id) }.sorted { $0.created > $1.created }
         }
-        // Running when Oby last quit (or crashed): it didn't finish.
-        for index in jobs.indices where jobs[index].isActive {
+        // Running when Oby last quit (or crashed): it didn't finish. On the runner it carries on
+        // (`resumeAfterRestart`), unless it waits for the user's answer.
+        for index in jobs.indices.reversed() where jobs[index].isActive {
+            if restarts != nil && jobs[index].question == nil {
+                wentDown.append(jobs[index].id)
+                continue
+            }
             jobs[index].status = .interrupted
             jobs[index].finished = jobs[index].finished ?? .now
             store.save(jobs[index])
@@ -628,6 +668,7 @@ final class Desk {
         store.save(job)
         onJobChange(job)
 
+        updatePreparing.insert(job.id)
         let previous = setups[job.repo]
         let ready = Task { () async throws -> Job in
             await previous?.value
@@ -636,11 +677,13 @@ final class Desk {
         setups[job.repo] = Task { _ = await ready.result }
         Task {
             do {
+                defer { updatePreparing.remove(job.id) }
                 let prepared = try await ready.value
                 // Stopped while Oby was getting the repository ready.
                 guard self.job(prepared.id)?.status == .queued else { return }
                 startOrWait(prepared)
             } catch {
+                updatePreparing.remove(job.id)
                 finish(job.id, .failed, "Couldn't get \(job.repoName) ready: \(error.localizedDescription)")
             }
         }
@@ -649,7 +692,7 @@ final class Desk {
 
     /// A job that's ready runs now, unless an earlier active job expects to touch the same files
     /// (case 2.1): then it waits, queued, until that job ends.
-    private func startOrWait(_ prepared: Job) {
+    func startOrWait(_ prepared: Job) {
         guard let blocker = blocker(of: prepared) else { return start(prepared) }
         var job = prepared
         job.step = "Waiting for \(blocker.heading) (\(blocker.id)): both touch \(Self.overlap(prepared, blocker).joined(separator: ", "))"
@@ -665,6 +708,7 @@ final class Desk {
 
     /// A job ended: the waiting jobs it was blocking run now, in order, unless another blocks them.
     private func releaseWaiting() {
+        guard !drainingForUpdate else { return }
         for waiter in waiting {
             guard let latest = job(waiter.id), latest.status == .queued, blocker(of: latest) == nil else { continue }
             waiting.removeAll { $0.id == waiter.id }
@@ -798,15 +842,30 @@ final class Desk {
         guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Tell the agent something of 1 to 2,000 characters.") }
         guard let job = job(id) else { throw Shell.Failure(message: "There's no job \(id).") }
         if job.isActive {
+            let held = updateWaiting[id]
             guard let agent = agents[id], !ending.contains(id) else {
+                if let held {
+                    // Its message waits for the update: the words join it, neither replaces the other.
+                    _ = try vault.forAgent(text)
+                    replace(Self.heard(job, text))
+                    restarts?.give(id, text, adding: true)
+                    updateWaiting[id]?.prompt = [held.prompt, text].filter { !$0.isEmpty }.joined(separator: "\n\n")
+                    return
+                }
                 throw Shell.Failure(message: job.status == .queued ? "\(job.agentName) hasn't started yet. Tell it again in a moment."
                                     : "\(job.agentName) is wrapping up. Tell it again once it's done.")
             }
             let said = try vault.forAgent(text)
             replace(Self.heard(job, text))
+            let betweenTurns = roundTimers[id] == nil || job.question != nil
             // Words between turns (while the check runs) start a turn: it gets a round timer too.
             if roundTimers[id] == nil { timeRound(id) }
-            agent.send(said)
+            restarts?.give(id, text, adding: true)
+            if drainingForUpdate && betweenTurns {
+                agents.removeValue(forKey: id)?.kill()
+                roundTimers.removeValue(forKey: id)?.cancel()
+                updateWaiting[id] = (self.job(id) ?? job, text, job.session, nil)
+            } else { agent.send(said) }
         } else {
             guard let session = job.session else { throw Shell.Failure(message: "This job never started, so there's no session to pick up.") }
             // Nothing is picked up while the vault can't be read: the user hears why.
@@ -816,7 +875,9 @@ final class Desk {
             if let author = resumed.reviewOf { reconnect(review: id, to: author) }
             asked.insert(id)
             roundMessage[id] = nil
-            run(resumed, prompt: text, resume: session)
+            // One the runner kept going down with still has the message it was about to get: it comes first.
+            let pending = restarts?.message(id)
+            run(resumed, prompt: [pending, text].compactMap { $0 }.joined(separator: "\n\n"), resume: session)
         }
     }
 
@@ -857,12 +918,16 @@ final class Desk {
         return job
     }
 
-    /// Oby is quitting: agents end now, and their jobs show as interrupted next time. Returns once
-    /// what they started is gone too, at most `Halt.dropping` from now.
-    func quit() {
+    /// Oby is quitting: agents end now, and their jobs show as interrupted next time (the runner's
+    /// carry on, `resumeAfterRestart`). Returns once what they started is gone too, at most
+    /// `Halt.dropping` from now. `planned` (the runner's own update) isn't counted as a crash when
+    /// its jobs are picked up again.
+    func quit(planned: Bool = false) {
+        if planned { restarts?.planRestart(active.map(\.id)) }
         for (id, agent) in agents {
             agent.kill()
-            finish(id, .interrupted, "Oby quit while this was running.")
+            // On the runner it stays queued or running on disk, its message with it: the next start picks it up.
+            if restarts == nil { finish(id, .interrupted, "Oby quit while this was running.") }
         }
         // Stopped a moment ago: its stop would end it after the grace, which is past Oby's exit.
         for agent in stopping.values { agent.kill() }
@@ -873,6 +938,13 @@ final class Desk {
     func job(_ id: String) -> Job? { jobs.first { $0.id == id } }
 
     private func start(_ prepared: Job) {
+        if drainingForUpdate {
+            var queued = prepared
+            queued.step = "Waiting for runner update"
+            replace(queued)
+            if !waiting.contains(where: { $0.id == prepared.id }) { waiting.append(prepared) }
+            return
+        }
         var job = prepared
         job.status = .running
         job.phase = .work
@@ -883,12 +955,22 @@ final class Desk {
     }
 
     /// Starts the job's agent in its worktree: a new session, or the job's own picked up again.
-    func run(_ job: Job, prompt: String, resume: String? = nil) {
+    /// The agent hears `notice` first, when there's one: then `prompt` is what was pending already.
+    func run(_ job: Job, prompt: String, resume: String? = nil, notice: String? = nil) {
+        // What the agent is about to get stays on disk until its turn ends (Engine/Restarts.swift).
+        if notice == nil { restarts?.give(job.id, prompt) }
+        if drainingForUpdate {
+            agents.removeValue(forKey: job.id)?.kill()
+            roundTimers.removeValue(forKey: job.id)?.cancel()
+            jobTimers.removeValue(forKey: job.id)?.cancel()
+            updateWaiting[job.id] = (job, prompt, resume, notice)
+            return
+        }
         // No vault secret reaches an agent, even one the user typed into the request; and when the
         // vault can't be read, no agent starts, and the job says why.
         let said: String
         do {
-            said = try vault.forAgent(prompt)
+            said = try vault.forAgent([notice, prompt].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n"))
         } catch {
             return finish(job.id, .failed, "\(job.agentName) didn't start: \(error.localizedDescription)")
         }
@@ -957,6 +1039,7 @@ final class Desk {
             replace(job, save: false)
         case .turnEnded(let summary, let failed):
             roundTimers.removeValue(forKey: id)?.cancel()
+            restarts?.took(id)
             job.summaries = (job.summaries ?? []) + [summary]
             job.tetrix?.endRound()
             // A question for the user (case I.1): the job waits for the answer, its agent idle, and
@@ -988,7 +1071,7 @@ final class Desk {
             Logger.jobs.notice("job \(id, privacy: .public): \(summary, privacy: .public) Picking its session up again.")
             job.step = "Picking up where \(job.agentName) was cut off"
             replace(job)
-            run(job, prompt: Self.cutOff, resume: session)
+            run(job, prompt: "", resume: session, notice: Self.cutOff)
         }
     }
 
@@ -1092,8 +1175,16 @@ final class Desk {
             job.step = "Round \(job.currentRound) of \(job.maxRounds)"
             replace(job)
             roundMessage[id] = message
-            timeRound(id)
-            agent.send(said)
+            restarts?.give(id, message)
+            if drainingForUpdate {
+                agents.removeValue(forKey: id)?.kill()
+                roundTimers.removeValue(forKey: id)?.cancel()
+                jobTimers.removeValue(forKey: id)?.cancel()
+                updateWaiting[id] = (job, message, job.session, nil)
+            } else {
+                timeRound(id)
+                agent.send(said)
+            }
         case let .hold(limit, text):
             hold(id, limit, text)
         }
@@ -1133,7 +1224,7 @@ final class Desk {
     /// them before it ends (case 4.1): commits already on the base by patch leave nothing to
     /// publish; a possible secret fails it, naming where; any other failure leaves it done, with
     /// the reason and Publish offered.
-    private func finish(_ id: String, _ status: Job.Status, _ summary: String) {
+    func finish(_ id: String, _ status: Job.Status, _ summary: String) {
         guard var job = job(id), job.isActive else { return }
         // Its agent ended while its question waits: the work isn't finished, so nothing is checked
         // or published. It's interrupted, keeping its question; the answer picks its session up again.
@@ -1236,6 +1327,7 @@ final class Desk {
         asked.remove(id)
         roundMessage[id] = nil
         handoffs[id] = nil
+        restarts?.forget(id)
         roundTimers.removeValue(forKey: id)?.cancel()
         jobTimers.removeValue(forKey: id)?.cancel()
         afterTurns.removeValue(forKey: id)?.cancel()
