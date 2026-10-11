@@ -117,10 +117,9 @@ struct CheckTests {
     }
 
     /// The reviewer approves the author's latest pull request push.
-    func approve() async throws {
+    func approve(_ summary: String = "It does what was asked.\n\nVERDICT: APPROVED") async throws {
         try await until("a review job runs") { made.agents.last?.job.reviewOf == "author" && desk.job(made.agents.last?.job.id ?? "")?.status == .running }
         let reviewer = try #require(made.agents.last)
-        let summary = "It does what was asked.\n\nVERDICT: APPROVED"
         reviewer.agent.onEvent(.turnEnded(summary: summary, failed: false))
         reviewer.agent.onEvent(.finished(summary: summary, failed: false))
         try await until("the review is on the author") { desk.job("author")?.review?.job == reviewer.job.id && desk.job("author")?.review?.comment != nil }
@@ -187,6 +186,31 @@ struct CheckTests {
     }
 
     // MARK: Passed
+
+    @Test func aFollowUpWithParenthesizedNoneApprovesAtTheReviewCapAndMerges() async throws {
+        desk.dispatch(Desk.Draft(said: "fix oby #75", reply: "", job: author, guessed: false))
+        try await until("the author runs") { desk.job("author")?.status == .running }
+        try await endRound(try #require(made.agents.last?.agent))
+        try await approve("One bug.\n\nBlocking:\n- Fix the off-by-one\n\nVERDICT: CHANGES REQUESTED")
+        try await until("the author takes up the review") { desk.job("author")?.status == .running && made.agents.last?.job.id == "author" }
+        #expect(desk.job("author")?.review?.verdict == .changesRequested)
+        made.pushes = [Self.next]
+        desk.countCommits = { _, _ in 3 }
+        try await endRound(try #require(made.agents.last?.agent), "Fixed the off-by-one.")
+        try await approve("The blocking finding is fixed.\n\nBlocking:\n(none)\n\nWorth doing later:\n- Add coverage\n\nVERDICT: APPROVED")
+        try await until("the approval queues a Mac check") { desk.job("author")?.macCheck != nil }
+        let reviewed = try #require(desk.job("author"))
+        #expect(reviewed.review?.round == Review.maxRounds && reviewed.review?.verdict == .approved)
+        #expect(reviewed.review?.blocking == nil && reviewed.review?.followUps == ["Add coverage"])
+        #expect(reviewed.review?.stopsHere == false && !reviewed.reviewNeedsYou)
+        #expect(!desk.inbox.contains { $0.job == "author" && $0.kind == .review && $0.isOpen })
+        let check = try #require(desk.nextMacCheck(mac: "Studio"))
+        #expect(check.head == Self.next)
+        _ = try desk.macCheckEnded(check.id, MacCheck.Report(passed: true, steps: steps, failures: [], log: nil))
+        try await until("the approved follow-up merges") { desk.job("author")?.pullRequest?.state == .merged }
+        #expect(made.scanned == [Self.next] && made.merged.map(\.head) == [Self.next])
+        #expect(made.agents.count == 4)
+    }
 
     @Test func aPassedCheckIsPostedThenSquashMergedIntoDevAndListedInTheReport() async throws {
         let check = try await approved()

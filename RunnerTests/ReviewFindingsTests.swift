@@ -5,6 +5,16 @@ import Testing
 /// The reviewer sorts its findings: blocking ones request changes, the rest are follow-ups for
 /// later; and a review after changes requested is a follow-up, not a fresh review (Engine/Review.swift).
 struct ReviewFindingsTests {
+    @Test(arguments: ["(none)", "(**None.**)", "(no blocking findings)"])
+    func parenthesizedNoneIsNotABlockingFinding(_ none: String) throws {
+        let summary = "Fixed.\n\nBlocking:\n\(none)\n\nWorth doing later:\n- Add coverage\n\nVERDICT: APPROVED"
+        let findings = try #require(Review.findings(summary))
+        #expect(findings.blocking.isEmpty && findings.later == ["Add coverage"])
+        #expect(Review.decide(summary) == .approved)
+        // Parentheses around a real finding must still block, even after a none item.
+        #expect(Review.decide("Blocking:\n- \(none)\n- (None of the new paths are tested)\n\nVERDICT: APPROVED") == .changesRequested)
+    }
+
     // MARK: Blocking or not
 
     @Test func onlyBlockingFindingsRequestChanges() {

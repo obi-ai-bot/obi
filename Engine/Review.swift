@@ -274,7 +274,11 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         /// Adds a finding; false when the text says there's none.
         @discardableResult func add(_ text: String, blocking: Bool) -> Bool {
             let finding = text.trimmingCharacters(in: .whitespaces)
-            let bare = finding.lowercased().filter { !"`*_.!".contains($0) }.trimmingCharacters(in: CharacterSet(charactersIn: " -–—:"))
+            var bare = finding.lowercased().filter { !"`*_.!".contains($0) }.trimmingCharacters(in: CharacterSet(charactersIn: " -–—:"))
+            // Reviewers also write "(none)" under Blocking: it isn't a blocking finding.
+            if bare.hasPrefix("("), bare.hasSuffix(")") {
+                bare = String(bare.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+            }
             let none = bare.prefixMatch(of: /none\b/) != nil && !bare.hasPrefix("none of")
                 || ["nothing", "n/a", "no findings", "nothing blocking", "no blocking findings", "nothing to add"].contains(bare)
             guard !finding.isEmpty, !none else {
