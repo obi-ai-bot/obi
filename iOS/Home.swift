@@ -52,7 +52,8 @@ struct HomeView: View {
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationDestination(for: String.self) { JobScreen(id: $0) }
             .toolbar {
-                if jobs.contains(where: { !$0.isActive }) {
+                // Only when it would take something: jobs that need you stay until you Dismiss them.
+                if jobs.contains(where: \.clearable) {
                     ToolbarItem(placement: .topBarLeading) {
                         // Through the runner, so the Mac's island clears too.
                         Button("Clear done") { Task { await clear() } }
@@ -91,8 +92,8 @@ struct HomeView: View {
     /// Nothing to show: Oby waits big in the middle of Home, and the first job sends it to its corner.
     private var centered: Bool { phone.loaded && jobs.isEmpty }
 
-    /// Every job but those that finished by the last Clear done, on any app.
-    private var jobs: [Job] { phone.visibleJobs }
+    /// Every job but those that finished by the last Clear done, on any app, and need you no more.
+    private var jobs: [Job] { phone.jobs.filter { $0.listed(after: phone.clearedAt) } }
 
     /// The jobs in the groups both apps show: needs you, working, in review, done.
     private var groups: [JobList.Section<Job>] { JobList.groups(jobs, by: \.group) }

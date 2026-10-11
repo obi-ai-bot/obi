@@ -111,7 +111,7 @@ extension Job {
                         set(.review, .failed, detail: "Changes requested",
                             reason: review.stopsHere ? Review.stopLine : "Oby requested changes.")
                     } else if let reviewError {
-                        set(.review, .current, detail: "Waiting for review · \(reviewError)")
+                        set(.review, .current, detail: reviewError.hasPrefix(Review.waiting) ? reviewError : "Waiting for review · \(reviewError)")
                     } else {
                         set(.review, .current, detail: pullRequest == nil ? "Waiting for GitHub status" : "Waiting for review")
                     }

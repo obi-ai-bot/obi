@@ -116,6 +116,9 @@ final class Desk {
         if let repos = try? await Workspace.knownRepos(), !repos.isEmpty { self.repos = repos }
         await Agents.readIdentity()
         await accounts.refresh()
+        // Reviews that were waiting for an account with room when Oby last ran: start them now that
+        // the sign-ins are known, or watch for room (also a five-minute safety net).
+        startWaitingReviews()
     }
 
     /// The brain picks "auto" or an account by name; Swift turns that into a real account.

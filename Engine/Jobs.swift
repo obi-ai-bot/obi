@@ -97,17 +97,29 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// published, then the ones later rounds made. A job published before Oby counted has none.
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
     /// Done, with commits that aren't on its pull request yet: Oby publishes it when it ends, and
-    /// offers Publish when that failed. Not once the user dismissed it, and never on Oby's own review
-    /// jobs: a review makes no commits.
-    var canPublish: Bool { status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil }
+    /// offers Publish when that failed. Not once the user dismissed it, never on Oby's own review
+    /// jobs (a review makes no commits), and never once its pull request was merged or closed: the
+    /// branch has nowhere to go.
+    var canPublish: Bool {
+        status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
+            && (pullRequest?.state ?? .open) == .open
+    }
     /// Oby's review requested changes for the last time it may (Review.maxRounds), and the pull
     /// request is still open: a person takes it from here.
     var reviewNeedsYou: Bool {
         status == .done && published != nil && (review?.stopsHere ?? false) && (pullRequest?.state ?? .open) == .open
     }
-    /// Waiting for Publish (its own publish failed), failed, interrupted, or out of review rounds:
-    /// what an alert is sent for, what Home counts, and what Dismiss takes. Not once dismissed.
-    var needsYou: Bool { dismissed == nil && (canPublish || status == .failed || status == .interrupted || reviewNeedsYou) }
+    /// Done with commits its pull request will never take: it was merged or closed before they
+    /// went out (a round that commits after that fails instead, `ending`).
+    var stranded: Bool {
+        status == .done && published != nil && unpublished > 0 && reviewOf == nil
+            && (pullRequest.map { $0.state != .open } ?? false)
+    }
+    /// Waiting for Publish (its own publish failed), failed, interrupted, out of review rounds, or
+    /// with commits its pull request won't take: what an alert is sent for, what Home counts, what
+    /// Clear done keeps, and what Dismiss takes. Not once dismissed.
+    // ponytail: Push has no alert for `stranded` yet (Push.notice is nil for it): the app lists it under Needs you.
+    var needsYou: Bool { dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou) }
     var agentName: String { Job.agentNames[agent] ?? agent }
     static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
@@ -137,7 +149,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var doneLine: String {
         switch status {
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done: \(heading)"
-        case .failed: summary.hasPrefix("Nothing committed:") ? "Nothing committed: \(heading)" : "Couldn't finish: \(heading)"
+        case .failed:
+            summary.hasPrefix("Nothing committed:") ? "Nothing committed: \(heading)"
+                : summary.hasPrefix("Not published:") ? "Not published: \(heading)" : "Couldn't finish: \(heading)"
         case .stopped: "Stopped: \(heading)"
         case .interrupted: "Interrupted: \(heading)"
         case .queued, .running: step
@@ -151,7 +165,16 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// (nil when unknown): a committing job that's done with none ends as "nothing committed", with
     /// the agent's own words as the reason. Not a round the user `asked` for with a message: their
     /// words say what it should do (reset the branch, drop the work), so none committed is done.
+    /// A job whose pull request was merged or closed and that made commits beyond what it published
+    /// fails too, saying so: they have nowhere to go, and the failure alerts the user (Push).
     static func ending(_ job: Job, _ status: Status, _ summary: String, made: Int?, asked: Bool = false) -> (Status, String) {
+        // ponytail: only jobs Oby opened the pull request for; on someone else's pull request
+        // `made` counts from its head, which `pushed` doesn't.
+        if status == .done, job.pr == nil, job.published != nil, let state = job.pullRequest?.state, state != .open,
+           let pushed = job.pushed, let made, made > pushed {
+            let commits = made - pushed == 1 ? "1 new commit has" : "\(made - pushed) new commits have"
+            return (.failed, "Not published: its pull request was \(state == .merged ? "merged" : "closed"), so \(commits) nowhere to go.\n\n" + summary)
+        }
         guard status == .done, made == 0, committing.contains(job.kind), !asked else { return (status, summary) }
         let lines = summary.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
         let reason = lines.first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""

@@ -87,8 +87,12 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
 
     /// Commits not on its pull request yet: all of them before it's published, then later rounds' ones.
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
-    /// Not once the user dismissed it, and never on Oby's own review jobs (as Engine's `Job.canPublish`).
-    var canPublish: Bool { status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil }
+    /// Not once the user dismissed it, never on Oby's own review jobs, and never once its pull
+    /// request was merged or closed (as Engine's `Job.canPublish`).
+    var canPublish: Bool {
+        status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
+            && (pullRequest?.state ?? "OPEN") == "OPEN"
+    }
 
     /// Oby's review requested changes for the last time it may (4 rounds) and the pull request is still open.
     var reviewNeedsYou: Bool {
@@ -96,9 +100,15 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
             && (pullRequest?.state ?? "OPEN") == "OPEN"
     }
 
-    /// Waiting for Publish (the runner's own publish failed), failed, interrupted or out of review
-    /// rounds, and not dismissed: what the runner sends an alert for, and what Dismiss takes.
-    var needsYou: Bool { dismissed == nil && (canPublish || status == .failed || status == .interrupted || reviewNeedsYou) }
+    /// Done with commits its pull request won't take: merged or closed before they went out (as Engine's `Job.stranded`).
+    var stranded: Bool {
+        status == .done && published != nil && unpublished > 0 && reviewOf == nil
+            && (pullRequest.map { $0.state != "OPEN" } ?? false)
+    }
+
+    /// Waiting for Publish (the runner's own publish failed), failed, interrupted, out of review
+    /// rounds or stranded, and not dismissed: what the runner sends an alert for, and what Dismiss takes.
+    var needsYou: Bool { dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou) }
 
     /// "Round 2 of 5 · Fable 5.1", or empty for a one-round job on the usual model.
     var extras: String {
@@ -341,6 +351,14 @@ extension Job {
         return .done
     }
 
+    /// Whether the list shows the job after the last Clear done, on any app (Shared/JobList.swift).
+    nonisolated func listed(after clearedAt: Date?) -> Bool {
+        JobList.lists(active: isActive, needsYou: needsYou, finished: finished, clearedAt: clearedAt)
+    }
+
+    /// Clear done would take it from the list (Shared/JobList.swift).
+    nonisolated var clearable: Bool { JobList.clears(active: isActive, needsYou: needsYou) }
+
     /// The status pill, the same on the iPhone and the Mac: how it's going, how it ended, and
     /// where its pull request is. A job you let go says Dismissed, however it ended.
     nonisolated var badge: JobBadge {
@@ -382,6 +400,7 @@ nonisolated enum NeedsYou {
             count(needing.count { $0.status == .failed }, "failed", "failed"),
             count(needing.count { $0.status == .interrupted }, "was interrupted", "were interrupted"),
             count(needing.count(where: \.reviewNeedsYou), "needs your review", "need your review"),
+            count(needing.count(where: \.stranded), "wasn't published", "weren't published"),
         ].compactMap(\.self)
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }

@@ -92,6 +92,56 @@ final class ClearTests {
         #expect(JobList.shows(finished: now - 3600, clearedAt: nil))
     }
 
+    /// Clear done never hides a job that still needs the user: ready to publish, failed,
+    /// interrupted, or out of review rounds. Only Dismiss lets those go.
+    @Test func clearDoneKeepsWhatNeedsYou() {
+        let cleared = now
+        var done = Job(id: "a", request: "fix oby", agent: "claude", account: "default", repo: "deskree-inc/oby",
+                       branch: "oby/fix-a", base: "dev", kind: .fix, task: "fix oby")
+        done.status = .done
+        done.finished = now - 60
+        let lists = { (job: Job) in JobList.lists(active: job.isActive, needsYou: job.needsYou, finished: job.finished, clearedAt: cleared) }
+
+        var ready = done
+        ready.commits = 2
+        ready.publishError = "git push failed"
+        var failed = done
+        failed.status = .failed
+        var interrupted = done
+        interrupted.status = .interrupted
+        var outOfRounds = done
+        outOfRounds.published = "https://github.com/deskree-inc/oby/pull/80"
+        outOfRounds.review = Review(verdict: .changesRequested, job: "rev4", agent: "codex", account: "Work", round: Review.maxRounds)
+        var stranded = ready
+        stranded.published = "https://github.com/deskree-inc/oby/pull/80"
+        stranded.pushed = 1
+        stranded.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: now - 120, checkedAt: now - 90)
+        #expect(stranded.stranded)
+        for job in [ready, failed, interrupted, outOfRounds, stranded] {
+            #expect(job.needsYou && lists(job), Comment(rawValue: "\(job.status) \(job.dismissed == nil)"))
+        }
+        // Dismissed, they go with the rest of what finished by the clear.
+        for var job in [ready, failed, interrupted, outOfRounds, stranded] {
+            job.dismissed = now - 30
+            #expect(!job.needsYou && !lists(job), Comment(rawValue: "\(job.status) \(job.dismissed == nil)"))
+        }
+        #expect(!lists(done))
+        var running = done
+        running.status = .running
+        running.finished = nil
+        #expect(lists(running))
+        // Finished after the clear: listed, needing you or not.
+        done.finished = now + 1
+        #expect(lists(done))
+        #expect(JobList.lists(active: false, needsYou: true, finished: now - 1, clearedAt: now))
+        #expect(!JobList.lists(active: false, needsYou: false, finished: now - 1, clearedAt: now))
+        #expect(JobList.lists(active: true, needsYou: false, finished: nil, clearedAt: now))
+        // Clear done is offered only for what it would take: finished jobs that need you no more.
+        #expect(JobList.clears(active: false, needsYou: false))
+        #expect(!JobList.clears(active: false, needsYou: true))
+        #expect(!JobList.clears(active: true, needsYou: false))
+    }
+
     /// The one line the iPhone's Home, the closed notch and the island's header all say.
     @Test func theSummaryLineIsTheSameEverywhere() {
         #expect(Summary.line(working: 0, needs: nil) == "All quiet.")

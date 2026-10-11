@@ -150,6 +150,207 @@ struct ReviewTests {
         #expect(!published.needsYou)
     }
 
+    // MARK: Waiting for an account with room
+
+    @Test func aReviewWaitsForAnAccountWithRoomAndStartsWhenItsWindowResets() async throws {
+        accounts.setLabel(nil, for: personal.id)
+        let resets = Date.now.addingTimeInterval(1.5)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: resets), for: work.id)
+        let published = try await publishAuthor()
+        let line = "Waiting for an account with room (resets \(Limits.clock(resets)))"
+        #expect(published.reviewing == nil && published.reviewError == line && published.waitsForReviewer)
+        let stage = published.pipeline.stages.first { $0.id == .review }
+        #expect(stage?.state == .current && stage?.detail == line)
+        #expect(made.agents.count == 1 && !published.needsYou && Push.notice(for: published) == nil)
+
+        // The Work account's window resets: Oby starts the review on it by itself.
+        let (review, _) = try await reviewJob()
+        #expect(review.account == work.id && review.agent == "codex")
+        let author = try #require(desk.job("author"))
+        #expect(author.reviewing == review.id && author.reviewError == nil && !author.waitsForReviewer)
+        #expect(Date.now >= resets)
+    }
+
+    @Test func aReviewThatWaitedBeforeARestartStartsAfterIt() async throws {
+        accounts.setLabel(nil, for: personal.id)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
+        _ = try await publishAuthor()
+        #expect(desk.job("author")?.waitsForReviewer == true)
+
+        // Oby starts again over the same jobs, and the Work account has room by then.
+        let after = AccountStore(root: folder)
+        after.setLabel("Max · well@example.com", for: "default")
+        after.setLabel("Plus · work@example.com", for: work.id)
+        after.record(.usage(fiveHour: 0.1, sevenDay: 0.2), for: work.id)
+        let restarted = Desk(accounts: after, store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        restarted.prepare = { $0 }
+        restarted.makeAgent = { [made] job, _, resume in
+            let agent = Agent()
+            made.agents.append((job, agent, resume))
+            return agent
+        }
+        // What `refresh()` does once the sign-ins are known.
+        restarted.startWaitingReviews()
+        try await until("the review starts") { made.agents.last?.job.reviewOf == "author" }
+        #expect(made.agents.last?.job.account == work.id && restarted.job("author")?.reviewing != nil)
+    }
+
+    @Test func aWaitingReviewStartsWhenAJobOnAFullAccountEnds() async throws {
+        accounts.setLabel(nil, for: personal.id)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
+        let published = try await publishAuthor()
+        // The tool named no reset time.
+        #expect(published.reviewError == "Waiting for an account with room" && published.waitsForReviewer)
+
+        // A job on the Work account runs, reports its window reset, and ends.
+        var other = author
+        other.id = "other"
+        other.base = nil
+        other.agent = "codex"
+        other.account = work.id
+        desk.dispatch(Desk.Draft(said: "fix oby", reply: "", job: other, guessed: false))
+        try await until("the other job runs") { desk.job("other")?.status == .running }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(desk.job("author")?.waitsForReviewer == true && made.agents.count == 2)
+        let agent = try #require(made.agents.last?.agent)
+        agent.onEvent(.usage(fiveHour: 0.1, sevenDay: 0.2))
+        agent.onEvent(.turnEnded(summary: "fix: done", failed: false))
+        agent.onEvent(.finished(summary: "fix: done", failed: false))
+        try await until("the other job ends") { desk.job("other")?.isActive == false }
+        let (review, _) = try await reviewJob()
+        #expect(review.account == work.id && desk.job("author")?.reviewing == review.id && desk.job("author")?.reviewError == nil)
+    }
+
+    @Test func aReviewWaitsForTheFirstAccountToReset() {
+        let now = Date(timeIntervalSince1970: 1_791_582_173)
+        let author = author
+        let mine = AccountState(account: Account(id: "default", agent: "claude", name: "Default", payer: "", home: nil), label: "Max", fiveHour: 0.99)
+        var personal = AccountState(account: Account(id: "p", agent: "claude", name: "Personal", payer: "", home: nil), label: "Max")
+        var work = AccountState(account: Account(id: "w", agent: "codex", name: "Work", payer: "", home: nil), label: "Plus")
+        work.fiveHour = 0.96
+        work.fiveHourResets = now + 3600
+        personal.fullUntil = now + 600
+        personal.sevenDay = 0.97
+        personal.sevenDayResets = now + 1800
+        // Personal has room once both its limits are past (in 30 minutes), before Work's window resets.
+        #expect(Review.reviewer([mine, personal, work], for: author, now: now) == nil)
+        #expect(Review.roomAt([mine, personal, work], for: author, now: now) == now + 1800)
+        // A window with no reset time leaves that account's room unknown.
+        personal.sevenDayResets = nil
+        #expect(Review.roomAt([mine, personal, work], for: author, now: now) == now + 3600)
+        work.fiveHourResets = nil
+        #expect(Review.roomAt([mine, personal, work], for: author, now: now) == nil)
+        // Past its reset time, a full window has room again.
+        work.fiveHourResets = now + 3600
+        #expect(Review.reviewer([mine, personal, work], for: author, now: now + 3601)?.id == "w")
+        #expect(Review.waitLine(resets: nil) == "Waiting for an account with room")
+        #expect(Review.waitLine(resets: now).hasPrefix("Waiting for an account with room (resets "))
+    }
+
+    @Test func aReviewNoLongerWaitsOnceThePullRequestMerged() async throws {
+        accounts.setLabel(nil, for: personal.id)
+        let resets = Date.now.addingTimeInterval(3600)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: resets), for: work.id)
+        let published = try await publishAuthor()
+        #expect(published.waitsForReviewer && desk.roomWakeAt == resets)
+        desk.followed("author", published: url.absoluteString, pushed: 2,
+                      status: PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now), error: nil)
+        try await until("the author stops waiting") { desk.job("author")?.reviewError == nil }
+        accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.2), for: work.id)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(made.agents.count == 1 && desk.job("author")?.reviewing == nil && desk.job("author")?.waitsForReviewer == false)
+        #expect(desk.roomWakeAt == nil)
+    }
+
+    /// A reset that has passed wakes nothing: while the author runs again, its waiting review sets
+    /// no wake-up, rather than one that fires every half second until the account reports again.
+    @Test func aPassedResetSetsNoWakeUp() async throws {
+        accounts.setLabel(nil, for: personal.id)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
+        let published = try await publishAuthor()
+        #expect(published.waitsForReviewer && desk.roomWakeAt == nil)
+        try desk.message("author", "One more thing.")
+        try await until("the author runs again") { desk.job("author")?.status == .running }
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: .now - 60), for: work.id)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(desk.job("author")?.waitsForReviewer == true && desk.roomWakeAt == nil && made.agents.count == 2)
+        // Past its reset, the account has room: Oby doesn't wait on it.
+        let now = Date.now
+        #expect(Review.roomAt(accounts.accounts, for: author, now: now) == now)
+    }
+
+    // MARK: Merged or closed pull requests
+
+    @Test func aMergedPullRequestIsNeverPublishedAgainAndSaysSo() async throws {
+        accounts.setLabel(nil, for: personal.id)
+        accounts.setLabel(nil, for: work.id)
+        _ = try await publishAuthor()
+        desk.followed("author", published: url.absoluteString, pushed: 2,
+                      status: PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now), error: nil)
+        // The user asks for more after the merge: the round's commit has nowhere to go.
+        try desk.message("author", "One more thing.")
+        try await until("the author runs again") { desk.job("author")?.status == .running }
+        let round = try #require(made.agents.last)
+        desk.countCommits = { _, _ in 3 }
+        round.agent.onEvent(.turnEnded(summary: "fix: one more thing", failed: false))
+        round.agent.onEvent(.finished(summary: "fix: one more thing", failed: false))
+        try await until("the author ends") { desk.job("author")?.isActive == false }
+        let ended = try #require(desk.job("author"))
+        #expect(ended.status == .failed && ended.unpublished == 1 && made.published.count == 1)
+        #expect(ended.summary == "Not published: its pull request was merged, so 1 new commit has nowhere to go.\n\nfix: one more thing")
+        #expect(ended.doneLine == "Not published: Fix oby #75")
+        // It needs you, and alerts: nothing is offered to publish, and Dismiss lets it go.
+        #expect(!ended.canPublish && ended.needsYou && Push.notice(for: ended) == .failed)
+        let work = ended.pipeline.stages.first { $0.id == .work }
+        #expect(work?.state == .failed && work?.reason == ended.summary)
+        await #expect(throws: Shell.Failure.self) { try await desk.publish("author") { _ in } }
+        #expect(made.published.count == 1)
+        try desk.dismiss("author")
+        #expect(desk.job("author")?.needsYou == false)
+    }
+
+    @Test func aClosedPullRequestIsNotPublishable() {
+        var job = author
+        job.status = .done
+        job.commits = 3
+        job.published = url.absoluteString
+        job.pushed = 2
+        #expect(job.canPublish && job.needsYou && Push.notice(for: job) == .ready)
+        job.pullRequest = PullRequestStatus(state: .open, base: "dev", checkedAt: .now)
+        #expect(job.canPublish)
+        #expect(!job.stranded)
+        // Ready to publish when its pull request merged or closed: nothing is offered to publish,
+        // and it still needs you, so it stays listed after Clear done until you Dismiss it.
+        for state in [PullRequestStatus.State.closed, .merged] {
+            job.pullRequest = PullRequestStatus(state: state, base: "dev", checkedAt: .now)
+            #expect(!job.canPublish && job.stranded && job.needsYou, Comment(rawValue: state.rawValue))
+            // No alert of its own yet: Push has no notice for it.
+            #expect(Push.notice(for: job) == nil)
+        }
+        var dismissed = job
+        dismissed.dismissed = .now
+        #expect(dismissed.stranded && !dismissed.needsYou)
+        // Everything it made went out before the merge: nothing needs you.
+        job.pushed = 3
+        #expect(!job.stranded && !job.needsYou)
+    }
+
+    @Test func aRoundWithCommitsForAClosedPullRequestFails() {
+        var job = author
+        job.status = .running
+        job.commits = 2
+        job.published = url.absoluteString
+        job.pullRequest = PullRequestStatus(state: .closed, base: "dev", checkedAt: .now)
+        let (status, summary) = Job.ending(job, .done, "fix: more", made: 4)
+        #expect(status == .failed && summary == "Not published: its pull request was closed, so 2 new commits have nowhere to go.\n\nfix: more")
+        // Nothing new beyond what went out, or no count: done as it was.
+        #expect(Job.ending(job, .done, "fix: nothing to add", made: 2, asked: true) == (.done, "fix: nothing to add"))
+        #expect(Job.ending(job, .done, "fix: more", made: nil) == (.done, "fix: more"))
+        #expect(Job.ending(job, .failed, "broke", made: 4) == (.failed, "broke"))
+        job.pullRequest?.state = .open
+        #expect(Job.ending(job, .done, "fix: more", made: 4) == (.done, "fix: more"))
+    }
+
     // MARK: Approved
 
     @Test func anApprovalIsPostedAndTheJobIsReadyToMergeButNotMerged() async throws {

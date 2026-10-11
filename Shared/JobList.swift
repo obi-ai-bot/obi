@@ -51,9 +51,20 @@ nonisolated enum JobList {
         return JobGroup.allCases.compactMap { group in grouped[group].map { Section(group: group, jobs: $0) } }
     }
 
-    /// Whether a job stays in the list after Clear done: it hasn't finished, nothing was ever
-    /// cleared, or it finished after the last clear. A job that finished at the clear's second or
-    /// before is hidden on every app, since the runner keeps the clear's time.
+    /// Whether a job stays in the list after Clear done: it's queued or running, it still needs
+    /// the user (ready to publish, failed, interrupted, out of review rounds: only Dismiss lets
+    /// those go), or `shows` keeps it by its finish time.
+    static func lists(active: Bool, needsYou: Bool, finished: Date?, clearedAt: Date?) -> Bool {
+        active || needsYou || shows(finished: finished, clearedAt: clearedAt)
+    }
+
+    /// Whether Clear done would take the job from the list: it finished and needs the user no
+    /// more. While no listed job would go, the iPhone's Home offers no Clear done.
+    static func clears(active: Bool, needsYou: Bool) -> Bool { !active && !needsYou }
+
+    /// Clear done by time alone: the job hasn't finished, nothing was ever cleared, or it finished
+    /// after the last clear. A job that finished at the clear's second or before is hidden on
+    /// every app, since the runner keeps the clear's time. `lists` is the whole rule.
     static func shows(finished: Date?, clearedAt: Date?) -> Bool {
         guard let finished, let clearedAt else { return true }
         return finished > clearedAt
