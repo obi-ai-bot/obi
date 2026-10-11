@@ -40,6 +40,7 @@ nonisolated enum Shell {
     }()
 
     /// Runs a tool found on the user's PATH. `env` adds variables, and a nil value removes one.
+    /// After `timeout` seconds it's ended, with all it started (`Halt`).
     static func run(_ arguments: [String], in directory: URL? = nil, input: Data? = nil,
                     env: [String: String?] = [:], timeout: TimeInterval = 600) async throws -> Output {
         try await withCheckedThrowingContinuation { done in
@@ -55,9 +56,11 @@ nonisolated enum Shell {
                 process.standardInput = stdin
                 process.standardOutput = stdout
                 process.standardError = stderr
-                do { try process.run() } catch { done.resume(throwing: error); return }
+                // What it leaves running ends with it, so its output ends too (a check's test can't hold it).
+                let group: ProcessGroup
+                do { group = try ProcessGroup.run(process) } catch { done.resume(throwing: error); return }
 
-                let kill = DispatchWorkItem { process.terminate() }
+                let kill = DispatchWorkItem { group.end(after: Halt.dropping) }
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: kill)
                 // Read stderr on its own thread so a chatty tool can't fill the pipe and stall.
                 let err = Collected()
