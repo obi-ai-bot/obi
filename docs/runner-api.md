@@ -283,7 +283,7 @@ The latest jobs, newest first.
 
 ### `GET /v1/jobs/{id}`
 
-One job.
+One job, however old: fetch it when an inbox item or a notification names a job that isn't in `GET /v1/jobs`'s latest 50.
 
 ### `GET /v1/jobs/{id}/wait`
 
@@ -347,7 +347,7 @@ data: { …InboxItem }
 - `accounts` comes when sign-ins, usage, reset times, running counts or `fullUntil` change.
 - `clear` comes when Clear done is pressed on any app (`POST /v1/clear`): hide the jobs that finished by `clearedAt`.
 - `inbox` comes with every inbox item that arrives or changes: answered, done or put off, on any app, or settled by itself. Replace the item with that `id`; one whose `state` is `done` leaves the inbox.
-- A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop. Fetch what you show (`GET /v1/status`, `GET /v1/jobs`, `GET /v1/inbox`) only once the events' response has arrived, and apply the events that came meanwhile over it: the runner follows a connection before it answers, so nothing that changes in between is lost.
+- A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop. Fetch what you show (`GET /v1/status`, `GET /v1/jobs`, `GET /v1/inbox`; a runner older than the inbox answers `404` there, which means an empty inbox, and any other failure means try again) only once the events' response has arrived, and apply the events that came meanwhile over it: the runner follows a connection before it answers, so nothing that changes in between is lost.
 
 ### `GET /v1/inbox`
 

@@ -457,6 +457,8 @@ nonisolated enum NeedsYou {
 
 nonisolated struct RunnerError: LocalizedError {
     let message: String
+    /// The runner's HTTP status, when it answered with an error.
+    var status: Int? = nil
     var errorDescription: String? { message }
 }
 
@@ -491,8 +493,18 @@ nonisolated struct Runner: Sendable {
         return answer.clearedAt
     }
 
-    /// What waits in the inbox, put-off items too.
-    func inbox() async throws -> [InboxItem] { try await call("GET", "v1/inbox") }
+    /// What waits in the inbox, put-off items too. A runner older than the inbox has none (it
+    /// doesn't know the path); any other failure throws, so the app tries again.
+    func inbox() async throws -> [InboxItem] {
+        do {
+            return try await call("GET", "v1/inbox")
+        } catch let error as RunnerError where error.status == 404 {
+            return []
+        }
+    }
+
+    /// One job, however old: the list has only the latest 50.
+    func job(_ id: String) async throws -> Job { try await call("GET", "v1/jobs/\(id)") }
 
     /// Settles an inbox item: an answer (one of its options, or the user's words) goes to its job;
     /// `done` lets it go without one; `later` puts it off until then. Send one of them.
@@ -625,8 +637,9 @@ nonisolated struct Runner: Sendable {
     static func check(_ response: URLResponse, _ data: Data?) throws {
         guard let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) else { return }
         struct Problem: Decodable { var error: String }
-        if let data, let problem = try? JSONDecoder().decode(Problem.self, from: data) { throw RunnerError(message: problem.error) }
-        throw RunnerError(message: http.statusCode == 401 ? "The runner only answers its owner's Tailscale login." : "The runner answered \(http.statusCode).")
+        if let data, let problem = try? JSONDecoder().decode(Problem.self, from: data) { throw RunnerError(message: problem.error, status: http.statusCode) }
+        throw RunnerError(message: http.statusCode == 401 ? "The runner only answers its owner's Tailscale login." : "The runner answered \(http.statusCode).",
+                          status: http.statusCode)
     }
 }
 

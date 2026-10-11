@@ -110,8 +110,7 @@ final class RunnerFeed {
                         // Status every time: a Clear done while the connection was down is in it.
                         let status = try await runner.status()
                         let list = try await runner.jobs()
-                        // A runner older than the inbox has none.
-                        let items = (try? await runner.inbox()) ?? []
+                        let items = try await runner.inbox()
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
                         host = status.runner.host

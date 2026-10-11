@@ -109,8 +109,7 @@ final class Phone {
         models = status.models
         clearedAt = status.clearedAt
         jobs = try await runner.jobs()
-        // A runner older than the inbox has none.
-        inbox = (try? await runner.inbox()) ?? []
+        inbox = try await runner.inbox()
         loaded = true
         // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
         await Notifications.clear(Set(jobs.filter { !$0.needsYou && !$0.waitsForAnswer }.map(\.id)))
@@ -135,7 +134,7 @@ final class Phone {
     func reload() async {
         do {
             jobs = try await runner.jobs()
-            inbox = (try? await runner.inbox()) ?? inbox
+            inbox = try await runner.inbox()
             loaded = true
         } catch {
             Logger.phone.error("reloading jobs failed: \(error.localizedDescription, privacy: .public)")
@@ -249,6 +248,19 @@ final class Phone {
     /// Settles an inbox item: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
         apply(.inbox(try await runner.settle(id, answer: answer, done: done, later: later)))
+    }
+
+    /// A job older than the list's 50 (an inbox item or a notification opened it): fetched, and
+    /// kept among the others in age order.
+    func fetch(_ id: String) async {
+        guard !jobs.contains(where: { $0.id == id }) else { return }
+        do {
+            let job = try await runner.job(id)
+            guard !jobs.contains(where: { $0.id == id }) else { return }
+            jobs.insert(job, at: jobs.firstIndex { $0.created < job.created } ?? jobs.count)
+        } catch {
+            Logger.phone.error("fetching job \(id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Tells the job's agent something; the runner answers with the job, running again.

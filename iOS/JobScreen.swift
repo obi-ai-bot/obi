@@ -13,6 +13,8 @@ struct JobScreen: View {
     @State private var telling = false
     @State private var noteProblem: String?
     @State private var requestExpanded = false
+    /// Asked the runner for a job the list doesn't have (it keeps only the latest 50).
+    @State private var looked = false
 
     private var job: Job? { phone.jobs.first { $0.id == id } }
 
@@ -56,7 +58,7 @@ struct JobScreen: View {
                     if let problem { Text(problem).font(.footnote).foregroundStyle(.red) }
                 }
                 .padding(20)
-            } else if phone.loaded {
+            } else if phone.loaded && looked {
                 ContentUnavailableView("This job isn't on the runner any more.", systemImage: "questionmark.folder")
             } else {
                 ProgressView().padding(.top, 80)
@@ -70,6 +72,10 @@ struct JobScreen: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .onChange(of: publishAsked, initial: true) { publishFromNotification() }
+        .task(id: id) {
+            await phone.fetch(id)
+            looked = true
+        }
     }
 
     private func header(_ job: Job) -> some View {
