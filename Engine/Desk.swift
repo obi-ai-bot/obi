@@ -532,7 +532,7 @@ final class Desk {
                                     : "\(job.agentName) is wrapping up. Tell it again once it's done.")
             }
             replace(Self.heard(job, text))
-            agent.send(text)
+            agent.send(Vault.shared.redacting().redact(text))
         } else {
             guard let session = job.session else { throw Shell.Failure(message: "This job never started, so there's no session to pick up.") }
             let resumed = Self.resumed(job, text)
@@ -611,7 +611,8 @@ final class Desk {
         ranHere[job.id] = job.commits ?? 0
         do {
             // Only the job's current agent speaks for it: one that was stopped or ended may still report.
-            try agent.start(prompt: prompt) { [weak self, weak agent] event in
+            // No vault secret reaches an agent, even one the user typed into the request.
+            try agent.start(prompt: Vault.shared.redacting().redact(prompt)) { [weak self, weak agent] event in
                 guard let self, let agent, self.agents[job.id] === agent else { return }
                 self.handle(event, job: job.id)
             }
@@ -742,7 +743,7 @@ final class Desk {
             job.step = "Round \(job.currentRound) of \(job.maxRounds)"
             replace(job)
             roundMessage[id] = message
-            agent.send(message)
+            agent.send(Vault.shared.redacting().redact(message))
         }
     }
 

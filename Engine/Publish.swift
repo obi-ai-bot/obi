@@ -29,6 +29,11 @@ nonisolated enum Publish {
         var line: Int?
         var rule: String
         var description: String { "\(file)\(line.map { ":\($0)" } ?? "") (\(rule))" }
+
+        /// With the vault's secrets taken out of the file's name.
+        func redacted(by leaks: Leaks) -> Finding {
+            leaks.isEmpty ? self : Finding(file: leaks.redact(file), line: line, rule: rule)
+        }
     }
 
     /// A line a diff adds, and where it lands in the new file.
@@ -211,7 +216,7 @@ nonisolated enum Publish {
         let found = lines.flatMap { line in matches(line.text, leaks: leaks).map { Finding(file: line.file, line: line.number, rule: $0) } }
         var seen = Set<Finding>()
         return (named + found + wrapped(lines, leaks: leaks) + spanning(lines, leaks: leaks))
-            .map { leaks.isEmpty ? $0 : Finding(file: leaks.redact($0.file), line: $0.line, rule: $0.rule) }
+            .map { $0.redacted(by: leaks) }
             .filter { seen.insert($0).inserted }
     }
 
@@ -395,13 +400,16 @@ nonisolated enum Publish {
         do {
             // Files' names as they are, not escaped, so the vault's secrets are found in them too.
             let git = ["git", "-C", worktree.path, "-c", "core.quotePath=false"]
-            let commits = try await Shell.ok(git + ["log", "-p", "--no-merges", "--format="] + options + ["\(since)..\(head)"])
+            // A merge as what its author changed from git's own merge of its parents: content a merge
+            // brings in that neither side had is pushed too, even if a later commit takes it out.
+            let commits = try await Shell.ok(git + ["log", "-p", "--diff-merges=remerge", "--format="] + options + ["\(since)..\(head)"])
             let total = try await Shell.ok(git + ["diff"] + options + ["\(since)...\(head)"])
             diff = commits + "\n" + total
         } catch {
             throw Shell.Failure(message: "Not published: the secret scan couldn't read the changes (\(error.localizedDescription)).")
         }
-        return findings(inDiff: diff, leaks: leaks) + (try await gitleaks(parse(diff).lines))
+        // gitleaks names files as the diff does: a vault secret in a name is redacted there too.
+        return findings(inDiff: diff, leaks: leaks) + (try await gitleaks(parse(diff).lines)).map { $0.redacted(by: leaks) }
     }
 
     /// gitleaks on the same added lines when it's installed. The built-in scanner runs either way.

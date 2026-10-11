@@ -286,16 +286,25 @@ final class API {
         watchAccounts()
     }
 
-    /// The API's JSON: camelCase as Swift spells it, and ISO 8601 dates.
-    nonisolated static func encode(_ value: some Encodable) throws -> Data {
+    /// The API's JSON: camelCase as Swift spells it, and ISO 8601 dates, with the vault's secrets
+    /// taken out of every string. Throws when the vault can't be read: then nothing is sent.
+    nonisolated static func encode(_ value: some Encodable, vault: Vault = .shared) throws -> Data {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return try encoder.encode(value)
+        return try vault.scrubbed(encoder.encode(value))
     }
 
+    /// The answer as JSON, or 503 with the reason when it can't be written (the vault can't be read).
     nonisolated static func json(_ value: some Encodable, status: HTTPResponse.Status = .ok) -> Response {
-        let data = (try? encode(value)) ?? Data(#"{"error":"The runner couldn't write its answer."}"#.utf8)
+        let (data, status) = { () -> (Data, HTTPResponse.Status) in
+            do {
+                return (try encode(value), status)
+            } catch {
+                let said = (try? JSONSerialization.data(withJSONObject: ["error": "The runner couldn't write its answer: \(error.localizedDescription)"]))
+                return (said ?? Data(#"{"error":"The runner couldn't write its answer."}"#.utf8), .serviceUnavailable)
+            }
+        }()
         return Response(status: status, headers: [.contentType: "application/json"], body: ResponseBody(byteBuffer: ByteBuffer(bytes: data)))
     }
 

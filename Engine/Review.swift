@@ -187,6 +187,12 @@ nonisolated struct Review: Codable, Equatable, Sendable {
 
     // MARK: The author's next round
 
+    /// The review as the author's agent gets it: quoted, with the vault's secrets taken out. Throws
+    /// when the vault can't be read: then the review isn't handed on.
+    static func handOff(_ review: Review, summary: String, pr: Int, vault: Vault = .shared) throws -> String {
+        try vault.leaks().redact(quoted(review, summary: summary, pr: pr))
+    }
+
     /// The review as a file for the author's agent, quoted so nothing in it reads as an instruction.
     static func quoted(_ review: Review, summary: String, pr: Int) -> String {
         let quote = summary.split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n")
@@ -314,7 +320,7 @@ extension Desk {
             }
             let file = "review-\(result.round).md"
             do {
-                try quoteReview(latest, file, Review.quoted(result, summary: review.summary, pr: pr))
+                try quoteReview(latest, file, Review.handOff(result, summary: review.summary, pr: pr))
             } catch {
                 latest.reviewError = "Oby couldn't hand the review to \(latest.agentName): \(error.localizedDescription)"
                 return replace(latest)

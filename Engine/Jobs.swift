@@ -682,8 +682,18 @@ nonisolated enum Agents {
     /// switch is Claude Code's own (checked in 2.1.296: "0", "false", "no" or "off" turn it off).
     static let noConnectors: [String: String?] = ["ENABLE_CLAUDEAI_MCP_SERVERS": "false"]
 
-    /// What changes from Oby's own environment, also for the checks Oby runs in a job's worktree.
-    static var overrides: [String: String?] { overrides(identity: identity.withLock { $0 }) }
+    /// What changes from Oby's own environment, also for the checks Oby runs in a job's worktree:
+    /// a variable of Oby's own that holds one of the vault's secrets (`export STAGING_API_KEY=…` in
+    /// the service's environment) doesn't pass through either.
+    static var overrides: [String: String?] {
+        overrides(identity: identity.withLock { $0 }).merging(withheld(Shell.environment, leaks: Vault.shared.redacting())) { $1 }
+    }
+
+    /// The variables in `env` that hold one of the vault's secrets, plain or encoded, each as a removal.
+    static func withheld(_ env: [String: String], leaks: Leaks) -> [String: String?] {
+        guard !leaks.isEmpty else { return [:] }
+        return Dictionary(uniqueKeysWithValues: env.filter { !leaks.hits(in: $0.value).isEmpty }.map { ($0.key, String?.none) })
+    }
 
     /// The owner's name and email from GitHub, for agents' commits; nil until `readIdentity` finds them.
     static let identity = Mutex<GitIdentity?>(nil)

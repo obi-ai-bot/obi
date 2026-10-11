@@ -405,7 +405,7 @@ struct VaultPushTests {
         failed.issue = nil
         failed.request = "Test with \(Fake.base64(value))"
         let body = try Push.notification(.failed, for: failed)
-        let scrubbed = try Push.scrubbed(body, vault: vault)
+        let scrubbed = try vault.scrubbed(body)
         let text = String(decoding: scrubbed, as: UTF8.self)
         for copy in copies(of: value) { #expect(!text.contains(copy.text), Comment(rawValue: copy.how)) }
         let alert = try #require((object(scrubbed)["aps"] as? [String: Any])?["alert"] as? [String: String])
@@ -415,9 +415,98 @@ struct VaultPushTests {
 
         // A clean push goes as it was.
         let clean = try Push.notification(.failed, for: job)
-        #expect(try Push.scrubbed(clean, vault: vault) == clean)
+        #expect(try vault.scrubbed(clean) == clean)
         // None goes when the vault can't be read.
         chmod(store.file.path, 0o644)
-        #expect(throws: Shell.Failure.self) { try Push.scrubbed(clean, vault: vault) }
+        #expect(throws: Shell.Failure.self) { try vault.scrubbed(clean) }
+    }
+}
+
+/// Review 3: what reaches agents, merges, the API, and every finding.
+struct VaultReachTests {
+    @Test func aVariableHoldingASecretIsntPassedToAgents() {
+        let value = secret()
+        let leaks = Leaks(["staging-api-key": value])
+        let env = ["STAGING_API_KEY": value, "ENCODED": Fake.base64(value), "PATH": "/usr/bin:/bin", "HOME": "/home/oby"]
+        let withheld = Agents.withheld(env, leaks: leaks)
+        #expect(Set(withheld.keys) == ["STAGING_API_KEY", "ENCODED"])
+        #expect(withheld.values.allSatisfy { $0 == nil })
+        #expect(Agents.withheld(env, leaks: .empty).isEmpty)
+        // Removals win over Oby's own environment, as `Agents.environment` and the checks apply them.
+        var applied = env
+        for (key, value) in withheld { applied[key] = value }
+        #expect(applied == ["PATH": "/usr/bin:/bin", "HOME": "/home/oby"])
+    }
+
+    @Test func aReviewIsHandedOnWithoutTheVaultsSecrets() throws {
+        let (vault, store, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let value = secret()
+        try vault.add(value, as: "staging-api-key")
+        let review = Review(verdict: .changesRequested, job: "rev12345", agent: "codex", account: "default", round: 1)
+        let text = try Review.handOff(review, summary: "The test uses \(value) and \(Fake.hex(value)).\n\nVERDICT: CHANGES REQUESTED", pr: 107, vault: vault)
+        for copy in copies(of: value) { #expect(!text.contains(copy.text), Comment(rawValue: copy.how)) }
+        #expect(text.contains("> The test uses [vault: staging-api-key] and [vault: staging-api-key]."))
+        // Not handed on when the vault can't be read.
+        chmod(store.file.path, 0o644)
+        #expect(throws: Shell.Failure.self) { try Review.handOff(review, summary: "fine", pr: 107, vault: vault) }
+    }
+
+    /// A secret a merge brings in, and a later commit takes out, is still in what the push sends.
+    @Test func aSecretAMergeBroughtInIsFound() async throws {
+        let (vault, _, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let value = secret()
+        try vault.add(value, as: "staging-api-key")
+        let repo = try temporaryFolder()
+        let git = { (arguments: [String]) in try await AlreadyOnBaseTests.git(arguments, in: repo) }
+        try await Shell.ok(["git", "-C", repo.path, "init", "--quiet", "-b", "dev"])
+        try await AlreadyOnBaseTests.commit("README.md", in: repo)
+        try await git(["update-ref", "refs/remotes/origin/dev", "dev"])
+        try await git(["switch", "--quiet", "-c", "side"])
+        try await AlreadyOnBaseTests.commit("side.txt", in: repo)
+        try await git(["switch", "--quiet", "-c", "oby/fix-2", "dev"])
+        try await AlreadyOnBaseTests.commit("a.txt", in: repo)
+        try await git(["merge", "--quiet", "--no-ff", "--no-commit", "side"])
+        try "token = \(value)\n".write(to: repo.appending(path: "config.txt"), atomically: true, encoding: .utf8)
+        try await git(["add", "config.txt"])
+        try await git(["commit", "--quiet", "-m", "Merge side"])
+        try await git(["rm", "--quiet", "config.txt"])
+        try await git(["commit", "--quiet", "-m", "remove config"])
+
+        let findings = try await Publish.scan(repo, base: "dev", head: "oby/fix-2", vault: vault)
+        #expect(findings.contains(Publish.Finding(file: "config.txt", line: 1, rule: "vault secret staging-api-key")))
+        // An ordinary merge brings in nothing new.
+        try await git(["switch", "--quiet", "-c", "oby/fix-3", "dev"])
+        try await AlreadyOnBaseTests.commit("b.txt", in: repo)
+        try await git(["merge", "--quiet", "--no-ff", "-m", "Merge side", "side"])
+        #expect(try await Publish.scan(repo, base: "dev", head: "oby/fix-3", vault: vault).isEmpty)
+    }
+
+    @Test func theAPIsJSONHasTheVaultsSecretsTakenOut() throws {
+        let (vault, store, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let value = secret()
+        try vault.add(value, as: "staging-api-key")
+        var leaky = job
+        leaky.request = "Use \(value) for the staging tests"
+        leaky.summary = "Ran them with \(Fake.percent(value))"
+        let data = try API.encode(JobJSON(job: leaky), vault: vault)
+        let text = String(decoding: data, as: UTF8.self)
+        for copy in copies(of: value) { #expect(!text.contains(copy.text), Comment(rawValue: copy.how)) }
+        #expect(object(data)["request"] as? String == "Use [vault: staging-api-key] for the staging tests")
+        // A clean answer is as it was; none is written when the vault can't be read.
+        #expect(try API.encode(JobJSON(job: job), vault: vault) == API.encode(JobJSON(job: job), vault: Vault(store: FileVault(folder: folder.appending(path: "none")))))
+        chmod(store.file.path, 0o644)
+        #expect(throws: Shell.Failure.self) { try API.encode(JobJSON(job: job), vault: vault) }
+    }
+
+    /// gitleaks' findings name files as the diff does: a secret in a name goes redacted.
+    @Test func everyFindingHasItsFileNameRedacted() {
+        let leaks = Leaks(["short-key": "abcdefgh"])
+        let finding = Publish.Finding(file: "notes/abcdefgh.txt", line: 3, rule: "gitleaks generic-api-key")
+        #expect(finding.redacted(by: leaks) == Publish.Finding(file: "notes/[vault: short-key].txt", line: 3, rule: "gitleaks generic-api-key"))
+        #expect(!Publish.blocked(by: [finding.redacted(by: leaks)]).contains("abcdefgh"))
+        #expect(finding.redacted(by: .empty) == finding)
     }
 }

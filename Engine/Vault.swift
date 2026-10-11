@@ -109,6 +109,29 @@ nonisolated final class Vault: Sendable {
         (try? leaks()) ?? learned.withLock { $0.leaks }
     }
 
+    /// JSON as it may leave Oby (a push through Apple, the runner's API): every string in it with
+    /// the vault's secrets, plain or encoded, taken out (a job's request, title, step or summary
+    /// could hold one). Unchanged when none does. Throws when the vault can't be read: then it doesn't go.
+    func scrubbed(_ json: Data) throws -> Data {
+        let leaks = try leaks()
+        guard !leaks.isEmpty, let object = try? JSONSerialization.jsonObject(with: json, options: .fragmentsAllowed) else { return json }
+        var changed = false
+        func scrub(_ value: Any) -> Any {
+            switch value {
+            case let text as String:
+                let clean = leaks.redact(text)
+                if clean != text { changed = true }
+                return clean
+            case let list as [Any]: return list.map(scrub)
+            case let fields as [String: Any]: return fields.mapValues(scrub)
+            default: return value
+            }
+        }
+        let clean = scrub(object)
+        guard changed else { return json }
+        return try JSONSerialization.data(withJSONObject: clean, options: [.sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed])
+    }
+
     /// Hands the value to `body`, for Oby's own call on a connection the user made. Nothing else reads it.
     func use<T>(_ name: String, _ body: (String) throws -> T) throws -> T {
         guard let value = try store.value(name) else { throw Shell.Failure(message: "The vault has no secret named \(name).") }

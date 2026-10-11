@@ -226,7 +226,7 @@ final class Push {
         guard let signer else { return }
         let body: Data
         do {
-            body = try Self.scrubbed(raw)
+            body = try Vault.shared.scrubbed(raw)
         } catch {
             Logger.runner.error("push held: the secret scan can't read the vault (\(error.localizedDescription, privacy: .public))")
             return
@@ -335,29 +335,6 @@ final class Push {
     }
 
     // MARK: Payloads
-
-    /// The push as it may go out through Apple: every string in it with the vault's secrets, plain
-    /// or encoded, taken out (a job's title, step or summary could hold one). Unchanged when none
-    /// does. Throws when the vault can't be read.
-    nonisolated static func scrubbed(_ body: Data, vault: Vault = .shared) throws -> Data {
-        let leaks = try vault.leaks()
-        guard !leaks.isEmpty, let object = try? JSONSerialization.jsonObject(with: body) else { return body }
-        var changed = false
-        func scrub(_ value: Any) -> Any {
-            switch value {
-            case let text as String:
-                let clean = leaks.redact(text)
-                if clean != text { changed = true }
-                return clean
-            case let list as [Any]: return list.map(scrub)
-            case let fields as [String: Any]: return fields.mapValues(scrub)
-            default: return value
-            }
-        }
-        let clean = scrub(object)
-        guard changed else { return body }
-        return try JSONSerialization.data(withJSONObject: clean, options: [.sortedKeys, .withoutEscapingSlashes])
-    }
 
     /// `{"aps": {…, "timestamp": now}}`, with `content-state` as the app's ContentState.
     nonisolated static func payload(_ aps: [String: any Encodable], now: Date) throws -> Data {
