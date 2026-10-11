@@ -213,6 +213,45 @@ extension Desk {
         }
     }
 
+    /// A user-authorized conflict round still needs the runner's credentials to fetch dev.
+    /// Reserve the job while git runs, so no agent starts with an unprepared worktree.
+    func retryCloudConflict(_ id: String) throws {
+        guard let author = job(id), author.cloudNeedsYou, let cloud = author.xcodeCloud, cloud.conflict,
+              author.reviewing == nil, let session = author.session, !cloudRecovering.contains(id) else {
+            throw Shell.Failure(message: "The Xcode Cloud conflict can't be retried right now.")
+        }
+        let file = "xcode-cloud-again.md"
+        try quoteReview(author, file, vault.forAgent(XcodeCloud.quoted(cloud)))
+        var again = Self.resumed(author, Inbox.oneMoreRound)
+        again.step = "Merging dev for Xcode Cloud"
+        again.xcodeCloud?.conflicts += 1
+        again.xcodeCloud?.problem = nil
+        cloudRecovering.insert(id)
+        replace(again)
+        Task {
+            defer { cloudRecovering.remove(id) }
+            do {
+                let conflicts = try await mergeCloudBase(again)
+                guard var latest = job(id), latest.status == .running, latest.round == again.round,
+                      latest.pushedHead == again.pushedHead, latest.dismissed == nil,
+                      latest.pullRequest?.state == .open else { return }
+                latest.step = "Working on Xcode Cloud"
+                latest.xcodeCloud?.handedOff = true
+                replace(latest)
+                run(latest, prompt: XcodeCloud.prompt(latest, file: file, conflicts: conflicts), resume: session)
+            } catch {
+                guard var latest = job(id), latest.status == .running, latest.round == again.round,
+                      latest.pushedHead == again.pushedHead else { return }
+                latest.status = .failed
+                latest.finished = .now
+                latest.step = ""
+                latest.summary = "Oby couldn't merge dev for the Xcode Cloud retry: \(error.localizedDescription)"
+                latest.xcodeCloud?.problem = latest.summary
+                replace(latest)
+            }
+        }
+    }
+
     func cloudAgain(_ id: String, ask: Bool = false) throws -> String {
         guard let author = job(id), let cloud = author.xcodeCloud else { throw Shell.Failure(message: "No Xcode Cloud failure to retry.") }
         let file = "xcode-cloud-again.md"

@@ -1292,7 +1292,8 @@ final class Desk {
             switch (item.kind, text) {
             case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss), (.merge, Inbox.dismiss): try dismiss(item.job)
             case (.failed, Inbox.oneMoreRound) where job(item.job)?.cloudNeedsYou == true:
-                try message(item.job, cloudAgain(item.job))
+                if job(item.job)?.xcodeCloud?.conflict == true { try retryCloudConflict(item.job) }
+                else { try message(item.job, cloudAgain(item.job)) }
             case (.failed, Inbox.askOby) where job(item.job)?.cloudNeedsYou == true:
                 try message(item.job, cloudAgain(item.job, ask: true))
             case (.merge, Inbox.tryAgain): try retryMerge(item.job)
