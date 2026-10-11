@@ -13,6 +13,8 @@ import Testing
 enum Fake {
     static let aws = "AKIA" + "ABCDEFGHIJKLMNOP"
     static let github = "ghp" + "_" + String(repeating: "aB3dE6", count: 6)
+    /// Built from parts, so this file doesn't trip the scan it tests.
+    static func assign(_ key: String, _ value: String) -> String { key + " = \"" + value + "\"" }
     static let password = "password" + " = \"" + "hunter2hunter2hunter2" + "\""
 
     static func base64(_ text: String) -> String { Data(text.utf8).base64EncodedString() }
@@ -70,6 +72,18 @@ struct EncodedSecretTests {
         #expect(Publish.findings(inDiff: diff) == [Publish.Finding(file: "k.yml", line: 1, rule: "GitHub token, base64")])
         let apart = Publish.wrapped(wrapped.enumerated().map { Publish.Line(file: "k.yml", number: $0.offset * 2 + 1, text: $0.element) })
         #expect(apart.isEmpty)
+    }
+
+    @Test func namesOfSecretsAreNotSecrets() {
+        // The keys and vault entry names code uses for secrets: names, not secrets.
+        #expect(Publish.matches("static let " + Fake.assign("client" + "Secret", "client" + "Secret")).isEmpty)
+        #expect(Publish.matches("static let " + Fake.assign("access" + "Token", "watch-access-client-" + "token")).isEmpty)
+        #expect(Publish.matches("case " + Fake.assign("api" + "Key", "api_" + "key")).isEmpty)
+        // Weak passwords, passphrases and real-looking keys still count.
+        #expect(Publish.matches(Fake.assign("pass" + "word", "hunter2" + "hunter2")) == ["password or secret"])
+        #expect(Publish.matches(Fake.assign("pass" + "word", "correct-horse-" + "battery-staple")) == ["password or secret"])
+        #expect(Publish.matches(Fake.assign("api_" + "key", "aB3dE6gH9jK2" + "mN5pQ8sT")) == ["password or secret"])
+        #expect(Publish.matches(Fake.assign("sec" + "ret", "mysecretpass" + "word1")) == ["password or secret"])
     }
 
     @Test func ordinaryCodeIsClean() {
