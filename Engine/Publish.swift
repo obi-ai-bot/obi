@@ -100,7 +100,9 @@ nonisolated enum Publish {
             throw Shell.Failure(message: "Not published: the secret scan couldn't read the commit messages.")
         }
         let title = title(for: job, subjects: subjects.split(separator: "\n").map(String.init))
-        let texts = outgoing(job, messages: messages, title: title)
+        // Read once: the scan checks the very description the pull request gets.
+        let closes = await closesIssue(job)
+        let texts = outgoing(job, messages: messages, title: title, closes: closes)
         let said: [Finding]
         do {
             said = try await scan(texts: texts)
@@ -115,15 +117,15 @@ nonisolated enum Publish {
         hooks.sent(Outgoing(action: .push, repo: job.repo, id: head, branch: job.branch))
         try hooks.proceed()
         progress(.pullRequest)
-        let (url, sent) = try await pullRequest(job, base: base, title: title)
+        let (url, sent) = try await pullRequest(job, base: base, title: title, closes: closes)
         if let sent { hooks.sent(Outgoing(action: sent, repo: job.repo, id: url.absoluteString)) }
         return url
     }
 
     /// Everything a publish sends besides the files: the branch's name, every commit's message, and
     /// the pull request's title and description.
-    static func outgoing(_ job: Job, messages: String, title: String) -> [(name: String, text: String)] {
-        [("branch name", job.branch), ("commit message", messages), ("pull request title", title), ("pull request description", body(for: job))]
+    static func outgoing(_ job: Job, messages: String, title: String, closes: Bool = true) -> [(name: String, text: String)] {
+        [("branch name", job.branch), ("commit message", messages), ("pull request title", title), ("pull request description", body(for: job, closes: closes))]
     }
 
     /// Why Oby won't publish this job, or nil to go ahead.
@@ -617,13 +619,8 @@ nonisolated enum Publish {
     /// Opens the pull request, ready for review, or returns the one already open for the branch
     /// with its description brought up to date (a later round's summary and check). `sent` says
     /// which went out: `pullRequestEdit` only when the description did update.
-    static func pullRequest(_ job: Job, base: String, title: String) async throws -> (url: URL, sent: Outgoing.Action?) {
+    static func pullRequest(_ job: Job, base: String, title: String, closes: Bool) async throws -> (url: URL, sent: Outgoing.Action?) {
         let file = FileManager.default.temporaryDirectory.appending(path: "oby-pr-\(UUID().uuidString).md")
-        // Only the issue's shape is read, never sent: a checklist, or an issue gh can't read, isn't closed.
-        var closes = false
-        if let number = job.issue, let issue = try? await Shell.ok(["gh", "issue", "view", "\(number)", "-R", job.repo, "--json", "body", "-q", ".body"]) {
-            closes = Self.closes(issue: issue)
-        }
         try body(for: job, closes: closes).write(to: file, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: file) }
         let open = try await Shell.ok(["gh", "pr", "list", "-R", job.repo, "--head", job.branch, "--state", "open",
@@ -663,6 +660,14 @@ nonisolated enum Publish {
         let issue = job.issue.map { " (#\($0))" } ?? ""
         if text.count + issue.count > 100 { text = text.prefix(99 - issue.count) + "…" }
         return text + issue
+    }
+
+    /// Whether the job's pull request closes its issue (`closes(issue:)`). Only the issue's shape is
+    /// read, never sent: one gh can't read isn't closed.
+    static func closesIssue(_ job: Job) async -> Bool {
+        guard let number = job.issue,
+              let issue = try? await Shell.ok(["gh", "issue", "view", "\(number)", "-R", job.repo, "--json", "body", "-q", ".body"]) else { return false }
+        return closes(issue: issue)
     }
 
     /// Whether a pull request closes its issue: not one whose body has a checklist (a feature or an
