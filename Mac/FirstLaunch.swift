@@ -201,7 +201,7 @@ private struct FirstLaunchView: View {
                 .formStyle(.grouped)
                 .scrollContentBackground(.hidden)
                 .padding(.horizontal, -20)
-                caption("Fable and Astra only if you pick them: they're stronger, and use up a plan's limits fast. Complex jobs use the stronger model only when you turn it on for that job.")
+                caption("Fable and Astra only if you pick them: they're stronger, and use up a plan's limits fast. Complex jobs use their model only when you turn it on for that job; if it's the routine model, there's nothing to turn on.")
             }
         }
     }
@@ -402,12 +402,8 @@ private struct FirstLaunchView: View {
         for agent in tools.connected {
             guard let model = routine[agent], !model.isEmpty else { continue }
             defaults.set(model, forKey: "\(agent).model")
-            // A complex pick that's the routine model would offer nothing: Oby's stronger model instead.
-            if let stronger = complex[agent], !stronger.isEmpty, stronger != model {
-                defaults.set(stronger, forKey: "\(agent).complexModel")
-            } else {
-                defaults.removeObject(forKey: "\(agent).complexModel")
-            }
+            // What the screen shows, even when it's the routine model: then the island offers nothing.
+            if let stronger = complex[agent], !stronger.isEmpty { defaults.set(stronger, forKey: "\(agent).complexModel") }
         }
     }
 

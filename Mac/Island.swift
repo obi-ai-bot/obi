@@ -618,9 +618,12 @@ private struct OpenIsland: View {
                 Text(model.summary).font(.system(size: 19, weight: .semibold))
                 Text("Type a task below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
                 // First launch was skipped or Accessibility refused: fn does nothing until it's allowed.
-                if !AXIsProcessTrusted() {
-                    Button("To talk with fn, allow Accessibility") { Task { await Permissions().ask(.accessibility) } }
-                        .buttonStyle(.plain).font(.system(size: 13, weight: .medium)).foregroundStyle(.orange)
+                // macOS doesn't say when it is, so look again every couple of seconds while open.
+                TimelineView(.periodic(from: .now, by: 2)) { _ in
+                    if !AXIsProcessTrusted() {
+                        Button("To talk with fn, allow Accessibility") { Task { await Permissions().ask(.accessibility) } }
+                            .buttonStyle(.plain).font(.system(size: 13, weight: .medium)).foregroundStyle(.orange)
+                    }
                 }
             }
         }
@@ -732,7 +735,7 @@ private struct PlanCard: View {
                 }
                 .frame(width: 170)
             }
-            if draft.suggestedModel != nil, let account {
+            if draft.suggestedModel != nil, let account, ModelPicks.complex(for: account.agent) != nil {
                 StrongerModel(agent: account.agent, plan: accounts.first { $0.account.id == account.id }?.label, on: $stronger)
             }
             Label("Works in Oby's own copy of the repository. Nothing is pushed or posted.", systemImage: "checkmark.shield")
@@ -823,8 +826,8 @@ private struct PlansCard: View {
                         Text(details(draft)).font(.system(size: 12, design: .monospaced)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
                     }
                     Spacer(minLength: 8)
-                    if draft.suggestedModel != nil {
-                        Toggle(AgentModels.name(ModelPicks.complex(for: agent(of: draft)) ?? ""), isOn: Binding {
+                    if draft.suggestedModel != nil, let model = ModelPicks.complex(for: agent(of: draft)) {
+                        Toggle(AgentModels.name(model), isOn: Binding {
                             stronger.contains(draft.job.id)
                         } set: { on in
                             if on { stronger.insert(draft.job.id) } else { stronger.remove(draft.job.id) }

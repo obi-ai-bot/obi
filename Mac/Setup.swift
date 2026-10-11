@@ -212,9 +212,11 @@ enum ModelPicks {
         return 1
     }
 
-    /// An everyday model (Sonnet 5.5 for Claude Code), else the smallest.
+    /// An everyday model (Sonnet 5.5 for Claude Code), else the smallest. Cursor's "auto" only if
+    /// it's all there is: that's Cursor choosing, not a model.
     nonisolated static func routine(_ models: [String]) -> String? {
-        models.first { size($0) == 1 } ?? models.min { size($0) < size($1) }
+        let models = models == ["auto"] ? models : models.filter { $0 != "auto" }
+        return models.first { size($0) == 1 } ?? models.min { size($0) < size($1) }
     }
 
     /// The strongest model short of the ones that need asking (Opus 5.5 for Claude Code).
@@ -236,8 +238,10 @@ enum ModelPicks {
         UserDefaults.standard.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "")?[key] as? String
     }
 
-    /// The model the island offers for complex work: the user's pick, else Oby's stronger model.
+    /// The model the island offers for complex work: the user's pick, else Oby's stronger model
+    /// (for whoever never picked). Nil when that's the model jobs already use: nothing to offer.
     static func complex(for agent: String) -> String? {
-        UserDefaults.standard.string(forKey: "\(agent).complexModel") ?? AgentModels.stronger[agent]
+        let model = UserDefaults.standard.string(forKey: "\(agent).complexModel") ?? AgentModels.stronger[agent]
+        return model == AgentModels.value(agent, "model") ? nil : model
     }
 }
