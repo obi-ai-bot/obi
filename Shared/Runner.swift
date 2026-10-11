@@ -57,6 +57,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var reviewOf: String?
     /// Everything the runner sent out for the job, oldest first (newer runners only).
     var outgoing: [Outgoing]?
+    /// What its agent asked the user and waits for (the inbox has it), or nil. Older runners don't send it.
+    var question: Question?
 
     var isActive: Bool { status == .queued || status == .running }
 
@@ -228,6 +230,46 @@ nonisolated struct Question: Codable, Equatable, Sendable {
     var options: [String]
 }
 
+#if os(iOS) || os(watchOS)
+/// Something only the user can answer, waiting in the inbox (docs/runner-api.md). The Mac reads
+/// these into Engine's own InboxItem.
+nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
+    /// `question`, `review`, `failed` or `limit`; more may come.
+    var kind: String
+    var id: String
+    var job: String
+    var title: String
+    var text: String
+    var options: [String]
+    var created: Date
+    var done: Date?
+    var later: Date?
+    var answer: String?
+
+    var isOpen: Bool { done == nil }
+    func waiting(at now: Date = .now) -> Bool { done == nil && (later.map { $0 <= now } ?? true) }
+}
+#endif
+
+extension InboxItem {
+    /// "Failed · Mac runner notifications · waiting 3m": what kind of item, its job, how long it waited.
+    nonisolated func line(now: Date = .now) -> String {
+        // The Mac's `kind` is Engine's enum, the iPhone's a string: both read the same.
+        let label = switch "\(kind)" {
+        case "question": "Question"
+        case "review": "Out of reviews"
+        case "limit": "Out of usage"
+        default: "Failed"
+        }
+        return "\(label) · \(title) · \(Elapsed.waiting(since: created, now: now))"
+    }
+
+    /// The inbox as the apps show it: what waits now, the longest-waiting first.
+    nonisolated static func waiting(_ items: [InboxItem], now: Date = .now) -> [InboxItem] {
+        items.filter { $0.waiting(at: now) }.sorted { $0.created < $1.created }
+    }
+}
+
 /// What the brain made of the user's words.
 nonisolated enum PlanResult: Decodable, Equatable, Sendable {
     /// One draft per job, 1 to 10.
@@ -321,6 +363,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     case accounts([Account])
     /// Clear done was pressed, here or on another app: jobs that finished by then are hidden.
     case cleared(Date)
+    /// An inbox item came, was answered, done or put off, here or on another app.
+    case inbox(InboxItem)
 }
 
 extension Job {
@@ -440,6 +484,16 @@ nonisolated struct Runner: Sendable {
     func clear() async throws -> Date {
         let answer: ClearedAt = try await call("POST", "v1/clear")
         return answer.clearedAt
+    }
+
+    /// What waits in the inbox, put-off items too.
+    func inbox() async throws -> [InboxItem] { try await call("GET", "v1/inbox") }
+
+    /// Settles an inbox item: an answer (one of its options, or the user's words) goes to its job;
+    /// `done` lets it go without one; `later` puts it off until then. Send one of them.
+    func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws -> InboxItem {
+        struct Body: Encodable { var answer: String?; var done: Bool?; var later: Date? }
+        return try await call("POST", "v1/inbox/\(id)/answer", body: Body(answer: answer, done: done, later: later))
     }
 
     /// Tells the job's agent something. A finished job picks its session up again.
@@ -598,6 +652,7 @@ nonisolated struct EventParser {
             case "job": return (try? Runner.decoder.decode(Job.self, from: json)).map(RunnerEvent.job)
             case "accounts": return (try? Runner.decoder.decode([Account].self, from: json)).map(RunnerEvent.accounts)
             case "clear": return (try? Runner.decoder.decode(ClearedAt.self, from: json)).map { .cleared($0.clearedAt) }
+            case "inbox": return (try? Runner.decoder.decode(InboxItem.self, from: json)).map(RunnerEvent.inbox)
             default: return nil
             }
         }

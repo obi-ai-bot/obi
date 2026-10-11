@@ -108,6 +108,10 @@ final class IslandController {
         panel.orderFrontRegardless()
         character.pause(true)
         desk.onFinish = { [weak self] job in self?.notify(job.doneLine, happy: job.status == .done) }
+        // A question from one of this Mac's jobs, as the runner's come (RunnerFeed.Notice.question).
+        desk.onInboxChange = { [weak self] item in
+            if item.kind == .question, item.isOpen, item.later == nil { self?.notify("Question: \(item.title)", happy: false) }
+        }
         feed.onNotice = { [weak self] job, notice in self?.notify(RunnerFeed.title(notice, for: job), happy: notice == .ready && job.publishError == nil) }
         feed.start()
         Task { await desk.refresh() }
@@ -501,8 +505,14 @@ private struct OpenIsland: View {
                 if let row = selectedRow {
                     scrolling { screen(row).id(row.id) }
                 } else {
-                    if !groups.isEmpty {
-                        scrolling { list }
+                    // The inbox first: what only you can answer, then the jobs.
+                    if !groups.isEmpty || IslandInbox.waits(desk: desk, feed: feed) {
+                        scrolling {
+                            VStack(alignment: .leading, spacing: 14) {
+                                IslandInbox(desk: desk, feed: feed)
+                                list
+                            }
+                        }
                     }
                     if let problem {
                         Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(2)

@@ -86,8 +86,13 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Files the user attached to the request (a screenshot, what they copied), as paths on this
     /// machine. Workspace.prepare copies them into the worktree's .oby/inputs.
     var attachments: [String]?
+    /// What the agent asked the user at the end of its turn (`QUESTION: …`, Inbox.question), or
+    /// nil. The job waits for the answer, which reaches the agent as its next message.
+    var question: Plan.Question?
 
     var maxRounds: Int { rounds ?? 1 }
+    /// Its agent asked the user something and waits for the answer: the inbox has it.
+    var waitsForAnswer: Bool { question != nil && dismissed == nil && status != .stopped }
     var currentRound: Int { round ?? 1 }
     /// It keeps going after a turn: there's a check to pass or more than one round.
     var loops: Bool { check != nil || maxRounds > 1 }
@@ -955,6 +960,7 @@ nonisolated enum Prompts {
             lines.append("You may take up to \(job.maxRounds) rounds. End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.")
         }
         lines.append("Finish with a short summary. Its first line is one sentence the user will see in the notch.")
+        lines.append(Inbox.howToAsk)
         return lines.joined(separator: "\n\n")
     }
 
@@ -1006,7 +1012,7 @@ nonisolated enum Prompts {
 
 /// The job list and the brain's recent turns, kept in SQLite in Oby's folder.
 nonisolated final class JobStore {
-    private var db: OpaquePointer?
+    private(set) var db: OpaquePointer?
 
     init(url: URL) {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -1014,6 +1020,8 @@ nonisolated final class JobStore {
         // ponytail: the job as JSON next to its id and time; add columns when something needs to query them.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS turns (created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
+        // The inbox (Engine/Inbox.swift), the same way.
+        sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
     }
 
     deinit { sqlite3_close(db) }

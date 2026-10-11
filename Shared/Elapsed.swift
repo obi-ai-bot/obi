@@ -13,4 +13,15 @@ nonisolated enum Elapsed {
         let time = text(Int((finished ?? now).timeIntervalSince(started)))
         return finished == nil ? "\(time) elapsed" : "Took \(time)"
     }
+
+    /// How long an inbox item has waited for the user: "just now", "waiting 3m", "waiting 2h", "waiting 3d".
+    static func waiting(since: Date, now: Date = .now) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(since)))
+        switch seconds {
+        case ..<60: return "just now"
+        case ..<3600: return "waiting \(seconds / 60)m"
+        case ..<86400: return "waiting \(seconds / 3600)h"
+        default: return "waiting \(seconds / 86400)d"
+        }
+    }
 }

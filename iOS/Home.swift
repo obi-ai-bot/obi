@@ -25,6 +25,8 @@ struct HomeView: View {
                             .font(.footnote).foregroundStyle(.orange)
                             .padding(.horizontal, 4)
                     }
+                    // What only you can answer, before the jobs.
+                    InboxSection()
                     ForEach(groups) { section in
                         Text(section.group.rawValue)
                             .font(.caption.weight(.semibold)).foregroundStyle(.secondary)

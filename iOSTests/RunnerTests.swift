@@ -88,6 +88,21 @@ struct RunnerTests {
         #expect(accounts.first?.title == "Deskree · Claude Code")
     }
 
+    /// An inbox item as the runner sends it (docs/runner-api.md), in its event and in the list.
+    @Test func inboxItems() throws {
+        let item = #"{"id": "ab12cd34-question-0", "kind": "question", "job": "ab12cd34", "title": "Nothing committed status", "text": "Failed, or a new status?", "options": ["Failed", "A new status"], "created": "2026-10-10T09:12:00Z", "done": null, "later": null, "answer": null, "state": "open"}"#
+        var parser = EventParser()
+        var events: [RunnerEvent] = []
+        for line in ["event: inbox", "data: \(item)", ""] {
+            if let event = parser.feed(line) { events.append(event) }
+        }
+        guard case .inbox(let decoded) = events.first else { Issue.record("no inbox event"); return }
+        #expect(decoded.kind == "question" && decoded.options == ["Failed", "A new status"] && decoded.isOpen)
+        let created = decoded.created
+        #expect(decoded.line(now: created + 190) == "Question · Nothing committed status · waiting 3m")
+        #expect(InboxItem.waiting([decoded], now: created).map(\.id) == ["ab12cd34-question-0"])
+    }
+
     /// The bytes the Face ID key signs must be exactly what the runner checks.
     @Test func approvalMessage() {
         let message = Approval.message(job: "abc", action: "Push oby/fix-1 to deskree-inc/oby and open a pull request into dev.", signedAt: "2026-10-09T22:01:07Z")

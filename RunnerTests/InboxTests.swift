@@ -1,0 +1,282 @@
+import Foundation
+import HTTPTypes
+import Hummingbird
+import HummingbirdTesting
+import Testing
+@testable import ObyEngine
+@testable import ObyShared
+@testable import oby_runner
+
+/// The inbox (docs/pipeline-cases.md, I.1): what only the user can answer waits there, with its
+/// job, a short line and the answers it offers. A job's question lands there instead of in its
+/// report, the job waits, and the answer reaches it as its next message.
+@MainActor
+final class InboxTests {
+    final class Agent: AgentRun {
+        var onEvent: (AgentEvent) -> Void = { _ in }
+        var sent: [String] = []
+        var ended = false
+        func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws { self.onEvent = onEvent }
+        func send(_ text: String) { sent.append(text) }
+        func end() { ended = true }
+        func stop() {}
+        func kill() {}
+    }
+
+    let folder: URL
+    let owner: HTTPFields = [.tailscaleUserLogin: "well@example.com"]
+
+    init() throws {
+        folder = try temporaryFolder()
+    }
+
+    deinit { try? FileManager.default.removeItem(at: folder) }
+
+    /// A fix job that has started and has a session.
+    var fix: Job {
+        var fix = job
+        fix.id = "ask62"
+        fix.kind = .fix
+        fix.pr = nil
+        fix.base = "dev"
+        fix.branch = "oby/fix-62"
+        fix.title = "Nothing committed status"
+        return fix
+    }
+
+    var failed: Job {
+        var failed = fix
+        failed.id = "failed"
+        failed.status = .failed
+        failed.session = "e6a24229"
+        failed.summary = "`swift test` still fails after 4 rounds.\n\nDetails."
+        failed.finished = Date(timeIntervalSince1970: 1_791_582_200)
+        return failed
+    }
+
+    func makeDesk(_ jobs: [Job] = []) -> Desk {
+        let store = JobStore(url: folder.appending(path: "oby.sqlite"))
+        for job in jobs { store.save(job) }
+        return Desk(accounts: AccountStore(root: folder), store: store)
+    }
+
+    /// A desk running `fix` on a fake agent, once it's running.
+    func running(_ agent: Agent) async throws -> Desk {
+        let desk = makeDesk()
+        desk.makeAgent = { _, _, _ in agent }
+        desk.prepare = { $0 }
+        desk.countCommits = { _, _ in 0 }
+        desk.dispatch(Desk.Draft(said: "work on oby #62", reply: "", job: fix, guessed: false))
+        for _ in 0..<500 where desk.job("ask62")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
+        agent.onEvent(.session("e6a24229"))
+        return desk
+    }
+
+    @Test func questionsAreReadFromTheSummarysEnd() {
+        let asked = "Nothing committed yet.\n\n**QUESTION:** Should a job that commits nothing end as `failed`, or get a new status?\nOPTIONS: Failed | A new status | "
+        #expect(Inbox.question(in: asked) == Plan.Question(text: "Should a job that commits nothing end as failed, or get a new status?",
+                                                          options: ["Failed", "A new status"]))
+        #expect(Inbox.question(in: "Done.\nquestion: Which branch?\n") == Plan.Question(text: "Which branch?", options: []))
+        // A question mid-report, or an empty one, isn't asked.
+        #expect(Inbox.question(in: "QUESTION: Which branch?\nThen I picked dev and committed.") == nil)
+        #expect(Inbox.question(in: "Done.\nQUESTION:") == nil)
+        #expect(Inbox.question(in: "Fixed it.\nGOAL MET") == nil)
+        #expect(Prompts.agent(fix).contains("QUESTION: <one question>"))
+    }
+
+    @Test func aQuestionWaitsInTheInboxAndTheAnswerGoesBackToTheJob() async throws {
+        let agent = Agent()
+        let desk = try await running(agent)
+        var told: [InboxItem] = []
+        desk.onInboxChange = { told.append($0) }
+        agent.onEvent(.turnEnded(summary: "Read the code.\nQUESTION: Failed, or a new status?\nOPTIONS: Failed | A new status", failed: false))
+
+        // The job waits, running, its agent idle: nothing ended, nothing failed.
+        let waiting = try #require(desk.job("ask62"))
+        #expect(waiting.status == .running && waiting.step == "Waiting for your answer" && !agent.ended)
+        #expect(waiting.question == Plan.Question(text: "Failed, or a new status?", options: ["Failed", "A new status"]))
+        #expect(Push.notice(for: waiting) == .question)
+        let item = try #require(desk.inbox.first)
+        #expect(desk.inbox.count == 1 && told == [item])
+        #expect(item.kind == .question && item.job == "ask62" && item.title == "Nothing committed status")
+        #expect(item.text == "Failed, or a new status?" && item.options == ["Failed", "A new status"] && item.waiting())
+
+        // The answer is the agent's next message, and the item is done with it.
+        let settled = try desk.settle(item.id, .answer("A new status"))
+        #expect(agent.sent == ["A new status"])
+        #expect(settled.done != nil && settled.answer == "A new status" && desk.item(item.id) == settled)
+        #expect(told.last == settled)
+        let answered = try #require(desk.job("ask62"))
+        #expect(answered.question == nil && answered.notes == ["A new status"] && Push.notice(for: answered) == nil)
+        #expect(throws: Shell.Failure.self) { try desk.settle(item.id, .answer("Failed")) }
+
+        // It goes on and ends as usual; a second question would be a new item.
+        agent.onEvent(.turnEnded(summary: "Added the status.\nQUESTION: Name it `empty`?", failed: false))
+        #expect(desk.inbox.count == 2 && desk.inbox[1].id != item.id && desk.inbox[1].options.isEmpty)
+        try desk.settle(desk.inbox[1].id, .answer("Yes"))
+        agent.onEvent(.turnEnded(summary: "Named it empty.", failed: false))
+        #expect(agent.ended)
+        desk.countCommits = { _, _ in 1 }
+        desk.publishOnItsOwn = { _, _, _ in URL(string: "https://github.com/deskree-inc/oby/pull/80")! }
+        agent.onEvent(.finished(summary: "Named it empty.", failed: false))
+        for _ in 0..<500 where desk.job("ask62")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(desk.job("ask62")?.status == .done)
+        #expect(desk.inbox.allSatisfy { !$0.isOpen })
+    }
+
+    /// Stopping a job that waits takes its question from the inbox, without an answer.
+    @Test func stoppingAWaitingJobSettlesItsQuestion() async throws {
+        let agent = Agent()
+        let desk = try await running(agent)
+        agent.onEvent(.turnEnded(summary: "QUESTION: Which repository?", failed: false))
+        #expect(desk.inbox.first?.isOpen == true)
+        desk.stop("ask62")
+        #expect(desk.inbox.first?.isOpen == false && desk.inbox.first?.answer == nil)
+    }
+
+    /// The agent's process ending while its question waits isn't "nothing committed": the question
+    /// stays, and answering picks the session up again.
+    @Test func aQuestionOutlivesItsAgent() async throws {
+        let agent = Agent()
+        let desk = try await running(agent)
+        agent.onEvent(.turnEnded(summary: "QUESTION: Which repository?", failed: false))
+        agent.onEvent(.finished(summary: "QUESTION: Which repository?", failed: false))
+        for _ in 0..<500 where desk.job("ask62")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
+        let ended = try #require(desk.job("ask62"))
+        #expect(ended.status == .done && ended.question?.text == "Which repository?")
+        #expect(desk.inbox.count == 1 && desk.inbox[0].kind == .question && desk.inbox[0].isOpen)
+
+        // A restart keeps both.
+        let restarted = makeDesk()
+        #expect(restarted.job("ask62")?.question?.text == "Which repository?")
+        #expect(restarted.inbox.map(\.id) == desk.inbox.map(\.id))
+
+        try desk.settle(desk.inbox[0].id, .answer("deskree-inc/oby"))
+        let resumed = try #require(desk.job("ask62"))
+        #expect(resumed.status == .running && resumed.question == nil && resumed.notes == ["deskree-inc/oby"])
+    }
+
+    /// A failure lands once, with Try again and Dismiss; Dismiss lets the job go, and an item that's
+    /// done never comes back for the same failure.
+    @Test func failuresLandOnceAndDismissLetsTheJobGo() throws {
+        let desk = makeDesk([failed])
+        let item = try #require(desk.inbox.first)
+        #expect(desk.inbox.count == 1)
+        #expect(item.kind == .failed && item.text == "`swift test` still fails after 4 rounds." && item.options == ["Try again", "Dismiss"])
+
+        // Done without an answer: the job still needs the user, but the item stays done.
+        try desk.settle(item.id, .done)
+        desk.replace(try #require(desk.job("failed")))
+        #expect(desk.inbox.count == 1 && desk.inbox[0].done != nil && desk.inbox[0].answer == nil)
+        #expect(makeDesk().inbox.count == 1)
+
+        // Another failed job, let go from its item.
+        var other = failed
+        other.id = "other"
+        let second = makeDesk([other])
+        let open = try #require(second.inbox.first { $0.job == "other" })
+        let dismissed = try second.settle(open.id, .answer("Dismiss"))
+        #expect(second.job("other")?.dismissed != nil && dismissed.answer == "Dismiss" && dismissed.done != nil)
+
+        // A job that never started has no session to try again.
+        var never = failed
+        never.session = nil
+        #expect(Inbox.need(of: never)?.options == ["Dismiss"])
+    }
+
+    /// Dismissing the job elsewhere (its screen, a swipe) settles its item by itself.
+    @Test func itemsSettleThemselvesWhenTheJobNeedsNothing() throws {
+        let desk = makeDesk([failed])
+        #expect(desk.inbox.first?.isOpen == true)
+        try desk.dismiss("failed")
+        #expect(desk.inbox.first?.isOpen == false && desk.inbox.first?.answer == nil)
+    }
+
+    @Test func limitsReviewsAndStopsHaveTheirOwnKinds() {
+        // All accounts full: the same item, said as a limit.
+        let limit = Inbox.need(of: failed, limited: true)
+        #expect(limit?.kind == .limit && limit?.id == Inbox.need(of: failed)?.id)
+        var interrupted = failed
+        interrupted.status = .interrupted
+        #expect(Inbox.need(of: interrupted)?.kind == .failed)
+        // Oby's fourth review asked for changes: one more round, or let it go.
+        var reviewed = fix
+        reviewed.status = .done
+        reviewed.published = "https://github.com/deskree-inc/oby/pull/80"
+        reviewed.review = Review(verdict: .changesRequested, job: "rev4", agent: "codex", account: "Work", round: 4)
+        let review = Inbox.need(of: reviewed)
+        #expect(review?.kind == .review && review?.text == Review.stopLine && review?.options == ["One more round", "Dismiss"])
+        // Nothing for what needs nothing.
+        var stopped = failed
+        stopped.status = .stopped
+        var running = fix
+        running.status = .running
+        #expect(Inbox.need(of: stopped) == nil && Inbox.need(of: running) == nil)
+        stopped.question = Plan.Question(text: "Which?", options: [])
+        #expect(Inbox.need(of: stopped) == nil)
+    }
+
+    /// How long an item has waited, as both apps say it next to it.
+    @Test func itemsSayHowLongTheyWaited() {
+        let now = Date(timeIntervalSince1970: 1_791_582_173)
+        #expect(Elapsed.waiting(since: now - 20, now: now) == "just now")
+        #expect(Elapsed.waiting(since: now - 190, now: now) == "waiting 3m")
+        #expect(Elapsed.waiting(since: now - 7300, now: now) == "waiting 2h")
+        #expect(Elapsed.waiting(since: now - 3 * 86400, now: now) == "waiting 3d")
+        // Put off until later: it waits again once that time has come.
+        var item = Inbox.need(of: failed)!
+        item.later = now + 60
+        #expect(!item.waiting(at: now) && item.waiting(at: now + 60))
+    }
+
+    @Test func theAPIListsAnswersAndTellsEveryApp() async throws {
+        var done = failed
+        done.id = "fine"
+        done.status = .done
+        let desk = makeDesk([failed, done])
+        let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
+        var events = api.follow().makeAsyncIterator()
+        #expect(await events.next() == ": ping\n\n")
+        let id = try #require(desk.inbox.first?.id)
+        let app = Application(router: api.router(owner: "well@example.com"))
+        try await app.test(.router) { [owner] client in
+            func answer(_ id: String, _ body: String) async throws -> (HTTPResponse.Status, [String: Any]) {
+                try await client.execute(uri: "/v1/inbox/\(id)/answer", method: .post, headers: owner, body: ByteBuffer(string: body)) { response in
+                    (response.status, object(Data(response.body.readableBytesView)))
+                }
+            }
+            let listed: [[String: Any]] = try await client.execute(uri: "/v1/inbox", method: .get, headers: owner) { response in
+                #expect(response.status == .ok)
+                return (try? JSONSerialization.jsonObject(with: Data(response.body.readableBytesView)) as? [[String: Any]]) ?? []
+            }
+            #expect(listed.count == 1)
+            let item = try #require(listed.first)
+            #expect(item["id"] as? String == id && item["kind"] as? String == "failed" && item["job"] as? String == "failed")
+            #expect(item["state"] as? String == "open" && item["options"] as? [String] == ["Try again", "Dismiss"])
+            for key in ["done", "later", "answer"] { #expect(item[key] is NSNull, "\(key)") }
+            #expect(Set(item.keys) == ["id", "kind", "job", "title", "text", "options", "created", "done", "later", "answer", "state"])
+
+            #expect(try await answer("nowhere", #"{"done": true}"#).0 == .notFound)
+            #expect(try await answer(id, #"{"answer": "x", "done": true}"#).0 == .unprocessableContent)
+            #expect(try await answer(id, #"{"later": "tomorrow"}"#).0 == .unprocessableContent)
+            #expect(try await answer(id, #"{"answer": " "}"#).0 == .unprocessableContent)
+            #expect(try await answer(id, "{").0 == .badRequest)
+
+            let (status, later) = try await answer(id, #"{"later": "2099-01-01T09:00:00Z"}"#)
+            #expect(status == .ok && later["state"] as? String == "later" && later["later"] as? String == "2099-01-01T09:00:00Z")
+            let (dismissed, settled) = try await answer(id, #"{"answer": "Dismiss"}"#)
+            #expect(dismissed == .ok && settled["state"] as? String == "done" && settled["answer"] as? String == "Dismiss")
+            #expect(try await answer(id, #"{"done": true}"#).0 == .conflict)
+            try await client.execute(uri: "/v1/inbox", method: .get, headers: owner) { response in
+                #expect(String(decoding: response.body.readableBytesView, as: UTF8.self) == "[]")
+            }
+        }
+        // Every app heard each change as an `inbox` event (and the job's, dismissed).
+        var heard: [String] = []
+        while heard.count < 3, let event = await events.next() {
+            if event.hasPrefix("event: inbox\n") { heard.append(event) }
+        }
+        #expect(heard.first?.contains(#""state":"later""#) == true)
+        #expect(heard.last?.contains(#""answer":"Dismiss""#) == true && heard.last?.contains(#""state":"done""#) == true)
+    }
+}

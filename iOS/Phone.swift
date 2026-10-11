@@ -48,6 +48,8 @@ final class Phone {
     /// The Live Activity's latest update, so a background wake can wait for it to land.
     @ObservationIgnored private var syncing: Task<Void, Never>?
     private(set) var accounts: [Account] = []
+    /// What waits in the runner's inbox, put-off items too: answered on the Mac, it goes from here too.
+    private(set) var inbox: [InboxItem] = []
     private(set) var models: ModelSettings?
     /// When Clear done was last pressed, here or on the Mac (the runner's clock), or nil: Home
     /// hides the jobs that finished by then. The runner keeps them all.
@@ -87,6 +89,8 @@ final class Phone {
                     models = status.models
                     clearedAt = status.clearedAt
                     jobs = try await runner.jobs()
+                    // A runner older than the inbox has none.
+                    inbox = (try? await runner.inbox()) ?? []
                     loaded = true
                     // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
                     await Notifications.clear(Set(jobs.filter { !$0.needsYou }.map(\.id)))
@@ -121,6 +125,7 @@ final class Phone {
     func reload() async {
         do {
             jobs = try await runner.jobs()
+            inbox = (try? await runner.inbox()) ?? inbox
             loaded = true
         } catch {
             Logger.phone.error("reloading jobs failed: \(error.localizedDescription, privacy: .public)")
@@ -143,6 +148,10 @@ final class Phone {
             self.accounts = accounts
         case .cleared(let date):
             clearedAt = date
+        case .inbox(let item):
+            // One that's done leaves the list.
+            inbox.removeAll { $0.id == item.id }
+            if item.isOpen { inbox.append(item) }
         }
     }
 
@@ -223,6 +232,11 @@ final class Phone {
     /// that finished by then.
     func clear() async throws {
         clearedAt = try await runner.clear()
+    }
+
+    /// Settles an inbox item: an answer goes to its job, `done` lets it go, `later` puts it off.
+    func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
+        apply(.inbox(try await runner.settle(id, answer: answer, done: done, later: later)))
     }
 
     /// Tells the job's agent something; the runner answers with the job, running again.
