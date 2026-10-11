@@ -255,10 +255,11 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// items that label themselves `Blocking:` or `Worth doing later:`. A heading's list ends at a
     /// paragraph after a blank line, another heading, or the verdict. A heading counts by how it
     /// starts: "Blocking issues" is blocking. List items under no heading, or under one it doesn't
-    /// know, are `unsorted`. "None" isn't a finding, and a heading whose content is "none" (after
-    /// its colon, or as its first item) has none: what follows it, until the next heading, is the
-    /// reviewer saying why ("Blocking: none." then what it checked). Nil when the review has
-    /// neither heading nor label: it didn't sort its findings.
+    /// know, are `unsorted`. "None" isn't a finding. A heading whose own content is "none" (after
+    /// its colon, or on the plain line under it) has no findings: what follows it until the next
+    /// heading is `unsorted` ("Blocking: none." then what the reviewer checked), so the last line
+    /// decides. A "- None" item is just an item: a real one after it is a finding. Nil when the
+    /// review has neither heading nor label: it didn't sort its findings.
     static func findings(_ summary: String) -> (blocking: [String], later: [String], unsorted: [String])? {
         var found: (blocking: [String], later: [String], unsorted: [String]) = ([], [], [])
         var sorted = false
@@ -267,9 +268,10 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         var section: Bool?
         var last: Bool?
         var blank = false
-        // Nothing under the heading yet, and whether it said "none".
+        // Set at each heading: whether nothing followed its colon yet, and whether its own content
+        // said "none". `fresh` ends at the first line under it.
         var fresh = false
-        var empty = false
+        var saidNone = false
         /// Adds a finding; false when the text says there's none.
         @discardableResult func add(_ text: String, blocking: Bool) -> Bool {
             let finding = text.trimmingCharacters(in: .whitespaces)
@@ -314,7 +316,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
                 }
                 section = blocking
                 fresh = rest.isEmpty
-                empty = !rest.isEmpty && !add(rest, blocking: blocking)
+                saidNone = !rest.isEmpty && !add(rest, blocking: blocking)
                 continue
             }
             let indented = raw.first?.isWhitespace == true
@@ -329,14 +331,17 @@ nonisolated struct Review: Codable, Equatable, Sendable {
                 if item != nil { found.unsorted.append(text) }
                 continue
             }
-            // The heading said none: the rest is why.
-            if empty { continue }
+            // The heading said none: what follows isn't sorted, so the last line decides.
+            if saidNone {
+                found.unsorted.append(text)
+                continue
+            }
             if item == nil, indented, let last {
                 // The item above, going on.
                 if last { found.blocking[found.blocking.count - 1] += " " + line } else { found.later[found.later.count - 1] += " " + line }
                 continue
             }
-            empty = !add(text, blocking: section) && fresh
+            saidNone = !add(text, blocking: section) && fresh && item == nil
             fresh = false
         }
         return sorted ? found : nil

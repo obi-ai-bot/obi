@@ -37,8 +37,15 @@ struct ReviewFindingsTests {
             """
         #expect(Review.findings(covered)?.blocking == [] && Review.decide(covered) == .approved)
         #expect(Review.decide("Fine.\n\n**Blocking:** None\n\nVERDICT: APPROVED") == .approved)
-        #expect(Review.decide("Fine.\n\nBlocking:\n- **None.**\n- Checked the round cap: covered\n\nVERDICT: APPROVED") == .approved)
+        #expect(Review.decide("Fine.\n\n**Blocking:**\nNone.\n- Checked the round cap: covered\n\nVERDICT: APPROVED") == .approved)
+        #expect(Review.decide("Fine.\n\nBlocking:\n- **None.**\n\nVERDICT: APPROVED") == .approved)
         #expect(Review.decide("Fine.\n\nBlocking: - none\n\nWorth doing later:\n- Add a test\n\nVERDICT: APPROVED") == .approved)
+        // What follows "none" isn't sorted, so the last line decides it: changes requested stays changes requested.
+        let unsure = "Hmm.\n\nBlocking: none.\n- The crash on empty input must be fixed\n\nVERDICT: CHANGES REQUESTED"
+        #expect(Review.findings(unsure)?.unsorted == ["The crash on empty input must be fixed"] && Review.decide(unsure) == .changesRequested)
+        // A "- None" item is just an item: a real one after it still blocks.
+        let item = "Bug.\n\nBlocking:\n- None\n- It crashes on an empty list\n\nVERDICT: APPROVED"
+        #expect(Review.findings(item)?.blocking == ["It crashes on an empty list"] && Review.decide(item) == .changesRequested)
         // A heading after it is read again: a real blocking finding still requests changes, whatever the last line says.
         let after = "Bug.\n\nBlocking: none.\n- Checked the cap\n\nBlocking issues:\n- It crashes on an empty list\n\nVERDICT: APPROVED"
         #expect(Review.findings(after)?.blocking == ["It crashes on an empty list"] && Review.decide(after) == .changesRequested)
