@@ -90,7 +90,7 @@ final class CodexAgent: AgentRun {
         if let thread, let turn {
             Task { _ = try? await server.call("turn/interrupt", ["threadId": thread, "turnId": turn]) }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { server.kill() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { server.halt() }
     }
 
     func kill() {
@@ -233,6 +233,11 @@ final class CodexServer {
 
     func kill() {
         if process.isRunning { process.terminate() }
+    }
+
+    /// Ends it now, with whatever it started (`Halt`).
+    func halt() {
+        Halt.end(process)
     }
 
     private func read() async {

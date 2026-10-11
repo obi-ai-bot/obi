@@ -8,6 +8,9 @@ struct ObyApp: App {
     var body: some Scene {
         MenuBarExtra {
             Button("Open Oby") { app.island.open() }
+            // The same keys work from any app (Mac/StopAllKey.swift).
+            Button("Stop All Jobs") { app.island.stopAll() }
+                .keyboardShortcut(".", modifiers: [.control, .option, .command])
             SettingsLink { Text("Settings…") }
                 .keyboardShortcut(",")
             Button("Show First Launch…") { app.firstLaunch.show() }

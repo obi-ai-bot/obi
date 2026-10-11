@@ -81,6 +81,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// How Oby claimed the job's issue when it started (assigned, labeled, moved on the board),
     /// or why it couldn't; nil until then, and on jobs the Lead didn't start.
     var claim: String?
+    /// Everything Oby sent out for it, oldest first (Engine/Outgoing.swift), or nil before anything went out.
+    var outgoing: [Outgoing]?
 
     var maxRounds: Int { rounds ?? 1 }
     var currentRound: Int { round ?? 1 }
@@ -195,6 +197,22 @@ protocol AgentRun: AnyObject {
     func stop()
     /// Ends it now: Oby is quitting.
     func kill()
+}
+
+/// Ending an agent that was asked to stop: Stop all promises every agent ends within 2 seconds.
+nonisolated enum Halt {
+    /// How long an agent asked to stop gets to wrap up its turn before it's ended.
+    static let grace: TimeInterval = 0.8
+
+    /// Ends the process now: SIGTERM, then SIGKILL 0.4 seconds later. When it leads a process
+    /// group of its own (Foundation starts it in one), the whole group, so the tools it started end too.
+    static func end(_ process: Process) {
+        guard process.isRunning else { return }
+        let pid = process.processIdentifier
+        let target = getpgid(pid) == pid && pid != getpgrp() ? -pid : pid
+        _ = kill(target, SIGTERM)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { _ = kill(target, SIGKILL) }
+    }
 }
 
 /// Claude Code, headless, speaking stream-json both ways (proven 2026-10-09).
@@ -312,7 +330,7 @@ final class ClaudeAgent: AgentRun {
         send(["type": "control_request", "request_id": UUID().uuidString, "request": ["subtype": "interrupt"]])
         try? input.fileHandleForWriting.close()
         let process = process
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { if process.isRunning { process.terminate() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { Halt.end(process) }
     }
 
     func kill() {

@@ -85,6 +85,7 @@ final class IslandController {
     let model: IslandModel
     let character = ObyCharacter()
     let talkKey = TalkKey()
+    let stopAllKey = StopAllKey()
     private let panel = NotchPanel()
     private var timer: Timer?
     private var lastMouse: CGPoint?
@@ -110,6 +111,8 @@ final class IslandController {
         Task { await desk.refresh() }
         talkKey.on = { [weak self] in self?.talk($0) }
         talkKey.start()
+        stopAllKey.on = { [weak self] in self?.stopAll() }
+        stopAllKey.start()
         model.voice.prepare()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.place() }
@@ -121,6 +124,24 @@ final class IslandController {
         // A click in another app closes the open island. Clicks on the island are ours and never arrive here.
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             MainActor.assumeIsolated { self?.close() }
+        }
+    }
+
+    /// Stop all (⌃⌥⌘. or the menu): every job on this Mac and on the runner stops now, and the
+    /// notch says how many.
+    func stopAll() {
+        let here = desk.stopAll()
+        Task {
+            var line: String
+            do {
+                let there = try await feed.runner?.stopAll()
+                for job in there?.jobs ?? [] { feed.apply(job) }
+                let stopped = here + (there?.stopped ?? 0)
+                line = stopped == 0 ? "Nothing is running." : "Stopped \(stopped) job\(stopped == 1 ? "" : "s")."
+            } catch {
+                line = "Stopped \(here) here. Couldn't reach the runner: \(error.localizedDescription)"
+            }
+            notify(line, happy: true)
         }
     }
 

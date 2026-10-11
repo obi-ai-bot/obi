@@ -234,7 +234,7 @@ struct UsersRoundTests {
         desk.makeAgent = { _, _, _ in agent }
         desk.prepare = { $0 }
         desk.countCommits = { _, _ in 1 }
-        desk.publishOnItsOwn = { _, _ in URL(string: "https://github.com/deskree-inc/oby/pull/80")! }
+        desk.publishOnItsOwn = { _, _, _ in URL(string: "https://github.com/deskree-inc/oby/pull/80")! }
         var fix = job
         fix.id = "reset"
         fix.kind = .fix

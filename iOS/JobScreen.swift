@@ -97,6 +97,7 @@ struct JobScreen: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Result").font(.headline).accessibilityAddTraits(.isHeader)
                 if !job.summary.isEmpty { Text(job.summary).font(.callout).textSelection(.enabled) }
+                if let sent = job.sentLines { Text(sent).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled) }
                 if let commits = job.commits {
                     Label("\(commits) \(commits == 1 ? "commit" : "commits")", systemImage: "point.3.connected.trianglepath.dotted")
                         .font(.subheadline).foregroundStyle(.secondary)
