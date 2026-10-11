@@ -31,7 +31,7 @@ final class SpeechTests {
         def value(flag): return args[args.index(flag) + 1]
         root = pathlib.Path(__file__).parent
         with (root / 'launches').open('a') as log: log.write(value('--model') + '\n')
-        if (root / 'mode').exists() and (root / 'mode').read_text() == 'no-ready': time.sleep(120)
+        while (root / 'mode').exists() and (root / 'mode').read_text() == 'no-ready': time.sleep(.01)
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args): pass
             def do_GET(self):
@@ -266,6 +266,68 @@ final class SpeechTests {
         await other.stopServers()
     }
 
+    @Test func portSquatterCannotReceiveWarmupOrSpeechDuringRestart() async throws {
+        config.finalModel = config.fastModel
+        config.startupTimeout = 1
+        config.warmup = true
+        let speech = Speech(config: config)
+        try await speech.startServers()
+        _ = try await speech.transcribe(device: device, utterance: utterance, audio: chunk)
+        let pid = try #require(record()["pid"] as? Int)
+        _ = kill(Int32(pid), SIGKILL)
+        try await Task.sleep(for: .milliseconds(100))
+        try mode("no-ready")
+        let script = folder.appending(path: "squatter.py")
+        // The impostor accepts every prefix, including ones it has never seen.
+        // Record only whether a POST happened, never its body.
+        try #"""
+        import pathlib, sys
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        root = pathlib.Path(__file__).parent
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+            def do_POST(self):
+                (root / 'leaked-post').touch()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"text":"stolen","language":"english"}')
+        server = ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), Handler)
+        (root / 'squatter-ready').touch()
+        server.serve_forever()
+        """#.write(to: script, atomically: true, encoding: .utf8)
+        let squatter = Process()
+        squatter.executableURL = URL(filePath: "/usr/bin/python3")
+        squatter.arguments = [script.path, String(config.fastPort)]
+        squatter.standardOutput = FileHandle.nullDevice
+        squatter.standardError = FileHandle.nullDevice
+        try squatter.run()
+        defer {
+            if squatter.isRunning { _ = kill(squatter.processIdentifier, SIGKILL); squatter.waitUntilExit() }
+        }
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: folder.appending(path: "squatter-ready").path) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(FileManager.default.fileExists(atPath: folder.appending(path: "squatter-ready").path))
+        await #expect(throws: APIError.self) { try await speech.startServers() }
+        await #expect(throws: APIError.self) {
+            try await speech.transcribe(device: self.device, utterance: self.utterance, audio: self.chunk, final: true)
+        }
+        await speech.maintainServers()
+        #expect(!FileManager.default.fileExists(atPath: folder.appending(path: "leaked-post").path))
+        _ = kill(squatter.processIdentifier, SIGKILL)
+        squatter.waitUntilExit()
+        try FileManager.default.removeItem(at: folder.appending(path: "mode"))
+        try await speech.startServers()
+        let recovered = try await speech.transcribe(device: device, utterance: UUID().uuidString, audio: chunk, final: true)
+        #expect(recovered.text == "texto 3200")
+        await speech.stopServers()
+        try clean()
+    }
+
     @Test func startupHasDeadline() async throws {
         config.startupTimeout = 0.2
         try mode("no-ready")
@@ -410,6 +472,65 @@ final class SpeechTests {
         try FileManager.default.removeItem(at: folder.appending(path: "mode"))
         _ = try await speech.transcribe(device: UUID().uuidString, utterance: UUID().uuidString, audio: chunk, final: true)
         _ = try await first.value
+        try clean()
+    }
+
+    @Test func busyModelRejectsChunkWithoutLosingOrDuplicatingEarlierAudio() async throws {
+        let speech = Speech(config: config)
+        _ = try await speech.transcribe(device: device, utterance: utterance, audio: chunk)
+        try FileManager.default.removeItem(at: folder.appending(path: "started"))
+        try mode("block")
+        let blocking = Task { try await speech.transcribe(device: UUID().uuidString, utterance: UUID().uuidString, audio: chunk) }
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: folder.appending(path: "started").path) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(FileManager.default.fileExists(atPath: folder.appending(path: "started").path))
+        let error = await #expect(throws: APIError.self) {
+            try await speech.transcribe(device: self.device, utterance: self.utterance, audio: self.chunk)
+        }
+        #expect(error?.status == .serviceUnavailable)
+        let newDevice = UUID().uuidString
+        let freshBusy = await #expect(throws: APIError.self) {
+            try await speech.transcribe(device: newDevice, utterance: UUID().uuidString, audio: self.chunk)
+        }
+        #expect(freshBusy?.status == .serviceUnavailable)
+        try FileManager.default.removeItem(at: folder.appending(path: "mode"))
+        _ = try await blocking.value
+        let retry = try await speech.transcribe(device: device, utterance: utterance, audio: chunk)
+        #expect(retry.text == "texto 6400")
+        let final = try await speech.transcribe(device: device, utterance: utterance, audio: Data(), final: true)
+        #expect(final.text == "texto 6400")
+        let fresh = try await speech.transcribe(device: newDevice, utterance: UUID().uuidString, audio: chunk, final: true)
+        #expect(fresh.text == "texto 3200")
+        await speech.stopServers()
+        try clean()
+    }
+
+    @Test func restartingModelRejectsChunkAndPreservesUtterance() async throws {
+        config.finalModel = config.fastModel
+        let speech = Speech(config: config)
+        _ = try await speech.transcribe(device: device, utterance: utterance, audio: chunk)
+        let pid = try #require(record()["pid"] as? Int)
+        _ = kill(Int32(pid), SIGKILL)
+        try await Task.sleep(for: .milliseconds(100))
+        try mode("no-ready")
+        let restarting = Task { await speech.maintainServers() }
+        for _ in 0..<200 {
+            let launches = try String(contentsOf: folder.appending(path: "launches"), encoding: .utf8)
+            if launches.split(separator: "\n").count >= 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(try String(contentsOf: folder.appending(path: "launches"), encoding: .utf8).split(separator: "\n").count >= 2)
+        let error = await #expect(throws: APIError.self) {
+            try await speech.transcribe(device: self.device, utterance: self.utterance, audio: self.chunk, final: true)
+        }
+        #expect(error?.status == .serviceUnavailable)
+        try FileManager.default.removeItem(at: folder.appending(path: "mode"))
+        await restarting.value
+        let retry = try await speech.transcribe(device: device, utterance: utterance, audio: chunk, final: true)
+        #expect(retry.text == "texto 6400")
+        await speech.stopServers()
         try clean()
     }
 

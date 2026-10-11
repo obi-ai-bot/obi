@@ -69,6 +69,7 @@ actor Speech {
         var language: String
         var pcm: Data
         var expiry: UUID
+        var expiresAt = Date.distantFuture
         var detectedLanguage: String? = nil
     }
     static let maxBytes = 60 * 16_000 * 2
@@ -135,7 +136,8 @@ actor Speech {
         let pcm = wav && !audio.isEmpty ? try Self.pcm(audio) : audio
         guard pcm.count <= 320_000 else { throw APIError(.contentTooLarge, "Send chunks of at most ten seconds.") }
         guard pcm.count % 2 == 0 else { throw APIError(.badRequest, "PCM must contain complete 16-bit samples.") }
-        var session = sessions[device] ?? Session(id: utterance, language: language, pcm: Data(), expiry: UUID())
+        let previous = sessions[device]
+        var session = previous ?? Session(id: utterance, language: language, pcm: Data(), expiry: UUID())
         guard session.pcm.count + pcm.count <= Self.maxBytes else {
             sessions[device] = nil
             throw APIError(.contentTooLarge, "An utterance may contain at most 60 seconds of audio.")
@@ -156,18 +158,30 @@ actor Speech {
             }
             if final { sessions[device] = nil }
             else {
-                let token = session.expiry, idleTimeout = config.idleTimeout
-                Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(idleTimeout))
-                    await self?.expire(device: device, token: token)
-                }
+                session.expiresAt = Date().addingTimeInterval(config.idleTimeout)
+                sessions[device] = session
+                scheduleExpiry(device: device, session: session)
             }
             return Answer(utterance: utterance, text: result.text, final: final)
         } catch {
+            if let error = error as? APIError, error.status == .serviceUnavailable {
+                // A rejected chunk is not consumed. Preserve the preceding audio and
+                // its original idle deadline so the client can retry exactly once.
+                sessions[device] = previous
+                if let previous { scheduleExpiry(device: device, session: previous) }
+                throw error
+            }
             sessions[device] = nil
-            if let error = error as? APIError, error.status == .serviceUnavailable { throw error }
             // No subprocess output, transcript, audio, or file paths in errors/logs.
             throw APIError(.internalServerError, "Whisper couldn't transcribe the audio. The utterance was discarded.")
+        }
+    }
+
+    private func scheduleExpiry(device: String, session: Session) {
+        let token = session.expiry, delay = max(0, session.expiresAt.timeIntervalSinceNow)
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            await self?.expire(device: device, token: token)
         }
     }
 
@@ -264,21 +278,13 @@ private actor WhisperServer {
     private var process: Process?
     private var busy = false
     private var closed = false
-    private let http: URLSession
 
     init(config: Speech.Config, model: URL, port: Int) {
         self.config = config; self.model = model; self.port = port
-        let settings = URLSessionConfiguration.ephemeral
-        settings.timeoutIntervalForResource = config.timeout
-        settings.connectionProxyDictionary = [:]
-        settings.httpShouldSetCookies = false
-        settings.urlCache = nil
-        http = URLSession(configuration: settings)
     }
 
     deinit {
         if let process, process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
-        http.invalidateAndCancel()
     }
 
     func shutdown() {
@@ -342,10 +348,10 @@ private actor WhisperServer {
     }
 
     private func ready() async -> Bool {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(prefix)/")!)
-        request.timeoutInterval = 0.5
-        guard let (_, response) = try? await http.data(for: request) else { return false }
-        return (response as? HTTPURLResponse)?.statusCode == 200
+        guard let child = process, child.isRunning,
+              let response = try? await WhisperConnection.request(pid: child.processIdentifier, port: port,
+                  path: prefix + "/", timeout: 0.5) else { return false }
+        return response.status == 200
     }
 
     func transcribe(pcm: Data, language: String, prompt: String) async throws -> Speech.Transcript {
@@ -387,15 +393,13 @@ private actor WhisperServer {
         body.append(contentsOf: "--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n".utf8)
         body.append(Speech.wave(pcm))
         body.append(contentsOf: "\r\n--\(boundary)--\r\n".utf8)
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(prefix)/inference")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = min(config.timeout, timeout ?? config.timeout)
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.httpBody = body
-        let (data, response) = try await http.data(for: request)
+        guard let child = process, child.isRunning else { throw URLError(.cannotConnectToHost) }
+        let response = try await WhisperConnection.request(pid: child.processIdentifier, port: port,
+            path: prefix + "/inference", timeout: min(config.timeout, timeout ?? config.timeout),
+            body: body, contentType: "multipart/form-data; boundary=\(boundary)")
         struct Result: Decodable { let text: String; let language: String? }
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let result = try? JSONDecoder().decode(Result.self, from: data) else {
+        guard response.status == 200,
+              let result = try? JSONDecoder().decode(Result.self, from: response.body) else {
             throw APIError(.internalServerError, "Whisper failed.")
         }
         return Speech.Transcript(text: result.text.trimmingCharacters(in: .whitespacesAndNewlines),
