@@ -37,6 +37,7 @@ final class API {
         }
         desk.onInboxChange = { [weak self] item in self?.send("inbox", InboxJSON(item: item)) }
         desk.onCheckChange = { [weak self] check in self?.send("check", MacCheckJSON(check: check)) }
+        desk.onTurnChange = { [weak self] turn in self?.send("turn", TurnJSON(turn: turn)) }
         watchAccounts()
     }
 
@@ -49,6 +50,10 @@ final class API {
         }
         router.get("v1/status") { _, _ in await self.status() }
         router.post("v1/plans") { request, _ in try await self.plan(try await Self.decode(PlanRequest.self, from: request)) }
+        router.get("v1/conversation") { request, _ in
+            try await self.conversation(before: request.uri.queryParameters.get("before").map { String($0) },
+                                        limit: request.uri.queryParameters.get("limit", as: Int.self))
+        }
         router.post("v1/jobs") { request, _ in try await self.dispatch(try await Self.decode(DispatchRequest.self, from: request)) }
         router.get("v1/jobs") { request, _ in await self.jobs(limit: request.uri.queryParameters.get("limit", as: Int.self) ?? 50) }
         router.get("v1/jobs/:id") { _, context in try await self.job(context.parameters.require("id")) }
@@ -123,6 +128,18 @@ final class API {
         let turns = try request.turns.map(Self.turns)
         let said = request.answer.map { Desk.answered(words, question: $0.question, option: $0.option) } ?? words
         return Self.json(PlanAnswer(await desk.converse(said, shown: request.answer?.option, turns: turns)))
+    }
+
+    /// One page of the conversation, oldest first: the latest `limit` turns (50 unless asked,
+    /// at most `Conversation.stored`), or the ones before the turn `before` names. Fewer than
+    /// `limit` means there are no older ones.
+    func conversation(before: String?, limit: Int?) throws -> Response {
+        let limit = min(max(limit ?? 50, 1), Conversation.stored)
+        let before = before.flatMap { $0.isEmpty ? nil : $0 }
+        guard let turns = desk.conversation(before: before, limit: limit) else {
+            throw APIError(.notFound, "There's no turn \(before ?? "") in the conversation.")
+        }
+        return Self.json(turns.map(TurnJSON.init))
     }
 
     /// The client's recent turns, checked: at most `Conversation.kept`, each from the user or Oby,
@@ -579,6 +596,23 @@ struct Status: Encodable {
 /// What `POST /v1/clear` answers and the `clear` event carries.
 struct ClearedJSON: Encodable {
     var clearedAt: Date
+}
+
+/// One turn of the conversation as `GET /v1/conversation` lists it and the `turn` event carries
+/// it: who said it, the words, when, and the jobs it started (always a list, empty for none).
+struct TurnJSON: Encodable {
+    var turn: Turn
+
+    private enum Keys: String, CodingKey { case id, who, text, at, jobs }
+
+    func encode(to encoder: any Encoder) throws {
+        var keys = encoder.container(keyedBy: Keys.self)
+        try keys.encode(turn.id, forKey: .id)
+        try keys.encode(turn.who, forKey: .who)
+        try keys.encode(turn.text, forKey: .text)
+        try keys.encode(turn.date, forKey: .at)
+        try keys.encode(turn.jobs ?? [], forKey: .jobs)
+    }
 }
 
 /// Each tool's model and effort, as Settings › Models keeps them.

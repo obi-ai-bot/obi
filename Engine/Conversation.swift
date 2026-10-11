@@ -5,9 +5,10 @@ import SQLite3
 import CSQLite
 #endif
 
-/// One turn of the conversation: what the user said, or what Oby answered. The island's thread
-/// shows them newest at the bottom, and the brain reads the recent ones so follow-ups work
-/// ("and the vault one?", "cancel it"). Kept in `oby.sqlite`, the last `Conversation.kept`.
+/// One turn of the conversation: what the user said, or what Oby answered. The Mac's window shows
+/// them newest at the bottom, and the brain reads the recent ones so follow-ups work ("and the
+/// vault one?", "cancel it"). Kept in `oby.sqlite`, the last `Conversation.stored`; the runner
+/// serves them (`GET /v1/conversation`) so every device reads one thread.
 nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     enum Who: String, Codable, Sendable { case user, oby }
 
@@ -15,18 +16,28 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     var date = Date.now
     var who: Who
     var text: String
+    /// The jobs this turn started: the ones dispatched from Oby's plan, or the Lead's. The window
+    /// shows them as cards under the turn. Nil on the user's turns and on older ones.
+    var jobs: [String]?
+    /// The user said it out loud (the Mac's talk key), so the window says "You, by voice". Nil when
+    /// typed, and on turns the runner kept.
+    var voice: Bool?
 
-    init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String) {
+    init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String, jobs: [String]? = nil, voice: Bool? = nil) {
         self.id = id
         self.date = date
         self.who = who
         self.text = text
+        self.jobs = jobs
+        self.voice = voice
     }
 }
 
 nonisolated enum Conversation {
-    /// How many turns the thread keeps, and how many the brain reads.
+    /// How many turns the brain reads, and how many a client may send it (`POST /v1/plans`).
     static let kept = 50
+    /// How many turns the thread keeps in `oby.sqlite`, the oldest pruned (`GET /v1/conversation`).
+    static let stored = 500
     /// What the island says when the brain took too long: the turn ends, never stuck on Thinking.
     static let timedOut = "Oby didn't answer in time. Try again."
 
@@ -97,6 +108,47 @@ nonisolated struct Briefing: Equatable, Sendable {
     /// The ids the brain may stop: every job that's queued or running.
     var stoppable: [String] { jobs.filter { $0.job.isActive }.map(\.job.id) }
 
+    /// Agents working now, everywhere: the same count the notch and the window's header show
+    /// (this Mac's active jobs plus the runner's), from the same jobs, not capped like `jobs`.
+    var working: Int { Self.working(places) }
+
+    /// The active jobs of these places, each with its place, newest first.
+    static func active(_ places: [Place]) -> [(place: String, job: Job)] {
+        places.flatMap { place in place.jobs.filter(\.isActive).map { (place.name, $0) } }.sorted { $0.job.created > $1.job.created }
+    }
+
+    static func working(_ places: [Place]) -> Int { active(places).count }
+
+    /// "2 agents are working: Vault secrets on this Mac, Watch home on tetrix-lab.", or "No agent is
+    /// working right now.": the facts the brain's reply must agree with (`contradicts`), in Oby's words.
+    static func workingLine(_ places: [Place]) -> String {
+        let active = active(places)
+        guard !active.isEmpty else { return "No agent is working right now." }
+        let named = active.prefix(5).map { "\(line($0.job.heading, cap: 60)) on \($0.place)" }
+        let more = active.count > named.count ? ", and \(active.count - named.count) more" : ""
+        return "\(active.count == 1 ? "1 agent is" : "\(active.count) agents are") working: \(named.joined(separator: ", "))\(more)."
+    }
+
+    /// Whether a reply says no job is running ("No jobs are running right now", "nothing is
+    /// running", "there are no agents working", "Oby isn't running anything"). Only that: a reply
+    /// about something else ("no jobs failed", "there are no jobs waiting for review") is Oby's
+    /// own to give. With agents working, Oby says `workingLine` instead of a reply that says none
+    /// is, so its reply never contradicts the header over it (#11).
+    static func contradicts(_ reply: String) -> Bool {
+        let text = reply.lowercased().replacing(/[’]/, with: "'")
+        let patterns: [Regex<Substring>] = [
+            // "no jobs are running", "no agents working", "no job is currently active".
+            /\bno (?:jobs?|agents?|work|tasks?)(?: (?:is|are))?(?: currently)? (?:running|working|active|in progress|under way|underway)\b/,
+            // "nothing is running", "nothing's in progress", "nothing running".
+            /\bnothing(?:'s| is)?(?: currently)? (?:running|working|in progress|under way|underway)\b/,
+            // "isn't running anything", "is not running any jobs", "aren't working on anything".
+            /\b(?:not|aren't|isn't|are not|is not)(?: currently)? (?:running|working on) (?:any|anything)\b/,
+            // "no running jobs", "zero active agents".
+            /\b(?:no|zero) (?:running|active|working) (?:jobs?|agents?|tasks?)\b/,
+        ]
+        return patterns.contains { text.contains($0) }
+    }
+
     /// Running, needing the user, in review, or finished lately: by its end, or by its pull
     /// request's merge when that came later.
     static func tells(_ job: Job, now: Date) -> Bool {
@@ -119,6 +171,8 @@ nonisolated struct Briefing: Equatable, Sendable {
             lines.append("\(turn.who == .user ? "User" : "Oby"): \(Self.line(turn.text, cap: 500))")
         }
         lines += ["", "## Jobs", ""]
+        // The count the notch and the window show, first and in so many words: the reply must agree with it.
+        lines.append("Working now: " + Self.workingLine(places))
         let jobs = self.jobs
         if jobs.isEmpty { lines.append("(No jobs running or finished lately.)") }
         var group: Group?
@@ -324,7 +378,7 @@ nonisolated struct Briefing: Equatable, Sendable {
     }
 }
 
-/// The conversation, kept in `oby.sqlite` next to the jobs: the last `Conversation.kept` turns.
+/// The conversation, kept in `oby.sqlite` next to the jobs: the last `Conversation.stored` turns.
 extension JobStore {
     func save(_ turn: Turn) {
         guard let body = try? JSONEncoder().encode(turn) else { return }
@@ -336,7 +390,7 @@ extension JobStore {
         sqlite3_bind_double(statement, 2, turn.date.timeIntervalSince1970)
         sqlite3_bind_text(statement, 3, String(decoding: body, as: UTF8.self), -1, transient)
         if sqlite3_step(statement) != SQLITE_DONE { Logger.jobs.error("saving turn \(turn.id, privacy: .public) failed") }
-        sqlite3_exec(db, "DELETE FROM conversation WHERE rowid NOT IN (SELECT rowid FROM conversation ORDER BY created DESC, rowid DESC LIMIT \(Conversation.kept))", nil, nil, nil)
+        sqlite3_exec(db, "DELETE FROM conversation WHERE rowid NOT IN (SELECT rowid FROM conversation ORDER BY created DESC, rowid DESC LIMIT \(Conversation.stored))", nil, nil, nil)
     }
 
     /// A turn that was cancelled: its words leave the thread.

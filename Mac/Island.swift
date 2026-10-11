@@ -80,6 +80,9 @@ final class IslandController {
     private var repos: [String] = []
     /// The last words sent were hands-free (fn + Space): once Oby has spoken its reply, it listens again.
     private var handsFreeAsk = false
+    /// Opens the Oby window (Mac/App/ChatWindow.swift), on a job's screen when one is named: the
+    /// app sets it. The island's "Open Oby" and its "Last from Oby" line go there.
+    var openWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
 
     init() { desk.issueSync.enabled = true; model = IslandModel(desk: desk, feed: feed) }
 
@@ -87,7 +90,11 @@ final class IslandController {
         panel.contentView = NSHostingView(rootView: IslandView(
             model: model, character: character,
             onOpen: { [weak self] in self?.open() },
-            onClose: { [weak self] in self?.close() }))
+            onClose: { [weak self] in self?.close() },
+            onOpenWindow: { [weak self] job in
+                self?.close()
+                self?.openWindow(job)
+            }))
         place()
         panel.orderFrontRegardless()
         character.pause(true)
@@ -333,6 +340,8 @@ struct IslandView: View {
     let character: ObyCharacter
     let onOpen: () -> Void
     let onClose: () -> Void
+    /// Opens the Oby window, on a job when one is named (Mac/App/ChatWindow.swift).
+    var onOpenWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
 
     private var mood: String {
         if model.state == .listening { return "listening" }
@@ -371,7 +380,7 @@ struct IslandView: View {
             }
 
             if model.state == .open {
-                OpenIsland(model: model, characterWidth: frame.maxX, insets: layout.insets ?? EdgeInsets(), onClose: onClose)
+                OpenIsland(model: model, characterWidth: frame.maxX, insets: layout.insets ?? EdgeInsets(), onClose: onClose, onOpenWindow: onOpenWindow)
                     .frame(width: size.width)
                     .fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { model.openHeight = $0 }
@@ -470,15 +479,18 @@ private struct Waveform: View {
     }
 }
 
-/// The open island: what Oby is up to, the conversation (your words and Oby's replies, newest at
-/// the bottom), every job the iPhone lists (the runner's and this Mac's, in the same groups), one
-/// job's screen when you click it, and the field where you type.
+/// The open island, the glance (#11): what Oby is up to, the last thing it said (the conversation
+/// itself lives in the Oby window), every job the iPhone lists (the runner's and this Mac's, in
+/// the same groups), one job's screen when you click it, and the field where you type: your words
+/// go to the same thread the window shows.
 private struct OpenIsland: View {
     let model: IslandModel
     let characterWidth: CGFloat
     /// From the island's edges (IslandLayout): the words start below the camera.
     let insets: EdgeInsets
     let onClose: () -> Void
+    /// Opens the Oby window (Mac/App/ChatWindow.swift), on a job when one is named.
+    var onOpenWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
     @State private var text = ""
     @FocusState private var typing: Bool
     /// The job open in place of the list (a Row's id), or nil for the list.
@@ -489,9 +501,7 @@ private struct OpenIsland: View {
     @State private var contentHeight: CGFloat = 0
 
     /// The list or a job grows the island up to here, then scrolls: the panel is 760 points tall.
-    /// With the conversation above it, the list gets less.
     private static let maxHeight: CGFloat = 420
-    private static let maxHeightWithThread: CGFloat = 260
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
@@ -499,7 +509,7 @@ private struct OpenIsland: View {
 
     /// Oby is thinking about what you just said.
     private var thinking: Bool { if case .thinking = desk.talk { true } else { false } }
-    /// The conversation shows once there's one.
+    /// There's a conversation to ask about.
     private var threaded: Bool { !desk.turns.isEmpty || thinking }
 
     var body: some View {
@@ -515,6 +525,9 @@ private struct OpenIsland: View {
                     Button(action: clear) { topPill { Text("Clear done") } }
                         .buttonStyle(.plain)
                 }
+                Button { onOpenWindow(nil) } label: { topPill { Text("Open Oby") } }
+                    .buttonStyle(.plain)
+                    .help("The window: the whole conversation, every agent, and what's live")
                 Button(action: onClose) {
                     Image(systemName: "chevron.up")
                         .font(.system(size: 12, weight: .bold))
@@ -526,10 +539,10 @@ private struct OpenIsland: View {
             }
             .frame(minHeight: 92, alignment: .top)
 
-            // With a job's screen open the thread steps aside, unless Oby is thinking: then its
-            // bubble and × stay in sight.
+            // The last thing Oby said, in one line that opens the window; while it thinks, its
+            // bubble and × stay in sight, even over a job's screen.
             if threaded, selected == nil || thinking {
-                ConversationThread(desk: desk, speaker: model.speaker, onCancel: { desk.cancel() })
+                LastFromOby(desk: desk, speaker: model.speaker, onCancel: { desk.cancel() }, onOpen: { onOpenWindow(nil) })
             }
 
             switch desk.talk {
@@ -640,7 +653,7 @@ private struct OpenIsland: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
         }
-        .frame(height: min(contentHeight, threaded && (selected == nil || thinking) ? Self.maxHeightWithThread : Self.maxHeight))
+        .frame(height: min(contentHeight, Self.maxHeight))
     }
 
     /// The jobs under their groups' headings, as Home shows them on the iPhone.
@@ -814,53 +827,45 @@ private struct OpenIsland: View {
     }
 }
 
-/// The conversation: your words on the right, Oby's replies on the left, newest at the bottom,
-/// the last 50 kept across launches. While Oby thinks, its bubble says so, with × (or Esc) to
-/// cancel; typing something else replaces the turn.
-private struct ConversationThread: View {
+/// "Last from Oby": the last thing Oby said, in one line that opens the window, where the whole
+/// conversation is (#11). While Oby thinks, its bubble says so, with × (or Esc) to cancel; typing
+/// something else replaces the turn.
+private struct LastFromOby: View {
     let desk: Desk
     let speaker: Speaker
     let onCancel: () -> Void
-    @State private var height: CGFloat = 0
+    let onOpen: () -> Void
 
-    /// The thread grows up to here, then scrolls, pinned to the newest turn.
-    private static let maxHeight: CGFloat = 200
+    /// What Oby said last, or the user's words waiting for an answer.
+    private var last: Turn? { desk.turns.last { $0.who == .oby } ?? desk.turns.last }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(desk.turns) { turn in bubble(turn) }
-                    if case .thinking = desk.talk { pending }
-                    if speaker.speaking {
-                        Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
-                            .padding(.leading, 4)
+        VStack(alignment: .leading, spacing: 6) {
+            if case .thinking = desk.talk {
+                pending
+            } else if let last {
+                Button(action: onOpen) {
+                    HStack(spacing: 8) {
+                        Text(last.who == .oby ? "Oby" : "You").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.55))
+                        Text(Briefing.line(last.text, cap: 200)).font(.system(size: 14, weight: .medium)).lineLimit(1)
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold)).foregroundStyle(.white.opacity(0.45))
                     }
-                    Color.clear.frame(height: 1).id("end")
+                    .padding(.horizontal, 12).padding(.vertical, 9)
+                    .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+                .buttonStyle(.plain)
+                .help("Open Oby: the whole conversation")
+                .accessibilityLabel("Last from Oby: \(last.text)")
+                .accessibilityHint("Opens the conversation")
             }
-            .frame(height: min(height, Self.maxHeight))
-            .defaultScrollAnchor(.bottom)
-            .onChange(of: desk.turns.count) { withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
-            .onChange(of: desk.talk) { proxy.scrollTo("end", anchor: .bottom) }
+            if speaker.speaking {
+                Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
+                    .padding(.leading, 4)
+            }
         }
-        .accessibilityLabel("Conversation")
-    }
-
-    private func bubble(_ turn: Turn) -> some View {
-        let yours = turn.who == .user
-        return HStack {
-            if yours { Spacer(minLength: 60) }
-            ReadingText(turn.text, weight: yours ? .regular : .medium)
-                .textSelection(.enabled)
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Color.white.opacity(yours ? 0.16 : 0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            if !yours { Spacer(minLength: 60) }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(yours ? "You" : "Oby"): \(turn.text)")
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Oby's bubble while it thinks: never left there, with a way out in sight.
@@ -885,7 +890,8 @@ private struct ConversationThread: View {
 }
 
 /// The plan, before anything runs: agent, account, repository and branch. Dispatch, Edit, Cancel.
-private struct PlanCard: View {
+/// The window shows it under the thread too (Mac/App/ChatWindow.swift).
+struct PlanCard: View {
     let draft: Desk.Draft
     let accounts: [AccountState]
     let onDispatch: (Desk.Draft) -> Void
@@ -1023,7 +1029,7 @@ private struct PlanCard: View {
 }
 
 /// Several jobs from one request, one row each with its own account, and Dispatch all.
-private struct PlansCard: View {
+struct PlansCard: View {
     let drafts: [Desk.Draft]
     let accounts: [AccountState]
     let onDispatch: ([Desk.Draft]) -> Void

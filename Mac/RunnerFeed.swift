@@ -59,6 +59,9 @@ final class RunnerFeed {
     let checks = MacChecks()
     /// This Mac's Touch ID key, registered on every connection: with it, the runner's jobs publish from here.
     let device = MacDevice()
+    /// The runner's conversation, read in pages and followed over `turn` events, for the window's
+    /// thread (Mac/App/Conversation.swift): one thread for every device (#11).
+    let conversation = ConversationModel()
     /// A job's notice just changed to something that needs the user: the notch's heads-up.
     @ObservationIgnored var onNotice: (Job, Notice) -> Void = { _, _ in }
 
@@ -85,6 +88,13 @@ final class RunnerFeed {
 
     static func runner(_ url: String) -> Runner? {
         URL(string: url.trimmingCharacters(in: .whitespaces)).flatMap { $0.host() == nil ? nil : Runner(base: $0) }
+    }
+
+    init() {
+        conversation.page = { [weak self] before, limit in
+            guard let runner = self?.runner else { return [] }
+            return try await runner.conversation(before: before, limit: limit)
+        }
     }
 
     func start() {
@@ -136,6 +146,7 @@ final class RunnerFeed {
         host = nil
         clearedAt = nil
         notified = nil
+        conversation.forget()
         device.reset()
     }
 
@@ -167,6 +178,10 @@ final class RunnerFeed {
                         try Task.checkCancellation()
                         inbox = items
                         inboxWords = words
+                        // The thread's latest page every time too: what was said from the iPhone
+                        // while the connection was down is in it.
+                        await conversation.reload()
+                        try Task.checkCancellation()
                         connection = .live
                         wait = 1
                         Self.ask()
@@ -181,6 +196,7 @@ final class RunnerFeed {
                         apply(item)
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
+                    case .turn(let turn): conversation.apply(turn)
                     }
                 }
             } catch {
