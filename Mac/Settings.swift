@@ -120,10 +120,16 @@ struct AccountsSettingsView: View {
                 if !state.account.payer.isEmpty {
                     Text("Paid by \(state.account.payer)").font(.caption).foregroundStyle(.secondary)
                 }
+                if state.signedIn {
+                    Text(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed))
+                        .font(.caption).foregroundStyle(state.tetrix == false ? Color.orange : Color.secondary)
+                }
             }
             VStack(alignment: .trailing, spacing: 6) {
                 if !state.signedIn {
                     Button("Sign In") { attempt { try store.signIn(state.account) } }
+                } else if state.tetrix == false {
+                    Button("Sign In to Tetrix") { attempt { try store.signIn(state.account, tetrix: true) } }
                 }
                 Button("Remove", role: .destructive) { removing = state.account }
             }
@@ -263,11 +269,12 @@ extension AccountState {
 }
 
 extension AccountStore {
-    /// Opens Terminal on the tool's own login, with the account's home in the environment.
-    func signIn(_ account: Account) throws {
-        let script = URL(filePath: account.home ?? homes.path).appending(path: "sign-in-\(account.id).command")
+    /// Opens Terminal on the tool's own login, with the account's home in the environment; with
+    /// `tetrix`, on the tool's own login to its Tetrix MCP server (Engine/TetrixUse.swift).
+    func signIn(_ account: Account, tetrix: Bool = false) throws {
+        let script = URL(filePath: account.home ?? homes.path).appending(path: "sign-in-\(tetrix ? "tetrix-" : "")\(account.id).command")
         try FileManager.default.createDirectory(at: script.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Self.signInScript(for: account).write(to: script, atomically: true, encoding: .utf8)
+        try (tetrix ? TetrixUse.signInScript(for: account) : Self.signInScript(for: account)).write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
         guard NSWorkspace.shared.open(script) else { throw Shell.Failure(message: "Couldn't open Terminal to sign in.") }
     }

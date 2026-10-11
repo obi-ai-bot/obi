@@ -77,12 +77,12 @@ struct AgentTests {
         #expect(Policy.deny(tool: "Edit", input: ["file_path": "/tmp/oby/jobs/abcd/a.ts"], worktree: worktree) != nil)
     }
 
-    @Test func policyAllowsOnlyTetrixReadsAmongMCPTools() {
+    @Test func policyAllowsOnlyTetrixReadsAndSaveSessionAmongMCPTools() {
         let worktree = URL(filePath: "/tmp/oby/jobs/abc")
-        for tool in ["mcp__tetrix__search_entities", "mcp__claude_ai_Tetrix__code_impact", "mcp__tetrix-main__operational_context"] {
+        for tool in ["mcp__tetrix__search_entities", "mcp__claude_ai_Tetrix__code_impact", "mcp__tetrix-main__operational_context", "mcp__tetrix__save_session"] {
             #expect(Policy.deny(tool: tool, input: [:], worktree: worktree) == nil, "\(tool)")
         }
-        for tool in ["mcp__tetrix__save_session", "mcp__tetrix__answer_hitl_question", "mcp__tetrix__admin_purge_dead_letters",
+        for tool in ["mcp__tetrix__answer_hitl_question", "mcp__tetrix__admin_purge_dead_letters",
                      "mcp__github__create_pull_request", "mcp__slack__slack_send_message", "mcp__evil__tetrix__search_entities",
                      "mcp__github__search_entities"] {
             #expect(Policy.deny(tool: tool, input: [:], worktree: worktree) != nil, "\(tool)")

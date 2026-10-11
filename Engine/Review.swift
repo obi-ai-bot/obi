@@ -121,6 +121,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
                       pr: pr, kind: .review, task: author.task)
         job.reviewOf = author.id
         job.review = author.review
+        job.tetrix = TetrixUse.facts(author).map { TetrixUse(author: $0) }
         return job
     }
 
@@ -138,7 +139,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             blocking,
             AppleCheck.reviewLine(job),
             "This is a review only: make no commits and change no files. Don't push, open pull requests or post anything to GitHub: Oby posts your review itself.",
-            "If the tetrix MCP server is connected, use it for questions about code structure, ownership and impact before reading many files: it saves tokens.",
+            TetrixUse.reviewLines(job).joined(separator: "\n\n"),
             finish,
         ].compactMap { $0 }.joined(separator: "\n\n")
     }
@@ -160,10 +161,8 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             "Blocking means a finding the last review blocked on that isn't fixed, or something the new commits broke: a bug, a security or data-loss problem, or a requirement or test they broke. Anything else you notice in the new commits is worth doing later.",
         ]
         if let apple = AppleCheck.reviewLine(job) { lines.append(apple) }
-        lines += [
-            "This is a review only: make no commits and change no files. Don't push, open pull requests or post anything to GitHub: Oby posts your review itself.",
-            finish,
-        ]
+        lines += ["This is a review only: make no commits and change no files. Don't push, open pull requests or post anything to GitHub: Oby posts your review itself."]
+            + TetrixUse.reviewLines(job) + [finish]
         return lines.joined(separator: "\n\n")
     }
 

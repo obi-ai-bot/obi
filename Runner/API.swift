@@ -583,7 +583,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix }
 
     private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou }
 
@@ -632,6 +632,7 @@ struct JobJSON: Encodable {
         if job.mergeError == nil { try nulls.encodeNil(forKey: .mergeError) }
         if job.appleCheck == nil { try nulls.encodeNil(forKey: .appleCheck) }
         if job.appleRan == nil { try nulls.encodeNil(forKey: .appleRan) }
+        if job.tetrix == nil { try nulls.encodeNil(forKey: .tetrix) }
         // What went out is always a list: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
     }
@@ -723,7 +724,7 @@ struct InboxAnswer: Decodable {
 struct AccountJSON: Encodable {
     var state: AccountState
 
-    private enum Keys: String, CodingKey { case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil }
+    private enum Keys: String, CodingKey { case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -738,6 +739,9 @@ struct AccountJSON: Encodable {
         try keys.encode(state.sevenDayResets, forKey: .sevenDayResets)
         try keys.encode(state.running, forKey: .running)
         try keys.encode(state.fullUntil, forKey: .fullUntil)
+        try keys.encode(state.tetrix, forKey: .tetrix)
+        try keys.encode(state.tetrixJobs, forKey: .tetrixJobs)
+        try keys.encode(state.tetrixUsed, forKey: .tetrixUsed)
     }
 }
 

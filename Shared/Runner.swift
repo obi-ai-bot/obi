@@ -215,6 +215,11 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     var running: Int
     /// A job of its hit the account's usage limit: no job goes to it before then (newer runners only).
     var fullUntil: Date?
+    /// Whether its agents have Tetrix connected (nil: not known yet), and of its recent jobs, how
+    /// many used it (newer runners only).
+    var tetrix: Bool?
+    var tetrixJobs: Int?
+    var tetrixUsed: Int?
 
     /// "Personal · Claude Code"
     var title: String { "\(name) · \(Usage.tool(agent))" }
@@ -361,7 +366,7 @@ typealias RunnerAccount = Account
 typealias RunnerAccount = AccountState
 
 extension AccountState: Decodable {
-    private enum Keys: String, CodingKey { case id, agent, name, label, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil }
+    private enum Keys: String, CodingKey { case id, agent, name, label, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed }
 
     init(from decoder: any Decoder) throws {
         let keys = try decoder.container(keyedBy: Keys.self)
@@ -373,7 +378,10 @@ extension AccountState: Decodable {
                   fiveHourResets: try keys.decodeIfPresent(Date.self, forKey: .fiveHourResets),
                   sevenDayResets: try keys.decodeIfPresent(Date.self, forKey: .sevenDayResets),
                   running: try keys.decodeIfPresent(Int.self, forKey: .running) ?? 0,
-                  fullUntil: try keys.decodeIfPresent(Date.self, forKey: .fullUntil))
+                  fullUntil: try keys.decodeIfPresent(Date.self, forKey: .fullUntil),
+                  tetrix: try keys.decodeIfPresent(Bool.self, forKey: .tetrix),
+                  tetrixJobs: try keys.decodeIfPresent(Int.self, forKey: .tetrixJobs) ?? 0,
+                  tetrixUsed: try keys.decodeIfPresent(Int.self, forKey: .tetrixUsed) ?? 0)
     }
 }
 #endif
