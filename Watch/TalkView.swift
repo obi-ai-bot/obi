@@ -1,14 +1,15 @@
 import AVFoundation
 import SwiftUI
 
-/// Hold to talk: the microphone is open only while the button is held. The recording goes to
-/// the iPhone, which writes it down (SpeechAnalyzer) and asks the brain; the plan comes back here
-/// to dispatch with one tap. Without the phone in reach, dictation stands in and the request
-/// waits for it.
-struct TalkView: View {
+/// Hold to talk, on Home: the microphone is open only while the button is held. The recording
+/// goes to the iPhone, which writes it down (SpeechAnalyzer) and asks the brain; the plan comes
+/// back in Home's sheet (TalkView) to dispatch with one tap. Without the phone in reach, or
+/// without the microphone, the button dictates instead; the request waits for the phone if it must.
+struct TalkButton: View {
     @Environment(Watch.self) private var watch
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    /// Home's sheet, brought back when an ask is already under way (one waiting for the phone).
+    @Binding var talking: Bool
     @State private var recorder = Recorder()
     /// True only while the finger is down: SwiftUI resets it when the gesture ends or is
     /// cancelled, so every hold has a release.
@@ -16,9 +17,107 @@ struct TalkView: View {
     @State private var holding = false
 
     var body: some View {
+        Group {
+            if watch.talk != .none, !holding {
+                // An ask is under way (one waiting for the phone, its sheet closed): it comes back.
+                Button { talking = true } label: { circle("mic.fill") }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Show the request")
+            } else if holding || (watch.reachable && recorder.allowed != false) {
+                // Drawn while held too, so the gesture that opened the mic is still there to close it.
+                circle(holding ? "waveform" : "mic.fill")
+                    .gesture(
+                        // Pressed and released, wherever the finger goes: the mic follows the hold.
+                        DragGesture(minimumDistance: 0)
+                            .updating($pressing) { _, pressing, _ in pressing = true }
+                    )
+                    .onChange(of: pressing) { if pressing { start() } else { release() } }
+                    .accessibilityLabel("Hold to talk")
+            } else {
+                TextFieldLink(prompt: Text("What should Oby do?")) {
+                    circle("mic.fill")
+                } onSubmit: { watch.ask($0) }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dictate to Oby")
+            }
+        }
+        .sensoryFeedback(trigger: holding) { _, held in held ? .start : .stop }
+        // At the limit the recorder stops itself: the wrist is told to let go.
+        .sensoryFeedback(.warning, trigger: recorder.seconds) { _, seconds in seconds >= Recorder.limit }
+        // The permission is asked here, before any hold, so a hold starts the mic at once or not at all.
+        .task { await recorder.prepare() }
+        // A hold the gesture never ends (the screen left, the app went inactive) is a release.
+        .onChange(of: scenePhase) { if scenePhase != .active { release() } }
+        // The phone went out of reach mid-hold: there's nowhere to send it, so the mic closes.
+        .onChange(of: watch.reachable) { if !watch.reachable { release() } }
+        .onDisappear {
+            release()
+            // Whatever state the talk is in, the microphone doesn't outlive the screen.
+            recorder.cancel()
+        }
+    }
+
+    private func circle(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.title3.weight(.semibold))
+            .foregroundStyle(.white)
+            .frame(width: 56, height: 56)
+            .background(holding ? Color.red : Color.accentColor, in: Circle())
+            .scaleEffect(holding ? 1.08 : 1)
+            .animation(.snappy, value: holding)
+    }
+
+    /// Synchronous: nothing waits between the hold and the microphone, so a release always finds
+    /// the recorder it has to stop.
+    private func start() {
+        guard !holding, watch.talk == .none else { return }
+        holding = true
+        do {
+            try recorder.start()
+            watch.talk = .recording
+        } catch {
+            holding = false
+            watch.talk = .reply(error.localizedDescription)
+        }
+    }
+
+    /// The hold ended, however it ended: the microphone closes now. The recording is sent only
+    /// when the talk is still the one it was made for (a notification tapped meanwhile cancels it).
+    private func release() {
+        guard holding else { return }
+        holding = false
+        if watch.talk == .recording { stop() } else { recorder.cancel() }
+    }
+
+    private func stop() {
+        guard let audio = recorder.stop() else {
+            // Too short to send: the sheet says why ("Hold the button while you talk.").
+            if let problem = recorder.problem { watch.talk = .reply(problem) } else { watch.talk = .none }
+            return
+        }
+        guard audio.count <= WatchWire.limit else {
+            watch.talk = .reply("That was too long for the watch. Keep it under \(Recorder.limit) seconds.")
+            return
+        }
+        watch.voice(audio)
+    }
+}
+
+/// Home's sheet for a talk under way: sending, thinking, waiting for the phone, then the plan to
+/// dispatch with one tap, a question from the brain, or its reply.
+struct TalkView: View {
+    @Environment(Watch.self) private var watch
+
+    var body: some View {
         switch watch.talk {
-        case .none, .recording, .sending:
-            holdToTalk
+        case .none, .recording:
+            // The sheet is on its way out.
+            EmptyView()
+        case .sending:
+            VStack(spacing: 8) {
+                ProgressView()
+                Text("Sending to your iPhone…").font(.footnote).multilineTextAlignment(.center)
+            }
         case .thinking(let said):
             waiting("Thinking…", said: said)
         case .queued(let said):
@@ -37,55 +136,6 @@ struct TalkView: View {
         }
     }
 
-    private var holdToTalk: some View {
-        VStack(spacing: 8) {
-            // Drawn while held too, so the gesture that opened the mic is still there to close it.
-            if watch.reachable || holding {
-                Image(systemName: holding ? "waveform" : "mic.fill")
-                    .font(.title.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 88, height: 88)
-                    .background(holding ? Color.red : Color.accentColor, in: Circle())
-                    .scaleEffect(holding ? 1.08 : 1)
-                    .animation(.snappy, value: holding)
-                    .gesture(
-                        // Pressed and released, wherever the finger goes: the mic follows the hold.
-                        DragGesture(minimumDistance: 0)
-                            .updating($pressing) { _, pressing, _ in pressing = true }
-                    )
-                    .onChange(of: pressing) { if pressing { start() } else { release() } }
-                    .accessibilityLabel("Hold to talk")
-                Text(caption).font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            } else {
-                Text("Your iPhone isn't in reach. Dictate, and Oby plans it when it is.")
-                    .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            }
-            TextFieldLink(prompt: Text("What should Oby do?")) {
-                Label(watch.reachable ? "Dictate instead" : "Dictate", systemImage: "keyboard")
-            } onSubmit: { watch.ask($0) }
-            .disabled(watch.talk != .none)
-        }
-        // The permission is asked here, before any hold, so a hold starts the mic at once or not at all.
-        .task { await recorder.prepare() }
-        // A hold the gesture never ends (the screen left, the app went inactive) is a release.
-        .onChange(of: scenePhase) { if scenePhase != .active { release() } }
-        // The phone went out of reach mid-hold: there's nowhere to send it, so the mic closes.
-        .onChange(of: watch.reachable) { if !watch.reachable { release() } }
-        .onDisappear {
-            release()
-            // Whatever state the talk is in, the microphone doesn't outlive the screen.
-            recorder.cancel()
-        }
-    }
-
-    private var caption: String {
-        switch watch.talk {
-        case .recording: recorder.seconds >= Recorder.limit ? "That's \(Recorder.limit)s, the most the watch sends. Let go." : "Listening… \(recorder.seconds)s"
-        case .sending: "Sending to your iPhone…"
-        default: recorder.problem ?? "Hold to talk"
-        }
-    }
-
     private func waiting(_ title: String, said: String) -> some View {
         VStack(spacing: 8) {
             ProgressView()
@@ -93,41 +143,6 @@ struct TalkView: View {
             Text("“\(said)”").font(.caption2).foregroundStyle(.secondary).lineLimit(3).multilineTextAlignment(.center)
             Button("Cancel") { watch.cancel() }
         }
-    }
-
-    /// Synchronous: nothing waits between the hold and the microphone, so a release always finds
-    /// the recorder it has to stop.
-    private func start() {
-        guard !holding, watch.talk == .none else { return }
-        holding = true
-        do {
-            try recorder.start()
-            watch.talk = .recording
-        } catch {
-            recorder.problem = error.localizedDescription
-            holding = false
-        }
-    }
-
-    /// The hold ended, however it ended: the microphone closes now. The recording is sent only
-    /// when the talk is still the one it was made for (a notification tapped meanwhile cancels it).
-    private func release() {
-        guard holding else { return }
-        holding = false
-        if watch.talk == .recording { stop() } else { recorder.cancel() }
-    }
-
-    private func stop() {
-        guard let audio = recorder.stop() else {
-            watch.talk = .none
-            return
-        }
-        guard audio.count <= WatchWire.limit else {
-            recorder.problem = "That was too long for the watch. Keep it under \(Recorder.limit) seconds."
-            watch.talk = .none
-            return
-        }
-        watch.voice(audio)
     }
 }
 

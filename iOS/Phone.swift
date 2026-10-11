@@ -34,8 +34,9 @@ final class Phone {
     private(set) var jobs: [Job] = [] {
         didSet {
             // Published, dismissed or running again, here or on the Mac: its alert goes.
-            let needed = Set(oldValue.filter(\.needsYou).map(\.id))
-            let done = Set(jobs.filter { !$0.needsYou && needed.contains($0.id) }.map(\.id))
+            // A question waiting for its answer keeps its alert too.
+            let needed = Set(oldValue.filter { $0.needsYou || $0.waitsForAnswer }.map(\.id))
+            let done = Set(jobs.filter { !$0.needsYou && !$0.waitsForAnswer && needed.contains($0.id) }.map(\.id))
             if !done.isEmpty { Task { await Notifications.clear(done) } }
             // One Live Activity update at a time, in order.
             syncing = Task { [jobs, syncing] in
@@ -45,9 +46,13 @@ final class Phone {
             JobWaiter.shared.wait(for: jobs, runner: runnerURL)
         }
     }
+    /// The jobs whose screens are open (JobScreen): a new list keeps them, even older than its 50.
+    @ObservationIgnored private var onScreen: Set<String> = []
     /// The Live Activity's latest update, so a background wake can wait for it to land.
     @ObservationIgnored private var syncing: Task<Void, Never>?
     private(set) var accounts: [Account] = []
+    /// What waits in the runner's inbox, put-off items too: answered on the Mac, it goes from here too.
+    private(set) var inbox: [InboxItem] = []
     private(set) var models: ModelSettings?
     /// When Clear done was last pressed, here or on the Mac (the runner's clock), or nil: Home
     /// hides the jobs that finished by then. The runner keeps them all.
@@ -73,31 +78,21 @@ final class Phone {
 
     // MARK: Staying live
 
-    /// Fetches everything, then follows the runner's events; after any drop it tries again,
-    /// waiting a little longer each time.
+    /// Follows the runner's events and, once it's following, fetches everything; after any drop it
+    /// tries again, waiting a little longer each time.
     func start() {
         guard loop == nil else { return }
         loop = Task {
             var wait = 1.0
             while !Task.isCancelled {
                 do {
-                    let status = try await runner.status()
-                    host = status.runner.host
-                    accounts = status.accounts
-                    models = status.models
-                    clearedAt = status.clearedAt
-                    jobs = try await runner.jobs()
-                    loaded = true
-                    // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
-                    await Notifications.clear(Set(jobs.filter { !$0.needsYou }.map(\.id)))
-                    connection = .live
-                    wait = 1
-                    // Jobs dispatched from the Mac or the runner API notify too, so ask on connecting.
-                    Notifications.ask()
-                    do { _ = try await registerDevice(again: true) } catch {
-                        Logger.phone.error("registering this iPhone failed: \(error.localizedDescription, privacy: .public)")
+                    // Following first, then fetching (`connected`): what changes in between waits in
+                    // the stream and applies over what was fetched.
+                    for try await event in runner.events() {
+                        guard case .connected = event else { apply(event); continue }
+                        try await connected()
+                        wait = 1
                     }
-                    for try await event in runner.events() { apply(event) }
                 } catch {
                     if Task.isCancelled { return }
                     connection = .offline(error.localizedDescription)
@@ -108,19 +103,40 @@ final class Phone {
         }
     }
 
+    /// The runner follows this app now: everything it has, fetched.
+    private func connected() async throws {
+        let status = try await runner.status()
+        host = status.runner.host
+        accounts = status.accounts
+        models = status.models
+        clearedAt = status.clearedAt
+        await take(try await runner.jobs())
+        inbox = try await runner.inbox()
+        loaded = true
+        // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
+        await Notifications.clear(Set(jobs.filter { !$0.needsYou && !$0.waitsForAnswer }.map(\.id)))
+        connection = .live
+        // Jobs dispatched from the Mac or the runner API notify too, so ask on connecting.
+        Notifications.ask()
+        do { _ = try await registerDevice(again: true) } catch {
+            Logger.phone.error("registering this iPhone failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// iOS woke Oby because a job ended (JobWaiter): fetch the list, and wait until the Live
     /// Activity says how it ended before iOS suspends Oby again.
     func catchUp() async {
         JobWaiter.shared.reconnect()
         guard let fresh = try? await runner.jobs() else { return }
-        jobs = fresh
+        await take(fresh)
         await syncing?.value
     }
 
     /// Pull to refresh: fetch the job list now, without waiting for the runner's next event.
     func reload() async {
         do {
-            jobs = try await runner.jobs()
+            await take(try await runner.jobs())
+            inbox = try await runner.inbox()
             loaded = true
         } catch {
             Logger.phone.error("reloading jobs failed: \(error.localizedDescription, privacy: .public)")
@@ -143,6 +159,12 @@ final class Phone {
             self.accounts = accounts
         case .cleared(let date):
             clearedAt = date
+        case .connected:
+            break
+        case .inbox(let item):
+            // One that's done leaves the list.
+            inbox.removeAll { $0.id == item.id }
+            if item.isOpen { inbox.append(item) }
         }
     }
 
@@ -223,6 +245,40 @@ final class Phone {
     /// that finished by then.
     func clear() async throws {
         clearedAt = try await runner.clear()
+    }
+
+    /// Settles an inbox item: an answer goes to its job, `done` lets it go, `later` puts it off.
+    func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
+        apply(.inbox(try await runner.settle(id, answer: answer, done: done, later: later)))
+    }
+
+    /// A job's screen opened or closed: while it's open, new lists keep its job.
+    func showing(_ id: String, _ shown: Bool) {
+        if shown { onScreen.insert(id) } else { onScreen.remove(id) }
+    }
+
+    /// A new list from the runner, the latest 50. A job whose screen is open stays even when it's
+    /// older than those, fetched again so it's current.
+    private func take(_ fresh: [Job]) async {
+        let (list, refetch) = JobList.keeping(fresh, old: jobs, onScreen: onScreen, id: \.id, created: \.created)
+        jobs = list
+        for id in refetch {
+            guard let job = try? await runner.job(id) else { continue }
+            jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
+        }
+    }
+
+    /// A job older than the list's 50 (an inbox item or a notification opened it): fetched, and
+    /// kept among the others in age order.
+    func fetch(_ id: String) async {
+        guard !jobs.contains(where: { $0.id == id }) else { return }
+        do {
+            let job = try await runner.job(id)
+            guard !jobs.contains(where: { $0.id == id }) else { return }
+            jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
+        } catch {
+            Logger.phone.error("fetching job \(id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Tells the job's agent something; the runner answers with the job, running again.

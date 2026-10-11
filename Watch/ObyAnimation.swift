@@ -10,6 +10,9 @@ struct ObyAnimation: View {
     }
 
     let loop: Loop
+    /// `.fill` covers the space it's given (Home, edge to edge): Oby keeps clear of the frames'
+    /// sides, so a watch screen's height crops only empty space.
+    var contentMode: ContentMode = .fit
 
     @State private var onScreen = false
     /// When the loop started, so a new loop plays from its first frame.
@@ -26,7 +29,7 @@ struct ObyAnimation: View {
         TimelineView(.animation(minimumInterval: 1 / Self.fps, paused: paused)) { context in
             Image(Self.frame(loop, paused ? 0 : Int(context.date.timeIntervalSince(start) * Self.fps)))
                 .resizable()
-                .scaledToFit()
+                .aspectRatio(contentMode: contentMode)
         }
         .onAppear { onScreen = true }
         .onDisappear { onScreen = false }
