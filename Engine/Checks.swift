@@ -31,6 +31,11 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         var failing: [FailingTest]? = nil
         /// The Mac got in its way (`Trouble`) and it ran a second time: what's here is that run's.
         var retried: Bool? = nil
+        /// The simulator runtime its last run used, like "iOS 26.5 (23F77)", or nil off a simulator.
+        var runtime: String? = nil
+
+        /// "iPhone app with Watch, and iOSTests on iOS 26.5 (23F77)"
+        var label: String { name + (runtime.map { " on " + $0 } ?? "") }
     }
 
     /// A failing test and its message, like `iOSTests/JobTests/testTitle()` and
@@ -177,7 +182,8 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
                 Array(tests.map { FailingTest(test: one($0.test, 300), message: flat($0.message, 500)) }.filter { !$0.test.isEmpty }.prefix(50))
             }
             return Step(name: one(step.name, 100), passed: step.passed, seconds: max(0, step.seconds),
-                        failing: failing.flatMap { $0.isEmpty ? nil : $0 }, retried: step.retried == true ? true : nil)
+                        failing: failing.flatMap { $0.isEmpty ? nil : $0 }, retried: step.retried == true ? true : nil,
+                        runtime: step.runtime.map { one($0, 60) }.flatMap { $0.isEmpty ? nil : $0 })
         }
         report.failures = Array(report.failures.map { one($0, 300) }.filter { !$0.isEmpty }.prefix(50))
         report.log = report.log.map { String($0.suffix(8000)) }
@@ -234,7 +240,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// from the build, so no mentions or links take effect), and that Oby ran them.
     static func comment(_ check: MacCheck) -> String {
         let rows = (check.steps ?? []).map {
-            "| \($0.name) | \($0.passed ? "Passed" : "Failed")\($0.retried == true ? " (second run)" : "") | \(duration($0.seconds)) |"
+            "| \($0.label) | \($0.passed ? "Passed" : "Failed")\($0.retried == true ? " (second run)" : "") | \(duration($0.seconds)) |"
         }
         var parts = ["### Oby Mac check · \(check.macName): \(check.label)",
                      (["| Step | Result | Time |", "| --- | --- | --- |"] + rows).joined(separator: "\n")]
@@ -332,7 +338,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
 
     /// "- Mac app and MacTests: failed (5m 01s)", for agents and reviewers.
     static func stepLine(_ step: Step) -> String {
-        "- \(step.name): \(step.passed ? "passed" : "failed") (\(duration(step.seconds))\(step.retried == true ? ", on its second run" : ""))"
+        "- \(step.label): \(step.passed ? "passed" : "failed") (\(duration(step.seconds))\(step.retried == true ? ", on its second run" : ""))"
     }
 
     /// The failing tests, each `name: message`, by the step that failed them; `failures` under
@@ -403,6 +409,108 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             command.arguments.insert(contentsOf: ["-resultBundlePath", bundle.path], at: arguments.count - 1)
             return command
         }
+
+        /// The simulator runtime it runs on, when Oby chose one (`on`); nil for `OS=latest` or no simulator.
+        var runtime: Runtime? = nil
+
+        /// The same on an iPhone 17 with `runtime`'s iOS, in place of `OS=latest`.
+        func on(_ runtime: Runtime) -> Command {
+            guard simulator, let at = arguments.firstIndex(of: "-destination"), at + 1 < arguments.count else { return self }
+            var command = self
+            command.arguments[at + 1] = "platform=iOS Simulator,name=\(MacCheck.device),OS=\(runtime.version)"
+            command.runtime = runtime
+            return command
+        }
+    }
+
+    /// The simulator the iPhone step tests on.
+    static let device = "iPhone 17"
+
+    /// An iOS simulator runtime installed on the Mac, like iOS 26.5 (23F77).
+    struct Runtime: Equatable, Sendable {
+        var version: String
+        var build: String
+
+        var label: String { "iOS \(version) (\(build))" }
+
+        /// Its version comes before `other`'s: 26.5 before 27.0, 9.0 before 10.0.
+        func older(than other: Runtime) -> Bool {
+            let mine = version.split(separator: ".").map { Int($0) ?? 0 }, theirs = other.version.split(separator: ".").map { Int($0) ?? 0 }
+            return mine.lexicographicallyPrecedes(theirs)
+        }
+    }
+
+    /// The iOS runtimes that have an available `device` simulator, newest first, from
+    /// `xcrun simctl list runtimes --json` and `xcrun simctl list devices --json`.
+    static func runtimes(_ runtimes: Data, devices: Data, device: String = device) -> [Runtime] {
+        guard let listed = (try? JSONSerialization.jsonObject(with: runtimes) as? [String: Any])?["runtimes"] as? [[String: Any]],
+              let byRuntime = (try? JSONSerialization.jsonObject(with: devices) as? [String: Any])?["devices"] as? [String: [[String: Any]]] else { return [] }
+        let found = listed.compactMap { runtime -> Runtime? in
+            guard let identifier = runtime["identifier"] as? String, identifier.contains(".SimRuntime.iOS-"),
+                  runtime["isAvailable"] as? Bool != false, let version = runtime["version"] as? String,
+                  (byRuntime[identifier] ?? []).contains(where: { $0["name"] as? String == device && $0["isAvailable"] as? Bool != false }) else { return nil }
+            return Runtime(version: version, build: runtime["buildversion"] as? String ?? "")
+        }
+        return found.sorted { $1.older(than: $0) }
+    }
+
+    /// What this Mac's checks learned about its simulator runtimes, kept between checks: the ones
+    /// a step hung on, and the one that last worked, by `Runtime.label`.
+    struct RuntimeMemory: Codable, Equatable, Sendable {
+        var hung: [String] = []
+        var working: String?
+
+        /// What a simulator step runs on first: the runtime that last worked, while it's installed;
+        /// else the newest that never hung; else the newest.
+        func first(of installed: [Runtime]) -> Runtime? {
+            installed.first { $0.label == working } ?? installed.first { !hung.contains($0.label) } ?? installed.first
+        }
+
+        /// What it runs on again after the Mac's trouble on `tried`: the newest older runtime that
+        /// never hung, or nil to run on `tried` again.
+        func retry(after tried: Runtime?, of installed: [Runtime]) -> Runtime? {
+            guard let tried else { return nil }
+            return installed.first { $0.older(than: tried) && !hung.contains($0.label) }
+        }
+
+        /// A step hung on `runtime`, or got past the simulator on it (passed, or failed in the code).
+        mutating func note(_ runtime: Runtime?, hung: Bool) {
+            guard let label = runtime?.label else { return }
+            if hung {
+                if !self.hung.contains(label) { self.hung.append(label) }
+                if working == label { working = nil }
+            } else {
+                working = label
+                self.hung.removeAll { $0 == label }
+            }
+        }
+
+        /// What a step's outcome teaches: a run the Mac's trouble stopped hung on its runtime, and the
+        /// last run, when it got past the simulator, worked.
+        mutating func learn(first: Runtime?, retry: Runtime?, from outcome: Outcome) {
+            if outcome.step.retried == true {
+                note(first, hung: true)
+                note(retry ?? first, hung: outcome.troubled)
+            } else if outcome.problem == nil {
+                note(first, hung: false)
+            }
+        }
+
+        static var file: URL { Workspace.root.appending(path: "checks/runtimes.json") }
+        static func load(_ file: URL = file) -> RuntimeMemory {
+            (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode(RuntimeMemory.self, from: $0) } ?? RuntimeMemory()
+        }
+        func save(_ file: URL = file) {
+            try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? JSONEncoder().encode(self).write(to: file, options: .atomic)
+        }
+    }
+
+    /// The iOS runtimes installed on this Mac with an iPhone 17, newest first; none when simctl can't say.
+    static func installedRuntimes() async -> [Runtime] {
+        guard let listed = try? await Shell.run(["xcrun", "simctl", "list", "runtimes", "--json"], timeout: 60), listed.status == 0,
+              let devices = try? await Shell.run(["xcrun", "simctl", "list", "devices", "--json"], timeout: 60), devices.status == 0 else { return [] }
+        return runtimes(listed.out, devices: devices.out)
     }
 
     /// Ad hoc signing with no team or profile, as docs/ci.md describes; hardened runtime off so the
@@ -623,7 +731,11 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         var steps: [Step] = [], failures: [String] = [], logs: [String] = [], problems: [String] = []
         let cache = Workspace.root.appending(path: "checks/cache")
         for (index, command) in (commands ?? (check.isApple ? appleCommands(cache: cache) : Self.commands(cache: cache))).enumerated() {
-            var outcome = await step(command) { run in
+            // A simulator step runs on the runtime that last worked, and again on an older one when the Mac's trouble stops it.
+            let installed = command.simulator ? await installedRuntimes() : []
+            var memory = RuntimeMemory.load()
+            let first = memory.first(of: installed), retry = memory.retry(after: first, of: installed)
+            var outcome = await step(first.map(command.on) ?? command, retry: retry.map(command.on)) { run, command in
                 let bundle = results.appending(path: "\(index + 1)-\(run).xcresult")
                 try? FileManager.default.removeItem(at: bundle)
                 let start = Date.now
@@ -635,6 +747,10 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             } reset: {
                 Logger.jobs.notice("check \(check.id, privacy: .public): \(command.name, privacy: .public) hit the Mac's own trouble; running it again")
                 await reset(derived: cache.appending(path: "DerivedData"))
+            }
+            if !installed.isEmpty {
+                memory.learn(first: first, retry: retry, from: outcome)
+                memory.save()
             }
             // Paths as the author's agent knows them: from the repository's root.
             let local = { (text: String) in text.replacing(worktree.path + "/", with: "") }
@@ -774,24 +890,30 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         var step: Step
         var log: String?
         var problem: String?
+        /// Its last run hit the Mac's own trouble too.
+        var troubled = false
     }
 
     /// Runs a step (`attempt`, given 1 or 2). When the Mac's own trouble kept it from testing
     /// anything, `reset` clears what's left of it and the step runs once more; the same again and
     /// the check couldn't run, with nothing for the author.
-    static func step(_ command: Command, attempt: (_ run: Int) async -> Attempt, reset: () async -> Void) async -> Outcome {
-        var run = await attempt(1)
-        var verdict = Self.verdict(command, run)
+    /// `retry`: what runs the second time, when it isn't `command` (an older simulator runtime).
+    static func step(_ command: Command, retry: Command? = nil, attempt: (_ run: Int, _ command: Command) async -> Attempt,
+                     reset: () async -> Void) async -> Outcome {
+        var ran = command
+        var run = await attempt(1, ran)
+        var verdict = Self.verdict(ran, run)
         var seconds = run.seconds
         var retried: Bool?
         if case .trouble = verdict {
             await reset()
-            run = await attempt(2)
-            verdict = Self.verdict(command, run)
+            ran = retry ?? command
+            run = await attempt(2, ran)
+            verdict = Self.verdict(ran, run)
             seconds += run.seconds
             retried = true
         }
-        var step = Step(name: command.name, passed: verdict == .passed, seconds: seconds, retried: retried)
+        var step = Step(name: command.name, passed: verdict == .passed, seconds: seconds, retried: retried, runtime: ran.runtime?.label)
         switch verdict {
         case .passed:
             return Outcome(step: step)
@@ -803,9 +925,11 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             let ended = run.timedOut
                 ? " It was stopped after \(Int(command.timeout / 60)) minutes" + (lastStarted(in: run.output).map { "; the last test that started was \($0)" } ?? "") + "."
                 : trouble == .noResults ? " xcodebuild exited \(run.status): \(said(run.output))" : ""
+            let elsewhere = ran.runtime != nil && ran.runtime != command.runtime ? " on \(ran.runtime?.label ?? "")" : ""
             return Outcome(step: step, log: run.timedOut ? stoppedLog(command, run.output) : nil,
                            problem: couldNotRun + trouble.line(simulator: command.simulator)
-                           + ", and again after Oby restarted the simulators and ran \(command.name) once more." + ended)
+                           + ", and again after Oby restarted the simulators and ran \(command.name) once more\(elsewhere)." + ended,
+                           troubled: true)
         case let .problem(problem, log):
             return Outcome(step: step, log: log, problem: problem)
         }

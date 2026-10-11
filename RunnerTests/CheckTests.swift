@@ -833,7 +833,7 @@ struct CheckTests {
         let real = summary([("iOSTests/JobRowTests/testTitle()", "iOSTests", "testTitle()", "XCTAssertEqual failed")])
         func run(_ attempts: [MacCheck.Attempt]) async -> (outcome: MacCheck.Outcome, runs: [Int], resets: Int) {
             var runs: [Int] = [], resets = 0
-            let outcome = await MacCheck.step(phone) { run in
+            let outcome = await MacCheck.step(phone) { run, _ in
                 runs.append(run)
                 return attempts[run - 1]
             } reset: {
@@ -887,7 +887,7 @@ struct CheckTests {
         #expect(MacCheck.verdict(swift, attempt(1, ended, bundled: false)) != .trouble(.noResults))
         // It runs once more after the reset; the same again, and the check couldn't run, saying how it ended.
         var runs = 0, resets = 0
-        var outcome = await MacCheck.step(phone) { _ in
+        var outcome = await MacCheck.step(phone) { _, _ in
             runs += 1
             return attempt(65, ended, bundled: false, seconds: 500)
         } reset: {
@@ -895,11 +895,69 @@ struct CheckTests {
         }
         #expect(runs == 2 && resets == 1 && !outcome.step.passed && outcome.step.retried == true && outcome.step.seconds == 1000 && outcome.log == nil)
         #expect(outcome.problem == "Mac check couldn't run: the iPhone app's tests ended without a result bundle or a failing test, and again after Oby restarted the simulators and ran iPhone app with Watch, and iOSTests once more. xcodebuild exited 65: ** TEST FAILED **")
-        outcome = await MacCheck.step(phone) { run in
+        outcome = await MacCheck.step(phone) { run, _ in
             run == 1 ? attempt(65, ended, bundled: false) : attempt(15, "◇ Test hangs() started.", timedOut: true, bundled: false)
         } reset: {}
         #expect(outcome.problem?.hasSuffix("once more. It was stopped after 40 minutes; the last test that started was hangs().") == true)
         #expect(outcome.log?.hasPrefix("Oby stopped it after 40 minutes; the last test that started was hangs().") == true)
+    }
+
+    // MARK: Simulator runtimes
+
+    /// `xcrun simctl list runtimes --json` and `list devices --json` on a Mac with iOS 27.0, 26.5 and 26.2
+    /// (no iPhone 17 on 26.2) and watchOS.
+    let simctl: (runtimes: Data, devices: Data) = {
+        let runtimes = #"{"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-5", "version": "26.5", "buildversion": "23F77", "isAvailable": true, "platform": "iOS"}, {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-0", "version": "27.0", "buildversion": "24A434", "isAvailable": true, "platform": "iOS"}, {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2", "version": "26.2", "buildversion": "23C54", "isAvailable": true, "platform": "iOS"}, {"identifier": "com.apple.CoreSimulator.SimRuntime.watchOS-27-0", "version": "27.0", "buildversion": "24R300", "isAvailable": true, "platform": "watchOS"}]}"#
+        let devices = #"{"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-27-0": [{"name": "iPhone 17", "isAvailable": true}], "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPhone 17 Pro", "isAvailable": true}, {"name": "iPhone 17", "isAvailable": true}], "com.apple.CoreSimulator.SimRuntime.iOS-26-2": [{"name": "iPhone 16", "isAvailable": true}], "com.apple.CoreSimulator.SimRuntime.watchOS-27-0": [{"name": "iPhone 17", "isAvailable": true}]}}"#
+        return (Data(runtimes.utf8), Data(devices.utf8))
+    }()
+
+    @Test func theIPhoneStepFallsBackToAnOlderRuntimeAndRemembersWhichOneWorks() async throws {
+        let installed = MacCheck.runtimes(simctl.runtimes, devices: simctl.devices)
+        let (new, old) = (MacCheck.Runtime(version: "27.0", build: "24A434"), MacCheck.Runtime(version: "26.5", build: "23F77"))
+        #expect(installed == [new, old] && new.label == "iOS 27.0 (24A434)" && old.older(than: new) && !new.older(than: old))
+        #expect(MacCheck.Runtime(version: "9.0", build: "").older(than: MacCheck.Runtime(version: "10.0", build: "")))
+        #expect(MacCheck.runtimes(Data("nope".utf8), devices: simctl.devices).isEmpty)
+        let phone = MacCheck.commands(cache: URL(filePath: "/cache"))[2]
+        #expect(phone.on(old).arguments.contains("platform=iOS Simulator,name=iPhone 17,OS=26.5") && !phone.on(old).arguments.contains(MacCheck.iPhone))
+        #expect(MacCheck.commands(cache: URL(filePath: "/cache"))[1].on(old).runtime == nil)
+
+        // Nothing learned yet: the newest first, the newest older one after trouble.
+        var memory = MacCheck.RuntimeMemory()
+        #expect(memory.first(of: installed) == new && memory.retry(after: new, of: installed) == old && memory.retry(after: old, of: installed) == nil)
+        // 27.0 hangs, 26.5 passes: the step passed on 26.5, and the comment says so.
+        var destinations: [String] = []
+        let outcome = await MacCheck.step(phone.on(new), retry: phone.on(old)) { run, command in
+            destinations.append(command.arguments[command.arguments.firstIndex(of: "-destination")! + 1])
+            return run == 1 ? attempt(65, hungOutput) : attempt(0, "** TEST SUCCEEDED **")
+        } reset: {}
+        #expect(destinations == ["platform=iOS Simulator,name=iPhone 17,OS=27.0", "platform=iOS Simulator,name=iPhone 17,OS=26.5"])
+        #expect(outcome.step.passed && outcome.step.retried == true && outcome.step.runtime == "iOS 26.5 (23F77)" && !outcome.troubled)
+        memory.learn(first: new, retry: old, from: outcome)
+        #expect(memory == MacCheck.RuntimeMemory(hung: ["iOS 27.0 (24A434)"], working: "iOS 26.5 (23F77)"))
+        // The next check runs on 26.5 straight away, and keeps it until it fails; then the hung 27.0 isn't tried again.
+        #expect(memory.first(of: installed) == old && memory.retry(after: old, of: installed) == nil)
+        var check = MacCheck.make(for: author, pr: 80, head: Self.head)
+        check.state = .passed
+        check.steps = [outcome.step]
+        #expect(MacCheck.comment(check).contains("| iPhone app with Watch, and iOSTests on iOS 26.5 (23F77) | Passed (second run) |"))
+        #expect(MacCheck.stepLine(outcome.step).hasPrefix("- iPhone app with Watch, and iOSTests on iOS 26.5 (23F77): passed"))
+        // Both hang: the check couldn't run, saying where it tried last, and neither counts as working.
+        let both = await MacCheck.step(phone.on(new), retry: phone.on(old)) { _, _ in attempt(65, hungOutput) } reset: {}
+        #expect(both.troubled && both.problem?.hasSuffix("ran iPhone app with Watch, and iOSTests once more on iOS 26.5 (23F77).") == true)
+        var hung = MacCheck.RuntimeMemory(working: "iOS 26.5 (23F77)")
+        hung.learn(first: old, retry: nil, from: both)
+        #expect(hung == MacCheck.RuntimeMemory(hung: ["iOS 26.5 (23F77)"], working: nil) && hung.first(of: installed) == new)
+        // A run that failed in the code still got past the simulator.
+        var failed = MacCheck.RuntimeMemory(hung: ["iOS 27.0 (24A434)"])
+        failed.learn(first: old, retry: nil, from: MacCheck.Outcome(step: MacCheck.Step(name: phone.name, passed: false, seconds: 1, failing: [MacCheck.FailingTest(test: "a()", message: "")])))
+        #expect(failed.working == "iOS 26.5 (23F77)")
+        // It's kept between checks.
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appending(path: "checks/runtimes.json")
+        memory.save(file)
+        #expect(MacCheck.RuntimeMemory.load(file) == memory && MacCheck.RuntimeMemory.load(folder.appending(path: "none.json")) == MacCheck.RuntimeMemory())
     }
 
     @Test func aStepStoppedAtItsTimeoutNamesTheLastTestThatStartedAndItsLastLines() {
