@@ -1,9 +1,10 @@
 import SwiftUI
 
 /// One job, opened from the island's list: the same screen as the iPhone's (iOS/JobScreen.swift),
-/// in the island's own style. Its stages, the result (Publish after Touch ID for this Mac's own
-/// jobs, Dismiss for one that needs you), what you asked, its details, what you told the agent,
-/// Stop, and a line to tell the agent more.
+/// in the island's own style. What its agent waits for (a decision card), its stages, the result
+/// (Publish after Touch ID for this Mac's own jobs, Dismiss for one that needs you), what you
+/// asked, its details, what you told the agent, Stop, and a line to tell the agent more. A
+/// runner's job has a Mode menu too.
 struct JobView: View {
     let job: Job
     /// Where it runs: the runner's name, like "tetrix-lab", or "This Mac".
@@ -15,6 +16,12 @@ struct JobView: View {
     let onPublish: (() async throws -> Void)?
     let onMessage: (String) async throws -> Void
     let onDismiss: () async throws -> Void
+    /// What the runner says about its job that Engine's Job doesn't read yet; nil for this Mac's own.
+    var extras: RunnerJobExtras? = nil
+    /// Changes a runner job's mode; nil for this Mac's own jobs (#134 brings modes to them).
+    var onMode: ((RunnerMode) async throws -> Void)? = nil
+    /// Allow, Always allow or Deny, with words for a deny; nil for this Mac's own jobs.
+    var onPermission: ((RunnerPermission.Decision, String?) async throws -> Void)? = nil
     @State private var busy = false
     @State private var problem: String?
     @State private var confirming = false
@@ -26,6 +33,7 @@ struct JobView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             header
+            decision
             pipeline
             result
             DisclosureGroup("What you asked", isExpanded: $requestExpanded) {
@@ -77,9 +85,62 @@ struct JobView: View {
                         .font(.system(size: 12).monospacedDigit()).foregroundStyle(.white.opacity(0.6))
                 }
             }
-            Text("\(job.agentName) · \(account ?? job.account) · \(place)")
-                .font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+            HStack(spacing: 10) {
+                Text("\(job.agentName) · \(account ?? job.account) · \(place)")
+                    .font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+                if let onMode, job.isActive, let mode = RunnerMode(extras?.mode) { modeMenu(mode, onMode) }
+            }
         }
+    }
+
+    /// Its OK on a command or a file, else the answer to its question or its plan: the runner's
+    /// with the recommended option first, this Mac's own jobs' as they ask.
+    @ViewBuilder private var decision: some View {
+        if let permission = extras?.permission, let onPermission, job.isActive {
+            DecisionCard(title: permission.title, detail: permission.detail, options: CardOption.permission(permission),
+                         busy: busy, wordsNote: CardOption.denyWords,
+                         onChoose: { option in
+                             guard let decision = RunnerPermission.Decision(rawValue: option.answer) else { return }
+                             Task { await run { try await onPermission(decision, nil) } }
+                         },
+                         onWords: { words in Task { await run { try await onPermission(.deny, words) } } })
+                .id(permission.id)
+                .padding(14)
+                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        } else if job.waitsForAnswer, let question = extras?.question ?? job.question.map({ Question(text: $0.text, options: $0.options) }) {
+            DecisionCard(title: question.text, plan: question.plan, options: question.cardOptions, busy: busy,
+                         onChoose: { option in Task { await run { try await onMessage(option.answer) } } },
+                         onWords: { words in Task { await run { try await onMessage(words) } } })
+                .id(question.text)
+                .padding(14)
+                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+    }
+
+    /// Ask, Accept edits, Plan or Bypass, while it runs.
+    private func modeMenu(_ mode: RunnerMode, _ change: @escaping (RunnerMode) async throws -> Void) -> some View {
+        Menu {
+            ForEach(RunnerMode.allCases) { choice in
+                Button {
+                    Task { await run { try await change(choice) } }
+                } label: {
+                    if choice == mode { Label(choice.label, systemImage: "checkmark") } else { Text(choice.label) }
+                }
+                .help(choice.help)
+            }
+        } label: {
+            Label(mode.label, systemImage: mode.symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.horizontal, 10).frame(height: 24)
+                .background(.white.opacity(0.12), in: Capsule())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(busy)
+        .help("Mode: \(mode.help)")
+        .accessibilityLabel("Mode: \(mode.label)")
     }
 
     /// "Stage 2 of 5" and the stages, as the iPhone's job screen draws them.

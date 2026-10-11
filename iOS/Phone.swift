@@ -73,6 +73,8 @@ final class Phone {
     /// What waits in the runner's inbox, put-off items too: answered on the Mac, it goes from here too.
     private(set) var inbox: [InboxItem] = []
     private(set) var models: ModelSettings?
+    /// The mode new jobs get by default, as the runner last said, or nil from a runner without modes.
+    private(set) var defaultMode: RunnerMode?
     /// When Clear done was last pressed, here or on the Mac (the runner's clock), or nil: Home
     /// hides the jobs that finished by then. The runner keeps them all.
     private(set) var clearedAt: Date?
@@ -129,6 +131,7 @@ final class Phone {
         accounts = status.accounts
         models = status.models
         clearedAt = status.clearedAt
+        defaultMode = RunnerMode(status.permissions?.mode)
         await take(try await runner.jobs())
         inbox = try await runner.inbox()
         loaded = true
@@ -340,6 +343,25 @@ final class Phone {
             apply(.job(job))
         }
         return url
+    }
+
+    // MARK: Permissions
+
+    /// Changes a running job's mode (the job screen's Mode menu).
+    func setMode(_ id: String, _ mode: RunnerMode) async throws {
+        apply(.job(try await runner.setMode(id, mode)))
+    }
+
+    /// Allow, Always allow or Deny on what a job's agent waits for; words go with a deny.
+    func answer(_ job: Job, _ decision: RunnerPermission.Decision, message: String? = nil) async throws {
+        guard let permission = job.permission else { return }
+        apply(.job(try await runner.answer(job.id, permission: permission.id, decision, message: message)))
+    }
+
+    /// Settings › Permissions: the mode new jobs get.
+    func setDefaultMode(_ mode: RunnerMode) async throws {
+        try await runner.setDefaultMode(mode)
+        defaultMode = mode
     }
 
     // MARK: Models

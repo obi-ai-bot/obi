@@ -1,14 +1,13 @@
 import SwiftUI
 
 /// Home's Inbox, above the jobs: what only you can answer, the longest-waiting first
-/// (docs/pipeline-cases.md, I.1). The first one is open, with a button per answer, and a question
-/// takes your own words too; Later puts it off for an hour, Done lets it go. Once it's settled, the
-/// next one opens. Answered on the Mac, it goes from here too.
+/// (docs/pipeline-cases.md, I.1). The first one is open, as a decision card (Shared/DecisionCard.swift):
+/// its answers, the recommended one first, and your own words; Later puts it off for an hour, Done
+/// lets it go. Once it's settled, the next one opens. Answered on the Mac, it goes from here too.
 struct InboxSection: View {
     @Environment(Phone.self) private var phone
     /// The item open now, or nil for the longest-waiting one.
     @State private var opened: String?
-    @State private var reply = ""
     /// Why the last answer didn't go through, until the next one does.
     @State private var problem: String?
     @State private var busy = false
@@ -28,48 +27,29 @@ struct InboxSection: View {
                         if item.id == current.id { card(item, now: context.date) } else { row(item, now: context.date) }
                     }
                 }
-                // Settled elsewhere, or another one opened: what was typed was for the one before.
-                .onChange(of: current.id, initial: true) {
-                    reply = ""
-                    problem = nil
-                }
+                // Settled elsewhere, or another one opened: the problem was the one before's.
+                .onChange(of: current.id, initial: true) { problem = nil }
             }
         }
     }
 
     /// The open item: what it asks, its answers, and the ways out.
     private func card(_ item: InboxItem, now: Date) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let job = phone.jobs.first { $0.id == item.job }
+        let permission = item.kind == "permission" ? job?.permission : nil
+        // A permission's words go with a deny; anything else's are the answer. An item without a job takes none.
+        let answerWords: ((String) -> Void)? = item.job.isEmpty ? nil : { words in
+            if let job, permission != nil { deny(job, words) } else { settle(item, answer: words) }
+        }
+        return VStack(alignment: .leading, spacing: 10) {
             Text(item.line(now: now)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            ReadingText(item.text, weight: .semibold)
-            ForEach(item.options, id: \.self) { option in
-                Button { settle(item, answer: option) } label: {
-                    ReadingText(option, weight: .medium)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16).padding(.vertical, 12)
-                        .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-            if item.kind == "question" {
-                HStack(spacing: 8) {
-                    TextField(item.options.isEmpty ? "Your answer" : "Or type your answer", text: $reply, axis: .vertical)
-                        .lineLimit(1...4)
-                        .readingText()
-                        .submitLabel(.send)
-                        .onSubmit { answerTyped(item) }
-                    Button { answerTyped(item) } label: {
-                        Image(systemName: "arrow.up").font(.footnote.weight(.bold))
-                            .foregroundStyle(Color(uiColor: .systemBackground))
-                            .frame(width: 28, height: 28)
-                            .background(Color.primary.opacity(typed.isEmpty ? 0.4 : 1), in: Circle())
-                    }
-                    .disabled(typed.isEmpty)
-                    .accessibilityLabel("Answer")
-                }
-                .padding(.leading, 14).padding(.trailing, 5).padding(.vertical, 5)
-                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 19, style: .continuous))
-            }
+            DecisionCard(title: item.text, detail: permission?.detail,
+                         plan: item.kind == "question" ? job?.question?.plan : nil,
+                         options: CardOption.inbox(item.options, kind: item.kind, question: job?.question, permission: permission),
+                         busy: busy, wordsNote: item.kind == "permission" ? CardOption.denyWords : nil,
+                         onChoose: { settle(item, answer: $0.answer) },
+                         onWords: answerWords)
+                .id(item.id)
             HStack(spacing: 18) {
                 Button("Later") { settle(item, later: .now.addingTimeInterval(3600)) }
                     .accessibilityHint("Puts it off for an hour")
@@ -92,7 +72,6 @@ struct InboxSection: View {
     private func row(_ item: InboxItem, now: Date) -> some View {
         Button {
             opened = item.id
-            reply = ""
             problem = nil
         } label: {
             VStack(alignment: .leading, spacing: 2) {
@@ -106,11 +85,19 @@ struct InboxSection: View {
         .buttonStyle(.plain)
     }
 
-    private var typed: String { reply.trimmingCharacters(in: .whitespacesAndNewlines) }
-
-    private func answerTyped(_ item: InboxItem) {
-        guard !typed.isEmpty else { return }
-        settle(item, answer: typed)
+    /// Deny, with the user's words for the agent: the runner settles the item.
+    private func deny(_ job: Job, _ words: String) {
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                try await phone.answer(job, .deny, message: words)
+                opened = nil
+                problem = nil
+            } catch {
+                problem = error.localizedDescription
+            }
+        }
     }
 
     /// Through the runner, so the Mac's island settles it too; then the next one opens.
@@ -121,7 +108,6 @@ struct InboxSection: View {
             do {
                 try await phone.settle(item.id, answer: answer, done: done, later: later)
                 opened = nil
-                reply = ""
                 problem = nil
             } catch {
                 problem = error.localizedDescription

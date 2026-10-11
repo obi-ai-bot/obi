@@ -37,6 +37,11 @@ final class RunnerFeed {
     private(set) var inbox: [InboxItem] = []
     /// The runner's accounts and their usage, as it last said: the brain tells them too.
     private(set) var accounts: [AccountState] = []
+    /// What each job carries that Engine's Job doesn't read yet (its mode, the permission it waits
+    /// on, its question's recommended option and plan), by job id.
+    private(set) var extras: [String: RunnerJobExtras] = [:]
+    /// The mode the runner's new jobs get by default, or nil from a runner without modes.
+    private(set) var defaultMode: RunnerMode?
     /// The name the runner reports in /v1/status, like "tetrix-lab".
     private(set) var host: String?
     /// When Clear done was last pressed, here or on the iPhone (the runner's clock), or nil: the
@@ -101,6 +106,8 @@ final class RunnerFeed {
             inbox = []
             accounts = []
             models = nil
+            extras = [:]
+            defaultMode = nil
             host = nil
             clearedAt = nil
             notified = nil
@@ -129,7 +136,7 @@ final class RunnerFeed {
                     case .connected:
                         // Status every time: a Clear done while the connection was down is in it.
                         let status = try await runner.status()
-                        let list = try await runner.jobs()
+                        let (list, extras) = try await runner.jobsWithExtras()
                         let items = try await runner.inbox()
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
@@ -137,13 +144,17 @@ final class RunnerFeed {
                         clearedAt = status.clearedAt
                         accounts = status.accounts
                         models = status.models
+                        defaultMode = RunnerMode(status.permissions?.mode)
+                        self.extras = extras
                         take(list)
                         inbox = items
                         connection = .live
                         wait = 1
                         Self.ask()
                         checks.look(runner)
-                    case .job(let job): apply(job)
+                    case .job(let job, let extras):
+                        if let extras { self.extras[job.id] = extras }
+                        apply(job)
                     case .cleared(let date): clearedAt = date
                     case .inbox(let item): apply(item)
                     case .accounts(let list): accounts = list
@@ -177,6 +188,32 @@ final class RunnerFeed {
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
         guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to answer it.") }
         apply(try await runner.settle(id, answer: answer, done: done, later: later))
+    }
+
+    /// Changes a runner job's mode (its screen's Mode menu): a permission it waits on that the new
+    /// mode allows is answered.
+    func setMode(_ id: String, _ mode: RunnerMode) async throws {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to change it.") }
+        let job = try await runner.setMode(id, mode)
+        extras[id, default: RunnerJobExtras(id: id)].mode = mode.rawValue
+        apply(job)
+    }
+
+    /// Allow, Always allow or Deny on what a runner job's agent waits for; words go with a deny.
+    func answer(_ id: String, _ decision: RunnerPermission.Decision, message: String? = nil) async throws {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to answer it.") }
+        guard let permission = extras[id]?.permission else { return }
+        let job = try await runner.answer(id, permission: permission.id, decision, message: message)
+        // The job's own event brings the next one, if any.
+        if extras[id]?.permission?.id == permission.id { extras[id]?.permission = nil }
+        apply(job)
+    }
+
+    /// Settings › Permissions: the mode the runner's new jobs get.
+    func setDefaultMode(_ mode: RunnerMode) async throws {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+        try await runner.setDefaultMode(mode)
+        defaultMode = mode
     }
 
     /// An inbox item as the runner last said it: one that's done leaves the list.

@@ -541,15 +541,9 @@ private struct OpenIsland: View {
                           onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
                           onCancel: { desk.cancel() })
             case .question(let said, let question):
-                ForEach(question.options, id: \.self) { option in
-                    Button { desk.answer(option, said: said, question: question.text) } label: {
-                        ReadingText(option, weight: .medium)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 16).padding(.vertical, 11)
-                            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                }
+                DecisionCard(title: question.text, options: CardOption.of(question.options),
+                             onChoose: { desk.answer($0.answer, said: said, question: question.text) },
+                             onWords: { desk.answer($0, said: said, question: question.text) })
                 field
             default:
                 if let row = selectedRow {
@@ -647,7 +641,10 @@ private struct OpenIsland: View {
         if let host = row.host {
             JobView(job: row.job, place: host, account: nil, onStop: { stop(row) }, onPublish: nil,
                     onMessage: { text in if let runner = feed.runner { feed.apply(try await runner.tell(row.job.id, text)) } },
-                    onDismiss: { try await dismiss(row) })
+                    onDismiss: { try await dismiss(row) },
+                    extras: feed.extras[row.job.id],
+                    onMode: { try await feed.setMode(row.job.id, $0) },
+                    onPermission: { try await feed.answer(row.job.id, $0, message: $1) })
         } else {
             let job = row.job
             JobView(job: job, place: "This Mac", account: desk.accounts.accounts.first { $0.account.id == job.account }?.account.name,
@@ -691,7 +688,7 @@ private struct OpenIsland: View {
             Text(model.summary).font(.system(size: 19, weight: .semibold))
             switch desk.talk {
             case .question:
-                Text("Pick one, or type below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+                Text("Pick one, or type your own.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
             case .thinking:
                 Text("Esc cancels. Type to ask something else.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
             default:

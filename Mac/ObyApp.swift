@@ -29,6 +29,7 @@ struct ObyApp: App {
                 AccountsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Accounts", systemImage: "person.2") }
                 ModelsSettingsView(feed: app.island.feed).tabItem { Label("Models", systemImage: "cpu") }
                 VaultSettingsView(vault: .shared).tabItem { Label("Vault", systemImage: "lock") }
+                PermissionsSettingsView(feed: app.island.feed).tabItem { Label("Permissions", systemImage: "hand.raised") }
             }
         }
     }

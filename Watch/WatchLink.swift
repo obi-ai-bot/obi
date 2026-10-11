@@ -91,6 +91,17 @@ nonisolated struct WatchLink: Sendable {
 
     func dismiss(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/dismiss") }
 
+    /// Allow, Always allow or Deny (with words for the agent). A Watch API without it answers 404:
+    /// that waits for the iPhone.
+    func answer(_ id: String, permission: String, _ decision: RunnerPermission.Decision, message: String?) async throws -> Job {
+        struct Body: Encodable { var id: String; var decision: RunnerPermission.Decision; var message: String? }
+        do {
+            return try await call("POST", "v1/jobs/\(id)/permission", body: Body(id: permission, decision: decision, message: message))
+        } catch let error as RunnerError where error.status == 404 {
+            throw RunnerError(message: "Answering this needs your iPhone in reach.", status: 404)
+        }
+    }
+
     func publishAction(_ id: String) async throws -> String {
         struct Answer: Decodable { var action: String }
         let answer: Answer = try await call("GET", "v1/jobs/\(id)/publish")

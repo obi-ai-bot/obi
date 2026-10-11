@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// One job: its stages, how it ended, Publish with the crown, a word to the agent.
+/// One job: what its agent waits for (a decision card), its stages, how it ended, Publish with
+/// the crown, a word to the agent.
 struct JobScreen: View {
     @Environment(Watch.self) private var watch
     let id: String
@@ -18,6 +19,7 @@ struct JobScreen: View {
                     Text(job.heading).font(.headline).accessibilityAddTraits(.isHeader)
                     let (status, color) = JobStatus.of(job)
                     Text(status).font(.caption.weight(.semibold)).foregroundStyle(color)
+                    decision(job)
                     stages(job)
                     result(job)
                     if let outcome = watch.outcomes[job.id] {
@@ -66,6 +68,26 @@ struct JobScreen: View {
             }
         }
         .onChange(of: publishAsked, initial: true) { publishFromNotification() }
+    }
+
+    /// Its OK on a command or a file, else the answer to its question or its plan: options as
+    /// buttons, the recommended one first, and dictation for your own answer.
+    @ViewBuilder private func decision(_ job: Job) -> some View {
+        if let permission = job.permission, job.isActive {
+            DecisionCard(title: permission.title, detail: permission.detail, options: CardOption.permission(permission),
+                         busy: busy, wordsNote: CardOption.denyWords,
+                         onChoose: { option in
+                             guard let decision = RunnerPermission.Decision(rawValue: option.answer) else { return }
+                             Task { await run { try await watch.answer(job, decision) } }
+                         },
+                         onWords: { words in Task { await run { try await watch.answer(job, .deny, message: words) } } })
+                .id(permission.id)
+        } else if let question = job.question, job.waitsForAnswer {
+            DecisionCard(title: question.text, plan: question.plan, options: question.cardOptions, busy: busy,
+                         onChoose: { option in Task { await run { try await watch.tell(job.id, option.answer) } } },
+                         onWords: { words in Task { await run { try await watch.tell(job.id, words) } } })
+                .id(question.text)
+        }
     }
 
     @ViewBuilder private func stages(_ job: Job) -> some View {

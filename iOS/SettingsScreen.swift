@@ -40,6 +40,8 @@ struct SettingsScreen: View {
                     }
                 }
 
+                PermissionsSection()
+
                 RunnerModelsSections(options: options, models: phone.models, save: phone.setModels)
 
                 Section {

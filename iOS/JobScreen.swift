@@ -23,6 +23,7 @@ struct JobScreen: View {
             if let job {
                 VStack(alignment: .leading, spacing: 24) {
                     header(job)
+                    decision(job)
                     if let pipeline = job.pipeline {
                         VStack(alignment: .leading, spacing: 12) {
                             Text(pipeline.label).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
@@ -71,6 +72,11 @@ struct JobScreen: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let job, job.isActive, job.mode != nil {
+                modeMenu(job)
+            }
+        }
         .onChange(of: publishAsked, initial: true) { publishFromNotification() }
         .task(id: id) {
             await phone.fetch(id)
@@ -92,6 +98,57 @@ struct JobScreen: View {
             Text("\(job.agentName) · \(phone.accounts.first { $0.id == job.account }?.name ?? job.account)")
                 .font(.subheadline).foregroundStyle(.secondary)
         }
+    }
+
+    /// What the job's agent waits for: its OK on a command or a file, else the answer to its
+    /// question or its plan. One tap answers; your own words go too.
+    @ViewBuilder private func decision(_ job: Job) -> some View {
+        if let permission = job.permission, job.isActive {
+            DecisionCard(title: permission.title, detail: permission.detail, options: CardOption.permission(permission),
+                         busy: busy, wordsNote: CardOption.denyWords,
+                         onChoose: { option in
+                             guard let decision = RunnerPermission.Decision(rawValue: option.answer) else { return }
+                             Task { await run { try await phone.answer(job, decision) } }
+                         },
+                         onWords: { words in Task { await run { try await phone.answer(job, .deny, message: words) } } })
+                .id(permission.id)
+                .padding(16)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        } else if let question = job.question, job.waitsForAnswer {
+            DecisionCard(title: question.text, plan: question.plan, options: question.cardOptions, busy: busy,
+                         onChoose: { option in Task { await run { try await phone.tell(job.id, option.answer) } } },
+                         onWords: { words in Task { await run { try await phone.tell(job.id, words) } } })
+                .id(question.text)
+                .padding(16)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        }
+    }
+
+    /// Ask, Accept edits, Plan or Bypass, while it runs: a permission the new mode allows is answered.
+    private func modeMenu(_ job: Job) -> some View {
+        Menu {
+            Picker("Mode", selection: Binding {
+                RunnerMode(job.mode)
+            } set: { mode in
+                guard let mode else { return }
+                Task { await run { try await phone.setMode(job.id, mode) } }
+            }) {
+                ForEach(RunnerMode.allCases) { mode in
+                    Label {
+                        Text(mode.label)
+                        Text(mode.help)
+                    } icon: {
+                        Image(systemName: mode.symbol)
+                    }
+                    .tag(RunnerMode?.some(mode))
+                }
+            }
+        } label: {
+            Label(RunnerMode(job.mode)?.label ?? "Mode", systemImage: RunnerMode(job.mode)?.symbol ?? "hand.raised")
+                .labelStyle(.titleAndIcon)
+        }
+        .disabled(busy)
+        .accessibilityLabel("Mode: \(RunnerMode(job.mode)?.label ?? "unknown")")
     }
 
     private func elapsed(_ job: Job) -> some View {
