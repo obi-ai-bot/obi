@@ -361,6 +361,9 @@ nonisolated struct StoppedJobs: Decodable, Sendable {
 
 /// One thing the runner reports while the app is open.
 nonisolated enum RunnerEvent: Equatable, Sendable {
+    /// The runner is following this app now: fetch what's there. Whatever changes meanwhile
+    /// arrives after this, so applying it over the fetched lists loses nothing.
+    case connected
     case job(Job)
     case accounts([Account])
     /// Clear done was pressed, here or on another app: jobs that finished by then are hidden.
@@ -554,6 +557,8 @@ nonisolated struct Runner: Sendable {
                     request.timeoutInterval = 60
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     try Self.check(response, nil)
+                    // The runner answers once it follows this connection: from here, every change arrives.
+                    stream.yield(.connected)
                     var parser = EventParser()
                     var line = Data()
                     // Split on newlines only: summaries may hold U+2028, which `lines` would break at.

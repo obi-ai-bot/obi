@@ -96,28 +96,31 @@ final class RunnerFeed {
         }
     }
 
-    /// Fetches the jobs, then follows the runner's events; after any drop it tries again, waiting
-    /// a little longer each time, up to half a minute.
+    /// Follows the runner's events and, once it's following, fetches the jobs and the inbox; after
+    /// any drop it tries again, waiting a little longer each time, up to half a minute.
     private func run(_ runner: Runner) async {
         var wait = 1.0
         while !Task.isCancelled {
             do {
-                // Status every time: a Clear done while the connection was down is in it.
-                let status = try await runner.status()
-                let list = try await runner.jobs()
-                // A runner older than the inbox has none.
-                let items = (try? await runner.inbox()) ?? []
-                // Settings › Runner changed, or the Mac woke, while these were on their way.
-                try Task.checkCancellation()
-                host = status.runner.host
-                clearedAt = status.clearedAt
-                take(list)
-                inbox = items
-                down = false
-                wait = 1
-                Self.ask()
+                // Following first, then fetching: what changes in between waits in the stream and
+                // applies over what was fetched.
                 for try await event in runner.events() {
                     switch event {
+                    case .connected:
+                        // Status every time: a Clear done while the connection was down is in it.
+                        let status = try await runner.status()
+                        let list = try await runner.jobs()
+                        // A runner older than the inbox has none.
+                        let items = (try? await runner.inbox()) ?? []
+                        // Settings › Runner changed, or the Mac woke, while these were on their way.
+                        try Task.checkCancellation()
+                        host = status.runner.host
+                        clearedAt = status.clearedAt
+                        take(list)
+                        inbox = items
+                        down = false
+                        wait = 1
+                        Self.ask()
                     case .job(let job): apply(job)
                     case .cleared(let date): clearedAt = date
                     case .inbox(let item): apply(item)

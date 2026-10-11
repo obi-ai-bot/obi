@@ -74,8 +74,12 @@ final class InboxTests {
 
     @Test func questionsAreReadFromTheSummarysEnd() {
         let asked = "Nothing committed yet.\n\n**QUESTION:** Should a job that commits nothing end as `failed`, or get a new status?\nOPTIONS: Failed | A new status | "
-        #expect(Inbox.question(in: asked) == Plan.Question(text: "Should a job that commits nothing end as failed, or get a new status?",
+        #expect(Inbox.question(in: asked) == Plan.Question(text: "Should a job that commits nothing end as `failed`, or get a new status?",
                                                           options: ["Failed", "A new status"]))
+        // Only the Markdown around the label goes: globs and code stay as the agent wrote them.
+        #expect(Inbox.question(in: "Done.\n`QUESTION: Which files?`\n**OPTIONS:** *.swift | `Engine/*` | all") ==
+                Plan.Question(text: "Which files?", options: ["*.swift", "`Engine/*`", "all"]))
+        #expect(Inbox.question(in: "**QUESTION: Keep _drafts_?**")?.text == "Keep _drafts_?")
         #expect(Inbox.question(in: "Done.\nquestion: Which branch?\n") == Plan.Question(text: "Which branch?", options: []))
         // A question mid-report, or an empty one, isn't asked.
         #expect(Inbox.question(in: "QUESTION: Which branch?\nThen I picked dev and committed.") == nil)
@@ -193,6 +197,50 @@ final class InboxTests {
         restarted.makeAgent = { _, _, _ in nil }
         let settled = try restarted.settle(restarted.inbox[0].id, .answer("deskree-inc/oby"))
         #expect(settled.answer == "deskree-inc/oby" && restarted.job("asking")?.notes == ["deskree-inc/oby"])
+    }
+
+    /// A review item's One more round still quotes the review after a restart, however old its review job is.
+    @Test func oldReviewItemsKeepTheirReview() throws {
+        var reviewed = fix
+        reviewed.id = "reviewed"
+        reviewed.status = .done
+        reviewed.session = "e6a24229"
+        reviewed.published = "https://github.com/deskree-inc/oby/pull/80"
+        reviewed.review = Review(verdict: .changesRequested, job: "rev4", agent: "codex", account: "Work", round: 4)
+        reviewed.created = Date(timeIntervalSince1970: 1_700_000_100)
+        var review = fix
+        review.id = "rev4"
+        review.status = .done
+        review.reviewOf = "reviewed"
+        review.summary = "Rename the status.\nVERDICT: CHANGES REQUESTED"
+        review.created = Date(timeIntervalSince1970: 1_700_000_000)
+        #expect(makeDesk([reviewed, review]).inbox.first?.kind == .review)
+        let store = JobStore(url: folder.appending(path: "oby.sqlite"))
+        for index in 0..<55 {
+            var job = fix
+            job.id = "newer\(index)"
+            job.status = .done
+            job.created = Date(timeIntervalSince1970: 1_791_582_173 + Double(index))
+            store.save(job)
+        }
+        let restarted = makeDesk()
+        #expect(restarted.job("rev4")?.summary == review.summary)
+        var quoted: [(String, String)] = []
+        restarted.quoteReview = { _, file, text in quoted.append((file, text)) }
+        restarted.makeAgent = { _, _, _ in nil }
+        try restarted.settle(try #require(restarted.inbox.first { $0.kind == .review }).id, .answer("One more round"))
+        #expect(quoted.first?.0 == "review-4.md" && quoted.first?.1.contains("Rename the status.") == true)
+        #expect(restarted.job("reviewed")?.notes?.first?.contains(".oby/inputs/review-4.md") == true)
+    }
+
+    /// A retry that fails again, even within the same second, is a new item: the settled one doesn't hide it.
+    @Test func aRetryThatFailsAgainIsANewItem() {
+        var again = failed
+        again.round = 2
+        again.finished = failed.finished! + 0.2
+        #expect(Inbox.need(of: failed)?.id != Inbox.need(of: again)?.id)
+        // The same failure is the same item.
+        #expect(Inbox.need(of: failed)?.id == Inbox.need(of: failed)?.id)
     }
 
     /// A failure lands once, with Try again and Dismiss; Dismiss lets the job go, and an item that's

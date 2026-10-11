@@ -108,8 +108,14 @@ final class Desk {
         jobs = store.recent()
         inbox = store.inbox()
         // The jobs open inbox items are about, however old: answering one needs its job.
+        // A review item's One more round quotes the review, so that job comes too.
         let asking = Set(inbox.filter(\.isOpen).map(\.job)).subtracting(jobs.map(\.id))
-        if !asking.isEmpty { jobs += store.recent(-1).filter { asking.contains($0.id) } }
+        if !asking.isEmpty {
+            let all = Dictionary(store.recent(-1).map { ($0.id, $0) }) { first, _ in first }
+            let reviews = asking.compactMap { all[$0]?.review?.job }
+            let wanted = asking.union(reviews).subtracting(jobs.map(\.id))
+            jobs += all.values.filter { wanted.contains($0.id) }.sorted { $0.created > $1.created }
+        }
         // Running when Oby last quit (or crashed): it didn't finish.
         for index in jobs.indices where jobs[index].isActive {
             jobs[index].status = .interrupted

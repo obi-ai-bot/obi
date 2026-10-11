@@ -71,11 +71,12 @@ nonisolated enum Inbox {
         }
         guard job.status == .failed || job.status == .interrupted else { return nil }
         let line = job.summary.split(separator: "\n").first.map(String.init) ?? job.status.rawValue.capitalized
-        let ended = Int((job.finished ?? job.created).timeIntervalSince1970)
+        // Each failure its own: a retry that fails within the same second is another round.
+        let ended = Int((job.finished ?? job.created).timeIntervalSince1970 * 1000)
         // Try again picks the job's session up: one that never started has none.
         let options = job.session == nil ? [dismiss] : [tryAgain, dismiss]
         // The same id either way: after a restart Oby no longer knows it was the limits, and the item stays.
-        return item(limited ? .limit : .failed, "failed-\(ended)", line, options)
+        return item(limited ? .limit : .failed, "failed-\(job.currentRound)-\(ended)", line, options)
     }
 
     // MARK: Questions from agents
@@ -86,12 +87,16 @@ nonisolated enum Inbox {
     /// The question at the end of an agent's summary (`QUESTION: …`, then optionally `OPTIONS: a | b`),
     /// or nil. Only the summary's last lines count: a question quoted mid-report isn't one.
     static func question(in summary: String) -> Plan.Question? {
-        let lines = summary.split(separator: "\n").map { line in
-            line.filter { $0 != "`" && $0 != "*" }.trimmingCharacters(in: .whitespaces)
-        }.filter { !$0.isEmpty }
+        let lines = summary.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        // Only the Markdown around the label goes (`**QUESTION:** …`, `` `QUESTION: …` ``): the
+        // question and its options keep every character, like `*.swift`.
         func value(_ line: String, _ label: String) -> String? {
-            guard line.uppercased().hasPrefix(label + ":") else { return nil }
-            return line.dropFirst(label.count + 1).trimmingCharacters(in: .whitespaces)
+            let opening = line.prefix { "*_`".contains($0) }
+            let rest = line.dropFirst(opening.count)
+            guard rest.uppercased().hasPrefix(label + ":") else { return nil }
+            var text = rest.dropFirst(label.count + 1).drop { "*_".contains($0) }.trimmingCharacters(in: .whitespaces)
+            if !opening.isEmpty, text.hasSuffix(opening) { text = text.dropLast(opening.count).trimmingCharacters(in: .whitespaces) }
+            return text
         }
         var options: [String] = []
         var last = lines.count - 1
