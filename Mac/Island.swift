@@ -705,18 +705,20 @@ private struct OpenIsland: View {
     @ViewBuilder private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(model.summary).font(.system(size: 19, weight: .semibold))
-            let hint = switch desk.talk {
-            case .question: "Pick one, or type below."
-            case .thinking: "Esc cancels. Type to ask something else."
-            default: threaded ? "Ask about the work, or type a task." : "Type a task below."
-            }
-            Text(hint).font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
-            // First launch was skipped or Accessibility refused: fn does nothing until it's allowed.
-            // macOS doesn't say when it is, so look again every couple of seconds while open.
-            TimelineView(.periodic(from: .now, by: 2)) { _ in
-                if !AXIsProcessTrusted() {
-                    Button("To talk with fn, allow Accessibility") { Task { await Permissions().ask(.accessibility) } }
-                        .buttonStyle(.plain).font(.system(size: 13, weight: .medium)).foregroundStyle(.orange)
+            switch desk.talk {
+            case .question:
+                Text("Pick one, or type below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+            case .thinking:
+                Text("Esc cancels. Type to ask something else.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+            default:
+                Text(threaded ? "Ask about the work, or type a task." : "Type a task below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+                // First launch was skipped or Accessibility refused: fn does nothing until it's allowed.
+                // macOS doesn't say when it is, so look again every couple of seconds while open.
+                TimelineView(.periodic(from: .now, by: 2)) { _ in
+                    if !AXIsProcessTrusted() {
+                        Button("To talk with fn, allow Accessibility") { Task { await Permissions().ask(.accessibility) } }
+                            .buttonStyle(.plain).font(.system(size: 13, weight: .medium)).foregroundStyle(.orange)
+                    }
                 }
             }
         }
