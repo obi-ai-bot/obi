@@ -71,10 +71,12 @@ final class Desk {
     }
     /// Publishes a job that ended done with commits, with no one to approve it: the check passed
     /// and the secret scan gates it (case 4.1). Tests put in their own.
-    @ObservationIgnored var publishOnItsOwn: (Job, _ base: String) async throws -> URL = { try await Publish.publish($0, base: $1) { _ in } }
+    @ObservationIgnored var publishOnItsOwn: (Job, _ base: String, Publish.Hooks) async throws -> URL = {
+        try await Publish.publish($0, base: $1, hooks: $2) { _ in }
+    }
     /// Publishes by hand, once `approve` lets the action through. Tests put in their own.
-    @ObservationIgnored var publishByHand: (Job, _ base: String, _ approve: (String) async throws -> Void) async throws -> URL = {
-        try await Publish.publish($0, base: $1, approve: $2)
+    @ObservationIgnored var publishByHand: (Job, _ base: String, _ approve: (String) async throws -> Void, Publish.Hooks) async throws -> URL = {
+        try await Publish.publish($0, base: $1, hooks: $3, approve: $2)
     }
     /// Oby's review of a job's pull request (Engine/Review.swift): posts it as a comment, after the
     /// secret scan, and quotes it as a file for the author's next round. Tests put in their own.
@@ -94,12 +96,6 @@ final class Desk {
         accounts.countRunning(jobs)
         // A review that was running: its author stops waiting for it.
         for job in jobs where job.reviewOf != nil && job.status == .interrupted { reviewEnded(job) }
-        publishOnItsOwn = { [weak self] job, base in
-            try await Publish.publish(job, base: base, progress: { self?.publishing(job.id, $0) }) { _ in }
-        }
-        publishByHand = { [weak self] job, base, approve in
-            try await Publish.publish(job, base: base, progress: { self?.publishing(job.id, $0) }, approve: approve)
-        }
     }
 
     var active: [Job] { jobs.filter(\.isActive) }
@@ -323,7 +319,7 @@ final class Desk {
     func publish(_ id: String, approve: (String) async throws -> Void) async throws -> URL {
         guard let job = job(id), job.canPublish, let base = job.base else { throw Shell.Failure(message: "Nothing to publish.") }
         do {
-            let url = try await publishByHand(job, base, approve)
+            let url = try await publishByHand(job, base, approve, hooks(id, stoppable: false))
             if var job = self.job(id) {
                 job.pullRequest = nil
                 job.pullRequestError = nil
@@ -619,7 +615,7 @@ final class Desk {
             running.step = "Publishing"
             replace(running)
             do {
-                let url = try await publishOnItsOwn(ended, base)
+                let url = try await publishOnItsOwn(ended, base, hooks(id, stoppable: true))
                 end(id, status, summary, commits: commits, made: made, published: url)
             } catch let merged as Publish.AlreadyOnBase {
                 // Merged already (a squash merge changes the hashes): nothing is left to publish.
@@ -674,6 +670,14 @@ final class Desk {
         if published != nil { reviewPublished(job) }
         if job.reviewOf != nil { reviewEnded(job) }
         onFinish(job)
+    }
+
+    /// What publishing `id` reports as it goes. A job publishing as it ends is `stoppable`: once
+    /// it's stopped, nothing more goes out.
+    private func hooks(_ id: String, stoppable: Bool) -> Publish.Hooks {
+        Publish.Hooks(progress: { [weak self] in self?.publishing(id, $0) },
+                      proceed: { [weak self] in if stoppable, self?.job(id)?.isActive != true { throw Publish.Stopped() } },
+                      sent: { [weak self] in self?.sent(id, $0) })
     }
 
     private func publishing(_ id: String, _ step: PublishStep) {

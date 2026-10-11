@@ -35,7 +35,7 @@ struct PublishOnItsOwnTests {
     func run(_ id: String, commits: Int?, failed: Bool = false, summary: String = "fix(engine): open the PR by itself",
              publish: @escaping (Job) async throws -> URL) async throws -> Job {
         desk.countCommits = { _, _ in commits }
-        desk.publishOnItsOwn = { [published] job, _ in
+        desk.publishOnItsOwn = { [published] job, _, _ in
             published.jobs.append(job)
             return try await publish(job)
         }
@@ -138,7 +138,7 @@ struct PublishOnItsOwnTests {
         restarted.makeAgent = { [agent] _, _, _ in agent }
         restarted.prepare = { $0 }
         restarted.countCommits = { _, _ in 1 }
-        restarted.publishOnItsOwn = { [published] job, _ in
+        restarted.publishOnItsOwn = { [published] job, _, _ in
             published.jobs.append(job)
             return URL(string: "https://github.com/deskree-inc/oby/pull/81")!
         }
@@ -180,7 +180,7 @@ struct PublishOnItsOwnTests {
         let failed = try await run("byhand", commits: 2) { _ in throw Shell.Failure(message: "Couldn't push oby/fix-75: the remote hung up.") }
         #expect(failed.canPublish && Push.notice(for: failed) == .ready)
         let alerted = Push.notices([failed], after: [:]).notified
-        desk.publishByHand = { _, base, _ in throw Publish.AlreadyOnBase(base: base) }
+        desk.publishByHand = { _, base, _, _ in throw Publish.AlreadyOnBase(base: base) }
         await #expect(throws: Publish.AlreadyOnBase.self) { try await desk.publish("byhand") { _ in } }
         let ended = try #require(desk.job("byhand"))
         #expect(ended.status == .done && ended.published == nil && ended.commits == 0)

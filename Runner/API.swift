@@ -46,6 +46,7 @@ final class API {
         router.get("v1/jobs/:id") { _, context in try await self.job(context.parameters.require("id")) }
         router.get("v1/jobs/:id/wait") { _, context in try await self.wait(context.parameters.require("id")) }
         router.post("v1/jobs/:id/stop") { _, context in try await self.stop(context.parameters.require("id")) }
+        router.post("v1/stop-all") { _, _ in await self.stopAll() }
         router.post("v1/jobs/:id/dismiss") { _, context in try await self.dismiss(context.parameters.require("id")) }
         router.post("v1/jobs/:id/messages") { request, context in
             try await self.message(context.parameters.require("id"), try await Self.decode(NewMessage.self, from: request))
@@ -139,6 +140,15 @@ final class API {
     }
 
     /// The user lets go of a job that needs them: it then needs nothing. No signature: nothing goes out.
+    /// Stop all (⌃⌥⌘. on the Mac, the iPhone's Stop all): every queued and running job stops now,
+    /// its agent ends within 2 seconds, and nothing it left half-done is published. Answers with the
+    /// jobs it stopped.
+    func stopAll() -> Response {
+        let ids = desk.active.map(\.id)
+        desk.stopAll()
+        return Self.json(StoppedAll(stopped: ids.count, jobs: ids.compactMap { desk.job($0) }.map { JobJSON(job: $0) }))
+    }
+
     func dismiss(_ id: String) throws -> Response {
         _ = try known(id)
         do {
@@ -428,11 +438,17 @@ struct Options: Encodable {
     var codex: Tool
 }
 
+/// What `POST /v1/stop-all` answers: how many jobs it stopped, and those jobs.
+struct StoppedAll: Encodable {
+    var stopped: Int
+    var jobs: [JobJSON]
+}
+
 /// A job with every key the API promises, null where Swift would leave one out.
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing }
 
     private enum Derived: String, CodingKey { case pipeline, title }
 
@@ -470,6 +486,8 @@ struct JobJSON: Encodable {
         if job.review == nil { try nulls.encodeNil(forKey: .review) }
         if job.reviewError == nil { try nulls.encodeNil(forKey: .reviewError) }
         if job.reviewOf == nil { try nulls.encodeNil(forKey: .reviewOf) }
+        // What went out is always a list: empty before anything did.
+        if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
     }
 }
 
