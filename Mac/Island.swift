@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import SwiftUI
 import WebKit
 
@@ -616,6 +617,14 @@ private struct OpenIsland: View {
                 // The same line as the iPhone's Home and the closed notch (Shared/JobList.swift).
                 Text(model.summary).font(.system(size: 19, weight: .semibold))
                 Text("Type a task below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+                // First launch was skipped or Accessibility refused: fn does nothing until it's allowed.
+                // macOS doesn't say when it is, so look again every couple of seconds while open.
+                TimelineView(.periodic(from: .now, by: 2)) { _ in
+                    if !AXIsProcessTrusted() {
+                        Button("To talk with fn, allow Accessibility") { Task { await Permissions().ask(.accessibility) } }
+                            .buttonStyle(.plain).font(.system(size: 13, weight: .medium)).foregroundStyle(.orange)
+                    }
+                }
             }
         }
         .padding(.top, 34)
@@ -726,7 +735,7 @@ private struct PlanCard: View {
                 }
                 .frame(width: 170)
             }
-            if draft.suggestedModel != nil, let account {
+            if draft.suggestedModel != nil, let account, ModelPicks.complex(for: account.agent) != nil {
                 StrongerModel(agent: account.agent, plan: accounts.first { $0.account.id == account.id }?.label, on: $stronger)
             }
             Label("Works in Oby's own copy of the repository. Nothing is pushed or posted.", systemImage: "checkmark.shield")
@@ -746,7 +755,7 @@ private struct PlanCard: View {
                     draft.job.rounds = rounds > 1 ? rounds : nil
                     let command = check.trimmingCharacters(in: .whitespaces)
                     draft.job.check = command.isEmpty ? nil : command
-                    draft.job.model = stronger ? AgentModels.stronger[draft.job.agent] : nil
+                    draft.job.model = stronger ? ModelPicks.complex(for: draft.job.agent) : nil
                     onDispatch(draft)
                 } label: {
                     Text("Dispatch").font(.system(size: 15, weight: .semibold)).foregroundStyle(.black)
@@ -817,8 +826,8 @@ private struct PlansCard: View {
                         Text(details(draft)).font(.system(size: 12, design: .monospaced)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
                     }
                     Spacer(minLength: 8)
-                    if draft.suggestedModel != nil {
-                        Toggle(AgentModels.name(AgentModels.stronger[agent(of: draft)] ?? ""), isOn: Binding {
+                    if draft.suggestedModel != nil, let model = ModelPicks.complex(for: agent(of: draft)) {
+                        Toggle(AgentModels.name(model), isOn: Binding {
                             stronger.contains(draft.job.id)
                         } set: { on in
                             if on { stronger.insert(draft.job.id) } else { stronger.remove(draft.job.id) }
@@ -877,7 +886,7 @@ private struct PlansCard: View {
                 draft.job.account = account.id
                 draft.job.agent = account.agent
             }
-            draft.job.model = stronger.contains(draft.job.id) ? AgentModels.stronger[draft.job.agent] : nil
+            draft.job.model = stronger.contains(draft.job.id) ? ModelPicks.complex(for: draft.job.agent) : nil
             return draft
         })
     }
@@ -896,8 +905,9 @@ private struct PlansCard: View {
     }
 }
 
-/// The offer for complex work: the tool's stronger model, off until the user turns it on. Astra
-/// on a ChatGPT Plus plan gets a warning, because it uses that plan's limits fast.
+/// The offer for complex work: the model picked for complex jobs (Oby's stronger model if none was),
+/// off until the user turns it on. Astra on a ChatGPT Plus plan gets a warning, because it uses
+/// that plan's limits fast.
 private struct StrongerModel: View {
     let agent: String
     /// The account's label, like "Plus · name@example.com".
@@ -905,11 +915,11 @@ private struct StrongerModel: View {
     @Binding var on: Bool
 
     var body: some View {
-        let model = AgentModels.stronger[agent] ?? ""
+        let model = ModelPicks.complex(for: agent) ?? ""
         VStack(alignment: .leading, spacing: 4) {
             Toggle("This looks complex. Use \(AgentModels.name(model)) for this job?", isOn: $on)
                 .toggleStyle(.switch).font(.system(size: 13, weight: .medium))
-            if agent == "codex", plan?.hasPrefix("Plus") == true {
+            if model.contains("astra"), plan?.hasPrefix("Plus") == true {
                 Label("Astra uses a ChatGPT Plus plan's limits fast.", systemImage: "exclamationmark.triangle")
                     .font(.system(size: 12)).foregroundStyle(.orange)
             }

@@ -10,6 +10,7 @@ struct ObyApp: App {
             Button("Open Oby") { app.island.open() }
             SettingsLink { Text("Settings…") }
                 .keyboardShortcut(",")
+            Button("Show First Launch…") { app.firstLaunch.show() }
             Divider()
             Button("Quit Oby") { NSApp.terminate(nil) }
                 .keyboardShortcut("q")
@@ -30,6 +31,7 @@ struct ObyApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     let island = IslandController()
+    lazy var firstLaunch = FirstLaunch(island: island)
 
     override init() {
         UserDefaults.standard.register(defaults: AgentModels.defaults)
@@ -50,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         UNUserNotificationCenter.current().delegate = self
         RunnerFeed.registerCategories()
         island.start()
+        if !FirstLaunch.done { firstLaunch.show() }
     }
 
     /// A click on a runner's alert opens the island on its job.
