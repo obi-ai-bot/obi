@@ -21,7 +21,7 @@ struct JobScreen: View {
                     stages(job)
                     result(job)
                     if let outcome = watch.outcomes[job.id] {
-                        Text(outcome).font(.footnote).foregroundStyle(.secondary)
+                        ReadingText(outcome, secondary: true)
                     }
                     if job.canPublish {
                         Button(job.published == nil ? "Publish…" : "Publish new commits…") {
@@ -81,7 +81,7 @@ struct JobScreen: View {
         if !job.summary.isEmpty || job.commits != nil || job.published != nil {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Result").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                if !job.summary.isEmpty { Text(job.summary).font(.footnote) }
+                if !job.summary.isEmpty { ReadingText(job.summary) }
                 if let commits = job.commits {
                     Text("\(commits) \(commits == 1 ? "commit" : "commits")").font(.caption2).foregroundStyle(.secondary)
                 }

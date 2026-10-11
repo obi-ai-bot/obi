@@ -152,7 +152,7 @@ struct HomeView: View {
                     Text("Requests already sent may still start jobs.")
                         .font(.caption).foregroundStyle(.secondary)
                 case .reply(let reply):
-                    Text(reply).font(.headline)
+                    ReadingText(reply, weight: .medium, alignment: centered ? .center : .leading)
                     Text("Type a task below.").font(.subheadline).foregroundStyle(.secondary)
                 default:
                     // The same line as the Mac's notch and island (Shared/JobList.swift).
@@ -725,10 +725,10 @@ struct QuestionSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(question.text).font(.title3.weight(.semibold)).padding(.bottom, 6)
+            ReadingText(question.text, weight: .semibold).padding(.bottom, 6)
             ForEach(question.options, id: \.self) { option in
                 Button { phone.answer(option, said: said, question: question) } label: {
-                    Text(option).font(.subheadline.weight(.medium))
+                    ReadingText(option, weight: .medium)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16).padding(.vertical, 13)
                         .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
