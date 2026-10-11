@@ -104,6 +104,19 @@ struct MacPublishTests {
         #expect(fetched.canPublish && fetched.publishError == "GitHub's rate limit")
         try await feed.fetch("0ld0b152", from: stub.runner)
         #expect(stub.requests.count == 1 && feed.jobs.count == 1)
+
+        // Settings › Runner changes while a fetch is on its way: the old runner's job doesn't land
+        // in the new runner's list, where its actions would go to the new runner.
+        let gate = DispatchSemaphore(value: 0)
+        let slow = RunnerStub { _ in gate.wait(); return (200, job.replacingOccurrences(of: "0ld0b152", with: "07he7152")) }
+        let switching = RunnerFeed()
+        let fetching = Task { try await switching.fetch("07he7152", from: slow.runner) }
+        for _ in 0..<500 where slow.requests.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(slow.requests.count == 1)
+        switching.forget()
+        gate.signal()
+        try await fetching.value
+        #expect(switching.jobs.isEmpty)
     }
 }
 

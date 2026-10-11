@@ -71,6 +71,9 @@ final class RunnerFeed {
     /// The runner's jobs whose screen the island shows: new lists keep them even when they're
     /// older than the latest 50, as on the iPhone.
     @ObservationIgnored private var onScreen: Set<String> = []
+    /// How many times Settings › Runner changed: an answer from before the last change is the
+    /// other runner's, and is dropped.
+    @ObservationIgnored private var runnerChanges = 0
 
     var runner: Runner? { Self.runner(url ?? "") }
     var active: [Job] { jobs.filter(\.isActive) }
@@ -108,19 +111,7 @@ final class RunnerFeed {
         let url = UserDefaults.standard.string(forKey: "runnerURL") ?? ""
         guard again || url != self.url else { return }
         let first = self.url == nil
-        if url != self.url {
-            jobs = []
-            inbox = []
-            inboxWords = [:]
-            accounts = []
-            models = nil
-            extras = [:]
-            defaultMode = nil
-            host = nil
-            clearedAt = nil
-            notified = nil
-            device.reset()
-        }
+        if url != self.url { forget() }
         self.url = url
         connection = .connecting
         loop?.cancel()
@@ -130,6 +121,22 @@ final class RunnerFeed {
             if !first { try? await Task.sleep(for: .seconds(1)) }
             await run(runner)
         }
+    }
+
+    /// Another runner: nothing the last one said holds, and what's still on its way from it is dropped.
+    func forget() {
+        runnerChanges += 1
+        jobs = []
+        inbox = []
+        inboxWords = [:]
+        accounts = []
+        models = nil
+        extras = [:]
+        defaultMode = nil
+        host = nil
+        clearedAt = nil
+        notified = nil
+        device.reset()
     }
 
     /// Follows the runner's events and, once it's following, fetches the jobs and the inbox; after
@@ -156,6 +163,8 @@ final class RunnerFeed {
                         defaultMode = RunnerMode(status.permissions?.mode)
                         self.extras = extras
                         await take(list, from: runner)
+                        // Settings › Runner changed while the open jobs were fetched again.
+                        try Task.checkCancellation()
                         inbox = items
                         inboxWords = words
                         connection = .live
@@ -282,8 +291,10 @@ final class RunnerFeed {
     func fetch(_ id: String, from runner: Runner? = nil) async throws {
         guard !jobs.contains(where: { $0.id == id }) else { return }
         guard let runner = runner ?? self.runner else { throw RunnerError(message: "Set the runner's URL in Settings to open it.") }
+        let asked = runnerChanges
         let job = try await runner.job(id)
-        guard !jobs.contains(where: { $0.id == id }) else { return }
+        // Settings › Runner changed while it was on its way: it's the other runner's job.
+        guard runnerChanges == asked, !jobs.contains(where: { $0.id == id }) else { return }
         jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
         noticeChanges()
     }
@@ -293,9 +304,11 @@ final class RunnerFeed {
     private func take(_ fresh: [Job], from runner: Runner) async {
         let (list, refetch) = JobList.keeping(fresh, old: jobs, onScreen: onScreen, id: \.id, created: \.created)
         jobs = list
-        // Settings › Runner changed meanwhile: these were the other runner's.
-        for id in refetch where !Task.isCancelled {
+        let asked = runnerChanges
+        for id in refetch {
             guard let job = try? await runner.job(id) else { continue }
+            // Settings › Runner changed meanwhile: these are the other runner's.
+            guard runnerChanges == asked, !Task.isCancelled else { return }
             jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
         }
         noticeChanges()
