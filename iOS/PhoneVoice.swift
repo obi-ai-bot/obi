@@ -1,6 +1,5 @@
 import AVFoundation
 import Foundation
-import NaturalLanguage
 import Observation
 import Speech
 import UIKit
@@ -245,21 +244,8 @@ final class PhoneSpeaker: NSObject, AVSpeechSynthesizerDelegate {
 
     func say(_ text: String) {
         stop()
-        // Replies can use a different language from the request. Never choose pronunciation
-        // from the speech-input setting; use the reply itself, with the system language for ambiguous text.
-        let detected = NLLanguageRecognizer.dominantLanguage(for: text)?.rawValue
-            ?? Locale.current.language.languageCode?.identifier ?? "en"
-        let fallback = AVSpeechSynthesisVoice(language: detected)
-        let locale = fallback?.language ?? detected
-        let language = locale.split(separator: "-").first.map(String.init) ?? detected
-        let voices = AVSpeechSynthesisVoice.speechVoices().filter {
-            $0.language.hasPrefix(language) && !$0.voiceTraits.contains(.isNoveltyVoice)
-                && ($0.quality == .enhanced || $0.quality == .premium)
-        }
-        let exact = voices.filter { $0.language == locale }
-        let preferred = (exact.isEmpty ? voices : exact).sorted { $0.quality.rawValue > $1.quality.rawValue }.first
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = preferred ?? fallback
+        utterance.voice = VoiceSettings.voice(for: text)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
         try? AVAudioSession.sharedInstance().setActive(true)
         current = utterance

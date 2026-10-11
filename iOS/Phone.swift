@@ -13,12 +13,6 @@ final class Phone {
         case reply(String)
     }
 
-    enum Connection: Equatable {
-        case connecting
-        case live
-        case offline(String)
-    }
-
     let voice = PhoneVoice()
     @ObservationIgnored private let speaker = PhoneSpeaker()
     @ObservationIgnored private var planning: Task<Void, Never>?
@@ -52,7 +46,7 @@ final class Phone {
         }
     }
     var talk: Talk = .none
-    private(set) var connection: Connection = .connecting
+    private(set) var connection: RunnerConnection = .connecting
     private(set) var host = ""
     /// The job list arrived at least once, so an empty list really is empty.
     private(set) var loaded = false
@@ -349,8 +343,6 @@ final class Phone {
     }
 
     // MARK: Models
-
-    func modelOptions() async throws -> ModelOptions { try await runner.modelOptions() }
 
     func setModels(_ models: ModelSettings) async throws {
         self.models = try await runner.setModels(models)

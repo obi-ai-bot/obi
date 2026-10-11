@@ -2,18 +2,13 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
-/// Settings › General.
+/// Settings › General: what the iPhone's Settings has too (Shared/SettingsSections.swift), and
+/// opening at login.
 struct SettingsView: View {
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var problem: String?
-    /// The always-on runner whose jobs the island lists and RunnerFeed follows; empty turns that off.
-    @AppStorage("runnerURL") private var runnerURL = ""
     /// Oby reads its reply out loud when you talked to it (Mac/Speech.swift).
     @AppStorage(Speaker.setting) private var speaks = true
-    /// Merge checks on this Mac (Mac/MacChecks.swift).
-    @AppStorage(MacChecks.setting) private var runMergeChecks = true
-    /// Apple checks agents ask for (Engine/AppleChecks.swift).
-    @AppStorage(MacChecks.appleSetting) private var runAppleChecks = true
 
     var body: some View {
         Form {
@@ -30,22 +25,8 @@ struct SettingsView: View {
             if let problem {
                 Text(problem).font(.caption).foregroundStyle(.red)
             }
-            Section("Voice") {
-                Toggle("Oby speaks its replies", isOn: $speaks)
-                Text("When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer until you press fn or say “stop”. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Section("Runner") {
-                TextField("URL", text: $runnerURL, prompt: Text(Runner.defaultURL.absoluteString))
-                Text("The island lists the jobs running there too, and Oby tells you when one needs you. Leave it empty to turn this off.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle("Run merge checks on this Mac", isOn: $runMergeChecks)
-                Text("When Oby's review approves a pull request, this Mac runs its tests and builds the Mac and iPhone apps, one at a time, before Oby merges it into dev.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle("Build and test agents' work on this Mac", isOn: $runAppleChecks)
-                Text("When an agent on the runner asks (oby-check apple), this Mac builds and tests the Mac and iPhone apps at its latest commit, before Oby's review has read it, and the agent gets the compiler's errors and failing tests.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+            VoiceSection(speaks: $speaks, footer: "When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer until you press fn or say “stop”. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
+            NotificationsSection()
         }
         .formStyle(.grouped)
         .frame(width: 460)
@@ -53,9 +34,96 @@ struct SettingsView: View {
     }
 }
 
-/// Settings › Accounts: the logins Oby spreads jobs across, who pays for each, and how much each has used.
+/// Settings › Runner: the always-on runner and how this Mac reaches it, the checks this Mac runs
+/// for it, and the Apple Watches paired with it.
+struct RunnerSettingsView: View {
+    let feed: RunnerFeed
+    /// The always-on runner whose jobs the island lists and RunnerFeed follows; empty turns that off.
+    @AppStorage("runnerURL") private var runnerURL = ""
+    /// Merge checks on this Mac (Mac/MacChecks.swift).
+    @AppStorage(MacChecks.setting) private var runMergeChecks = true
+    /// Apple checks agents ask for (Engine/AppleChecks.swift).
+    @AppStorage(MacChecks.appleSetting) private var runAppleChecks = true
+    @State private var watches: [PairedWatch] = []
+    @State private var removing: PairedWatch?
+    @State private var watchProblem: String?
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("URL", text: $runnerURL, prompt: Text(Runner.defaultURL.absoluteString))
+                LabeledContent("Status", value: feed.runner == nil ? "Off" : feed.connection.status(host: feed.name))
+            } header: {
+                Text("Runner")
+            } footer: {
+                Text("The runner does the work while your Mac is closed. The island lists the jobs running there too, and Oby tells you when one needs you. It answers only your Tailscale login, so this Mac needs Tailscale on. Leave it empty to turn this off.")
+            }
+            Section("Checks on this Mac") {
+                Toggle("Run merge checks on this Mac", isOn: $runMergeChecks)
+                Text("When Oby's review approves a pull request, this Mac runs its tests and builds the Mac and iPhone apps, one at a time, before Oby merges it into dev.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Build and test agents' work on this Mac", isOn: $runAppleChecks)
+                Text("When an agent on the runner asks (oby-check apple), this Mac builds and tests the Mac and iPhone apps at its latest commit, before Oby's review has read it, and the agent gets the compiler's errors and failing tests.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                if watches.isEmpty {
+                    Text("None yet").foregroundStyle(.secondary)
+                }
+                ForEach(watches) { watch in
+                    HStack {
+                        LabeledContent(watch.name, value: "Paired")
+                        Button("Remove", role: .destructive) { removing = watch }
+                    }
+                }
+                if let watchProblem { Text(watchProblem).font(.caption).foregroundStyle(.red) }
+            } header: {
+                Text("Apple Watch without iPhone")
+            } footer: {
+                Text("Away from your iPhone, a paired watch reaches the runner through your Cloudflare Tunnel. Pair one in Oby's Settings on your iPhone, with Oby open on the watch: pairing asks for Face ID.")
+            }
+            Section {
+                LabeledContent("Publishing key", value: "On your iPhone, Face ID")
+            } footer: {
+                Text("Oby opens a pull request by itself once a job's check passes and the secret scan is clean. Publishing by hand, when that failed, needs Face ID on your iPhone. Oby merges only into dev, once its review approves and your Mac's checks pass.")
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
+        // Once the runner answers, and again after it comes back.
+        .task(id: feed.connection) {
+            guard feed.connection == .live, let runner = feed.runner else { return }
+            // A runner older than the Watch API has no list: then there's nothing to show.
+            watches = (try? await runner.watches()) ?? []
+        }
+        .confirmationDialog("Remove \(removing?.name ?? "this watch")?",
+                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            presenting: removing) { watch in
+            Button("Remove", role: .destructive) { remove(watch) }
+        } message: { _ in
+            Text("The runner forgets it: away from your iPhone, it reaches the runner again once you pair it on your iPhone.")
+        }
+    }
+
+    private func remove(_ watch: PairedWatch) {
+        guard let runner = feed.runner else { return }
+        Task {
+            do {
+                try await runner.removeWatch(watch.id)
+                watches.removeAll { $0.id == watch.id }
+                watchProblem = nil
+            } catch {
+                watchProblem = error.localizedDescription
+            }
+        }
+    }
+}
+
+/// Settings › Accounts: the logins Oby spreads jobs across, who pays for each, and how much each has
+/// used, on this Mac and on the runner, as the iPhone shows them (Shared/SettingsSections.swift).
 struct AccountsSettingsView: View {
     let store: AccountStore
+    let feed: RunnerFeed
     @State private var agent = "claude"
     @State private var name = ""
     @State private var payer = ""
@@ -64,14 +132,8 @@ struct AccountsSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Accounts") {
-                Text(Usage.summary(store.accounts.map(\.usage))).font(.subheadline)
-            }
-            ForEach(Usage.agents(store.accounts.map(\.account.agent)), id: \.self) { agent in
-                Section(Usage.tool(agent)) {
-                    ForEach(store.accounts.filter { $0.account.agent == agent }, id: \.account.id, content: row)
-                }
-            }
+            AccountSections("Accounts on this Mac", items: store.accounts, id: \.account.id, usage: \.usage,
+                            place: "on this Mac", row: row)
             Section("Add an account") {
                 Picker("Tool", selection: $agent) {
                     Text("Claude Code").tag("claude")
@@ -90,6 +152,18 @@ struct AccountsSettingsView: View {
             }
             if let problem {
                 Text(problem).font(.caption).foregroundStyle(.red)
+            }
+            if feed.runner != nil {
+                AccountSections("Accounts on \(feed.name)", items: feed.accounts, id: \.account.id, usage: \.usage,
+                                place: "on \(feed.name)") { state in
+                    VStack(alignment: .leading, spacing: 4) {
+                        UsageCard(snapshot: state.usage)
+                        if state.signedIn {
+                            Text(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed))
+                                .font(.caption).foregroundStyle(state.tetrix == false ? Color.orange : Color.secondary)
+                        }
+                    }
+                }
             }
         }
         .formStyle(.grouped)
@@ -213,18 +287,23 @@ struct VaultSettingsView: View {
     }
 }
 
-/// Settings › Models: which model and effort Claude Code and Codex jobs use.
+/// Settings › Models: which model and effort Claude Code and Codex jobs use, on this Mac and on the
+/// runner (as the iPhone sets them, Shared/SettingsSections.swift).
 struct ModelsSettingsView: View {
+    let feed: RunnerFeed
     @AppStorage("claude.model") private var claudeModel = AgentModels.defaults["claude.model"] ?? ""
     @AppStorage("claude.effort") private var claudeEffort = AgentModels.defaults["claude.effort"] ?? ""
     @AppStorage("codex.model") private var codexModel = AgentModels.defaults["codex.model"] ?? ""
     @AppStorage("codex.effort") private var codexEffort = AgentModels.defaults["codex.effort"] ?? ""
     /// What the signed-in Codex account offers, from its own model list.
     @State private var codexModels: [CodexModel] = []
+    /// What the runner offers, once it has answered.
+    @State private var runnerOptions: ModelOptions?
+    @State private var problem: String?
 
     var body: some View {
         Form {
-            Section("Claude Code") {
+            Section("Claude Code on this Mac") {
                 Picker("Model", selection: $claudeModel) {
                     ForEach(AgentModels.claude, id: \.0) { Text($0.1).tag($0.0) }
                 }
@@ -232,7 +311,7 @@ struct ModelsSettingsView: View {
                     ForEach(AgentModels.claudeEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
                 }
             }
-            Section("Codex") {
+            Section("Codex on this Mac") {
                 Picker("Model", selection: $codexModel) {
                     ForEach(codexChoices, id: \.id) { Text($0.name).tag($0.id) }
                 }
@@ -240,12 +319,28 @@ struct ModelsSettingsView: View {
                     ForEach(codexEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
                 }
             }
-            Text("New jobs use these. Oby's brain stays on Haiku: it plans and answers in the conversation, so it should be quick.")
+            Text("New jobs on this Mac use these. Oby's brain stays on Haiku: it plans and answers in the conversation, so it should be quick.")
                 .font(.caption).foregroundStyle(.secondary)
+            if feed.runner != nil {
+                RunnerModelsSections(options: runnerOptions, models: feed.models, save: feed.setModels, place: "on \(feed.name)")
+            }
+            if let problem {
+                Text(problem).font(.caption).foregroundStyle(.red)
+            }
         }
         .formStyle(.grouped)
         .frame(width: 460)
         .task { codexModels = (try? await CodexAgent.models(home: nil)) ?? [] }
+        // Once the runner answers, and again after it comes back or its URL changes.
+        .task(id: feed.connection) {
+            guard feed.connection == .live, let runner = feed.runner else { return }
+            do {
+                runnerOptions = try await runner.modelOptions()
+                problem = nil
+            } catch {
+                problem = error.localizedDescription
+            }
+        }
     }
 
     /// The account's models, plus the chosen one while the list loads (or if the plan dropped it).
