@@ -672,7 +672,10 @@ nonisolated enum Publish {
             return "\(label)\n\n\(fence)\n\(summary)\n\(fence)"
         }
         let request = job.request.split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n")
-        let check = job.check.map { "- Check: \(code($0)) passed." } ?? "- Check: none, the job had no check."
+        // No Mac took its Apple check (#68): the Mac check before merging is the first to build the apps.
+        let check = job.check.map { "- Check: \(code($0)) passed" + (job.appleUnbuilt ? " without its Apple build. " + AppleCheck.unbuiltLine : ".") }
+            ?? "- Check: none, the job had no check."
+        let passed = job.appleUnbuilt ? "the check passed without its Apple build" : "the check passed"
         return """
             \(rounds.joined(separator: "\n\n"))
 
@@ -683,7 +686,7 @@ nonisolated enum Publish {
             \(check)
             - Secret scan: clean.\(job.issue.map { "\n\nCloses #\($0)" } ?? "")
 
-            by Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
+            by Oby: Oby opened this pull request after \(passed) and the secret scan was clean. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
             """
     }
 

@@ -453,7 +453,8 @@ final class Failures {
     nonisolated static func stepLimit(_ phase: JobStage.ID?, limits: JobLimits) -> TimeInterval {
         switch phase {
         case .work: limits.round + 600
-        case .check: limits.testRun + 600
+        // Twice when no Mac took its Apple check: it runs again without it (`Desk.afterTurn`).
+        case .check: 2 * limits.testRun + 600
         case .publish: 1200
         default: 1800
         }
