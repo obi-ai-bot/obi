@@ -639,9 +639,9 @@ nonisolated struct Runner: Sendable {
     /// Engine Job has none yet (#134).
     static func mode(of job: Job) -> String? {
         #if os(macOS)
-        nil
+        return nil
         #else
-        job.mode
+        return job.mode
         #endif
     }
 
