@@ -187,6 +187,17 @@ final class IssueSync {
         try await write(args + ["--body-file", file.path], texts: [body], job: job, action: action)
     }
 
+    /// The job the issue's claim line names or, for an issue claimed before #162, the job its latest
+    /// `Oby is working on …` comment names. Read only: nothing comments any more.
+    private func claimant(_ row: [String: Any], number: Int, repo: String) async throws -> String? {
+        if let id = Self.claimant(row["body"] as? String ?? "") { return id }
+        let comments = try await json(["issue", "view", "\(number)", "-R", repo, "--json", "comments"]) as? [String: Any]
+        return (comments?["comments"] as? [[String: Any]] ?? []).compactMap { comment in
+            (comment["body"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                .wholeMatch(of: /Oby is working on .* \(job ([A-Za-z0-9._-]+)\)\./).map { String($0.1) }
+        }.last
+    }
+
     private func labels(_ row: [String: Any], status: String?, job: Job) async throws -> Bool {
         let current = Board.names(row["labels"], key: "name").filter { $0.hasPrefix("status:") }
         guard Set(current) != Set(status.map { [$0] } ?? []) else { return false }
@@ -194,7 +205,7 @@ final class IssueSync {
         // the issue last takes its running or blocked status away; otherwise the labels stay.
         let held = ["status:in-progress", "status:blocked"]
         if !held.contains(status ?? ""), current.contains(where: held.contains) {
-            guard let id = Self.claimant(row["body"] as? String ?? ""), desk?.issueJobs.contains(where: { $0.id == id }) == true else { return false }
+            guard let id = try await claimant(row, number: job.issue!, repo: job.repo), desk?.issueJobs.contains(where: { $0.id == id }) == true else { return false }
         }
         var args = ["issue", "edit", "\(job.issue!)", "-R", job.repo]
         for label in current where label != status { args += ["--remove-label", label] }

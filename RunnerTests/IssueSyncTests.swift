@@ -30,6 +30,7 @@ struct IssueSyncTests {
             if args.first == "issue", ["edit", "comment"].contains(args[1]), let repositoryFailure { throw Shell.Failure(message: repositoryFailure) }
             if args.first == "project", scopeFailure { throw Shell.Failure(message: "missing required scope read:project") }
             switch command {
+            case ["issue", "view"] where args.last == "comments": return try encode(["comments": notes.map { ["body": $0] }])
             case ["issue", "view"]: return try encode(row)
             case ["issue", "list"]: return try encode([row] + extraIssues)
             case ["pr", "list"]: return try encode(openPRs)
@@ -480,6 +481,41 @@ struct IssueSyncTests {
         await restarted.drain()
         #expect(fake.mutations.count == edits)
         #expect(fake.notes.isEmpty && !fake.calls.contains { $0.prefix(2) == ["issue", "comment"] })
+    }
+
+    /// Issues claimed before #162 have only the start comment: it's read, never written, until a claim line replaces it.
+    @Test func claimsMadeByStartCommentsStillClear() async throws {
+        let legacy = { (id: String) in "Oby is working on branch `oby/build-116` (job \(id))." }
+        let (desk, fake, original) = try fixture()
+        fake.labels = ["feature", "status:in-progress"]
+        fake.notes = [legacy(original.id)]
+        var done = original
+        done.status = .done
+        await send(done, to: desk)
+        #expect(fake.labels == ["feature"] && fake.notes.count == 1)
+        #expect(!fake.calls.contains { $0.prefix(2) == ["issue", "comment"] })
+
+        let (other, otherFake, otherJob) = try fixture()
+        otherFake.labels = ["feature", "status:blocked"]
+        otherFake.notes = [legacy(otherJob.id), legacy("mac-job")]
+        var finished = otherJob
+        finished.status = .done
+        await send(finished, to: other)
+        #expect(otherFake.labels.contains("status:blocked"))
+        otherFake.notes = [legacy(otherJob.id)]
+        otherFake.body = IssueSync.claimed(otherFake.body, by: "mac-job")
+        await other.issueSync.audit(now: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(otherFake.labels.contains("status:blocked") && other.inbox.isEmpty)
+
+        let (audited, auditFake, auditJob) = try fixture()
+        var idle = auditJob
+        idle.status = .done
+        audited.issueSync.store.save(idle)
+        auditFake.labels = ["feature", "status:in-progress"]
+        auditFake.notes = [legacy(auditJob.id)]
+        await audited.issueSync.audit(now: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(auditFake.labels == ["feature"] && auditFake.notes.count == 1)
+        #expect(audited.inbox.first?.text == "Issue audit: fixed drift on 1 issue(s).")
     }
 
     @Test func runnerAuditPreservesWorkOwnedByTheMacDesk() async throws {
