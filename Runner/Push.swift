@@ -220,9 +220,17 @@ final class Push {
         await deliver(body, to: token, type: "liveactivity", priority: priority, now: now)
     }
 
-    /// Sends one push; a token Apple no longer takes is dropped.
-    private func deliver(_ body: Data, to token: Token, type: String, priority: Int, collapse: String? = nil, now: Date) async {
+    /// Sends one push, the vault's secrets taken out first (none goes when the vault can't be read);
+    /// a token Apple no longer takes is dropped.
+    private func deliver(_ raw: Data, to token: Token, type: String, priority: Int, collapse: String? = nil, now: Date) async {
         guard let signer else { return }
+        let body: Data
+        do {
+            body = try Self.scrubbed(raw)
+        } catch {
+            Logger.runner.error("push held: the secret scan can't read the vault (\(error.localizedDescription, privacy: .public))")
+            return
+        }
         // Apple takes a provider token for an hour, and refuses new ones more often than every 20 minutes.
         let bearer: String
         if let jwt, now.timeIntervalSince(jwt.made) < 50 * 60 {
@@ -327,6 +335,29 @@ final class Push {
     }
 
     // MARK: Payloads
+
+    /// The push as it may go out through Apple: every string in it with the vault's secrets, plain
+    /// or encoded, taken out (a job's title, step or summary could hold one). Unchanged when none
+    /// does. Throws when the vault can't be read.
+    nonisolated static func scrubbed(_ body: Data, vault: Vault = .shared) throws -> Data {
+        let leaks = try vault.leaks()
+        guard !leaks.isEmpty, let object = try? JSONSerialization.jsonObject(with: body) else { return body }
+        var changed = false
+        func scrub(_ value: Any) -> Any {
+            switch value {
+            case let text as String:
+                let clean = leaks.redact(text)
+                if clean != text { changed = true }
+                return clean
+            case let list as [Any]: return list.map(scrub)
+            case let fields as [String: Any]: return fields.mapValues(scrub)
+            default: return value
+            }
+        }
+        let clean = scrub(object)
+        guard changed else { return body }
+        return try JSONSerialization.data(withJSONObject: clean, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
 
     /// `{"aps": {…, "timestamp": now}}`, with `content-state` as the app's ContentState.
     nonisolated static func payload(_ aps: [String: any Encodable], now: Date) throws -> Data {

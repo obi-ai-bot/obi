@@ -371,6 +371,10 @@ nonisolated struct Leaks: Sendable {
             needles.append(Needle(name: name, how: "URL-encoded", text: encoded, anyCase: true))
         }
         needles.append(Needle(name: name, how: "URL-encoded", text: bytes.map { String(format: "%%%02X", $0) }.joined(), anyCase: true))
+        // As a form sends it: spaces as +.
+        if value.contains(" "), let form = value.addingPercentEncoding(withAllowedCharacters: unreserved.union(CharacterSet(charactersIn: " "))) {
+            needles.append(Needle(name: name, how: "URL-encoded", text: form.replacing(" ", with: "+"), anyCase: true))
+        }
         return needles
     }
 
@@ -400,7 +404,12 @@ nonisolated struct Leaks: Sendable {
             let plain = text.replacing(/(?:%[0-9A-Fa-f]{2})+/) { Publish.percent($0.output) }
             if plain != text { places.append(("URL-encoded", plain)) }
         }
-        places += Publish.decoded(text)
+        if text.contains("+") {
+            let form = text.replacing("+", with: " ").replacing(/(?:%[0-9A-Fa-f]{2})+/) { Publish.percent($0.output) }
+            places.append(("URL-encoded", form))
+        }
+        // Any decoded run as long as the shortest value: the built-in rules' 15 readable characters would miss a short one.
+        places += Publish.decoded(text, keep: { $0.utf8.count >= Vault.shortest })
         var seen = Set<String>()
         var hits: [(name: String, how: String)] = []
         for place in places {
@@ -439,6 +448,7 @@ nonisolated struct Leaks: Sendable {
             text = needle.anyCase ? text.replacingOccurrences(of: needle.text, with: marker([needle.name]), options: .caseInsensitive)
                 : text.replacing(needle.text, with: marker([needle.name]))
         }
+        if text.contains("\n") { text = unwrapped(text) }
         guard !hits(in: text).isEmpty else { return text }
         let runs = [/[^\s"'<>]*%[0-9A-Fa-f]{2}[^\s"'<>]*/, /[A-Za-z0-9+\/_-]{16,}={0,2}/, /[0-9A-Fa-f]{16,}/,
                     /(?:\\x[0-9A-Fa-f]{2}){8,}|(?:0x[0-9A-Fa-f]{2}[\s,]*){8,}/]
@@ -455,6 +465,31 @@ nonisolated struct Leaks: Sendable {
         }.joined(separator: "\n")
         let names = hits(in: text).map(\.name)
         return names.isEmpty ? text : marker(names)
+    }
+
+    /// `text` with base64 or hex wrapped over lines taken out, joined as the scan joins them
+    /// (`Publish.wrapped`): runs of lines that hold nothing else, with the end of the line before.
+    private func unwrapped(_ text: String) -> String {
+        let trim = CharacterSet.whitespaces.union(CharacterSet(charactersIn: "\"',\\"))
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let encoded = lines.map { line in
+            let text = line.trimmingCharacters(in: trim)
+            return !text.isEmpty && text.wholeMatch(of: /[A-Za-z0-9+\/=_-]+/) != nil
+        }
+        var start = 0
+        while start < lines.count {
+            guard encoded[start] else { start += 1; continue }
+            var end = start
+            while end + 1 < lines.count, encoded[end + 1] { end += 1 }
+            let lead = start == 0 ? "" : lines[start - 1].trimmingCharacters(in: trim).firstMatch(of: /[A-Za-z0-9+\/_-]{8,}$/).map { String($0.output) } ?? ""
+            let joined = lead + lines[start...end].map { $0.trimmingCharacters(in: trim) }.joined()
+            let names = hits(in: joined).map(\.name)
+            if !names.isEmpty {
+                for index in (lead.isEmpty ? start : start - 1)...end { lines[index] = marker(names) }
+            }
+            start = end + 1
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func marker(_ names: [String]) -> String { "[vault: \(names.joined(separator: ", "))]" }

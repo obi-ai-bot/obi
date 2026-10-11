@@ -155,6 +155,10 @@ nonisolated enum Publish {
             if line.hasPrefix("diff --git ") {
                 let names = line.replacing("\"", with: "")
                 file = names.range(of: " b/", options: .backwards).map { String(names[$0.upperBound...]) } ?? String(names)
+                // A name with a tab, newline, quote or backslash in it, git writes quoted, with C escapes.
+                if line.hasSuffix("\""), let quoted = line.range(of: " \"b/", options: .backwards) {
+                    file = String(unquoted(line[line.index(after: quoted.lowerBound)...]).dropFirst(2))
+                }
                 files.append(file)
                 inHunk = false
             } else if let hunk = line.prefixMatch(of: /@@ -\d+(?:,\d+)? \+(\d+)/) {
@@ -168,6 +172,31 @@ nonisolated enum Publish {
             }
         }
         return (files, lines)
+    }
+
+    /// A path as git quotes it (`"b/a\tb\303\251"`: C escapes, octal bytes), as it is.
+    static func unquoted(_ quoted: Substring) -> String {
+        guard quoted.count >= 2, quoted.first == "\"", quoted.last == "\"" else { return String(quoted) }
+        var rest = Array(quoted.dropFirst().dropLast().utf8)[...]
+        var bytes: [UInt8] = []
+        let escapes: [UInt8: UInt8] = [UInt8(ascii: "t"): 9, UInt8(ascii: "n"): 10, UInt8(ascii: "r"): 13, UInt8(ascii: "a"): 7,
+                                       UInt8(ascii: "b"): 8, UInt8(ascii: "f"): 12, UInt8(ascii: "v"): 11]
+        let octal = UInt8(ascii: "0")...UInt8(ascii: "7")
+        while let byte = rest.popFirst() {
+            guard byte == UInt8(ascii: "\\"), let next = rest.popFirst() else { bytes.append(byte); continue }
+            if octal.contains(next) {
+                var value = Int(next - octal.lowerBound)
+                for _ in 0..<2 {
+                    guard let digit = rest.first, octal.contains(digit) else { break }
+                    value = value * 8 + Int(digit - octal.lowerBound)
+                    rest.removeFirst()
+                }
+                bytes.append(UInt8(truncatingIfNeeded: value))
+            } else {
+                bytes.append(escapes[next] ?? next)
+            }
+        }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     /// What the built-in scanner finds in a diff, each place once, with the vault's secrets in `leaks`:
@@ -255,7 +284,8 @@ nonisolated enum Publish {
 
     /// The text's encoded runs, decoded: URL-encoding, base64 (standard or URL-safe) and hex, and
     /// what those hide in turn (`depth` levels), labelled like "base64" or "hex in base64".
-    static func decoded(_ text: String, depth: Int = 2) -> [(how: String, text: String)] {
+    /// `keep` says which decoded texts are worth looking in: by default those a rule could match.
+    static func decoded(_ text: String, depth: Int = 2, keep: (String) -> Bool = readable) -> [(how: String, text: String)] {
         guard depth > 0 else { return [] }
         var found: [(how: String, text: String)] = []
         // Each run of %XX on its own, so one stray % (`50%`) doesn't hide the rest of the line.
@@ -278,8 +308,8 @@ nonisolated enum Publish {
         }
         // What a run of letters that isn't an encoding decodes to has no stretch a rule could match:
         // skipping it keeps long lines (minified code, lockfiles) quick.
-        found = found.filter { readable($0.text) }
-        return found + found.flatMap { how, plain in decoded(plain, depth: depth - 1).map { ("\($0.how) in \(how)", $0.text) } }
+        found = found.filter { keep($0.text) }
+        return found + found.flatMap { how, plain in decoded(plain, depth: depth - 1, keep: keep).map { ("\($0.how) in \(how)", $0.text) } }
     }
 
     /// Text with 15 printable ASCII characters in a row: the shortest any rule matches.

@@ -42,6 +42,9 @@ private func copies(of value: String) -> [(how: String, text: String)] {
         ("URL-encoded", value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""),
         ("URL-encoded", Fake.percent(value)),
         ("URL-encoded", Fake.percent(value).lowercased()),
+        // As a form sends it, spaces as +.
+        ("URL-encoded", (value.addingPercentEncoding(withAllowedCharacters: unreserved.union(CharacterSet(charactersIn: " "))) ?? "")
+            .replacing(" ", with: "+")),
     ]
 }
 
@@ -155,11 +158,21 @@ struct VaultScanTests {
             "blob \(Fake.hex(Fake.base64(value))) end",
             "key = \(Fake.hex(value).chunks(2).map { "\\x\($0)" }.joined())",
             "multi\n\(value)\nlines",
+            // Partly form-encoded: + for the space, %2B for the +, the rest as it is.
+            "q=" + value.replacing("+", with: "%2B").replacing(" ", with: "+"),
+            // Base64 wrapped over lines, as `base64` does, and its first part at the end of the line before.
+            (["data: |"] + Fake.base64("export STAGING_KEY=" + value + "\n").chunks(16).map { "  " + $0 } + ["done"]).joined(separator: "\n"),
+            (["token = \"" + Fake.base64(value + " tail").chunks(12)[0] + "\""] + Fake.base64(value + " tail").chunks(12).dropFirst().map { "\"" + $0 + "\"" }).joined(separator: "\n"),
         ]
         for text in texts {
-            #expect(!leaks.hits(in: text).isEmpty, Comment(rawValue: text))
+            let vaultRules = { (text: String) in
+                Publish.findings(inText: text, named: "log", leaks: leaks).filter { $0.rule.hasPrefix("vault secret") }
+            }
+            #expect(!vaultRules(text).isEmpty, Comment(rawValue: text))
             let redacted = leaks.redact(text)
+            // Nothing the scan would find is left.
             #expect(leaks.hits(in: redacted).isEmpty, Comment(rawValue: redacted))
+            #expect(vaultRules(redacted).isEmpty, Comment(rawValue: redacted))
             #expect(redacted.contains("[vault: staging-api-key]"), Comment(rawValue: redacted))
         }
         #expect(leaks.redact("blob \(Fake.base64(Fake.hex(value))) end") == "blob [vault: staging-api-key] end")
@@ -246,6 +259,33 @@ struct VaultScanTests {
         #expect(Publish.findings(inDiff: diff, leaks: leaks) == [Publish.Finding(file: "notes.txt", line: 5, rule: "vault secret two-lines")])
         // With Windows line ends.
         #expect(!Leaks(["two-lines": "aaaa!\nbbbb?"]).hits(in: "aaaa!\r\nbbbb?").isEmpty)
+    }
+
+    /// A short value as \x or 0x escapes: decoded runs shorter than the built-in rules' 15 readable characters count too.
+    @Test func aShortValueAsEscapesIsBlocked() {
+        let value = "s3cr3t!x"
+        let leaks = Leaks(["short-key": value])
+        let escaped = Fake.hex(value).chunks(2).map { "\\x\($0)" }.joined()
+        let bytes = Fake.hex(value).chunks(2).map { "0x\($0)" }.joined(separator: ", ")
+        #expect(Publish.matches("let key = \"\(escaped)\"", leaks: leaks) == ["vault secret short-key, hex"])
+        #expect(Publish.matches("char key[] = { \(bytes) };", leaks: leaks) == ["vault secret short-key, hex"])
+        #expect(!leaks.redact("let key = \"\(escaped)\"").contains(escaped))
+    }
+
+    /// Git quotes a name with a tab in it, with C escapes: the name is read as it is.
+    @Test func aQuotedFileNameIsReadAsItIs() {
+        #expect(Publish.unquoted("\"b/caf\\303\\251 \\\"x\\\" a\\tb\\\\c\"") == "b/café \"x\" a\tb\\c")
+        let leaks = Leaks(["tabbed": "tab\tsecret1"])
+        let diff = """
+            diff --git "a/notes/tab\\tsecret1.txt" "b/notes/tab\\tsecret1.txt"
+            new file mode 100644
+            --- /dev/null
+            +++ "b/notes/tab\\tsecret1.txt"
+            @@ -0,0 +1,1 @@
+            +clean
+            """
+        #expect(Publish.findings(inDiff: diff, leaks: leaks)
+                == [Publish.Finding(file: "notes/[vault: tabbed].txt", line: nil, rule: "vault secret tabbed in the file's name")])
     }
 
     /// A file named with a secret is blocked even when what's in it is clean, and the finding doesn't show the name as it is.
@@ -348,4 +388,36 @@ struct VaultNeverShownTests {
         #expect(logger.line("notice", "token \(value)", vault: vault) == "notice [test] token <private>\n")
     }
     #endif
+}
+
+@MainActor
+struct VaultPushTests {
+    /// A push goes out through Apple: a job's title or summary with a secret in it goes redacted.
+    @Test func aPushHasTheVaultsSecretsTakenOut() throws {
+        let (vault, store, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let value = secret()
+        try vault.add(value, as: "staging-api-key")
+        var failed = job
+        failed.status = .failed
+        failed.summary = "Failed: the API said 401 to \(value)"
+        failed.pr = nil
+        failed.issue = nil
+        failed.request = "Test with \(Fake.base64(value))"
+        let body = try Push.notification(.failed, for: failed)
+        let scrubbed = try Push.scrubbed(body, vault: vault)
+        let text = String(decoding: scrubbed, as: UTF8.self)
+        for copy in copies(of: value) { #expect(!text.contains(copy.text), Comment(rawValue: copy.how)) }
+        let alert = try #require((object(scrubbed)["aps"] as? [String: Any])?["alert"] as? [String: String])
+        #expect(alert["body"] == "Failed: the API said 401 to [vault: staging-api-key]")
+        #expect(alert["title"] == "Failed: Test with [vault: staging-api-key]")
+        #expect(object(scrubbed)["job"] as? String == job.id)
+
+        // A clean push goes as it was.
+        let clean = try Push.notification(.failed, for: job)
+        #expect(try Push.scrubbed(clean, vault: vault) == clean)
+        // None goes when the vault can't be read.
+        chmod(store.file.path, 0o644)
+        #expect(throws: Shell.Failure.self) { try Push.scrubbed(clean, vault: vault) }
+    }
 }

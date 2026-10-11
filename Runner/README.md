@@ -48,7 +48,7 @@ The models and efforts the app picks in Settings › Models are kept in `~/.conf
 
 ## Vault
 
-Secrets for connections you make (an API token for a service) live in `vault/secrets.json` in `OBY_HOME`: the folder is 0700 and the file 0600, owned by the runner's user. Agents never see it: all of `OBY_HOME` is empty in their bubblewrap. The secret scan learns every value, plain, base64, hex and URL-encoded, and nothing outgoing that holds one is published; the runner's log lines have them taken out. If the file or its folder is readable by anyone else, or owned by someone else, the runner doesn't read it, and nothing is published until it's fixed.
+Secrets for connections you make (an API token for a service) live in `vault/secrets.json` in `OBY_HOME`: the folder is 0700 and the file 0600, owned by the runner's user. Agents never see it: all of `OBY_HOME` is empty in their bubblewrap. The secret scan learns every value, plain, base64, hex and URL-encoded, and nothing outgoing that holds one is published; the runner's log lines and the pushes to the phone have them taken out. If the file or its folder is readable by anyone else, or owned by someone else, the runner doesn't read it, and nothing is published (and no push goes to the phone) until it's fixed.
 
 Run these as the runner's user, with its `OBY_HOME`. The value comes on stdin (typed without echo, or piped), never as an argument, and nothing prints it:
 
