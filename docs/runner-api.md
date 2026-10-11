@@ -340,7 +340,7 @@ To answer the brain's question, send the original words with the answer:
 
 Bare cancel words ("never mind", "stop", "cancel", "forget it") never reach the brain: the answer is `none`, and nothing stops. Stopping work takes a job's name or "stop everything".
 
-The conversation so far is the runner's own, the last 50 turns, kept in `oby.sqlite`. An app that shows its own thread sends it instead, oldest first; `who` is `user` or `oby`, `text` 1 to 2,000 characters, at most 50 turns (`422` otherwise). Either way the new exchange joins the runner's conversation.
+The conversation so far is the runner's own, the last 50 of the turns it keeps (`GET /v1/conversation`, below). An app that shows its own thread sends it instead, oldest first; `who` is `user` or `oby`, `text` 1 to 2,000 characters, at most 50 turns (`422` otherwise). Either way the new exchange joins the runner's conversation.
 
 ```json
 {"said": "and the vault one?",
@@ -380,6 +380,19 @@ An unlinked job is linked only when a standalone `Part of #N` line, an exact bra
 The runner checks hourly whether the UTC day's audit has run, using a separate persisted ledger (`issue-audit.json`). It resolves `Oby — Roadmap` by title and owner as the Lead does, reads its fields and paginated items once, and audits only open issues already on that project that it has jobs for; issues it has no job for are left alone. It posts no comments. It fixes labels and board columns, removes unsupported running/review/blocked labels, and preserves merged slices' remaining Build work or device-test handoff. Board updates never add items, set Todo, or move Done/Shipped/Closed items; a missing desired status leaves the column alone. A single `audit` inbox item appears only for drift or errors (already `done` when nothing failed: the runner fixed the drift itself), with a one-line report, an empty `job` and optional `outgoing` records of its repairs. Repairs for existing jobs also appear in those jobs' reports; no audit jobs enter history. Limited issue/PR results refuse cleanup instead of assuming unseen work is absent. Missing project scopes from `gh project` (gh prints the scopes line before its refresh hint; any line counts) report exactly: `Runner gh login lacks read:project or project scope; run gh auth refresh -s read:project,project on the runner`. The Lead reports the same fix rather than claiming the project does not exist; repository permission failures retain their actual cause.
 
 Every Lead turn is logged on the runner (the words, the plan or why it was refused, the skipped list, the jobs started) and kept in `oby.sqlite` with the brain's turns.
+
+### `GET /v1/conversation?before=&limit=`
+
+One thread for every device (#11): the conversation the runner keeps, which every `POST /v1/plans` joins, whichever app sent it. The runner keeps the last 500 turns in `oby.sqlite`, the oldest pruned; the brain reads the last 50 of them. Answers one page, oldest first:
+
+```json
+[{"id": "7c1e2f30-…", "who": "user", "text": "Review oby PR #33", "at": "2026-10-11T09:12:00Z", "jobs": []},
+ {"id": "9a4b5c60-…", "who": "oby", "text": "Oby will review PR #33 in oby.", "at": "2026-10-11T09:12:04Z", "jobs": ["9f08fd10"]}]
+```
+
+- `who` is `user` or `oby`. `at` is when it was said. `jobs` is always a list: the jobs the turn started, by id, for a card under Oby's words. A job dispatched from a plan (`POST /v1/jobs`) joins the Oby turn that proposed it; the Lead's reply carries the jobs it started. Fetch one that isn't in `GET /v1/jobs` with `GET /v1/jobs/{id}`.
+- `limit`: how many, 50 unless asked, 1 to 500. `before`: the `id` of the oldest turn you show, for the turns before it; leave it out for the latest. Fewer than `limit` turns means there are no older ones. `404` for an id that isn't in the thread (a turn pruned since).
+- A `turn` event (`GET /v1/events`, below) comes with every turn added, and again for a turn that changed (its `jobs`): replace the turn with that `id`, or add it in `at` order.
 
 ### `POST /v1/jobs`
 
@@ -465,6 +478,9 @@ data: { …InboxItem }
 
 event: check
 data: { …Mac check }
+
+event: turn
+data: { …Turn }
 ```
 
 - A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`, `dismissed`, `macCheck`, `mergeError`, a move to another account. The app replaces the job with that `id`.
@@ -472,6 +488,7 @@ data: { …Mac check }
 - `clear` comes when Clear done is pressed on any app (`POST /v1/clear`): hide the jobs that finished by `clearedAt`.
 - `inbox` comes with every inbox item that arrives or changes: answered, done or put off, on any app, or settled by itself. Replace the item with that `id`; one whose `state` is `done` leaves the inbox.
 - `check` comes when a Mac check or an Apple check (below) is queued, taken by a Mac or ends. A Mac that runs checks asks for one (`GET /v1/checks/next`) when one is `queued`; other apps can ignore it, since the job's own event carries `macCheck` and `appleCheck` too.
+- `turn` comes with every turn of the conversation that's added, from any app, and again when one changes (a job was dispatched from it): the turn as `GET /v1/conversation` lists it. Replace the turn with that `id`, or add it in `at` order. Older runners don't send it.
 - A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop. Fetch what you show (`GET /v1/status`, `GET /v1/jobs`, `GET /v1/inbox`; a runner older than the inbox answers `404` there, which means an empty inbox, and any other failure means try again) only once the events' response has arrived, and apply the events that came meanwhile over it: the runner follows a connection before it answers, so nothing that changes in between is lost.
 
 ### `GET /v1/inbox`

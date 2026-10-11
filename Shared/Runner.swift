@@ -468,8 +468,27 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     #if os(macOS)
     /// A merge check was queued, taken or ended (Engine/Checks.swift): a Mac that runs them asks for one.
     case check(MacCheck)
+    /// A turn of the conversation was added, from any app, or changed (a job dispatched from it):
+    /// the window's thread replaces it by id, or adds it by time (#11).
+    case turn(Turn)
     #endif
 }
+
+#if os(macOS)
+/// One turn of the runner's conversation as `GET /v1/conversation` and the `turn` event send it
+/// (docs/runner-api.md), read into Engine's own Turn.
+nonisolated struct RunnerTurn: Decodable, Sendable {
+    var id: String
+    var who: String
+    var text: String
+    var at: Date
+    var jobs: [String]?
+
+    var turn: Turn {
+        Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text, jobs: (jobs ?? []).isEmpty ? nil : jobs)
+    }
+}
+#endif
 
 extension Job {
     #if os(iOS) || os(watchOS)
@@ -859,6 +878,19 @@ nonisolated struct Runner: Sendable {
         let data = try await send("GET", "v1/jobs?limit=50")
         return (try Self.decoder.decode([Job].self, from: data), RunnerJobExtras.of(data))
     }
+
+    /// One page of the runner's conversation, oldest first (#11): the latest `limit` turns, or the
+    /// ones before the turn `before` names. A runner older than the thread has none.
+    func conversation(before: String? = nil, limit: Int = 50) async throws -> [Turn] {
+        var query = "limit=\(limit)"
+        if let before, let id = before.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) { query += "&before=\(id)" }
+        do {
+            let turns: [RunnerTurn] = try await call("GET", "v1/conversation?\(query)")
+            return turns.map(\.turn)
+        } catch let error as RunnerError where error.status == 404 && before == nil {
+            return []
+        }
+    }
     #endif
 
     static func check(_ response: URLResponse, _ data: Data?) throws {
@@ -917,6 +949,7 @@ nonisolated struct EventParser {
             #endif
             #if os(macOS)
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
+            case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn) }
             #endif
             default: return nil
             }

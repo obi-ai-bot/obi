@@ -31,8 +31,14 @@ final class Desk {
 
     var talk: Talk = .none
     /// The conversation (Engine/Conversation.swift): what the user said and what Oby answered,
-    /// oldest first, the last `Conversation.kept`. The island's thread, and the brain's memory.
+    /// oldest first, the last `Conversation.stored`. The window's thread, and the brain's memory
+    /// (it reads the last `Conversation.kept`).
     private(set) var turns: [Turn]
+    /// Called with every turn that's added or changes (a job dispatched from it), for the runner's
+    /// event stream. Not when a cancelled turn leaves the thread: that happens only on the Mac.
+    var onTurnChange: (Turn) -> Void = { _ in }
+    /// The jobs the Lead just started, for the reply turn that tells of them.
+    private var justStarted: [String] = []
     private(set) var jobs: [Job] {
         didSet { accounts.countRunning(jobs) }
     }
@@ -325,7 +331,7 @@ final class Desk {
         cancel()
         asking += 1
         let mine = asking
-        let turn = Turn(who: .user, text: shown ?? said)
+        let turn = Turn(who: .user, text: shown ?? said, voice: spoken ? true : nil)
         pending = turn.id
         add(turn)
         talk = .thinking(said)
@@ -344,7 +350,7 @@ final class Desk {
             pending = nil
             self.talk = talk
             if let reply = Self.reply(in: talk) {
-                add(Turn(who: .oby, text: reply))
+                addReply(reply)
                 onReply(reply, spoken)
             }
         }
@@ -369,8 +375,20 @@ final class Desk {
         guard !Conversation.cancels(said) else { return .none }
         let talk = await plan(said, turns: given) { !Task.isCancelled }
         add(Turn(who: .user, text: shown ?? said))
-        if let reply = Self.reply(in: talk) { add(Turn(who: .oby, text: reply)) }
+        if let reply = Self.reply(in: talk) { addReply(reply) }
         return talk
+    }
+
+    /// The conversation's turns before `before` (a turn's id; nil for the newest), at most `limit`,
+    /// oldest first: one page of the thread for `GET /v1/conversation`. Nil for an id that isn't in it.
+    func conversation(before: String? = nil, limit: Int) -> [Turn]? {
+        var end = turns.count
+        if let before {
+            guard let index = turns.firstIndex(where: { $0.id == before }) else { return nil }
+            end = index
+        }
+        let start = max(0, end - max(0, limit))
+        return Array(turns[start..<end])
     }
 
     /// What Oby says for a talk, as the thread shows it and the Mac speaks it: a plan's line,
@@ -386,8 +404,28 @@ final class Desk {
 
     private func add(_ turn: Turn) {
         turns.append(turn)
-        if turns.count > Conversation.kept { turns.removeFirst(turns.count - Conversation.kept) }
+        if turns.count > Conversation.stored { turns.removeFirst(turns.count - Conversation.stored) }
         store.save(turn)
+        onTurnChange(turn)
+    }
+
+    /// Oby's reply joins the thread, with the jobs the Lead just started for it, if any.
+    private func addReply(_ text: String) {
+        let started = justStarted
+        justStarted = []
+        add(Turn(who: .oby, text: text, jobs: started.isEmpty ? nil : started))
+    }
+
+    /// A job dispatched from Oby's latest plan joins the turn that proposed it: the window shows
+    /// it as a card under Oby's words. The turn is saved again and sent again (`onTurnChange`).
+    private func link(_ job: String) {
+        guard let index = turns.lastIndex(where: { $0.who == .oby }) else { return }
+        var turn = turns[index]
+        guard !(turn.jobs ?? []).contains(job) else { return }
+        turn.jobs = (turn.jobs ?? []) + [job]
+        turns[index] = turn
+        store.save(turn)
+        onTurnChange(turn)
     }
 
     private func remove(_ id: String) {
@@ -536,6 +574,7 @@ final class Desk {
             }
             turn.started = started.map(\.id)
             record(turn)
+            justStarted = started.map(\.id)
             guard !started.isEmpty else {
                 if !taken.isEmpty, unrouted == 0 { return .reply("Nothing new to start: " + taken.map { "#\($0)" }.joined(separator: ", ") + " already \(taken.count == 1 ? "has" : "have") a job.") }
                 return .reply("No account is signed in with room to spare. Check Settings › Accounts.")
@@ -649,7 +688,12 @@ final class Desk {
             }
             return .reply(reply)
         case .replyOnly, .ignore:
-            return plan.reply.isEmpty ? .none : .reply(plan.reply)
+            guard !plan.reply.isEmpty else { return .none }
+            // The brain counted wrong: with agents working here or on the runner, Oby never says
+            // nothing is running. The facts come from the jobs the header counts (#11).
+            let places = [Briefing.Place(name: "this Mac", jobs: jobs, inbox: [])] + elsewhere()
+            if Briefing.working(places) > 0, Briefing.contradicts(plan.reply) { return .reply(Briefing.workingLine(places)) }
+            return .reply(plan.reply)
         }
     }
 
@@ -660,7 +704,9 @@ final class Desk {
         talk = .none
         drafts.removeAll { $0.job.id == draft.job.id }
         // Why routing chose its account, unless the user picked another on the card.
-        return enqueue(draft.job, why: draft.route.flatMap { $0.id == draft.job.account ? $0.why : nil })
+        let job = enqueue(draft.job, why: draft.route.flatMap { $0.id == draft.job.account ? $0.why : nil })
+        link(job.id)
+        return job
     }
 
     /// Queues a job: its worktree gets ready, then its agent starts. Oby's own jobs (reviews) start here.

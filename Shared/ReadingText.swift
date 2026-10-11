@@ -88,13 +88,16 @@ struct ReadingText: View {
     var weight: Font.Weight?
     /// How its paragraphs line up: leading, or centered where the screen centers its text.
     var alignment: HorizontalAlignment
+    /// A colour of its own, where the surface isn't the usual one (the Mac window's light bubble).
+    var color: Color?
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
 
-    init(_ text: String, secondary: Bool = false, weight: Font.Weight? = nil, alignment: HorizontalAlignment = .leading) {
+    init(_ text: String, secondary: Bool = false, weight: Font.Weight? = nil, alignment: HorizontalAlignment = .leading, color: Color? = nil) {
         self.text = text
         self.secondary = secondary
         self.weight = weight
         self.alignment = alignment
+        self.color = color
     }
 
     var body: some View {
@@ -107,7 +110,7 @@ struct ReadingText: View {
                 }
             }
         }
-        .modifier(ReadingStyle(role: secondary ? .secondary : .prose))
+        .modifier(ReadingStyle(role: secondary ? .secondary : .prose, color: color))
     }
 }
 
@@ -142,6 +145,7 @@ extension View {
 private struct ReadingStyle: ViewModifier {
     enum Role { case prose, code, secondary }
     let role: Role
+    var color: Color? = nil
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
 
     func body(content: Content) -> some View {
@@ -150,7 +154,7 @@ private struct ReadingStyle: ViewModifier {
         content
             .font(role == .code ? reading.code(scale: scale) : reading.prose)
             .lineSpacing(reading.lineSpacing * scale)
-            .foregroundStyle(role == .secondary ? Self.secondary : Self.primary)
+            .foregroundStyle(color ?? (role == .secondary ? Self.secondary : Self.primary))
     }
 
     #if os(macOS)
