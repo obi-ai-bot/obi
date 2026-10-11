@@ -108,6 +108,30 @@ struct AppleCheckTests {
 
     // MARK: The queue
 
+    @Test func aSimulatorConnectionFailureKeepsTheAgentWaitingForABoundedRetry() async throws {
+        try await running()
+        let now = Date.now
+        let check = try await desk.askAppleCheck("apple118", now: now)
+        _ = desk.nextMacCheck(mac: "Studio", kinds: [.apple], now: now)
+        let report = MacCheck.Report(passed: false, steps: [
+            MacCheck.Step(name: MacCheck.appleSteps[0], passed: true, seconds: 19),
+            MacCheck.Step(name: MacCheck.appleSteps[1], passed: false, seconds: 396)
+        ], failures: [], log: "The test runner hung before establishing connection.")
+        for attempt in 0...2 {
+            let time = now + Double(attempt * 600)
+            let ended = try desk.appleCheckEnded(check.id, report, now: time)
+            #expect(ended.state == (attempt < 2 ? .queued : .error))
+            #expect(desk.job("apple118")?.appleRan == nil)
+            if attempt < 2 {
+                #expect(desk.appleCheck("apple118", now: time + 61)?.state == .queued)
+                #expect(desk.nextMacCheck(mac: "Laptop", kinds: [.apple], now: time + 599) == nil)
+                let retried = try #require(desk.nextMacCheck(mac: "Laptop", kinds: [.apple], now: time + 600))
+                #expect(retried.head == check.head && retried.round == 1 && retried.simulatorRetries == attempt + 1)
+            }
+        }
+        #expect(desk.nextMacCheck(mac: "Laptop", kinds: [.apple], now: now + 1800) == nil)
+    }
+
     @Test func anAgentsCheckGoesFirstToAMacThatTakesAppleChecksAndItsResultStaysWithTheJob() async throws {
         try await running()
         let check = try await desk.askAppleCheck("apple118")

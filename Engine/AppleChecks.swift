@@ -308,12 +308,14 @@ extension Desk {
     func appleCheck(_ id: String, now: Date = .now) -> MacCheck? {
         guard var job = job(id), var check = job.appleCheck else { return nil }
         guard check.state == .queued else { return check }
-        let waited = now.timeIntervalSince(check.created)
+        let queued = check.awaitsSimulatorRetry ? max(check.created, (check.finished ?? check.created) + 10 * 60) : check.created
+        let waited = now.timeIntervalSince(queued)
         if let asked = check.finalCheck {
             guard now.timeIntervalSince(asked) > AppleCheck.finalWait(limits.testRun) else { return check }
             check.problem = AppleCheck.unbuiltLine
         } else {
-            let idle = now.timeIntervalSince(max(check.created, macFreed() ?? check.created))
+            if check.awaitsSimulatorRetry, !check.canRetrySimulator(now: now) { return check }
+            let idle = now.timeIntervalSince(max(queued, macFreed() ?? queued))
             guard waited > AppleCheck.stale || idle > AppleCheck.unclaimed && busyMac(now: now) == nil else { return check }
             check.problem = waited > AppleCheck.stale ? AppleCheck.staleLine : AppleCheck.noMacLine
         }
@@ -361,12 +363,11 @@ extension Desk {
     func nextAppleCheck(mac: String, now: Date = .now) -> MacCheck? {
         let ready = jobs.filter { job in
             guard job.isActive, let check = job.appleCheck else { return false }
-            return check.state == .queued || check.state == .running && now.timeIntervalSince(check.started ?? now) > MacCheck.lease
+            return check.state == .queued && (!check.awaitsSimulatorRetry || check.canRetrySimulator(now: now))
+                || check.state == .running && now.timeIntervalSince(check.started ?? now) > MacCheck.lease
         }
         guard var job = ready.min(by: { ($0.appleCheck?.created ?? now) < ($1.appleCheck?.created ?? now) }), var check = job.appleCheck else { return nil }
-        check.state = .running
-        check.started = now
-        check.mac = mac
+        check.take(mac: mac, now: now)
         job.appleCheck = check
         replace(job)
         onCheckChange(check)
@@ -386,6 +387,10 @@ extension Desk {
         check.steps = report.steps
         check.failures = report.failures
         check.problem = report.problem
+        if check.state == .error, check.awaitsSimulatorRetry {
+            // Keep the command waiting through recovery rather than end the agent's check.
+            check.state = .queued
+        }
         job.appleCheck = check
         appleLogs[check.id] = report.log
         if check.state == .passed || check.state == .failed {

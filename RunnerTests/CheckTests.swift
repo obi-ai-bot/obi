@@ -702,6 +702,82 @@ struct CheckTests {
         #expect(!kept.passed && kept.problem == "Xcode broke")
     }
 
+    static let connectionHang = "Testing failed:\nThe test runner hung before establishing connection.\n** TEST FAILED **"
+
+    @Test func aSimulatorConnectionHangIsNotACodeFailureEvenWithExit65() {
+        let phone = MacCheck.commands(cache: URL(filePath: "/cache"))[2]
+        #expect(MacCheck.problem(phone, status: 65, output: Self.connectionHang, timedOut: false, named: false) == MacCheck.simulatorProblem)
+        #expect(MacCheck.problem(phone, status: 65, output: Self.connectionHang, timedOut: false, named: true) == nil)
+        let compiler = Self.connectionHang + "\n/x/A.swift:3:5: error: cannot find 'foo' in scope"
+        #expect(MacCheck.problem(phone, status: 65, output: compiler, timedOut: false, named: false) == nil)
+        #expect(MacCheck.simulatorConnectionFailure("xcodebuild: error: Failed to establish communication with the test runner."))
+        #expect(!MacCheck.simulatorConnectionFailure(Self.connectionHang + "\nTest case 'Tests/broken()' failed"))
+        var failed = steps
+        failed[2].passed = false
+        let report = MacCheck.validated(MacCheck.Report(passed: false, steps: failed, failures: [], log: Self.connectionHang))
+        #expect(report.problem == MacCheck.simulatorProblem && !report.passed)
+    }
+
+    actor Simulator {
+        var calls: [[String]] = []
+        var results: [MacCheck.StepResult]
+        let resetFails: Bool
+        init(_ results: [MacCheck.StepResult], resetFails: Bool = false) {
+            self.results = results
+            self.resetFails = resetFails
+        }
+        func execute(_ arguments: [String], _ directory: URL, _ env: [String: String?], _ timeout: TimeInterval) async -> MacCheck.StepResult {
+            calls.append(arguments)
+            if arguments.first == "xcodebuild" { return results.removeFirst() }
+            return (resetFails ? 1 : 0, "", false)
+        }
+    }
+
+    @Test func aSimulatorHangRebootsAndRetriesOnlyTheSameStepWithABound() async {
+        let phone = MacCheck.commands(cache: URL(filePath: "/cache"))[2]
+        let hang: MacCheck.StepResult = (65, Self.connectionHang, false)
+        let recovered = Simulator([hang, (0, "passed", false)])
+        let result = await MacCheck.executeStep(phone, in: folder, env: [:], execute: recovered.execute)
+        #expect(result.status == 0)
+        #expect(await recovered.calls == [phone.arguments, ["xcrun", "simctl", "shutdown", "iPhone 17"],
+                                         ["xcrun", "simctl", "boot", "iPhone 17"], ["xcrun", "simctl", "bootstatus", "iPhone 17", "-b"], phone.arguments])
+        let exhausted = Simulator([hang, hang, hang])
+        let failed = await MacCheck.executeStep(phone, in: folder, env: [:], execute: exhausted.execute)
+        #expect(failed.status == 65 && failed.output == Self.connectionHang)
+        #expect(await exhausted.calls.filter { $0 == phone.arguments }.count == 3)
+        let brokenReset = Simulator([hang], resetFails: true)
+        #expect(await MacCheck.executeStep(phone, in: folder, env: [:], execute: brokenReset.execute).status == 65)
+        #expect(await brokenReset.calls.count == 3)
+        let code = Simulator([(65, "Test case 'Tests/broken()' failed", false)])
+        _ = await MacCheck.executeStep(phone, in: folder, env: [:], execute: code.execute)
+        #expect(await code.calls == [phone.arguments])
+    }
+
+    @Test func aSimulatorHangWaitsThenChecksTheSameCommitWithoutAnAgentRound() async throws {
+        let check = try await approved()
+        let now = Date.now
+        _ = desk.nextMacCheck(mac: "Studio", now: now)
+        var failed = steps
+        failed[2].passed = false
+        let report = MacCheck.Report(passed: false, steps: failed, failures: [], log: Self.connectionHang)
+        let ended = try desk.macCheckEnded(check.id, report, now: now)
+        #expect(ended.state == .error && ended.problem == MacCheck.simulatorProblem)
+        #expect(desk.job("author")?.mergeNeedsYou == false)
+        await desk.finishCheck("author", log: report.log)
+        #expect(made.agents.count == 2 && made.comments.isEmpty && made.merged.isEmpty)
+        #expect(desk.nextMacCheck(mac: "Laptop", now: now + 599) == nil)
+        for attempt in 1...2 {
+            let time = now + Double(attempt * 600)
+            let retried = try #require(desk.nextMacCheck(mac: "Laptop", now: time))
+            #expect(retried.head == check.head && retried.round == check.round && retried.id == check.id)
+            #expect(retried.simulatorRetries == attempt && retried.problem == nil && retried.finished == nil)
+            _ = try desk.macCheckEnded(check.id, report, now: time)
+        }
+        #expect(desk.nextMacCheck(mac: "Laptop", now: now + 1800) == nil)
+        #expect(desk.job("author")?.mergeNeedsYou == true)
+        #expect(made.agents.count == 2 && made.comments.isEmpty)
+    }
+
     @Test func aStepThatHangsIsEndedWithWhatItStartedAndNothingWaitsOnItsOutput() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }

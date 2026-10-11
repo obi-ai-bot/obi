@@ -77,6 +77,8 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// When a job's final check asked for this Apple check (`Desk.afterTurn`), or nil when only its
     /// agent did: from then it waits for a Mac up to the final check's time limit (#68).
     var finalCheck: Date?
+    /// Delayed retries of a simulator connection failure, without using an author's round.
+    var simulatorRetries: Int?
 
     var isApple: Bool { kind == .apple }
 
@@ -93,6 +95,28 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     static let reviewsUsedLine = "Oby reviewed it \(Review.maxRounds) times already, so a fix can't merge. Take it from here."
     /// How many times the runner tries a merge that failed on something that may pass later.
     static let maxTries = 3
+    static let simulatorProblem = "Simulator test runner couldn't connect."
+
+    var awaitsSimulatorRetry: Bool {
+        problem?.hasPrefix(Self.simulatorProblem) == true && (simulatorRetries ?? 0) < 2
+    }
+
+    func canRetrySimulator(now: Date) -> Bool {
+        awaitsSimulatorRetry && now.timeIntervalSince(finished ?? now) >= 10 * 60
+    }
+
+    mutating func take(mac: String, now: Date) {
+        if awaitsSimulatorRetry {
+            simulatorRetries = (simulatorRetries ?? 0) + 1
+            finished = nil
+            steps = nil
+            failures = nil
+            problem = nil
+        }
+        state = .running
+        started = now
+        self.mac = mac
+    }
 
     var label: String {
         switch state {
@@ -174,6 +198,10 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     static func validated(_ report: Report, required requiredSteps: [String] = requiredSteps) -> Report {
         var report = trimmed(report)
         guard report.problem == nil else { return report }
+        if !report.passed, report.failures.isEmpty, simulatorConnectionFailure(report.log ?? "") {
+            report.problem = simulatorProblem
+            return report
+        }
         if !report.failures.isEmpty { report.passed = false }
         let missing = requiredSteps.filter { name in !report.steps.contains { $0.name == name } }
         if report.passed, !missing.isEmpty || !requiredSteps.allSatisfy({ name in report.steps.contains { $0.name == name && $0.passed } }) {
@@ -495,7 +523,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         let cache = Workspace.root.appending(path: "checks/cache")
         for command in commands ?? (check.isApple ? appleCommands(cache: cache) : Self.commands(cache: cache)) {
             let start = Date.now
-            let result = await execute(command.arguments, in: worktree, env: env, timeout: command.timeout)
+            let result = await executeStep(command, in: worktree, env: env)
             let seconds = Int(Date.now.timeIntervalSince(start))
             let passed = result.status == 0 && !result.timedOut
             steps.append(Step(name: command.name, passed: passed, seconds: seconds))
@@ -522,6 +550,9 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// Anything else is the Mac's: a step that hung until its timeout, a tool that isn't there
     /// (exit 127), or xcodebuild failing otherwise (no such simulator, Xcode itself).
     static func problem(_ command: Command, status: Int32, output: String, timedOut: Bool, named: Bool) -> String? {
+        if !named, command.arguments.first == "xcodebuild", simulatorConnectionFailure(output) {
+            return simulatorProblem
+        }
         if timedOut { return named ? nil : "\(command.name) was stopped after \(Int(command.timeout / 60)) minutes without naming a failing test." }
         if named { return nil }
         if status == 127 { return "\(command.name) couldn't start: \(command.arguments.first ?? "the tool") isn't installed on this Mac." }
@@ -531,6 +562,46 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         let said = output.split(separator: "\n").last { $0.contains("error") || $0.contains("Unable to find") }
             ?? output.split(separator: "\n").last ?? ""
         return "\(command.name) couldn't run on this Mac (exit \(status)): \(said.trimmingCharacters(in: .whitespaces).prefix(200))"
+    }
+
+    /// Exit 65 also covers a test host that never connected. Keep actual test/compiler failures
+    /// on the code path, even when a connection diagnostic appears alongside them.
+    static func simulatorConnectionFailure(_ output: String) -> Bool {
+        let connection = { (line: String) in
+            let line = line.lowercased()
+            return line.contains("test runner hung before establishing connection")
+                || line.contains("failed to establish communication with the test runner")
+        }
+        guard failures(in: output).isEmpty else { return false }
+        let lines = output.split(separator: "\n").map(String.init)
+        return lines.contains(where: connection) && !lines.contains {
+            ($0.contains(": error:") || $0.hasPrefix("error: ")) && !connection($0)
+        }
+    }
+
+    typealias StepResult = (status: Int32, output: String, timedOut: Bool)
+    typealias Execute = @Sendable ([String], URL, [String: String?], TimeInterval) async -> StepResult
+
+    /// Reboot only the configured iPhone simulator, then retry this step on the same checkout.
+    /// Two retries at most; a broken reset leaves the original infrastructure result intact.
+    static func executeStep(_ command: Command, in directory: URL, env: [String: String?],
+                            execute: Execute = Self.execute) async -> StepResult {
+        let deadline = Date.now + command.timeout
+        var result = await execute(command.arguments, directory, env, command.timeout)
+        for _ in 0..<2 {
+            guard result.status != 0 || result.timedOut,
+                  command.arguments.first == "xcodebuild", command.arguments.contains(iPhone),
+                  simulatorConnectionFailure(result.output), deadline.timeIntervalSinceNow > 240 else { break }
+            _ = await execute(["xcrun", "simctl", "shutdown", "iPhone 17"], directory, env, 60)
+            let boot = await execute(["xcrun", "simctl", "boot", "iPhone 17"], directory, env, 60)
+            guard boot.status == 0, !boot.timedOut else { break }
+            let ready = await execute(["xcrun", "simctl", "bootstatus", "iPhone 17", "-b"], directory, env, 120)
+            guard ready.status == 0, !ready.timedOut else { break }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            result = await execute(command.arguments, directory, env, remaining)
+        }
+        return result
     }
 
     /// Runs one step to its end or its timeout, with what it prints going to a file, not a pipe: a
@@ -612,7 +683,7 @@ extension Job {
     nonisolated var mergeNeedsYou: Bool {
         guard status == .done, dismissed == nil, published != nil, (pullRequest?.state ?? .open) == .open, review?.verdict == .approved,
               reviewing == nil, let check = macCheck, check.head == pushedHead, check.state != .queued, check.state != .running else { return false }
-        return mergeError != nil || checkStop != nil || check.state == .error
+        return mergeError != nil || checkStop != nil || check.state == .error && !check.awaitsSimulatorRetry
     }
 
     /// The Merged stage while the pull request is open and Oby's review approved it.
@@ -626,7 +697,9 @@ extension Job {
         case .running: return (.current, "Checking on \(check.macName)", nil)
         case .passed: return (.current, "Mac check passed · merging", nil)
         case .failed: return (.failed, "Mac check failed", check.failureLine + (checkStop.map { " " + $0 } ?? ""))
-        case .error: return (.failed, "Mac check couldn't run", check.problem ?? "The Mac couldn't run it.")
+        case .error:
+            if check.awaitsSimulatorRetry { return (.current, "Waiting to retry the simulator check", check.problem) }
+            return (.failed, "Mac check couldn't run", check.problem ?? "The Mac couldn't run it.")
         }
     }
 }
@@ -667,11 +740,10 @@ extension Desk {
         let ready = jobs.filter { job in
             guard let check = job.macCheck, !job.isActive, check.head == job.pushedHead else { return false }
             return check.state == .queued || check.state == .running && now.timeIntervalSince(check.started ?? now) > MacCheck.lease
+                || check.state == .error && job.dismissed == nil && (job.pullRequest?.state ?? .open) == .open && check.canRetrySimulator(now: now)
         }
         guard var author = ready.min(by: { ($0.macCheck?.created ?? now) < ($1.macCheck?.created ?? now) }), var check = author.macCheck else { return nil }
-        check.state = .running
-        check.started = now
-        check.mac = mac
+        check.take(mac: mac, now: now)
         author.macCheck = check
         replace(author)
         onCheckChange(check)
