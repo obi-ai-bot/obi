@@ -713,7 +713,7 @@ struct CheckTests {
             return test
         }
         let json: [String: Any] = ["title": "Test - ObyPhone", "result": "Failed", "totalTestCount": total, "passedTests": total - failures.count,
-                                   "failedTests": failures.count, "skippedTests": 0, "expectedFailures": 0, "statistics": [] as [Any],
+                                   "failedTests": failures.count, "expectedFailures": 0, "statistics": [] as [Any],
                                    "topInsights": [] as [Any], "devicesAndConfigurations": [] as [Any], "testFailures": tests]
         return try! JSONSerialization.data(withJSONObject: json)
     }
@@ -741,6 +741,10 @@ struct CheckTests {
         #expect(MacCheck.verdict(mac, attempt(65, "Lost connection to the test manager service.\n** TEST FAILED **")) == .trouble(.lostConnection))
         #expect(MacCheck.Trouble.in("Unable to boot the Simulator.") == .boot)
         #expect(MacCheck.Trouble.in("Failed to install the requested application") == .install)
+        // What followed a hung runner once dtdeviceinfod had crashed.
+        #expect(MacCheck.verdict(phone, attempt(65, "Testing failed:\n\tFailed to install or launch the test runner. (Underlying Error: (Mach error -308 - (ipc/mig) server died))\n** TEST FAILED **"))
+                == .trouble(.install))
+        #expect(MacCheck.Trouble.in("(ipc/mig) server died") == .install)
         #expect(MacCheck.Trouble.in("Timed out waiting for testmanagerd to become ready") == .daemon)
         #expect(MacCheck.Trouble.in("** TEST FAILED **") == nil)
         // A real failure: the bundle names the tests and their messages, whatever else the output says.
@@ -785,7 +789,7 @@ struct CheckTests {
         // Hung twice: the check couldn't run, with nothing for the author.
         (outcome, runs, resets) = await run([attempt(65, hungOutput), attempt(65, hungOutput)])
         #expect(runs == [1, 2] && resets == 1 && !outcome.step.passed && outcome.step.failing == nil && outcome.log == nil)
-        #expect(outcome.problem == "Mac check couldn't run: the iPhone simulator's test runner hung, and again after Oby shut the simulators down and ran iPhone app with Watch, and iOSTests once more.")
+        #expect(outcome.problem == "Mac check couldn't run: the iPhone simulator's test runner hung, and again after Oby restarted the simulators and ran iPhone app with Watch, and iOSTests once more.")
         // Hung, then a real failure: that goes to the author.
         (outcome, runs, resets) = await run([attempt(65, hungOutput), attempt(65, "** TEST FAILED **", summary: real)])
         #expect(runs == [1, 2] && outcome.problem == nil && outcome.step.retried == true)
@@ -795,6 +799,13 @@ struct CheckTests {
         #expect(runs == [1] && resets == 0 && outcome.step.retried == nil && outcome.step.failing?.count == 1)
         (outcome, runs, resets) = await run([attempt(65, "/x/A.swift:3:5: error: cannot find 'foo' in scope")])
         #expect(runs == [1] && resets == 0 && outcome.log == "/x/A.swift:3:5: error: cannot find 'foo' in scope" && outcome.problem == nil)
+        // Between the runs: the simulators shut down, CoreSimulatorService and dtdeviceinfod ended, then what the check built.
+        #expect(MacCheck.resetCommands(derived: URL(filePath: "/cache/DerivedData")) == [
+            ["xcrun", "simctl", "shutdown", "all"],
+            ["killall", "-9", "com.apple.CoreSimulator.CoreSimulatorService"],
+            ["killall", "-9", "dtdeviceinfod"],
+            ["pkill", "-KILL", "-f", "/cache/DerivedData"],
+        ])
         // xcodebuild writes its result bundle where the Mac reads it, before its action.
         let bundled = phone.bundled(at: URL(filePath: "/tmp/1-1.xcresult")).arguments
         #expect(bundled.suffix(3) == ["-resultBundlePath", "/tmp/1-1.xcresult", "test"])
@@ -848,7 +859,7 @@ struct CheckTests {
         var failing = steps
         failing[2].passed = false
         failing[2].retried = true
-        let problem = "Mac check couldn't run: the iPhone simulator's test runner hung, and again after Oby shut the simulators down and ran iPhone app with Watch, and iOSTests once more."
+        let problem = "Mac check couldn't run: the iPhone simulator's test runner hung, and again after Oby restarted the simulators and ran iPhone app with Watch, and iOSTests once more."
         let ended = try desk.macCheckEnded(check.id, MacCheck.Report(passed: false, steps: failing, failures: [], problem: problem))
         #expect(ended.state == .error)
         try await Task.sleep(for: .milliseconds(100))

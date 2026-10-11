@@ -500,8 +500,8 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         for line in output.split(separator: "\n") {
             if let match = line.firstMatch(of: /◇ Test (.+?) started\./) ?? line.firstMatch(of: /Test [Cc]ase '(.+?)' started/) {
                 started.append(String(match.1))
-            } else if let match = line.firstMatch(of: /[✔✘➜] Test (.+?) (?:passed after|failed after|skipped)/)
-                        ?? line.firstMatch(of: /Test [Cc]ase '(.+?)' (?:passed|failed|skipped)/) {
+            } else if let match = line.firstMatch(of: /[✔✘➜] Test (.+?) (?:passed after|failed after|skip)/)
+                        ?? line.firstMatch(of: /Test [Cc]ase '(.+?)' (?:passed|failed|skip)/) {
                 ended.insert(String(match.1))
             }
         }
@@ -676,7 +676,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             case .hung: [/hung before establishing connection/, /never began executing tests/, /never finished bootstrapping/]
             case .lostConnection: [/lost (?:its |the )?connection to (?:the )?test ?manager/, /testmanagerd.{0,60}(?:interrupted|invalidated)/]
             case .boot: [/(?:failed|unable) to boot/, /simulator (?:device )?failed to (?:boot|start)/]
-            case .install: [/(?:failed|unable) to install/, /could not be installed/]
+            case .install: [/(?:failed|unable) to install/, /could not be installed/, /mach error -308/, /ipc\/mig\)? server died/]
             case .daemon: [/(?:testmanagerd|test daemon).{0,80}(?:not ready|never|timed out)/,
                            /timed out (?:while )?waiting for (?:the )?(?:testmanagerd|test daemon)/]
             }
@@ -773,7 +773,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             return Outcome(step: step, log: log)
         case let .trouble(trouble):
             return Outcome(step: step, problem: couldNotRun + trouble.line(simulator: command.simulator)
-                           + ", and again after Oby shut the simulators down and ran \(command.name) once more.")
+                           + ", and again after Oby restarted the simulators and ran \(command.name) once more.")
         case let .problem(problem, log):
             return Outcome(step: step, log: log, problem: problem)
         }
@@ -787,11 +787,21 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         return read.out
     }
 
-    /// Before a step runs again: every simulator shut down, and whatever the check built (`derived`)
-    /// that's still running, its test runners and hosts, ended.
+    /// What clears the Mac's trouble before a step runs again, in order: every simulator shut down;
+    /// CoreSimulatorService (launchd starts it again by itself) and dtdeviceinfod ended, since a
+    /// crashed one fails the next install with "Mach error -308, ipc/mig server died" and shutting
+    /// the simulators down alone doesn't help; and whatever the check built (`derived`) that's still
+    /// running, its test runners and hosts, ended.
+    static func resetCommands(derived: URL) -> [[String]] {
+        [["xcrun", "simctl", "shutdown", "all"],
+         ["killall", "-9", "com.apple.CoreSimulator.CoreSimulatorService"],
+         ["killall", "-9", "dtdeviceinfod"],
+         ["pkill", "-KILL", "-f", derived.path]]
+    }
+
+    /// Runs `resetCommands`, each whatever the one before said: one with nothing to end fails, and that's fine.
     static func reset(derived: URL) async {
-        _ = try? await Shell.run(["xcrun", "simctl", "shutdown", "all"], timeout: 120)
-        _ = try? await Shell.run(["pkill", "-KILL", "-f", derived.path], timeout: 30)
+        for command in resetCommands(derived: derived) { _ = try? await Shell.run(command, timeout: 120) }
     }
 
     /// Why a failed step says nothing about the code, or nil when the code failed it: it named failing
