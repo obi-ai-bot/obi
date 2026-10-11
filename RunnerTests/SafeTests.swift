@@ -84,6 +84,10 @@ struct EncodedSecretTests {
         #expect(Publish.matches(Fake.assign("pass" + "word", "correct-horse-" + "battery-staple")) == ["password or secret"])
         #expect(Publish.matches(Fake.assign("api_" + "key", "aB3dE6gH9jK2" + "mN5pQ8sT")) == ["password or secret"])
         #expect(Publish.matches(Fake.assign("sec" + "ret", "mysecretpass" + "word1")) == ["password or secret"])
+        // Whole words only, and never one that holds a password (Codex's review of #121).
+        #expect(Publish.matches(Fake.assign("pass" + "word", "my-secret-" + "password")) == ["password or secret"])
+        #expect(Publish.matches(Fake.assign("pass" + "word", "monkeyForest" + "Tree")) == ["password or secret"])
+        #expect(Publish.matches(Fake.assign("sec" + "ret", "blue-sky-" + "morning")) == ["password or secret"])
     }
 
     @Test func ordinaryCodeIsClean() {
