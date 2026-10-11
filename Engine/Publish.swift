@@ -667,7 +667,12 @@ nonisolated enum Publish {
     /// which went out: `pullRequestEdit` only when the description did update.
     static func pullRequest(_ job: Job, base: String, title: String) async throws -> (url: URL, sent: Outgoing.Action?) {
         let file = FileManager.default.temporaryDirectory.appending(path: "oby-pr-\(UUID().uuidString).md")
-        try body(for: job).write(to: file, atomically: true, encoding: .utf8)
+        // Only the issue's shape is read, never sent: a checklist, or an issue gh can't read, isn't closed.
+        var closes = false
+        if let number = job.issue, let issue = try? await Shell.ok(["gh", "issue", "view", "\(number)", "-R", job.repo, "--json", "body", "-q", ".body"]) {
+            closes = Self.closes(issue: issue)
+        }
+        try body(for: job, closes: closes).write(to: file, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: file) }
         let open = try await Shell.ok(["gh", "pr", "list", "-R", job.repo, "--head", job.branch, "--state", "open",
                                        "--json", "url", "--jq", ".[0].url // empty"], as: .app)
@@ -708,11 +713,21 @@ nonisolated enum Publish {
         return text + issue
     }
 
+    /// Whether a pull request closes its issue: not one whose body has a checklist (a feature or an
+    /// epic). Its items are ticked as slices merge (Engine/IssueSync.swift), and it closes once
+    /// its "Test it when it's done" list passes, never because one slice merged.
+    static func closes(issue body: String) -> Bool {
+        !body.split(separator: "\n").contains { line in
+            let text = line.trimmingCharacters(in: .whitespaces)
+            return text.hasPrefix("- [ ] ") || text.hasPrefix("- [x] ") || text.hasPrefix("- [X] ")
+        }
+    }
+
     /// The pull request's description: every round's summary, what the user asked for, the check
-    /// and the scan, `Closes #N`, and that Oby opened it. The agent's summaries are untrusted (it
-    /// may have read someone else's pull request), so they go in as code blocks: no mentions,
-    /// links or closing keywords.
-    static func body(for job: Job) -> String {
+    /// and the scan, `Closes #N` (`Part of #N` when it doesn't close it), and that Oby opened it.
+    /// The agent's summaries are untrusted (it may have read someone else's pull request), so they
+    /// go in as code blocks: no mentions, links or closing keywords.
+    static func body(for job: Job, closes: Bool = true) -> String {
         let summaries = job.summaries.flatMap { $0.isEmpty ? nil : $0 } ?? [job.summary]
         let rounds = summaries.enumerated().map { index, summary in
             let fence = String(repeating: "`", count: max(3, (summary.matches(of: /`+/).map(\.output.count).max() ?? 0) + 1))
@@ -732,7 +747,7 @@ nonisolated enum Publish {
             \(request)
 
             \(check)
-            - Secret scan: clean.\(job.issue.map { "\n\nCloses #\($0)" } ?? "")
+            - Secret scan: clean.\(job.issue.map { "\n\n\(closes ? "Closes" : "Part of") #\($0)" } ?? "")
 
             by Oby: Oby opened this pull request after \(passed) and the secret scan was clean. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
             """

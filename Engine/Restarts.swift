@@ -116,6 +116,7 @@ extension Desk {
                 startOrWait(job)
             } else {
                 // A setup the restart cut short: its worktree gets ready again.
+                let job = job
                 Task {
                     do {
                         let prepared = try await prepare(job)
