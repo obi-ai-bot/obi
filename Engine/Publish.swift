@@ -7,7 +7,8 @@ import LocalAuthentication
 /// review. Guards, then a secret scan, then the approval; nothing is sent before it (only the base is fetched).
 /// A job that ends done with commits publishes by itself (the approval lets everything through);
 /// a job whose publish failed is published by hand, with Touch ID on the Mac or a phone's
-/// signature on the runner. Oby never force-pushes or pushes to main for anyone; it merges only
+/// signature on the runner. Oby never pushes to main for anyone, and force-pushes only a rebase of
+/// its own oby/ branch, over the commit it pushed there last (`--force-with-lease`); it merges only
 /// into dev, after its review and the Mac check (Engine/Checks.swift).
 nonisolated enum Publish {
     /// The secret scan found something: nothing goes out, and the job fails naming where.
@@ -111,7 +112,10 @@ nonisolated enum Publish {
         try await approve(action(for: job, base: base))
         try hooks.proceed()
         progress(.push)
-        try await push(head, of: job, from: worktree)
+        // A rebased branch replaces what's on GitHub, and only what Oby pushed there itself.
+        let lease = try await lease(for: head, of: job, from: worktree)
+        try hooks.proceed()
+        try await push(head, of: job, from: worktree, over: lease)
         hooks.sent(Outgoing(action: .push, repo: job.repo, id: head, branch: job.branch))
         try hooks.proceed()
         progress(.pullRequest)
@@ -580,13 +584,57 @@ nonisolated enum Publish {
     private static let toGitHub = ["git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
                                    "-c", "credential.helper=!gh auth git-credential"]
 
-    /// Pushes one commit to the job's own branch, never with --force: no tags, submodules or signing programs either.
-    static func push(_ commit: String, of job: Job, from worktree: URL) async throws {
+    /// The job's repository on GitHub, as git talks to it.
+    static func github(_ job: Job) -> String { "https://github.com/\(job.repo).git" }
+
+    /// The commit the job's branch has on `remote` (GitHub), or nil when it has no such branch yet.
+    static func remoteHead(of job: Job, from worktree: URL, remote: String? = nil) async throws -> String? {
+        let result = try await Shell.run(toGitHub + ["ls-remote", "--heads", remote ?? github(job), "refs/heads/\(job.branch)"],
+                                         in: worktree, env: ["GIT_TERMINAL_PROMPT": "0"], timeout: 120)
+        guard result.status == 0 else { throw Shell.Failure(message: "Couldn't read \(job.branch) on GitHub: \(said(result.err))") }
+        return String(decoding: result.out, as: UTF8.self).split(separator: "\n").lazy.compactMap { line -> String? in
+            let parts = line.split(separator: "\t")
+            return parts.count == 2 && parts[1] == "refs/heads/\(job.branch)" ? String(parts[0]) : nil
+        }.first
+    }
+
+    /// What pushing `head` replaces on the job's branch: nil when it only adds to what's there
+    /// (no branch yet, the same commit, or one `head` builds on), else the commit there, which a
+    /// rebase leaves behind. Only the commit Oby pushed there last may be replaced: anything else
+    /// someone else pushed, and Oby refuses rather than overwrite it.
+    static func lease(for head: String, of job: Job, from worktree: URL, remote: String? = nil) async throws -> String? {
+        guard let there = try await remoteHead(of: job, from: worktree, remote: remote), there != head else { return nil }
+        // Fails too when the clone doesn't have that commit: then it isn't one Oby pushed from here.
+        let builds = try await Shell.run(["git", "-C", worktree.path, "merge-base", "--is-ancestor", there, head])
+        if builds.status == 0 { return nil }
+        guard there == job.pushedHead else { throw Shell.Failure(message: overwritten(job, there)) }
+        return there
+    }
+
+    /// Why a rebased branch isn't pushed: someone else's commit is on it.
+    static func overwritten(_ job: Job, _ there: String) -> String {
+        "Not published: \(job.branch) on GitHub is at \(there.prefix(12)), not the commit Oby pushed, so the rebase would overwrite someone else's work."
+    }
+
+    /// Pushes one commit to the job's own branch: no tags, submodules or signing programs. With
+    /// `lease`, the commit a rebase replaces, it pushes with `--force-with-lease` on that commit, so
+    /// it fails when the branch moved since; never to a branch Oby didn't make.
+    static func push(_ commit: String, of job: Job, from worktree: URL, over lease: String? = nil, to remote: String? = nil) async throws {
+        if lease != nil, !job.branch.hasPrefix("oby/") || !Plan.isBranchName(job.branch) {
+            throw Shell.Failure(message: "Oby never force-pushes \(job.branch): only the oby/ branches it made.")
+        }
+        let force = lease.map { ["--force-with-lease=refs/heads/\(job.branch):\($0)"] } ?? []
         let result = try await Shell.run(
-            toGitHub + ["push", "--no-follow-tags", "--no-signed", "--recurse-submodules=no",
-                        "https://github.com/\(job.repo).git", "\(commit):refs/heads/\(job.branch)"],
+            toGitHub + ["push", "--no-follow-tags", "--no-signed", "--recurse-submodules=no"] + force
+                + [remote ?? github(job), "\(commit):refs/heads/\(job.branch)"],
             in: worktree, env: ["GIT_TERMINAL_PROMPT": "0"])
-        guard result.status == 0 else { throw Shell.Failure(message: "Couldn't push \(job.branch): \(said(result.err))") }
+        guard result.status == 0 else {
+            // The lease didn't hold: the branch moved after Oby read it.
+            if lease != nil, result.err.contains("stale info") {
+                throw Shell.Failure(message: "Not published: \(job.branch) moved on GitHub while Oby pushed the rebase, so it would overwrite someone else's work.")
+            }
+            throw Shell.Failure(message: "Couldn't push \(job.branch): \(said(result.err))")
+        }
     }
 
     /// Brings origin/<base> up to date from GitHub, so what's merged since the job started counts.

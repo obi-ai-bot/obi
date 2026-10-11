@@ -295,9 +295,17 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         return try await Publish.scan(worktree, base: base, head: head)
     }
 
+    /// GitHub can't merge the pull request: it conflicts with its base. The author's agent rebases
+    /// it (`Desk.rebaseConflicted`) rather than the merge being tried again.
+    struct Conflict: LocalizedError {
+        var base: String
+        var errorDescription: String? { "it conflicts with \(base)." }
+    }
+
     /// Squash-merges the pull request into dev and deletes its branch, as the GitHub app (the
     /// owner's gh login without one), through GitHub's REST API: only while GitHub says it's open,
-    /// into dev, with the checked commit as its head.
+    /// into dev, with the checked commit as its head. Throws `Conflict` when GitHub says it conflicts
+    /// with dev, before the merge or as the reason it failed.
     static func merge(_ job: Job, _ check: MacCheck) async throws {
         // Outside any checkout, so gh touches no local branch.
         let away = FileManager.default.temporaryDirectory
@@ -305,8 +313,17 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         let pull = "repos/\(job.repo)/pulls/\(check.pr)"
         let view = try await Shell.ok(["gh", "api", pull], in: away, env: env, as: .app)
         if let why = mismatch(Data(view.utf8), check) { throw Shell.Failure(message: why) }
-        try await Shell.ok(["gh", "api", "-X", "PUT", "\(pull)/merge", "-f", "merge_method=squash", "-f", "sha=\(check.head)"],
-                           in: away, env: env, as: .app)
+        if conflicted(Data(view.utf8)) { throw Conflict(base: into) }
+        do {
+            try await Shell.ok(["gh", "api", "-X", "PUT", "\(pull)/merge", "-f", "merge_method=squash", "-f", "sha=\(check.head)"],
+                               in: away, env: env, as: .app)
+        } catch {
+            // GitHub works out whether it's mergeable after it's asked: by now it may know.
+            if let again = try? await Shell.ok(["gh", "api", pull], in: away, env: env, as: .app), conflicted(Data(again.utf8)) {
+                throw Conflict(base: into)
+            }
+            throw error
+        }
         // Only a branch in this repository; it's merged already, so a branch left over isn't a failed merge.
         guard let branch = headBranch(Data(view.utf8), repo: job.repo) else { return }
         do {
@@ -327,6 +344,13 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         }
         guard (info["head"] as? [String: Any])?["sha"] as? String == check.head else { return "the pull request's head moved since the Mac checked it." }
         return nil
+    }
+
+    /// Whether the pull request as GitHub's REST API has it conflicts with its base:
+    /// `mergeable_state` "dirty", or `mergeable` false. Not while GitHub is still working it out (null).
+    static func conflicted(_ view: Data) -> Bool {
+        guard let info = try? JSONSerialization.jsonObject(with: view) as? [String: Any] else { return false }
+        return info["mergeable_state"] as? String == "dirty" || info["mergeable"] as? Bool == false
     }
 
     /// The pull request's head branch, when it's in `repo` itself rather than a fork.
@@ -385,6 +409,20 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             "Fix what made them fail. The Apple builds may not run here; work from the names and the output, and run `swift test` yourself when it applies."
                 + (apple ? " Once you've committed a fix, `oby-check apple` builds and tests the Apple apps on the user's Mac again and prints what still fails." : "")
                 + " Commit your changes on this branch when they're ready: Oby pushes them to the pull request itself. Don't push, open pull requests or post anything to GitHub.",
+        ]
+        if let check = author.check {
+            lines.append("The work counts as done only when `\(check)` succeeds in this directory; Oby runs it after you finish. Run it yourself first.")
+        }
+        lines.append("Finish with a short summary. Its first line is one sentence the user will see in the notch.")
+        return lines.joined(separator: "\n\n")
+    }
+
+    /// What the author's agent hears for a rebase round: its pull request conflicts with `base`,
+    /// which Oby fetched; the commit to rebase onto. Never merge the base in.
+    static func rebasePrompt(_ author: Job, base: String, onto: String) -> String {
+        var lines = [
+            "Your pull request conflicts with \(base), so Oby can't merge it. Oby fetched \(base) from GitHub for you: origin/\(base) is at \(onto). Don't fetch it yourself (you have no GitHub login here).",
+            "Rebase this branch onto \(onto) (`git rebase \(onto)`) and resolve the conflicts so your work still does what it did, on top of what's new in \(base). Never merge \(base) into this branch. When the rebase is done, the branch's history is the rewritten commits on top of \(onto): Oby pushes it to the pull request itself, replacing the old commits. Don't push, open pull requests or post anything to GitHub.",
         ]
         if let check = author.check {
             lines.append("The work counts as done only when `\(check)` succeeds in this directory; Oby runs it after you finish. Run it yourself first.")
@@ -1259,6 +1297,7 @@ extension Desk {
         replace(job)
         var problem: String?
         var transient = false
+        var conflicted = false
         do {
             let findings = try await scanForMerge(job, check.head)
             if !findings.isEmpty { problem = "Not merged: possible secret in " + MacCheck.places(findings) + "." }
@@ -1271,6 +1310,10 @@ extension Desk {
         if problem == nil {
             do {
                 try await mergePullRequest(latest, check)
+            } catch let conflict as MacCheck.Conflict {
+                // Trying the merge again changes nothing: the branch needs a rebase.
+                problem = "Not merged: \(conflict.localizedDescription)"
+                conflicted = true
             } catch {
                 problem = "Not merged: \(error.localizedDescription)"
                 transient = true
@@ -1281,7 +1324,9 @@ extension Desk {
             latest.mergeError = problem
             latest.macCheck?.transient = transient
             Logger.jobs.error("job \(id, privacy: .public): \(problem, privacy: .public)")
-            return replace(latest)
+            replace(latest)
+            if conflicted { await rebaseConflicted(id) }
+            return
         }
         sent(id, Outgoing(action: .merge, repo: latest.repo, id: latest.published ?? "", branch: latest.branch))
         guard var merged = self.job(id) else { return }
@@ -1290,6 +1335,39 @@ extension Desk {
         merged.pullRequestError = nil
         merged.mergeError = nil
         replace(merged)
+    }
+
+    /// The pull request conflicts with its base: the author's agent rebases its branch onto the base
+    /// as GitHub has it now (fetched here: its sandbox has no GitHub login), as its next round in the
+    /// same session and worktree. Its commits publish by themselves when the round ends, with
+    /// `--force-with-lease` (Engine/Publish.swift), and are reviewed, checked and merged again; one
+    /// more review is allowed for that. Once per commit of the base: the same conflict with the same
+    /// base again needs you, its merge error saying so.
+    func rebaseConflicted(_ id: String) async {
+        guard let author = job(id), !author.isActive, let base = author.base else { return }
+        guard let session = author.session else {
+            var stuck = author
+            stuck.mergeError = (author.mergeError ?? "Not merged: it conflicts with \(base).") + " The job has no session to rebase it."
+            return replace(stuck)
+        }
+        let onto: String
+        do {
+            onto = try await fetchBase(author, base)
+        } catch {
+            guard var latest = job(id), !latest.isActive else { return }
+            latest.mergeError = (latest.mergeError ?? "Not merged: it conflicts with \(base).") + " Oby couldn't fetch \(base) to rebase onto: \(error.localizedDescription)"
+            return replace(latest)
+        }
+        guard var latest = job(id), !latest.isActive, latest.mergeError != nil else { return }
+        // Rebased onto that commit already, and it still conflicts: a person takes it from here.
+        guard latest.rebasedOnto != onto else { return }
+        latest.rebasedOnto = onto
+        latest.extraReviews = max(latest.extraReviews ?? 0, (latest.review?.round ?? 0) + 1 - Review.maxRounds)
+        var again = Review.round(latest)
+        again.step = "Rebasing onto \(base)"
+        replace(again)
+        Logger.jobs.notice("job \(id, privacy: .public): pull request conflicts with \(base, privacy: .public), rebasing onto \(onto, privacy: .public)")
+        run(again, prompt: MacCheck.rebasePrompt(again, base: base, onto: onto), resume: session)
     }
 
     /// The Mac check failed: the failing tests go to the author's agent as its next round, in the
