@@ -285,6 +285,11 @@ final class Phone {
         apply(.job(try await runner.dismiss(id)))
     }
 
+    /// Moves a job to another tool, account or model; the runner picks what's left nil.
+    func move(_ id: String, agent: String?, account: String?, model: String?) async throws {
+        apply(.job(try await runner.move(id, agent: agent, account: account, model: model)))
+    }
+
     /// Clear done: the runner records the time, and Home here and the Mac's island hide the jobs
     /// that finished by then.
     func clear() async throws {

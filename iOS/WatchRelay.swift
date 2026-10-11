@@ -214,6 +214,12 @@ final class WatchRelay: NSObject {
                 let job = try await phone.runner.dismiss(id)
                 _ = await refresh()
                 return [WatchWire.job: try Runner.encoder.encode(job)]
+            case .move:
+                guard let id = message[WatchWire.job] as? String else { return bad }
+                let job = try await phone.runner.move(id, agent: message[WatchWire.agent] as? String, account: message[WatchWire.account] as? String,
+                                                      model: message[WatchWire.model] as? String)
+                _ = await refresh()
+                return [WatchWire.job: try Runner.encoder.encode(job)]
             case .publishAction:
                 guard let id = message[WatchWire.job] as? String else { return bad }
                 return [WatchWire.action: try await phone.runner.publishAction(id)]

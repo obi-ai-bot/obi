@@ -51,6 +51,8 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 /// - `tell`: `job` (its id) and `text`; answered with `job`.
 /// - `stop`: `job` (its id); answered with `job`.
 /// - `dismiss`: `job` (its id); answered with `job`.
+/// - `move`: `job` (its id), with any of `agent`, `account` and `model` (docs/runner-api.md,
+///   `POST /v1/jobs/{id}/move`); answered with `job`.
 /// - `publishAction`: `job` (its id); answered with `action`.
 /// - `publish`: `job` (its id) and `action`; answered with `ok`, then a `published` message.
 ///
@@ -68,7 +70,7 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 ///
 /// Any reply may carry `error` instead of what was asked for.
 nonisolated enum WatchWire {
-    enum Kind: String { case refresh, voice, voiceStart, voiceChunk, voiceEnd, voiceCancel, transcript, plan, dispatch, tell, stop, dismiss, publishAction, publish, planned, published, pairKey, paired, unpaired }
+    enum Kind: String { case refresh, voice, voiceStart, voiceChunk, voiceEnd, voiceCancel, transcript, plan, dispatch, tell, stop, dismiss, move, publishAction, publish, planned, published, pairKey, paired, unpaired }
 
     static let kind = "kind"
     static let ok = "ok"
@@ -93,6 +95,9 @@ nonisolated enum WatchWire {
     static let watch = "watch"
     static let clientID = "clientId"
     static let clientSecret = "clientSecret"
+    static let agent = "agent"
+    static let account = "account"
+    static let model = "model"
 
     /// What WatchConnectivity carries in one message or context, with room to spare.
     static let limit = 60_000
