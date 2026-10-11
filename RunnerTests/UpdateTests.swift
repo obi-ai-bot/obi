@@ -11,7 +11,7 @@ struct UpdateTests {
     final class Fake {
         var head = String(repeating: "a", count: 40)
         var failed: [String]?
-        var calls: [([String], URL)] = []
+        var calls: [(args: [String], directory: URL, env: [String: String?])] = []
         var installs = 0
         var restarts = 0
         var resumes: [String?] = []
@@ -25,7 +25,8 @@ struct UpdateTests {
 
     init() throws {
         folder = try temporaryFolder()
-        desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")),
+                    restarts: Restarts(file: folder.appending(path: "restarts.json")))
         let root = folder.appending(path: "updates")
         let source = root.appending(path: "source")
         try FileManager.default.createDirectory(at: source.appending(path: ".git"), withIntermediateDirectories: true)
@@ -34,11 +35,7 @@ struct UpdateTests {
         let binary = folder.appending(path: "oby-runner")
         try Data("old binary".utf8).write(to: binary)
         updates = Updates(desk: desk, root: root, binary: binary)
-        updates.command = { [fake] args, directory in
-            fake.calls.append((args, directory))
-            if args == fake.failed { throw Shell.Failure(message: "fake failure") }
-            return args.prefix(2) == ["git", "rev-parse"] ? fake.head : ""
-        }
+        updates.command = fakeCommand
         updates.install = { [fake] source, target in
             fake.installs += 1
             try Updates.install(source, target)
@@ -53,15 +50,37 @@ struct UpdateTests {
         }
     }
 
+    var fakeCommand: ([String], URL, [String: String?]) async throws -> String {
+        { [fake] args, directory, env in
+            fake.calls.append((args, directory, env))
+            if args == fake.failed { throw Shell.Failure(message: "fake failure") }
+            return args.prefix(2) == ["git", "rev-parse"] ? fake.head : ""
+        }
+    }
+
+    /// The runner as it starts again on the same folder.
+    func restarted(store: String = "oby.sqlite") -> Desk {
+        let restored = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: store)),
+                            restarts: Restarts(file: folder.appending(path: "restarts.json")))
+        restored.makeAgent = desk.makeAgent
+        restored.prepare = { $0 }
+        return restored
+    }
+
     @Test func buildsThenTestsInOwnCheckoutAndInstallsAtomically() async throws {
         await updates.poll()
-        #expect(fake.calls.map { $0.0 }.suffix(2) == [["swift", "build", "-c", "release"], ["swift", "test"]])
-        #expect(fake.calls.allSatisfy { $0.1 == updates.root.appending(path: "source") })
+        #expect(fake.calls.map(\.args).suffix(2) == [["swift", "build", "-c", "release"], ["swift", "test"]])
+        #expect(fake.calls.allSatisfy { $0.directory == updates.root.appending(path: "source") })
+        // The tests' Obys get a throwaway home, like a Mac check's, and it's gone afterwards.
+        let test = try #require(fake.calls.last)
+        let home = try #require(test.env["OBY_HOME"] ?? nil)
+        #expect(home != Workspace.root.path && home.hasPrefix(FileManager.default.temporaryDirectory.path))
+        #expect(test.env["TEST_RUNNER_OBY_HOME"] == home)
+        #expect(!FileManager.default.fileExists(atPath: home))
         #expect(fake.installs == 1 && fake.restarts == 1)
         #expect(try String(contentsOf: updates.binary, encoding: .utf8) == "new binary")
         let restarted = Updates(desk: desk, root: updates.root, binary: updates.binary)
         #expect(restarted.status.commit == fake.head)
-        #expect(restarted.state.resume.isEmpty)
         await updates.poll()
         #expect(fake.installs == 1)
     }
@@ -76,25 +95,77 @@ struct UpdateTests {
         #expect(desk.inbox.count == 1)
         #expect(desk.inbox.first?.text.contains(step.joined(separator: " ")) == true)
         #expect(!desk.drainingForUpdate && updates.status.waiting == nil)
-        let buildCalls = fake.calls.filter { $0.0 == step }.count
+        let buildCalls = fake.calls.filter { $0.args == step }.count
         let restarted = Updates(desk: desk, root: updates.root, binary: updates.binary)
         restarted.command = updates.command
         await restarted.poll()
-        #expect(fake.calls.filter { $0.0 == step }.count == buildCalls)
+        #expect(fake.calls.filter { $0.args == step }.count == buildCalls)
         fake.head = String(repeating: "b", count: 40)
         fake.failed = nil
         await updates.poll()
         #expect(fake.installs == 1 && fake.restarts == 1)
     }
 
-    func startJob(_ id: String = "updating", rounds: Int? = nil) async throws {
+    @Test func aRestartMidBuildTriesTheSameCommitAgain() async throws {
+        // The runner goes down while `swift build` runs: the runner that starts next reads the journal as it was then.
+        var midBuild: Updates?
+        let build = ["swift", "build", "-c", "release"]
+        updates.command = { [fake, desk, updates] args, directory, env in
+            fake.calls.append((args, directory, env))
+            if args == build, midBuild == nil {
+                midBuild = Updates(desk: desk, root: updates.root, binary: updates.binary)
+                throw CancellationError()
+            }
+            return args.prefix(2) == ["git", "rev-parse"] ? fake.head : ""
+        }
+        await updates.poll()
+        let restarted = try #require(midBuild)
+        restarted.command = fakeCommand
+        restarted.install = updates.install
+        restarted.restart = updates.restart
+        await restarted.poll()
+        #expect(fake.calls.filter { $0.args == build }.count == 2)
+        #expect(fake.installs == 1 && fake.restarts == 1)
+    }
+
+    @Test func fetchFailuresReportOncePerOutage() async throws {
+        let fetch = ["git", "fetch", "origin", "dev"]
+        var date = Date(timeIntervalSince1970: 1_791_582_173)
+        updates.now = { date }
+        fake.failed = fetch
+        await updates.poll()
+        date += 180
+        await updates.poll()
+        // A restart mid-outage doesn't report it again.
+        let restarted = Updates(desk: desk, root: updates.root, binary: updates.binary)
+        restarted.command = fakeCommand
+        restarted.now = { date }
+        await restarted.poll()
+        #expect(desk.inbox.count == 1 && desk.inbox[0].text.contains("fetch dev"))
+        // It clears (dev's head fails to build: another item), then comes back: the inbox hears about it again.
+        fake.failed = ["swift", "build", "-c", "release"]
+        date += 180
+        await updates.poll()
+        fake.failed = fetch
+        date += 180
+        await updates.poll()
+        date += 180
+        await updates.poll()
+        #expect(desk.inbox.filter { $0.text.contains("fetch dev") }.count == 2)
+    }
+
+    /// Dispatches a job, and waits for its agent, which gets its session.
+    @discardableResult
+    func startJob(_ id: String = "updating", rounds: Int? = nil) async throws -> CutOffTests.Agent {
         var work = job
         work.id = id
         work.rounds = rounds
+        let before = fake.agents.count
         desk.dispatch(Desk.Draft(said: "review", reply: "", job: work, guessed: false))
-        for _ in 0..<500 where fake.agents.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
-        let agent = try #require(fake.agents.first)
-        agent.onEvent(.session("own-session"))
+        for _ in 0..<500 where fake.agents.count == before { try await Task.sleep(for: .milliseconds(10)) }
+        let agent = try #require(fake.agents.last)
+        agent.onEvent(.session("\(id)-session"))
+        return agent
     }
 
     @Test func drainsRunningWorkAndDefersNewReviews() async throws {
@@ -111,19 +182,53 @@ struct UpdateTests {
         for _ in 0..<500 where desk.job("updating")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
         updates.deployIfReady()
         #expect(fake.installs == 1 && fake.restarts == 1)
-        #expect(updates.state.resume == ["queued-review"])
+        // The review that waited starts when the new runner does, in a session of its own.
+        let restored = restarted()
+        restored.resumeAfterRestart()
+        for _ in 0..<500 where fake.agents.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(fake.agents.count == 2 && fake.resumes.last == .some(nil))
+        #expect(restored.job(review.id)?.status == .running && restored.job("updating")?.status == .done)
+        restored.quit()
     }
 
-    @Test func nextRoundWaitsDuringDrain() async throws {
+    @Test func theNextRoundAndTheUsersWordsWaitDuringDrainThenFollowTheNotice() async throws {
         try await startJob(rounds: 3)
         await updates.poll()
         fake.agents[0].onEvent(.turnEnded(summary: "GOAL NOT MET: more work", failed: false))
         for _ in 0..<500 where !desk.updateIsIdle { try await Task.sleep(for: .milliseconds(10)) }
         #expect(desk.updateIsIdle)
         #expect(desk.job("updating")?.currentRound == 2)
+        // The user's words join the round's message: neither replaces the other.
+        try desk.message("updating", "Also fix the docs")
         #expect(fake.agents.count == 1)
         updates.deployIfReady()
-        #expect(fake.restarts == 1 && updates.state.resume == ["updating"])
+        #expect(fake.restarts == 1)
+        let restored = restarted()
+        restored.resumeAfterRestart()
+        #expect(fake.resumes.last == "updating-session")
+        #expect(fake.agents.last?.prompt == Restarts.noticeWithMessage + "\n\nKeep going: more work\n\nAlso fix the docs")
+        #expect(restored.job("updating")?.currentRound == 2)
+        restored.quit()
+    }
+
+    @Test func aHandOffToAFinishedJobDuringDrainIsSentAfterTheRestart() async throws {
+        let finished = try await startJob("finished")
+        finished.onEvent(.finished(summary: "Done", failed: false))
+        for _ in 0..<500 where desk.job("finished")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
+        try await startJob()
+        await updates.poll()
+        // Like Oby's review or a failed Mac check handing its findings over: the job runs again, in its session.
+        try desk.message("finished", "Fix what the review found")
+        #expect(fake.agents.count == 2 && desk.job("finished")?.status == .running)
+        fake.agents[1].onEvent(.finished(summary: "Reviewed", failed: false))
+        for _ in 0..<500 where !desk.updateIsIdle { try await Task.sleep(for: .milliseconds(10)) }
+        updates.deployIfReady()
+        #expect(fake.restarts == 1)
+        let restored = restarted()
+        restored.resumeAfterRestart()
+        #expect(fake.agents.count == 3 && fake.resumes.last == "finished-session")
+        #expect(fake.agents.last?.prompt == Restarts.noticeWithMessage + "\n\nFix what the review found")
+        restored.quit()
     }
 
     @Test func drainCapRestartsAndRecoversTheSameSessionWithoutAnotherRound() async throws {
@@ -136,18 +241,17 @@ struct UpdateTests {
         #expect(fake.restarts == 0)
         updates.now = { date.addingTimeInterval(Updates.drainLimit) }
         updates.deployIfReady()
-        #expect(fake.restarts == 1 && updates.state.resume == ["updating"])
-        let restored = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")),
-                            updateRecovery: Updates.recoveryIDs(root: updates.root))
-        restored.makeAgent = desk.makeAgent
-        let newer = Updates(desk: restored, root: updates.root, binary: updates.binary)
-        try newer.recover()
-        #expect(fake.resumes.last == "own-session")
-        #expect(fake.agents.last?.prompt == "the runner restarted for an update: pick up where you left off")
+        #expect(fake.restarts == 1)
+        let restored = restarted()
+        restored.resumeAfterRestart()
+        #expect(fake.resumes.last == "updating-session")
+        // Cut off mid-turn: it hears the notice, then the task it was on.
+        let prompt = try #require(fake.agents.last?.prompt)
+        #expect(prompt.hasPrefix(Restarts.noticeWithMessage + "\n\n") && prompt.contains(job.task))
         #expect(restored.job("updating")?.currentRound == 1)
         #expect(restored.job("updating")?.status == .running)
         #expect(restored.inbox.filter(\.isOpen).isEmpty)
-        try newer.recover()
+        restored.resumeAfterRestart()
         #expect(fake.agents.count == 2)
         restored.quit()
     }
@@ -156,7 +260,7 @@ struct UpdateTests {
         updates.install = { _, _ in throw Shell.Failure(message: "read only") }
         await updates.poll()
         #expect(fake.restarts == 0 && !desk.drainingForUpdate)
-        #expect(updates.state.installed == nil && updates.state.resume.isEmpty)
+        #expect(updates.state.installed == nil && updates.state.failed == fake.head)
         #expect(desk.inbox.first?.text.contains("install") == true)
         #expect(try String(contentsOf: updates.binary, encoding: .utf8) == "old binary")
     }
@@ -191,7 +295,7 @@ struct UpdateTests {
         for _ in 0..<500 where !desk.updateIsIdle { try await Task.sleep(for: .milliseconds(10)) }
         updates.deployIfReady()
         #expect(!desk.drainingForUpdate && fake.agents.count == 2)
-        #expect(fake.resumes.last == "own-session")
+        #expect(fake.resumes.last == "updating-session")
         #expect(fake.agents.last?.prompt == "Keep going: more work")
         desk.quit()
     }
@@ -201,16 +305,15 @@ struct UpdateTests {
         fake.agents[0].onEvent(.turnEnded(summary: "QUESTION: Which option?\nOPTIONS: One | Two", failed: false))
         await updates.poll()
         #expect(fake.restarts == 1)
-        let restored = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")),
-                            updateRecovery: Updates.recoveryIDs(root: updates.root))
-        restored.makeAgent = desk.makeAgent
-        let newer = Updates(desk: restored, root: updates.root, binary: updates.binary)
-        try newer.recover()
+        let restored = restarted()
+        restored.resumeAfterRestart()
         #expect(fake.agents.count == 1)
+        #expect(restored.job("updating")?.status == .interrupted)
         #expect(restored.job("updating")?.question?.text == "Which option?")
         #expect(restored.inbox.contains { $0.kind == .question && $0.isOpen })
         try restored.message("updating", "One")
-        #expect(fake.resumes.last == "own-session" && fake.agents.count == 2)
+        #expect(fake.resumes.last == "updating-session" && fake.agents.count == 2)
+        #expect(fake.agents.last?.prompt == "One")
         restored.quit()
     }
 
@@ -221,10 +324,9 @@ struct UpdateTests {
         queued.status = .queued
         queued.startCommit = fake.head
         store.save(queued)
-        let restored = Desk(accounts: AccountStore(root: folder), store: store, updateRecovery: [queued.id])
-        restored.makeAgent = desk.makeAgent
+        let restored = restarted(store: "queued.sqlite")
         restored.prepare = { _ in throw Shell.Failure(message: "must reuse the existing worktree") }
-        restored.resumeAfterUpdate([queued.id])
+        restored.resumeAfterRestart()
         #expect(restored.job(queued.id)?.status == .running)
         #expect(fake.agents.count == 1 && fake.resumes.count == 1 && fake.resumes[0] == nil)
         restored.quit()
@@ -245,13 +347,11 @@ struct UpdateTests {
         queued.startCommit = fake.head
         queued.created = older.created.addingTimeInterval(1)
         store.save(queued)
-        let restored = Desk(accounts: AccountStore(root: folder), store: store, updateRecovery: [older.id, queued.id])
-        restored.makeAgent = desk.makeAgent
-        restored.resumeAfterUpdate([queued.id, older.id])
+        let restored = restarted(store: "overlap.sqlite")
+        restored.resumeAfterRestart()
         #expect(fake.agents.count == 1 && fake.resumes[0] == "blocker-session")
         #expect(restored.job(queued.id)?.status == .queued)
         #expect(restored.job(queued.id)?.step.contains("Waiting for") == true)
-        restored.drainingForUpdate = true
         restored.quit()
     }
 
@@ -263,42 +363,39 @@ struct UpdateTests {
         author.created = .distantPast
         author.reviewing = "live-review"
         store.save(author)
+        var review = job
+        review.id = "live-review"
+        review.status = .running
+        review.reviewOf = author.id
+        review.session = "review-session"
+        review.created = Date(timeIntervalSince1970: 1_000_000)
+        store.save(review)
+        // Newer than both: the review and its author aren't among the latest 50.
         for number in 0..<60 {
             var filler = job
             filler.id = "filler-\(number)"
             filler.status = .done
             store.save(filler)
         }
-        var review = job
-        review.id = "live-review"
-        review.status = .running
-        review.reviewOf = author.id
-        review.session = "review-session"
-        review.created = .now
-        store.save(review)
-        let restored = Desk(accounts: AccountStore(root: folder), store: store, updateRecovery: [review.id])
-        restored.makeAgent = desk.makeAgent
+        let restored = restarted(store: "review.sqlite")
         #expect(restored.job(author.id)?.reviewing == review.id)
         #expect(restored.job(author.id)?.reviewError == nil)
-        restored.resumeAfterUpdate([review.id])
+        restored.resumeAfterRestart()
         #expect(fake.resumes.last == "review-session")
         #expect(restored.job(author.id)?.reviewing == review.id)
-        restored.drainingForUpdate = true
         restored.quit()
         #expect(restored.job(author.id)?.reviewing == review.id)
     }
 
-    @Test func normalInterruptedJobsAreNotResumed() throws {
-        var stopped = job
-        stopped.id = "ordinary"
-        stopped.status = .interrupted
-        stopped.session = "normal-session"
+    @Test func interruptedJobsAreNotResumed() throws {
+        var interrupted = job
+        interrupted.id = "ordinary"
+        interrupted.status = .interrupted
+        interrupted.session = "normal-session"
         let store = JobStore(url: folder.appending(path: "normal.sqlite"))
-        store.save(stopped)
-        let restored = Desk(accounts: AccountStore(root: folder), store: store)
-        restored.makeAgent = desk.makeAgent
-        let newer = Updates(desk: restored, root: updates.root, binary: updates.binary)
-        try newer.recover()
-        #expect(fake.agents.isEmpty && restored.job(stopped.id)?.status == .interrupted)
+        store.save(interrupted)
+        let restored = restarted(store: "normal.sqlite")
+        restored.resumeAfterRestart()
+        #expect(fake.agents.isEmpty && restored.job(interrupted.id)?.status == .interrupted)
     }
 }

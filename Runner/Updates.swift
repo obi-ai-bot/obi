@@ -2,18 +2,21 @@ import Foundation
 import Crypto
 @testable import ObyEngine
 
-/// Owns a checkout outside every agent sandbox. A failed commit is tried once, even across
-/// restarts; deployment and recovery are journaled before the installed executable changes.
+/// Owns a checkout outside every agent sandbox. A commit that failed is tried once, even across
+/// restarts; one a restart cut short is tried again. Jobs carry on after the restart like after any
+/// other (`Desk.resumeAfterRestart`, Engine/Restarts.swift).
 @MainActor
 final class Updates {
     static let interval: TimeInterval = 180
     static let drainLimit: TimeInterval = 30 * 60
 
     struct State: Codable {
-        var attempted: String?
+        /// The last commit that failed to build, test or install: not tried again.
+        var failed: String?
         var installed: String?
         var digest: String?
-        var resume: [String] = []
+        /// Fetching `dev` fails since the inbox last heard: one item per outage.
+        var outage: Bool?
     }
     struct Status: Encodable {
         var commit: String?
@@ -39,8 +42,8 @@ final class Updates {
     private var candidate: URL?
     var now: () -> Date = Date.init
     /// Fake commands and install/restart in tests. Production commands never enter Agents.sandboxed.
-    var command: ([String], URL) async throws -> String = { args, directory in
-        let result = try await Shell.run(args, in: directory, timeout: 1800)
+    var command: ([String], URL, [String: String?]) async throws -> String = { args, directory, env in
+        let result = try await Shell.run(args, in: directory, env: env, timeout: 1800)
         guard result.status == 0, !result.timedOut else {
             throw Shell.Failure(message: result.timedOut ? "timed out" : "exit \(result.status)")
         }
@@ -60,23 +63,9 @@ final class Updates {
         status = Status(commit: commit, waiting: nil, phase: "idle")
     }
 
-    static func recoveryIDs(root: URL = Workspace.root.appending(path: "updates")) -> Set<String> {
-        guard let data = try? Data(contentsOf: root.appending(path: "state.json")),
-              let state = try? JSONDecoder().decode(State.self, from: data) else { return [] }
-        return Set(state.resume)
-    }
-
     private func save() throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try JSONEncoder().encode(state).write(to: root.appending(path: "state.json"), options: .atomic)
-    }
-
-    /// Called before polling/accounts refresh. Jobs with questions still wait for their answer.
-    func recover() throws {
-        guard !state.resume.isEmpty else { return }
-        desk.resumeAfterUpdate(state.resume)
-        state.resume = []
-        try save()
     }
 
     func poll() async {
@@ -91,23 +80,31 @@ final class Updates {
             let source = root.appending(path: "source")
             if !FileManager.default.fileExists(atPath: source.appending(path: ".git").path) {
                 _ = try await command(["git", "clone", "--single-branch", "--branch", "dev",
-                                       "https://github.com/deskree-inc/oby.git", source.path], root)
+                                       "https://github.com/deskree-inc/oby.git", source.path], root, [:])
             }
-            _ = try await command(["git", "fetch", "origin", "dev"], source)
-            let commit = try await command(["git", "rev-parse", "refs/remotes/origin/dev"], source)
-            guard commit != status.commit, commit != state.attempted else { return }
+            _ = try await command(["git", "fetch", "origin", "dev"], source, [:])
+            let commit = try await command(["git", "rev-parse", "refs/remotes/origin/dev"], source, [:])
+            // The outage is over: the next one reaches the inbox again.
+            if state.outage == true {
+                state.outage = nil
+                try save()
+            }
+            guard commit != status.commit, commit != state.failed else { return }
             head = commit
-            state.attempted = commit
-            try save()
             status.waiting = commit
             status.phase = "building"
             step = "checkout dev"
-            _ = try await command(["git", "reset", "--hard", commit], source)
-            _ = try await command(["git", "clean", "-fd"], source)
+            _ = try await command(["git", "reset", "--hard", commit], source, [:])
+            _ = try await command(["git", "clean", "-fd"], source, [:])
             step = "swift build -c release"
-            _ = try await command(["swift", "build", "-c", "release"], source)
+            _ = try await command(["swift", "build", "-c", "release"], source, [:])
             step = "swift test"
-            _ = try await command(["swift", "test"], source)
+            // Like a Mac check, the tests' Obys get a throwaway home, never the runner's own data.
+            let home = FileManager.default.temporaryDirectory.appending(path: "oby-update-home-\(commit.prefix(12))")
+            try? FileManager.default.removeItem(at: home)
+            try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: home) }
+            _ = try await command(["swift", "test"], source, MacCheck.home(home))
             candidate = source.appending(path: ".build/release/oby-runner")
             desk.drainingForUpdate = true
             drainStarted = now()
@@ -124,7 +121,6 @@ final class Updates {
               desk.updateIsIdle || now().timeIntervalSince(drainStarted) >= Self.drainLimit else { return }
         let previous = state
         do {
-            state.resume = desk.active.map(\.id)
             state.installed = commit
             state.digest = try Self.digest(candidate)
             try save()
@@ -136,11 +132,14 @@ final class Updates {
             return fail("install", head: commit)
         }
         status.phase = "restarting"
+        // The jobs and the messages their agents were about to get are on disk: the new runner picks them up.
         desk.quit()
         restart()
     }
 
     private func fail(_ step: String, head: String?) {
+        if let head { state.failed = head } else if state.outage == true { return } else { state.outage = true }
+        try? save()
         status.waiting = nil
         status.phase = "failed"
         candidate = nil
@@ -148,7 +147,8 @@ final class Updates {
         desk.cancelUpdateDrain()
         // No build output is stored: it can contain credentials. A single durable item identifies
         // the step; polling/network failures are deduplicated too. Mark done after reading.
-        desk.updateFailed(InboxItem(id: "runner-update-\(head ?? "fetch")", kind: .failed, job: "runner-update",
+        let id = head ?? "fetch-\(Int(now().timeIntervalSince1970))"
+        desk.updateFailed(InboxItem(id: "runner-update-\(id)", kind: .failed, job: "runner-update",
                                     title: "Runner update failed", text: "Runner update failed at \(step)\(head.map { " (\($0))" } ?? ""). The old binary is kept. \(head == nil ? "The next poll tries again." : "The next dev commit tries again.")",
                                     options: [], created: now()))
     }
