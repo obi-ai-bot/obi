@@ -6,6 +6,8 @@ nonisolated enum Shell {
         var status: Int32
         var out: Data
         var err: String
+        /// It ran past its timeout and Oby ended it.
+        var timedOut = false
         var text: String { String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
@@ -40,9 +42,20 @@ nonisolated enum Shell {
     }()
 
     /// Runs a tool found on the user's PATH. `env` adds variables, and a nil value removes one.
-    /// After `timeout` seconds it's ended, with all it started (`Halt`).
+    /// After `timeout` seconds it's ended, with all it started (`Halt`), and so it is when the task
+    /// is cancelled.
     static func run(_ arguments: [String], in directory: URL? = nil, input: Data? = nil,
                     env: [String: String?] = [:], timeout: TimeInterval = 600) async throws -> Output {
+        let running = Running()
+        return try await withTaskCancellationHandler {
+            try await run(arguments, in: directory, input: input, env: env, timeout: timeout, running: running)
+        } onCancel: {
+            running.cancel()
+        }
+    }
+
+    private static func run(_ arguments: [String], in directory: URL?, input: Data?, env: [String: String?],
+                            timeout: TimeInterval, running: Running) async throws -> Output {
         try await withCheckedThrowingContinuation { done in
             DispatchQueue.global().async {
                 let process = Process()
@@ -59,8 +72,10 @@ nonisolated enum Shell {
                 // What it leaves running ends with it, so its output ends too (a check's test can't hold it).
                 let group: ProcessGroup
                 do { group = try ProcessGroup.run(process) } catch { done.resume(throwing: error); return }
+                running.started(group)
 
-                let kill = DispatchWorkItem { group.end(after: Halt.dropping) }
+                let expired = Collected()
+                let kill = DispatchWorkItem { expired.data = Data([1]); group.end(after: Halt.dropping) }
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: kill)
                 // Read stderr on its own thread so a chatty tool can't fill the pipe and stall.
                 let err = Collected()
@@ -72,7 +87,8 @@ nonisolated enum Shell {
                 reading.wait()
                 process.waitUntilExit()
                 kill.cancel()
-                done.resume(returning: Output(status: process.terminationStatus, out: out, err: String(decoding: err.data, as: UTF8.self)))
+                done.resume(returning: Output(status: process.terminationStatus, out: out, err: String(decoding: err.data, as: UTF8.self),
+                                              timedOut: !expired.data.isEmpty))
             }
         }
     }
@@ -92,4 +108,26 @@ nonisolated enum Shell {
     }
 
     private final class Collected: @unchecked Sendable { var data = Data() }
+
+    /// The process group a run started, for cancelling it: whichever comes second, the start or
+    /// the cancel, ends it.
+    private final class Running: @unchecked Sendable {
+        private let lock = NSLock()
+        private var group: ProcessGroup?
+        private var cancelled = false
+
+        func started(_ group: ProcessGroup) {
+            lock.withLock {
+                self.group = group
+                if cancelled { group.end(after: Halt.dropping) }
+            }
+        }
+
+        func cancel() {
+            lock.withLock {
+                cancelled = true
+                group?.end(after: Halt.dropping)
+            }
+        }
+    }
 }

@@ -13,6 +13,8 @@ import Testing
 enum Fake {
     static let aws = "AKIA" + "ABCDEFGHIJKLMNOP"
     static let github = "ghp" + "_" + String(repeating: "aB3dE6", count: 6)
+    /// Built from parts, so this file doesn't trip the scan it tests.
+    static func assign(_ key: String, _ value: String) -> String { key + " = \"" + value + "\"" }
     static let password = "password" + " = \"" + "hunter2hunter2hunter2" + "\""
 
     static func base64(_ text: String) -> String { Data(text.utf8).base64EncodedString() }
@@ -70,6 +72,18 @@ struct EncodedSecretTests {
         #expect(Publish.findings(inDiff: diff) == [Publish.Finding(file: "k.yml", line: 1, rule: "GitHub token, base64")])
         let apart = Publish.wrapped(wrapped.enumerated().map { Publish.Line(file: "k.yml", number: $0.offset * 2 + 1, text: $0.element) })
         #expect(apart.isEmpty)
+    }
+
+    @Test func namesOfSecretsAreNotSecrets() {
+        // The keys and vault entry names code uses for secrets: names, not secrets.
+        #expect(Publish.matches("static let " + Fake.assign("client" + "Secret", "client" + "Secret")).isEmpty)
+        #expect(Publish.matches("static let " + Fake.assign("access" + "Token", "watch-access-client-" + "token")).isEmpty)
+        #expect(Publish.matches("case " + Fake.assign("api" + "Key", "api_" + "key")).isEmpty)
+        // Weak passwords, passphrases and real-looking keys still count.
+        #expect(Publish.matches(Fake.assign("pass" + "word", "hunter2" + "hunter2")) == ["password or secret"])
+        #expect(Publish.matches(Fake.assign("pass" + "word", "correct-horse-" + "battery-staple")) == ["password or secret"])
+        #expect(Publish.matches(Fake.assign("api_" + "key", "aB3dE6gH9jK2" + "mN5pQ8sT")) == ["password or secret"])
+        #expect(Publish.matches(Fake.assign("sec" + "ret", "mysecretpass" + "word1")) == ["password or secret"])
     }
 
     @Test func ordinaryCodeIsClean() {
@@ -272,8 +286,8 @@ final class StopAllTests {
         #expect(outgoing.compactMap { $0["action"] as? String } == ["push", "pullRequest"])
         #expect(outgoing.first?["id"] as? String == "1a2b3c4d5e" && outgoing.first?["branch"] as? String == "oby/fix-7-sent")
         // An action this build doesn't know still reads (an older Mac, a newer runner).
-        let future = try JSONDecoder().decode(Outgoing.self, from: Data(#"{"action":"merge","repo":"deskree-inc/oby","id":"https://github.com/deskree-inc/oby/pull/80","date":0}"#.utf8))
-        #expect(future.line == "merge https://github.com/deskree-inc/oby/pull/80")
+        let future = try JSONDecoder().decode(Outgoing.self, from: Data(#"{"action":"release","repo":"deskree-inc/oby","id":"https://github.com/deskree-inc/oby/pull/80","date":0}"#.utf8))
+        #expect(future.line == "release https://github.com/deskree-inc/oby/pull/80")
         // Nothing sent yet: an empty list, never missing.
         #expect((object(try API.encode(JobJSON(job: job)))["outgoing"] as? [Any])?.isEmpty == true)
     }
@@ -329,18 +343,22 @@ struct HaltTests {
         let process = Process()
         process.executableURL = URL(filePath: "/bin/sh")
         process.arguments = ["-c", "trap '' TERM; sleep 30 & echo $! > '\(child.path)'; wait"]
+        // When it really ended, not when this test, waiting on a busy main actor, gets to see it.
+        let ended = Ended()
+        process.terminationHandler = { _ in ended.mark() }
         let group = try ProcessGroup.run(process)
         for _ in 0..<200 where (try? String(contentsOf: child, encoding: .utf8))?.isEmpty ?? true { try await Task.sleep(for: .milliseconds(10)) }
         let sleeper = try #require(Int32((try String(contentsOf: child, encoding: .utf8)).trimmingCharacters(in: .whitespacesAndNewlines)))
         defer { _ = kill(sleeper, SIGKILL) }
 
-        // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt.
-        let start = ContinuousClock.now
+        // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt, which gets the rest of the 2 seconds.
         try await Task.sleep(for: .seconds(Halt.grace))
+        let start = ContinuousClock.now
         group.end(after: Halt.stopping)
-        for _ in 0..<200 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<500 where ended.at == nil { try await Task.sleep(for: .milliseconds(10)) }
+        let end = try #require(ended.at)
         #expect(!process.isRunning)
-        #expect(ContinuousClock.now - start < .seconds(2))
+        #expect(end - start < .seconds(2) - .seconds(Halt.grace))
         // What it started ends too: it's in the agent's process group.
         for _ in 0..<100 where kill(sleeper, 0) == 0 { try await Task.sleep(for: .milliseconds(10)) }
         #expect(kill(sleeper, 0) != 0)
@@ -459,4 +477,12 @@ struct HaltTests {
         #expect(ContinuousClock.now - start < .seconds(10))
         #expect(try await gone(mark))
     }
+}
+
+/// When a process ended, from its termination handler's thread.
+final class Ended: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant: ContinuousClock.Instant?
+    var at: ContinuousClock.Instant? { lock.withLock { instant } }
+    func mark() { lock.withLock { instant = .now } }
 }

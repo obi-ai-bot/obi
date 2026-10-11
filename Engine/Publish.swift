@@ -7,7 +7,8 @@ import LocalAuthentication
 /// review. Guards, then a secret scan, then the approval; nothing is sent before it (only the base is fetched).
 /// A job that ends done with commits publishes by itself (the approval lets everything through);
 /// a job whose publish failed is published by hand, with Touch ID on the Mac or a phone's
-/// signature on the runner. Oby never merges, force-pushes or pushes to main for anyone.
+/// signature on the runner. Oby never force-pushes or pushes to main for anyone; it merges only
+/// into dev, after its review and the Mac check (Engine/Checks.swift).
 nonisolated enum Publish {
     /// The secret scan found something: nothing goes out, and the job fails naming where.
     struct Blocked: LocalizedError {
@@ -285,12 +286,30 @@ nonisolated enum Publish {
     /// ("GitHub token, base64"), and the vault's secrets it holds, first ("vault secret npm-token, hex").
     static func matches(_ text: String, leaks: Leaks = .empty) -> [String] {
         let vault = leaks.found(in: text)
-        let plain = rules.filter { text.contains($0.pattern) }.map(\.name)
+        let plain = rules.filter { breaks($0, text) }.map(\.name)
         guard plain.isEmpty else { return vault + plain }
         var seen = Set<String>()
         return vault + decoded(text).flatMap { how, text in
-            rules.filter { text.contains($0.pattern) }.map { "\($0.name), \(how)" }
+            rules.filter { breaks($0, text) }.map { "\($0.name), \(how)" }
         }.filter { seen.insert($0).inserted }
+    }
+
+    /// Whether `text` breaks `rule`. A "password or secret" assignment counts unless its value is
+    /// only the name of one: words in camelCase or joined by - _ . with no digits, one of which says
+    /// what it names ("clientSecret", "watch-access-client-token"), as code's keys and vault entry
+    /// names are. A weak password ("hunter2hunter2"), a passphrase ("correct-horse-battery-staple")
+    /// and real keys still count. Every other rule counts on its own.
+    static func breaks(_ rule: (name: String, pattern: Regex<Substring>), _ text: String) -> Bool {
+        guard rule.name == "password or secret" else { return text.contains(rule.pattern) }
+        return text.matches(of: rule.pattern).contains { !onlyNames(String($0.output)) }
+    }
+
+    /// The quoted value of a "password or secret" match is a name for one, not one.
+    static func onlyNames(_ assignment: String) -> Bool {
+        guard let value = assignment.split(whereSeparator: { $0 == "\"" || $0 == "'" }).last.map(String.init),
+              value.wholeMatch(of: /[a-z]+(?:[A-Z][a-z]+)+/) != nil || value.wholeMatch(of: /[a-z]+(?:[-_.][a-z]+)+/) != nil else { return false }
+        let lower = value.lowercased()
+        return ["secret", "token", "password", "passwd", "key", "client", "vault", "entry", "access", "name", "id"].contains { lower.contains($0) }
     }
 
     /// The text's encoded runs, decoded: URL-encoding, base64 (standard or URL-safe) and hex, and
@@ -636,7 +655,7 @@ nonisolated enum Publish {
             \(check)
             - Secret scan: clean.\(job.issue.map { "\n\nCloses #\($0)" } ?? "")
 
-            by Oby: Oby opened this pull request after the check passed and the secret scan was clean. A person reviews it before it merges.
+            by Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
             """
     }
 

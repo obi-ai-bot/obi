@@ -88,6 +88,6 @@ nonisolated enum WatchWire {
     static let voiceSampleRate = 16_000.0
     static let voiceSampleBytes = 2
     static let chunkLimit = 32_000
-    static let voiceSeconds = 15
+    static let voiceSeconds = 60
 }
 #endif

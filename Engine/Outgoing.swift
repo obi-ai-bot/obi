@@ -4,7 +4,7 @@ import OSLog
 #endif
 
 /// Something Oby sent out for a job: a push, a pull request opened or brought up to date, a
-/// comment. The job's report lists them, oldest first, and the log keeps one line each. Ids only
+/// comment, a merge. The job's report lists them, oldest first, and the log keeps one line each. Ids only
 /// (the commit, the URL), never what was sent.
 nonisolated struct Outgoing: Codable, Equatable, Sendable {
     /// What went out. A struct rather than an enum, so an app built before a new action still reads the job.
@@ -14,13 +14,14 @@ nonisolated struct Outgoing: Codable, Equatable, Sendable {
         static let pullRequest = Action(rawValue: "pullRequest")
         static let pullRequestEdit = Action(rawValue: "pullRequestEdit")
         static let comment = Action(rawValue: "comment")
+        static let merge = Action(rawValue: "merge")
     }
 
     var action: Action
     var repo: String
     /// The commit pushed, or the pull request's or the comment's URL.
     var id: String
-    /// The branch a push went to; nil for the rest.
+    /// The branch a push went to, or the one a merge deleted; nil for the rest.
     var branch: String?
     var date = Date.now
     /// Opaque issue-sync idempotency marker; never the comment or question itself.
@@ -33,6 +34,7 @@ nonisolated struct Outgoing: Codable, Equatable, Sendable {
         case .pullRequest: "Opened pull request \(id)"
         case .pullRequestEdit: "Updated the description of \(id)"
         case .comment: "Commented \(id)"
+        case .merge: "Squash-merged \(id) into \(MacCheck.into) and deleted \(branch ?? "its branch")"
         default: "\(action.rawValue) \(id)"
         }
     }

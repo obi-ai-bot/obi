@@ -304,7 +304,7 @@ struct PullRequestTextTests {
         #expect(body.contains("- Check: ` swift test ` passed.\n- Secret scan: clean."))
         #expect(body.contains("\n\nCloses #75\n\n"))
         #expect(!body.contains("Part of #75"))
-        #expect(body.hasSuffix("by Oby: Oby opened this pull request after the check passed and the secret scan was clean. A person reviews it before it merges."))
+        #expect(body.hasSuffix("by Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit."))
         job.check = nil
         job.issue = nil
         job.summaries = nil

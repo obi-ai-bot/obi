@@ -97,7 +97,12 @@ extension Job {
                 switch pullRequest?.reviewDecision {
                 case .approved:
                     set(.review, .done, detail: "Approved")
-                    set(.merged, .current, detail: "Waiting to merge")
+                    if review?.verdict == .approved {
+                        let merge = mergeProgress
+                        set(.merged, merge.state, detail: merge.detail, reason: merge.reason)
+                    } else {
+                        set(.merged, .current, detail: "Waiting to merge")
+                    }
                 case .changesRequested:
                     set(.review, .failed, detail: "Changes requested", reason: "The reviewer requested changes.")
                 case .waiting, nil:
@@ -106,7 +111,9 @@ extension Job {
                         set(.review, .current, detail: "Oby is reviewing")
                     } else if let review, review.verdict == .approved {
                         set(.review, .done, detail: "Approved by Oby")
-                        set(.merged, .current, detail: "Ready to merge")
+                        // The Mac checks it, then Oby merges it (Engine/Checks.swift).
+                        let merge = mergeProgress
+                        set(.merged, merge.state, detail: merge.detail, reason: merge.reason)
                     } else if let review {
                         set(.review, .failed, detail: "Changes requested",
                             reason: review.stopsHere ? Review.stopLine : "Oby requested changes.")

@@ -12,6 +12,8 @@ final class IslandModel {
     let feed: RunnerFeed
     /// What you say while you hold fn.
     let voice = Voice()
+    /// Oby's reply, spoken, when you talked (Mac/Speech.swift).
+    let speaker = Speaker()
     /// What goes with the next request: screenshots, what you copied.
     let tray = Tray()
     var state: IslandState = .compact
@@ -96,6 +98,8 @@ final class IslandController {
     /// Every repository the user pushed to lately: names the voice listens for. Fetched when you
     /// first talk, and again each time until it works.
     private var repos: [String] = []
+    /// The last words sent were hands-free (fn + Space): once Oby has spoken its reply, it listens again.
+    private var handsFreeAsk = false
 
     init() { desk.issueSync.enabled = true; model = IslandModel(desk: desk, feed: feed) }
 
@@ -113,6 +117,25 @@ final class IslandController {
             if item.kind == .question, item.isOpen, item.later == nil { self?.notify("Question: \(item.title)", happy: false) }
         }
         feed.onNotice = { [weak self] job, notice in self?.notify(RunnerFeed.title(notice, for: job), happy: notice == .ready && job.publishError == nil) }
+        // The brain's briefing takes in the runner's jobs, inbox and accounts too, and "stop" reaches its jobs.
+        desk.elsewhere = { [weak self] in
+            guard let self else { return [] }
+            return [Briefing.Place(name: feed.name, jobs: feed.jobs, inbox: feed.inbox, accounts: feed.accounts)]
+        }
+        desk.stopElsewhere = { [weak self] ids in
+            guard let self else { return [:] }
+            var failed: [String: String] = [:]
+            for id in ids {
+                do {
+                    guard let runner = feed.runner else { throw RunnerError(message: "\(feed.name) isn't set up.") }
+                    feed.apply(try await runner.stop(id))
+                } catch {
+                    failed[id] = error.localizedDescription
+                }
+            }
+            return failed
+        }
+        desk.onReply = { [weak self] text, spoken in self?.replied(text, spoken: spoken) }
         feed.start()
         Task { await desk.refresh() }
         talkKey.on = { [weak self] in self?.talk($0) }
@@ -182,26 +205,53 @@ final class IslandController {
     private func talk(_ event: TalkKey.Event) {
         let voice = model.voice
         switch event {
+        case .press:
+            // Whatever Oby was saying, you come first.
+            model.speaker.stop()
         case .start(let key):
             noticeTask?.cancel()
             model.notice = nil
-            // Your own jobs' repositories first: they're the ones you're likeliest to name.
-            voice.start(key: key, context: Voice.context(repos: desk.jobs.map(\.repo) + repos))
-            if repos.isEmpty { Task { repos = (try? await Workspace.knownRepos()) ?? [] } }
-            set(.listening)
+            listen(key: key)
         case .handsFree:
             voice.handsFree = true
         case .send:
             let key = voice.key
+            handsFreeAsk = voice.handsFree
             voice.finish { [weak self] said in self?.heard(said, key: key) }
         case .cancel:
+            handsFreeAsk = false
             voice.cancel()
             stopListening()
         }
     }
 
+    private func listen(key: TalkKey.Key) {
+        // Your own jobs' repositories first: they're the ones you're likeliest to name.
+        model.voice.start(key: key, context: Voice.context(repos: desk.jobs.map(\.repo) + repos))
+        if repos.isEmpty { Task { repos = (try? await Workspace.knownRepos()) ?? [] } }
+        set(.listening)
+    }
+
+    /// Oby answered what you said: it speaks the reply (Settings › General), and in hands-free
+    /// mode listens again for yours once it has finished.
+    private func replied(_ text: String, spoken: Bool) {
+        guard spoken, Speaker.on else { return }
+        let again = handsFreeAsk
+        let key = model.voice.key
+        model.speaker.speak(text) { [weak self] heard in
+            guard let self, heard, again, model.state == .open, model.voice.phase == .idle else { return }
+            talkKey.listenAgain()
+            listen(key: key)
+            model.voice.handsFree = true
+        }
+    }
+
     private func heard(_ said: String, key: TalkKey.Key) {
-        if !said.isEmpty { desk.ask(said) }
+        // A bare "stop" or "never mind" ends the turn and the hands-free listening, and no job
+        // with it: Desk.ask sends nothing to the brain for it, so nothing is spoken and nothing
+        // listens again.
+        if Conversation.cancels(said) { handsFreeAsk = false }
+        if !said.isEmpty { desk.ask(said, spoken: true) }
         // Talking again already: that's what the island shows.
         guard model.voice.phase == .idle, model.state == .listening else { return }
         if said.isEmpty {
@@ -430,8 +480,9 @@ private struct Waveform: View {
     }
 }
 
-/// The open island: what Oby is up to, every job the iPhone lists (the runner's and this Mac's, in
-/// the same groups), one job's screen when you click it, and the field where you type a task.
+/// The open island: what Oby is up to, the conversation (your words and Oby's replies, newest at
+/// the bottom), every job the iPhone lists (the runner's and this Mac's, in the same groups), one
+/// job's screen when you click it, and the field where you type.
 private struct OpenIsland: View {
     let model: IslandModel
     let characterWidth: CGFloat
@@ -447,11 +498,18 @@ private struct OpenIsland: View {
     @State private var contentHeight: CGFloat = 0
 
     /// The list or a job grows the island up to here, then scrolls: the panel is 760 points tall.
+    /// With the conversation above it, the list gets less.
     private static let maxHeight: CGFloat = 420
+    private static let maxHeightWithThread: CGFloat = 260
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
     private var tray: Tray { model.tray }
+
+    /// Oby is thinking about what you just said.
+    private var thinking: Bool { if case .thinking = desk.talk { true } else { false } }
+    /// The conversation shows once there's one.
+    private var threaded: Bool { !desk.turns.isEmpty || thinking }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -476,6 +534,12 @@ private struct OpenIsland: View {
                 .accessibilityLabel("Close")
             }
             .frame(minHeight: 92, alignment: .top)
+
+            // With a job's screen open the thread steps aside, unless Oby is thinking: then its
+            // bubble and × stay in sight.
+            if threaded, selected == nil || thinking {
+                ConversationThread(desk: desk, speaker: model.speaker, onCancel: { desk.cancel() })
+            }
 
             switch desk.talk {
             case .plan(let drafts) where drafts.count == 1:
@@ -527,8 +591,10 @@ private struct OpenIsland: View {
         .padding(.top, top + 10)
         .padding(.horizontal, 22)
         .padding(.bottom, 22)
-        // Escape leaves a job's screen first, then closes the island.
-        .onExitCommand { if selected != nil { selected = nil } else { onClose() } }
+        // Escape cancels the turn Oby is thinking about first, then leaves a job's screen, then closes the island.
+        .onExitCommand {
+            if thinking { desk.cancel() } else if selected != nil { selected = nil } else { onClose() }
+        }
         .onAppear { typing = true }
         // A notification opened the island on a runner's job: its screen opens.
         .onChange(of: model.focus, initial: true) { if let focus = model.focus { selected = Row.id(focus, local: false) } }
@@ -572,7 +638,7 @@ private struct OpenIsland: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
         }
-        .frame(height: min(contentHeight, Self.maxHeight))
+        .frame(height: min(contentHeight, threaded && (selected == nil || thinking) ? Self.maxHeightWithThread : Self.maxHeight))
     }
 
     /// The jobs under their groups' headings, as Home shows them on the iPhone.
@@ -634,25 +700,18 @@ private struct OpenIsland: View {
         }
     }
 
+    /// The jobs in one line, as the iPhone's Home and the closed notch say it (Shared/JobList.swift).
+    /// What you said and what Oby answered are in the thread below.
     @ViewBuilder private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
+            Text(model.summary).font(.system(size: 19, weight: .semibold))
             switch desk.talk {
-            case .thinking(let said):
-                Text("Thinking…").font(.system(size: 19, weight: .semibold))
-                Text("You said “\(said)”").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
-            case .plan(let drafts):
-                Text("You said “\(drafts[0].said)”").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
-                Text(drafts[0].reply).font(.system(size: 19, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
-            case .reply(let reply):
-                Text(reply).font(.system(size: 17, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
-                Text("Type a task below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
-            case .question(_, let question):
-                Text(question.text).font(.system(size: 17, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+            case .question:
                 Text("Pick one, or type below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
-            case .none:
-                // The same line as the iPhone's Home and the closed notch (Shared/JobList.swift).
-                Text(model.summary).font(.system(size: 19, weight: .semibold))
-                Text("Type a task below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+            case .thinking:
+                Text("Esc cancels. Type to ask something else.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+            default:
+                Text(threaded ? "Ask about the work, or type a task." : "Type a task below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
                 // First launch was skipped or Accessibility refused: fn does nothing until it's allowed.
                 // macOS doesn't say when it is, so look again every couple of seconds while open.
                 TimelineView(.periodic(from: .now, by: 2)) { _ in
@@ -721,8 +780,8 @@ private struct OpenIsland: View {
 
     private func send() {
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        // The chips stay until Dispatch, which hands them to the jobs.
-        desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text)
+        // The chips stay until Dispatch, which hands them to the jobs. The thread shows your words alone.
+        desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text, shown: text)
         text = ""
     }
 
@@ -737,6 +796,78 @@ private struct OpenIsland: View {
             await tray.screenshot()
             NSApp.windows.first { $0 is NotchPanel }?.makeKey()
             typing = true
+        }
+    }
+}
+
+/// The conversation: your words on the right, Oby's replies on the left, newest at the bottom,
+/// the last 50 kept across launches. While Oby thinks, its bubble says so, with × (or Esc) to
+/// cancel; typing something else replaces the turn.
+private struct ConversationThread: View {
+    let desk: Desk
+    let speaker: Speaker
+    let onCancel: () -> Void
+    @State private var height: CGFloat = 0
+
+    /// The thread grows up to here, then scrolls, pinned to the newest turn.
+    private static let maxHeight: CGFloat = 200
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(desk.turns) { turn in bubble(turn) }
+                    if case .thinking = desk.talk { pending }
+                    if speaker.speaking {
+                        Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
+                            .padding(.leading, 4)
+                    }
+                    Color.clear.frame(height: 1).id("end")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+            }
+            .frame(height: min(height, Self.maxHeight))
+            .defaultScrollAnchor(.bottom)
+            .onChange(of: desk.turns.count) { withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
+            .onChange(of: desk.talk) { proxy.scrollTo("end", anchor: .bottom) }
+        }
+        .accessibilityLabel("Conversation")
+    }
+
+    private func bubble(_ turn: Turn) -> some View {
+        let yours = turn.who == .user
+        return HStack {
+            if yours { Spacer(minLength: 60) }
+            Text(turn.text)
+                .font(.system(size: 14, weight: yours ? .regular : .medium))
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Color.white.opacity(yours ? 0.16 : 0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            if !yours { Spacer(minLength: 60) }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(yours ? "You" : "Oby"): \(turn.text)")
+    }
+
+    /// Oby's bubble while it thinks: never left there, with a way out in sight.
+    private var pending: some View {
+        HStack {
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small).tint(.white)
+                Text("Thinking…").font(.system(size: 14, weight: .medium)).foregroundStyle(.white.opacity(0.75))
+                Button(action: onCancel) {
+                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
+                        .frame(width: 20, height: 20).background(.white.opacity(0.14), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Cancel (Esc)")
+                .accessibilityLabel("Cancel")
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            Spacer(minLength: 60)
         }
     }
 }
