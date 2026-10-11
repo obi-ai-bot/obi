@@ -174,6 +174,12 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
 
     /// "Moved from Codex · Deskree to Claude Code · Personal": its latest move, or nil.
     var movedLine: String? { moves?.last.map { "Moved from \($0.from) to \($0.to)" } }
+    /// How much the job asks the user (Engine/Permissions.swift): Settings › Permissions' default
+    /// when it was dispatched, or what the user changed it to. Nil on older jobs, which are `bypass`.
+    var mode: PermissionMode?
+    /// The command or edit its agent waits for the user's OK on, or nil. The job stays running,
+    /// its agent idle and its clocks paused; a runner restart leaves it interrupted, keeping it.
+    var permission: Permission?
 
     var maxRounds: Int { rounds ?? 1 }
     /// How many times in a day Oby rebases a pull request that conflicts with its base by itself
@@ -183,6 +189,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var reviewCap: Int { Review.maxRounds + (extraReviews ?? 0) }
     /// Its agent asked the user something and waits for the answer: the inbox has it.
     var waitsForAnswer: Bool { question != nil && dismissed == nil && status != .stopped }
+    /// Its agent waits for the user's OK on a command or an edit: the inbox has it.
+    var waitsForPermission: Bool { permission != nil && dismissed == nil && status != .stopped }
+    var currentMode: PermissionMode { mode ?? .bypass }
     var currentRound: Int { round ?? 1 }
     /// It keeps going after a turn: there's a check to pass or more than one round.
     var loops: Bool { check != nil || maxRounds > 1 }
@@ -372,6 +381,9 @@ nonisolated enum AgentEvent: Equatable, Sendable {
     case cutOff(summary: String)
     /// Oby answered a permission prompt: nil when it allowed the action, else why it denied it.
     case permission(denied: String?)
+    /// A prompt Policy's fixed rules let through: the job's mode and the user's rules decide, and
+    /// the answer goes back with `AgentRun.answer` (now, or once the user answers).
+    case ask(ToolCall)
     /// Claude Code used up its `--max-turns` in this round without finishing.
     case maxTurns
     /// Whether Tetrix's MCP server is connected, or a call to one of its tools (Engine/TetrixUse.swift).
@@ -397,11 +409,18 @@ protocol AgentRun: AnyObject {
     func kill()
     /// Returns once its process has ended, or right away when it never started.
     func ended() async
+    /// Answers a prompt it asked about (`AgentEvent.ask`).
+    func answer(_ call: ToolCall, _ answer: ToolAnswer)
+    /// The job's mode changed: Claude Code's session switches in or out of plan, Codex's next turn
+    /// runs with the mode's sandbox and approvals.
+    func setMode(_ mode: PermissionMode)
 }
 
 extension AgentRun {
     /// One without a process of its own (a test's) has nothing to wait for.
     func ended() async {}
+    func answer(_ call: ToolCall, _ answer: ToolAnswer) {}
+    func setMode(_ mode: PermissionMode) {}
 }
 
 /// Ending an agent with everything it started: SIGTERM to its process group, then SIGKILL.
@@ -586,6 +605,12 @@ final class ClaudeAgent: AgentRun {
     var model: String?
     /// The most turns it takes for one message (`JobLimits.maxTurns`), or nil for no limit.
     var maxTurns: Int?
+    /// The job's mode: Plan starts Claude Code in its own plan mode; every other mode starts it in
+    /// its default mode, which asks Oby about every command and edit. Never its bypass mode.
+    var mode = PermissionMode.bypass
+    /// The prompts waiting for an answer, by request id: their input goes back with an allow, and
+    /// their suggestions with an always.
+    private var pending: [String: (input: [String: Any], suggestions: [[String: Any]])] = [:]
     private var onEvent: (AgentEvent) -> Void = { _ in }
     private var finished = false
     /// The latest turn's result. The job ends when Claude Code exits, not when a turn ends.
@@ -607,7 +632,8 @@ final class ClaudeAgent: AgentRun {
     }
 
     /// The command line and environment Claude Code starts with.
-    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil) throws -> (arguments: [String], environment: [String: String]) {
+    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil,
+                                   mode: PermissionMode = .bypass) throws -> (arguments: [String], environment: [String: String]) {
         // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
         // mcpServers (Tetrix) stay; only its claude.ai connectors are off.
         let arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
@@ -616,6 +642,7 @@ final class ClaudeAgent: AgentRun {
                              "--setting-sources", "user",
                              "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
                             + (maxTurns.map { ["--max-turns", String($0)] } ?? [])
+                            + (mode == .plan ? ["--permission-mode", "plan"] : [])
                             + (resume.map { ["--resume", $0] } ?? []),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude")
         let environment = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 }
@@ -626,7 +653,7 @@ final class ClaudeAgent: AgentRun {
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
         self.onEvent = onEvent
         process.executableURL = URL(filePath: "/usr/bin/env")
-        let launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns)
+        let launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mode: mode)
         process.arguments = launch.arguments
         process.environment = launch.environment
         process.currentDirectoryURL = worktree
@@ -721,14 +748,15 @@ final class ClaudeAgent: AgentRun {
             return
         }
         if let (id, tool, toolInput) = StreamJSON.permission(message) {
-            let denied = Policy.deny(tool: tool, input: toolInput, worktree: worktree)
-            if let denied {
+            // Policy's fixed denials first, in every mode; then the job's mode and the user's rules (Desk).
+            if let denied = Policy.deny(tool: tool, input: toolInput, worktree: worktree) {
                 Logger.jobs.notice("denied \(tool, privacy: .public): \(denied, privacy: .public)")
                 answer(id, ["behavior": "deny", "message": denied])
-            } else {
-                answer(id, ["behavior": "allow", "updatedInput": toolInput])
+                onEvent(.permission(denied: denied))
+                return
             }
-            onEvent(.permission(denied: denied))
+            pending[id] = (toolInput, StreamJSON.suggestions(message))
+            onEvent(.ask(ToolCall.claude(id, tool: tool, input: toolInput)))
             return
         }
         for event in StreamJSON.events(message) {
@@ -754,6 +782,21 @@ final class ClaudeAgent: AgentRun {
         guard !finished else { return }
         finished = true
         onEvent(event)
+    }
+
+    func answer(_ call: ToolCall, _ decision: ToolAnswer) {
+        guard let (input, suggestions) = pending.removeValue(forKey: call.request) else { return }
+        answer(call.request, StreamJSON.answer(decision, tool: call.tool, input: input, suggestions: suggestions))
+    }
+
+    /// Claude Code's own mode follows the job's: plan, or its default mode, where every command and
+    /// edit comes to Oby.
+    func setMode(_ mode: PermissionMode) {
+        guard mode != self.mode else { return }
+        self.mode = mode
+        guard process.isRunning else { return }
+        send(["type": "control_request", "request_id": UUID().uuidString,
+              "request": ["subtype": "set_permission_mode", "mode": StreamJSON.claudeMode(mode)]])
     }
 
     private func answer(_ id: String, _ response: [String: Any]) {
@@ -812,6 +855,34 @@ nonisolated enum StreamJSON {
               let request = message["request"] as? [String: Any], request["subtype"] as? String == "can_use_tool",
               let tool = request["tool_name"] as? String else { return nil }
         return (id, tool, request["input"] as? [String: Any] ?? [:])
+    }
+
+    /// The rules a permission prompt suggests (`permission_suggestions`), for "always".
+    static func suggestions(_ message: [String: Any]) -> [[String: Any]] {
+        ((message["request"] as? [String: Any])?["permission_suggestions"] as? [[String: Any]]) ?? []
+    }
+
+    /// Claude Code's mode for the job's: its plan mode, or its default one. Never `bypassPermissions`
+    /// or `acceptEdits`: Oby answers every prompt, so its fixed rules hold.
+    static func claudeMode(_ mode: PermissionMode) -> String { mode == .plan ? "plan" : "default" }
+
+    /// The `control_response` for Oby's answer. An always passes on the prompt's suggested rules
+    /// for this session only (`updatedPermissions`), and never a mode; approving a plan
+    /// (ExitPlanMode) leaves plan mode for the default one.
+    static func answer(_ answer: ToolAnswer, tool: String, input: [String: Any], suggestions: [[String: Any]]) -> [String: Any] {
+        switch answer {
+        case .deny(let message):
+            return ["behavior": "deny", "message": message]
+        case .allow where tool == "ExitPlanMode", .always where tool == "ExitPlanMode":
+            return ["behavior": "allow", "updatedInput": input,
+                    "updatedPermissions": [["type": "setMode", "mode": "default", "destination": "session"]]]
+        case .allow:
+            return ["behavior": "allow", "updatedInput": input]
+        case .always:
+            let rules = suggestions.filter { $0["type"] as? String == "addRules" && ($0["behavior"] as? String ?? "allow") == "allow" }
+                .map { $0.merging(["destination": "session"]) { $1 } }
+            return rules.isEmpty ? ["behavior": "allow", "updatedInput": input] : ["behavior": "allow", "updatedInput": input, "updatedPermissions": rules]
+        }
     }
 
     static func events(_ message: [String: Any]) -> [AgentEvent] {
@@ -980,8 +1051,9 @@ nonisolated enum Limits {
     }
 }
 
-/// Oby's answers to an agent's permission prompts until F3 brings them to the notch: work
-/// inside the job's worktree is allowed, publishing is not (only Oby publishes).
+/// Oby's fixed answers to an agent's permission prompts, in every mode (Bypass too): work inside the
+/// job's worktree may go on, publishing never does (only Oby publishes). What passes, the job's
+/// mode and the user's rules decide (Engine/Permissions.swift).
 nonisolated enum Policy {
     // ponytail: a pattern deny-list is leaky on purpose-built commands; the real fences are that
     // the agent has no GitHub login and Oby's clone can't push. F3 asks the user instead.
@@ -1362,6 +1434,7 @@ nonisolated enum Prompts {
         }
         lines.append(foreground)
         if apple, let line = AppleCheck.agentLine(job) { lines.append(line) }
+        if job.mode == .plan { lines.append(planFirst) }
         lines.append("Finish with a short summary. Its first line is one sentence the user will see in the notch.")
         if job.issue != nil { lines.append(IssueSync.coverageInstruction) }
         lines.append(Inbox.howToAsk)
@@ -1391,6 +1464,8 @@ nonisolated enum Prompts {
         return "Other jobs are changing the same files right now, each on its own branch:\n\n" + named.joined(separator: "\n")
             + "\n\nKeep your change to what the task needs: don't move, rename or reformat code you don't have to. Whichever merges first, Oby rebases the other onto it, so expect a rebase."
     }
+    /// What an agent in Plan mode is told: this turn only reads, and ends with the plan.
+    static let planFirst = "Plan first: in this turn only read (no edits, no commits, no commands that change anything). When you know what you'd do, present your plan (with ExitPlanMode if you have it, otherwise as your summary, in Markdown) and stop: the user approves it, and picks how you go on, before you change anything."
 
     /// What an agent hears when it takes a job over from `previous` (like "Codex · Deskree"), whose
     /// account hit its limit mid-round: the task as the first agent heard it, what earlier rounds
@@ -1468,6 +1543,8 @@ nonisolated final class JobStore {
         // The inbox (Engine/Inbox.swift) and the conversation (Engine/Conversation.swift), the same way.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS conversation (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
+        // Settings › Permissions and the saved rules (Engine/Permissions.swift).
+        createPermissionTables()
     }
 
     deinit { sqlite3_close(db) }

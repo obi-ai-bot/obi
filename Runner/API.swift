@@ -70,6 +70,12 @@ final class API {
         router.post("v1/jobs/:id/start-when") { request, context in
             try await self.startWhen(context.parameters.require("id"), try await Self.decode(StartWhenRequest.self, from: request))
         }
+        router.post("v1/jobs/:id/mode") { request, context in
+            try await self.mode(context.parameters.require("id"), try await Self.decode(ModeJSON.self, from: request))
+        }
+        router.post("v1/jobs/:id/permission") { request, context in
+            try await self.permission(context.parameters.require("id"), try await Self.decode(PermissionAnswer.self, from: request))
+        }
         router.post("v1/jobs/:id/messages") { request, context in
             try await self.message(context.parameters.require("id"), try await Self.decode(NewMessage.self, from: request))
         }
@@ -108,6 +114,10 @@ final class API {
         router.get("v1/settings/models/options") { _, _ in await Self.options() }
         router.get("v1/settings/jobs") { _, _ in await self.jobSettings() }
         router.put("v1/settings/jobs") { request, _ in try await self.change(try await Self.decode(JobSettings.self, from: request)) }
+        router.get("v1/settings/permissions") { _, _ in await self.permissionSettings() }
+        router.put("v1/settings/permissions") { request, _ in try await self.changePermissions(try await Self.decode(ModeJSON.self, from: request)) }
+        router.get("v1/permissions/rules") { _, _ in await self.rules() }
+        router.delete("v1/permissions/rules/:id") { _, context in try await self.forget(context.parameters.require("id")) }
         return router
     }
 
@@ -116,7 +126,8 @@ final class API {
     func status() -> Response {
         Self.json(Status(runner: .init(version: Self.version, host: ProcessInfo.processInfo.hostName, update: updates?.status),
                          accounts: accounts, models: .current, maxRunning: desk.maxRunning, running: desk.runningCount, clearedAt: cleared.at,
-                         github: (GitHubApp.inUse ? GitHubActor.app : .owner).rawValue, checks: GitHubApp.checks))
+                         github: (GitHubApp.inUse ? GitHubActor.app : .owner).rawValue, checks: GitHubApp.checks,
+                         permissions: ModeJSON(mode: desk.defaultMode.rawValue)))
     }
 
     /// Clear done, on the iPhone or the Mac: the runner records now, answers it, and tells every
@@ -170,9 +181,10 @@ final class API {
 
     func dispatch(_ request: DispatchRequest) throws -> Response {
         do {
+            let mode = try request.job.mode.map { try Self.mode($0) }
             let job = try desk.dispatch(request.job.id, branch: request.job.branch, account: request.job.account,
                                         rounds: request.job.rounds, check: request.job.check, model: request.job.model,
-                                        files: request.job.files, startWhen: request.job.startWhen)
+                                        files: request.job.files, startWhen: request.job.startWhen, mode: mode)
             return Self.json(JobJSON(job: job), status: .created)
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
@@ -275,6 +287,63 @@ final class API {
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
         return Self.json(JobJSON(job: try known(id)))
+    }
+
+    /// The job's mode changes: a waiting permission the new mode allows is answered, and a plan
+    /// waiting for approval is approved in it.
+    func mode(_ id: String, _ body: ModeJSON) throws -> Response {
+        _ = try known(id)
+        let mode = try Self.mode(body.mode)
+        do {
+            try desk.setMode(id, mode)
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+        return Self.json(JobJSON(job: try known(id)))
+    }
+
+    /// The user answers the job's waiting permission: allow, always (a rule for the repository) or deny.
+    func permission(_ id: String, _ answer: PermissionAnswer) throws -> Response {
+        let job = try known(id)
+        guard let decision = PermissionDecision(rawValue: answer.decision) else {
+            throw APIError(.unprocessableContent, "decision is allow, always or deny.")
+        }
+        guard job.permission?.id == answer.id else { throw APIError(.conflict, "That permission isn't waiting any more.") }
+        do {
+            try desk.answerPermission(id, answer.id, decision, message: answer.message)
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+        return Self.json(JobJSON(job: try known(id)))
+    }
+
+    func permissionSettings() -> Response {
+        Self.json(ModeJSON(mode: desk.defaultMode.rawValue))
+    }
+
+    /// Settings › Permissions: the mode new jobs get.
+    func changePermissions(_ body: ModeJSON) throws -> Response {
+        desk.defaultMode = try Self.mode(body.mode)
+        return permissionSettings()
+    }
+
+    func rules() -> Response {
+        Self.json(desk.permissionRules)
+    }
+
+    /// Forgets a saved rule: answers with the rules left.
+    func forget(_ id: String) throws -> Response {
+        do {
+            try desk.forgetRule(id)
+        } catch {
+            throw APIError(.notFound, error.localizedDescription)
+        }
+        return rules()
+    }
+
+    nonisolated static func mode(_ name: String) throws -> PermissionMode {
+        guard let mode = PermissionMode(rawValue: name) else { throw APIError(.unprocessableContent, "mode is ask, acceptEdits, plan or bypass.") }
+        return mode
     }
 
     /// What only the user can answer and hasn't settled, the longest-waiting first. Items put off
@@ -650,8 +719,10 @@ struct Status: Encodable {
     /// Whether Oby's review and Mac check go on pull requests as check runs: "ok", "missing
     /// permission" (the app lacks Checks: write) or "no app" (`GitHubApp.checks`).
     var checks: String = "no app"
+    /// Settings › Permissions: the mode new jobs get.
+    var permissions: ModeJSON
 
-    private enum Keys: String, CodingKey { case runner, accounts, models, maxRunning, running, clearedAt, github, checks }
+    private enum Keys: String, CodingKey { case runner, accounts, models, maxRunning, running, clearedAt, github, checks, permissions }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -663,7 +734,21 @@ struct Status: Encodable {
         try keys.encode(clearedAt, forKey: .clearedAt)
         try keys.encode(github, forKey: .github)
         try keys.encode(checks, forKey: .checks)
+        try keys.encode(permissions, forKey: .permissions)
     }
+}
+
+/// A mode, as `POST /v1/jobs/{id}/mode`, Settings › Permissions and the status carry it.
+struct ModeJSON: Codable {
+    var mode: String
+}
+
+/// How `POST /v1/jobs/{id}/permission` answers the job's waiting permission.
+struct PermissionAnswer: Decodable {
+    var id: String
+    var decision: String
+    /// The user's words for the agent, with a deny.
+    var message: String?
 }
 
 /// What `POST /v1/clear` answers and the `clear` event carries.
@@ -735,7 +820,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, fromPR, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, fromPR, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting, mode, permission }
 
     private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou }
 
@@ -792,6 +877,9 @@ struct JobJSON: Encodable {
         if job.tetrix == nil { try nulls.encodeNil(forKey: .tetrix) }
         if job.startWhen == nil { try nulls.encodeNil(forKey: .startWhen) }
         if job.waiting == nil { try nulls.encodeNil(forKey: .waiting) }
+        // Older jobs ran before modes: Oby answered everything, as Bypass does.
+        try nulls.encode(job.currentMode, forKey: .mode)
+        if job.permission == nil { try nulls.encodeNil(forKey: .permission) }
         // What went out and where it moved are always lists: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
         if job.moves == nil { try nulls.encode([Job.Move](), forKey: .moves) }
@@ -1028,7 +1116,10 @@ struct DispatchRequest: Decodable {
         /// it at once. Left out or null, the plan's stay.
         var startWhen: [StartCondition]?
 
-        private enum Keys: String, CodingKey { case id, branch, account, rounds, check, model, files, startWhen }
+        /// How the job asks (`ask`, `acceptEdits`, `plan` or `bypass`); left out, Settings' default.
+        var mode: String?
+
+        private enum Keys: String, CodingKey { case id, branch, account, rounds, check, model, files, startWhen, mode }
 
         init(from decoder: any Decoder) throws {
             let keys = try decoder.container(keyedBy: Keys.self)
@@ -1040,6 +1131,7 @@ struct DispatchRequest: Decodable {
             model = keys.contains(.model) ? .some(try keys.decodeIfPresent(String.self, forKey: .model)) : nil
             files = try keys.decodeIfPresent([String].self, forKey: .files)
             startWhen = try keys.decodeIfPresent([StartCondition].self, forKey: .startWhen)
+            mode = try keys.decodeIfPresent(String.self, forKey: .mode)
         }
     }
 

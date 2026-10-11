@@ -23,6 +23,15 @@ final class CodexAgent: AgentRun {
     private var result: (summary: String, failed: Bool)?
     /// This job's model, or nil for Settings › Models.
     var model: String?
+    /// The job's mode: the thread starts with its sandbox and approvals, and a turn after a change
+    /// carries the new ones.
+    var mode = PermissionMode.bypass
+    /// The mode the thread started with.
+    private var started = PermissionMode.bypass
+    private var git: String?
+    /// Approvals waiting for an answer, by request id: the JSON-RPC id to answer, and the turn to
+    /// tell why it was declined.
+    private var pending: [String: (id: Any, thread: String?, turn: String?)] = [:]
 
     init(worktree: URL, home: URL?, resume: String? = nil) {
         self.worktree = worktree
@@ -45,10 +54,12 @@ final class CodexAgent: AgentRun {
             do {
                 try await server.initialize()
                 let git = await Self.gitDirectory(worktree)
+                self.git = git
+                self.started = mode
                 let started = if let resume {
-                    try await server.call("thread/resume", CodexRPC.threadResume(thread: resume, worktree: worktree, git: git))
+                    try await server.call("thread/resume", CodexRPC.threadResume(thread: resume, worktree: worktree, git: git, mode: mode))
                 } else {
-                    try await server.call("thread/start", CodexRPC.threadStart(worktree: worktree, git: git))
+                    try await server.call("thread/start", CodexRPC.threadStart(worktree: worktree, git: git, mode: mode))
                 }
                 guard let thread = (started["thread"] as? [String: Any])?["id"] as? String else {
                     throw Shell.Failure(message: "Codex didn't start a thread.")
@@ -75,9 +86,11 @@ final class CodexAgent: AgentRun {
         guard let server, let thread else { return }
         Task {
             if let turn, (try? await server.call("turn/steer", CodexRPC.steer(thread: thread, turn: turn, text: text))) != nil { return }
-            let turn = try? await server.call("turn/start", CodexRPC.turnStart(thread: thread, prompt: text,
-                                                                             model: model ?? AgentModels.value("codex", "model"),
-                                                                             effort: AgentModels.value("codex", "effort")))
+            var params = CodexRPC.turnStart(thread: thread, prompt: text, model: model ?? AgentModels.value("codex", "model"),
+                                            effort: AgentModels.value("codex", "effort"))
+            // The mode changed since the thread started (a plan approved): this turn runs with the new one.
+            if mode != started { params.merge(CodexRPC.turnOverrides(mode: mode, git: git)) { $1 } }
+            let turn = try? await server.call("turn/start", params)
             self.turn = (turn?["turn"] as? [String: Any])?["id"] as? String
         }
     }
@@ -129,12 +142,35 @@ final class CodexAgent: AgentRun {
         }
     }
 
+    /// The job's mode changed: the next turn runs with it.
+    func setMode(_ mode: PermissionMode) {
+        self.mode = mode
+    }
+
+    /// Oby's answer, or the user's: accept, acceptForSession for always (Oby applies the saved rule
+    /// to later jobs itself), or decline, with why as a word to the turn.
+    func answer(_ call: ToolCall, _ answer: ToolAnswer) {
+        guard let server, let (id, thread, turn) = pending.removeValue(forKey: call.request) else { return }
+        switch answer {
+        case .allow: server.reply(id, ["decision": "accept"])
+        case .always: server.reply(id, ["decision": "acceptForSession"])
+        case .deny(let reason):
+            server.reply(id, ["decision": "decline"])
+            if let thread, let turn {
+                Task { _ = try? await server.call("turn/steer", CodexRPC.steer(thread: thread, turn: turn, text: "Declined: \(reason)")) }
+            }
+        }
+    }
+
     private func answer(_ id: Any, _ request: [String: Any]) {
         guard let server else { return }
         switch CodexRPC.answer(request, files: files, worktree: worktree) {
         case .accept:
-            server.reply(id, ["decision": "accept"])
-            onEvent(.permission(denied: nil))
+            // Policy lets it through: the job's mode and the user's rules decide (Desk).
+            guard let call = CodexRPC.call(request, files: files) else { return server.reply(id, ["decision": "accept"]) }
+            let params = request["params"] as? [String: Any] ?? [:]
+            pending[call.request] = (id, params["threadId"] as? String, params["turnId"] as? String)
+            onEvent(.ask(call))
         case let .decline(reason):
             Logger.jobs.notice("declined \(request["method"] as? String ?? "", privacy: .public): \(reason, privacy: .public)")
             server.reply(id, ["decision": "decline"])
@@ -305,12 +341,19 @@ nonisolated enum CodexRPC {
     /// rather than to Codex's reviewer agent. Without the git directory, plain workspace-write.
     /// On Linux, Oby's bubblewrap is the sandbox: Codex's own is bubblewrap too and can't run inside it
     /// (Ubuntu's AppArmor denies it), so Codex runs none and asks Oby about every command instead.
-    static func threadStart(worktree: URL, git: String?, bubblewrap: Bool = Agents.bubblewrap) -> [String: Any] {
+    /// Modes (#134): Bypass is the above. Ask and Accept edits keep the sandbox but approve nothing
+    /// by themselves (`untrusted`: every command that isn't a known read, and every file change,
+    /// comes to Oby). Plan runs read-only and untrusted, for a plan-only turn. On Linux every mode
+    /// is untrusted already, and Oby refuses edits in Plan itself.
+    static func threadStart(worktree: URL, git: String?, bubblewrap: Bool = Agents.bubblewrap, mode: PermissionMode = .bypass) -> [String: Any] {
         if bubblewrap {
             return ["cwd": worktree.path, "sandbox": "danger-full-access", "approvalPolicy": "untrusted", "approvalsReviewer": "user"]
         }
+        if mode == .plan {
+            return ["cwd": worktree.path, "sandbox": "read-only", "approvalPolicy": "untrusted", "approvalsReviewer": "user"]
+        }
         var params: [String: Any] = ["cwd": worktree.path, "sandbox": "workspace-write",
-                                     "approvalPolicy": "on-request", "approvalsReviewer": "user"]
+                                     "approvalPolicy": mode == .bypass ? "on-request" : "untrusted", "approvalsReviewer": "user"]
         if let git {
             params["config"] = ["sandbox_workspace_write": ["writable_roots": [git], "network_access": false]]
         }
@@ -318,8 +361,18 @@ nonisolated enum CodexRPC {
     }
 
     /// A thread Codex already has, in the same sandbox: Oby picks it up again to talk to a finished job.
-    static func threadResume(thread: String, worktree: URL, git: String?) -> [String: Any] {
-        threadStart(worktree: worktree, git: git).merging(["threadId": thread]) { $1 }
+    static func threadResume(thread: String, worktree: URL, git: String?, mode: PermissionMode = .bypass) -> [String: Any] {
+        threadStart(worktree: worktree, git: git, mode: mode).merging(["threadId": thread]) { $1 }
+    }
+
+    /// What a turn carries when the job's mode changed since its thread started: the mode's
+    /// approvals and sandbox, as `threadStart` would set them.
+    // ponytail: turn/start's sandboxPolicy shape is from app-server's v2 protocol, not yet proven against a real Codex.
+    static func turnOverrides(mode: PermissionMode, git: String?, bubblewrap: Bool = Agents.bubblewrap) -> [String: Any] {
+        if bubblewrap { return ["approvalPolicy": "untrusted", "sandboxPolicy": ["type": "dangerFullAccess"]] }
+        if mode == .plan { return ["approvalPolicy": "untrusted", "sandboxPolicy": ["type": "readOnly"]] }
+        return ["approvalPolicy": mode == .bypass ? "on-request" : "untrusted",
+                "sandboxPolicy": ["type": "workspaceWrite", "writableRoots": git.map { [$0] } ?? [], "networkAccess": false]]
     }
 
     /// Words for the turn under way; Codex refuses them once that turn has ended.
@@ -438,6 +491,22 @@ nonisolated enum CodexRPC {
             return nil
         }
         return calls.lazy.compactMap { Policy.deny(tool: $0.tool, input: $0.input, worktree: worktree) }.first.map(Answer.decline) ?? .accept
+    }
+
+    /// An approval request as a tool call, for the job's mode and the user's rules: a command is
+    /// "Bash" (without the shell Codex wraps it in), a file change "Edit".
+    static func call(_ request: [String: Any], files: [String: [String]]) -> ToolCall? {
+        let params = request["params"] as? [String: Any] ?? [:]
+        let key = (request["id"] as? Int).map(String.init) ?? request["id"] as? String ?? UUID().uuidString
+        switch request["method"] as? String {
+        case "item/commandExecution/requestApproval":
+            return (params["command"] as? String).map { ToolCall(request: key, tool: "Bash", command: command($0)) }
+        case "item/fileChange/requestApproval":
+            let paths = (params["itemId"] as? String).flatMap { files[$0] } ?? []
+            return ToolCall(request: key, tool: "Edit", paths: paths + [params["grantRoot"] as? String].compactMap { $0 })
+        default:
+            return nil
+        }
     }
 
     static func finished(_ turn: [String: Any]) -> AgentEvent {

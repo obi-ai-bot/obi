@@ -292,10 +292,12 @@ final class APITests {
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
         for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "fromPR", "check", "model", "notes", "pullRequest", "pullRequestError",
-                    "dismissed", "reviewing", "review", "reviewError", "reviewOf", "files", "lead", "claim", "question", "limit", "startCommit", "macCheck", "mergeError", "appleCheck", "appleRan", "tetrix", "xcodeCloud", "xcodeCloudError", "startWhen", "waiting"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
+                    "dismissed", "reviewing", "review", "reviewError", "reviewOf", "files", "lead", "claim", "question", "limit", "startCommit", "macCheck", "mergeError", "appleCheck", "appleRan", "tetrix", "xcodeCloud", "xcodeCloudError", "startWhen", "waiting", "permission"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 58)
+        #expect(decoded.count == 60)
         #expect(decoded["cloudNeedsYou"] as? Bool == false)
+        // A job from before modes ran as Bypass does.
+        #expect(decoded["mode"] as? String == "bypass")
         #expect(json.contains(#""outgoing":[]"#) && json.contains(#""moves":[]"#))
         #expect(decoded["pipeline"] is [String: Any])
         #expect(decoded["title"] as? String == "Review oby #33")
