@@ -28,6 +28,11 @@ struct InboxSection: View {
                         if item.id == current.id { card(item, now: context.date) } else { row(item, now: context.date) }
                     }
                 }
+                // Settled elsewhere, or another one opened: what was typed was for the one before.
+                .onChange(of: current.id, initial: true) {
+                    reply = ""
+                    problem = nil
+                }
             }
         }
     }

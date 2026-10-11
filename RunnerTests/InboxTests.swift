@@ -139,11 +139,18 @@ final class InboxTests {
     @Test func aQuestionOutlivesItsAgent() async throws {
         let agent = Agent()
         let desk = try await running(agent)
+        // It committed something, but nothing is checked or published while its question waits.
+        var published = 0
+        desk.countCommits = { _, _ in 1 }
+        desk.publishOnItsOwn = { _, _, _ in published += 1; return URL(string: "https://github.com/deskree-inc/oby/pull/80")! }
         agent.onEvent(.turnEnded(summary: "QUESTION: Which repository?", failed: false))
         agent.onEvent(.finished(summary: "QUESTION: Which repository?", failed: false))
         for _ in 0..<500 where desk.job("ask62")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
+        try await Task.sleep(for: .milliseconds(50))
         let ended = try #require(desk.job("ask62"))
-        #expect(ended.status == .done && ended.question?.text == "Which repository?")
+        #expect(ended.status == .interrupted && ended.question?.text == "Which repository?")
+        #expect(published == 0 && ended.published == nil && !ended.canPublish)
+        #expect(Push.notice(for: ended) == .question)
         #expect(desk.inbox.count == 1 && desk.inbox[0].kind == .question && desk.inbox[0].isOpen)
 
         // A restart keeps both.
@@ -154,6 +161,38 @@ final class InboxTests {
         try desk.settle(desk.inbox[0].id, .answer("deskree-inc/oby"))
         let resumed = try #require(desk.job("ask62"))
         #expect(resumed.status == .running && resumed.question == nil && resumed.notes == ["deskree-inc/oby"])
+    }
+
+    /// A question older than the 50 jobs a restart loads can still be answered: its job comes back too.
+    @Test func oldQuestionsKeepTheirJobs() throws {
+        var asking = fix
+        asking.id = "asking"
+        asking.status = .interrupted
+        asking.session = "e6a24229"
+        asking.created = Date(timeIntervalSince1970: 1_700_000_000)
+        asking.finished = asking.created
+        asking.question = Plan.Question(text: "Which repository?", options: [])
+        var newer: [Job] = []
+        for index in 0..<55 {
+            var job = fix
+            job.id = "newer\(index)"
+            job.status = .done
+            job.created = Date(timeIntervalSince1970: 1_791_582_173 + Double(index))
+            newer.append(job)
+        }
+        // The question lands, then 55 newer jobs come.
+        let first = makeDesk([asking])
+        #expect(first.inbox.count == 1)
+        let store = JobStore(url: folder.appending(path: "oby.sqlite"))
+        for job in newer { store.save(job) }
+        #expect(!store.recent().contains { $0.id == "asking" })
+        let restarted = makeDesk()
+        #expect(restarted.job("asking")?.question != nil)
+        try #require(restarted.inbox.count == 1)
+        // No agent: the job takes the answer, then fails at once without starting a process.
+        restarted.makeAgent = { _, _, _ in nil }
+        let settled = try restarted.settle(restarted.inbox[0].id, .answer("deskree-inc/oby"))
+        #expect(settled.answer == "deskree-inc/oby" && restarted.job("asking")?.notes == ["deskree-inc/oby"])
     }
 
     /// A failure lands once, with Try again and Dismiss; Dismiss lets the job go, and an item that's

@@ -61,6 +61,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var question: Question?
 
     var isActive: Bool { status == .queued || status == .running }
+    /// Its agent asked the user something and waits for the answer: its alert stays until then.
+    var waitsForAnswer: Bool { question != nil && dismissed == nil && status != .stopped }
 
     /// The report's list of what Oby sent out for the job, or nil when nothing went out.
     var sentLines: String? {

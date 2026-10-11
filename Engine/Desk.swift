@@ -106,6 +106,10 @@ final class Desk {
         self.accounts = accounts
         self.store = store
         jobs = store.recent()
+        inbox = store.inbox()
+        // The jobs open inbox items are about, however old: answering one needs its job.
+        let asking = Set(inbox.filter(\.isOpen).map(\.job)).subtracting(jobs.map(\.id))
+        if !asking.isEmpty { jobs += store.recent(-1).filter { asking.contains($0.id) } }
         // Running when Oby last quit (or crashed): it didn't finish.
         for index in jobs.indices where jobs[index].isActive {
             jobs[index].status = .interrupted
@@ -113,7 +117,6 @@ final class Desk {
             store.save(jobs[index])
         }
         accounts.countRunning(jobs)
-        inbox = store.inbox()
         // A review that was running: its author stops waiting for it.
         for job in jobs where job.reviewOf != nil && job.status == .interrupted { reviewEnded(job) }
         // What the jobs need now, the interrupted ones too.
@@ -774,6 +777,9 @@ final class Desk {
     /// the reason and Publish offered.
     private func finish(_ id: String, _ status: Job.Status, _ summary: String) {
         guard var job = job(id), job.isActive else { return }
+        // Its agent ended while its question waits: the work isn't finished, so nothing is checked
+        // or published. It's interrupted, keeping its question; the answer picks its session up again.
+        if status == .done, job.question != nil { return end(id, .interrupted, summary) }
         guard status == .done, let base = job.base else { return end(id, status, summary) }
         // Already finishing: the agent's process ending after its last turn changes nothing.
         guard finishing.insert(id).inserted else { return }
@@ -789,7 +795,7 @@ final class Desk {
             guard var running = self.job(id), running.isActive else { return }
             // The job as it would end, which is what gets published.
             var ended = running
-            (ended.status, ended.summary) = Job.ending(ended, status, summary, made: made, asked: asked.contains(id) || ended.question != nil)
+            (ended.status, ended.summary) = Job.ending(ended, status, summary, made: made, asked: asked.contains(id))
             ended.commits = commits
             guard ended.canPublish, let before = ranHere[id], (commits ?? 0) > before else {
                 // Still waiting for Publish by hand: why its own publish failed still holds.
@@ -829,8 +835,7 @@ final class Desk {
             }
             return
         }
-        // A job that waits for the user's answer hasn't failed to commit: it's waiting.
-        (job.status, job.summary) = Job.ending(job, status, summary, made: made, asked: asked.contains(id) || job.question != nil)
+        (job.status, job.summary) = Job.ending(job, status, summary, made: made, asked: asked.contains(id))
         if job.status == .failed && status == .done { job.phase = .work }
         // How it moved between accounts, for the report.
         if let moves = handoffs[id], !moves.isEmpty { job.summary += "\n\n" + moves.joined(separator: "\n") }

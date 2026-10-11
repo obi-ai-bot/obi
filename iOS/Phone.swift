@@ -34,8 +34,9 @@ final class Phone {
     private(set) var jobs: [Job] = [] {
         didSet {
             // Published, dismissed or running again, here or on the Mac: its alert goes.
-            let needed = Set(oldValue.filter(\.needsYou).map(\.id))
-            let done = Set(jobs.filter { !$0.needsYou && needed.contains($0.id) }.map(\.id))
+            // A question waiting for its answer keeps its alert too.
+            let needed = Set(oldValue.filter { $0.needsYou || $0.waitsForAnswer }.map(\.id))
+            let done = Set(jobs.filter { !$0.needsYou && !$0.waitsForAnswer && needed.contains($0.id) }.map(\.id))
             if !done.isEmpty { Task { await Notifications.clear(done) } }
             // One Live Activity update at a time, in order.
             syncing = Task { [jobs, syncing] in
@@ -93,7 +94,7 @@ final class Phone {
                     inbox = (try? await runner.inbox()) ?? []
                     loaded = true
                     // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
-                    await Notifications.clear(Set(jobs.filter { !$0.needsYou }.map(\.id)))
+                    await Notifications.clear(Set(jobs.filter { !$0.needsYou && !$0.waitsForAnswer }.map(\.id)))
                     connection = .live
                     wait = 1
                     // Jobs dispatched from the Mac or the runner API notify too, so ask on connecting.

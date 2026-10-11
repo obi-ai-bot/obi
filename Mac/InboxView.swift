@@ -48,6 +48,11 @@ struct IslandInbox: View {
                         if entry.id == current.id { card(entry, now: context.date) } else { row(entry, now: context.date) }
                     }
                 }
+                // Settled elsewhere, or another one opened: what was typed was for the one before.
+                .onChange(of: current.id, initial: true) {
+                    reply = ""
+                    problem = nil
+                }
             }
         }
     }
