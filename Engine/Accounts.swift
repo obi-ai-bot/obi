@@ -160,6 +160,14 @@ final class AccountStore {
             .element.account
     }
 
+    /// The account for the next of several jobs started together (the Lead's): `route`, with the
+    /// pick counted as running in `states`, so the next pick spreads out.
+    nonisolated static func pick(_ states: inout [AccountState], agent: String?, now: Date = .now) -> Account? {
+        guard let account = route(states, agent: agent, now: now) else { return nil }
+        if let index = states.firstIndex(where: { $0.account.id == account.id }) { states[index].running += 1 }
+        return account
+    }
+
     /// Where a job goes on from an account that hit its limit: the same tool first, then any.
     nonisolated static func next(_ accounts: [AccountState], agent: String, now: Date = .now) -> Account? {
         route(accounts, agent: agent, now: now) ?? route(accounts, agent: nil, now: now)
