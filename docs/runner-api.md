@@ -482,7 +482,7 @@ Oby studies every failure and fixes the cause itself (#139, Engine/Failures.swif
 
 ### `GET /v1/failures?limit=50`
 
-The failure records, newest first, each with its post-mortem (null until studied).
+The failure records, newest first, each with its post-mortem (null until studied). `limit` goes up to 1,000.
 
 ### `GET /v1/failures/{id}`
 

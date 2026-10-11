@@ -240,9 +240,9 @@ final class API {
         }
     }
 
-    /// The failure records, newest first, with their post-mortems (Engine/Failures.swift).
+    /// The failure records, newest first, with their post-mortems (Engine/Failures.swift), at most 1,000.
     func failures(limit: Int) -> Response {
-        Self.json(desk.failureLog.store.failures(limit: max(0, limit)).map(FailureJSON.init))
+        Self.json(desk.failureLog.store.failures(limit: min(max(0, limit), 1000)).map(FailureJSON.init))
     }
 
     func failure(_ id: String) throws -> Response {

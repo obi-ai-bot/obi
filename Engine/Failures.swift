@@ -199,7 +199,7 @@ extension JobStore {
         sqlite3_prepare_v2(db, "SELECT body FROM failures WHERE created >= ? ORDER BY created DESC, rowid DESC LIMIT ?", -1, &statement, nil)
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_double(statement, 1, since.timeIntervalSince1970)
-        sqlite3_bind_int(statement, 2, Int32(limit))
+        sqlite3_bind_int(statement, 2, Int32(clamping: limit))
         var records: [FailureRecord] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             if let text = sqlite3_column_text(statement, 0),

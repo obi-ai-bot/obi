@@ -360,6 +360,7 @@ struct FailureTests {
         let app = Application(router: api.router(owner: "well@example.com"))
         let owner: HTTPFields = [.tailscaleUserLogin: "well@example.com"]
         let id = try #require(log.store.failures().first?.id)
+        #expect(log.store.failures(limit: Int.max).count == 2)
         try await app.test(.router) { client in
             try await client.execute(uri: "/v1/failures", method: .get, headers: owner) { response in
                 #expect(response.status == .ok)
@@ -371,6 +372,14 @@ struct FailureTests {
             try await client.execute(uri: "/v1/failures/\(id)", method: .get, headers: owner) { response in
                 #expect(response.status == .ok)
                 #expect(object(Data(response.body.readableBytesView))["trigger"] as? String == "interrupted")
+            }
+            // A limit past what SQLite takes is capped, not a crash.
+            for limit in ["3000000000", "-5", "1"] {
+                try await client.execute(uri: "/v1/failures?limit=\(limit)", method: .get, headers: owner) { response in
+                    #expect(response.status == .ok)
+                    let list = try JSONSerialization.jsonObject(with: Data(response.body.readableBytesView)) as? [[String: Any]]
+                    #expect(list?.count == (limit == "-5" ? 0 : limit == "1" ? 1 : 2))
+                }
             }
             try await client.execute(uri: "/v1/failures/nowhere", method: .get, headers: owner) { #expect($0.status == .notFound) }
             try await client.execute(uri: "/v1/failures/nowhere/fix", method: .post, headers: owner) { #expect($0.status == .notFound) }
