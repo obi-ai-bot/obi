@@ -6,10 +6,10 @@ import Testing
 /// (#134): RunnerJobExtras reads them from the same JSON, and a runner without them still decodes.
 struct DecisionTests {
     let job = #"{"id": "9f08fd10", "request": "Fix it", "agent": "claude", "account": "default", "repo": "deskree-inc/oby", "branch": "oby/fix-12", "base": "dev", "pr": null, "kind": "fix", "task": "Fix it", "status": "running", "step": "Waiting for your OK", "summary": "", "session": "e6a24229", "created": "2026-10-09T21:42:53Z", "started": "2026-10-09T21:42:55Z", "finished": null, "commits": null, "published": null"#
-    let keys = #", "mode": "plan", "permission": {"id": "p1", "tool": "Bash", "title": "Run swift test", "detail": "swift test --filter SpeechTests", "rule": "Bash(swift test:*)", "always": "Yes, and don't ask again for swift test in deskree-inc/oby"}, "question": {"text": "Approve the plan?", "plan": "## Plan", "options": ["Approve: Accept edits", "Approve: Bypass", "Change it"], "recommended": 0}}"#
+    let keys = ###", "mode": "plan", "permission": {"id": "p1", "tool": "Bash", "title": "Run swift test", "detail": "swift test --filter SpeechTests", "rule": "Bash(swift test:*)", "always": "Yes, and don't ask again for swift test in deskree-inc/oby"}, "question": {"text": "Approve the plan?", "plan": "## Plan", "options": ["Approve: Accept edits", "Approve: Bypass", "Change it"], "recommended": 0}}"###
 
     @Test func extrasDecode() throws {
-        let data = Data("[\(job + keys), \(job.replacingOccurrences(of: "9f08fd10", with: "older"))}]".utf8))
+        let data = Data("[\(job + keys), \(job.replacingOccurrences(of: "9f08fd10", with: "older"))}]".utf8)
         // Engine's Job still reads the list, new keys and all.
         #expect(try Runner.decoder.decode([Job].self, from: data).map(\.id) == ["9f08fd10", "older"])
         let extras = RunnerJobExtras.of(data)

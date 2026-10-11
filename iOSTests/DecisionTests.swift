@@ -29,7 +29,7 @@ struct DecisionTests {
     }
 
     @Test func questionsCarryRecommendedAndPlan() throws {
-        let plan = #"{"text": "Approve the plan?", "plan": "## Plan\n- Add the card", "options": ["Approve: Accept edits", "Approve: Bypass", "Change it"], "recommended": 0}"#
+        let plan = ###"{"text": "Approve the plan?", "plan": "## Plan\n- Add the card", "options": ["Approve: Accept edits", "Approve: Bypass", "Change it"], "recommended": 0}"###
         let question = try Runner.decoder.decode(Question.self, from: Data(plan.utf8))
         #expect(question.recommended == 0 && question.plan == "## Plan\n- Add the card")
         #expect(question.recommendedOption == "Approve: Accept edits")
