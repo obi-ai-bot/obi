@@ -43,6 +43,24 @@ struct DecisionTests {
         #expect(none == RunnerJobExtras(id: "9f08fd10"))
     }
 
+    /// Engine's InboxItem doesn't read Oby's plain words (#65): the Mac reads them beside it.
+    @Test func inboxWords() throws {
+        let item = #"{"id": "i1", "kind": "question", "job": "9f08fd10", "title": "Nothing committed status", "text": "Failed, or a new status?", "options": ["A new status", "Failed"], "created": "2026-10-10T09:12:00Z", "done": null, "later": null, "answer": null"#
+        let words = #", "headline": "Failed or new status?", "happened": "The job ended without a commit.", "recommended": 1, "why": "It's what happens today."}"#
+        let data = Data("[\(item + words), \(item.replacingOccurrences(of: "\"i1\"", with: "\"i2\""))}]".utf8)
+        #expect(try Runner.decoder.decode([InboxItem].self, from: data).map(\.id) == ["i1", "i2"])
+        let read = InboxWords.of(data)
+        #expect(read["i1"] == InboxWords(headline: "Failed or new status?", happened: "The job ended without a commit.", recommended: 1, why: "It's what happens today."))
+        #expect(read["i2"] == InboxWords())
+        #expect(CardOption.inbox(["A new status", "Failed"], kind: "question", words: read["i1"]).map(\.label) == ["Failed", "A new status"])
+
+        var parser = EventParser()
+        var event: RunnerEvent?
+        for line in ["event: inbox", "data: \(item + words)", ""] { event = parser.feed(line) ?? event }
+        guard case .inbox(let decoded, let carried) = event else { Issue.record("no inbox event"); return }
+        #expect(decoded.id == "i1" && carried?.headline == "Failed or new status?")
+    }
+
     @Test func statusCarriesTheDefaultMode() throws {
         let status = #"{"runner": {"version": "0.2.0", "host": "tetrix-lab"}, "accounts": [], "models": {"claude": {"model": "claude-opus-5-5", "effort": "xhigh"}, "codex": {"model": "gpt-6-sol", "effort": "high"}}, "permissions": {"mode": "acceptEdits"}}"#
         #expect(RunnerMode(try Runner.decoder.decode(RunnerStatus.self, from: Data(status.utf8)).permissions?.mode) == .acceptEdits)

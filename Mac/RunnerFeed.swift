@@ -35,6 +35,8 @@ final class RunnerFeed {
     /// What waits in the runner's inbox, put-off items too, oldest first: answered on the iPhone,
     /// it goes from here too.
     private(set) var inbox: [InboxItem] = []
+    /// Oby's plain words for each of those items (#65), which Engine's InboxItem doesn't read, by item id.
+    private(set) var inboxWords: [String: InboxWords] = [:]
     /// The runner's accounts and their usage, as it last said: the brain tells them too.
     private(set) var accounts: [AccountState] = []
     /// What each job carries that Engine's Job doesn't read yet (its mode, the permission it waits
@@ -104,6 +106,7 @@ final class RunnerFeed {
         if url != self.url {
             jobs = []
             inbox = []
+            inboxWords = [:]
             accounts = []
             models = nil
             extras = [:]
@@ -137,7 +140,7 @@ final class RunnerFeed {
                         // Status every time: a Clear done while the connection was down is in it.
                         let status = try await runner.status()
                         let (list, extras) = try await runner.jobsWithExtras()
-                        let items = try await runner.inbox()
+                        let (items, words) = try await runner.inboxWithWords()
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
                         host = status.runner.host
@@ -148,6 +151,7 @@ final class RunnerFeed {
                         self.extras = extras
                         take(list)
                         inbox = items
+                        inboxWords = words
                         connection = .live
                         wait = 1
                         Self.ask()
@@ -156,7 +160,9 @@ final class RunnerFeed {
                         if let extras { self.extras[job.id] = extras }
                         apply(job)
                     case .cleared(let date): clearedAt = date
-                    case .inbox(let item): apply(item)
+                    case .inbox(let item, let words):
+                        if let words { inboxWords[item.id] = words }
+                        apply(item)
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     }
@@ -219,7 +225,7 @@ final class RunnerFeed {
     /// An inbox item as the runner last said it: one that's done leaves the list.
     func apply(_ item: InboxItem) {
         inbox.removeAll { $0.id == item.id }
-        if item.isOpen { inbox.append(item) }
+        if item.isOpen { inbox.append(item) } else { inboxWords[item.id] = nil }
     }
 
     /// The runner's answer to Stop or a message, or one of its events: the job with that id.

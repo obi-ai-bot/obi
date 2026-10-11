@@ -162,15 +162,84 @@ nonisolated struct CardOption: Equatable, Sendable {
 extension CardOption {
     /// An inbox item's answers (`kind` as the runner names it): a question's with its job's
     /// recommended one first, a permission's with the rule Always allow saves and Deny in red.
-    static func inbox(_ options: [String], kind: String, question: Question? = nil, permission: RunnerPermission? = nil) -> [CardOption] {
-        var list = of(options, recommending: kind == "question" ? question?.recommendedOption : nil)
-        guard kind == "permission" else { return list }
+    /// Oby's own recommendation (`words`, #65) comes before the job question's, and its why goes
+    /// under the option it recommends.
+    static func inbox(_ options: [String], kind: String, question: Question? = nil, permission: RunnerPermission? = nil,
+                      words: InboxWords? = nil) -> [CardOption] {
+        let ours = words?.recommended.flatMap { options.indices.contains($0) ? $0 : nil }
+        var list = ours.map { of(options, recommended: $0) } ?? of(options, recommending: kind == "question" ? question?.recommendedOption : nil)
         for index in list.indices {
-            if list[index].label == "Always allow" { list[index].detail = permission?.always ?? permission?.rule.map { "Don't ask again for \($0)" } }
-            if list[index].label == "Deny" { list[index].role = .destructive }
+            if kind == "permission", list[index].label == "Always allow" {
+                list[index].detail = permission?.always ?? permission?.rule.map { "Don't ask again for \($0)" }
+            }
+            if kind == "permission", list[index].label == "Deny" { list[index].role = .destructive }
+            if list[index].recommended, let why = InboxWords.plain(words?.why) {
+                list[index].detail = [list[index].detail, why].compactMap(\.self).joined(separator: "\n")
+            }
         }
         return list
     }
+}
+
+/// Oby's plain words for an inbox item (#65), from newer runners: a headline of at most 8 words,
+/// what happened in a sentence or two, the option it recommends (an index, or nil) and why. Every
+/// key is optional, and one that can't be read counts as missing: the card then shows the item
+/// as before.
+nonisolated struct InboxWords: Decodable, Equatable, Sendable {
+    var headline: String?
+    var happened: String?
+    var recommended: Int?
+    var why: String?
+
+    private enum Keys: String, CodingKey { case headline, happened, recommended, why }
+
+    init(headline: String? = nil, happened: String? = nil, recommended: Int? = nil, why: String? = nil) {
+        self.headline = headline
+        self.happened = happened
+        self.recommended = recommended
+        self.why = why
+    }
+
+    init(from decoder: any Decoder) throws {
+        let keys = try decoder.container(keyedBy: Keys.self)
+        headline = try? keys.decodeIfPresent(String.self, forKey: .headline)
+        happened = try? keys.decodeIfPresent(String.self, forKey: .happened)
+        recommended = try? keys.decodeIfPresent(Int.self, forKey: .recommended)
+        why = try? keys.decodeIfPresent(String.self, forKey: .why)
+    }
+
+    /// The card's title: the headline, else the item's text, as before.
+    func title(_ text: String) -> String { Self.plain(headline) ?? text }
+
+    /// What happened, under the title, or nil.
+    var body: String? { Self.plain(happened) }
+
+    /// The item's own text, behind Details once the headline stands in for it; else nil (it's the title).
+    func details(_ text: String) -> String? { Self.plain(headline) == nil ? nil : Self.plain(text) }
+
+    /// The words, or nil when there are none.
+    static func plain(_ words: String?) -> String? {
+        guard let words = words?.trimmingCharacters(in: .whitespacesAndNewlines), !words.isEmpty else { return nil }
+        return words
+    }
+
+    #if os(macOS)
+    /// Each runner item's words, by item id, from `GET /v1/inbox`: the Mac reads the items into
+    /// Engine's InboxItem, which doesn't have them. A list that can't be read gives none.
+    static func of(_ data: Data) -> [String: InboxWords] {
+        struct Lossy: Decodable {
+            var id: String?
+            var words: InboxWords?
+            private enum Keys: String, CodingKey { case id }
+            init(from decoder: any Decoder) throws {
+                id = try? decoder.container(keyedBy: Keys.self).decode(String.self, forKey: .id)
+                words = try? InboxWords(from: decoder)
+            }
+        }
+        let list = (try? Runner.decoder.decode([Lossy].self, from: data)) ?? []
+        return Dictionary(list.compactMap { item in item.id.flatMap { id in item.words.map { (id, $0) } } }, uniquingKeysWith: { $1 })
+    }
+    #endif
 }
 
 extension Question {

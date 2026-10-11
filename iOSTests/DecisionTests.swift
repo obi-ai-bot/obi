@@ -112,6 +112,35 @@ struct DecisionTests {
         #expect(options[2].role == .destructive && options[0].role == .plain)
     }
 
+    /// Oby's plain words on an inbox item (#65): headline, what happened, the option it recommends and why.
+    @Test func inboxWords() throws {
+        let older = #"{"id": "ab12cd34-question-0", "kind": "question", "job": "ab12cd34", "title": "Nothing committed status", "text": "Should a job that commits nothing end as failed, or get a new status?", "options": ["A new status", "Failed"], "created": "2026-10-10T09:12:00Z", "done": null, "later": null, "answer": null"#
+        let plain = try Runner.decoder.decode(InboxItem.self, from: Data((older + "}").utf8))
+        #expect(plain.headline == nil && plain.happened == nil && plain.recommended == nil && plain.why == nil)
+        // Missing: shown as before, the text as its title, nothing behind Details.
+        #expect(plain.words.title(plain.text) == plain.text && plain.words.body == nil && plain.words.details(plain.text) == nil)
+        #expect(CardOption.inbox(plain.options, kind: plain.kind, words: plain.words).map(\.label) == ["A new status", "Failed"])
+
+        let sent = older + #", "headline": "Nothing committed: failed or new status?", "happened": "The job ended without a commit. Oby needs to know how to mark it.", "recommended": 1, "why": "Failed is what the runner does today."}"#
+        let item = try Runner.decoder.decode(InboxItem.self, from: Data(sent.utf8))
+        #expect(item.words.title(item.text) == "Nothing committed: failed or new status?")
+        #expect(item.words.body == "The job ended without a commit. Oby needs to know how to mark it.")
+        #expect(item.words.details(item.text) == item.text)
+        let options = CardOption.inbox(item.options, kind: item.kind, words: item.words)
+        #expect(options.map(\.label) == ["Failed", "A new status"])
+        #expect(options[0].recommended && options[0].detail == "Failed is what the runner does today.")
+        #expect(options[1].detail == nil)
+
+        // Oby's recommendation comes before the job question's; one out of range leaves the question's.
+        let question = Question(text: "?", options: ["A new status", "Failed"], recommended: 0)
+        #expect(CardOption.inbox(item.options, kind: "question", question: question, words: item.words).first?.label == "Failed")
+        #expect(CardOption.inbox(item.options, kind: "question", question: question, words: InboxWords(recommended: 9)).first?.label == "A new status")
+        // A key that can't be read counts as missing.
+        let odd = try Runner.decoder.decode(InboxWords.self, from: Data(#"{"headline": 3, "recommended": "one", "why": "  "}"#.utf8))
+        #expect(odd.title("text") == "text" && odd.recommended == nil)
+        #expect(CardOption.inbox(["a", "b"], kind: "failed", words: InboxWords(recommended: 0, why: "  ")).first?.detail == nil)
+    }
+
     @Test func planMarkdown() {
         let blocks = PlanBlock.blocks("# Plan\n\nAdd the **card**\nin Shared.\n\n- one\n* two\n2. three\n```\nswift test\n```")
         #expect(blocks == [.heading("Plan"), .text("Add the **card** in Shared."), .item("•", "one"), .item("•", "two"),

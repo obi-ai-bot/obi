@@ -281,8 +281,16 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
     var done: Date?
     var later: Date?
     var answer: String?
+    /// Oby's plain words for it (#65), from newer runners only: a headline of at most 8 words, what
+    /// happened, the option it recommends (an index into `options`, or nil) and why.
+    var headline: String?
+    var happened: String?
+    var recommended: Int?
+    var why: String?
 
     var isOpen: Bool { done == nil }
+    /// Those words, for its card.
+    var words: InboxWords { InboxWords(headline: headline, happened: happened, recommended: recommended, why: why) }
     func waiting(at now: Date = .now) -> Bool { done == nil && (later.map { $0 <= now } ?? true) }
 }
 #endif
@@ -447,7 +455,12 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     /// Clear done was pressed, here or on another app: jobs that finished by then are hidden.
     case cleared(Date)
     /// An inbox item came, was answered, done or put off, here or on another app.
+    #if os(macOS)
+    /// With Oby's plain words for it (InboxWords), which Engine's InboxItem doesn't read.
+    case inbox(InboxItem, InboxWords?)
+    #else
     case inbox(InboxItem)
+    #endif
     #if os(macOS)
     /// A merge check was queued, taken or ended (Engine/Checks.swift): a Mac that runs them asks for one.
     case check(MacCheck)
@@ -827,6 +840,16 @@ nonisolated struct Runner: Sendable {
     }
 
     #if os(macOS)
+    /// What waits in the inbox, as `inbox()`, with Oby's plain words for each item, by item id.
+    func inboxWithWords() async throws -> ([InboxItem], [String: InboxWords]) {
+        do {
+            let data = try await send("GET", "v1/inbox")
+            return (try Self.decoder.decode([InboxItem].self, from: data), InboxWords.of(data))
+        } catch let error as RunnerError where error.status == 404 {
+            return ([], [:])
+        }
+    }
+
     /// The latest jobs, with what Engine's Job doesn't read yet, by job id.
     func jobsWithExtras() async throws -> ([Job], [String: RunnerJobExtras]) {
         let data = try await send("GET", "v1/jobs?limit=50")
@@ -883,7 +906,11 @@ nonisolated struct EventParser {
             #endif
             case "accounts": return (try? Runner.decoder.decode([RunnerAccount].self, from: json)).map(RunnerEvent.accounts)
             case "clear": return (try? Runner.decoder.decode(ClearedAt.self, from: json)).map { .cleared($0.clearedAt) }
+            #if os(macOS)
+            case "inbox": return (try? Runner.decoder.decode(InboxItem.self, from: json)).map { RunnerEvent.inbox($0, try? Runner.decoder.decode(InboxWords.self, from: json)) }
+            #else
             case "inbox": return (try? Runner.decoder.decode(InboxItem.self, from: json)).map(RunnerEvent.inbox)
+            #endif
             #if os(macOS)
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
             #endif

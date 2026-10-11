@@ -1,10 +1,15 @@
 import SwiftUI
 
-/// The card: what's asked, the command or file it's about, the plan, the options with the
-/// recommended one first, then "Type your own…". One tap answers. Its container adds the
-/// background and what goes around it (Later, Done, Open job).
+/// The card: what's asked (Oby's headline, when it wrote one, and what happened), the command or
+/// file it's about, the plan, the options with the recommended one first (and why), then "Type
+/// your own…". The asker's own words wait behind Details when a headline stands in for them. One
+/// tap answers. Its container adds the background and what goes around it (Later, Done, Open job).
 struct DecisionCard: View {
     let title: String
+    /// What happened, in a sentence or two, under the title.
+    var happened: String? = nil
+    /// The item's own text, behind Details, when the title is Oby's headline instead.
+    var behindDetails: String? = nil
     /// The command or the file a permission is about.
     var detail: String? = nil
     /// A plan to approve, in markdown.
@@ -18,6 +23,7 @@ struct DecisionCard: View {
     var onWords: ((String) -> Void)? = nil
 
     @State private var typing = false
+    @State private var showsDetails = false
     @State private var words = ""
     @FocusState private var focused: Bool
 
@@ -26,6 +32,9 @@ struct DecisionCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Style.spacing) {
             Text(title).font(Style.title).fixedSize(horizontal: false, vertical: true)
+            if let happened, !happened.isEmpty {
+                Text(happened).font(Style.body).fixedSize(horizontal: false, vertical: true)
+            }
             if let detail, !detail.isEmpty {
                 Text(detail).font(Style.code).foregroundStyle(Style.secondary)
                     .selectable()
@@ -34,12 +43,30 @@ struct DecisionCard: View {
                     .background(Style.fill.opacity(0.6), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             if let plan, !plan.isEmpty { planView(plan) }
+            if let behindDetails, !behindDetails.isEmpty { details(behindDetails) }
             ForEach(Array(options.enumerated()), id: \.offset) { index, option in
                 button(option, index: index)
             }
             if let onWords { ownWords(onWords) }
         }
         .disabled(busy)
+    }
+
+    // MARK: Details
+
+    @ViewBuilder private func details(_ text: String) -> some View {
+        Button { showsDetails.toggle() } label: {
+            Label("Details", systemImage: showsDetails ? "chevron.down" : "chevron.right")
+                .font(Style.small.weight(.semibold)).foregroundStyle(Style.secondary)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(showsDetails ? "Shown" : "Hidden")
+        if showsDetails {
+            Text(text).font(Style.body).foregroundStyle(Style.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .selectable()
+        }
     }
 
     // MARK: The plan
@@ -214,6 +241,7 @@ struct DecisionCard: View {
         static let secondary = Color.white.opacity(0.55)
         static let fill = Color.white.opacity(0.09)
         static let title = Font.system(size: 15, weight: .semibold)
+        static let body = Font.system(size: 13)
         static let option = Font.system(size: 13, weight: .medium)
         static let small = Font.system(size: 11)
         static let code = Font.system(size: 12).monospaced()
@@ -228,6 +256,8 @@ struct DecisionCard: View {
         static let secondary = Color.secondary
         static let fill = Color.primary.opacity(0.12)
         static let title = Font.footnote.weight(.semibold)
+        static let body = Font.caption
+        static let small = Font.caption2
         static let code = Font.caption2.monospaced()
         static let plan = Font.caption2
         static let planHeading = Font.caption.weight(.semibold)
@@ -239,6 +269,7 @@ struct DecisionCard: View {
         static let secondary = Color.secondary
         static let fill = Color.primary.opacity(0.08)
         static let title = Font.headline
+        static let body = Font.subheadline
         static let option = Font.subheadline.weight(.medium)
         static let small = Font.caption
         static let code = Font.footnote.monospaced()

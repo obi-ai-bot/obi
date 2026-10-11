@@ -61,15 +61,18 @@ struct IslandInbox: View {
         let kind = "\(item.kind)"
         let extras = entry.local ? nil : feed.extras[item.job]
         let permission = kind == "permission" ? extras?.permission : nil
+        // Oby's plain words (#65), when the runner wrote them; the item as it is otherwise.
+        let words = entry.local ? InboxWords() : feed.inboxWords[item.id] ?? InboxWords()
         // A permission's words go with a deny; anything else's are the answer. An item without a job takes none.
         let answerWords: ((String) -> Void)? = item.job.isEmpty ? nil : { words in
             if permission != nil { deny(entry, words) } else { settle(entry, answer: words) }
         }
         return VStack(alignment: .leading, spacing: 8) {
             Text(item.line(now: now)).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.5))
-            DecisionCard(title: item.text, detail: permission?.detail,
+            DecisionCard(title: words.title(item.text), happened: words.body, behindDetails: words.details(item.text),
+                         detail: permission?.detail,
                          plan: kind == "question" ? extras?.question?.plan : nil,
-                         options: CardOption.inbox(item.options, kind: kind, question: extras?.question, permission: permission),
+                         options: CardOption.inbox(item.options, kind: kind, question: extras?.question, permission: permission, words: words),
                          busy: busy, wordsNote: kind == "permission" ? CardOption.denyWords : nil,
                          onChoose: { settle(entry, answer: $0.answer) },
                          onWords: answerWords)

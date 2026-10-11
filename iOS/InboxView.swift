@@ -43,9 +43,11 @@ struct InboxSection: View {
         }
         return VStack(alignment: .leading, spacing: 10) {
             Text(item.line(now: now)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            DecisionCard(title: item.text, detail: permission?.detail,
+            // Oby's plain words (#65), when the runner wrote them; the item as it is otherwise.
+            DecisionCard(title: item.words.title(item.text), happened: item.words.body, behindDetails: item.words.details(item.text),
+                         detail: permission?.detail,
                          plan: item.kind == "question" ? job?.question?.plan : nil,
-                         options: CardOption.inbox(item.options, kind: item.kind, question: job?.question, permission: permission),
+                         options: CardOption.inbox(item.options, kind: item.kind, question: job?.question, permission: permission, words: item.words),
                          busy: busy, wordsNote: item.kind == "permission" ? CardOption.denyWords : nil,
                          onChoose: { settle(item, answer: $0.answer) },
                          onWords: answerWords)
