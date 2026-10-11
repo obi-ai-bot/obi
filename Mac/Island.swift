@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import SwiftUI
 import WebKit
 
@@ -616,6 +617,11 @@ private struct OpenIsland: View {
                 // The same line as the iPhone's Home and the closed notch (Shared/JobList.swift).
                 Text(model.summary).font(.system(size: 19, weight: .semibold))
                 Text("Type a task below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+                // First launch was skipped or Accessibility refused: fn does nothing until it's allowed.
+                if !AXIsProcessTrusted() {
+                    Button("To talk with fn, allow Accessibility") { Task { await Permissions().ask(.accessibility) } }
+                        .buttonStyle(.plain).font(.system(size: 13, weight: .medium)).foregroundStyle(.orange)
+                }
             }
         }
         .padding(.top, 34)

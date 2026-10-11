@@ -24,7 +24,7 @@ final class Permissions {
         default: .denied
         }
         let notifications: State = switch await UNUserNotificationCenter.current().notificationSettings().authorizationStatus {
-        case .authorized, .provisional, .ephemeral: .allowed
+        case .authorized, .provisional: .allowed
         case .notDetermined: .notAsked
         default: .denied
         }
@@ -127,7 +127,7 @@ final class Tools {
         looking = true
         defer { looking = false }
         var found: [String: String] = [:]
-        for (agent, commands) in [("claude", ["claude"]), ("codex", ["codex"]), ("cursor", ["cursor-agent", "agent"]), ("gemini", ["gemini"])] {
+        for (agent, commands) in [("claude", ["claude"]), ("codex", ["codex"]), ("cursor", ["cursor-agent"]), ("gemini", ["gemini"])] {
             for command in commands {
                 if await Self.onPath(command) {
                     found[agent] = command
@@ -176,7 +176,7 @@ final class Tools {
         (try? await Shell.run(["which", command], timeout: 10))?.status == 0
     }
 
-    /// `agent models` prints one model a line, as "id - Name", maybe marked "(current)" or
+    /// `cursor-agent models` prints one model a line, as "id - Name", maybe marked "(current)" or
     /// "(default)", between a heading and tips.
     nonisolated static func cursorModels(_ text: String) -> [Model] {
         let plain = text.replacingOccurrences(of: "\u{1B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
@@ -199,10 +199,13 @@ final class Tools {
 enum ModelPicks {
     /// The best planner first: Claude holds Oby to a typed plan, then Codex, then Cursor.
     static let planners = ["claude", "codex", "cursor"]
+    /// The tools Oby can run jobs on today: Cursor's runner is F6.
+    static let workers = ["claude", "codex"]
 
     /// 0 small, 1 everyday, 2 strong, 3 strongest (Fable, Astra: only when the user picks it).
     nonisolated static func size(_ id: String) -> Int {
-        let id = id.lowercased()
+        // "gemini" holds "mini": it says nothing about size.
+        let id = id.lowercased().replacingOccurrences(of: "gemini", with: "")
         if ["fable", "astra"].contains(where: { id.contains($0) }) { return 3 }
         if ["opus", "-max", "-pro", "ultra"].contains(where: { id.contains($0) }) { return 2 }
         if ["haiku", "mini", "nano", "flash", "lite", "small"].contains(where: { id.contains($0) }) { return 0 }
@@ -226,6 +229,11 @@ enum ModelPicks {
             if let model = routine(models[agent] ?? []) { return (agent, model) }
         }
         return nil
+    }
+
+    /// A value the user saved (in first launch or Settings), not one of Oby's registered defaults.
+    static func saved(_ key: String) -> String? {
+        UserDefaults.standard.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "")?[key] as? String
     }
 
     /// The model the island offers for complex work: the user's pick, else Oby's stronger model.

@@ -20,7 +20,7 @@ final class FirstLaunch: NSObject, NSWindowDelegate {
             return
         }
         let view = FirstLaunchView(voice: island.model.voice, permissions: Permissions(),
-                                   tools: Tools(store: island.desk.accounts), again: Self.done,
+                                   tools: Tools(store: island.desk.accounts),
                                    onDone: { [weak self] in self?.window?.close() })
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
                               styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -50,8 +50,6 @@ private struct FirstLaunchView: View {
     let voice: Voice
     let permissions: Permissions
     let tools: Tools
-    /// Shown again from the menu: the models step starts from what was saved.
-    let again: Bool
     let onDone: () -> Void
 
     @State private var step = Step.hello
@@ -62,7 +60,8 @@ private struct FirstLaunchView: View {
     @State private var lead = ""
     @State private var routine: [String: String] = [:]
     @State private var complex: [String: String] = [:]
-    @State private var proposed = false
+    /// The Lead Oby proposed last: while it's unchanged, Oby may propose another.
+    @State private var proposedLead = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -110,7 +109,7 @@ private struct FirstLaunchView: View {
                 .resizable().renderingMode(.template).frame(width: 72, height: 72)
                 .padding(.bottom, 8)
             title("Hi, I'm Oby.")
-            text("I live in the notch and hand your coding work to the tools you already use: Claude Code, Codex and Cursor. They work in their own copies of your repositories, and I tell you when they're done.")
+            text("I live in the notch and hand your coding work to the tools you already use: Claude Code and Codex, and Cursor soon. They work in their own copies of your repositories, and I tell you when they're done.")
             text("Two minutes and we're set. You can skip any step.")
         }
     }
@@ -303,7 +302,7 @@ private struct FirstLaunchView: View {
         case "gemini":
             return [installed ? "Found. Gemini isn't in Oby's first version." : "Not installed. Gemini isn't in Oby's first version."]
         case "cursor":
-            guard installed else { return ["Not installed. Install the Cursor CLI, and Oby finds it."] }
+            guard installed else { return ["Not installed. Install the Cursor CLI (cursor-agent), and Oby finds it."] }
             return [tools.models["cursor"]?.isEmpty == false ? "Signed in." : "Found, signed out.",
                     "Oby can't run jobs on Cursor yet."]
         default:
@@ -349,18 +348,21 @@ private struct FirstLaunchView: View {
 
     // MARK: Models
 
-    /// "Oby thinks with Sonnet 5.5 and works with Sonnet 5.5 and Opus 5.5."
+    /// "Oby thinks with Sonnet 5.5 and works with Sonnet 5.5 and Opus 5.5." Only the tools Oby
+    /// can run jobs on work.
     private var sentence: String {
         let parts = lead.split(separator: "|", maxSplits: 1).map(String.init)
         guard parts.count == 2 else { return "" }
         let thinks = name(parts[1], parts[0])
-        let tools = self.tools.connected
-        if tools.count == 1, let agent = tools.first {
+        let workers = tools.connected.filter { ModelPicks.workers.contains($0) }
+        if workers.count == 1, let agent = workers.first {
             let jobs = Set([routine[agent], complex[agent]].compactMap { $0 })
             let works = (tools.models[agent] ?? []).filter { jobs.contains($0.id) }.map(\.name)
-            return "Oby thinks with \(thinks) and works with \(works.joined(separator: " and "))."
+            let on = parts[0] == agent ? "" : " on \(Usage.tool(parts[0]))"
+            return "Oby thinks with \(thinks)\(on) and works with \(works.joined(separator: " and "))."
         }
-        let works = ListFormatter.localizedString(byJoining: tools.map(Usage.tool))
+        guard !workers.isEmpty else { return "Oby thinks with \(thinks) on \(Usage.tool(parts[0]))." }
+        let works = ListFormatter.localizedString(byJoining: workers.map(Usage.tool))
         return "Oby thinks with \(Usage.tool(parts[0])) (\(thinks)) and works with \(works)."
     }
 
@@ -368,25 +370,25 @@ private struct FirstLaunchView: View {
         tools.models[agent]?.first { $0.id == model }?.name ?? model
     }
 
-    /// Fills in each role from what's connected; shown again, what was saved if it's still offered.
+    /// Each time Models opens, fills in the tools with no pick yet: what the user saved (in an
+    /// earlier first launch or in Settings) if it's still offered, else a proposal. The Lead is
+    /// proposed again while the user hasn't changed it, so a tool connected since can take it.
     private func propose() {
-        guard !proposed, !tools.connected.isEmpty else { return }
-        proposed = true
-        let defaults = UserDefaults.standard
         var lists: [String: [String]] = [:]
         for agent in tools.connected {
             let ids = (tools.models[agent] ?? []).map(\.id)
             lists[agent] = ids
-            let saved = { (key: String) in again ? defaults.string(forKey: key).flatMap { ids.contains($0) ? $0 : nil } : nil }
-            routine[agent] = saved("\(agent).model") ?? ModelPicks.routine(ids)
-            complex[agent] = saved("\(agent).complexModel") ?? ModelPicks.complex(ids)
+            let saved = { (key: String) in ModelPicks.saved(key).flatMap { ids.contains($0) ? $0 : nil } }
+            if routine[agent] == nil { routine[agent] = saved("\(agent).model") ?? ModelPicks.routine(ids) }
+            if complex[agent] == nil { complex[agent] = saved("\(agent).complexModel") ?? ModelPicks.complex(ids) }
         }
-        if again, let agent = defaults.string(forKey: "lead.agent"), let model = defaults.string(forKey: "lead.model"),
-           lists[agent]?.contains(model) == true {
+        guard lead.isEmpty || lead == proposedLead else { return }
+        if let agent = ModelPicks.saved("lead.agent"), let model = ModelPicks.saved("lead.model"), lists[agent]?.contains(model) == true {
             lead = "\(agent)|\(model)"
         } else if let pick = ModelPicks.lead(lists) {
             lead = "\(pick.agent)|\(pick.model)"
         }
+        proposedLead = lead
     }
 
     private func save() {
@@ -398,8 +400,14 @@ private struct FirstLaunchView: View {
             defaults.set(parts[1], forKey: "lead.model")
         }
         for agent in tools.connected {
-            if let model = routine[agent], !model.isEmpty { defaults.set(model, forKey: "\(agent).model") }
-            if let model = complex[agent], !model.isEmpty { defaults.set(model, forKey: "\(agent).complexModel") }
+            guard let model = routine[agent], !model.isEmpty else { continue }
+            defaults.set(model, forKey: "\(agent).model")
+            // A complex pick that's the routine model would offer nothing: Oby's stronger model instead.
+            if let stronger = complex[agent], !stronger.isEmpty, stronger != model {
+                defaults.set(stronger, forKey: "\(agent).complexModel")
+            } else {
+                defaults.removeObject(forKey: "\(agent).complexModel")
+            }
         }
     }
 
