@@ -4,6 +4,7 @@ import WebKit
 /// Oby, what's going on, the jobs, and the field where you type a task.
 struct HomeView: View {
     @Environment(Phone.self) private var phone
+    @Environment(\.scenePhase) private var scenePhase
     let character: ObyCharacter
     @State private var text = ""
     @State private var settings = false
@@ -75,6 +76,10 @@ struct HomeView: View {
             .safeAreaInset(edge: .bottom) { field }
             .sheet(isPresented: sheetShown) { sheet }
             .sheet(isPresented: $settings) { SettingsScreen() }
+            .onDisappear { phone.cancelVoice() }
+            .onChange(of: scenePhase) { if scenePhase != .active { phone.cancelVoice() } }
+            .onChange(of: settings) { if settings { phone.cancelVoice() } }
+            .onChange(of: path) { if !path.isEmpty { phone.cancelVoice() } }
             .onChange(of: phone.opening, initial: true) {
                 guard let id = phone.opening else { return }
                 phone.opening = nil
@@ -143,6 +148,7 @@ struct HomeView: View {
                 case .thinking(let said):
                     Text("Thinking…").font(.title3.weight(.semibold))
                     Text("You said “\(said)”").font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                    Button("Cancel") { phone.cancel() }
                 case .reply(let reply):
                     Text(reply).font(.headline)
                     Text("Type a task below.").font(.subheadline).foregroundStyle(.secondary)
@@ -172,26 +178,40 @@ struct HomeView: View {
     }
 
     private var field: some View {
-        HStack(spacing: 8) {
-            TextField("Type a task, like “Review oby PR #12”", text: $text, axis: .vertical)
-                .lineLimit(1...4)
-                .focused($typing)
-                .submitLabel(.send)
-                .onSubmit(send)
-            Button(action: send) {
-                Image(systemName: "arrow.up")
-                    .font(.body.weight(.bold))
-                    .foregroundStyle(Color(uiColor: .systemBackground))
-                    .frame(width: 34, height: 34)
-                    .background(Color.primary.opacity(text.isEmpty ? 0.4 : 1), in: Circle())
+        VStack(alignment: .leading, spacing: 6) {
+            if phone.voice.held || phone.voice.finishing {
+                Text(phone.voice.words.isEmpty ? (phone.voice.finishing ? "Writing down…" : "Listening…") : phone.voice.words)
+                    .font(.subheadline).padding(.horizontal, 12)
+                    .accessibilityAddTraits(.updatesFrequently)
             }
-            .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty)
-            .accessibilityLabel("Send")
+            if let problem = phone.voice.problem {
+                Text(problem).font(.footnote).foregroundStyle(.red).padding(.horizontal, 12)
+            }
+            HStack(spacing: 8) {
+                TextField("Type a task, like “Review oby PR #12”", text: $text, axis: .vertical)
+                    .lineLimit(1...4)
+                    .focused($typing)
+                    .submitLabel(.send)
+                    .onSubmit(send)
+                HoldMic(held: phone.voice.held, enabled: !phone.voice.finishing,
+                        start: { typing = false; phone.holdMic() },
+                        release: { phone.releaseMic() }, cancel: { phone.cancelVoice() })
+                    .frame(width: 44, height: 44)
+                Button(action: send) {
+                    Image(systemName: "arrow.up")
+                        .font(.body.weight(.bold))
+                        .foregroundStyle(Color(uiColor: .systemBackground))
+                        .frame(width: 34, height: 34)
+                        .background(Color.primary.opacity(text.isEmpty ? 0.4 : 1), in: Circle())
+                }
+                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityLabel("Send")
+            }
+            .padding(.leading, 18)
+            .padding(.trailing, 7)
+            .padding(.vertical, 7)
+            .background(Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         }
-        .padding(.leading, 18)
-        .padding(.trailing, 7)
-        .padding(.vertical, 7)
-        .background(Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
         .background(Color(uiColor: .systemGroupedBackground))
