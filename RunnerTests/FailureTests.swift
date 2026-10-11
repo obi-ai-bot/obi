@@ -14,37 +14,63 @@ struct FailureTests {
     final class PostMortems: LeadAdapter, @unchecked Sendable {
         var answers: [[String: Any]]
         var evidence: [String] = []
+        var known: [String] = []
         var name: String { "fake post-mortem" }
         init(_ answers: [[String: Any]]) { self.answers = answers }
 
         func turn(system: String, user: String, schema: Data, in directory: URL, timeout: TimeInterval) async throws -> Data {
             evidence.append(try String(contentsOf: directory.appending(path: ".oby/evidence/failure.md"), encoding: .utf8))
+            known.append(try String(contentsOf: directory.appending(path: ".oby/evidence/known.md"), encoding: .utf8))
             let answer = answers.count > 1 ? answers.removeFirst() : answers[0]
             return try JSONSerialization.data(withJSONObject: answer)
         }
     }
 
-    nonisolated static func answer(_ cause: String, _ signature: String, happened: String = "The iPhone tests' runner hung before connecting.") -> [String: Any] {
+    nonisolated static func answer(_ cause: String, _ signature: String, happened: String = "The iPhone tests' runner hung before connecting.",
+                                   sameAs: (kind: String, number: Int)? = nil) -> [String: Any] {
         ["what_happened": happened, "cause": cause, "oby_could_handle": true, "signature": signature,
-         "fix": ["files": ["Engine/AppleChecks.swift"], "change": "Reset the simulator and retry once before handing the failure on."]]
+         "fix": ["files": ["Engine/AppleChecks.swift"], "change": "Reset the simulator and retry once before handing the failure on."],
+         "same_as": sameAs.map { ["kind": $0.kind, "number": $0.number] as [String: Any] } ?? NSNull()]
     }
 
-    /// The runner's gh: open `oby-failure` issues, what it created and edited, and every call.
+    /// The runner's gh: open `oby-failure` issues, fix pull requests merged into dev, what it
+    /// created, edited and closed, other issues (number: labels) it can view, and every call.
     final class GitHub {
         var issues: [(number: Int, body: String)] = []
+        var merged: [[String: Any]] = []
+        var others: [Int: [String]] = [:]
         var created: [[String]] = []
         var edits: [(number: Int, body: String)] = []
+        var closed: [Int] = []
         var calls: [[String]] = []
 
         func run(_ args: [String]) async throws -> String {
             calls.append(args)
             let body = args.firstIndex(of: "--body-file").map { try? String(contentsOfFile: args[$0 + 1], encoding: .utf8) } ?? nil
+            func json(_ value: Any) throws -> String { String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self) }
             switch Array(args.prefix(2)) {
             case ["label", "create"]: return ""
             case ["issue", "list"]:
                 #expect(args.contains(Failures.label))
-                let rows = issues.map { ["number": $0.number, "url": "https://github.com/deskree-inc/oby/issues/\($0.number)", "body": $0.body] as [String: Any] }
-                return String(decoding: try JSONSerialization.data(withJSONObject: rows), as: UTF8.self)
+                let open = issues.filter { !closed.contains($0.number) }
+                return try json(open.map { ["number": $0.number, "title": "Oby failure", "url": "https://github.com/deskree-inc/oby/issues/\($0.number)", "body": $0.body] as [String: Any] })
+            case ["pr", "list"]:
+                #expect(args.contains("merged") && args.contains("dev"))
+                return try json(merged)
+            case ["pr", "view"]:
+                let pr = merged.first { $0["number"] as? Int == Int(args[2]) }
+                return try json(["body": pr?["body"] ?? "", "mergeCommit": ["oid": "c0ffee0000000000000000000000000000000001"]] as [String: Any])
+            case ["issue", "view"]:
+                let number = Int(args[2]) ?? 0
+                let failure = issues.contains { $0.number == number }
+                let labels = failure ? [Failures.label] : others[number] ?? []
+                let open = !closed.contains(number) && (failure || others[number] != nil)
+                let body = issues.first { $0.number == number }?.body ?? ""
+                return try json(["state": open ? "OPEN" : "CLOSED", "labels": labels.map { ["name": $0] }, "body": body] as [String: Any])
+            case ["issue", "close"]:
+                #expect(!args.contains("--comment"))
+                closed.append(Int(args[2]) ?? 0)
+                return ""
             case ["issue", "create"]:
                 created.append(args)
                 let number = 200 + issues.count
@@ -72,11 +98,14 @@ struct FailureTests {
     let github = GitHub()
     let made = Made()
 
-    init(signedIn: Bool = true, answers: [[String: Any]] = [FailureTests.answer("environment", "simulator-hung-before-connecting")]) throws {
+    /// `jobs` are on the desk from the start, as a restart finds them.
+    init(signedIn: Bool = true, answers: [[String: Any]] = [FailureTests.answer("environment", "simulator-hung-before-connecting")], jobs: [Job] = []) throws {
         folder = try temporaryFolder()
         let accounts = AccountStore(root: folder)
         if signedIn { accounts.setLabel("Max · well@example.com", for: "default") }
-        desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        let store = JobStore(url: folder.appending(path: "oby.sqlite"))
+        for job in jobs { store.save(job) }
+        desk = Desk(accounts: accounts, store: store)
         desk.vault = Vault(store: FileVault(folder: folder.appending(path: "vault")))
         desk.prepare = { [made] in made.prepared.append($0); return $0 }
         desk.makeAgent = { [made] job, _, _ in
@@ -95,7 +124,9 @@ struct FailureTests {
     }
 
     /// A job of Oby's that ended done just now, on a pull request Oby opened.
-    func job(_ id: String, _ change: (inout Job) -> Void = { _ in }) -> Job {
+    func job(_ id: String, _ change: (inout Job) -> Void = { _ in }) -> Job { Self.job(id, change) }
+
+    nonisolated static func job(_ id: String, _ change: (inout Job) -> Void = { _ in }) -> Job {
         var job = Job(id: id, request: "fix oby #75", agent: "claude", account: "default", repo: "deskree-inc/oby", branch: "oby/fix-75",
                       base: "dev", pr: nil, kind: .fix, task: "Open the pull request by itself.")
         job.status = .done
@@ -104,6 +135,16 @@ struct FailureTests {
         job.summary = "fix(engine): open the PR by itself"
         change(&job)
         return job
+    }
+
+    /// A job on `issue` whose pull request #`pr` Oby opened, and merged into dev unless `open`.
+    nonisolated static func fixer(_ id: String, issue: Int, pr: Int, open: Bool = false) -> Job {
+        job(id) {
+            $0.issue = issue
+            $0.published = "https://github.com/deskree-inc/oby/pull/\(pr)"
+            $0.pullRequest = PullRequestStatus(state: open ? .open : .merged, base: "dev", mergedAt: open ? nil : .now, checkedAt: .now)
+            if !open { $0.outgoing = [Outgoing(action: .merge, repo: "deskree-inc/oby", id: $0.published ?? "", branch: $0.branch)] }
+        }
     }
 
     func check(_ id: String, _ state: MacCheck.State) -> MacCheck {
@@ -290,16 +331,20 @@ struct FailureTests {
             test.made.agents.last?.agent.onEvent(.finished(summary: "The iPhone tests hung.", failed: true))
             try await test.until("\(id) failed") { desk.job(id)?.status == .failed }
             await log.drain()
+            // An environment cause seen twice files nothing (#197): it reaches the inbox, once.
+            if id == "two" {
+                #expect(test.github.created.isEmpty && test.github.edits.isEmpty)
+                #expect(desk.inbox.filter { $0.kind == .failure }.count == 1)
+            }
         }
         let records = log.store.failures().filter { $0.job != nil }
         #expect(records.count == 3 && records.allSatisfy { $0.postMortem?.signature == "simulator-hung-before-connecting" && $0.acted == true })
-        // Once is environment, nothing filed; twice opens one issue; three times brings its body up
-        // to date, never a comment: comments email the owner (#198).
-        #expect(test.github.created.count == 1)
-        #expect(test.github.edits.map(\.number) == [200] && test.github.edits.first?.body.contains("seen 3 times in the last 7 days") == true)
-        #expect(!test.github.calls.contains { $0.contains("comment") || $0.contains("--assignee") })
-        #expect(log.store.failure(records.last!.id)?.issue == nil)
-        #expect(Set(records.dropLast().compactMap(\.issue)) == ["https://github.com/deskree-inc/oby/issues/200"])
+        // Once is environment, nothing; twice, the inbox only; three times opens one issue. Never a
+        // comment: comments email the owner (#198).
+        #expect(test.github.created.count == 1 && test.github.edits.isEmpty)
+        #expect(!test.github.calls.contains { $0.contains("comment") || $0.contains("--comment") || $0.contains("--assignee") })
+        #expect(records.first?.issue == "https://github.com/deskree-inc/oby/issues/200")
+        #expect(records.dropFirst().allSatisfy { $0.issue == nil })
         let body = try #require(test.github.issues.first?.body)
         #expect(body.contains("oby-failure-signature: simulator-hung-before-connecting") && body.contains("Reset the simulator"))
         #expect(test.github.created.first?.contains(Failures.label) == true)
@@ -324,6 +369,8 @@ struct FailureTests {
         await log.drain()
         #expect(test.github.created.count == 2)
         #expect(desk.inbox.filter { $0.kind == .failure && $0.isOpen }.count == 2)
+        // Its post-mortem read the open issue, quoted, to match against.
+        #expect(test.postMortems.known.last?.contains("- #200, signature `simulator-hung-before-connecting`: environment: The iPhone tests' runner hung before connecting.") == true)
 
         // The brain hears about the week.
         let briefing = desk.briefing(turns: [])
@@ -363,6 +410,128 @@ struct FailureTests {
         // Fixing it twice while it runs is refused.
         try await test.until("the fix runs") { desk.job(fix.id)?.isActive == true }
         #expect(throws: (any Error).self) { try log.fix(record.id) }
+    }
+
+    // MARK: One cause, one issue (#197)
+
+    @Test func aPostMortemTheSameAsAnOpenIssueCommentsOnItAndItsSignatureMatchesNextTime() async throws {
+        let test = try FailureTests(answers: [
+            FailureTests.answer("oby-bug", "publish-push-rejected-after-rebase"),
+            FailureTests.answer("oby-bug", "merge-conflict-rebase-left-unpushed", sameAs: ("issue", 200)),
+            FailureTests.answer("oby-bug", "merge-conflict-rebase-left-unpushed"),
+            // An issue it wasn't offered is no match.
+            FailureTests.answer("oby-bug", "blocking-none-counted-as-finding", sameAs: ("issue", 999)),
+        ])
+        let log = test.desk.failureLog
+        for id in ["first", "second", "third"] {
+            log.observe(test.job(id) { $0.status = .failed; $0.summary = "The rebase wasn't pushed." })
+            await log.drain()
+        }
+        // One issue: the second brings it up to date, and the third matches it by its alias. Never a comment (#198).
+        #expect(test.github.created.count == 1)
+        #expect(test.github.edits.map(\.number) == [200, 200])
+        #expect(test.github.edits.first?.body.contains("`publish-push-rejected-after-rebase` (also named `merge-conflict-rebase-left-unpushed`), seen 2 times") == true)
+        #expect(test.github.edits.last?.body.contains("oby-failure-signature: publish-push-rejected-after-rebase") == true)
+        #expect(!test.github.calls.contains { $0.contains("comment") })
+        #expect(log.store.failureAliases() == ["merge-conflict-rebase-left-unpushed": "publish-push-rejected-after-rebase"])
+        #expect(log.store.failures().allSatisfy { $0.issue == "https://github.com/deskree-inc/oby/issues/200" })
+        // The second post-mortem read the open issue it matched, quoted.
+        #expect(test.postMortems.known[1].contains("- #200, signature `publish-push-rejected-after-rebase`: oby-bug: The iPhone tests' runner hung before connecting."))
+        #expect(test.desk.inbox.filter { $0.kind == .failure && $0.isOpen }.map(\.title) == ["Oby failure: publish-push-rejected-after-rebase"])
+
+        log.observe(test.job("fourth") { $0.status = .failed })
+        await log.drain()
+        #expect(test.github.created.count == 2)
+        #expect(log.store.failures().first { $0.job == "fourth" }?.postMortem?.sameAs == nil)
+    }
+
+    @Test func aFailureAFixMergedIntoDevHandlesIsRecordedAgainstItAndFixItStartsNothing() async throws {
+        let test = try FailureTests(answers: [FailureTests.answer("oby-bug", "merge-conflict-after-sibling-pr-merged", sameAs: ("pull-request", 189))])
+        let merged = Date.now.addingTimeInterval(-1200).formatted(.iso8601)
+        test.github.merged = [["number": 189, "url": "https://github.com/deskree-inc/oby/pull/189", "body": "Closes #159",
+                               "title": "fix(publish): push rebased branches with force-with-lease", "mergedAt": merged]]
+        let log = test.desk.failureLog
+        log.observe(test.job("b652504f") { $0.status = .failed })
+        await log.drain()
+        #expect(test.postMortems.known.first?.contains("- #189 \"fix(publish): push rebased branches with force-with-lease\"") == true)
+        #expect(test.postMortems.known.first?.contains("closes #159") == true)
+        let record = try #require(log.store.failures().first)
+        #expect(record.fixedBy == "https://github.com/deskree-inc/oby/pull/189" && record.acted == true)
+        // No issue and no inbox item: the fix is on dev.
+        #expect(test.github.created.isEmpty && test.github.edits.isEmpty && record.issue == nil)
+        #expect(!test.desk.inbox.contains { $0.kind == .failure })
+        #expect(log.underway(record) == "Fixed by #189 on dev.")
+        #expect(throws: (any Error).self) { try log.fix(record.id) }
+        #expect(test.made.prepared.isEmpty)
+    }
+
+    @Test func fixItWithAnOpenFixPullRequestStartsNothing() async throws {
+        let test = try FailureTests(answers: [FailureTests.answer("oby-bug", "blocking-none-counted-as-finding")],
+                                    jobs: [FailureTests.fixer("fixer", issue: 200, pr: 81, open: true)])
+        let desk = test.desk
+        let log = desk.failureLog
+        log.observe(test.job("pr124") { $0.status = .failed })
+        await log.drain()
+        let record = try #require(log.store.failures().first)
+        #expect(record.issue == "https://github.com/deskree-inc/oby/issues/200")
+        let item = try #require(desk.inbox.first { $0.kind == .failure })
+        do {
+            try log.answer(item.id, Failures.fixIt)
+            Issue.record("Fix it started a job")
+        } catch {
+            #expect(error.localizedDescription == "Already being fixed by #81, its pull request open.")
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(test.made.prepared.isEmpty && desk.item(item.id)?.isOpen == true)
+    }
+
+    @Test func mergingAFixIntoDevClosesItsFailureIssueAndNotAFeatureIssue() async throws {
+        let test = try FailureTests(answers: [FailureTests.answer("oby-bug", "blocking-none-counted-as-finding")],
+                                    jobs: [FailureTests.fixer("fixer", issue: 200, pr: 81), FailureTests.fixer("feature", issue: 75, pr: 82)])
+        test.github.merged = [["number": 81, "url": "https://github.com/deskree-inc/oby/pull/81", "title": "fix: blocking none", "body": "Closes #200"],
+                              ["number": 82, "url": "https://github.com/deskree-inc/oby/pull/82", "title": "feat: the vault", "body": "Closes #75"]]
+        test.github.others = [75: ["feature"]]
+        let desk = test.desk
+        let log = desk.failureLog
+        log.observe(test.job("pr124") { $0.status = .failed })
+        await log.drain()
+        #expect(test.github.created.count == 1 && desk.inbox.contains { $0.kind == .failure && $0.isOpen })
+
+        // The sweep finds both merged; only the failure issue closes, naming the merge commit.
+        log.sweep()
+        await log.drain()
+        // With no comment (#198): the merge commit goes at the end of the issue's body.
+        #expect(test.github.closed == [200])
+        let closed = try #require(test.github.issues.first { $0.number == 200 }?.body)
+        #expect(closed.contains("oby-failure-signature: blocking-none-counted-as-finding"))
+        #expect(closed.hasSuffix("\n\nFixed by #81, merged into dev as c0ffee0000000000000000000000000000000001. GitHub closes issues by itself only on merges into the default branch, so Oby closed it."))
+        #expect(log.store.failures().first?.fixedBy == "https://github.com/deskree-inc/oby/pull/81")
+        #expect(!desk.inbox.contains { $0.kind == .failure && $0.isOpen })
+        // Once.
+        log.sweep()
+        await log.drain()
+        #expect(test.github.calls.filter { $0.prefix(2) == ["pr", "view"] }.count == 2)
+
+        // The same cause again, while the fix is on dev: recorded against it, nothing filed.
+        log.observe(test.job("again") { $0.status = .failed })
+        await log.drain()
+        #expect(test.github.created.count == 1 && test.github.edits.count == 1)
+        let again = try #require(log.store.failures().first { $0.job == "again" })
+        #expect(again.fixedBy == "https://github.com/deskree-inc/oby/pull/81" && again.fixedAt == desk.job("fixer")?.pullRequest?.mergedAt)
+
+        // Still coming back more than 7 days after the fix merged: the fix didn't work, and the
+        // mark doesn't carry over from the records in between.
+        for day in [6.0, 8.0] {
+            let later = Date.now.addingTimeInterval(day * 86_400)
+            log.now = { later }
+            log.observe(test.job("day\(Int(day))") { $0.status = .failed; $0.finished = later })
+            await log.drain()
+        }
+        #expect(log.store.failures().first { $0.job == "day6" }?.fixedBy != nil)
+        let late = try #require(log.store.failures().first { $0.job == "day8" })
+        #expect(late.fixedBy == nil && late.issue == "https://github.com/deskree-inc/oby/issues/201")
+        #expect(test.github.created.count == 2)
+        #expect(log.underway(late) == nil)
     }
 
     @Test func theAPIListsFailuresAndFixesThem() async throws {

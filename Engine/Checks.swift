@@ -1373,6 +1373,7 @@ extension Desk {
                                                mergedAt: .now, checkedAt: .now)
         merged.pullRequestError = nil
         merged.mergeError = nil
+        // Replacing it closes the `oby-failure` issues it fixes (`Failures.observe`): GitHub won't, on dev.
         replace(merged)
     }
 
