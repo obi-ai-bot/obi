@@ -176,8 +176,7 @@ final class WatchRelay: NSObject {
                 defer { if liveVoice === live { liveVoice = nil } }
                 let said = try await live.finish(sequence: sequence)
                 guard liveVoice === live, !live.cancelled else { return bad }
-                guard !said.isEmpty else { return [WatchWire.error: "Oby didn't catch that."] }
-                startPlan(said, answer: nil, request: request)
+                // Only the words: the watch keeps them as a draft, and its Send is a `plan`.
                 return [WatchWire.text: said]
             case .voiceCancel:
                 if preparingVoice == request { preparingVoice = nil }

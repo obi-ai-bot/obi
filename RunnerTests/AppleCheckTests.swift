@@ -332,7 +332,8 @@ struct AppleCheckTests {
         let start = ContinuousClock.now
         #expect(await CheckCommand.run(["apple", "--wait", "1"], environment: ["OBY_CHECK_URL": "http://x", "OBY_CHECK_TOKEN": "t"], send: slow,
                                        uncommitted: { false }, print: { printed.append($0) }) == 3)
-        #expect(ContinuousClock.now - start < .seconds(10))
+        // Well under the slow runner's 30 seconds, with room for a loaded runner's parallel tests.
+        #expect(ContinuousClock.now - start < .seconds(20))
         #expect(printed.last?.hasPrefix("Still queued after ") == true)
 
         // The runner installs a script that runs its own executable, `check` first.

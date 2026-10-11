@@ -13,9 +13,12 @@ import WidgetKit
 final class Watch: NSObject {
     enum Talk: Equatable {
         case none
+        /// The mic is open; the words appear as they're said.
         case recording
-        /// The recording is on its way to the phone, to be written down.
+        /// Stopped: the last of the audio is on its way, and the final words come back.
         case sending
+        /// The words, kept: Send asks Oby, the mic adds more.
+        case draft(String)
         case thinking(String)
         /// Dictated while the phone was out of reach: the phone plans it when it's back.
         case queued(String)
@@ -38,14 +41,21 @@ final class Watch: NSObject {
     @ObservationIgnored private var isOnScreen = false
     @ObservationIgnored private var following: Task<Void, Never>?
     var talk: Talk = .none
+    /// What this time listening has said so far; the draft's earlier words are `earlier`.
     private(set) var words = ""
     private(set) var level = 0.0
+    /// Why the last words couldn't be written down, under the draft that kept the rest.
+    private(set) var notice: String?
     /// A failed live connection offers the system's input on the next tap.
     var useDictation = false
-    /// The hold's audio not yet sent. It can hold the whole hold: a slow phone delays the words
-    /// rather than dropping the request.
+    /// The microphone, open only while `talk` is `.recording`.
+    let recorder = Recorder()
+    /// The draft's words from before this time listening; the new ones join them.
+    @ObservationIgnored private var earlier = ""
+    /// The audio not yet sent. It can hold the whole 60 seconds: a slow line delays the words
+    /// rather than dropping them.
     @ObservationIgnored private var voiceBacklog = Data()
-    /// Wakes the sender when audio arrives; finished when the hold ends.
+    /// Wakes the sender when audio arrives; finished when listening stops.
     @ObservationIgnored private var voiceInput: AsyncStream<Void>.Continuation?
     @ObservationIgnored private var voiceTask: Task<Void, Never>?
     /// The job a notification asked to open; Home opens it.
@@ -79,8 +89,10 @@ final class Watch: NSObject {
     var paired: Bool { link != nil }
     /// The runner directly, while the phone is out of reach.
     private var direct: WatchLink? { reachable ? nil : link }
-    /// Hold-to-talk works through the phone, or through the runner when paired.
+    /// Live words come from the phone, or from the runner when paired.
     var canTalk: Bool { reachable || paired }
+    /// The draft as it reads now: its earlier words, then what's being said.
+    var heard: String { Self.join(earlier, words) }
 
     var needing: [Job] { jobs.filter(\.needsYou) }
     var working: [Job] { jobs.filter(\.isActive) }
@@ -293,14 +305,70 @@ final class Watch: NSObject {
 
     // MARK: Talking to Oby
 
-    /// One ordered, acknowledged stream per hold. Each chunk waits for the phone's reply; when
-    /// the phone is slow, the backlog goes in bigger chunks (up to `chunkLimit`) to catch up.
-    func beginVoice(sampleRate: Double) {
+    /// The mic's tap. The microphone opens at once, with no await, so the next tap can always close
+    /// it. A draft keeps its words and the new ones join them; any other answer on Home gives way.
+    func listen() {
+        guard talk != .recording, talk != .sending else { return }
+        var draft = ""
+        if case .draft(let text) = talk { draft = text }
+        cancel()
+        do {
+            let rate = try recorder.start(deliver: { [weak self] audio, level in self?.stream(audio, level: level) },
+                                          limit: { [weak self] in self?.stopListening() })
+            beginVoice(sampleRate: rate, after: draft)
+        } catch {
+            recorder.cancel()
+            if recorder.allowed == true { useDictation = true }
+            keep(draft, notice: error.localizedDescription)
+        }
+    }
+
+    /// Stop, the 60-second limit, the screen turning off or leaving Home: the microphone closes now,
+    /// and the final words become the draft. Nothing is sent.
+    func stopListening() {
+        guard talk == .recording else { return }
+        // Audio captured before the stop but not yet received is the end of the last word.
+        let heard = recorder.stop()
+        guard heard >= 0.4 || !words.isEmpty else {
+            // A tap and a stop right after: nothing was said.
+            let draft = earlier
+            cancel()
+            keep(draft, notice: nil)
+            return
+        }
+        talk = .sending
+        level = 0
+        voiceInput?.finish()
+        voiceInput = nil
+    }
+
+    /// Send: the draft goes to Oby, as a typed request would.
+    func sendDraft() {
+        guard case .draft(let text) = talk else { return }
+        ask(text)
+    }
+
+    /// The system's dictation or scribble: its words join the draft, as spoken ones do.
+    func dictated(_ text: String) {
+        let said = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !said.isEmpty else { return }
+        var draft = ""
+        if case .draft(let text) = talk { draft = text } else { cancel() }
+        keep(Self.join(draft, said), notice: nil)
+    }
+
+    /// One ordered, acknowledged stream each time the mic listens. Each chunk waits for the reply
+    /// before the next; when the line is slow, the backlog goes in bigger chunks (up to
+    /// `chunkLimit`) to catch up. The phone sends the live words as `transcript` messages; the
+    /// runner answers each piece with them.
+    private func beginVoice(sampleRate: Double, after draft: String) {
         useDictation = false
         let id = UUID().uuidString
         asking = id
+        earlier = draft
         words = ""
         level = 0
+        notice = nil
         talk = .recording
         voiceBacklog = Data()
         let (stream, input) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
@@ -309,48 +377,61 @@ final class Watch: NSObject {
         voiceTask = Task {
             do {
                 try Task.checkCancellation()
+                var sequence = 0
+                let said: String
                 if let link {
-                    // The phone is out of reach: the pieces go to the runner. It can't write speech
-                    // down yet and says so at the first one, so the system's dictation takes over.
-                    let send: (Data, Int) async throws -> Void = { try await link.speech(request: id, sequence: $1, audio: $0) }
-                    var sequence = 0
+                    // The phone is out of reach: the runner's Whisper writes it down. A runner
+                    // without it says so at the first piece, and the system's dictation takes over.
+                    let send: (Data, Int) async throws -> Void = { audio, sequence in
+                        let text = try await link.speech(request: id, sequence: sequence, audio: audio)
+                        if let text, self.asking == id, self.talk == .recording || self.talk == .sending { self.words = text }
+                    }
                     for await _ in stream { try await sendBacklog(id, sequence: &sequence, send: send) }
                     try await sendBacklog(id, sequence: &sequence, send: send)
-                    throw WatchLink.SpeechUnavailable(message: "Speech-to-text isn't set up on the runner yet.")
+                    guard asking == id else { return }
+                    said = try await link.speech(request: id, sequence: sequence, audio: Data(), final: true) ?? words
+                } else {
+                    _ = try await request([WatchWire.kind: WatchWire.Kind.voiceStart.rawValue,
+                                           WatchWire.request: id, WatchWire.sampleRate: sampleRate])
+                    let send: (Data, Int) async throws -> Void = { audio, sequence in
+                        _ = try await self.request([WatchWire.kind: WatchWire.Kind.voiceChunk.rawValue,
+                                                    WatchWire.request: id, WatchWire.sequence: sequence,
+                                                    WatchWire.audio: audio])
+                    }
+                    for await _ in stream { try await sendBacklog(id, sequence: &sequence, send: send) }
+                    // The stream finishes on Stop; the last of the audio may have come with it.
+                    try await sendBacklog(id, sequence: &sequence, send: send)
+                    guard asking == id else { return }
+                    let reply = try await request([WatchWire.kind: WatchWire.Kind.voiceEnd.rawValue,
+                                                   WatchWire.request: id, WatchWire.sequence: sequence])
+                    guard let text = reply[WatchWire.text] as? String else {
+                        throw RunnerError(message: "Your iPhone sent no final words back.")
+                    }
+                    said = text
                 }
-                _ = try await request([WatchWire.kind: WatchWire.Kind.voiceStart.rawValue,
-                                       WatchWire.request: id, WatchWire.sampleRate: sampleRate])
-                let send: (Data, Int) async throws -> Void = { audio, sequence in
-                    _ = try await self.request([WatchWire.kind: WatchWire.Kind.voiceChunk.rawValue,
-                                                WatchWire.request: id, WatchWire.sequence: sequence,
-                                                WatchWire.audio: audio])
-                }
-                var sequence = 0
-                for await _ in stream { try await sendBacklog(id, sequence: &sequence, send: send) }
-                // The stream finishes on release; the last of the audio may have come with it.
-                try await sendBacklog(id, sequence: &sequence, send: send)
-                guard asking == id else { return }
-                let reply = try await request([WatchWire.kind: WatchWire.Kind.voiceEnd.rawValue,
-                                               WatchWire.request: id, WatchWire.sequence: sequence])
-                guard asking == id else { return }
-                guard let said = reply[WatchWire.text] as? String else {
-                    throw RunnerError(message: "Your iPhone sent no final words back.")
-                }
-                words = said
-                if talk == .sending { talk = .thinking(said) }
+                guard asking == id, talk == .sending else { return }
+                let final = said.trimmingCharacters(in: .whitespacesAndNewlines)
+                let draft = earlier
+                // Written down: the line has nothing left to drop.
+                asking = nil
+                cancel()
+                keep(Self.join(draft, final), notice: final.isEmpty ? "Oby didn't catch that. Tap the mic to try again." : nil)
             } catch let unavailable as WatchLink.SpeechUnavailable {
                 guard asking == id, !Task.isCancelled else { return }
+                let kept = heard
                 cancel()
                 useDictation = true
-                talk = .reply(unavailable.message + " Tap the mic to dictate instead.")
+                keep(kept, notice: unavailable.message + " Tap the mic to dictate instead.")
             } catch {
                 guard asking == id, !Task.isCancelled else { return }
                 // The session may know the phone is gone before its reachability update arrives.
-                let connectionFailed = !reachable || !WCSession.default.isReachable
-                    || (error as NSError).domain == WCErrorDomain
+                let connectionFailed = link == nil && (!reachable || !WCSession.default.isReachable
+                    || (error as NSError).domain == WCErrorDomain)
+                let kept = heard
                 cancel()
-                useDictation = connectionFailed
-                talk = .reply(error.localizedDescription + (connectionFailed ? " Tap the mic to dictate instead." : ""))
+                // A paired watch goes to the runner on the next tap instead.
+                useDictation = connectionFailed && !paired
+                keep(kept, notice: error.localizedDescription + (useDictation ? " Tap the mic to dictate instead." : " Tap the mic to try again."))
             }
         }
     }
@@ -368,29 +449,41 @@ final class Watch: NSObject {
         }
     }
 
-    func stream(_ audio: Data, level: Double) {
+    private func stream(_ audio: Data, level: Double) {
         guard talk == .recording, let input = voiceInput else { return }
         self.level = level
-        // The recorder stops at the limit; this only bounds a runaway (16 s of audio, ~512 KB).
+        // The recorder stops at the limit; this only bounds a runaway (61 s of audio, ~1.9 MB).
         guard voiceBacklog.count + audio.count <= Int(WatchWire.voiceSampleRate) * WatchWire.voiceSampleBytes * (WatchWire.voiceSeconds + 1) else { return }
         voiceBacklog.append(audio)
         input.yield()
     }
 
-    func endVoice() {
-        guard talk == .recording else { return }
-        talk = .sending
-        level = 0
-        voiceInput?.finish()
-        voiceInput = nil
+    /// The words kept so far become the draft, with why the rest couldn't be; with no words,
+    /// the reason alone.
+    private func keep(_ text: String, notice: String?) {
+        if text.isEmpty {
+            talk = notice.map(Talk.reply) ?? .none
+            self.notice = nil
+        } else {
+            talk = .draft(text)
+            self.notice = notice
+        }
     }
 
-    /// Dictated or typed.
+    /// Earlier words and new ones, with a space between when neither has one.
+    nonisolated static func join(_ earlier: String, _ new: String) -> String {
+        guard !earlier.isEmpty else { return new }
+        guard !new.isEmpty else { return earlier }
+        return earlier.last!.isWhitespace || new.first!.isWhitespace ? earlier + new : earlier + " " + new
+    }
+
+    /// Typed, or a draft sent.
     func ask(_ words: String) {
-        // One fallback input doesn't permanently replace hold-to-talk on a reachable phone.
+        // One fallback input doesn't permanently replace the live mic on a reachable phone.
         useDictation = false
         let said = words.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !said.isEmpty else { return }
+        notice = nil
         plan(said, answer: nil)
     }
 
@@ -399,21 +492,35 @@ final class Watch: NSObject {
         plan(said, answer: (question.text, option))
     }
 
-    /// A jobs tap or notification leaves Home without dismissing its answer or queued ask.
+    /// A jobs tap or notification leaves Home: listening stops and keeps its words. It doesn't
+    /// dismiss an answer, a draft or a queued ask.
     func leaveHome() {
-        if talk == .recording { cancel() }
+        stopListening()
+    }
+
+    /// The phone went out of reach while an unpaired watch was listening through it: what was
+    /// heard stays, and the mic opens the system's dictation next.
+    private func lostPhone() {
+        guard !reachable, !paired, talk == .recording || talk == .sending else { return }
+        let kept = heard
+        cancel()
+        useDictation = true
+        keep(kept, notice: "Your iPhone isn't in reach. Tap the mic to dictate instead.")
     }
 
     func cancel() {
         let id = asking
         asking = nil
+        recorder.cancel()
         voiceInput?.finish()
         voiceInput = nil
         voiceTask?.cancel()
         voiceTask = nil
         voiceBacklog = Data()
+        earlier = ""
         words = ""
         level = 0
+        notice = nil
         talk = .none
         if let id {
             for transfer in WCSession.default.outstandingUserInfoTransfers
@@ -603,7 +710,7 @@ extension Watch: WCSessionDelegate {
         let reachable = session.isReachable
         Task { @MainActor in
             self.reachable = reachable
-            if reachable { self.useDictation = false }
+            if reachable { self.useDictation = false } else { self.lostPhone() }
             self.follow()
             self.refresh()
         }
