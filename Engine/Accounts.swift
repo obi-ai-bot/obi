@@ -173,10 +173,12 @@ final class AccountStore {
     /// against its own plan, so a small plan fills up faster and gets fewer jobs. Unknown usage
     /// counts as 0; ties keep list order. Every automatic choice goes through here (the brain's
     /// dispatch, failover, reviews); only a job the user sends to an account by name skips it.
-    nonisolated static func route(_ accounts: [AccountState], agent: String?, now: Date = .now) -> Account? {
+    /// `under` is how much of the 5-hour window may be used: a job the user moves without naming
+    /// an account goes only where both windows are under 80% (Engine/Move.swift).
+    nonisolated static func route(_ accounts: [AccountState], agent: String?, now: Date = .now, under: Double = 0.95) -> Account? {
         accounts.enumerated()
             .filter { $0.element.signedIn && (agent == nil || $0.element.account.agent == agent) && !$0.element.isFull(at: now)
-                && ($0.element.fiveHour ?? 0) < 0.95 && !$0.element.isReserved(at: now) }
+                && ($0.element.fiveHour ?? 0) < under && !$0.element.isReserved(at: now) }
             .min { (score($0.element, now: now), $0.offset) < (score($1.element, now: now), $1.offset) }?
             .element.account
     }

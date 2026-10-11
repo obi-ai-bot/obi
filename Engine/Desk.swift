@@ -45,6 +45,11 @@ final class Desk {
     /// Stops jobs elsewhere, by id, when the brain names them or stops everything. Answers once
     /// they're stopped, with why each that couldn't be wasn't, by id.
     @ObservationIgnored var stopElsewhere: ([String]) async -> [String: String] = { _ in [:] }
+    /// Moves a job elsewhere, by id, when the brain names it (`Desk.move` there): the job as it is
+    /// now, or why it couldn't move.
+    @ObservationIgnored var moveElsewhere: (_ id: String, _ target: MoveTarget, _ why: String?) async throws -> Job = { _, _, _ in
+        throw Shell.Failure(message: "That job isn't here.")
+    }
     /// The brain's adapters, on the Claude account whose home is given. Tests put in their own.
     @ObservationIgnored var makeBrain: (_ home: String?, Vault) -> [any BrainAdapter] = { [ClaudeBrain(home: $0, vault: $1)] }
     /// How long `ask` waits for an answer before the turn ends with `Conversation.timedOut`, so
@@ -224,7 +229,13 @@ final class Desk {
         var choices = ["auto": ["auto"] + known.map(\.name)]
         for (agent, list) in Dictionary(grouping: known, by: \.agent) { choices[agent] = ["auto"] + list.map(\.name) }
         let briefing = briefing(turns: turns)
-        return BrainContext(accounts: choices, repos: repos, briefing: briefing.text, quoted: briefing.quoted, jobs: briefing.stoppable)
+        // A job may move to any account the briefing knows, here or elsewhere: Swift checks it when it moves.
+        var moveAccounts: [String: [String]] = [:]
+        for state in accounts.accounts + elsewhere().flatMap(\.accounts) where !(moveAccounts[state.account.agent] ?? []).contains(state.account.name) {
+            moveAccounts[state.account.agent, default: []].append(state.account.name)
+        }
+        return BrainContext(accounts: choices, repos: repos, briefing: briefing.text, quoted: briefing.quoted, jobs: briefing.stoppable,
+                            movable: briefing.jobs.map(\.job.id), models: Moves.models, moveAccounts: moveAccounts)
     }
 
     /// What the brain is told before the user's words (Engine/Conversation.swift).
@@ -570,6 +581,19 @@ final class Desk {
                 reply += (reply.isEmpty ? "" : " ") + "Couldn't stop \(job.heading): \(failed[job.id] ?? "")"
             }
             return .reply(reply)
+        case .moveJob:
+            // The job the brain named, here or elsewhere, to where the user said: Swift picks the
+            // account and checks the model (`Moves.choose`), and the reply says what happened.
+            guard let id = plan.jobs?.first, let move = plan.move else { return .reply("Say which job to move, and where.") }
+            let auto = { (value: String) in value == "auto" ? nil : value }
+            let target = MoveTarget(agent: auto(move.agent), account: auto(move.account), model: auto(move.model))
+            do {
+                if job(id) != nil { return .reply(Moves.reply(try self.move(id, to: target, why: said))) }
+                guard elsewhere().flatMap(\.jobs).contains(where: { $0.id == id }) else { return .reply("That job isn't here any more.") }
+                return .reply(Moves.reply(try await moveElsewhere(id, target, said)))
+            } catch {
+                return .reply("Couldn't move it: \(error.localizedDescription)")
+            }
         case .replyOnly, .ignore:
             return plan.reply.isEmpty ? .none : .reply(plan.reply)
         }
@@ -602,9 +626,11 @@ final class Desk {
         setups[job.repo] = Task { _ = await ready.result }
         Task {
             do {
-                let prepared = try await ready.value
+                var prepared = try await ready.value
                 // Stopped while Oby was getting the repository ready.
-                guard self.job(prepared.id)?.status == .queued else { return }
+                guard let latest = self.job(prepared.id), latest.status == .queued else { return }
+                // Moved meanwhile: it starts where it was moved to.
+                (prepared.agent, prepared.account, prepared.model, prepared.moves) = (latest.agent, latest.account, latest.model, latest.moves)
                 startOrWait(prepared)
             } catch {
                 finish(job.id, .failed, "Couldn't get \(job.repoName) ready: \(error.localizedDescription)")
@@ -726,7 +752,12 @@ final class Desk {
         // Out before the job ends, so it's ended by its own stop, after the grace for its turn.
         let agent = agents.removeValue(forKey: id)
         finish(id, .stopped, "Stopped by you.")
-        guard let agent else { return }
+        if let agent { halt(agent) }
+    }
+
+    /// Asks an agent that no longer speaks for its job to stop, and keeps it until its own stop
+    /// has ended it, so quitting ends it too.
+    private func halt(_ agent: any AgentRun) {
         agent.stop()
         let key = ObjectIdentifier(agent)
         stopping[key] = agent
@@ -747,6 +778,47 @@ final class Desk {
         }
         job.dismissed = .now
         replace(job)
+    }
+
+    /// The user moves a job to another tool, account or model (`Moves.choose` picks and checks
+    /// where). It keeps its id, worktree, branch and history, and notes the move. A queued job
+    /// starts there; a running one's agent is stopped and the round starts over there with a new
+    /// session, hearing the work so far and why it moved; a finished one's next round runs there.
+    /// Not Oby's own reviews, and not a job that's wrapping up or publishing.
+    @discardableResult
+    func move(_ id: String, to target: MoveTarget, why: String? = nil) throws -> Job {
+        guard let job = job(id) else { throw Shell.Failure(message: "There's no job \(id).") }
+        guard job.reviewOf == nil else { throw Shell.Failure(message: "Oby's own reviews pick their account themselves.") }
+        guard !finishing.contains(id), !(job.isActive && ending.contains(id)) else {
+            throw Shell.Failure(message: "\(job.agentName) is wrapping up. Move it once it's done.")
+        }
+        let (account, model) = try Moves.choose(job, to: target, accounts: accounts.accounts)
+        let reason = why.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500)) }.flatMap { $0.isEmpty ? nil : $0 }
+        let from = Moves.place(job, accounts: accounts.accounts)
+        var moved = job
+        moved.account = account.id
+        moved.agent = account.agent
+        moved.model = model
+        let to = Moves.place(moved, accounts: accounts.accounts)
+        moved.moves = (job.moves ?? []) + [Job.Move(from: from, to: to, why: reason, date: .now)]
+        // Sessions belong to a tool and an account: the next round starts a new one.
+        moved.session = nil
+        Logger.jobs.notice("job \(id, privacy: .public): moved from \(from, privacy: .public) to \(to, privacy: .public)")
+        guard job.status == .running else {
+            replace(moved)
+            return moved
+        }
+        // Dropped before it's stopped, so nothing it says as it ends counts; a check under way ends too.
+        if let agent = agents.removeValue(forKey: id) { halt(agent) }
+        afterTurns.removeValue(forKey: id)?.cancel()
+        handoffs[id, default: []].append("Moved from \(from) to \(to) by you.")
+        moved.question = nil
+        moved.phase = .work
+        moved.step = "Moved to \(to)"
+        replace(moved)
+        pickedUp.remove(id)
+        run(moved, prompt: Prompts.moved(moved, from: from, why: reason, round: roundMessage[id], apple: offersAppleChecks))
+        return self.job(id) ?? moved
     }
 
     /// Stops every queued and running job, and says how many.
@@ -774,7 +846,9 @@ final class Desk {
             if roundTimers[id] == nil { timeRound(id) }
             agent.send(said)
         } else {
-            guard let session = job.session else { throw Shell.Failure(message: "This job never started, so there's no session to pick up.") }
+            // Moved since its last round: a new session on the new choice takes it over.
+            let moved = job.session == nil && job.started != nil ? job.moves?.last : nil
+            guard job.session != nil || moved != nil else { throw Shell.Failure(message: "This job never started, so there's no session to pick up.") }
             // Nothing is picked up while the vault can't be read: the user hears why.
             _ = try vault.forAgents()
             let resumed = Self.resumed(job, text)
@@ -782,7 +856,11 @@ final class Desk {
             if let author = resumed.reviewOf { reconnect(review: id, to: author) }
             asked.insert(id)
             roundMessage[id] = nil
-            run(resumed, prompt: text, resume: session)
+            if let moved {
+                run(resumed, prompt: Prompts.moved(resumed, from: moved.from, why: moved.why, round: text, apple: offersAppleChecks))
+            } else {
+                run(resumed, prompt: text, resume: job.session)
+            }
         }
     }
 

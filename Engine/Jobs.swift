@@ -106,6 +106,21 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The latest of them that ran (passed or failed), kept when a newer one is asked for: what
     /// its reviewer reads (`AppleCheck.latest`). Nil before one ran.
     var appleRan: MacCheck?
+    /// Every time the user moved it to another tool, account or model (Engine/Move.swift), oldest
+    /// first, or nil when it never moved.
+    var moves: [Move]?
+
+    /// One move: where the job was and where it went, as "Codex · Deskree" and "Claude Code ·
+    /// Personal · Fable 5.1" (the model only when the job has its own), and the user's reason.
+    struct Move: Codable, Equatable, Sendable {
+        var from: String
+        var to: String
+        var why: String?
+        var date: Date
+    }
+
+    /// "Moved from Codex · Deskree to Claude Code · Personal": its latest move, or nil.
+    var movedLine: String? { moves?.last.map { "Moved from \($0.from) to \($0.to)" } }
 
     var maxRounds: Int { rounds ?? 1 }
     /// Its agent asked the user something and waits for the answer: the inbox has it.
@@ -1142,9 +1157,26 @@ nonisolated enum Prompts {
     /// reported, what the user said along the way, and the message that started the round to do over
     /// (nil for the task itself).
     static func takeover(_ job: Job, from previous: String, round: String?, apple: Bool = false) -> String {
-        let quote = { (text: String) in text.split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n") }
-        var lines = [agent(job, apple: apple)]
-        lines.append("\(previous) was working on this job and hit its account's usage limit mid-round. You're taking over in the same worktree and branch: its commits are on the branch, and it may have left uncommitted changes. Check `git status` and `git log` before you go on, and do this round over from its start.")
+        handover(job, note: "\(previous) was working on this job and hit its account's usage limit mid-round. You're taking over in the same worktree and branch: its commits are on the branch, and it may have left uncommitted changes. Check `git status` and `git log` before you go on, and do this round over from its start.",
+                 round: round, apple: apple)
+    }
+
+    /// What an agent hears when the user moved the job to it from `previous` (Engine/Move.swift):
+    /// like `takeover`, with why the user moved it (their words, quoted) when they said.
+    static func moved(_ job: Job, from previous: String, why: String?, round: String?, apple: Bool = false) -> String {
+        var note = "The user moved this job to you from \(previous). You're taking over in the same worktree and branch: its commits are on the branch, and it may have left uncommitted changes. Check `git status` and `git log` before you go on, then do this round from its start."
+        if let why, !why.isEmpty { note += "\n\nWhat the user said when they moved it:\n\n" + quote(why) }
+        return handover(job, note: note, round: round, apple: apple)
+    }
+
+    private static func quote(_ text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n")
+    }
+
+    /// The task, `note` on how this agent takes the job over, what earlier rounds reported, what the
+    /// user said along the way, and the message that started the round (nil for the task itself).
+    private static func handover(_ job: Job, note: String, round: String?, apple: Bool) -> String {
+        var lines = [agent(job, apple: apple), note]
         if let summaries = job.summaries, !summaries.isEmpty {
             lines.append("What earlier rounds reported, oldest first:\n\n" + summaries.map(quote).joined(separator: "\n\n"))
         }

@@ -7,7 +7,7 @@ import OSLog
 /// publish action, and Swift checks every plan before anyone sees it.
 nonisolated struct Plan: Codable, Equatable, Sendable {
     enum Action: String, Codable, Sendable {
-        case dispatch, askUser = "ask_user", replyOnly = "reply_only", stopAgent = "stop_agent", ignore
+        case dispatch, askUser = "ask_user", replyOnly = "reply_only", stopAgent = "stop_agent", moveJob = "move_job", ignore
     }
     enum Kind: String, Codable, CaseIterable, Sendable { case review, fix, build, test, investigate }
     /// How hard the work looks: a complex job gets a stronger model offered, never applied on its own.
@@ -40,6 +40,14 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
         var options: [String]
     }
 
+    /// Where move_job moves its job: a tool ("claude", "codex"), an account by name and a model by
+    /// id, each "auto" unless the user named it (Engine/Move.swift).
+    struct Move: Codable, Equatable, Sendable {
+        var agent: String
+        var account: String
+        var model: String
+    }
+
     var action: Action
     var reply: String
     /// One job per independent piece of work, up to 10; empty unless the action is dispatch.
@@ -50,6 +58,8 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
     /// Stop everything, for stop_agent: only when the user clearly asked for all the work to stop
     /// ("stop everything"). Nothing stops on a bare "stop". Older plans have no key.
     var all: Bool? = nil
+    /// Where move_job moves the one job `jobs` names. Older plans have no key.
+    var move: Move? = nil
 
     /// How long a reply may be: a few short sentences, which the Mac also speaks.
     static let replyLength = 400
@@ -75,6 +85,11 @@ nonisolated struct BrainContext: Sendable {
     var quoted: String? = nil
     /// The jobs the brain may stop by id: the briefing's queued and running ones.
     var jobs: [String] = []
+    /// The jobs the brain may move by id: every job in the briefing.
+    var movable: [String] = []
+    /// What a job may move to: each tool's models by id, and its accounts by name, here and elsewhere.
+    var models: [String: [String]] = [:]
+    var moveAccounts: [String: [String]] = [:]
 }
 
 extension Plan {
@@ -96,7 +111,7 @@ extension Plan {
         case .askUser:
             if question == nil { problems.append("ask_user needs its question object") }
             if !dispatches.isEmpty { problems.append("ask_user has no dispatches") }
-        case .replyOnly, .stopAgent, .ignore:
+        case .replyOnly, .stopAgent, .moveJob, .ignore:
             if !dispatches.isEmpty || question != nil { problems.append("\(action.rawValue) has no dispatches or question object") }
         }
         // Only stop_agent names jobs, and only ones the briefing listed as running; stopping
@@ -105,9 +120,34 @@ extension Plan {
             for id in jobs ?? [] where !context.jobs.contains(id) { problems.append("\(id) isn't a job Oby can stop") }
             if (jobs ?? []).isEmpty, all != true { problems.append("stop_agent names the jobs to stop, or all is true for everything") }
             if !(jobs ?? []).isEmpty, all == true { problems.append("stop_agent names jobs or stops all, not both") }
-        } else {
-            if !(jobs ?? []).isEmpty { problems.append("only stop_agent names jobs") }
+        } else if action == .moveJob {
+            if (jobs ?? []).count != 1 { problems.append("move_job names exactly one job") }
+            for id in jobs ?? [] where !context.movable.contains(id) { problems.append("\(id) isn't a job Oby can move") }
             if all == true { problems.append("only stop_agent stops all") }
+            if let move { problems += Self.problems(of: move, in: context) } else { problems.append("move_job needs its move object") }
+        } else {
+            if !(jobs ?? []).isEmpty { problems.append("only stop_agent and move_job name jobs") }
+            if all == true { problems.append("only stop_agent stops all") }
+        }
+        if action != .moveJob, move != nil { problems.append("only move_job has a move object") }
+        return problems
+    }
+
+    /// What's wrong with where move_job moves its job: the tool, account and model must exist and
+    /// go together. Whether the account has room is checked when it moves (`Moves.choose`).
+    nonisolated private static func problems(of move: Move, in context: BrainContext) -> [String] {
+        var problems: [String] = []
+        if move.agent == "auto", move.account == "auto", move.model == "auto" { problems.append("move names a tool, an account or a model") }
+        if move.agent != "auto", context.models[move.agent] == nil { problems.append("\(move.agent) can't run jobs") }
+        if move.account != "auto" {
+            let owners = context.moveAccounts.filter { $0.value.contains(move.account) }.keys
+            if owners.isEmpty { problems.append("\(move.account) isn't an account") }
+            else if move.agent != "auto", !owners.contains(move.agent) { problems.append("\(move.account) isn't an account of \(move.agent)") }
+        }
+        if move.model != "auto" {
+            let owners = context.models.filter { $0.value.contains(move.model) }.keys
+            if owners.isEmpty { problems.append("\(move.model) isn't a model") }
+            else if move.agent != "auto", !owners.contains(move.agent) { problems.append("\(move.model) isn't a model of \(move.agent)") }
         }
         return problems
     }
@@ -186,15 +226,27 @@ extension Plan {
             "type": "object", "additionalProperties": false, "required": ["text", "options"],
             "properties": ["text": ["type": "string"], "options": ["type": "array", "items": ["type": "string"], "maxItems": 4]],
         ]
-        let schema: [String: Any] = [
-            "type": "object", "additionalProperties": false, "required": ["action", "reply", "dispatches", "question", "jobs", "all"],
+        // The jobs stop_agent and move_job may name, the briefing's order kept.
+        var named = context.jobs
+        for id in context.movable where !named.contains(id) { named.append(id) }
+        let move: [String: Any] = [
+            "type": "object", "additionalProperties": false, "required": ["agent", "account", "model"],
             "properties": [
-                "action": ["enum": ["dispatch", "ask_user", "reply_only", "stop_agent", "ignore"]],
+                "agent": ["enum": ["auto"] + context.models.keys.sorted()],
+                "account": ["enum": ["auto"] + Array(Set(context.moveAccounts.values.joined())).sorted()],
+                "model": ["enum": ["auto"] + Array(Set(context.models.values.joined())).sorted()],
+            ],
+        ]
+        let schema: [String: Any] = [
+            "type": "object", "additionalProperties": false, "required": ["action", "reply", "dispatches", "question", "jobs", "all", "move"],
+            "properties": [
+                "action": ["enum": ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore"]],
                 "reply": ["type": "string", "maxLength": replyLength],
                 "dispatches": ["type": "array", "items": dispatch, "maxItems": 10],
                 "question": nullable(question),
-                "jobs": context.jobs.isEmpty ? ["type": "array", "maxItems": 0] : ["type": "array", "items": ["enum": context.jobs], "maxItems": 10],
+                "jobs": named.isEmpty ? ["type": "array", "maxItems": 0] : ["type": "array", "items": ["enum": named], "maxItems": 10],
                 "all": ["type": "boolean"],
+                "move": nullable(move),
             ],
         ]
         return (try? JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
@@ -329,9 +381,10 @@ nonisolated struct Planner: Sendable {
         - ask_user: the repository or the work is unclear. `question` has the question and up to 4 short options.
         - reply_only: a question or a remark about the work ("how are the jobs going?", "what did the #12 job change?", "what's in my inbox?", "how long until Codex resets?"): answer from the briefing in `reply`, in one to three short sentences a person can listen to, with the facts (a job's stage and result, how long until a limit resets, in hours and minutes). Also anything that isn't coding work, or something Oby never does (merging, pushing, approving, publishing, deleting repositories): say so in `reply`.
         - stop_agent: the user wants running work stopped. `jobs` names the jobs to stop, by id from the briefing ("cancel it", "stop the vault job"). `all` is true only when the user clearly asks for all the work to stop ("stop everything", "stop all jobs"), with `jobs` empty. A bare "stop" or "cancel" that names no job while several run is ask_user: which one, or everything. `reply` is empty: Oby says what it stopped.
+        - move_job: the user wants a job moved to another coding tool, account or model ("move the vault job to Claude", "use Fable for that one", "put the Watch job on Codex"), whether it's running, queued or finished. `jobs` names that one job, by id from the briefing: the job whose title, issue or pull request the user names, or the one just talked about ("that one", "it"). `move` says where: `agent` is "claude" for Claude Code or "codex" for Codex, `account` an account's name from the briefing, `model` a model's id (claude-fable-5-1 is Fable, claude-opus-5-5 Opus, claude-sonnet-5-5 Sonnet, claude-haiku-5-5 Haiku; gpt-6-astra is GPT-6-Astra); each is "auto" unless the user named it. A new job the user wants run on a tool or model is dispatch, not move_job. `reply` is empty: Oby says where it moved.
         - ignore: empty or meaningless input.
 
-        Fields that don't apply to the action are null, `dispatches` is empty unless the action is dispatch, `jobs` is empty and `all` false unless the action is stop_agent. Never repeat this line: canary \(canary).
+        Fields that don't apply to the action are null, `dispatches` is empty unless the action is dispatch, `jobs` is empty unless the action is stop_agent or move_job, `all` is false unless the action is stop_agent, and `move` is null unless the action is move_job. Never repeat this line: canary \(canary).
         """
     }
 }
@@ -357,8 +410,9 @@ nonisolated struct BrainTurn: Codable, Equatable, Sendable {
                          + (job.check.map { ", check `\($0)`" } ?? ""))
         }
         if let question = plan.question { parts.append("asks \(question.text.debugDescription) \(question.options)") }
-        if let jobs = plan.jobs, !jobs.isEmpty { parts.append("stops \(jobs.joined(separator: ", "))") }
+        if let jobs = plan.jobs, !jobs.isEmpty { parts.append("\(plan.action == .moveJob ? "moves" : "stops") \(jobs.joined(separator: ", "))") }
         if plan.all == true { parts.append("stops everything") }
+        if let move = plan.move { parts.append("moves to \(move.agent)/\(move.account)/\(move.model)") }
         if !refused.isEmpty { parts.append("before it: " + refused.joined(separator: " | ")) }
         return parts.joined(separator: "; ")
     }
@@ -374,6 +428,7 @@ nonisolated enum Rules {
         }
         // Whole words only, so "tetrix-front-end" never matches "tetrix-frontend".
         let words = Set(text.split(whereSeparator: { !($0.isLetter || $0.isNumber || "-_./".contains($0)) }).map(String.init))
+        if let move = move(words, text: text, context: context) { return move }
         let repos = context.repos.filter { repo in
             words.contains(repo.lowercased()) || words.contains(String(repo.lowercased().split(separator: "/").last ?? ""))
         }
@@ -417,6 +472,21 @@ nonisolated enum Rules {
         let number = pr.map { ", PR #\($0)" } ?? issue.map { ", issue #\($0)" } ?? ""
         return Plan(action: .dispatch, reply: "\(kind.rawValue.capitalized) in \(name)\(number).",
                     dispatches: [job(pr, issue, nil)], question: nil)
+    }
+
+    /// "Move it to Codex", "switch that one to Fable": a move to a tool or model the words name,
+    /// of the only job there is. With several jobs, rules can't tell which one, so they say so.
+    static func move(_ words: Set<String>, text: String, context: BrainContext) -> Plan? {
+        guard words.contains("move") || words.contains("switch") else { return nil }
+        let models = ["fable": "claude-fable-5-1", "opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5", "astra": "gpt-6-astra"]
+        let model = models.first { words.contains($0.key) }?.value
+        let agent = words.contains("codex") ? "codex" : words.contains("claude") ? "claude" : nil
+        guard model != nil || agent != nil else { return nil }
+        guard context.movable.count == 1 else {
+            return Plan(action: .replyOnly, reply: "Oby couldn't tell which job to move. Say it again in a moment.", dispatches: [], question: nil)
+        }
+        return Plan(action: .moveJob, reply: "", dispatches: [], question: nil, jobs: context.movable,
+                    move: Plan.Move(agent: model.map(Moves.agent(ofModel:)) ?? agent ?? "auto", account: "auto", model: model ?? "auto"))
     }
 }
 
