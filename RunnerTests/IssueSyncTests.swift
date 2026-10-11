@@ -15,6 +15,10 @@ struct IssueSyncTests {
         var scopeFailure = false
         var laterPage = false
         var missingItem = false
+        var extraIssues: [[String: Any]] = []
+        var extraItems: [[String: Any]] = []
+        var repositoryFailure: String?
+        var projectTitle = Lead.boardTitle
         let issueURL = "https://github.com/deskree-inc/oby/issues/116"
 
         func encode(_ object: Any) throws -> String { String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self) }
@@ -22,10 +26,11 @@ struct IssueSyncTests {
         func run(_ args: [String]) async throws -> String {
             calls.append(args)
             let command = Array(args.prefix(2))
+            if args.first == "issue", ["edit", "comment"].contains(args[1]), let repositoryFailure { throw Shell.Failure(message: repositoryFailure) }
             if args.first == "project", scopeFailure { throw Shell.Failure(message: "missing required scope read:project") }
             switch command {
             case ["issue", "view"]: return try encode(row)
-            case ["issue", "list"]: return try encode([row])
+            case ["issue", "list"]: return try encode([row] + extraIssues)
             case ["pr", "list"]: return try encode(openPRs)
             case ["pr", "view"]: return try encode(["body": prBody])
             case ["issue", "comment"]:
@@ -40,11 +45,14 @@ struct IssueSyncTests {
                 }
                 return ""
             case ["project", "view"]: return try encode(["id": "PVT_20"])
+            case ["api", "user"]: return "well-prado"
+            case ["project", "list"]: return try encode(["projects": [["title": projectTitle, "number": 20, "id": "PVT_20"]]])
             case ["project", "field-list"]:
                 return try encode(["fields": [["id": "FIELD", "name": "Status", "options": ["Todo", "In progress", "In review", "Blocked", "Needs test"].map { ["id": $0, "name": $0] }]]])
             case ["api", "graphql"]:
                 let firstPage = laterPage && !args.contains("cursor=next")
-                return try encode(["data": ["node": ["items": ["nodes": firstPage || missingItem ? [] : [["id": "ITEM", "content": ["url": issueURL], "fieldValueByName": ["name": column]]], "pageInfo": ["hasNextPage": firstPage, "endCursor": "next"]]]]])
+                let items: [[String: Any]] = firstPage || missingItem ? [] : [["id": "ITEM", "content": ["url": issueURL], "fieldValueByName": ["name": column]]] + extraItems
+                return try encode(["data": ["node": ["items": ["nodes": items, "pageInfo": ["hasNextPage": firstPage, "endCursor": "next"]]]]])
             case ["project", "item-add"]: missingItem = false; return try encode(["id": "ITEM"])
             case ["project", "item-edit"]:
                 column = args[args.firstIndex(of: "--single-select-option-id")! + 1]
@@ -64,16 +72,17 @@ struct IssueSyncTests {
         let fake = FakeGH()
         desk.issueSync.gh = fake.run
         desk.issueSync.enabled = true
+        desk.issueSync.auditURL = folder.appending(path: "audit.json")
         var job = Job(id: "issue-sync", request: "Implement issue #116", agent: "codex", account: "default", repo: "deskree-inc/oby", branch: "oby/build-116", base: "dev", pr: nil, kind: .build, task: "Implement issue #116")
         job.issue = 116
         job.status = .running
         job.started = Date(timeIntervalSince1970: 1234)
-        desk.store.save(job)
+        desk.issueSync.store.save(job)
         return (desk, fake, job)
     }
 
     func send(_ job: Job, to desk: Desk) async {
-        desk.store.save(job)
+        desk.issueSync.store.save(job)
         desk.issueSync.observe(job)
         await desk.issueSync.drain()
     }
@@ -84,7 +93,8 @@ struct IssueSyncTests {
         #expect(fake.labels.sorted() == ["feature", "status:in-progress"])
         #expect(fake.column == "In progress")
         #expect(fake.notes.first?.contains("oby/build-116") == true)
-        #expect(desk.issueJobs.first?.outgoing?.count == 3)
+        #expect(desk.issueJobs.first?.outgoing?.count == 4)
+        #expect(fake.calls.contains { $0.contains("--add-assignee") && $0.contains("@me") })
         desk.issueSync.observe(original)
         await desk.issueSync.drain()
         #expect(fake.notes.count == 1)
@@ -162,9 +172,11 @@ struct IssueSyncTests {
         job.request = "Work on Watch"
         job.branch = "oby/build-abcd"
         #expect(IssueSync.inferred(job, issues: issues) == 20)
-        job.task = "Part of #20 and part of #116"
+        job.task = "Part of #20\nPart of #116"
         #expect(IssueSync.inferred(job, issues: issues) == nil)
         job.task = "Do some work"
+        #expect(IssueSync.inferred(job, issues: issues) == nil)
+        job.task = "Build something like issue #20"
         #expect(IssueSync.inferred(job, issues: issues) == nil)
         job.title = "Issues always current"
         #expect(IssueSync.inferred(job, issues: issues) == 116)
@@ -174,14 +186,14 @@ struct IssueSyncTests {
         let (desk, fake, original) = try fixture()
         var job = original
         job.status = .done
-        desk.store.save(job)
+        desk.issueSync.store.save(job)
         fake.labels = ["status:in-progress", "feature"]
         fake.column = "In progress"
         let day = Date(timeIntervalSince1970: 1_800_000_000)
         await desk.issueSync.audit(now: day)
-        #expect(fake.labels == ["feature"] && fake.column == "Todo")
+        #expect(fake.labels == ["feature"] && fake.column == "In progress")
         #expect(desk.inbox.count == 1 && desk.inbox.first?.text == "Issue audit: fixed drift on 1 issue(s).")
-        #expect(desk.issueJobs.first(where: { $0.id == original.id })?.outgoing?.count == 2)
+        #expect(desk.issueJobs.first(where: { $0.id == original.id })?.outgoing?.count == 1)
         let count = fake.calls.count
         await desk.issueSync.audit(now: day)
         #expect(fake.calls.count == count)
@@ -195,12 +207,13 @@ struct IssueSyncTests {
         job.branch = "unrelated"
         job.request = "Unrelated work"
         job.task = "Unrelated work"
-        desk.store.save(job)
+        desk.issueSync.store.save(job)
         fake.openPRs = [["url": "https://github.com/deskree-inc/oby/pull/117", "headRefName": "manual-branch", "closingIssuesReferences": [["number": 116, "url": fake.issueURL]]]]
         await desk.issueSync.audit()
         #expect(fake.labels.contains("status:in-review") && fake.column == "In review")
         #expect(fake.notes.first?.contains("/pull/117") == true)
-        #expect(desk.issueJobs.contains { $0.id.hasPrefix("issue-audit-") && $0.outgoing?.isEmpty == false })
+        #expect(desk.issueJobs.count == 1)
+        #expect(desk.inbox.first?.job == "" && desk.inbox.first?.outgoing?.count == 3)
     }
 
     @Test func unknownChecklistCoverageIsNotGuessed() {
@@ -220,7 +233,7 @@ struct IssueSyncTests {
         #expect(fake.notes.last?.contains(Review.stopLine) == true)
         var other = original
         other.id = "another-slice"
-        desk.store.save(other)
+        desk.issueSync.store.save(other)
         job = desk.issueJobs.first { $0.id == original.id }!
         job.review = nil
         job.published = nil
@@ -228,15 +241,15 @@ struct IssueSyncTests {
         #expect(fake.labels.contains("status:in-progress") && fake.column == "In progress")
     }
 
-    @Test func runnerLinksUnlinkedJobAndNewProjectItem() async throws {
+    @Test func runnerLinksUnlinkedJobWithoutAddingProjectItem() async throws {
         let (desk, fake, original) = try fixture()
         var job = original
         job.issue = nil
         fake.missingItem = true
         await send(job, to: desk)
         #expect(desk.issueJobs.first?.issue == 116)
-        #expect(fake.calls.contains { $0.prefix(2) == ["project", "item-add"] })
-        #expect(fake.column == "In progress")
+        #expect(!fake.calls.contains { $0.prefix(2) == ["project", "item-add"] })
+        #expect(fake.column == "Todo")
     }
 
     @Test func leadScopeFailureIsNotMissingProject() async throws {
@@ -244,5 +257,93 @@ struct IssueSyncTests {
             try await Board.read(repos: ["deskree-inc/oby"], gh: { _ in throw Shell.Failure(message: "missing scope read:project") })
         }
         #expect(error?.localizedDescription == IssueSync.scopeFix)
+    }
+
+    @Test(arguments: ["Done", "Shipped", "Closed"])
+    func finishedColumnsAreNeverReopened(_ column: String) async throws {
+        let (desk, fake, job) = try fixture()
+        fake.column = column
+        await send(job, to: desk)
+        #expect(fake.column == column)
+        #expect(!fake.calls.contains { $0.prefix(2) == ["project", "item-edit"] })
+    }
+
+    @Test func auditIsLimitedToExistingNamedRoadmapItems() async throws {
+        let (desk, fake, original) = try fixture()
+        var job = original
+        job.status = .done
+        desk.issueSync.store.save(job)
+        desk.repos += ["other-owner/unrelated", "deskree-inc/another"]
+        fake.extraIssues = [["number": 999, "title": "Unrelated", "url": "https://github.com/deskree-inc/oby/issues/999", "labels": [["name": "status:in-progress"]]]]
+        await desk.issueSync.audit()
+        #expect(!fake.calls.contains { $0.contains("other-owner/unrelated") || $0.contains("deskree-inc/another") || $0.contains("999") || $0.prefix(2) == ["project", "item-add"] })
+        fake.calls = []
+        fake.projectTitle = "An unrelated project numbered 20"
+        await desk.issueSync.audit(now: Date.now.addingTimeInterval(86400))
+        #expect(fake.mutations.isEmpty)
+        #expect(!fake.calls.contains { $0.prefix(2) == ["project", "field-list"] || $0.prefix(2) == ["issue", "list"] })
+    }
+
+    @Test func idleSlicePreservesMergedSliceHandoff() async throws {
+        let (desk, fake, original) = try fixture()
+        fake.body = "## Build\n- [x] First slice\n## Test it when it's done\n- [ ] Test on a Mac"
+        fake.column = "Needs test"
+        var merged = original
+        merged.id = "merged-slice"
+        merged.status = .done
+        merged.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now)
+        desk.issueSync.store.save(merged)
+        var idle = original
+        idle.status = .done
+        await send(idle, to: desk)
+        #expect(fake.labels.contains("status:needs-test") && fake.column == "Needs test")
+    }
+
+    @Test func auditKeepsRemainingSlicesAndQuietDaysQuiet() async throws {
+        let (desk, fake, original) = try fixture()
+        var merged = original
+        merged.status = .done
+        merged.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now)
+        desk.issueSync.store.save(merged)
+        fake.labels = ["feature", "status:in-progress"]
+        fake.column = "In progress"
+        let day = Date(timeIntervalSince1970: 1_800_000_000)
+        await desk.issueSync.audit(now: day)
+        #expect(fake.labels.contains("status:in-progress") && desk.inbox.isEmpty && fake.mutations.isEmpty)
+        let count = fake.calls.count
+        await desk.issueSync.audit(now: day)
+        #expect(fake.calls.count == count)
+        await desk.issueSync.audit(now: day.addingTimeInterval(86400))
+        #expect(desk.inbox.isEmpty && desk.issueJobs.count == 1 && fake.mutations.isEmpty)
+    }
+
+    @Test func auditReadsProjectOnceAndDoesNotRepeatOrphanComments() async throws {
+        let (desk, fake, original) = try fixture()
+        var idle = original
+        idle.status = .done
+        idle.issue = nil
+        idle.branch = "unrelated"
+        idle.task = "Unrelated"
+        desk.issueSync.store.save(idle)
+        fake.laterPage = true
+        fake.extraItems = [["id": "FINISHED", "content": ["url": "https://github.com/deskree-inc/oby/issues/20"], "fieldValueByName": ["name": "Shipped"]]]
+        fake.extraIssues = [["number": 20, "title": "Finished feature", "body": "", "labels": [["name": "status:needs-test"]]]]
+        fake.openPRs = [["url": "https://github.com/deskree-inc/oby/pull/117", "headRefName": "manual-branch", "closingIssuesReferences": [["number": 116, "url": fake.issueURL]]]]
+        let day = Date(timeIntervalSince1970: 1_800_000_000)
+        await desk.issueSync.audit(now: day)
+        #expect(fake.calls.filter { $0.prefix(2) == ["project", "field-list"] }.count == 1)
+        #expect(fake.calls.filter { $0.prefix(2) == ["api", "graphql"] }.count == 2)
+        await desk.issueSync.audit(now: day.addingTimeInterval(86400))
+        #expect(fake.notes.count == 1 && desk.inbox.count == 1 && desk.issueJobs.count == 1)
+    }
+
+    @Test func repositoryPermissionErrorsKeepTheirActualCause() async throws {
+        let (desk, fake, job) = try fixture()
+        let failure = "Resource not accessible: missing repository scope"
+        fake.repositoryFailure = failure
+        await send(job, to: desk)
+        #expect(desk.issueJobs.first?.claim == "Issue sync: \(failure)")
+        #expect(IssueSync.projectError(failure) == failure)
+        #expect(IssueSync.projectError("missing required scopes [read:project]") == IssueSync.scopeFix)
     }
 }

@@ -280,7 +280,7 @@ nonisolated struct Board: Equatable, Sendable {
     static func read(title: String = Lead.boardTitle, repos: [String],
                      gh: ([String]) async throws -> String = { args in
                          do { return try await Shell.ok(args) }
-                         catch { throw Shell.Failure(message: IssueSync.projectError(error.localizedDescription)) }
+                         catch { throw Shell.Failure(message: args.dropFirst().first == "project" ? IssueSync.projectError(error.localizedDescription) : error.localizedDescription) }
                      }) async throws -> Board {
         let user = (try? await gh(["gh", "api", "user", "-q", ".login"])) ?? ""
         var owners = ["@me"]

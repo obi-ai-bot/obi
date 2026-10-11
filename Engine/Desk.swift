@@ -42,12 +42,12 @@ final class Desk {
     /// Called with every inbox item that's added or changes, for the runner's event stream.
     var onInboxChange: (InboxItem) -> Void = { _ in }
 
-    let store: JobStore
+    private let store: JobStore
     /// The repositories the brain and the Lead may choose from; `refresh` reads them, tests set them.
     var repos: [String] = []
     /// The roadmap board as the Lead last read it (Engine/Lead.swift), for claims.
     private var board: Board?
-    @ObservationIgnored lazy var issueSync = IssueSync(desk: self)
+    @ObservationIgnored lazy var issueSync = IssueSync(desk: self, store: store)
     /// Jobs ready to run that wait for an earlier job touching the same files to end (case 2.1), in order.
     private var waiting: [Job] = []
     /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
@@ -104,7 +104,6 @@ final class Desk {
     /// Claude account whose home is given, and claims an issue when a job starts on it. Tests put in their own.
     @ObservationIgnored var readBoard: (_ repos: [String]) async throws -> Board = { try await Board.read(repos: $0) }
     @ObservationIgnored var makeLead: (_ home: String?) -> [any LeadAdapter] = Lead.adapters
-    @ObservationIgnored var claim: (Job, Board?) async throws -> String = { _, _ in "" }
     /// Where each goal's context files go: `leads/<goal>/.oby/context/`.
     @ObservationIgnored var leadRoot = Workspace.root.appending(path: "leads")
 
@@ -639,7 +638,6 @@ final class Desk {
         job.step = "Starting \(job.agentName)"
         replace(job)
         run(job, prompt: Prompts.agent(job))
-        claimIssue(job, board: board)
     }
 
     /// Starts the job's agent in its worktree: a new session, or the job's own picked up again.

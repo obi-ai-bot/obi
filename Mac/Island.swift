@@ -97,7 +97,7 @@ final class IslandController {
     /// first talk, and again each time until it works.
     private var repos: [String] = []
 
-    init() { model = IslandModel(desk: desk, feed: feed) }
+    init() { desk.issueSync.enabled = true; model = IslandModel(desk: desk, feed: feed) }
 
     func start() {
         panel.contentView = NSHostingView(rootView: IslandView(

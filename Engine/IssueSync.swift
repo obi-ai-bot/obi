@@ -7,21 +7,30 @@ final class IssueSync {
     nonisolated static let scopeFix = "Runner gh login lacks read:project or project scope; run gh auth refresh -s read:project,project on the runner"
     nonisolated static func projectError(_ text: String) -> String {
         let lower = text.lowercased()
-        return lower.contains("scope") || lower.contains("read:project") || lower.contains("resource not accessible") ? scopeFix : text
+        return lower.contains("scope") && (lower.contains("read:project") || lower.contains("'project'") || lower.contains("scope project")) ? scopeFix : text
     }
 
     weak var desk: Desk?
+    let store: JobStore
     var enabled = false
     var gh: ([String]) async throws -> String = { args in
         do { return try await Shell.ok(["gh"] + args, env: ["GH_PROMPT_DISABLED": "1"]) }
-        catch { throw Shell.Failure(message: IssueSync.projectError(error.localizedDescription)) }
+        catch { throw Shell.Failure(message: args.first == "project" ? IssueSync.projectError(error.localizedDescription) : error.localizedDescription) }
     }
     var scan: ([(name: String, text: String)]) async throws -> Void
     private var tail: Task<Void, Never>?
     private var seen: [String: String] = [:]
+    var auditURL = Workspace.root.appending(path: "issue-audit.json")
+    private struct AuditState: Codable { var day: String?; var outgoing: [Outgoing] = [] }
+    private var auditState = AuditState()
+    private var auditing = false
+    private struct Project { var id: String; var number: Int; var owner: String; var fields: [[String: Any]]; var items: [[String: Any]] }
+    private var project: Project?
+    private var projectRead = false
 
-    init(desk: Desk) {
+    init(desk: Desk, store: JobStore) {
         self.desk = desk
+        self.store = store
         scan = { [weak desk] texts in
             guard let desk else { throw Shell.Failure(message: "Issue sync has no desk.") }
             let findings = try await Publish.scan(texts: texts, vault: desk.vault)
@@ -71,7 +80,9 @@ final class IssueSync {
     static func inferred(_ job: Job, issues: [[String: Any]]) -> Int? {
         let open = Set(issues.compactMap { $0["number"] as? Int })
         let references = Set([job.task, job.request, job.title ?? ""].flatMap { text in
-            text.matches(of: /(?i)\b(?:part of|issue|feature)\s+#([0-9]+)/).compactMap { Int($0.1) }
+            text.split(separator: "\n").compactMap { line in
+                line.trimmingCharacters(in: .whitespaces).wholeMatch(of: /(?i)part of #([0-9]+)/).flatMap { Int($0.1) }
+            }
         }).intersection(open)
         if references.count == 1 { return references.first }
         if !references.isEmpty { return nil }
@@ -100,7 +111,9 @@ final class IssueSync {
     func drain() async { await tail?.value }
 
     private func json(_ args: [String]) async throws -> Any {
-        let text = try await gh(args)
+        let text: String
+        do { text = try await gh(args) }
+        catch { throw Shell.Failure(message: args.first == "project" ? Self.projectError(error.localizedDescription) : error.localizedDescription) }
         return try JSONSerialization.jsonObject(with: Data(text.utf8))
     }
 
@@ -121,13 +134,19 @@ final class IssueSync {
     private func write(_ args: [String], texts: [String], job: Job, action: String, marker: String? = nil) async throws {
         // Arguments are outgoing data too, including label names, URLs and repository names.
         try await scan((texts + args).enumerated().map { ("issue sync \($0.offset)", $0.element) })
-        let answer = try await gh(args)
+        let answer: String
+        do { answer = try await gh(args) }
+        catch { throw Shell.Failure(message: args.first == "project" ? Self.projectError(error.localizedDescription) : error.localizedDescription) }
         let url = "https://github.com/\(job.repo)/issues/\(job.issue ?? 0)"
         let validComment = answer.hasPrefix(url + "#issuecomment-") && answer.dropFirst((url + "#issuecomment-").count).allSatisfy(\.isNumber)
         let detail = action == "issueLabels" ? args.enumerated().compactMap { i, arg in ["--add-label", "--remove-label"].contains(arg) ? "\(arg) \(args[i + 1])" : nil }.joined(separator: ", ") : action
         let id = action == "comment" && validComment ? answer : "\(url) (\(detail))"
-        desk?.keepIssueJob(job)
-        desk?.recordIssueOutgoing(job.id, Outgoing(action: .init(rawValue: action), repo: job.repo, id: id, sync: marker.map(Self.marker)))
+        let outgoing = Outgoing(action: .init(rawValue: action), repo: job.repo, id: id, sync: marker.map(Self.marker))
+        if desk?.issueJobs.contains(where: { $0.id == job.id }) == true { desk?.recordIssueOutgoing(job.id, outgoing) }
+        else {
+            auditState.outgoing.append(outgoing)
+            try saveAuditState()
+        }
     }
 
     private func bodyFile(_ body: String, args: [String], job: Job, action: String, marker: String? = nil) async throws {
@@ -141,6 +160,7 @@ final class IssueSync {
     private func comment(_ note: String, job: Job, key: String) async throws -> Bool {
         // Durable outgoing entries also prevent duplicates after a partial transition/restart.
         if desk?.issueJobs.first(where: { $0.id == job.id })?.outgoing?.contains(where: { $0.action == .comment && $0.sync == Self.marker(key) }) == true { return false }
+        if auditState.outgoing.contains(where: { $0.repo == job.repo && $0.id.hasPrefix("https://github.com/\(job.repo)/issues/\(job.issue!)") && $0.action == .comment && $0.sync == Self.marker(key) }) { return false }
         try await bodyFile(note, args: ["issue", "comment", "\(job.issue!)", "-R", job.repo], job: job, action: "comment", marker: key)
         return true
     }
@@ -155,21 +175,29 @@ final class IssueSync {
         return true
     }
 
-    /// gh item-edit needs actual IDs, not column names. Page all items before adding one.
-    private func board(status: String?, job: Job) async throws -> Bool {
-        let owner = String(job.repo.split(separator: "/")[0])
-        guard let project = try await json(["project", "view", "20", "--owner", owner, "--format", "json"]) as? [String: Any], let projectID = project["id"] as? String else {
-            throw Shell.Failure(message: "Issue sync: project #20 returned no ID.")
+    /// Resolve the same named roadmap and owner as the Lead, then read it once per pass.
+    private func roadmap() async throws -> Project? {
+        if projectRead { return project }
+        let user = (try? await gh(["api", "user", "-q", ".login"])) ?? ""
+        var owners = ["@me"]
+        for owner in (desk?.repos ?? []).compactMap({ $0.split(separator: "/").first.map(String.init) }) where owner != user && !owners.contains(owner) { owners.append(owner) }
+        var found: (String, Int, String)?
+        for owner in owners {
+            let projects: [[String: Any]]
+            do { projects = try await rows(["project", "list", "--owner", owner, "--format", "json", "--limit", "100"], key: "projects") }
+            catch {
+                if error.localizedDescription == Self.scopeFix { throw error }
+                continue
+            }
+            if let row = projects.first(where: { Board.sameTitle($0["title"] as? String ?? "", Lead.boardTitle) }), let number = Board.int(row["number"]), let id = row["id"] as? String {
+                found = (owner, number, id); break
+            }
         }
-        let fields = try await rows(["project", "field-list", "20", "--owner", owner, "--format", "json", "--limit", "100"], key: "fields")
-        let column = switch status { case "status:in-progress": "In progress"; case "status:in-review": "In review"; case "status:blocked": "Blocked"; case "status:needs-test": "Needs test"; default: "Todo" }
-        guard let field = fields.first(where: { $0["name"] as? String == "Status" }), let fieldID = field["id"] as? String,
-              let options = field["options"] as? [[String: Any]], let option = options.first(where: { ($0["name"] as? String)?.lowercased() == column.lowercased() }), let optionID = option["id"] as? String else {
-            throw Shell.Failure(message: "Issue sync: project #20 has no Status option \(column).")
-        }
-        let url = "https://github.com/\(job.repo)/issues/\(job.issue!)"
+        guard let (owner, number, projectID) = found else { projectRead = true; return nil }
+        let fields = try await rows(["project", "field-list", "\(number)", "--owner", owner, "--format", "json", "--limit", "100"], key: "fields")
         var cursor: String?
-        var item: [String: Any]?
+        var all: [[String: Any]] = []
+        var visited = Set<String>()
         repeat {
             let query = "query($id:ID!,$cursor:String){node(id:$id){... on ProjectV2{items(first:100,after:$cursor){nodes{id content{... on Issue{url}} fieldValueByName(name:\"Status\"){... on ProjectV2ItemFieldSingleSelectValue{name}}} pageInfo{hasNextPage endCursor}}}}}"
             var args = ["api", "graphql", "-f", "query=\(query)", "-f", "id=\(projectID)"]
@@ -178,21 +206,29 @@ final class IssueSync {
                   let nodes = items["nodes"] as? [[String: Any]], let page = items["pageInfo"] as? [String: Any], let more = page["hasNextPage"] as? Bool else {
                 throw Shell.Failure(message: "Issue sync: couldn't read project #20 items.")
             }
-            item = nodes.first { ($0["content"] as? [String: Any])?["url"] as? String == url }
+            all += nodes
             cursor = more ? page["endCursor"] as? String : nil
             if more && cursor == nil { throw Shell.Failure(message: "Issue sync: project pagination returned no cursor.") }
-        } while item == nil && cursor != nil
-        if item == nil {
-            // Add returns the new ID; no recursive retry if GitHub fails to include it.
-            try await scan([(name: "project item URL", text: url), (name: "project owner", text: owner)])
-            let text = try await gh(["project", "item-add", "20", "--owner", owner, "--url", url, "--format", "json"])
-            desk?.keepIssueJob(job)
-            desk?.recordIssueOutgoing(job.id, Outgoing(action: .init(rawValue: "projectAdd"), repo: job.repo, id: url))
-            item = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]
+            if let cursor, !visited.insert(cursor).inserted { throw Shell.Failure(message: "Issue sync: project pagination repeated a cursor.") }
+        } while cursor != nil
+        project = Project(id: projectID, number: number, owner: owner, fields: fields, items: all)
+        projectRead = true
+        return project
+    }
+
+    private func board(status: String?, job: Job) async throws -> Bool {
+        guard let status, let project = try await roadmap() else { return false }
+        let url = "https://github.com/\(job.repo)/issues/\(job.issue!)"
+        guard let item = project.items.first(where: { ($0["content"] as? [String: Any])?["url"] as? String == url }), let itemID = item["id"] as? String else { return false }
+        let current = ((item["fieldValueByName"] as? [String: Any])?["name"] as? String)?.lowercased()
+        guard !["done", "shipped", "closed"].contains(current ?? "") else { return false }
+        let column = switch status { case "status:in-progress": "In progress"; case "status:in-review": "In review"; case "status:blocked": "Blocked"; default: "Needs test" }
+        if current == column.lowercased() { return false }
+        guard let field = project.fields.first(where: { $0["name"] as? String == "Status" }), let fieldID = field["id"] as? String,
+              let options = field["options"] as? [[String: Any]], let option = options.first(where: { ($0["name"] as? String)?.lowercased() == column.lowercased() }), let optionID = option["id"] as? String else {
+            throw Shell.Failure(message: "Issue sync: roadmap has no Status option \(column).")
         }
-        guard let itemID = item?["id"] as? String else { throw Shell.Failure(message: "Issue sync: project item has no ID.") }
-        if ((item?["fieldValueByName"] as? [String: Any])?["name"] as? String)?.lowercased() == column.lowercased() { return false }
-        try await write(["project", "item-edit", "--id", itemID, "--project-id", projectID, "--field-id", fieldID, "--single-select-option-id", optionID], texts: [column], job: job, action: "projectStatus")
+        try await write(["project", "item-edit", "--id", itemID, "--project-id", project.id, "--field-id", fieldID, "--single-select-option-id", optionID], texts: [column], job: job, action: "projectStatus")
         return true
     }
 
@@ -224,6 +260,7 @@ final class IssueSync {
 
     private func sync(_ snapshot: Job, event: Event) async throws {
         guard let desk else { return }
+        if !auditing { project = nil; projectRead = false }
         var job = snapshot
         if job.issue == nil {
             let issues = try await rows(["issue", "list", "-R", job.repo, "--state", "open", "--limit", "1000", "--json", "number,title"])
@@ -234,6 +271,10 @@ final class IssueSync {
         guard let number = job.issue, number > 0, job.repo.wholeMatch(of: /[A-Za-z0-9-]+\/[A-Za-z0-9._-]+/) != nil, !job.repo.contains("..") else { return }
         var row = try await issue(number, repo: job.repo)
         var status = event.status
+        if event.key.hasPrefix("start:"), !desk.issueJobs.contains(where: { $0.id == job.id && ($0.outgoing ?? []).contains(where: { $0.action.rawValue == "issueAssignment" && $0.sync == Self.marker(event.key) }) }) {
+            try await scan([("claim", event.note ?? "")])
+            try await write(["issue", "edit", "\(number)", "-R", job.repo, "--add-assignee", "@me"], texts: [], job: job, action: "issueAssignment", marker: event.key)
+        }
         if event.key.hasPrefix("merged:") {
             guard let url = job.published, let pr = try await json(["pr", "view", url, "-R", job.repo, "--json", "body"]) as? [String: Any], let prBody = pr["body"] as? String else {
                 throw Shell.Failure(message: "Issue sync: merged PR returned no body.")
@@ -244,26 +285,37 @@ final class IssueSync {
                 try await bodyFile(body, args: ["issue", "edit", "\(number)", "-R", job.repo], job: job, action: "issueChecklist")
                 row["body"] = body
             }
-            let build = body.components(separatedBy: "## Build").dropFirst().first?.components(separatedBy: "\n## ").first ?? ""
-            if build.contains("- [ ] ") || desk.issueJobs.contains(where: { $0.id != job.id && $0.repo == job.repo && $0.issue == number && $0.isActive }) { status = "status:in-progress" }
+            if Self.remainingBuild(body) || desk.issueJobs.contains(where: { $0.id != job.id && $0.repo == job.repo && $0.issue == number && $0.isActive }) { status = "status:in-progress" }
         }
         if let note = event.note { try await comment(note, job: job, key: event.key) }
         // An older slice ending must not clear another slice's running/review status.
         let other = desk.issueJobs.filter { $0.id != job.id && $0.repo == job.repo && $0.issue == number && $0.reviewOf == nil }
         if !job.isActive && !job.waitsForAnswer && !job.needsYou, other.contains(where: { $0.isActive }) { status = "status:in-progress" }
         else if status == nil, other.contains(where: { $0.published != nil && ($0.pullRequest?.state ?? .open) == .open }) { status = "status:in-review" }
+        else if status == nil, other.contains(where: { $0.pullRequest?.state == .merged }) { status = Self.remainingBuild(row["body"] as? String ?? "") ? "status:in-progress" : "status:needs-test" }
         _ = try await labels(row, status: status, job: job)
         _ = try await board(status: status, job: job)
         desk.clearIssueSyncError(job.id)
+        if event.key.hasPrefix("start:") { desk.issueSyncError(job.id, "Claimed: assigned to you, labeled status:in-progress, branch noted.") }
+    }
+
+    static func remainingBuild(_ body: String) -> Bool {
+        let build = body.components(separatedBy: "## Build").dropFirst().first?.components(separatedBy: "\n## ").first ?? ""
+        return build.contains("- [ ] ")
     }
 
     private func recordError(_ id: String, _ error: Error) {
         guard let desk else { return }
-        let safe = (try? desk.vault.forAgent("Issue sync: \(Self.projectError(error.localizedDescription))")) ?? "Issue sync failed; the secret scan couldn't read the vault."
+        let safe = (try? desk.vault.forAgent("Issue sync: \(error.localizedDescription)")) ?? "Issue sync failed; the secret scan couldn't read the vault."
         desk.issueSyncError(id, safe)
     }
 
-    /// Called hourly by the runner; persisted inbox IDs make this a daily audit across restarts.
+    private func saveAuditState() throws {
+        try FileManager.default.createDirectory(at: auditURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(auditState).write(to: auditURL, options: .atomic)
+    }
+
+    /// Called hourly by the runner; a separate ledger keeps quiet days out of the inbox.
     func audit(now: Date = .now) async {
         guard enabled else { return }
         let previous = tail
@@ -279,23 +331,33 @@ final class IssueSync {
     private func auditRun(now: Date) async {
         guard enabled, let desk else { return }
         let auditID = "issue-audit-\(Int(now.timeIntervalSince1970 / 86400))"
-        guard !desk.inbox.contains(where: { $0.id == auditID }) else { return }
+        if let data = try? Data(contentsOf: auditURL), let state = try? JSONDecoder().decode(AuditState.self, from: data) { auditState = state }
+        guard auditState.day != auditID else { return }
         if desk.repos.isEmpty { desk.repos = (try? await Workspace.knownRepos()) ?? [] }
         guard !desk.repos.isEmpty || !desk.issueJobs.isEmpty else { return }
         let outgoingBefore = Dictionary(desk.issueJobs.map { ($0.id, $0.outgoing?.count ?? 0) }, uniquingKeysWith: { _, last in last })
+        let ledgerBefore = auditState.outgoing.count
+        auditing = true; project = nil; projectRead = false
+        defer { auditing = false; project = nil; projectRead = false }
         var changed = 0, failures: [String] = []
-        for unlinked in desk.issueJobs where unlinked.issue == nil && unlinked.reviewOf == nil && !unlinked.repo.isEmpty {
-            do { if let event = Self.event(unlinked) { try await sync(unlinked, event: event) } }
-            catch { recordError(unlinked.id, error); failures.append(Self.projectError(error.localizedDescription)) }
-        }
+        let roadmap: Project?
+        do { roadmap = try await self.roadmap() }
+        catch { roadmap = nil; failures.append(error.localizedDescription) }
         let jobs = desk.issueJobs
-        for repo in Set(desk.repos + jobs.map(\.repo)).filter({ !$0.isEmpty }).sorted() {
+        let urls = Set((roadmap?.items ?? []).compactMap { ($0["content"] as? [String: Any])?["url"] as? String })
+        let repos = Set(urls.compactMap { url -> String? in
+            guard let parts = URLComponents(string: url), parts.host == "github.com" else { return nil }
+            let path = parts.path.split(separator: "/")
+            guard path.count == 4, path[2] == "issues" else { return nil }
+            return "\(path[0])/\(path[1])"
+        })
+        for repo in repos.sorted() {
             do {
                 let issues = try await rows(["issue", "list", "-R", repo, "--state", "open", "--limit", "1000", "--json", "number,title,body,labels,url"])
                 let prs = try await rows(["pr", "list", "-R", repo, "--state", "open", "--limit", "1000", "--json", "url,title,body,headRefName,closingIssuesReferences"])
                 guard issues.count < 1000, prs.count < 1000 else { throw Shell.Failure(message: "Issue audit: result limit reached; no stale statuses removed.") }
                 for row in issues {
-                    guard let number = row["number"] as? Int else { continue }
+                    guard let number = row["number"] as? Int, urls.contains("https://github.com/\(repo)/issues/\(number)") else { continue }
                     do {
                         let related = jobs.filter { $0.repo == repo && $0.issue == number && $0.reviewOf == nil }.sorted { $0.created > $1.created }
                         let pr = prs.first { pr in
@@ -308,7 +370,8 @@ final class IssueSync {
                         job.issue = number
                         var status = Self.event(job)?.status
                         if !job.isActive && !job.waitsForAnswer && !job.needsYou {
-                            status = pr != nil ? "status:in-review" : (Board.names(row["labels"], key: "name").contains("status:needs-test") ? "status:needs-test" : nil)
+                            let merged = related.contains { $0.pullRequest?.state == .merged }
+                            status = pr != nil ? "status:in-review" : merged ? (Self.remainingBuild(row["body"] as? String ?? "") ? "status:in-progress" : "status:needs-test") : (Board.names(row["labels"], key: "name").contains("status:needs-test") ? "status:needs-test" : nil)
                         }
                         var commented = false
                         if let url = pr?["url"] as? String { commented = try await comment("Oby's pull request for this issue: \(url).", job: job, key: "pr:\(url)") }
@@ -319,60 +382,45 @@ final class IssueSync {
                         let labeled = try await labels(row, status: status, job: job)
                         let moved = try await board(status: status, job: job)
                         if labeled || moved || commented { changed += 1 }
-                    } catch { failures.append("\(repo)#\(number): \(Self.projectError(error.localizedDescription))") }
+                    } catch { failures.append("\(repo)#\(number): \(error.localizedDescription)") }
                 }
-            } catch { failures.append(Self.projectError(error.localizedDescription)) }
+            } catch { failures.append(error.localizedDescription) }
         }
-        let line = "Issue audit: fixed drift on \(changed) issue(s)." + (failures.isEmpty ? "" : " " + failures.joined(separator: "; ").replacingOccurrences(of: "\n", with: " "))
-        let safe = (try? desk.vault.forAgent(line)) ?? "Issue audit failed: couldn't read the vault."
-        var report = Job(id: auditID, request: "Daily issue audit", agent: "runner", account: "", repo: "", branch: "", base: nil, pr: nil, kind: .investigate, task: "Daily issue audit")
-        report.status = .done
-        report.title = "Daily issue audit"
-        report.summary = safe
-        report.outgoing = desk.issueJobs.flatMap { Array(($0.outgoing ?? []).dropFirst(outgoingBefore[$0.id] ?? 0)) }.sorted { $0.date < $1.date }
-        desk.keepIssueJob(report)
-        desk.addIssueAudit(InboxItem(id: auditID, kind: .audit, job: auditID, title: "Daily issue audit", text: safe, options: [], created: now))
+        let outgoing = desk.issueJobs.flatMap { Array(($0.outgoing ?? []).dropFirst(outgoingBefore[$0.id] ?? 0)) } + Array(auditState.outgoing.dropFirst(ledgerBefore))
+        auditState.day = auditID
+        do { try saveAuditState() } catch { failures.append("Couldn't save the audit ledger.") }
+        if changed > 0 || !failures.isEmpty {
+            let line = "Issue audit: fixed drift on \(changed) issue(s)." + (failures.isEmpty ? "" : " " + failures.joined(separator: "; ").replacingOccurrences(of: "\n", with: " "))
+            let safe = (try? desk.vault.forAgent(line)) ?? "Issue audit failed: couldn't read the vault."
+            desk.addIssueAudit(InboxItem(id: auditID, kind: .audit, job: "", title: "Daily issue audit", text: safe, options: [], created: now, outgoing: outgoing.sorted { $0.date < $1.date }))
+        }
     }
 }
 
 extension Desk {
-    /// Compatibility hook for injected Lead claim handlers; runner writes use IssueSync.
-    func claimIssue(_ job: Job, board: Board?) {
-        guard job.lead != nil, job.issue != nil else { return }
-        Task {
-            let line: String
-            do { line = try await claim(job, board) }
-            catch { line = "Not claimed: \(error.localizedDescription)" }
-            guard !line.isEmpty, var latest = self.job(job.id) else { return }
-            latest.claim = line
-            replace(latest)
-        }
-    }
-
     var issueJobs: [Job] {
-        var all = Dictionary(store.recent(-1).map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        var all = Dictionary(issueSync.store.recent(-1).map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
         for job in jobs { all[job.id] = job }
         return Array(all.values)
     }
     func linkIssue(_ id: String, _ number: Int) {
         guard var latest = issueJobs.first(where: { $0.id == id }) else { return }
         latest.issue = number
-        if job(id) != nil { replace(latest) } else { store.save(latest); onJobChange(latest) }
+        if job(id) != nil { replace(latest) } else { issueSync.store.save(latest); onJobChange(latest) }
     }
-    func keepIssueJob(_ job: Job) { if !issueJobs.contains(where: { $0.id == job.id }) { store.save(job) } }
     func recordIssueOutgoing(_ id: String, _ outgoing: Outgoing) {
         guard var latest = issueJobs.first(where: { $0.id == id }) else { return }
         latest.outgoing = (latest.outgoing ?? []) + [outgoing]
-        if job(id) != nil { replace(latest) } else { store.save(latest); onJobChange(latest) }
+        if job(id) != nil { replace(latest) } else { issueSync.store.save(latest); onJobChange(latest) }
     }
     func issueSyncError(_ id: String, _ line: String) {
         guard var latest = issueJobs.first(where: { $0.id == id }) else { return }
         latest.claim = line
-        if job(id) != nil { replace(latest) } else { store.save(latest); onJobChange(latest) }
+        if job(id) != nil { replace(latest) } else { issueSync.store.save(latest); onJobChange(latest) }
     }
     func clearIssueSyncError(_ id: String) {
         guard var latest = issueJobs.first(where: { $0.id == id }), latest.claim?.hasPrefix("Issue sync:") == true else { return }
         latest.claim = nil
-        if job(id) != nil { replace(latest) } else { store.save(latest); onJobChange(latest) }
+        if job(id) != nil { replace(latest) } else { issueSync.store.save(latest); onJobChange(latest) }
     }
 }

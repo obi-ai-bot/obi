@@ -40,6 +40,8 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
     var later: Date?
     /// What the user answered, or nil (done without an answer, or settled by itself).
     var answer: String?
+    /// Audit mutations without creating an artificial job; nil for older records.
+    var outgoing: [Outgoing]?
 
     var isOpen: Bool { done == nil }
 
