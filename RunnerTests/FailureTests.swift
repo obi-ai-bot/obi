@@ -29,13 +29,15 @@ struct FailureTests {
          "fix": ["files": ["Engine/AppleChecks.swift"], "change": "Reset the simulator and retry once before handing the failure on."]]
     }
 
-    /// The runner's gh: open `oby-failure` issues, what it created and commented.
+    /// The runner's gh: open `oby-failure` issues, what it created and edited, and every call.
     final class GitHub {
         var issues: [(number: Int, body: String)] = []
         var created: [[String]] = []
-        var comments: [(number: Int, body: String)] = []
+        var edits: [(number: Int, body: String)] = []
+        var calls: [[String]] = []
 
         func run(_ args: [String]) async throws -> String {
+            calls.append(args)
             let body = args.firstIndex(of: "--body-file").map { try? String(contentsOfFile: args[$0 + 1], encoding: .utf8) } ?? nil
             switch Array(args.prefix(2)) {
             case ["label", "create"]: return ""
@@ -48,9 +50,11 @@ struct FailureTests {
                 let number = 200 + issues.count
                 issues.append((number, body ?? ""))
                 return "https://github.com/deskree-inc/oby/issues/\(number)\n"
-            case ["issue", "comment"]:
-                comments.append((Int(args[2]) ?? 0, body ?? ""))
-                return "https://github.com/deskree-inc/oby/issues/\(args[2])#issuecomment-1"
+            case ["issue", "edit"]:
+                let number = Int(args[2]) ?? 0
+                edits.append((number, body ?? ""))
+                if let index = issues.firstIndex(where: { $0.number == number }) { issues[index].body = body ?? "" }
+                return "https://github.com/deskree-inc/oby/issues/\(number)"
             default: throw Shell.Failure(message: "Unexpected fake gh command: \(args)")
             }
         }
@@ -289,9 +293,11 @@ struct FailureTests {
         }
         let records = log.store.failures().filter { $0.job != nil }
         #expect(records.count == 3 && records.allSatisfy { $0.postMortem?.signature == "simulator-hung-before-connecting" && $0.acted == true })
-        // Once is environment, nothing filed; twice opens one issue; three times comments on it.
+        // Once is environment, nothing filed; twice opens one issue; three times brings its body up
+        // to date, never a comment: comments email the owner (#198).
         #expect(test.github.created.count == 1)
-        #expect(test.github.comments.map(\.number) == [200])
+        #expect(test.github.edits.map(\.number) == [200] && test.github.edits.first?.body.contains("seen 3 times in the last 7 days") == true)
+        #expect(!test.github.calls.contains { $0.contains("comment") || $0.contains("--assignee") })
         #expect(log.store.failure(records.last!.id)?.issue == nil)
         #expect(Set(records.dropLast().compactMap(\.issue)) == ["https://github.com/deskree-inc/oby/issues/200"])
         let body = try #require(test.github.issues.first?.body)

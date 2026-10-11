@@ -173,6 +173,8 @@ final class APITests {
                 #expect(claude?["model"] as? String == AgentModels.value("claude", "model"))
                 // No GitHub app here: the runner's own calls go with the owner's login.
                 #expect(status["github"] as? String == "owner")
+                // Nor any check runs: the owner can't write them, so reviews and Mac checks stay in Oby (#198).
+                #expect(status["checks"] as? String == "no app")
             }
             try await client.execute(uri: "/v1/nowhere", method: .get, headers: owner) { response in
                 #expect(response.status == .notFound)

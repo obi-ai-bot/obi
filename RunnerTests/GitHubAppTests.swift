@@ -13,8 +13,13 @@ struct GitHubAppTests {
         let clock = Mutex(Date(timeIntervalSince1970: 1_800_000_000))
         let requests = Mutex<[(method: String, path: String, bearer: String)]>([])
         let refuse = Mutex(false)
+        /// The installations' Checks permission, as GitHub lists it: "read", "write", or none.
+        let checks: String?
 
-        init(installations: [(id: Int, login: String)] = [(7, "deskree-inc")]) { self.installations = installations }
+        init(installations: [(id: Int, login: String)] = [(7, "deskree-inc")], checks: String? = nil) {
+            self.installations = installations
+            self.checks = checks
+        }
 
         var minted: Int { requests.withLock { $0.filter { $0.method == "POST" }.count } }
 
@@ -25,7 +30,7 @@ struct GitHubAppTests {
             }
             if refuse.withLock({ $0 }) { return .init(status: 401, body: Data(#"{"message":"A JSON web token could not be decoded"}"#.utf8)) }
             if method == "GET", path.hasPrefix("/app/installations") {
-                let rows = installations.map { ["id": $0.id, "account": ["login": $0.login]] as [String: Any] }
+                let rows = installations.map { ["id": $0.id, "account": ["login": $0.login], "permissions": checks.map { ["checks": $0] } ?? [:]] as [String: Any] }
                 return .init(status: 200, body: try JSONSerialization.data(withJSONObject: rows))
             }
             let expires = clock.withLock { $0 }.addingTimeInterval(3600).ISO8601Format()
@@ -203,8 +208,11 @@ struct GitHubAppTests {
             let said: String = switch Array(arguments.prefix(3)) {
             case ["gh", "api", "repos/deskree-inc/oby/pulls/152"]: pull
             case ["gh", "api", "repos/deskree-inc/oby/pulls/152/commits?per_page=100"]: #"[{"commit":{"message":"fix: it\n\nCloses #151"}}]"#
+            case ["gh", "api", "repos/deskree-inc/oby/commits/\(CheckTests.head)/check-runs?check_name=Oby%20review&filter=latest&per_page=100"],
+                 ["gh", "api", "repos/deskree-inc/oby/commits/\(CheckTests.head)/check-runs?check_name=Oby%20Mac%20check&filter=latest&per_page=100"]:
+                #"{"check_runs":[]}"#
+            case ["gh", "api", "-X"] where arguments.contains("repos/deskree-inc/oby/check-runs"): #"{"html_url":"https://github.com/deskree-inc/oby/runs/1"}"#
             case ["gh", "pr", "create"]: "https://github.com/deskree-inc/oby/pull/152"
-            case ["gh", "pr", "comment"]: "https://github.com/deskree-inc/oby/pull/152#issuecomment-1"
             case ["gh", "pr", "view"]: #"{"state":"OPEN","reviewDecision":"","mergedAt":null,"baseRefName":"dev","headRefOid":"\#(CheckTests.head)"}"#
             case ["gh", "api", "user"]: "well-prado"
             case ["gh", "pr", "list"]: ""
@@ -224,9 +232,13 @@ struct GitHubAppTests {
             _ = try await Publish.pullRequest(job, base: "dev", title: "fix: #151")
             // Merging into dev, through the REST API.
             try await MacCheck.merge(job, check)
-            // Reviews and check results.
-            _ = try await Review.post(job, body: "Approve.")
-            _ = try await MacCheck.post(job, body: "Passed.")
+            // Reviews and check results, as check runs.
+            var check = check
+            check.state = .passed
+            check.mac = "Studio"
+            _ = try await CheckRun.post(job, Review.checkRun(Review(verdict: .approved, job: "r", agent: "codex", account: "Work", round: 1),
+                                                             summary: "Approve.", head: CheckTests.head))
+            _ = try await CheckRun.post(job, MacCheck.checkRun(check))
             // Following the PR, the issue and its epic, the board, the failure records.
             _ = try await PullRequests(desk: desk).read(try PullRequests.arguments(for: job))
             _ = try await desk.issueSync.gh(["issue", "view", "151", "-R", job.repo, "--json", "title"])
@@ -242,8 +254,10 @@ struct GitHubAppTests {
         #expect(ran.token(["gh", "api", "-X", "PUT", "repos/deskree-inc/oby/pulls/152/merge", "-f", "merge_method=squash", "-f", "sha=\(CheckTests.head)",
                            "-f", "commit_title=fix: it (#151) (#152)", "-f", "commit_message=Part of #151"]) == app)
         #expect(ran.token(["gh", "api", "-X", "DELETE", "repos/deskree-inc/oby/git/refs/heads/oby/fix-151"]) == app)
-        let comments = ran.calls.withLock { $0 }.filter { $0.arguments.prefix(3) == ["gh", "pr", "comment"] }
-        #expect(comments.count == 2 && comments.allSatisfy { $0.token == app })
+        let runs = ran.calls.withLock { $0 }.filter { $0.arguments.contains("repos/deskree-inc/oby/check-runs") }
+        #expect(runs.count == 2 && runs.allSatisfy { $0.token == app && $0.arguments.contains("POST") })
+        // No comment from the runner on a pull request or an issue: GitHub emails the owner for each (#198).
+        #expect(!ran.calls.withLock { $0 }.contains { $0.arguments.contains("comment") })
         #expect(ran.token(["gh", "pr", "view"]) == app)
         #expect(ran.token(["gh", "issue", "view"]) == app)
         #expect(ran.token(["gh", "issue", "list"]) == app)
@@ -253,6 +267,155 @@ struct GitHubAppTests {
         #expect(ran.token(["gh", "project", "list", "--owner", "@me"]) == .some(nil))
         #expect(ran.token(["gh", "project", "list", "--owner", "deskree-inc"]) == app)
         #expect(github.minted == 1)
+    }
+
+    // MARK: Check runs (#198)
+
+    /// GitHub's check runs: what's on each commit, by which app, and what each request sent.
+    final class Runs: Sendable {
+        struct Run: Sendable {
+            var id: Int
+            var app: Int
+            var name: String
+            var head: String
+            var body: [String: String]
+        }
+        let runs = Mutex<[Run]>([])
+        let sent = Mutex<[(method: String, path: String, body: [String: String])]>([])
+        /// GitHub refuses writes: the app has Checks: read only.
+        let refuse = Mutex(false)
+
+        /// gh's answer: GET lists the runs on a commit, POST adds one, PATCH updates one.
+        func answer(_ arguments: [String]) -> Shell.Output {
+            func said(_ object: Any) -> Shell.Output { Shell.Output(status: 0, out: try! JSONSerialization.data(withJSONObject: object), err: "") }
+            // The secret scan's own tools find nothing.
+            guard arguments.prefix(2) == ["gh", "api"] else { return Shell.Output(status: 0, out: Data(), err: "") }
+            if arguments.count == 3, let path = URLComponents(string: arguments[2]), path.path.hasSuffix("/check-runs") {
+                let parts = path.path.split(separator: "/")
+                let name = path.queryItems?.first { $0.name == "check_name" }?.value
+                let rows = runs.withLock { $0 }.filter { $0.head == parts[parts.count - 2] && $0.name == name }
+                return said(["total_count": rows.count, "check_runs": rows.map { ["id": $0.id, "name": $0.name, "app": ["id": $0.app]] }])
+            }
+            guard let method = arguments.firstIndex(of: "-X").map({ arguments[$0 + 1] }), let input = arguments.firstIndex(of: "--input"),
+                  let path = arguments.dropFirst(2).first(where: { $0.hasPrefix("repos/") }),
+                  let data = FileManager.default.contents(atPath: arguments[input + 1]),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return Shell.Output(status: 1, out: Data(), err: "bad request") }
+            var body: [String: String] = [:]
+            for (key, value) in object {
+                if let output = value as? [String: String] { for (inner, text) in output { body["\(key).\(inner)"] = text } } else { body[key] = "\(value)" }
+            }
+            sent.withLock { $0.append((method, path, body)) }
+            if refuse.withLock({ $0 }) {
+                return Shell.Output(status: 1, out: Data(#"{"message":"Resource not accessible by integration"}"#.utf8),
+                                    err: "gh: Resource not accessible by integration (HTTP 403)")
+            }
+            let id: Int = runs.withLock { runs in
+                if method == "PATCH", let id = Int(path.split(separator: "/").last ?? ""), let index = runs.firstIndex(where: { $0.id == id }) {
+                    runs[index].body = runs[index].body.merging(body) { $1 }
+                    return id
+                }
+                let id = 100 + runs.count
+                runs.append(Run(id: id, app: 5276623, name: body["name"] ?? "", head: body["head_sha"] ?? "", body: body))
+                return id
+            }
+            return said(["id": id, "html_url": "https://github.com/deskree-inc/oby/runs/\(id)"])
+        }
+    }
+
+    static func review(_ verdict: Review.Verdict, round: Int = 1) -> Review {
+        Review(verdict: verdict, job: "r", agent: "codex", account: "Work", round: round)
+    }
+
+    @Test func aReviewAndAMacCheckAreCheckRunsOnTheCommitAndARerunUpdatesItsOwn() async throws {
+        let github = GitHub(checks: "write")
+        let app = try github.app()
+        let runs = Runs()
+        // Another app's check run with the same name on the same commit is never touched.
+        runs.runs.withLock { $0.append(.init(id: 7, app: 1, name: "Oby review", head: CheckTests.head, body: [:])) }
+        let ran = Ran { arguments, _ in runs.answer(arguments) }
+        let job = Self.job()
+        var check = MacCheck.make(for: job, pr: 152, head: CheckTests.head)
+        check.mac = "Studio"
+        check.state = .failed
+        check.steps = [MacCheck.Step(name: "Mac app and MacTests", passed: false, seconds: 61,
+                                     failing: [MacCheck.FailingTest(test: "MacTests/PublishTests/blocksASecret()", message: "Expectation failed")])]
+        check.failures = ["MacTests/PublishTests/blocksASecret()"]
+        let urls = try await Shell.$stand.withValue(ran.stand(app)) {
+            [
+                try await CheckRun.post(job, Review.checkRun(Self.review(.changesRequested), summary: "Blocking:\n- It crashes\n\nVERDICT: CHANGES REQUESTED", head: CheckTests.head)),
+                // The same commit reviewed again: the app's own check run changes, no second one.
+                try await CheckRun.post(job, Review.checkRun(Self.review(.approved, round: 2), summary: "Fine.\n\nVERDICT: APPROVED", head: CheckTests.head)),
+                try await CheckRun.post(job, MacCheck.checkRun(check)),
+            ]
+        }
+        #expect(urls.map(\.absoluteString) == ["https://github.com/deskree-inc/oby/runs/101", "https://github.com/deskree-inc/oby/runs/101", "https://github.com/deskree-inc/oby/runs/102"])
+        let sent = runs.sent.withLock { $0 }
+        #expect(sent.map(\.method) == ["POST", "PATCH", "POST"])
+        #expect(sent.map(\.path) == ["repos/deskree-inc/oby/check-runs", "repos/deskree-inc/oby/check-runs/101", "repos/deskree-inc/oby/check-runs"])
+        // Changes requested: failure, the review fenced as its summary.
+        #expect(sent[0].body["name"] == "Oby review" && sent[0].body["head_sha"] == CheckTests.head && sent[0].body["status"] == "completed")
+        #expect(sent[0].body["conclusion"] == "failure" && sent[0].body["output.title"] == "Oby review · Codex · Work: Changes requested")
+        #expect(sent[0].body["output.summary"]?.hasPrefix("```\nBlocking:\n- It crashes\n\nVERDICT: CHANGES REQUESTED\n```") == true)
+        // Approved on the second look: success.
+        #expect(sent[1].body["conclusion"] == "success" && sent[1].body["output.title"] == "Oby review · Codex · Work: Approved" && sent[1].body["head_sha"] == nil)
+        #expect(sent[1].body["output.summary"]?.contains("review 2 of at most 2") == true)
+        // The Mac check: failure, the steps and the failing tests.
+        #expect(sent[2].body["name"] == "Oby Mac check" && sent[2].body["conclusion"] == "failure" && sent[2].body["output.title"] == "Oby Mac check · Studio: Failed")
+        #expect(sent[2].body["output.summary"]?.contains("| Mac app and MacTests | Failed | 1m 01s |") == true)
+        #expect(sent[2].body["output.summary"]?.contains("```\nMacTests/PublishTests/blocksASecret(): Expectation failed\n```") == true)
+        #expect(runs.runs.withLock { $0 }.first { $0.id == 7 }?.body.isEmpty == true)
+        // Every call as the app, and none a comment.
+        #expect(ran.calls.withLock { $0 }.filter { $0.arguments.first == "gh" }.allSatisfy { $0.token == "ghs_1" && !$0.arguments.contains("comment") })
+        _ = await app.check()
+        #expect(app.writesChecks && GitHubApp.checks(app) == "ok")
+
+        // Passed, and the Mac couldn't run it: success and neutral.
+        check.state = .passed
+        #expect(MacCheck.checkRun(check).conclusion == .success)
+        check.state = .error
+        check.problem = "The simulator is missing."
+        let neutral = MacCheck.checkRun(check)
+        #expect(neutral.conclusion == .neutral && neutral.title == "Oby Mac check · Studio: Couldn't run" && neutral.summary.contains("The simulator is missing."))
+    }
+
+    @Test func withoutTheChecksPermissionNothingGoesOutAndTheStatusSaysSo() async throws {
+        // The app as it's installed today: Checks read.
+        let github = GitHub(checks: "read")
+        let app = try github.app()
+        _ = await app.check()
+        #expect(app.works && !app.writesChecks && GitHubApp.checks(app) == "missing permission")
+        let runs = Runs()
+        runs.refuse.withLock { $0 = true }
+        let ran = Ran { arguments, _ in runs.answer(arguments) }
+        let run = Review.checkRun(Self.review(.approved), summary: "Fine.\n\nVERDICT: APPROVED", head: CheckTests.head)
+        await #expect(throws: CheckRun.Unwritable.self) {
+            try await Shell.$stand.withValue(ran.stand(app)) { _ = try await CheckRun.post(Self.job(), run) }
+        }
+        #expect(GitHubApp.checks(app) == "missing permission")
+        // Once the owner grants it, the next one goes through, and the status says so.
+        runs.refuse.withLock { $0 = false }
+        _ = try await Shell.$stand.withValue(ran.stand(app)) { try await CheckRun.post(Self.job(), run) }
+        #expect(GitHubApp.checks(app) == "ok")
+        #expect(!ran.calls.withLock { $0 }.contains { $0.arguments.contains("comment") })
+
+        // Without the app, the owner's login can't write check runs: nothing runs at all.
+        let stranded = Ran()
+        await #expect(throws: CheckRun.Unwritable.self) {
+            try await Shell.$stand.withValue(stranded.stand(nil)) { _ = try await CheckRun.post(Self.job(), run) }
+        }
+        #expect(stranded.calls.withLock { $0 }.isEmpty && GitHubApp.checks(nil) == "no app")
+    }
+
+    @Test func noRunnerPathCommentsOnAPullRequestOrAnIssue() throws {
+        let root = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        for folder in ["Engine", "Runner"] {
+            let files = try FileManager.default.contentsOfDirectory(atPath: root.appending(path: folder).path).filter { $0.hasSuffix(".swift") }
+            #expect(!files.isEmpty)
+            for file in files {
+                let text = try String(contentsOf: root.appending(path: "\(folder)/\(file)"), encoding: .utf8)
+                #expect(text.firstMatch(of: /"(pr|issue)",\s*"comment"/) == nil, "\(folder)/\(file)")
+            }
+        }
     }
 
     // MARK: Agents

@@ -9,9 +9,10 @@ import OSLog
 /// reviews Codex's work and Codex reviews Claude Code's. The reviewer reads the diff and the
 /// job's task, makes no commits, and ends with a verdict. Each finding is blocking (a bug, a
 /// security or data-loss problem, a broken requirement or test) or worth doing later: only
-/// blocking ones request changes, and the rest go in the job's report as follow-ups. Oby posts the
-/// review as a pull request comment (GitHub won't let the user approve or request changes on their
-/// own pull request) and keeps it on the job. Changes requested go back to the author's agent as
+/// blocking ones request changes, and the rest go in the job's report as follow-ups. Oby writes the
+/// review as the `Oby review` check run on the commit it read (GitHub won't let the user approve or
+/// request changes on their own pull request, and a comment would email them; Engine/CheckRuns.swift)
+/// and keeps it on the job. Changes requested go back to the author's agent as
 /// its next round, as a quoted file, never in the prompt; the round that publishes gets a
 /// follow-up review, which checks only the blocking findings and the new commits, `maxRounds`
 /// reviews at most, then the job stops and needs the user. Approved: the user's Mac checks the
@@ -28,7 +29,9 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// Which of Oby's reviews of this pull request this is, from 1.
     var round: Int
     var date = Date.now
-    /// The pull request comment Oby posted it as, or nil when it couldn't: `postError` says why.
+    /// The check run Oby wrote it as on the pull request, or nil when it couldn't: `postError` says why.
+    var checkRun: String?
+    /// The pull request comment an Oby from before check runs posted it as.
     var comment: String?
     var postError: String?
     /// The branch the reviewer read, still at the commit it reviewed: a follow-up compares with it.
@@ -50,7 +53,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     var stopsHere: Bool { verdict == .changesRequested && round >= Self.maxRounds }
     static let stopLine = "Oby requested changes \(maxRounds) times. Take it from here."
 
-    /// "Oby review · Claude Code · Personal: Approved": the heading of the comment on the pull request.
+    /// "Oby review · Claude Code · Personal: Approved": the title of its check run on the pull request.
     var heading: String { "Oby review · \(agentName) · \(account): \(label)" }
 
     // MARK: The reviewer
@@ -369,21 +372,19 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         return kept.isEmpty ? list : kept + "\n\n" + list
     }
 
-    // MARK: The comment on the pull request
+    // MARK: The check on the pull request
 
-    /// The comment Oby posts: the heading, the review as a code block (the reviewer may have read
-    /// anything, so no mentions, links or closing keywords take effect), and that Oby wrote it.
-    static func comment(_ review: Review, summary: String) -> String {
-        let fence = String(repeating: "`", count: max(3, (summary.matches(of: /`+/).map(\.output.count).max() ?? 0) + 1))
-        return """
-            ### \(review.heading)
+    /// The check run Oby writes on the commit the review read (Engine/CheckRuns.swift): `Oby review`,
+    /// success when approved and failure when changes are requested, headed like "Oby review ·
+    /// Claude Code · Personal: Approved", the review as a code block (the reviewer may have read
+    /// anything, so no mentions, links or images take effect), and that Oby wrote it.
+    static func checkRun(_ review: Review, summary: String, head: String) -> CheckRun {
+        let cut = summary.count > CheckRun.summaryLimit - 2000 ? summary.prefix(CheckRun.summaryLimit - 2000) + "\n…" : summary
+        return CheckRun(name: CheckRun.review, head: head, conclusion: review.verdict == .approved ? .success : .failure, title: review.heading, summary: """
+            \(CheckRun.fenced(cut))
 
-            \(fence)
-            \(summary)
-            \(fence)
-
-            \(overruled(review, summary: summary).map { $0 + "\n\n" } ?? "")by Oby: \(review.agentName) reviewed this pull request on the \(review.account) account for Oby, review \(review.round) of at most \(maxRounds). GitHub doesn't let a pull request's own author approve it or request changes, so this comment stands in. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
-            """
+            \(overruled(review, summary: summary).map { $0 + "\n\n" } ?? "")by Oby: \(review.agentName) reviewed this pull request on the \(review.account) account for Oby, review \(review.round) of at most \(maxRounds). GitHub doesn't let a pull request's own author approve it or request changes, so this check stands in. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
+            """)
     }
 
     /// Why the heading's verdict isn't the review's last line, when Oby decided otherwise
@@ -401,31 +402,6 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         try await Publish.scan(texts: [("review", text)])
     }
 
-    /// Posts `body` as a comment on `author`'s own pull request, after the secret scan. Returns the
-    /// comment's URL.
-    static func post(_ author: Job, body: String) async throws -> URL {
-        guard let pr = pullRequest(of: author) else { throw Shell.Failure(message: "Not posted: the job has no pull request of its own.") }
-        let findings: [Publish.Finding]
-        do {
-            findings = try await scan(body)
-        } catch {
-            throw Shell.Failure(message: "Not posted: the secret scan couldn't run (\(error.localizedDescription)).")
-        }
-        if !findings.isEmpty {
-            let more = findings.count > 3 ? " and \(findings.count - 3) more" : ""
-            throw Shell.Failure(message: "Not posted: possible secret in the review at line "
-                                + findings.prefix(3).map { "\($0.line.map(String.init) ?? "?") (\($0.rule))" }.joined(separator: ", ") + more + ".")
-        }
-        let file = FileManager.default.temporaryDirectory.appending(path: "oby-review-\(UUID().uuidString).md")
-        try body.write(to: file, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: file) }
-        let said = try await Shell.ok(["gh", "pr", "comment", "\(pr)", "-R", author.repo, "--body-file", file.path], as: .app)
-        guard let url = said.split(separator: "\n").last.flatMap({ URL(string: String($0)) }) else {
-            throw Shell.Failure(message: "gh posted no comment: \(said)")
-        }
-        return url
-    }
-
     // MARK: The author's next round
 
     /// The review as the author's agent gets it: quoted, with the vault's secrets taken out. Throws
@@ -437,7 +413,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// The review as a file for the author's agent, quoted so nothing in it reads as an instruction.
     static func quoted(_ review: Review, summary: String, pr: Int) -> String {
         let quote = summary.split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n")
-        let posted = review.comment.map { "- Posted on the pull request: \($0)" }
+        let posted = (review.checkRun ?? review.comment).map { "- Posted on the pull request: \($0)" }
             ?? "- Not posted on the pull request\(review.postError.map { ": \($0)" } ?? "")"
         return """
             # Oby's review of pull request #\(pr), quoted
@@ -529,7 +505,7 @@ extension Desk {
         enqueue(review)
     }
 
-    /// A review job ended: its verdict goes on the author's job, to the pull request as a comment,
+    /// A review job ended: its verdict goes on the author's job, on the pull request as a check run,
     /// and, when changes are requested, to the author's agent as its next round. What it found
     /// worth doing later goes in the author's report as follow-ups. A review that
     /// didn't end with a verdict leaves the author waiting for a person, saying why.
@@ -561,12 +537,19 @@ extension Desk {
         if verdict == .approved { reviewApproved(id, review: review.id) }
         Task {
             do {
-                let url = try await postReview(author, Review.comment(result, summary: review.summary)).absoluteString
-                result.comment = url
-                sent(id, Outgoing(action: .comment, repo: author.repo, id: url))
+                // The commit the reviewer read; the pull request's head when its worktree can't say.
+                let head = await reviewedHead(review.id) ?? author.pushedHead ?? ""
+                let url = try await postReview(author, Review.checkRun(result, summary: review.summary, head: head)).absoluteString
+                result.checkRun = url
+                sent(id, Outgoing(action: .checkRun, repo: author.repo, id: url))
             } catch {
                 result.postError = error.localizedDescription
-                Logger.jobs.error("job \(id, privacy: .public): the review wasn't posted: \(error.localizedDescription, privacy: .public)")
+                // The app without Checks: write, or none: the review stays in Oby, and /v1/status says why.
+                if error is CheckRun.Unwritable {
+                    Logger.jobs.notice("job \(id, privacy: .public): the review stays in Oby: \(error.localizedDescription, privacy: .public)")
+                } else {
+                    Logger.jobs.error("job \(id, privacy: .public): the review wasn't posted: \(error.localizedDescription, privacy: .public)")
+                }
             }
             guard var latest = self.job(id), latest.review?.job == review.id else { return }
             latest.review = result

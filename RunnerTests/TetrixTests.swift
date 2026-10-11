@@ -129,7 +129,7 @@ struct TetrixTests {
         desk.countCommits = { _, _ in 2 }
         desk.readStamps = { [made] _, _ in made.stamps }
         desk.publishOnItsOwn = { _, _, _ in URL(string: "https://github.com/deskree-inc/oby/pull/131")! }
-        desk.postReview = { _, _ in URL(string: "https://github.com/deskree-inc/oby/pull/131#issuecomment-1")! }
+        desk.postReview = { _, _ in URL(string: "https://github.com/deskree-inc/oby/runs/1")! }
         desk.quoteReview = { _, _, _ in }
         return (desk, made, work.id)
     }

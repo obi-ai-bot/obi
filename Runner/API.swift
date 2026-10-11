@@ -96,7 +96,7 @@ final class API {
     func status() -> Response {
         Self.json(Status(runner: .init(version: Self.version, host: ProcessInfo.processInfo.hostName),
                          accounts: accounts, models: .current, clearedAt: cleared.at,
-                         github: (GitHubApp.inUse ? GitHubActor.app : .owner).rawValue))
+                         github: (GitHubApp.inUse ? GitHubActor.app : .owner).rawValue, checks: GitHubApp.checks))
     }
 
     /// Clear done, on the iPhone or the Mac: the runner records now, answers it, and tells every
@@ -557,8 +557,11 @@ struct Status: Encodable {
     var clearedAt: Date?
     /// Who the runner's own GitHub calls act as: "app" (Oby by Deskree) or "owner" (the owner's gh login).
     var github: String = GitHubActor.owner.rawValue
+    /// Whether Oby's review and Mac check go on pull requests as check runs: "ok", "missing
+    /// permission" (the app lacks Checks: write) or "no app" (`GitHubApp.checks`).
+    var checks: String = "no app"
 
-    private enum Keys: String, CodingKey { case runner, accounts, models, clearedAt, github }
+    private enum Keys: String, CodingKey { case runner, accounts, models, clearedAt, github, checks }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -567,6 +570,7 @@ struct Status: Encodable {
         try keys.encode(models, forKey: .models)
         try keys.encode(clearedAt, forKey: .clearedAt)
         try keys.encode(github, forKey: .github)
+        try keys.encode(checks, forKey: .checks)
     }
 }
 
@@ -713,7 +717,7 @@ struct CheckAnswer: Encodable {
 struct MacCheckJSON: Encodable {
     var check: MacCheck
 
-    private enum Nullable: String, CodingKey { case started, finished, mac, steps, failures, comment, postError, kind }
+    private enum Nullable: String, CodingKey { case started, finished, mac, steps, failures, checkRun, comment, postError, kind }
 
     func encode(to encoder: any Encoder) throws {
         try check.encode(to: encoder)
@@ -725,6 +729,7 @@ struct MacCheckJSON: Encodable {
         if check.mac == nil { try nulls.encodeNil(forKey: .mac) }
         if check.steps == nil { try nulls.encodeNil(forKey: .steps) }
         if check.failures == nil { try nulls.encodeNil(forKey: .failures) }
+        if check.checkRun == nil { try nulls.encodeNil(forKey: .checkRun) }
         if check.comment == nil { try nulls.encodeNil(forKey: .comment) }
         if check.postError == nil { try nulls.encodeNil(forKey: .postError) }
     }

@@ -9,7 +9,8 @@ import OSLog
 /// merge checks on this Mac") takes it (`GET /v1/checks/next`), runs the runner's tests, the Mac
 /// app with MacTests and the iPhone app (with its Watch app) with iOSTests in a clean worktree of
 /// that commit, one step at a time, each with a timeout, and reports pass or fail with the failing
-/// tests' names (`POST /v1/checks/{id}/result`). The runner posts the results on the pull request.
+/// tests' names (`POST /v1/checks/{id}/result`). The runner writes the results on the pull request's
+/// commit as the `Oby Mac check` check run (Engine/CheckRuns.swift).
 /// Passed, with Oby's review approved on the same commit and a clean secret scan: the runner
 /// squash-merges it into dev and deletes the branch. Never into main. Failed: the failing tests go
 /// back to the author's agent as its next round, quoted in a file.
@@ -77,7 +78,9 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     var mac: String?
     var steps: [Step]?
     var failures: [String]?
-    /// The pull request comment with the results, or nil with `postError` saying why there's none.
+    /// The check run with the results on the pull request, or nil with `postError` saying why there's none.
+    var checkRun: String?
+    /// The pull request comment an Oby from before check runs posted the results as.
     var comment: String?
     var postError: String?
     /// Why the Mac couldn't run it (`State.error`), or nil.
@@ -232,51 +235,35 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         String(text.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(limit))
     }
 
-    // MARK: The comment on the pull request
+    // MARK: The check on the pull request
 
     /// "2m 05s"
     static func duration(_ seconds: Int) -> String {
         seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(String(format: "%02d", seconds % 60))s"
     }
 
-    /// The results as Oby posts them: each step, the failing tests in a code block (they came
-    /// from the build, so no mentions or links take effect), and that Oby ran them.
-    static func comment(_ check: MacCheck) -> String {
+    /// The results as Oby writes them on the commit, as the `Oby Mac check` check run: success when
+    /// it passed, failure when it failed, neutral when the Mac couldn't run it. Each step, the failing
+    /// tests in a code block (they came from the build, so no mentions or links take effect), and
+    /// that Oby ran them.
+    static func checkRun(_ check: MacCheck) -> CheckRun {
         let rows = (check.steps ?? []).map {
             "| \($0.label) | \($0.passed ? "Passed" : "Failed")\($0.retried == true ? " (second run)" : "") | \(duration($0.seconds)) |"
         }
-        var parts = ["### Oby Mac check · \(check.macName): \(check.label)",
-                     (["| Step | Result | Time |", "| --- | --- | --- |"] + rows).joined(separator: "\n")]
+        var parts = rows.isEmpty ? [] : [(["| Step | Result | Time |", "| --- | --- | --- |"] + rows).joined(separator: "\n")]
         for group in failingTests(check) {
-            let text = group.tests.joined(separator: "\n")
-            let fence = String(repeating: "`", count: max(3, (text.matches(of: /`+/).map(\.output.count).max() ?? 0) + 1))
-            parts.append("\(group.heading):\n\n\(fence)\n\(text)\n\(fence)")
+            parts.append("\(group.heading):\n\n\(CheckRun.fenced(group.tests.joined(separator: "\n")))")
         }
-        let then = check.state == .passed
-            ? "Oby merges it into \(into) once its review has approved this commit and the secret scan is clean."
-            : "The job's agent gets the failing tests as its next round."
+        if check.state == .error { parts.append(CheckRun.fenced(check.problemLine ?? "The Mac couldn't run it.")) }
+        let then = switch check.state {
+        case .passed: "Oby merges it into \(into) once its review has approved this commit and the secret scan is clean."
+        case .error: "Nothing the code can fix: it needs the user, who can check the same commit again."
+        default: "The job's agent gets the failing tests as its next round."
+        }
         parts.append("by Oby: Oby ran the runner's tests, the Mac app with MacTests and the iPhone app with iOSTests on \(check.macName), ad hoc signed, for commit \(check.head.prefix(12)) (check \(check.round) of at most \(maxRounds)), because GitHub Actions doesn't run for this repository. \(then)")
-        return parts.joined(separator: "\n\n")
-    }
-
-    /// Posts `body` on `author`'s own pull request, after the secret scan. Returns the comment's URL.
-    static func post(_ author: Job, body: String) async throws -> URL {
-        guard let pr = Review.pullRequest(of: author) else { throw Shell.Failure(message: "Not posted: the job has no pull request of its own.") }
-        let findings: [Publish.Finding]
-        do {
-            findings = try await Publish.scan(texts: [("check results", body)])
-        } catch {
-            throw Shell.Failure(message: "Not posted: the secret scan couldn't run (\(error.localizedDescription)).")
-        }
-        if !findings.isEmpty { throw Shell.Failure(message: "Not posted: possible secret in " + places(findings) + ".") }
-        let file = FileManager.default.temporaryDirectory.appending(path: "oby-check-\(UUID().uuidString).md")
-        try body.write(to: file, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: file) }
-        let said = try await Shell.ok(["gh", "pr", "comment", "\(pr)", "-R", author.repo, "--body-file", file.path], as: .app)
-        guard let url = said.split(separator: "\n").last.flatMap({ URL(string: String($0)) }) else {
-            throw Shell.Failure(message: "gh posted no comment: \(said)")
-        }
-        return url
+        let conclusion: CheckRun.Conclusion = switch check.state { case .passed: .success; case .failed: .failure; default: .neutral }
+        return CheckRun(name: CheckRun.macCheck, head: check.head, conclusion: conclusion,
+                        title: "Oby Mac check · \(check.macName): \(check.label)", summary: parts.joined(separator: "\n\n"))
     }
 
     /// "README.md:3 (AWS access key), …": where, never the secret.
@@ -1224,7 +1211,7 @@ extension Desk {
     }
 
     /// A Mac reports check `id`. Its results go on the job and, while the job still waits for that
-    /// commit, on the pull request as a comment; then passed merges, and failed goes back to the
+    /// commit, on the pull request as a check run; then passed merges, and failed goes back to the
     /// author's agent as its next round (`finishCheck`). Throws `MacCheck.Unknown` for a check Oby
     /// doesn't have, and a failure when it isn't running.
     @discardableResult
@@ -1250,38 +1237,44 @@ extension Desk {
         return check
     }
 
-    /// What follows a check's result, once at a time per job: its comment on the pull request when
-    /// it has none yet, then the merge when it passed, or the author's next round when it failed.
+    /// What follows a check's result, once at a time per job: its check run on the pull request when
+    /// it has none yet, then the merge when it passed, or the author's next round when it failed. A
+    /// check the Mac couldn't run gets its check run (neutral), and nothing else: it needs the user.
     /// Nothing for results of a commit the job moved on from (it ran again, or pushed since).
     /// `resumeChecks` calls it again for what a restart cut short.
     func finishCheck(_ id: String, log: String?) async {
         guard finishingChecks.insert(id).inserted else { return }
         defer { finishingChecks.remove(id) }
-        // A check the Mac couldn't run has no results to post or hand on: it needs the user.
-        guard let author = job(id), var check = author.macCheck, check.state == .passed || check.state == .failed,
+        guard let author = job(id), var check = author.macCheck, [.passed, .failed, .error].contains(check.state),
               !author.isActive, check.head == author.pushedHead else { return }
-        if check.comment == nil && check.postError == nil {
+        if check.checkRun == nil && check.comment == nil && check.postError == nil {
             do {
-                let url = try await postCheck(author, MacCheck.comment(check)).absoluteString
-                check.comment = url
-                sent(id, Outgoing(action: .comment, repo: author.repo, id: url))
+                let url = try await postCheck(author, MacCheck.checkRun(check)).absoluteString
+                check.checkRun = url
+                sent(id, Outgoing(action: .checkRun, repo: author.repo, id: url))
             } catch {
                 check.postError = error.localizedDescription
-                Logger.jobs.error("job \(id, privacy: .public): the check results weren't posted: \(error.localizedDescription, privacy: .public)")
+                // The app without Checks: write, or none: the results stay in Oby, and /v1/status says why.
+                if error is CheckRun.Unwritable {
+                    Logger.jobs.notice("job \(id, privacy: .public): the check results stay in Oby: \(error.localizedDescription, privacy: .public)")
+                } else {
+                    Logger.jobs.error("job \(id, privacy: .public): the check results weren't posted: \(error.localizedDescription, privacy: .public)")
+                }
             }
             guard var latest = self.job(id), latest.macCheck?.id == check.id else { return }
-            latest.macCheck?.comment = check.comment
+            latest.macCheck?.checkRun = check.checkRun
             latest.macCheck?.postError = check.postError
             replace(latest)
         }
-        if check.state == .passed { await mergeChecked(id) } else { checkFailed(id, log: log) }
+        // A check the Mac couldn't run has nothing to merge or hand on.
+        if check.state == .passed { await mergeChecked(id) } else if check.state == .failed { checkFailed(id, log: log) }
     }
 
     /// After a restart, and every time the desk refreshes: a passed check whose job wasn't merged
     /// is finished again, when nothing was tried yet (the runner stopped while it posted or merged)
     /// or when the last try failed on something that may pass now (`gh`, the network, the scan
     /// not running), `MacCheck.maxTries` times at most. A failed check whose round for the author
-    /// never started goes on to its comment, when it has none, and the round.
+    /// never started goes on to its check run, when it has none, and the round.
     func resumeChecks() {
         for job in jobs where job.status == .done && job.dismissed == nil && (job.pullRequest?.state ?? .open) == .open {
             guard let check = job.macCheck, check.head == job.pushedHead, !finishingChecks.contains(job.id) else { continue }

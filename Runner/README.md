@@ -27,14 +27,14 @@ Oby never reads these logins. More accounts go in `accounts.json` in `OBY_HOME`,
 
 ### The GitHub app
 
-The runner's own GitHub calls (reading pull requests, checks, issues and the board, posting Oby's reviews and Mac check results, merging into `dev`, the failure records) go as a GitHub App with an hourly budget of its own, so jobs that finish together don't run the owner's login out of it. Pushing, opening and editing pull requests, and who the owner is stay with the owner's `gh` login ([the runner API](../docs/runner-api.md#get-v1status) lists which is which). Deskree's app is **Oby by Deskree** (`oby-by-deskree`, App ID `5276623`). To set one up:
+The runner's own GitHub calls (reading pull requests, checks, issues and the board, writing Oby's reviews and Mac check results as check runs, merging into `dev`, the failure records) go as a GitHub App with an hourly budget of its own, so jobs that finish together don't run the owner's login out of it. Pushing, opening and editing pull requests, and who the owner is stay with the owner's `gh` login ([the runner API](../docs/runner-api.md#get-v1status) lists which is which). Deskree's app is **Oby by Deskree** (`oby-by-deskree`, App ID `5276623`). To set one up:
 
-1. Create a GitHub App (Settings › Developer settings › GitHub Apps) with no webhook and these permissions: Contents, Pull requests and Issues read and write; Checks and Commit statuses read; organization Projects read and write; no Workflows.
+1. Create a GitHub App (Settings › Developer settings › GitHub Apps) with no webhook and these permissions: Contents, Pull requests, Issues and Checks read and write; Commit statuses read; organization Projects read and write; no Workflows.
 2. Install it on the account that owns the repositories, for those repositories.
 3. Generate a private key and put it on the runner at `~/.config/oby/github-app.pem`, owned by the runner's user, mode 600. The runner refuses a key others may read.
 4. Set `OBY_GITHUB_APP_ID` in the service (the service file has Deskree's), and `OBY_GITHUB_APP_KEY` if the key is elsewhere, then restart it.
 
-The journal says at start whether calls go as the app (`GitHub: as the app 5276623, installed for deskree-inc`), and `GET /v1/status` says `"github": "app"` or `"owner"`. With no App ID, a key that's missing or that others may read, or no installation for a repository's owner, those calls go as the owner, as before. The key is read once and never leaves the runner: it isn't logged, and neither its path nor a token reaches an agent (`GH_TOKEN` is set only on the runner's own `gh` calls).
+The journal says at start whether calls go as the app (`GitHub: as the app 5276623, installed for deskree-inc`), and `GET /v1/status` says `"github": "app"` or `"owner"`. Oby's review and Mac check go on pull requests as the check runs `Oby review` and `Oby Mac check`, never as comments, so they email no one: that needs **Checks: Read and write**. An installation from before then has Checks read only: the app's settings ask for write, GitHub shows the request on the installation, and until the owner accepts it the results stay in Oby and `GET /v1/status` says `"checks": "missing permission"`. With no App ID, a key that's missing or that others may read, or no installation for a repository's owner, those calls go as the owner, as before. The key is read once and never leaves the runner: it isn't logged, and neither its path nor a token reaches an agent (`GH_TOKEN` is set only on the runner's own `gh` calls).
 
 ## Install
 

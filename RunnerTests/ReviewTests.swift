@@ -25,7 +25,7 @@ struct ReviewTests {
     /// posted on GitHub, and what it quoted for the author.
     final class Made {
         var agents: [(job: Job, agent: Agent, resume: String?)] = []
-        var posted: [(author: Job, body: String)] = []
+        var posted: [(author: Job, run: CheckRun)] = []
         var quoted: [(author: Job, file: String, text: String)] = []
         var postError: Error?
         var published: [Job] = []
@@ -61,10 +61,10 @@ struct ReviewTests {
             hooks.sent(Outgoing(action: .push, repo: job.repo, id: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", branch: job.branch))
             return url
         }
-        desk.postReview = { [made] author, body in
-            made.posted.append((author, body))
+        desk.postReview = { [made] author, run in
+            made.posted.append((author, run))
             if let error = made.postError { throw error }
-            return URL(string: "https://github.com/deskree-inc/oby/pull/80#issuecomment-1")!
+            return URL(string: "https://github.com/deskree-inc/oby/runs/1")!
         }
         desk.quoteReview = { [made] author, file, text in made.quoted.append((author, file, text)) }
     }
@@ -112,7 +112,7 @@ struct ReviewTests {
         agent.onEvent(.turnEnded(summary: summary, failed: failed))
         agent.onEvent(.finished(summary: summary, failed: failed))
         try await until("the review ends") { desk.job(job.id)?.isActive == false }
-        try await until("the verdict is on the author") { desk.job("author")?.reviewing == nil && (desk.job("author")?.review == nil || desk.job("author")?.review?.job != job.id || desk.job("author")?.review?.comment != nil || desk.job("author")?.review?.postError != nil) }
+        try await until("the verdict is on the author") { desk.job("author")?.reviewing == nil && (desk.job("author")?.review == nil || desk.job("author")?.review?.job != job.id || desk.job("author")?.review?.checkRun != nil || desk.job("author")?.review?.postError != nil) }
         return try #require(desk.job("author"))
     }
 
@@ -363,20 +363,23 @@ struct ReviewTests {
 
     // MARK: Approved
 
-    @Test func anApprovalIsPostedAndTheJobIsReadyToMergeButNotMerged() async throws {
+    @Test func anApprovalIsACheckRunAndTheJobIsReadyToMergeButNotMerged() async throws {
         _ = try await publishAuthor()
         let reviewed = try await review("The change does what was asked and the tests cover it.\n\nVERDICT: APPROVED")
         let verdict = try #require(reviewed.review)
         #expect(verdict.verdict == .approved && verdict.round == 1 && verdict.agent == "codex" && verdict.account == "Work")
-        #expect(verdict.comment == "https://github.com/deskree-inc/oby/pull/80#issuecomment-1" && verdict.postError == nil)
-        // The comment is in the author's report (#7).
-        #expect(reviewed.outgoing?.last == Outgoing(action: .comment, repo: "deskree-inc/oby", id: verdict.comment ?? "",
+        #expect(verdict.checkRun == "https://github.com/deskree-inc/oby/runs/1" && verdict.comment == nil && verdict.postError == nil)
+        // The check run is in the author's report (#7).
+        #expect(reviewed.outgoing?.last == Outgoing(action: .checkRun, repo: "deskree-inc/oby", id: verdict.checkRun ?? "",
                                                     date: try #require(reviewed.outgoing?.last?.date)))
         #expect(reviewed.reviewing == nil && reviewed.reviewError == nil && reviewed.status == .done)
         #expect(made.posted.count == 1 && made.posted.first?.author.id == "author")
-        let body = try #require(made.posted.first?.body)
-        #expect(body.hasPrefix("### Oby review · Codex · Work: Approved\n\n```\nThe change does what was asked and the tests cover it.\n\nVERDICT: APPROVED\n```"))
-        #expect(body.contains("by Oby:"))
+        // A check run on the commit it read, never a comment (#198).
+        let run = try #require(made.posted.first?.run)
+        #expect(run.name == "Oby review" && run.conclusion == .success && run.head == "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b")
+        #expect(run.title == "Oby review · Codex · Work: Approved")
+        #expect(run.summary.hasPrefix("```\nThe change does what was asked and the tests cover it.\n\nVERDICT: APPROVED\n```"))
+        #expect(run.summary.contains("by Oby:"))
         // Ready to merge where no Mac takes checks (this desk, as the Mac's own): no author round, no second review.
         let stages = reviewed.pipeline.stages
         #expect(stages.first { $0.id == .review }?.state == .done && stages.first { $0.id == .review }?.detail == "Approved by Oby")
@@ -398,7 +401,7 @@ struct ReviewTests {
         let text = "Two things to fix.\n\n- Fix the off-by-one in Rounds.next\n- Add a test for the empty case\n\nVERDICT: CHANGES REQUESTED"
         let reviewed = try await review(text)
         #expect(reviewed.review?.verdict == .changesRequested && reviewed.review?.round == 1)
-        #expect(made.posted.first?.body.hasPrefix("### Oby review · Codex · Work: Changes requested") == true)
+        #expect(made.posted.first?.run.title == "Oby review · Codex · Work: Changes requested" && made.posted.first?.run.conclusion == .failure)
         // The author runs again, in its own session, with the review as a file and never in the prompt.
         try await until("the author runs again") { desk.job("author")?.status == .running && made.agents.count == 3 }
         let again = try #require(desk.job("author"))
@@ -411,7 +414,7 @@ struct ReviewTests {
         let quoted = try #require(made.quoted.first)
         #expect(quoted.author.id == "author" && quoted.file == "review-1.md")
         #expect(quoted.text.hasPrefix("# Oby's review of pull request #80, quoted"))
-        #expect(quoted.text.contains("- Reviewer: Codex, on the Work account\n- Verdict: Changes requested\n- Review 1 of at most 2\n- Posted on the pull request: https://github.com/deskree-inc/oby/pull/80#issuecomment-1"))
+        #expect(quoted.text.contains("- Reviewer: Codex, on the Work account\n- Verdict: Changes requested\n- Review 1 of at most 2\n- Posted on the pull request: https://github.com/deskree-inc/oby/runs/1"))
         #expect(quoted.text.contains("> - Fix the off-by-one in Rounds.next\n> - Add a test for the empty case\n> \n> VERDICT: CHANGES REQUESTED"))
         #expect(again.pipeline.number == 2)
 
@@ -422,7 +425,7 @@ struct ReviewTests {
         try await until("the author publishes again") { made.published.count == 2 }
         let approved = try await review("All good now.\n\nVERDICT: APPROVED")
         #expect(approved.review?.verdict == .approved && approved.review?.round == 2 && approved.pushed == 3)
-        #expect(made.posted.count == 2 && made.posted.last?.body.contains("review 2 of at most 2") == true)
+        #expect(made.posted.count == 2 && made.posted.last?.run.summary.contains("review 2 of at most 2") == true)
         #expect(approved.pipeline.stages.last?.detail == "Ready to merge")
         #expect(desk.jobs.filter { $0.reviewOf == "author" }.count == 2)
     }
@@ -436,8 +439,8 @@ struct ReviewTests {
         let verdict = try #require(reviewed.review)
         #expect(verdict.verdict == .approved && verdict.blocking == nil && verdict.branch == "oby/review-80")
         #expect(verdict.followUps == ["Rename `next` to `nextRound`", "Document the empty case"])
-        #expect(made.posted.first?.body.hasPrefix("### Oby review · Codex · Work: Approved") == true)
-        #expect(made.posted.first?.body.contains("Oby counts this review as approved") == true)
+        #expect(made.posted.first?.run.title == "Oby review · Codex · Work: Approved" && made.posted.first?.run.conclusion == .success)
+        #expect(made.posted.first?.run.summary.contains("Oby counts this review as approved") == true)
         // The follow-ups are in the job's report, below what the agent said.
         #expect(reviewed.summary == "fix(engine): open the PR by itself\n\nFollow-ups from Oby's review:\n- Rename `next` to `nextRound`\n- Document the empty case")
         // No round for the author, and no second review.
@@ -543,10 +546,21 @@ struct ReviewTests {
         _ = try await publishAuthor()
         made.postError = Shell.Failure(message: "Not posted: possible secret in the review at line 3 (AWS access key).")
         let reviewed = try await review("Hmm.\n\n- Remove the key\n\nVERDICT: CHANGES REQUESTED")
-        #expect(reviewed.review?.comment == nil && reviewed.outgoing?.map(\.action) == [.push])
+        #expect(reviewed.review?.checkRun == nil && reviewed.outgoing?.map(\.action) == [.push])
         #expect(reviewed.review?.postError == "Not posted: possible secret in the review at line 3 (AWS access key).")
         try await until("the author runs again") { desk.job("author")?.status == .running }
         #expect(made.quoted.first?.text.contains("- Not posted on the pull request: Not posted: possible secret in the review at line 3 (AWS access key).") == true)
+    }
+
+    @Test func withoutTheChecksPermissionTheReviewStaysInObyAndTheRoundGoesOn() async throws {
+        _ = try await publishAuthor()
+        made.postError = CheckRun.Unwritable.permission
+        let reviewed = try await review("Hmm.\n\nBlocking:\n- It crashes\n\nVERDICT: CHANGES REQUESTED")
+        // Nothing on GitHub, nothing that needs the user for it: the verdict counts all the same.
+        #expect(reviewed.review?.verdict == .changesRequested && reviewed.review?.checkRun == nil && reviewed.outgoing?.map(\.action) == [.push])
+        #expect(reviewed.review?.postError == "Not posted: the Oby app needs Checks: Read and write on its installation.")
+        try await until("the author runs again") { desk.job("author")?.status == .running }
+        #expect(made.quoted.first?.text.contains("- Not posted on the pull request: Not posted: the Oby app needs Checks: Read and write") == true)
     }
 
     // MARK: Reviews that give no verdict
@@ -647,15 +661,17 @@ struct ReviewTests {
         }
     }
 
-    @Test func theCommentIsFencedAndScanned() async throws {
+    @Test func theCheckRunIsFencedAndScanned() async throws {
         let review = Review(verdict: .changesRequested, job: "rev1", agent: "claude", account: "Personal", round: 2)
-        let comment = Review.comment(review, summary: "Use ```swift``` fences.\n\nVERDICT: CHANGES REQUESTED")
-        #expect(comment.hasPrefix("### Oby review · Claude Code · Personal: Changes requested\n\n````\nUse ```swift``` fences.\n\nVERDICT: CHANGES REQUESTED\n````\n\nby Oby: Claude Code reviewed this pull request on the Personal account for Oby, review 2 of at most 2."))
+        let run = Review.checkRun(review, summary: "Use ```swift``` fences.\n\nVERDICT: CHANGES REQUESTED", head: CheckTests.head)
+        #expect(run.name == "Oby review" && run.head == CheckTests.head && run.conclusion == .failure)
+        #expect(run.title == "Oby review · Claude Code · Personal: Changes requested")
+        #expect(run.summary.hasPrefix("````\nUse ```swift``` fences.\n\nVERDICT: CHANGES REQUESTED\n````\n\nby Oby: Claude Code reviewed this pull request on the Personal account for Oby, review 2 of at most 2."))
         // Built at runtime so this file holds no line the scan would flag.
         let key = "AKIA" + "ABCDEFGHIJKLMNOP"
         let findings = try await Review.scan("### Oby review\n\nThe key \(key) is in the diff.\n")
         #expect(findings.contains(Publish.Finding(file: "review", line: 3, rule: "AWS access key")))
-        #expect(try await Review.scan(comment).isEmpty)
+        #expect(try await Review.scan(run.summary).isEmpty)
     }
 
     @Test func theRoundKeepsTheLoopsLimit() {
@@ -677,12 +693,12 @@ struct ReviewTests {
         reviewed.status = .done
         reviewed.published = url.absoluteString
         reviewed.review = Review(verdict: .approved, job: "rev1", agent: "codex", account: "Work", round: 1,
-                                 date: Date(timeIntervalSince1970: 1_791_582_173), comment: "https://github.com/deskree-inc/oby/pull/80#issuecomment-1")
+                                 date: Date(timeIntervalSince1970: 1_791_582_173), checkRun: "https://github.com/deskree-inc/oby/runs/1")
         let json = object(try API.encode(JobJSON(job: reviewed)))
         let review = try #require(json["review"] as? [String: Any])
         #expect(review["verdict"] as? String == "approved" && review["job"] as? String == "rev1" && review["round"] as? Int == 1)
         #expect(review["agent"] as? String == "codex" && review["account"] as? String == "Work")
-        #expect(review["date"] as? String == "2026-10-09T21:42:53Z" && review["comment"] as? String == "https://github.com/deskree-inc/oby/pull/80#issuecomment-1")
+        #expect(review["date"] as? String == "2026-10-09T21:42:53Z" && review["checkRun"] as? String == "https://github.com/deskree-inc/oby/runs/1")
         #expect(json["reviewing"] is NSNull && json["reviewError"] is NSNull && json["reviewOf"] is NSNull)
         let stage = (json["pipeline"] as? [String: Any]).flatMap { ($0["stages"] as? [[String: Any]])?.first { $0["id"] as? String == "review" } }
         #expect(stage?["detail"] as? String == "Approved by Oby")
