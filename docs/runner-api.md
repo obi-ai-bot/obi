@@ -143,7 +143,7 @@ Every job response (list, detail, dispatch, stop, message, wait, plan and `job` 
 - `pipeline.number` and `pipeline.total`: one-based position and count of displayed stages, including skipped ones. Display “Stage n of m”. The position is the first current/failed stage, otherwise the last completed/skipped stage. A completed investigation with no commits skips Publish, Review and Merged and reports 5 of 5. A failure/cancellation marks its execution stage failed with its reason and skips downstream stages.
 - A done, published job progresses through Review: waiting (`current`), changes requested (`failed`, with reason), approved (`done`, with merge current). A merged PR completes Review (`Approved`, or `Merged without review` when GitHub has no review decision) and the final stage; a closed, unmerged PR fails Review and skips Merged. The merge title uses GitHub's actual base, normally “Merged into dev”. Running again shows Work before the earlier round's PR progress.
 - `phase` (optional): persisted execution phase `prepare`, `work`, `check` or `publish`. `publishStep` (optional): `scan`, `push` or `pullRequest`. These are execution facts, not separate client derivation rules. Older saved jobs have neither; Engine derives their best available progress.
-- `pullRequest`: null until a successful read, otherwise `{"state":"OPEN","reviewDecision":"REVIEW_REQUIRED","base":"dev","mergedAt":null,"checkedAt":"2026-10-09T21:43:30Z"}`. State is `OPEN`, `CLOSED` or `MERGED`; review decision is `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, `APPROVED`, or absent/null (no decision yet). `mergedAt` is present only after a merge. All dates are ISO 8601.
+- `pullRequest`: null until a successful read, otherwise `{"state":"OPEN","reviewDecision":"REVIEW_REQUIRED","base":"dev","mergedAt":null,"checkedAt":"2026-10-09T21:43:30Z"}`. State is `OPEN`, `CLOSED` or `MERGED`; review decision is `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, `APPROVED`, or absent/null (no decision yet). `mergedAt` is present only after a merge. `head` is the pull request's head commit as GitHub has it (absent on older observations): one Oby didn't push is an intervention (Failure record, below). All dates are ISO 8601.
 - The runner polls published PRs on startup and every three minutes while open/unknown, using its own `gh pr view` outside the agents' sandbox. It follows `published`, not the input `pr`, including saved jobs older than the latest 50. Closed and merged PRs stop polling. Fresh saved observations wait for the next interval after restart.
 - `pullRequestError`: null after a successful refresh; otherwise a short retry message. Network/authentication/JSON failures preserve the last successful observation and retry at the next interval. `checkedAt` remains the date of that last success. Updates are saved and sent as `job` events without overwriting a concurrent agent step or resumed round.
 - Following is read-only: it never posts a review, pushes, or merges (merging is the Mac check's, below). [`gh pr view` JSON fields](https://cli.github.com/manual/gh_pr_view) supply only typed status data; GitHub prose never enters an agent prompt.
@@ -226,9 +226,10 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
   | `limit` | the job failed because its account hit its usage limit and no other had room | the summary's first line | `Try again`, `Dismiss` |
   | `merge` | Oby's merge stopped (`mergeNeedsYou`, Mac check below) | `mergeError`, or why the check failed and that a person takes it from here | `Try again` and `Dismiss` when it couldn't merge (merge again, or hand the check to the author again), when the Mac couldn't run the check, or when the round brought no new commit (check the same commit again); only `Dismiss` after the last failed check |
   | `audit` | the runner's daily issue/board reconciliation found drift or errors | one line with the drift count and any failures | none; mark done or put off |
+  | `failure` | a failure's post-mortem found an Oby bug, or a cause seen twice in 7 days (Failure record, below); one open per signature | the cause, how often it was seen this week, and what happened | `Fix it`, `Dismiss` |
 
   More kinds will come (permissions, hands-on steps): show one you don't know with its `text` and `options`.
-- `job`: the job's `id`, or empty for an audit report without a job. `title`: the job's title or "Daily issue audit". Optional `outgoing` on audits lists repairs using the same records as a job's report.
+- `job`: the job's `id`, or empty for an audit report or a failure (it's about Oby, not one job). `title`: the job's title, "Daily issue audit", or `Oby failure: <signature>`. Optional `outgoing` on audits lists repairs using the same records as a job's report.
 - `created`: when it came. Apps list the open ones longest-waiting first, with how long each has waited ("waiting 3m").
 - `done`: when it was settled, or null. `answer`: what the user answered, or null (done without an answer, or settled by itself).
 - `later`: put off until then, or null. `state`: `open`, `later` (put off until a time still to come) or `done`. Apps show a `later` item again once its time has passed.
@@ -303,7 +304,7 @@ To answer the brain's question, send the original words with the answer:
 {"said": "Review PR 12", "answer": {"question": "Which repository is PR #12 in?", "option": "deskree-inc/oby"}}
 ```
 
-**The brain answers with context.** Before the user's words it reads a briefing the runner builds: the conversation so far, the jobs (running, needing the user, in review, finished or merged in the last two days, with their titles and stages), the inbox and each account's usage. So it answers questions about the work ("how are the jobs going?", "what did the #12 job change?", "how long until Codex resets?") as a `reply`, and reads follow-ups ("and the vault one?", "cancel it"). The briefing holds only what the user and Oby said and what the runner knows; what agents wrote (a job's result and current step, an inbox question and its options, a failure's reason) reaches the brain as a quoted file it may read, never in a prompt, as every other outside text does. The typed plan is still checked in Swift. A plan acts once it's made: the runner can't tell a client that gave up waiting from a slow one, so an app that lets the user cancel a turn only drops the answer, and a stop the turn asked for still happens.
+**The brain answers with context.** Before the user's words it reads a briefing the runner builds: the conversation so far, the jobs (running, needing the user, in review, finished or merged in the last two days, with their titles and stages), the inbox, each account's usage, and the week's failure records (below: counts by cause, the rounds the failed jobs used, and each record's trigger, cause, signature, issue and fix job; what the post-mortem wrote is in the quoted file). So it answers "why did jobs fail this week?", questions about the work ("how are the jobs going?", "what did the #12 job change?", "how long until Codex resets?") as a `reply`, and reads follow-ups ("and the vault one?", "cancel it"). The briefing holds only what the user and Oby said and what the runner knows; what agents wrote (a job's result and current step, an inbox question and its options, a failure's reason) reaches the brain as a quoted file it may read, never in a prompt, as every other outside text does. The typed plan is still checked in Swift. A plan acts once it's made: the runner can't tell a client that gave up waiting from a slow one, so an app that lets the user cancel a turn only drops the answer, and a stop the turn asked for still happens.
 
 Bare cancel words ("never mind", "stop", "cancel", "forget it") never reach the brain: the answer is `none`, and nothing stops. Stopping work takes a job's name or "stop everything".
 
@@ -465,11 +466,44 @@ Settles an item, on the iPhone or the Mac. The body is exactly one of:
   - `Try again` (on `merge`): the merge is tried again, or the Mac check is handed to the author again or queued again on the same commit (Mac check, above).
   - `Try again` (on `failed` and `limit`): the job runs again in its session, told to pick up where it left off.
   - `One more round` (on `review`): Oby's last review is quoted in `.oby/inputs/review-4.md` and the agent works on it, as a message does. The runner doesn't review it again.
+  - `Fix it` (on `failure`): the fix job starts, as `POST /v1/failures/{id}/fix` does, and the signature's items are done. `Dismiss` (on `failure`): done, nothing starts. Other words on a `failure` are refused (`422`).
   - Other words: sent to the job as a message.
 - `done`: settled without an answer; the job is left as it is.
 - `later`: put off until that time (ISO 8601).
 
 Returns the item. `404` for an item the runner doesn't know, `409` when it's done already, `422` for a body that isn't exactly one of these, a `later` that isn't a date, an empty or too-long answer, or a job that can't take it (the same reasons as `POST /v1/jobs/{id}/messages`). Every app following events hears the item (`inbox`) and its job (`job`).
+
+### Failure record
+
+Oby studies every failure and fixes the cause itself (#139, Engine/Failures.swift). Whenever a job fails, stalls, or someone had to step in, the runner writes a record in `oby.sqlite` with the evidence, kept for good, after the job list forgets the job.
+
+```json
+{"id": "ab12cd34-limit-1791582173", "trigger": "limit", "date": "2026-10-09T21:42:53Z", "job": "ab12cd34", "repo": "deskree-inc/oby",
+ "title": "Mac runner notifications", "what": "Stopped at a limit: the same failure twice in a row", "rounds": 3, "intervention": false,
+ "evidence": {"summary": "…", "step": "Stage 3 of 6, Check: swift test · phase check · round 3 of 4", "check": "`swift test` printed (its end): …",
+              "reviews": [], "log": ["2026-10-09 21:42:50 UTC notice [jobs] job ab12cd34 stopped at a limit: …"]},
+ "postMortem": {"happened": "…", "cause": "environment", "obyCouldHandle": true, "signature": "simulator-hung-before-connecting",
+                "fix": {"files": ["Engine/AppleChecks.swift"], "change": "…"}, "by": "claude Sonnet 5.5", "date": "2026-10-09T21:44:10Z"},
+ "tries": 1, "acted": true, "studyError": null, "issue": "https://github.com/deskree-inc/oby/issues/140", "issueError": null, "fix": null}
+```
+
+- `trigger`: what Oby saw. `failed`, `interrupted` (a restart or quit cut it off) and `limit` (case 3.1); `reviewCap` (Oby's review requested changes for the last time it may), `noVerdict` (the review ended with no verdict, failed or was interrupted), `noReviewer` (no account could review it); `checkError` (the Mac couldn't run a merge or Apple check) and `unnamedFailure` (one failed without naming a test); `publishError` and `mergeError`; `stuck` (it stayed in one step past its own limit: work 10 minutes past the round's, a check 10 minutes past the test run's, publishing 20 minutes, getting ready 30; or a Mac check queued 2 hours, or running past its lease); `brainFallback` (the brain didn't answer and rules planned: `job` is null); and the interventions, `handMerge` (a pull request Oby opened was merged, and Oby never merged it) and `outsideCommit` (its head is a commit Oby didn't push), with `intervention` true. A review job's own end reaches its author as `noVerdict`; a job the user stopped isn't a failure. Each is recorded once, and only while it's news (within a day).
+- `what`: what Oby saw, in its own words. `rounds`: the rounds the job had used. `evidence`, with the vault's secrets taken out: `summary` (the job's report, or what the user said and why the brain failed), `step` (its stage and step), `check` (the end of what its check printed, and its Mac checks with what they printed, or null), `reviews` (Oby's reviews of it, oldest first) and `log` (the runner's log lines of the last hour that name the job, and the last few of all).
+- `postMortem`: null until it's studied. A fresh, read-only turn boxed like the Lead's (`claude-sonnet-5-5`, only Read, Grep and Glob, no settings or MCP) reads the evidence as a quoted file and Oby's own source (the runner's read-only clone of `deskree-inc/oby`), and answers in a JSON schema: `happened`; `cause`, one of `oby-bug`, `environment`, `agent-mistake`, `account-limit`, `flaky-test`, `feedback-not-converging`, `outside-service`; `obyCouldHandle`; `fix`, the `files` in Oby and the `change`; and `signature`, a short kebab-case name for the cause that groups repeats (the turn sees the signatures used before). It runs on the least busy Claude account with room, one record at a time, never holding a job up; with no account, it waits for the next minute's sweep. `tries` counts the turns (3 at most), and `studyError` says why the last one didn't answer.
+- **Acting on it** (`acted`): the job's report (`summary`) gets a `What went wrong: <what happened> (cause: <cause>)` paragraph, before the review's follow-ups. An `oby-bug`, or any signature seen twice in 7 days, becomes or updates one open GitHub issue labeled `oby-failure` in `deskree-inc/oby` (created with the runner's own gh login, after the secret scan of its title and text; a repeat comments on it), with the post-mortem, the record and the evidence fenced; `issue` is its URL, or `issueError` why it couldn't. It also brings a `failure` inbox item offering `Fix it`, one open per signature.
+- `fix`: the fix job Fix it started, or null. It's a `fix` job in `deskree-inc/oby` (on the account with the most room; the issue's when it has one, so its branch is `oby/fix-<issue>`), checked with `swift test` over up to 4 rounds, told only Swift's words; the post-mortem and the evidence are quoted in `.oby/inputs/failure-<record>.md`, as data.
+
+### `GET /v1/failures?limit=50`
+
+The failure records, newest first, each with its post-mortem (null until studied). `limit` goes up to 1,000.
+
+### `GET /v1/failures/{id}`
+
+One record. `404` for one the runner doesn't know.
+
+### `POST /v1/failures/{id}/fix`
+
+Fix it: starts the fix job (Failure record, above) and answers it, `201`, as `POST /v1/jobs` does; the signature's `failure` inbox items are done. `404` for a record the runner doesn't know; `409` when it isn't studied yet (`"Oby hasn't studied this failure yet."`), its fix job is still running, or no account has room.
 
 ### `GET /v1/jobs/{id}/publish`
 
@@ -725,6 +759,6 @@ The Watch API doesn't pass pieces on to the runner's speech service (`POST /v1/s
 
 - **Force-push or push to main:** not for anyone, not even with an approval.
 - **Merge, except into `dev` after the Mac check:** the runner squash-merges a pull request it opened only into `dev`, only when Oby's review approved it, the Mac check passed on the same commit and the secret scan is clean (Mac check, above). Never into `main`.
-- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comments that go out are Oby's own review of its own pull request and the Mac check's results on it (an Apple check posts nothing), and the runner's own issue lifecycle and audit updates (Engine/IssueSync.swift), all after the secret scan; no agent posts to GitHub, and no GitHub review, approval or comment goes on anyone else's work.
+- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comments that go out are Oby's own review of its own pull request and the Mac check's results on it (an Apple check posts nothing), the runner's own issue lifecycle and audit updates (Engine/IssueSync.swift), and the `oby-failure` issues its post-mortems file in Oby's own repository (Engine/Failures.swift), all after the secret scan; no agent posts to GitHub, and no GitHub review, approval or comment goes on anyone else's work.
 - **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
 - **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 #if canImport(OSLog)
 import os
 #endif
@@ -25,6 +26,8 @@ nonisolated struct Logger: Sendable {
     func debug(_ message: Message) { write("debug", message) }
 
     private func write(_ level: String, _ message: Message) {
+        let line = line(level, message)
+        Self.remember(line)
         #if canImport(OSLog)
         // Redacted already: what's left may show.
         let said = text(message)
@@ -34,7 +37,7 @@ nonisolated struct Logger: Sendable {
         default: system.notice("\(said, privacy: .public)")
         }
         #else
-        FileHandle.standardError.write(Data(line(level, message).utf8))
+        FileHandle.standardError.write(Data(line.utf8))
         #endif
     }
 
@@ -47,6 +50,23 @@ nonisolated struct Logger: Sendable {
     /// The runner's line: level, category, and `text`.
     func line(_ level: String, _ message: Message, vault: Vault = .shared) -> String {
         "\(level) [\(category)] \(text(message, vault: vault))\n"
+    }
+
+    /// The latest lines written, redacted, oldest first, with when: what a failure record keeps
+    /// as the log around it (Engine/Failures.swift). Memory only.
+    static let kept = 400
+    private static let latest = Mutex<[(date: Date, line: String)]>([])
+
+    static func remember(_ line: String, at date: Date = .now) {
+        latest.withLock { lines in
+            lines.append((date, line.trimmingCharacters(in: .newlines)))
+            if lines.count > kept { lines.removeFirst(lines.count - kept) }
+        }
+    }
+
+    /// The lines from the last `within` seconds before `now`, oldest first.
+    static func recent(within: TimeInterval = 3600, now: Date = .now) -> [(date: Date, line: String)] {
+        latest.withLock { lines in lines.filter { now.timeIntervalSince($0.date) <= within } }
     }
 
     enum Privacy { case `public`, `private` }

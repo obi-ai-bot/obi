@@ -68,6 +68,8 @@ final class Desk {
     /// The roadmap board as the Lead last read it (Engine/Lead.swift), for claims.
     private var board: Board?
     @ObservationIgnored lazy var issueSync = IssueSync(desk: self, store: store)
+    /// Failure records and their post-mortems (Engine/Failures.swift): on for the runner.
+    @ObservationIgnored lazy var failureLog = Failures(desk: self, store: store)
     /// Jobs ready to run that wait for an earlier job touching the same files to end (case 2.1), in order.
     private var waiting: [Job] = []
     /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
@@ -233,7 +235,8 @@ final class Desk {
 
     /// What the brain is told before the user's words (Engine/Conversation.swift).
     func briefing(turns: [Turn]) -> Briefing {
-        Briefing(turns: turns, places: [Briefing.Place(name: "this Mac", jobs: jobs, inbox: inbox)] + elsewhere(), accounts: accounts.accounts)
+        Briefing(turns: turns, places: [Briefing.Place(name: "this Mac", jobs: jobs, inbox: inbox)] + elsewhere(), accounts: accounts.accounts,
+                 failures: failureLog.week())
     }
 
     // MARK: The conversation
@@ -1233,6 +1236,8 @@ final class Desk {
         if save { store.save(job) }
         onJobChange(job)
         issueSync.observe(job)
+        // Where a job ends or a stage fails: the failure is recorded and studied.
+        failureLog.observe(job)
         // A step changes nothing the user must answer.
         if save { syncInbox(job) }
     }

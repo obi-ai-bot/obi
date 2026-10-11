@@ -40,7 +40,7 @@ struct PullRequestTests {
         desk.onJobChange = { changes.append($0) }
         follower.read = { args in arguments.append(args); return response(review: "REVIEW_REQUIRED") }
         await follower.poll(at: now)
-        #expect(arguments == [["gh", "pr", "view", "99", "--repo", "deskree-inc/oby", "--json", "state,reviewDecision,mergedAt,baseRefName"]])
+        #expect(arguments == [["gh", "pr", "view", "99", "--repo", "deskree-inc/oby", "--json", "state,reviewDecision,mergedAt,baseRefName,headRefOid"]])
         #expect(desk.job("published")?.pullRequest?.state == .open)
         #expect(changes.count == 1)
         await follower.poll(at: now + 179)
