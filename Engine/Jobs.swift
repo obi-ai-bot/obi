@@ -86,6 +86,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Files the user attached to the request (a screenshot, what they copied), as paths on this
     /// machine. Workspace.prepare copies them into the worktree's .oby/inputs.
     var attachments: [String]?
+    /// The commit the work started from, recorded by Oby when it set the worktree up: what test
+    /// integrity compares with (Engine/Guards.swift). Nil before then, and on older jobs.
+    var startCommit: String?
     /// The limit Oby stopped the job at (case 3.1, Engine/Guards.swift), like "the same failure twice
     /// in a row", or nil. Such a job is `failed`, keeps its branch and pushed nothing; one more round
     /// is possible, by telling it something.
@@ -211,8 +214,8 @@ nonisolated enum AgentEvent: Equatable, Sendable {
     case cutOff(summary: String)
     /// Oby answered a permission prompt: nil when it allowed the action, else why it denied it.
     case permission(denied: String?)
-    /// Claude Code took its `--max-turns` in this round (how many it says it took), without finishing.
-    case maxTurns(Int?)
+    /// Claude Code used up its `--max-turns` in this round without finishing.
+    case maxTurns
 
     /// A reset time as the tools send it: seconds since 1970 (milliseconds are taken too).
     nonisolated static func epoch(_ value: Any?) -> Date? {
@@ -514,7 +517,8 @@ nonisolated enum StreamJSON {
             }
             return events
         case "result" where message["subtype"] as? String == "error_max_turns":
-            return [.maxTurns((message["num_turns"] as? Int))]
+            // Its `num_turns` can say more than the limit (2 for `--max-turns 1`, checked in 2.1.296).
+            return [.maxTurns]
         case "result":
             let failed = message["is_error"] as? Bool ?? (message["subtype"] as? String != "success")
             let text = (message["result"] as? String) ?? ""
@@ -924,6 +928,7 @@ nonisolated enum Workspace {
         }
         let worktree = worktree(job.id)
         try await git(["worktree", "add", "--quiet", "-b", job.branch, worktree.path, start])
+        job.startCommit = try await git(["rev-parse", "--verify", "\(start)^{commit}"])
         try FileManager.default.createDirectory(at: worktree.appending(path: ".oby/inputs"), withIntermediateDirectories: true)
         job.attachments = Attachments.copy(job, into: worktree)
 

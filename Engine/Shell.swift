@@ -42,8 +42,19 @@ nonisolated enum Shell {
     }()
 
     /// Runs a tool found on the user's PATH. `env` adds variables, and a nil value removes one.
+    /// Cancelling the task ends the tool, with the tools it started.
     static func run(_ arguments: [String], in directory: URL? = nil, input: Data? = nil,
                     env: [String: String?] = [:], timeout: TimeInterval = 600) async throws -> Output {
+        let running = Running()
+        return try await withTaskCancellationHandler {
+            try await run(arguments, in: directory, input: input, env: env, timeout: timeout, running: running)
+        } onCancel: {
+            running.cancel()
+        }
+    }
+
+    private static func run(_ arguments: [String], in directory: URL?, input: Data?, env: [String: String?],
+                            timeout: TimeInterval, running: Running) async throws -> Output {
         try await withCheckedThrowingContinuation { done in
             DispatchQueue.global().async {
                 let process = Process()
@@ -58,6 +69,7 @@ nonisolated enum Shell {
                 process.standardOutput = stdout
                 process.standardError = stderr
                 do { try process.run() } catch { done.resume(throwing: error); return }
+                running.started(process)
 
                 // Past the timeout, the whole process group ends, so a tool it started can't hold the pipes open.
                 let expired = Collected()
@@ -91,4 +103,26 @@ nonisolated enum Shell {
     }
 
     private final class Collected: @unchecked Sendable { var data = Data() }
+
+    /// The process a run started, for cancelling it: whichever comes second, the start or the
+    /// cancel, ends it.
+    private final class Running: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        private var cancelled = false
+
+        func started(_ process: Process) {
+            lock.withLock {
+                self.process = process
+                if cancelled { Halt.end(process) }
+            }
+        }
+
+        func cancel() {
+            lock.withLock {
+                cancelled = true
+                if let process { Halt.end(process) }
+            }
+        }
+    }
 }

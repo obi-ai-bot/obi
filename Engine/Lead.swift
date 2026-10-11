@@ -15,7 +15,7 @@ nonisolated enum Lead {
     /// The model the spike (#63) proved the turn on: the fallback when the strongest one fails.
     static let provenModel = "claude-sonnet-5-5"
     /// One attempt and three fix rounds (case 3.1): what a job of the Lead's gets with its check.
-    static let rounds = JobLimits().rounds
+    static let rounds = 4
     /// How long one turn may take (the spike's timer).
     static let timeout: TimeInterval = 120
 

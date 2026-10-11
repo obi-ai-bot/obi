@@ -38,7 +38,7 @@ struct GuardTests {
             made.published += 1
             return URL(string: "https://github.com/deskree-inc/oby/pull/80")!
         }
-        desk.integrity = { _ in [] }
+        desk.integrity = { _ in Integrity.Report() }
     }
 
     /// A fix job with a check and four rounds, started on the default account.
@@ -169,14 +169,14 @@ struct GuardTests {
         #expect(at.map { launch.arguments[$0 + 1] } == "200")
         #expect(!ClaudeAgent.launch(worktree: folder, configDirectory: nil, model: nil, resume: nil).arguments.contains("--max-turns"))
         let result: [String: Any] = ["type": "result", "subtype": "error_max_turns", "is_error": false, "num_turns": 200]
-        #expect(StreamJSON.events(result) == [.maxTurns(200)])
+        #expect(StreamJSON.events(result) == [.maxTurns])
     }
 
     @Test func usingEveryTurnStopsTheJob() async throws {
         let agent = try await start("turns")
-        agent.onEvent(.maxTurns(200))
+        agent.onEvent(.maxTurns)
         try await until { desk.job("turns")?.isActive == false }
-        try expectHeld("turns", "Claude Code took its 200 turns in one round", agent: agent)
+        try expectHeld("turns", "Claude Code used its 200 turns in one round", agent: agent)
     }
 
     // MARK: No progress
@@ -222,12 +222,33 @@ struct GuardTests {
         #expect(desk.job("denied")?.summary.hasSuffix("The last one: Oby publishes the job's branch itself.") == true)
     }
 
+    @Test func stoppingAJobEndsItsCheck() async throws {
+        var ended: Date?
+        desk.runCheck = { [folder] _, command, _ in
+            let check = await Rounds.run("sleep 30", in: folder, timeout: 60, boxed: false)
+            ended = .now
+            return check
+        }
+        let agent = try await start("stopcheck")
+        agent.onEvent(.turnEnded(summary: "Done.", failed: false))
+        try await until { desk.job("stopcheck")?.phase == .check }
+        try await Task.sleep(for: .milliseconds(200))
+        let stopped = Date.now
+        desk.stop("stopcheck")
+        try await until { ended != nil }
+        #expect(ended.map { $0.timeIntervalSince(stopped) < 5 } == true)
+        #expect(desk.job("stopcheck")?.status == .stopped)
+    }
+
     // MARK: Test integrity
 
     @Test func aRoundThatWeakensTheTestsFailsEvenWhenTheCheckPasses() async throws {
         failing([])
         var weakened = true
-        desk.integrity = { _ in weakened ? ["deletes the test file RunnerTests/StopTests.swift"] : [] }
+        desk.integrity = { _ in
+            weakened ? Integrity.Report(problems: ["deletes the test file RunnerTests/StopTests.swift"])
+                : Integrity.Report(notes: ["edits existing tests in RunnerTests/TitleTests.swift"])
+        }
         let agent = try await start("weak", rounds: 3)
         agent.onEvent(.turnEnded(summary: "Green now.", failed: false))
         try await until { agent.sent.count == 1 }
@@ -237,12 +258,15 @@ struct GuardTests {
         weakened = false
         agent.onEvent(.turnEnded(summary: "Put the tests back.", failed: false))
         try await until { desk.job("weak")?.isActive == false }
-        #expect(desk.job("weak")?.status == .done && desk.job("weak")?.limit == nil && made.published == 1)
+        let done = try #require(desk.job("weak"))
+        #expect(done.status == .done && done.limit == nil && made.published == 1)
+        // An edit that doesn't weaken the tests passes, and the summary says it for review.
+        #expect(done.summary.hasSuffix("Checked: `swift test` passed.\n\nChanged in the existing tests, for review:\n- edits existing tests in RunnerTests/TitleTests.swift"))
     }
 
     @Test func weakenedTestsOnTheLastRoundHoldTheJob() async throws {
         failing([])
-        desk.integrity = { _ in ["adds a skip marker in RunnerTests/StopTests.swift: @Test(.disabled())"] }
+        desk.integrity = { _ in Integrity.Report(problems: ["adds a skip marker in RunnerTests/StopTests.swift: @Test(.disabled())"]) }
         let agent = try await start("weaklast", rounds: 1)
         agent.onEvent(.turnEnded(summary: "Green now.", failed: false))
         try await until { desk.job("weaklast")?.isActive == false }
@@ -267,6 +291,10 @@ struct GuardTests {
             @@ -10 +10 @@
             -    @Test func leads() {
             +    @Test(.enabled(if: bubblewrapRuns)) func leads() {
+            @@ -12,2 +12 @@
+            -        #expect(lead.ok)
+            -        #expect(lead.jobs.count == 2)
+            +        #expect(lead.ok)
             diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
             index 4444444..5555555 100644
             --- a/.github/workflows/ci.yml
@@ -274,6 +302,12 @@ struct GuardTests {
             @@ -3 +3 @@
             -  run: swift test
             +  run: swift build
+            diff --git a/Package.swift b/Package.swift
+            index 8888888..9999999 100644
+            --- a/Package.swift
+            +++ b/Package.swift
+            @@ -20 +19,0 @@
+            -        .testTarget(name: "RunnerTests", dependencies: ["oby-runner"]),
             diff --git a/Engine/Desk.swift b/Engine/Desk.swift
             index 6666666..7777777 100644
             --- a/Engine/Desk.swift
@@ -283,15 +317,31 @@ struct GuardTests {
             +let a = 2
             """
         let changes = Integrity.changes(diff)
-        #expect(changes.map(\.old) == ["RunnerTests/StopTests.swift", "RunnerTests/LeadTests.swift", ".github/workflows/ci.yml", "Engine/Desk.swift"])
-        #expect(changes.map(\.new) == [nil, "RunnerTests/LeadTests.swift", ".github/workflows/ci.yml", "Engine/Desk.swift"])
-        #expect(Integrity.problems(changes) == [
+        #expect(changes.map(\.old) == ["RunnerTests/StopTests.swift", "RunnerTests/LeadTests.swift", ".github/workflows/ci.yml", "Package.swift", "Engine/Desk.swift"])
+        #expect(changes.map(\.new) == [nil, "RunnerTests/LeadTests.swift", ".github/workflows/ci.yml", "Package.swift", "Engine/Desk.swift"])
+        #expect(Integrity.report(changes) == Integrity.Report(problems: [
             "deletes the test file RunnerTests/StopTests.swift",
-            "edits existing tests in RunnerTests/LeadTests.swift",
+            "removes 1 assertion from RunnerTests/LeadTests.swift",
             "adds a skip marker in RunnerTests/LeadTests.swift: @Test(.enabled(if: bubblewrapRuns)) func leads() {",
             "changes test or CI config: .github/workflows/ci.yml",
+            "changes the test settings in Package.swift: .testTarget(name: \"RunnerTests\", dependencies: [\"oby-runner\"]),",
             "lowers the test count by 1",
-        ])
+        ]))
+    }
+
+    @Test func editsThatDontWeakenTheTestsAreOnlyFlagged() {
+        // This pull request's own edit: an expectation changed, not removed.
+        let edited = Integrity.Change(old: "RunnerTests/TitleTests.swift", new: "RunnerTests/TitleTests.swift",
+                                      added: ["        #expect(decoded.count == 42)"], removed: ["        #expect(decoded.count == 41)"])
+        let moved = Integrity.Change(old: "RunnerTests/StopTests.swift", new: "RunnerTests/Jobs/StopTests.swift")
+        let away = Integrity.Change(old: "tests/test_cart.py", new: "scripts/cart_check.py")
+        let script = Integrity.Change(old: "web/package.json", new: "web/package.json",
+                                      added: [#"    "test": "echo ok","#], removed: [#"    "test": "vitest run","#])
+        let target = Integrity.Change(old: "Package.swift", new: "Package.swift", added: [#"        .testTarget(name: "GuardTests"),"#])
+        #expect(Integrity.report([edited, moved, away, script, target]) == Integrity.Report(
+            problems: ["moves the test file tests/test_cart.py out of the tests, to scripts/cart_check.py",
+                       #"changes the test settings in web/package.json: "test": "echo ok","#],
+            notes: ["edits existing tests in RunnerTests/TitleTests.swift", "moves the test file RunnerTests/StopTests.swift to RunnerTests/Jobs/StopTests.swift"]))
     }
 
     @Test func newTestsAreFine() {
@@ -299,7 +349,7 @@ struct GuardTests {
                                      added: ["", "    @Test func aNewOne() {", "        #expect(true)", "    }"])
         let file = Integrity.Change(old: nil, new: "web/src/cart.test.ts", added: ["it('adds', () => {})", "test('removes', () => {})"])
         let code = Integrity.Change(old: "Engine/Desk.swift", new: "Engine/Desk.swift", added: ["it.skip"], removed: ["func test() {}"])
-        #expect(Integrity.problems([added, file, code]) == [])
+        #expect(Integrity.report([added, file, code]) == Integrity.Report())
         for path in ["RunnerTests/A.swift", "tests/test_cart.py", "pkg/cart_test.go", "src/__tests__/x.js", "Sources/CartTests.swift", "web/a.spec.tsx"] {
             #expect(Integrity.isTest(path), "\(path)")
         }
@@ -308,35 +358,57 @@ struct GuardTests {
                      "describe.only('cart', () => {", "@Test(.disabled(\"flaky\"))", "withKnownIssue {"] {
             #expect(line.contains(Integrity.skip), "\(line)")
         }
+        for line in ["#expect(a)", "try #require(b)", "XCTAssertEqual(a, b)", "expect(cart).toEqual([])", "assert total == 3", "t.Fatalf(\"no\")"] {
+            #expect(line.contains(Integrity.assertion), "\(line)")
+        }
+    }
+
+    @Test func integrityComparesWithTheCommitObyRecorded() {
+        var work = job
+        work.pr = nil
+        work.base = "dev"
+        #expect(Integrity.ref(work) == "refs/remotes/origin/dev")
+        work.pr = 33
+        #expect(Integrity.ref(work) == "refs/oby/pr-33")
+        work.startCommit = "1eb426a0c3"
+        #expect(Integrity.ref(work) == "1eb426a0c3")
     }
 
     @Test func theIntegrityCheckReadsARealWorktree() async throws {
         let repo = folder.appending(path: "repo")
         try FileManager.default.createDirectory(at: repo.appending(path: "Tests"), withIntermediateDirectories: true)
-        func git(_ arguments: String...) async throws {
+        @discardableResult func git(_ arguments: String...) async throws -> String {
             let result = try await Shell.run(["git", "-C", repo.path, "-c", "user.name=Oby", "-c", "user.email=oby@example.com", "-c", "commit.gpgsign=false"] + arguments)
             #expect(result.status == 0, "\(arguments): \(result.err)")
+            return result.text
         }
-        try "@Test func one() {}\n@Test func two() {}\n".write(to: repo.appending(path: "Tests/CartTests.swift"), atomically: true, encoding: .utf8)
+        try "@Test func one() {\n    #expect(true)\n}\n@Test func two() {}\n".write(to: repo.appending(path: "Tests/CartTests.swift"), atomically: true, encoding: .utf8)
         try "let a = 1\n".write(to: repo.appending(path: "Cart.swift"), atomically: true, encoding: .utf8)
         try await git("init", "-q", "-b", "dev")
         try await git("add", ".")
         try await git("commit", "-q", "-m", "base")
         try await git("checkout", "-q", "-b", "oby/fix-64")
-        #expect(await Integrity.check(worktree: repo, against: "dev") == [])
+        let start = try await git("rev-parse", "HEAD")
+        #expect(await Integrity.check(worktree: repo, against: start) == Integrity.Report())
 
-        // A committed new test and a code change are fine; an uncommitted edit to an existing test isn't.
+        // A committed new test and a code change are fine; an uncommitted deletion of a test isn't.
         try "let a = 2\n".write(to: repo.appending(path: "Cart.swift"), atomically: true, encoding: .utf8)
         try "@Test func three() {}\n".write(to: repo.appending(path: "Tests/NewTests.swift"), atomically: true, encoding: .utf8)
         try await git("add", ".")
         try await git("commit", "-q", "-m", "work")
-        #expect(await Integrity.check(worktree: repo, against: "dev") == [])
-        try "@Test func one() {}\n".write(to: repo.appending(path: "Tests/CartTests.swift"), atomically: true, encoding: .utf8)
+        #expect(await Integrity.check(worktree: repo, against: start) == Integrity.Report())
+        try "@Test func one() {\n    #expect(true)\n}\n".write(to: repo.appending(path: "Tests/CartTests.swift"), atomically: true, encoding: .utf8)
         try "@Test(.disabled()) func four() {}\n".write(to: repo.appending(path: "Tests/MoreTests.swift"), atomically: true, encoding: .utf8)
-        #expect(await Integrity.check(worktree: repo, against: "dev") == [
-            "edits existing tests in Tests/CartTests.swift",
-            "adds a skip marker in Tests/MoreTests.swift: @Test(.disabled()) func four() {}",
-        ])
-        #expect(await Integrity.check(worktree: repo, against: "main") == ["Oby couldn't compare the tests with main"])
+        let weakened = Integrity.Report(problems: ["adds a skip marker in Tests/MoreTests.swift: @Test(.disabled()) func four() {}"],
+                                        notes: ["edits existing tests in Tests/CartTests.swift"])
+        #expect(await Integrity.check(worktree: repo, against: start) == weakened)
+
+        // The agent can move a ref to hide its work, but not the commit Oby recorded.
+        try await git("add", ".")
+        try await git("commit", "-q", "-m", "hide")
+        try await git("update-ref", "refs/heads/dev", "HEAD")
+        #expect(await Integrity.check(worktree: repo, against: "dev") == Integrity.Report())
+        #expect(await Integrity.check(worktree: repo, against: start) == weakened)
+        #expect(await Integrity.check(worktree: repo, against: "main") == Integrity.Report(problems: ["Oby couldn't compare the tests with main"]))
     }
 }

@@ -72,6 +72,9 @@ final class Desk {
     private var failures: [String: String] = [:]
     /// How many actions in a row Oby denied each running job.
     private var denials: [String: Int] = [:]
+    /// Each looping job's work after a turn (its check, then the round that follows): stopping the
+    /// job cancels it, which ends a check still running.
+    private var afterTurns: [String: Task<Void, Never>] = [:]
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
     /// Gets a job's worktree ready, and makes its agent (nil for a tool that can't run jobs yet). Tests put in their own.
@@ -87,10 +90,10 @@ final class Desk {
     @ObservationIgnored var runCheck: (_ id: String, _ command: String, _ timeout: TimeInterval) async -> Rounds.Check = { id, command, timeout in
         await Rounds.run(command, in: Workspace.worktree(id), timeout: timeout)
     }
-    /// What a job's work does to the tests since its branch started (case 3.2): one line per
-    /// problem, none when they're intact. Tests put in their own.
-    @ObservationIgnored var integrity: (Job) async -> [String] = { job in
-        guard let ref = Integrity.ref(job) else { return [] }
+    /// What a job's work does to the tests since its branch started (case 3.2): what weakens them,
+    /// and other changes to existing tests. Tests put in their own.
+    @ObservationIgnored var integrity: (Job) async -> Integrity.Report = { job in
+        guard let ref = Integrity.ref(job) else { return Integrity.Report() }
         return await Integrity.check(worktree: Workspace.worktree(job.id), against: ref)
     }
     /// Publishes a job that ended done with commits, with no one to approve it: the check passed
@@ -682,8 +685,8 @@ final class Desk {
             let count = (denials[id] ?? 0) + 1
             denials[id] = count
             if count >= limits.denials { hold(id, "\(count) actions in a row were denied", "The last one: \(denied)") }
-        case .maxTurns(let turns):
-            hold(id, "\(job.agentName) took its \(turns ?? limits.maxTurns) turns in one round")
+        case .maxTurns:
+            hold(id, "\(job.agentName) used its \(limits.maxTurns) turns in one round")
         case .turnEnded(let summary, let failed):
             roundTimers.removeValue(forKey: id)?.cancel()
             job.summaries = (job.summaries ?? []) + [summary]
@@ -695,7 +698,7 @@ final class Desk {
                 return
             }
             let heard = job.notes?.count ?? 0
-            Task { await afterTurn(id, summary: summary, failed: failed, heard: heard) }
+            afterTurns[id] = Task { await afterTurn(id, summary: summary, failed: failed, heard: heard) }
         case .finished(let summary, let failed):
             finish(id, failed ? .failed : .done, summary)
         case .cutOff(let summary):
@@ -760,9 +763,10 @@ final class Desk {
             // Stopped while the check ran.
             guard var latest = self.job(id), latest.isActive else { return }
             // Oby compares the tests with where the branch started too: weakening them fails the round (case 3.2).
-            latest.step = "Comparing the tests with \(Integrity.ref(latest).map { $0.replacing("refs/remotes/", with: "") } ?? "the base")"
+            latest.step = "Comparing the tests with where the branch started"
             replace(latest, save: false)
-            result.problems = await integrity(latest)
+            let report = await integrity(latest)
+            (result.problems, result.notes) = (report.problems, report.notes)
             guard let checked = self.job(id), checked.isActive else { return }
             job = checked
             check = result
@@ -902,6 +906,7 @@ final class Desk {
         handoffs[id] = nil
         roundTimers.removeValue(forKey: id)?.cancel()
         jobTimers.removeValue(forKey: id)?.cancel()
+        afterTurns.removeValue(forKey: id)?.cancel()
         failures[id] = nil
         denials[id] = nil
         waiting.removeAll { $0.id == id }
@@ -966,6 +971,8 @@ nonisolated enum Rounds {
         var output: String
         /// What the work does to the tests (Integrity): any of these fails the round, even when the command passed.
         var problems: [String] = []
+        /// Other changes to existing tests, said when the job ends, for review.
+        var notes: [String] = []
 
         var succeeded: Bool { passed && problems.isEmpty }
     }
@@ -1006,7 +1013,10 @@ nonisolated enum Rounds {
         let rounds = "\(job.maxRounds) round\(job.maxRounds == 1 ? "" : "s")"
         if failed { return .finish(.failed, summary) }
         if let check {
-            if check.succeeded { return .finish(.done, summary + "\n\nChecked: `\(check.command)` passed.") }
+            if check.succeeded {
+                let notes = check.notes.isEmpty ? "" : "\n\nChanged in the existing tests, for review:\n" + check.notes.map { "- " + $0 }.joined(separator: "\n")
+                return .finish(.done, summary + "\n\nChecked: `\(check.command)` passed." + notes)
+            }
             if let previous, Fingerprint.of(check) == previous { return .hold("the same failure twice in a row", summary) }
             if last {
                 return .hold(check.passed ? "the tests are still weakened after \(rounds)" : "`\(check.command)` still fails after \(rounds)", summary)

@@ -5,8 +5,6 @@ import Foundation
 /// and says one more round is possible (`Job.limit`).
 // ponytail: the same for every repository; Oby tunes them per repo once it learns how you decide (X.4).
 nonisolated struct JobLimits: Equatable, Sendable {
-    /// One attempt and three fix rounds: what a job of the Lead's gets with its check.
-    var rounds = 4
     /// How long one round's agent turn may take, in seconds.
     var round: TimeInterval = 15 * 60
     /// How long a whole job may take, every round and check included, in seconds.
@@ -75,11 +73,13 @@ nonisolated enum Fingerprint {
     }
 }
 
-/// Test integrity (case 3.2): Oby compares the job's work with where its branch started and fails
-/// a round that deletes or edits existing tests, adds a skip marker, lowers the test count, or
-/// touches test or CI config. New tests are fine.
-// ponytail: strict, with no way through yet. A skip the Lead approves with a reason (#62's
-// `.enabled(if: bubblewrapRuns)`) is the exception path still to build.
+/// Test integrity (case 3.2): Oby compares the job's work with the commit its branch started
+/// from and fails a round that clearly weakens the tests: deletes a test file or moves it out of
+/// the tests, adds a skip marker, lowers the number of tests or of assertions, or changes test or CI
+/// config (the test settings in build files too). Other edits to existing tests and moved test
+/// files don't fail it: they're flagged for review. New tests are fine.
+// ponytail: a skip the Lead approves with a reason (#62's `.enabled(if: bubblewrapRuns)`) is the
+// exception path still to build.
 nonisolated enum Integrity {
     /// One file in the diff: its path before (nil when it's new) and after (nil when it's
     /// deleted), and the lines added and removed.
@@ -90,18 +90,27 @@ nonisolated enum Integrity {
         var removed: [String] = []
     }
 
-    /// Where the job's work started: the pull request's head it checked out, else its base on origin.
+    struct Report: Equatable, Sendable {
+        /// What weakens the tests: any of these fails the round.
+        var problems: [String] = []
+        /// Other changes to existing tests, flagged for review without failing the round.
+        var notes: [String] = []
+    }
+
+    /// What the work is compared with: the commit Oby recorded when it set the worktree up, which
+    /// an agent can't move the way it can move a ref. Jobs from before that compare with the pull
+    /// request's head or the base on origin.
     static func ref(_ job: Job) -> String? {
-        job.pr.map { "refs/oby/pr-\($0)" } ?? job.base.map { "refs/remotes/origin/\($0)" }
+        job.startCommit ?? job.pr.map { "refs/oby/pr-\($0)" } ?? job.base.map { "refs/remotes/origin/\($0)" }
     }
 
     /// What the worktree's work (committed or not) does to the tests since it left `ref`. Fails
     /// closed: when git can't say, that's the problem.
-    static func check(worktree: URL, against ref: String) async -> [String] {
+    static func check(worktree: URL, against ref: String) async -> Report {
         let git = ["git", "-c", "core.quotePath=false", "-C", worktree.path]
         guard let base = try? await Shell.ok(git + ["merge-base", ref, "HEAD"]),
               let diff = try? await Shell.run(git + ["diff", "--no-color", "--no-ext-diff", "-U0", "-M", base]), diff.status == 0 else {
-            return ["Oby couldn't compare the tests with \(ref)"]
+            return Report(problems: ["Oby couldn't compare the tests with \(ref)"])
         }
         var changes = self.changes(String(decoding: diff.out, as: UTF8.self))
         // Files the agent made and didn't commit count too: they're in the worktree the check ran in.
@@ -110,7 +119,7 @@ nonisolated enum Integrity {
             let text = (try? String(contentsOf: worktree.appending(path: path), encoding: .utf8)) ?? ""
             changes.append(Change(old: nil, new: path, added: text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)))
         }
-        return problems(changes)
+        return report(changes)
     }
 
     /// The files a `git diff -U0 -M` names, with their added and removed lines.
@@ -144,31 +153,58 @@ nonisolated enum Integrity {
         return changes
     }
 
-    /// What weakens the tests, one line each, in the diff's order.
-    static func problems(_ changes: [Change]) -> [String] {
-        var problems: [String] = []
+    /// What weakens the tests and what else changed in them, one line each, in the diff's order.
+    static func report(_ changes: [Change]) -> Report {
+        var report = Report()
         var tests = 0
         for change in changes {
             if let config = [change.old, change.new].compactMap({ $0 }).first(where: isConfig) {
-                problems.append("changes test or CI config: \(config)")
+                report.problems.append("changes test or CI config: \(config)")
+            }
+            if let file = change.new ?? change.old, let setting = testSetting(in: file) {
+                let changed = (file.hasSuffix("Package.swift") ? [] : change.added) + change.removed
+                if let line = changed.first(where: { $0.contains(setting) }) {
+                    report.problems.append("changes the test settings in \(file): \(line.trimmingCharacters(in: .whitespaces).prefix(80))")
+                }
             }
             let wasTest = change.old.map(isTest) ?? false, isTest = change.new.map(isTest) ?? false
             guard wasTest || isTest else { continue }
             if let old = change.old, wasTest {
-                if change.new == nil { problems.append("deletes the test file \(old)") }
-                else if let new = change.new, new != old { problems.append("moves the test file \(old) to \(new)") }
-                else if change.removed.contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
-                    problems.append("edits existing tests in \(old)")
+                if change.new == nil {
+                    report.problems.append("deletes the test file \(old)")
+                } else if let new = change.new, new != old {
+                    if isTest { report.notes.append("moves the test file \(old) to \(new)") }
+                    else { report.problems.append("moves the test file \(old) out of the tests, to \(new)") }
+                }
+                if change.new != nil {
+                    let lost = change.removed.count(where: { $0.contains(assertion) }) - change.added.count(where: { $0.contains(assertion) })
+                    if lost > 0 {
+                        report.problems.append("removes \(lost) assertion\(lost == 1 ? "" : "s") from \(change.new ?? old)")
+                    } else if change.removed.contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+                        report.notes.append("edits existing tests in \(change.new ?? old)")
+                    }
                 }
             }
             let path = change.new ?? change.old ?? ""
             for line in change.added where line.contains(skip) {
-                problems.append("adds a skip marker in \(path): \(line.trimmingCharacters(in: .whitespaces).prefix(80))")
+                report.problems.append("adds a skip marker in \(path): \(line.trimmingCharacters(in: .whitespaces).prefix(80))")
             }
             tests += change.added.count(where: { $0.contains(declaration) }) - change.removed.count(where: { $0.contains(declaration) })
         }
-        if tests < 0 { problems.append("lowers the test count by \(-tests)") }
-        return problems
+        if tests < 0 { report.problems.append("lowers the test count by \(-tests)") }
+        return report
+    }
+
+    /// What a build file's test settings look like, for the build files that hold them: test
+    /// targets in Package.swift (only removing one counts), the test scripts in package.json, and
+    /// pytest's settings in pyproject.toml, setup.cfg and tox.ini.
+    static func testSetting(in path: String) -> Regex<Substring>? {
+        switch URL(filePath: path).lastPathComponent {
+        case "Package.swift": /\btestTarget\b/
+        case "package.json": /"test[\w:.-]*"\s*:/
+        case "pyproject.toml", "setup.cfg": /pytest|testpaths|addopts|python_(?:files|classes|functions)|norecursedirs/
+        default: nil
+        }
     }
 
     /// A test file: in a folder of tests (`tests/`, `__tests__/`, `RunnerTests/`), or named like one.
@@ -185,6 +221,9 @@ nonisolated enum Integrity {
 
     /// A line that skips, focuses or expects a test to fail, in the common frameworks.
     static let skip = /\.disabled\s*\(|\.enabled\s*\(\s*if\s*:|XCTSkip|XCTExpectFailure|withKnownIssue|\b(?:it|test|describe|context|suite)\.(?:skip|todo|only|fails)\b|\b(?:xit|xdescribe|xtest|fit|fdescribe)\s*\(|@pytest\.mark\.(?:skip|skipif|xfail)\b|\bpytest\.(?:skip|xfail)\s*\(|@unittest\.(?:skip\w*|expectedFailure)\b|\bt\.Skip(?:Now|f)?\s*\(|#\[ignore\b|@(?:Disabled|Ignore)\b/
+
+    /// A line that asserts, in the common frameworks.
+    static let assertion = /#expect\b|#require\b|\bXCT(?:Assert\w*|Fail|Unwrap)\b|\bexpect\s*\(|\bassert\w*\s*[(\s!]|\bt\.(?:Error|Errorf|Fatal|Fatalf|Fail)\b|\bshould\b|\.to(?:Be|Equal|Have)\w*\(/
 
     /// A line that declares a test: Swift Testing and XCTest, Jest and Vitest, pytest, Go, Rust, JUnit, RSpec.
     static let declaration = /^\s*(?:@Test\b|#\[(?:\w+::)?test\]|(?:(?:public|private|internal|async|override)\s+)*(?:func|def)\s+(?:test|Test)\w*\s*\(|(?:it|test)(?:\.\w+)*\s*\(|it\s+['"])/
