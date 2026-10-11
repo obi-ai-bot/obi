@@ -60,6 +60,7 @@ This document is the contract between the runner and its clients. Change it in t
   "limit": null,
   "startCommit": null,
   "outgoing": [],
+  "moves": [],
   "question": null,
   "macCheck": null,
   "mergeError": null,
@@ -118,7 +119,8 @@ This document is the contract between the runner and its clients. Change it in t
 
   Such a job is `failed` with `limit` set (like `"the same failure twice in a row"` or ``"`swift test` still fails after 4 rounds"``), keeps its branch and pushes nothing. Its `summary` starts with `Stopped at a limit: <limit>. The branch is kept and nothing was pushed; one more round is possible.` and the notch says `Stopped at a limit: <title>`. One more round: its inbox item (kind `failed`) offers `One more round` instead of `Try again`, or `POST /v1/jobs/{id}/messages`; either clears `limit`. Stopping a job (or a limit stopping it) also ends a check that's still running. Older runners don't send this key.
 - `startCommit`: the commit the work started from (the base on origin, or the pull request's head), recorded when the worktree is set up, or null before then and on older jobs. Test integrity compares with it: an agent can move a branch or a ref, not this. Older runners don't send this key.
-- `model`: a stronger model the user chose for this job, or null for the one in Settings › Models.
+- `model`: a model the user chose for this job (the stronger one on the plan's card, or one it was moved to), or null for the one in Settings › Models.
+- `moves`: every time the user moved the job to another tool, account or model (`POST /v1/jobs/{id}/move`), oldest first. Always a list, empty when it never moved. Each is `{"from": "Codex · Deskree", "to": "Claude Code · Personal", "why": "Codex keeps looping", "date": "2026-10-11T14:02:10Z"}`: `from` and `to` are the tool and the account, with the model after another ` · ` when the job ran one of its own (`"Claude Code · Personal · Fable 5.1"`); `why` is what the user said when they moved it, or null. The job screens show the latest as "Moved from Codex · Deskree to Claude Code · Personal".
 - `notes`: what the user told the agent along the way (`POST /v1/jobs/{id}/messages`), oldest first, or null.
 - `title`: what to call the job in rows, the job screen, the notch and alerts. It's the brain's short title (3 to 6 words, like `"Mac runner notifications"`), which every planned dispatch gets and the job keeps. Jobs without one (the rules' plans when the brain is down, an epic's sub-issue jobs, jobs from before titles) get `"<Kind> <repo name> #<number>"` when `pr` or `issue` is set, otherwise the first line of `task` (falling back to `request`), capped at 60 characters. It's always a string; older runners don't send it, so clients fall back the same way. Show "Round 2 of 5" when `rounds` is above 1.
 - `files`: the files or folders (ending in `/`) the job is expected to touch, relative to the repository: its claim (below). From the Lead's brief, from the client that dispatched it (`POST /v1/jobs`), or else from its issue: the issue's `Files:` line (paths and folders, in backticks or separated by commas), or when it has none, the paths its title and text name (in backticks, or with a folder, like `Engine/Checks.swift` or `MCP/`). The runner reads the issue as it plans, so a draft from `POST /v1/plans` shows them; a job that still has none claims them when its worktree gets ready. Null when nothing named any (the job then neither waits nor blocks), `[]` when the client claimed none. `lead` is set on jobs the Lead started (below), null otherwise: the goal (one Lead turn) that started it. `claim` also reports issue-sync errors on any job; successful changes are listed in `outgoing`. Older runners don't send these keys.
@@ -361,6 +363,8 @@ The answer is one of:
 
 Words that ask to stop work stop jobs right away, with nothing to confirm, and answer once they have, with a reply saying what stopped. "Stop everything" or "stop all jobs" stops every queued and running job: `"Stopped 2 jobs."`, or `"Nothing is running."`. "Cancel it" or "stop the vault job" stops the job the conversation is about, by its id from the briefing: `"Stopped Vault secrets."`, or `"That job isn't running any more."`. The brain's plan says which (the jobs by id, or everything in so many words), and Swift refuses a stop that says neither; a stop that names no job while several run is answered with a question (which one, or everything?) or `"Say which job to stop, or “stop everything”."`. (On the Mac, whose brain also sees the runner's jobs, inbox and accounts, both reach the runner's jobs through `POST /v1/jobs/{id}/stop`, and a job the runner couldn't stop is said so: `"Couldn't stop Watch home: …"`.)
 
+Words that ask to move a job ("move the vault job to Claude", "use Fable for that one", "put the Watch job on Codex") move it right away too, as `POST /v1/jobs/{id}/move` would, and answer with a reply: `"Moved Vault secrets from Codex · Deskree to Claude Code · Personal. It goes on there now."`, or `"Couldn't move it: …"` with why. The brain names the job by its id from the briefing (its title, its issue or pull request, or "that one" in the conversation) and where it goes (a tool, an account by name, a model), and Swift checks both before anything moves: the job must be one the briefing listed, the account one it knows, and the model one of that tool's. (On the Mac, a runner's job moves through the runner's `POST /v1/jobs/{id}/move`.)
+
 One message can plan up to 10 jobs ("work on oby #12, #15 and #18", or "work on epic #30", which becomes one job per open sub-issue). Each draft is already routed (Routing, under Account); dispatch each with its own `POST /v1/jobs`. `draft` is kept for apps that know only one job.
 
 #### The Lead: vague goals
@@ -448,6 +452,22 @@ Lets go of a job that needs you (`done` with commits it couldn't publish, `faile
 
 `404` for an unknown job. `409` when the job doesn't need you (running, stopped, done and published, or done with nothing to publish).
 
+### `POST /v1/jobs/{id}/move`
+
+Moves a job to another tool, account or model:
+
+```json
+{"agent": "claude", "account": "Personal", "model": "claude-fable-5-1", "why": "Codex keeps looping"}
+```
+
+Every key may be left out (or null), but not all of the first three. `agent` is `claude` or `codex`; `account` is an account's `id` or its `name`; `model` is a model's id (Claude Code's from Settings › Models, Codex's from `GET /v1/settings/models/options`), or `default` to drop the job's own model and run the tool's from Settings › Models; `why` is the user's reason, up to 500 characters, which the agent taking over hears. What's left out follows from the rest: a model names its tool (`claude-…` is Claude Code's, any other Codex's), an account its tool too; with no account named, the job keeps its own when the tool stays, else goes to the tool's least busy signed-in account under 80% of both its 5-hour and its weekly window. An account named takes it however busy it is, but not while it's signed out or stopped at its limit. With no model named, the job keeps its own on the same tool; on another, the strongest stays the strongest (`claude-fable-5-1` and `gpt-6-astra`) and any other model gives way to Settings › Models.
+
+- **Queued:** it starts on the new choice.
+- **Running:** its agent is stopped, and the round starts over on the new choice with a new session, in the same worktree and branch. The new agent hears the task, the earlier rounds' summaries, what the user told it, the message that started the round, that the user moved the job to it from where, and `why`. The job's report says `Moved from … to … by you.`
+- **Finished** (`done`, `failed`, `stopped` or `interrupted`): it stays as it ended, and its next round (`POST /v1/jobs/{id}/messages`, or Try again from the inbox) runs on the new choice, with a new session that hears what a running job's would, then the user's words.
+
+The job keeps its `id`, branch and history, and a move is added to `moves`. Returns the job. `404` for an unknown job. `422` with why when it can't move: nothing named, an unknown tool, account or model, a model of another tool, an account signed out or at its limit, no account of the tool with room, the job already there, one of Oby's own reviews (they pick their account themselves), or a job wrapping up its only turn or publishing (move it once it's done).
+
 ### `POST /v1/jobs/{id}/messages`
 
 Tells the job's agent something:
@@ -457,10 +477,10 @@ Tells the job's agent something:
 ```
 
 - **Running:** the agent hears it now, in the turn under way or as the next one (Claude Code: another message; Codex: it steers the turn).
-- **Finished** (`done`, `failed`, `stopped` or `interrupted`): the runner picks the agent's session up again in the same worktree and branch. The job keeps its `id`, goes back to `running` and gets a new `round`; when `rounds` is above 1 it grows by one too, so a loop still has a round for this. A dismissed job is dismissed no more. It ends as usual, except that this round may end `done` with nothing committed: your words decide what it should do.
+- **Finished** (`done`, `failed`, `stopped` or `interrupted`): the runner picks the agent's session up again in the same worktree and branch (a job moved since its last round starts a new session on its new choice instead: `POST /v1/jobs/{id}/move`). The job keeps its `id`, goes back to `running` and gets a new `round`; when `rounds` is above 1 it grows by one too, so a loop still has a round for this. A dismissed job is dismissed no more. It ends as usual, except that this round may end `done` with nothing committed: your words decide what it should do.
 - The text is saved in `notes`, and `step` shows `"You: …"` until the agent moves on.
 
-Returns the job. `404` for an unknown job. `422` when the text isn't 1 to 2,000 characters, or the job can't take it: still getting ready, wrapping up its only turn (try again once it's done), or never started (no `session`).
+Returns the job. `404` for an unknown job. `422` when the text isn't 1 to 2,000 characters, or the job can't take it: still getting ready, wrapping up its only turn (try again once it's done), or never started (no `session`, and never moved).
 
 ### `GET /v1/events`
 
@@ -791,6 +811,7 @@ The endpoints, each as on the tailnet API unless it says otherwise:
 | `POST /v1/jobs` | Dispatch. |
 | `POST /v1/jobs/{id}/messages` | A word to the job's agent. |
 | `POST /v1/jobs/{id}/dismiss` | Dismiss. |
+| `POST /v1/jobs/{id}/move` | Move to another tool, account or model. |
 | `GET /v1/jobs/{id}/publish` | The sentence publishing would carry out. |
 | `POST /v1/jobs/{id}/publish` | Publish, approved on the Watch (below). |
 | `POST /v1/notifications` | The Watch's push tokens (below). |

@@ -19,6 +19,7 @@ struct JobScreen: View {
                     Text(job.heading).font(.headline).accessibilityAddTraits(.isHeader)
                     let (status, color) = JobStatus.of(job)
                     Text(status).font(.caption.weight(.semibold)).foregroundStyle(color)
+                    if let moved = job.movedLine { Text(moved).font(.caption2).foregroundStyle(.secondary) }
                     decision(job)
                     stages(job)
                     result(job)
@@ -31,7 +32,7 @@ struct JobScreen: View {
                         }
                         .tint(.orange).disabled(busy)
                     }
-                    if job.status == .running || (!job.isActive && job.session != nil) {
+                    if job.status == .running || (!job.isActive && job.resumable) {
                         TextFieldLink(prompt: Text("Tell the agent…")) {
                             Label("Tell the agent", systemImage: "text.bubble")
                         } onSubmit: { text in
@@ -40,6 +41,10 @@ struct JobScreen: View {
                             Task { await run { try await watch.tell(job.id, text) } }
                         }
                         .disabled(busy)
+                    }
+                    // Oby's own reviews pick their account themselves.
+                    if job.reviewOf == nil {
+                        NavigationLink("Move to…") { MoveList(job: job) }.disabled(busy)
                     }
                     if job.needsYou {
                         Button("Dismiss") {
@@ -133,6 +138,62 @@ struct JobScreen: View {
         defer { busy = false }
         do { try await work(); problem = nil }
         catch { problem = error.localizedDescription }
+    }
+}
+
+/// "Move to…" on the Watch: a tool (Oby picks its least busy account with room), an account with
+/// its usage, or a model. What the move does is said first; a tap moves it.
+private struct MoveList: View {
+    @Environment(Watch.self) private var watch
+    @Environment(\.dismiss) private var dismiss
+    let job: Job
+    @State private var busy = false
+    @State private var problem: String?
+
+    var body: some View {
+        List {
+            Section {
+                Text(MoveChoice.effect(active: job.isActive, running: job.status == .running)).font(.caption2).foregroundStyle(.secondary)
+                if let problem { Text(problem).font(.caption2).foregroundStyle(.red) }
+            }
+            Section("Tools") {
+                ForEach(MoveChoice.tools, id: \.0) { tool in
+                    Button(tool.1) { move(agent: tool.0) }.disabled(busy || tool.0 == job.agent)
+                }
+            }
+            Section("Accounts") {
+                ForEach(watch.accounts) { account in
+                    Button { move(account: account.id) } label: {
+                        VStack(alignment: .leading) {
+                            Text(account.title)
+                            Text(MoveChoice.usage(signedIn: account.signedIn, fiveHour: account.fiveHour, sevenDay: account.sevenDay))
+                                .font(.caption2)
+                                .foregroundStyle(MoveChoice.busy(fiveHour: account.fiveHour, sevenDay: account.sevenDay) ? Color.orange : Color.secondary)
+                        }
+                    }
+                    .disabled(busy || !account.signedIn || account.id == job.account)
+                }
+            }
+            Section("Models") {
+                ForEach(MoveChoice.claudeModels + [MoveChoice.codexStrongest], id: \.self) { model in
+                    Button(ModelChoice.name(model)) { move(model: model) }.disabled(busy || model == job.model)
+                }
+            }
+        }
+        .navigationTitle("Move to")
+    }
+
+    private func move(agent: String? = nil, account: String? = nil, model: String? = nil) {
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                try await watch.move(job.id, agent: agent, account: account, model: model)
+                dismiss()
+            } catch {
+                problem = error.localizedDescription
+            }
+        }
     }
 }
 

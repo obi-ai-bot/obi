@@ -122,6 +122,12 @@ final class IslandController {
             }
             return failed
         }
+        desk.moveElsewhere = { [weak self] id, target, why in
+            guard let self, let runner = feed.runner else { throw RunnerError(message: "The runner isn't set up.") }
+            let job = try await runner.move(id, agent: target.agent, account: target.account, model: target.model, why: why)
+            feed.apply(job)
+            return job
+        }
         desk.onReply = { [weak self] text, spoken in self?.replied(text, spoken: spoken) }
         feed.start()
         Task { await desk.refresh() }
@@ -678,7 +684,7 @@ private struct OpenIsland: View {
     @ViewBuilder private func screen(_ row: Row) -> some View {
         if let host = row.host {
             let id = row.job.id
-            JobView(job: row.job, place: host, account: nil, onStop: { stop(row) },
+            JobView(job: row.job, place: host, account: feed.accounts.first { $0.account.id == row.job.account }?.account.name, onStop: { stop(row) },
                     publishing: feed.device.key.isAvailable
                         ? JobView.Publishing(action: { try await feed.publishAction(id) }, publish: { try await feed.publish(id, action: $0) })
                         : nil,
@@ -688,14 +694,16 @@ private struct OpenIsland: View {
                     onMode: { try await feed.setMode(id, $0) },
                     onPermission: { try await feed.answer(id, $0, message: $1) },
                     publishNow: model.publishing == id,
-                    onPublishNow: { model.publishing = nil })
+                    onPublishNow: { model.publishing = nil },
+                    accounts: feed.accounts, onMove: mover(row))
         } else {
             let job = row.job
             JobView(job: job, place: "This Mac", account: desk.accounts.accounts.first { $0.account.id == job.account }?.account.name,
                     onStop: { stop(row) },
                     publishing: JobView.Publishing(action: { Publish.action(for: job, base: job.base ?? "") },
                                                    publish: { _ in _ = try await desk.publish(job.id, approve: Publish.touchID) }),
-                    onMessage: { try desk.message(job.id, $0) }, onDismiss: { try await dismiss(row) })
+                    onMessage: { try desk.message(job.id, $0) }, onDismiss: { try await dismiss(row) },
+                    accounts: desk.accounts.accounts, onMove: mover(row))
         }
     }
 
@@ -704,6 +712,19 @@ private struct OpenIsland: View {
             desk.stop(row.job.id)
         } else {
             Task { if let job = try? await feed.runner?.stop(row.job.id) { feed.apply(job) } }
+        }
+    }
+
+    /// Moves the job, here or on the runner; nil for Oby's own reviews, which pick their account themselves.
+    private func mover(_ row: Row) -> ((MoveTarget) async throws -> Void)? {
+        guard row.job.reviewOf == nil else { return nil }
+        let id = row.job.id
+        if row.host == nil {
+            return { target in _ = try desk.move(id, to: target) }
+        }
+        return { target in
+            guard let runner = feed.runner else { throw RunnerError(message: "The runner isn't set up.") }
+            feed.apply(try await runner.move(id, agent: target.agent, account: target.account, model: target.model))
         }
     }
 

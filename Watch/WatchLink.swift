@@ -102,6 +102,10 @@ nonisolated struct WatchLink: Sendable {
         }
     }
 
+    func move(_ id: String, agent: String?, account: String?, model: String?) async throws -> Job {
+        try await call("POST", "v1/jobs/\(id)/move", body: MoveBody(agent: agent, account: account, model: model))
+    }
+
     func publishAction(_ id: String) async throws -> String {
         struct Answer: Decodable { var action: String }
         let answer: Answer = try await call("GET", "v1/jobs/\(id)/publish")
