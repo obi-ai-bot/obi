@@ -402,15 +402,16 @@ struct IslandView: View {
     }
 
     /// "Oby" and the hover line: under the camera, centered, on a screen with a notch; else Oby's
-    /// name beside it and the line trailing.
+    /// name beside it and the line trailing. The line wraps to two lines, cut only past the second;
+    /// IslandLayout measures it in these fonts and gives the row the height it needs.
     @ViewBuilder private func peek(below: Bool) -> some View {
         let name = Text("Oby").font(.system(size: 12, weight: .semibold)).layoutPriority(1)
         let line = Text(model.peekLine).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.6))
-            .lineLimit(1).truncationMode(.tail)
+            .lineLimit(IslandLayout.maxLines).truncationMode(.tail)
         if below {
-            HStack(spacing: 8) { name; line }
+            HStack(alignment: .firstTextBaseline, spacing: IslandLayout.gap(below: true)) { name; line }
         } else {
-            HStack(spacing: 12) { name; Spacer(minLength: 0); line }
+            HStack(alignment: .firstTextBaseline, spacing: IslandLayout.gap(below: false)) { name; Spacer(minLength: 0); line }
         }
     }
 }

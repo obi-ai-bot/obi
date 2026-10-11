@@ -18,8 +18,13 @@ struct IslandLayoutTests {
         Screen(width: 1920, notch: nil),
     ]
     static let states: [IslandState] = [.compact, .peek, .open, .listening]
+    /// The busy summary seen cut on the Air (#191).
+    static let busy = "2 agents are working. 1 job is ready to publish, 1 job failed, 3 jobs need your review, 2 jobs have questions waiting for you."
     static let lines = [
         "6 agents are working · 1 needs your review, 1 job wasn't published, 2 questions are waiting for you",
+        busy,
+        String(repeating: busy + " ", count: 4),
+        "1 agent is working.",
         Summary.quiet,
     ]
 
@@ -33,6 +38,7 @@ struct IslandLayoutTests {
             let layout = Self.layout(state, on: screen, line: line)
             let island = CGRect(origin: .zero, size: layout.size)
             #expect(!layout.texts.isEmpty)
+            #expect((1...IslandLayout.maxLines).contains(layout.lines))
             for text in layout.texts {
                 #expect(island.contains(text), "\(text) leaves the island \(island)")
                 if let notch = layout.notch {
@@ -85,8 +91,9 @@ struct IslandLayoutTests {
 
     @Test func withoutANotchTheHoverPillIsUnchanged() throws {
         let screen = Self.screens[2]
-        let peek = Self.layout(.peek, on: screen)
+        let peek = Self.layout(.peek, on: screen, line: "1 agent is working.")
         #expect(peek.size == CGSize(width: 180 + 320, height: 24 + 6))
+        #expect(peek.lines == 1)
         let quiet = Self.layout(.peek, on: screen, line: Summary.quiet)
         #expect(quiet.size.width == 320)
         #expect(peek.radius == 18)
@@ -97,6 +104,39 @@ struct IslandLayoutTests {
         #expect(line.minX == peek.character.maxX + 4)
         #expect(line.maxX == peek.size.width - 14)
         #expect(line.minY == 0 && line.height == peek.size.height)
+    }
+
+    @Test(arguments: screens)
+    func aLongHoverLineTakesTwoLines(screen: Screen) throws {
+        let short = Self.layout(.peek, on: screen, line: "1 agent is working.")
+        let long = Self.layout(.peek, on: screen, line: Self.busy)
+        #expect(short.lines == 1)
+        #expect(long.lines == 2)
+        #expect(long.size.width == short.size.width)
+        #expect(long.size.height == short.size.height + IslandLayout.lineHeight)
+        let shortLine = try #require(short.line)
+        let longLine = try #require(long.line)
+        #expect(longLine.height == shortLine.height + IslandLayout.lineHeight)
+        #expect(longLine.minY == shortLine.minY)
+        // Past two lines the line is cut, and the island grows no further.
+        let endless = Self.layout(.peek, on: screen, line: String(repeating: Self.busy + " ", count: 4))
+        #expect(endless.lines == 2)
+        #expect(endless.size == long.size)
+    }
+
+    @Test(arguments: screens)
+    func aQuietHoverKeepsTodaysHeight(screen: Screen) {
+        let quiet = Self.layout(.peek, on: screen, line: Summary.quiet)
+        let top = screen.notch?.height ?? 24
+        #expect(quiet.lines == 1)
+        #expect(quiet.size.height == top + (screen.notch == nil ? 6 : 10 + IslandLayout.row))
+    }
+
+    @Test func measuringWrapsWhereTheRowEnds() {
+        #expect(IslandLayout.lines(of: Summary.quiet, width: 400) == 1)
+        #expect(IslandLayout.lines(of: Self.busy, width: 600) == 2)
+        #expect(IslandLayout.lines(of: Self.busy, width: 100) > 2)
+        #expect(IslandLayout.lines(of: "", width: 400) == 1)
     }
 
     @Test(arguments: screens)
