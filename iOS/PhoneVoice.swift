@@ -173,10 +173,18 @@ final class PhoneVoice {
 /// One synthesizer for the conversation. Enhanced/premium installed voices are preferred;
 /// availability varies by phone and language, so the system voice is the fallback.
 @MainActor
-final class PhoneSpeaker {
+final class PhoneSpeaker: NSObject, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
+    private var current: AVSpeechUtterance?
+
+    override init() {
+        super.init()
+        synthesizer.delegate = self
+    }
 
     func stop() {
+        // Invalidate before stopping: a late completion must not deactivate a new mic session.
+        current = nil
         synthesizer.stopSpeaking(at: .immediate)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
@@ -192,6 +200,21 @@ final class PhoneSpeaker {
         utterance.voice = preferred ?? AVSpeechSynthesisVoice(language: locale)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
         try? AVAudioSession.sharedInstance().setActive(true)
+        current = utterance
         synthesizer.speak(utterance)
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in self?.finished(utterance) }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in self?.finished(utterance) }
+    }
+
+    private func finished(_ utterance: AVSpeechUtterance) {
+        guard current === utterance else { return }
+        current = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 }

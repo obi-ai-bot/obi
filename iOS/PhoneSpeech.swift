@@ -31,11 +31,11 @@ final class PhoneSpeech {
         self.input = input
     }
 
-    /// English and Portuguese use the phone's preferred language; other languages fall back to English.
+    /// Explicit English/Portuguese settings override the system language. Keep the Watch's
+    /// existing system-language behavior for every locale SpeechTranscriber supports.
     static var locale: Locale {
         let selected = UserDefaults.standard.string(forKey: "voice.language") ?? "system"
-        let preferred = selected == "system" ? (Locale.preferredLanguages.first ?? "en-US") : selected
-        return Locale(identifier: preferred.hasPrefix("pt") ? preferred : (preferred.hasPrefix("en") ? preferred : "en-US"))
+        return selected == "system" ? .current : Locale(identifier: selected)
     }
 
     static func context(repos: [String]) -> [String] {
@@ -246,4 +246,3 @@ final class PhoneSpeech {
         }
     }
 }
-

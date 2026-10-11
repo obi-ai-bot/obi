@@ -49,8 +49,12 @@ struct TalkButton: View {
                     .onChange(of: pressing) {
                         if !pressing {
                             gestureStarted = false
-                            // A cancelled gesture has no onEnded: discard unless explicitly locked.
-                            if !locked { abort() }
+                            // Both release signals may arrive in either order. Finish is idempotent;
+                            // navigation, lost reachability and scene interruptions still discard.
+                            if !locked {
+                                if scenePhase == .active, watch.reachable, watch.talk == .recording { finish() }
+                                else { abort() }
+                            }
                         }
                     }
                     .accessibilityLabel("Hold to talk")
@@ -65,6 +69,7 @@ struct TalkButton: View {
         }
         .sensoryFeedback(trigger: holding) { _, held in held ? .start : .stop }
         .sensoryFeedback(.impact(weight: .light), trigger: locked) { _, locked in locked }
+        .sensoryFeedback(.warning, trigger: recorder.seconds) { _, seconds in seconds >= Recorder.limit }
         .task { await recorder.prepare() }
         .onChange(of: recorder.seconds) { if recorder.seconds >= Recorder.limit { finish() } }
         .onChange(of: recorder.listening) { listening = recorder.listening }
@@ -205,8 +210,8 @@ struct TalkView: View {
 /// Mono 16 kHz Int16 PCM (WatchWire), delivered in 1/4-second pieces. No audio file stays on the watch.
 @Observable
 final class Recorder {
-    // UI cutoff; the transport job owns WatchWire.voiceSeconds and its matching stream bounds.
-    static let limit = 60
+    // One bound for capture, sender backlog and the phone's transcription stream.
+    static let limit = WatchWire.voiceSeconds
     private(set) var listening = false
     private(set) var seconds = 0
     private(set) var allowed: Bool?
