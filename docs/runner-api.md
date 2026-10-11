@@ -488,3 +488,34 @@ Each tool's model and effort, as in `status.models`. `GET /v1/settings/models/op
 - **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comments that go out are Oby's own review of its own pull request, after the secret scan, and the Lead's claim on an issue a job starts on (the branch name, written by the runner); no GitHub review, approval or comment on anyone else's work.
 - **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
 - **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.
+
+### `POST /v1/speech?device=<UUID>&utterance=<UUID>&final=false&language=auto`
+
+Transcribes one utterance on the runner's CPU using whisper.cpp, independently of the iPhone and of any agent. It uses the same owner gate as the other `/v1` endpoints. This is the speech service only; a Watch gateway can call it later.
+
+The body is binary audio: signed 16-bit little-endian PCM, 16 kHz, mono (`Content-Type: audio/pcm` or `application/octet-stream`), or a complete RIFF/WAV chunk containing that same format (`audio/wav` or `audio/x-wav`). Send sequential chunks of at most ten seconds; each WAV request has its own header. The HTTP body limit is 324,096 bytes including WAV metadata. Audio for an utterance may total at most 60 seconds (1,920,000 PCM bytes).
+
+- `device`: stable UUID chosen by the app for this device. This is a concurrency key, not authentication.
+- `utterance`: a fresh UUID for each utterance. Reuse it for every chunk of that utterance.
+- `final`: `false` by default. Every non-final call appends the chunk and transcribes **all** audio so far with multilingual `base-q5_1`. A `true` call appends its optional last chunk and transcribes all audio with `large-v3-turbo`, then discards the utterance. An empty final body is allowed after earlier audio. Partial text can change.
+- `language`: `auto` (default, detection while transcribing), `en` or `pt`. Use the same language on every call. Transcription keeps the spoken language; it does not translate.
+
+Returns `{"utterance":"<UUID>","text":"…","final":false}` (or `true`). Wait for each answer before sending the next chunk. Chunks append exactly once per received call; this endpoint does not deduplicate retries. After an uncertain network result, let the session expire before starting again.
+
+Only one utterance per device is open or transcribing at once (`409` for an overlapping call, a different utterance or a changed language). At most two CLI processes and 32 open utterances are allowed across devices (`503` when busy). Idle utterances are discarded after 120 seconds following their last partial answer. `400` means invalid parameters/audio; `413` means a body or utterance is too large. Exceeding the utterance limit discards it. `415` means unsupported content type. `501` clearly identifies a missing CLI/model or invalid thread count. `500` means transcription failed or timed out: audio is discarded and the client starts a fresh utterance. Each CLI has a 120-second deadline.
+
+Audio stays in memory between chunks. For inference only, the service writes a WAV in a private 0700 directory under `OBY_HOME/whisper/audio`, outside agent sandboxes, then deletes that directory (including transcript files) after success or failure. CLI stdout/stderr go to `/dev/null`; neither audio nor transcripts are logged, sent to agents, or dispatched as work. Startup removes crash leftovers before serving requests. A process or host crash can leave files until that restart.
+
+Run `OBY_HOME=/srv/nvme/oby Runner/scripts/setup-whisper.sh` once as the runner's owner on tetrix-lab. It requires git, CMake, a C++ compiler, curl and flock (Ubuntu: `git cmake build-essential curl util-linux`). It pins whisper.cpp v1.8.2, builds a static release CLI optimized for this CPU with GPU backends off, and atomically downloads the two multilingual models. Repeated runs reuse the checkout/build and completed downloads; interrupted downloads are retried. The final model needs roughly 1.6 GB of disk. The build uses the [upstream CMake options](https://github.com/ggml-org/whisper.cpp/blob/v1.8.2/CMakeLists.txt) and the [upstream model distribution](https://github.com/ggml-org/whisper.cpp/blob/v1.8.2/models/download-ggml-model.sh).
+
+The runner reads this configuration from its environment at startup (restart after changes):
+
+| Variable | Default |
+| --- | --- |
+| `OBY_WHISPER_CLI` | `OBY_HOME/whisper/bin/whisper-cli` |
+| `OBY_WHISPER_FAST_MODEL` | `OBY_HOME/whisper/models/ggml-base-q5_1.bin` |
+| `OBY_WHISPER_FINAL_MODEL` | `OBY_HOME/whisper/models/ggml-large-v3-turbo.bin` |
+| `OBY_WHISPER_THREADS` | `16`, for tetrix-lab's 16 CPU cores |
+| `OBY_SPEECH_NAMES` | `oby,tetrix,deskree-inc/oby`; comma-separated product/repository names passed as Whisper's initial prompt. Set this to include the runner's repositories. |
+
+No GPU is needed. Actual latency and English/Portuguese recognition quality still need checking on tetrix-lab with real Watch recordings.

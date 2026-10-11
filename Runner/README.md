@@ -46,6 +46,12 @@ Put the owner's Tailscale login in place of `you@example.com` (`tailscale status
 
 The models and efforts the app picks in Settings › Models are kept in `~/.config/oby-runner.plist`.
 
+## Speech
+
+Speech runs directly on the runner's CPU with whisper.cpp. As the runner's owner on tetrix-lab, run `OBY_HOME=/srv/nvme/oby Runner/scripts/setup-whisper.sh` to build the CLI and download the multilingual fast and final models. The script needs `git cmake build-essential curl util-linux`, can be run again safely, and stores everything under `OBY_HOME/whisper`.
+
+`POST /v1/speech` accepts short PCM/WAV chunks and returns partial or final text. It never sends audio to an agent or logs it. Model paths, CPU threads and product/repository prompt names are environment settings; the full contract and defaults are in [the runner API](../docs/runner-api.md#post-v1speechdeviceuuidutteranceuuidfinalfalselanguageauto).
+
 ## Vault
 
 Secrets for connections you make (an API token for a service) live in `vault/secrets.json` in `OBY_HOME`: the folder is 0700 and the file 0600, owned by the runner's user. Agents never see it: all of `OBY_HOME` is empty in their bubblewrap.

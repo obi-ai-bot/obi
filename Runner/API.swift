@@ -11,6 +11,7 @@ final class API {
     static let version = "0.2.0"
 
     let desk: Desk
+    let speech: Speech
     let devices: Devices
     /// Push to the iPhone (Live Activity and alerts), or nil when this runner has none.
     let push: Push?
@@ -22,7 +23,8 @@ final class API {
     private var sentAccounts = Data()
 
     /// Without `cleared` (the tests), the clear time lives in memory only.
-    init(desk: Desk, devices: Devices, push: Push? = nil, cleared: Cleared? = nil) {
+    init(desk: Desk, devices: Devices, push: Push? = nil, cleared: Cleared? = nil, speech: Speech = Speech()) {
+        self.speech = speech
         self.desk = desk
         self.devices = devices
         self.push = push
@@ -40,6 +42,9 @@ final class API {
     nonisolated func router(owner: String) -> Router<BasicRequestContext> {
         let router = Router()
         router.add(middleware: Gate(owner: owner))
+        router.post("v1/speech") { request, _ in
+            try await Self.json(self.speech.handle(request))
+        }
         router.get("v1/status") { _, _ in await self.status() }
         router.post("v1/plans") { request, _ in await self.plan(try await Self.decode(PlanRequest.self, from: request)) }
         router.post("v1/jobs") { request, _ in try await self.dispatch(try await Self.decode(DispatchRequest.self, from: request)) }
