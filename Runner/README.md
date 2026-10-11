@@ -120,7 +120,7 @@ watchOS can't run Tailscale, so the Watch reaches a second, smaller API (`docs/r
 journalctl --user -u oby-runner -f
 ```
 
-The log lists the registered phones at startup, and every turn of the brain: the words the user typed, the plan it made (or the rules' plan when it didn't answer), and any plan Swift refused, with why. Stopping the service ends running agents, and their jobs show as interrupted.
+The log lists the registered phones at startup, and every turn of the brain: the words the user typed, the plan it made (or the rules' plan when it didn't answer), and any plan Swift refused, with why. Stopping the service ends running agents; their jobs carry on in their own sessions when it starts again (docs/runner-api.md, "After any restart").
 
 ## Run it by hand
 
