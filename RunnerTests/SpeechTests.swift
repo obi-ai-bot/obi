@@ -3,6 +3,11 @@ import HTTPTypes
 import Hummingbird
 import HummingbirdTesting
 import Testing
+#if os(Linux)
+import Glibc
+#else
+import Darwin
+#endif
 @testable import ObyEngine
 @testable import oby_runner
 
@@ -16,42 +21,92 @@ final class SpeechTests {
 
     init() throws {
         folder = try temporaryFolder()
-        let cli = folder.appending(path: "whisper-cli")
+        let cli = folder.appending(path: "whisper-server")
         // Record only arguments and sample counts, never the audio or transcript in a log.
         let fake = #"""
         #!/usr/bin/env python3
-        import json, pathlib, sys, time
+        import json, pathlib, sys, time, email.parser, email.policy
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         args = sys.argv[1:]
         def value(flag): return args[args.index(flag) + 1]
         root = pathlib.Path(__file__).parent
-        mode = (root / 'mode').read_text() if (root / 'mode').exists() else ''
-        # Started once it knows its mode: a test may take the mode away as soon as it sees this.
-        (root / 'started').touch()
-        if mode == 'hang':
-            while True: time.sleep(.01)
-        if mode == 'block':
-            while (root / 'mode').exists(): time.sleep(.01)
-        if mode == 'fail':
-            print('private subprocess detail', file=sys.stderr)
-            sys.exit(1)
-        audio = pathlib.Path(value('--file')).read_bytes()
-        record = {'model': pathlib.Path(value('--model')).name, 'threads': value('--threads'),
-                  'language': value('--language'), 'prompt': value('--prompt'), 'bytes': len(audio)-44,
-                  'cpu': '--no-gpu' in args}
-        (root / 'args.json').write_text(json.dumps(record))
-        pathlib.Path(value('--output-file') + '.txt').write_text('texto ' + str(len(audio)-44) + '\n')
+        with (root / 'launches').open('a') as log: log.write(value('--model') + '\n')
+        if (root / 'mode').exists() and (root / 'mode').read_text() == 'no-ready': time.sleep(120)
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_GET(self):
+                self.send_response(200 if self.path == value('--request-path') + '/' else 404)
+                self.end_headers()
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers['Content-Length']))
+                message = email.parser.BytesParser(policy=email.policy.default).parsebytes(
+                    ('Content-Type: ' + self.headers['Content-Type'] + '\r\n\r\n').encode() + body)
+                fields = {p.get_param('name', header='content-disposition'): p.get_payload(decode=True) for p in message.iter_parts()}
+                mode = (root / 'mode').read_text() if (root / 'mode').exists() else ''
+                # Started once it knows its mode: a test may take the mode away as soon as it sees this.
+                (root / 'started').touch()
+                if mode == 'hang':
+                    while True: time.sleep(.01)
+                if mode == 'block':
+                    while (root / 'mode').exists(): time.sleep(.01)
+                record = {'model': pathlib.Path(value('--model')).name, 'threads': value('--threads'),
+                          'language': fields['language'].decode(), 'prompt': fields['prompt'].decode(),
+                          'bytes': len(fields['file'])-44, 'cpu': '--no-gpu' in args,
+                          'response_format': fields['response_format'].decode(), 'probabilities_disabled': fields['no_language_probabilities'].decode(), 'audio_ctx': fields['audio_ctx'].decode(), 'no_context': fields['no_context'].decode(), 'host': value('--host'), 'pid': __import__('os').getpid()}
+                (root / 'args.json').write_text(json.dumps(record))
+                self.send_response(500 if mode == 'fail' else 200)
+                self.end_headers()
+                self.wfile.write((json.dumps({'text': 'texto ' + str(len(fields['file'])-44) + '\n', 'language': 'portuguese' if mode == 'detect-pt' or fields['language'] == b'pt' else ('french' if mode == 'detect-other' else 'english')}) if mode not in ('fail', 'malformed') else 'private subprocess detail').encode())
+        ThreadingHTTPServer((value('--host'), int(value('--port'))), Handler).serve_forever()
         """#
         try executable(fake, at: cli)
-        config = Speech.Config(cli: cli, fastModel: folder.appending(path: "fast.bin"),
+        let ports = try Self.availablePorts()
+        config = Speech.Config(server: cli, fastModel: folder.appending(path: "fast.bin"),
                                finalModel: folder.appending(path: "large.bin"), folder: folder.appending(path: "audio"),
-                               threads: 7, names: ["oby", "tetrix", "deskree-inc/repo"])
+                               threads: 7, fastPort: ports.0, finalPort: ports.1, warmup: false, names: ["oby", "tetrix", "deskree-inc/repo"])
         try Data([1]).write(to: config.fastModel)
         try Data([1]).write(to: config.finalModel)
     }
     deinit { try? FileManager.default.removeItem(at: folder) }
 
+    private static func availablePorts() throws -> (Int, Int) {
+        func reserve() throws -> (Int32, Int) {
+            #if os(Linux)
+            let descriptor = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+            #else
+            let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+            #endif
+            guard descriptor >= 0 else { throw CocoaError(.fileReadUnknown) }
+            var address = sockaddr_in()
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_addr.s_addr = inet_addr("127.0.0.1")
+            #if !os(Linux)
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            #endif
+            let bound = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let named = withUnsafeMutablePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(descriptor, $0, &length) }
+            }
+            guard bound == 0, named == 0 else {
+                close(descriptor)
+                throw CocoaError(.fileReadUnknown)
+            }
+            return (descriptor, Int(UInt16(bigEndian: address.sin_port)))
+        }
+        let first = try reserve()
+        defer { close(first.0) }
+        let second = try reserve()
+        defer { close(second.0) }
+        return (first.1, second.1)
+    }
+
     func record() throws -> [String: Any] { object(try Data(contentsOf: folder.appending(path: "args.json"))) }
-    func clean() throws { #expect(try FileManager.default.contentsOfDirectory(atPath: config.folder.path).isEmpty) }
+    func clean() throws { #expect(!FileManager.default.fileExists(atPath: config.folder.path)) }
     func mode(_ mode: String) throws { try mode.write(to: folder.appending(path: "mode"), atomically: true, encoding: .utf8) }
 
     @Test func setupScriptReusesInstalledModels() async throws {
@@ -71,6 +126,7 @@ final class SpeechTests {
                 build = pathlib.Path(args[args.index('-B') + 1])
                 (build / 'bin').mkdir(parents=True, exist_ok=True)
                 (build / 'bin' / 'whisper-cli').write_text('#!/bin/sh\nexit 0\n')
+                (build / 'bin' / 'whisper-server').write_text('#!/bin/sh\nexit 0\n')
                 (root / 'cmake-flags').write_text(' '.join(args))
         elif tool == 'curl':
             pathlib.Path(args[args.index('--output') + 1]).write_bytes(b'model')
@@ -99,18 +155,18 @@ final class SpeechTests {
             #expect(code == 0)
         }
         let downloads = try String(contentsOf: folder.appending(path: "downloads"), encoding: .utf8)
-        #expect(downloads == "download\ndownload\n")
-        #expect(FileManager.default.isExecutableFile(atPath: folder.appending(path: "whisper/bin/whisper-cli").path))
+        #expect(downloads == "download\ndownload\ndownload\n")
+        #expect(FileManager.default.isExecutableFile(atPath: folder.appending(path: "whisper/bin/whisper-server").path))
         let flags = try String(contentsOf: folder.appending(path: "cmake-flags"), encoding: .utf8)
         #expect(flags.contains("-DGGML_NATIVE=ON") && flags.contains("-DBUILD_SHARED_LIBS=OFF"))
         #expect(flags.contains("-DGGML_CUDA=OFF") && flags.contains("-DGGML_METAL=OFF"))
     }
 
     @Test func environmentOverridesAndInvalidThreads() async throws {
-        let settings = Speech.Config.environment(["OBY_WHISPER_CLI": "/custom/cli",
+        let settings = Speech.Config.environment(["OBY_WHISPER_SERVER": "/custom/cli",
             "OBY_WHISPER_FAST_MODEL": "/custom/fast", "OBY_WHISPER_FINAL_MODEL": "/custom/final",
             "OBY_WHISPER_THREADS": "8", "OBY_SPEECH_NAMES": "oby,tetrix,owner/repo"])
-        #expect(settings.cli.path == "/custom/cli" && settings.fastModel.path == "/custom/fast")
+        #expect(settings.server.path == "/custom/cli" && settings.fastModel.path == "/custom/fast")
         #expect(settings.finalModel.path == "/custom/final" && settings.threads == 8)
         #expect(settings.names == ["oby", "tetrix", "owner/repo"])
         #expect(Speech.Config.environment([:]).threads == 8)
@@ -144,6 +200,7 @@ final class SpeechTests {
         #expect(args["language"] as? String == "pt")
         #expect(args["prompt"] as? String == "oby, tetrix, deskree-inc/repo")
         #expect(args["cpu"] as? Bool == true)
+        #expect(args["audio_ctx"] as? String == "600")
         try clean()
         let final = try await speech.transcribe(device: device, utterance: utterance, audio: Speech.wave(chunk), wav: true, final: true, language: "pt")
         #expect(final.text == "texto 6400" && final.final)
@@ -153,6 +210,121 @@ final class SpeechTests {
         let next = try await speech.transcribe(device: device, utterance: UUID().uuidString, audio: chunk, final: true)
         #expect(next.text == "texto 3200")
         #expect(try record()["language"] as? String == "auto")
+    }
+
+    @Test func residentModelIsReusedAndRestartsAfterDeath() async throws {
+        let speech = Speech(config: config)
+        try await speech.startServers()
+        _ = try await speech.transcribe(device: device, utterance: utterance, audio: chunk)
+        let firstPID = try #require(record()["pid"] as? Int)
+        #expect(try record()["host"] as? String == "127.0.0.1")
+        #expect(try record()["no_context"] as? String == "true")
+        _ = try await speech.transcribe(device: device, utterance: utterance, audio: chunk)
+        #expect(try record()["pid"] as? Int == firstPID)
+        #expect(try String(contentsOf: folder.appending(path: "launches"), encoding: .utf8).split(separator: "\n").count == 2)
+        _ = kill(Int32(firstPID), SIGKILL)
+        try await Task.sleep(for: .milliseconds(100))
+        await speech.maintainServers()
+        _ = try await speech.transcribe(device: device, utterance: utterance, audio: chunk)
+        let newPID = try #require(record()["pid"] as? Int)
+        #expect(newPID != firstPID)
+        await speech.stopServers()
+        #expect(kill(Int32(newPID), 0) == -1)
+        try clean()
+    }
+
+    @Test func startupWarmsTheModelWithGeneratedSilenceAndReusesIt() async throws {
+        config.finalModel = config.fastModel
+        config.warmup = true
+        let speech = Speech(config: config)
+        try await speech.startServers()
+        let args = try record()
+        #expect(args["bytes"] as? Int == 32_000)
+        #expect(args["audio_ctx"] as? String == "600")
+        #expect(args["language"] as? String == "en")
+        #expect(args["prompt"] as? String == "")
+        let warmPID = try #require(args["pid"] as? Int)
+        _ = try await speech.transcribe(device: device, utterance: utterance, audio: chunk, final: true)
+        #expect(try record()["pid"] as? Int == warmPID)
+        #expect(try record()["bytes"] as? Int == chunk.count)
+        await speech.stopServers()
+        try clean()
+    }
+
+    @Test func oneServerForIdenticalModelsAndOccupiedPortsFailClosed() async throws {
+        config.finalModel = config.fastModel
+        let speech = Speech(config: config)
+        try await speech.startServers()
+        _ = try await speech.transcribe(device: device, utterance: utterance, audio: chunk, final: true)
+        #expect(try String(contentsOf: folder.appending(path: "launches"), encoding: .utf8).split(separator: "\n").count == 1)
+        config.startupTimeout = 1
+        let other = Speech(config: config)
+        await #expect(throws: APIError.self) { try await other.startServers() }
+        // The existing server belongs to speech; the failed startup must not stop or use it.
+        _ = try await speech.transcribe(device: device, utterance: UUID().uuidString, audio: chunk, final: true)
+        await speech.stopServers()
+        await other.stopServers()
+    }
+
+    @Test func startupHasDeadline() async throws {
+        config.startupTimeout = 0.2
+        try mode("no-ready")
+        let speech = Speech(config: config)
+        await #expect(throws: APIError.self) { try await speech.startServers() }
+        #expect(!FileManager.default.fileExists(atPath: folder.appending(path: "started").path))
+        await speech.stopServers()
+        try clean()
+    }
+
+    @Test func malformedServerResponseDiscardsUtterance() async throws {
+        try mode("malformed")
+        let speech = Speech(config: config)
+        let error = await #expect(throws: APIError.self) { try await speech.transcribe(device: self.device, utterance: self.utterance, audio: self.chunk) }
+        #expect(error?.status == .internalServerError)
+        #expect(error?.message.contains("private") == false)
+        try FileManager.default.removeItem(at: folder.appending(path: "mode"))
+        _ = try await speech.transcribe(device: device, utterance: UUID().uuidString, audio: chunk, final: true)
+        try clean()
+    }
+
+    @Test func encoderWindowCoversTheAudioAndPreservesLongUtterances() {
+        #expect(Speech.audioContext(bytes: 32_000) == 600)
+        #expect(Speech.audioContext(bytes: 11 * 32_000) == 600)
+        #expect(Speech.audioContext(bytes: 11 * 32_000 + 2) == 650)
+        #expect(Speech.audioContext(bytes: 20 * 32_000) == 1050)
+        #expect(Speech.audioContext(bytes: 30 * 32_000) == 1500)
+        #expect(Speech.audioContext(bytes: Speech.maxBytes) == 1500)
+    }
+
+    @Test func finalReusesLatestDetectedLanguageFromSufficientPartialAudio() async throws {
+        let speech = Speech(config: config)
+        _ = try await speech.transcribe(device: device, utterance: utterance, audio: Data(repeating: 0, count: 160_000))
+        #expect(try record()["language"] as? String == "auto")
+        // A later partial can correct the detected language; it still performs detection.
+        try mode("detect-pt")
+        _ = try await speech.transcribe(device: device, utterance: utterance, audio: chunk)
+        #expect(try record()["language"] as? String == "auto")
+        let answer = try await speech.transcribe(device: device, utterance: utterance, audio: Data(), final: true)
+        #expect(answer.text == "texto 163200")
+        #expect(try record()["language"] as? String == "pt")
+        #expect(try record()["response_format"] as? String == "verbose_json")
+        #expect(try record()["probabilities_disabled"] as? String == "true")
+        _ = try await speech.transcribe(device: device, utterance: UUID().uuidString, audio: chunk, final: true)
+        #expect(try record()["language"] as? String == "auto")
+        await speech.stopServers()
+    }
+
+    @Test func shortOrOtherLanguagePartialsKeepAutomaticFinalDetection() async throws {
+        let speech = Speech(config: config)
+        _ = try await speech.transcribe(device: device, utterance: utterance, audio: chunk)
+        _ = try await speech.transcribe(device: device, utterance: utterance, audio: Data(), final: true)
+        #expect(try record()["language"] as? String == "auto")
+        try mode("detect-other")
+        let next = UUID().uuidString
+        _ = try await speech.transcribe(device: device, utterance: next, audio: Data(repeating: 0, count: 160_000))
+        _ = try await speech.transcribe(device: device, utterance: next, audio: Data(), final: true)
+        #expect(try record()["language"] as? String == "auto")
+        await speech.stopServers()
     }
 
     @Test func onlyOneUtterancePerDeviceAndEmptyFinalWorks() async throws {
@@ -176,8 +348,8 @@ final class SpeechTests {
         try clean()
     }
 
-    @Test func missingCLIOrEitherModelIs501() async throws {
-        for url in [config.cli, config.fastModel, config.finalModel] {
+    @Test func missingServerOrEitherModelIs501() async throws {
+        for url in [config.server, config.fastModel, config.finalModel] {
             let data = try Data(contentsOf: url)
             try FileManager.default.removeItem(at: url)
             let speech = Speech(config: config)
@@ -185,7 +357,7 @@ final class SpeechTests {
             #expect(error?.status == .notImplemented)
             #expect(error?.message.contains("setup-whisper.sh") == true)
             try data.write(to: url)
-            if url == config.cli { try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path) }
+            if url == config.server { try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path) }
         }
     }
 
@@ -233,6 +405,8 @@ final class SpeechTests {
         #expect(FileManager.default.fileExists(atPath: folder.appending(path: "started").path))
         let error = await #expect(throws: APIError.self) { try await speech.transcribe(device: self.device, utterance: self.utterance, audio: self.chunk) }
         #expect(error?.status == .conflict)
+        let busy = await #expect(throws: APIError.self) { try await speech.transcribe(device: UUID().uuidString, utterance: UUID().uuidString, audio: self.chunk) }
+        #expect(busy?.status == .serviceUnavailable)
         try FileManager.default.removeItem(at: folder.appending(path: "mode"))
         _ = try await speech.transcribe(device: UUID().uuidString, utterance: UUID().uuidString, audio: chunk, final: true)
         _ = try await first.value
@@ -250,12 +424,13 @@ final class SpeechTests {
             next = try? await speech.transcribe(device: device, utterance: UUID().uuidString, audio: chunk, final: true)
         }
         #expect(next?.text == "texto 3200")
+        try FileManager.default.createDirectory(at: config.folder, withIntermediateDirectories: true)
         try chunk.write(to: config.folder.appending(path: "leftover.wav"))
         try await speech.discardAbandonedAudio()
         #expect(!FileManager.default.fileExists(atPath: config.folder.path))
     }
 
-    @Test func invalidWAVAndOddPCMNeverReachCLI() async throws {
+    @Test func invalidWAVAndOddPCMNeverReachServer() async throws {
         let speech = Speech(config: config)
         var badRate = Speech.wave(chunk); badRate[24] = 0
         var stereo = Speech.wave(chunk); stereo[22] = 2

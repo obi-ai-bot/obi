@@ -58,6 +58,14 @@ catch {
     Logger.runner.error("Couldn't delete abandoned speech audio; refusing to start.")
     exit(1)
 }
+do { try await speech.startServers() }
+catch { Logger.runner.error("Speech servers unavailable; run setup-whisper.sh and check the models and loopback ports.") }
+Task {
+    while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(5))
+        await speech.maintainServers()
+    }
+}
 // Jobs that were queued or running when the runner went down carry on (Engine/Restarts.swift).
 let desk = Desk(restarts: Restarts(file: Workspace.root.appending(path: "restarts.json")))
 desk.issueSync.enabled = true
@@ -111,7 +119,10 @@ let stops = [SIGTERM, SIGINT].map { number in
     let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
     source.setEventHandler {
         MainActor.assumeIsolated { desk.quit() }
-        exit(0)
+        Task {
+            await speech.stopServers()
+            exit(0)
+        }
     }
     source.resume()
     return source
