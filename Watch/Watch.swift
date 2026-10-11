@@ -62,17 +62,12 @@ final class Watch: NSObject {
     /// What needs you first, then what's running.
     var shown: [Job] { needing + working }
 
-    /// "1 needs you · 2 working", or "All quiet".
+    /// "1 needs you · 2 working", or "All quiet": what Oby's pose says, for VoiceOver.
     var line: String {
         var parts: [String] = []
         if !needing.isEmpty { parts.append(needing.count == 1 ? "1 needs you" : "\(needing.count) need you") }
         if !working.isEmpty { parts.append("\(working.count) working") }
         return parts.isEmpty ? "All quiet" : parts.joined(separator: " · ")
-    }
-
-    var subline: String {
-        if !host.isEmpty { return "On \(host)." }
-        return reachable ? "Reaching the runner…" : "Your iPhone isn't in reach."
     }
 
     func account(_ id: String) -> String { accounts.first { $0.id == id }?.name ?? id }
