@@ -100,7 +100,7 @@ nonisolated struct PermissionRule: Codable, Equatable, Identifiable, Sendable {
     var created: Date
 }
 
-nonisolated enum Permissions {
+nonisolated enum PermissionPolicy {
     enum Verdict: Equatable { case allow, deny(String), ask }
 
     /// What never asks: reads, and Oby's own bookkeeping (a to-do list, a helper whose own actions ask).
@@ -115,9 +115,13 @@ nonisolated enum Permissions {
 
     /// The mode's answer to a call Policy let through, after the user's saved rules for the repository.
     static func decide(_ call: ToolCall, mode: PermissionMode, rules: [PermissionRule], worktree: URL) -> Verdict {
-        // Policy's fixed denials, again: the agents ask Policy first, but no mode or rule gets past them.
-        let inputs: [[String: Any]] = call.paths.isEmpty ? [call.command.map { ["command": $0] } ?? [:]] : call.paths.map { ["file_path": $0] }
-        if let fixed = inputs.lazy.compactMap({ Policy.deny(tool: call.tool, input: $0, worktree: worktree) }).first { return .deny(fixed) }
+        // Policy's fixed denials, again, on what the call carries in full (a command, the files, an MCP
+        // tool's name): no mode or rule gets past them. Not for the quiet tools: whether a helper runs
+        // in the background is in its whole input, which the agents gave Policy before asking.
+        if !quiet.contains(call.tool) {
+            let inputs: [[String: Any]] = call.paths.isEmpty ? [call.command.map { ["command": $0] } ?? [:]] : call.paths.map { ["file_path": $0] }
+            if let fixed = inputs.lazy.compactMap({ Policy.deny(tool: call.tool, input: $0, worktree: worktree) }).first { return .deny(fixed) }
+        }
         // Plan's own end: the plan waits for the user in Plan, and in any other mode there's nothing to approve.
         if call.tool == "ExitPlanMode" { return mode == .plan ? .ask : .allow }
         if quiet.contains(call.tool) || call.tool.hasPrefix("mcp__") { return .allow }
@@ -394,7 +398,7 @@ extension Desk {
     func ask(_ call: ToolCall, job: Job) {
         let id = job.id
         let worktree = Workspace.worktree(id)
-        switch Permissions.decide(call, mode: job.currentMode, rules: rules(for: job.repo), worktree: worktree) {
+        switch PermissionPolicy.decide(call, mode: job.currentMode, rules: rules(for: job.repo), worktree: worktree) {
         case .allow:
             tally(id, denied: nil)
             agents[id]?.answer(call, .allow)
@@ -403,7 +407,7 @@ extension Desk {
             agents[id]?.answer(call, .deny(why))
             tally(id, denied: why)
         case .ask:
-            let permission = Permissions.permission(for: call, id: Permissions.newID(), repo: job.repo, worktree: worktree)
+            let permission = PermissionPolicy.permission(for: call, id: PermissionPolicy.newID(), repo: job.repo, worktree: worktree)
             asks[id, default: []].append(Ask(call: call, permission: permission))
             if asks[id]?.count == 1 { show(id) }
         }
@@ -415,7 +419,7 @@ extension Desk {
         guard var job = job(id), job.isActive else { return }
         if let first = asks[id]?.first {
             if let plan = first.call.plan {
-                job.question = Permissions.planQuestion(plan)
+                job.question = PermissionPolicy.planQuestion(plan)
                 job.permission = nil
                 job.step = "Waiting for your OK on the plan"
             } else {
@@ -440,7 +444,7 @@ extension Desk {
         var answered: String?
         for ask in waiting {
             guard ask.call.plan == nil else { kept.append(ask); continue }
-            switch Permissions.decide(ask.call, mode: job.currentMode, rules: rules, worktree: Workspace.worktree(id)) {
+            switch PermissionPolicy.decide(ask.call, mode: job.currentMode, rules: rules, worktree: Workspace.worktree(id)) {
             case .allow:
                 agents[id]?.answer(ask.call, .allow)
                 answered = answered ?? "Allowed: \(ask.permission.title)"
@@ -476,8 +480,8 @@ extension Desk {
                 guard let rule = permission.rule else { throw Shell.Failure(message: "This one has no rule to save: allow it once instead.") }
                 saveRule(rule, repo: job.repo)
             }
-            let answer: ToolAnswer = decision == .deny ? .deny(words ?? Permissions.saidNo) : .allow
-            return try tell(id, said, agentText: Permissions.later(permission, answer))
+            let answer: ToolAnswer = decision == .deny ? .deny(words ?? PermissionPolicy.saidNo) : .allow
+            return try tell(id, said, agentText: PermissionPolicy.later(permission, answer))
         }
         guard ask.call.plan == nil, ask.permission.id == permissionID else { throw Shell.Failure(message: "That permission isn't waiting any more.") }
         var answer = ToolAnswer.allow
@@ -486,7 +490,7 @@ extension Desk {
         case .always:
             guard ask.permission.rule != nil else { throw Shell.Failure(message: "This one has no rule to save: allow it once instead.") }
             answer = .always
-        case .deny: answer = .deny(words ?? Permissions.saidNo)
+        case .deny: answer = .deny(words ?? PermissionPolicy.saidNo)
         }
         asks[id]?.removeFirst()
         agents[id]?.answer(ask.call, answer)
@@ -520,8 +524,8 @@ extension Desk {
     /// The user's answer to a plan: an approval in a mode ("Approve: Accept edits"), or words for
     /// changes, which reach the agent (Change it alone asks it to revise).
     func answerPlan(_ id: String, _ text: String) throws {
-        if let mode = Permissions.approval(text) { return try approvePlan(id, mode, said: text) }
-        let words = text == Permissions.changeIt ? Permissions.changePlan : text
+        if let mode = PermissionPolicy.approval(text) { return try approvePlan(id, mode, said: text) }
+        let words = text == PermissionPolicy.changeIt ? PermissionPolicy.changePlan : text
         if let ask = asks[id]?.first, ask.call.plan != nil, var job = job(id), job.isActive {
             asks[id]?.removeFirst()
             job.question = nil
@@ -552,7 +556,7 @@ extension Desk {
         }
         replace(job)
         agents[id]?.setMode(mode)
-        try tell(id, said, agentText: Permissions.approved(mode))
+        try tell(id, said, agentText: PermissionPolicy.approved(mode))
     }
 
     /// What the brain's answer_permission and set_mode do, here or elsewhere, and what Oby says.
@@ -574,7 +578,7 @@ extension Desk {
             if let job = job(id) {
                 do {
                     if job.question?.plan != nil {
-                        if decision == .deny { try answerPlan(id, message ?? Permissions.changeIt); return "Sent \(job.heading)'s plan back." }
+                        if decision == .deny { try answerPlan(id, message ?? PermissionPolicy.changeIt); return "Sent \(job.heading)'s plan back." }
                         try approvePlan(id, .acceptEdits)
                         return "Approved \(job.heading)'s plan: it goes on in Accept edits."
                     }

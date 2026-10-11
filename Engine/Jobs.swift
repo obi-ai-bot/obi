@@ -106,7 +106,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The latest of them that ran (passed or failed), kept when a newer one is asked for: what
     /// its reviewer reads (`AppleCheck.latest`). Nil before one ran.
     var appleRan: MacCheck?
-    /// How much the job asks the user (Engine/Permissions.swift): Settings › Permissions' default
+    /// How much the job asks the user (Engine/PermissionPolicy.swift): Settings › Permissions' default
     /// when it was dispatched, or what the user changed it to. Nil on older jobs, which are `bypass`.
     var mode: PermissionMode?
     /// The command or edit its agent waits for the user's OK on, or nil. The job stays running,
@@ -842,7 +842,7 @@ nonisolated enum Limits {
 
 /// Oby's fixed answers to an agent's permission prompts, in every mode (Bypass too): work inside the
 /// job's worktree may go on, publishing never does (only Oby publishes). What passes, the job's
-/// mode and the user's rules decide (Engine/Permissions.swift).
+/// mode and the user's rules decide (Engine/PermissionPolicy.swift).
 nonisolated enum Policy {
     // ponytail: a pattern deny-list is leaky on purpose-built commands; the real fences are that
     // the agent has no GitHub login and Oby's clone can't push. F3 asks the user instead.
@@ -1275,7 +1275,7 @@ nonisolated final class JobStore {
         // The inbox (Engine/Inbox.swift) and the conversation (Engine/Conversation.swift), the same way.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS conversation (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
-        // Settings › Permissions and the saved rules (Engine/Permissions.swift).
+        // Settings › Permissions and the saved rules (Engine/PermissionPolicy.swift).
         createPermissionTables()
     }
 

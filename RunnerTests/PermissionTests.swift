@@ -78,19 +78,24 @@ final class PermissionTests {
                      ToolCall(request: "5", tool: "Edit", paths: ["/tmp/oby/jobs/abc/Engine/Jobs.swift"]),
                      ToolCall(request: "6", tool: "Write", paths: ["/tmp/oby/jobs/abc/new.swift"]),
                      bash("swift test"), ToolCall(request: "8", tool: "WebFetch", url: "https://example.com")]
-        let deny = Permissions.Verdict.deny(Permissions.planOnly)
-        let table: [PermissionMode: [Permissions.Verdict]] = [
+        let deny = PermissionPolicy.Verdict.deny(PermissionPolicy.planOnly)
+        let table: [PermissionMode: [PermissionPolicy.Verdict]] = [
             .ask: [.allow, .allow, .allow, .allow, .ask, .ask, .ask, .ask],
             .acceptEdits: [.allow, .allow, .allow, .allow, .allow, .allow, .ask, .ask],
             .plan: [.allow, .allow, .allow, .allow, deny, deny, .ask, .ask],
             .bypass: [.allow, .allow, .allow, .allow, .allow, .allow, .allow, .allow],
         ]
         for (mode, verdicts) in table {
-            #expect(calls.map { Permissions.decide($0, mode: mode, rules: [], worktree: worktree) } == verdicts, "\(mode)")
+            #expect(calls.map { PermissionPolicy.decide($0, mode: mode, rules: [], worktree: worktree) } == verdicts, "\(mode)")
+        }
+        // Helpers and the to-do list never ask, and aren't taken for background work: the agents asked
+        // Policy about that with their whole input, which a ToolCall doesn't carry.
+        for tool in ["Agent", "Task", "TodoWrite"] {
+            #expect(PermissionMode.allCases.allSatisfy { PermissionPolicy.decide(ToolCall(request: "h", tool: tool), mode: $0, rules: [], worktree: worktree) == .allow }, "\(tool)")
         }
         // The plan's own end asks only in Plan.
         let exit = ToolCall(request: "9", tool: "ExitPlanMode", plan: "1. Read")
-        #expect(PermissionMode.allCases.map { Permissions.decide(exit, mode: $0, rules: [], worktree: worktree) } == [.allow, .allow, .ask, .allow])
+        #expect(PermissionMode.allCases.map { PermissionPolicy.decide(exit, mode: $0, rules: [], worktree: worktree) } == [.allow, .allow, .ask, .allow])
         #expect(PermissionMode(named: "Accept edits") == .acceptEdits && PermissionMode(named: "acceptEdits") == .acceptEdits && PermissionMode(named: "nope") == nil)
     }
 
@@ -102,12 +107,15 @@ final class PermissionTests {
                       ToolCall(request: "3", tool: "mcp__github__create_issue")]
         for call in fenced {
             for mode in PermissionMode.allCases {
-                guard case .deny = Permissions.decide(call, mode: mode, rules: allowAll, worktree: worktree) else {
+                guard case .deny = PermissionPolicy.decide(call, mode: mode, rules: allowAll, worktree: worktree) else {
                     Issue.record("\(call.tool) \(call.command ?? "") went through in \(mode)")
                     continue
                 }
             }
         }
+        // A helper left running in the background is still Policy's no, before the mode.
+        #expect(Policy.deny(tool: "Agent", input: ["description": "look"], worktree: worktree) != nil)
+        #expect(Policy.deny(tool: "Agent", input: ["description": "look", "run_in_background": false], worktree: worktree) == nil)
         // Agents ask Policy first, as before: a push never reaches the mode.
         #expect(Policy.deny(tool: "Bash", input: ["command": "git push"], worktree: worktree) != nil)
     }
@@ -115,47 +123,59 @@ final class PermissionTests {
     @Test func rulesDenyBeatsAllow() {
         let allow = PermissionRule(id: "a", rule: "Bash(swift test:*)", repo: "deskree-inc/oby", decision: .allow, created: .now)
         let deny = PermissionRule(id: "d", rule: "Bash(swift test --filter Slow:*)", repo: "deskree-inc/oby", decision: .deny, created: .now)
-        #expect(Permissions.decide(bash("swift test --filter SpeechTests"), mode: .ask, rules: [allow], worktree: worktree) == .allow)
-        #expect(Permissions.decide(bash("swift test"), mode: .ask, rules: [allow], worktree: worktree) == .allow)
+        #expect(PermissionPolicy.decide(bash("swift test --filter SpeechTests"), mode: .ask, rules: [allow], worktree: worktree) == .allow)
+        #expect(PermissionPolicy.decide(bash("swift test"), mode: .ask, rules: [allow], worktree: worktree) == .allow)
         // Not another command that starts the same, and never a chained one.
-        #expect(Permissions.decide(bash("swift testing"), mode: .ask, rules: [allow], worktree: worktree) == .ask)
-        #expect(Permissions.decide(bash("swift test && rm -rf build"), mode: .ask, rules: [allow], worktree: worktree) == .ask)
-        #expect(Permissions.decide(bash("swift test | tee log"), mode: .ask, rules: [allow], worktree: worktree) == .ask)
+        #expect(PermissionPolicy.decide(bash("swift testing"), mode: .ask, rules: [allow], worktree: worktree) == .ask)
+        #expect(PermissionPolicy.decide(bash("swift test && rm -rf build"), mode: .ask, rules: [allow], worktree: worktree) == .ask)
+        #expect(PermissionPolicy.decide(bash("swift test | tee log"), mode: .ask, rules: [allow], worktree: worktree) == .ask)
         // Deny beats allow, even in Bypass, and covers a chained command.
         for mode in PermissionMode.allCases {
-            guard case .deny = Permissions.decide(bash("swift test --filter Slow"), mode: mode, rules: [allow, deny], worktree: worktree) else {
+            guard case .deny = PermissionPolicy.decide(bash("swift test --filter Slow"), mode: mode, rules: [allow, deny], worktree: worktree) else {
                 Issue.record("allowed in \(mode)")
                 continue
             }
         }
-        guard case .deny = Permissions.decide(bash("swift build && swift test --filter Slow"), mode: .bypass, rules: [deny], worktree: worktree) else {
+        guard case .deny = PermissionPolicy.decide(bash("swift build && swift test --filter Slow"), mode: .bypass, rules: [deny], worktree: worktree) else {
             Issue.record("a chained command got past a deny rule")
             return
         }
         // Edits: every edit, or a folder's.
         let engine = PermissionRule(id: "e", rule: "Edit(Engine/*)", repo: "deskree-inc/oby", decision: .allow, created: .now)
-        #expect(Permissions.decide(ToolCall(request: "e", tool: "Edit", paths: ["/tmp/oby/jobs/abc/Engine/Jobs.swift"]), mode: .ask, rules: [engine], worktree: worktree) == .allow)
-        #expect(Permissions.decide(ToolCall(request: "e", tool: "Edit", paths: ["/tmp/oby/jobs/abc/Mac/App.swift"]), mode: .ask, rules: [engine], worktree: worktree) == .ask)
+        #expect(PermissionPolicy.decide(ToolCall(request: "e", tool: "Edit", paths: ["/tmp/oby/jobs/abc/Engine/Jobs.swift"]), mode: .ask, rules: [engine], worktree: worktree) == .allow)
+        #expect(PermissionPolicy.decide(ToolCall(request: "e", tool: "Edit", paths: ["/tmp/oby/jobs/abc/Mac/App.swift"]), mode: .ask, rules: [engine], worktree: worktree) == .ask)
     }
 
     @Test func theCardSaysWhatAndWhichRule() {
-        #expect(Permissions.prefix(of: "swift test --filter SpeechTests") == "swift test")
-        #expect(Permissions.prefix(of: "ls -la") == "ls")
-        #expect(Permissions.prefix(of: "cat Package.swift") == "cat")
-        #expect(Permissions.prefix(of: "swift build && swift test") == nil)
-        #expect(Permissions.prefix(of: "FOO=1 swift test") == nil)
-        let card = Permissions.permission(for: bash("swift test --filter SpeechTests"), id: "p1", repo: "deskree-inc/oby", worktree: worktree)
+        #expect(PermissionPolicy.prefix(of: "swift test --filter SpeechTests") == "swift test")
+        #expect(PermissionPolicy.prefix(of: "ls -la") == "ls")
+        #expect(PermissionPolicy.prefix(of: "cat Package.swift") == "cat")
+        #expect(PermissionPolicy.prefix(of: "swift build && swift test") == nil)
+        #expect(PermissionPolicy.prefix(of: "FOO=1 swift test") == nil)
+        let card = PermissionPolicy.permission(for: bash("swift test --filter SpeechTests"), id: "p1", repo: "deskree-inc/oby", worktree: worktree)
         #expect(card == Permission(id: "p1", tool: "Bash", title: "Run swift test", detail: "swift test --filter SpeechTests", rule: "Bash(swift test:*)",
                                    always: "Yes, and don't ask again for swift test in deskree-inc/oby"))
-        let chained = Permissions.permission(for: bash("swift build && swift test"), id: "p2", repo: "deskree-inc/oby", worktree: worktree)
+        let chained = PermissionPolicy.permission(for: bash("swift build && swift test"), id: "p2", repo: "deskree-inc/oby", worktree: worktree)
         #expect(chained.rule == nil && chained.always == nil && chained.title == "Run swift build && swift test")
-        let edit = Permissions.permission(for: ToolCall(request: "e", tool: "Edit", paths: ["/tmp/oby/jobs/abc/Engine/Jobs.swift"]), id: "p3",
+        let edit = PermissionPolicy.permission(for: ToolCall(request: "e", tool: "Edit", paths: ["/tmp/oby/jobs/abc/Engine/Jobs.swift"]), id: "p3",
                                           repo: "deskree-inc/oby", worktree: worktree)
         #expect(edit.title == "Edit Jobs.swift" && edit.detail == "Engine/Jobs.swift" && edit.rule == "Edit")
         #expect(Inbox.need(of: { var job = fix("c", mode: .ask); job.status = .running; job.permission = chained; return job }())?.options == ["Allow", "Deny"])
     }
 
     // MARK: Waiting
+
+    /// A helper agent in the foreground goes through in every mode, and never counts toward the
+    /// denials in a row that hold a job.
+    @Test func helpersGoThroughInEveryMode() async throws {
+        for (index, mode) in PermissionMode.allCases.enumerated() {
+            let agent = Agent()
+            let desk = try await running(agent, mode: mode, id: "help\(index)")
+            for request in ["h1", "h2", "h3"] { agent.onEvent(.ask(ToolCall(request: request, tool: "Agent"))) }
+            #expect(agent.answers.map(\.request) == ["h1", "h2", "h3"] && agent.answers.allSatisfy { $0.answer == .allow }, "\(mode)")
+            #expect(desk.job("help\(index)")?.status == .running && desk.job("help\(index)")?.permission == nil, "\(mode)")
+        }
+    }
 
     @Test func aPermissionWaitsInTheInboxAndAlwaysSavesARuleTheNextPromptUses() async throws {
         let agent = Agent()
@@ -206,7 +226,7 @@ final class PermissionTests {
         // A plain Deny, and words told to the job while it waits, say no too.
         agent.onEvent(.ask(bash("swift build", "r2")))
         try desk.settle(try #require(desk.inbox.last).id, .answer("Deny"))
-        #expect(agent.answers.last?.answer == .deny(Permissions.saidNo))
+        #expect(agent.answers.last?.answer == .deny(PermissionPolicy.saidNo))
         agent.onEvent(.ask(bash("make", "r3")))
         try desk.message("perm1", "use swift build instead")
         #expect(agent.answers.last?.answer == .deny("use swift build instead") && agent.sent.isEmpty)
@@ -245,7 +265,7 @@ final class PermissionTests {
         again.makeAgent = { _, _, resume in resume == "s134" ? resumed : nil }
         let permission = try #require(interrupted.permission)
         try again.answerPermission("perm1", permission.id, .allow)
-        #expect(resumed.prompt == Permissions.later(permission, .allow) && again.job("perm1")?.status == .running)
+        #expect(resumed.prompt == PermissionPolicy.later(permission, .allow) && again.job("perm1")?.status == .running)
         #expect(again.job("perm1")?.permission == nil && again.item(item.id)?.isOpen == false)
 
         // Stopping a waiting job drops its permission.
@@ -281,7 +301,7 @@ final class PermissionTests {
         #expect(agent.prompt.contains(Prompts.planFirst))
         // Edits are refused while it plans.
         agent.onEvent(.ask(ToolCall(request: "e1", tool: "Edit", paths: [Workspace.worktree("perm1").appending(path: "a.swift").path])))
-        #expect(agent.answers.last?.answer == .deny(Permissions.planOnly))
+        #expect(agent.answers.last?.answer == .deny(PermissionPolicy.planOnly))
         agent.onEvent(.ask(ToolCall(request: "x1", tool: "ExitPlanMode", plan: "1. Add modes\n2. Test them")))
         let waiting = try #require(desk.job("perm1"))
         let question = try #require(waiting.question)
@@ -289,11 +309,11 @@ final class PermissionTests {
                                          recommended: 0, plan: "1. Add modes\n2. Test them"))
         #expect(waiting.permission == nil && waiting.status == .running && Push.notice(for: waiting) == .question)
         let item = try #require(desk.inbox.last)
-        #expect(item.kind == .question && item.options == Permissions.planOptions)
+        #expect(item.kind == .question && item.options == PermissionPolicy.planOptions)
 
         // Change it sends it back; a new plan waits again.
         try desk.settle(item.id, .answer("Change it"))
-        #expect(agent.answers.last?.request == "x1" && agent.answers.last?.answer == .deny(Permissions.changePlan) && desk.job("perm1")?.question == nil)
+        #expect(agent.answers.last?.request == "x1" && agent.answers.last?.answer == .deny(PermissionPolicy.changePlan) && desk.job("perm1")?.question == nil)
         agent.onEvent(.ask(ToolCall(request: "x2", tool: "ExitPlanMode", plan: "1. Add modes, smaller")))
         try desk.settle(try #require(desk.inbox.last).id, .answer("Approve: Accept edits"))
         #expect(agent.answers.last?.request == "x2" && agent.answers.last?.answer == .allow && agent.modes == [.acceptEdits])
@@ -315,10 +335,10 @@ final class PermissionTests {
         let waiting = try #require(desk.job("perm1"))
         #expect(waiting.question?.plan == "Here's the plan:\n1. Add modes" && waiting.step == "Waiting for your OK on the plan" && !agent.ended)
         try desk.setMode("perm1", .bypass)
-        #expect(agent.modes == [.bypass] && agent.sent == [Permissions.approved(.bypass)])
+        #expect(agent.modes == [.bypass] && agent.sent == [PermissionPolicy.approved(.bypass)])
         #expect(desk.job("perm1")?.mode == .bypass && desk.job("perm1")?.question == nil && desk.job("perm1")?.notes == ["Approve: Bypass"])
-        #expect(Permissions.approval("Approve: Accept edits") == .acceptEdits && Permissions.approval("yes") == .acceptEdits)
-        #expect(Permissions.approval("Approve: Bypass") == .bypass && Permissions.approval("Change it") == nil && Permissions.approval("no, smaller") == nil)
+        #expect(PermissionPolicy.approval("Approve: Accept edits") == .acceptEdits && PermissionPolicy.approval("yes") == .acceptEdits)
+        #expect(PermissionPolicy.approval("Approve: Bypass") == .bypass && PermissionPolicy.approval("Change it") == nil && PermissionPolicy.approval("no, smaller") == nil)
     }
 
     // MARK: Questions
