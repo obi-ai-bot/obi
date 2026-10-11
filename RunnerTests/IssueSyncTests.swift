@@ -30,7 +30,6 @@ struct IssueSyncTests {
             if args.first == "issue", ["edit", "comment"].contains(args[1]), let repositoryFailure { throw Shell.Failure(message: repositoryFailure) }
             if args.first == "project", scopeFailure { throw Shell.Failure(message: "missing required scope read:project") }
             switch command {
-            case ["issue", "view"] where args.last == "comments": return try encode(["comments": notes.map { ["body": $0] }])
             case ["issue", "view"]: return try encode(row)
             case ["issue", "list"]: return try encode([row] + extraIssues)
             case ["pr", "list"]: return try encode(openPRs)
@@ -89,27 +88,28 @@ struct IssueSyncTests {
         await desk.issueSync.drain()
     }
 
+    /// Labels and the board follow the job; no comment and no assignee, which would email the owner (#162).
     @Test func lifecycleAndReports() async throws {
         let (desk, fake, original) = try fixture()
         await send(original, to: desk)
         #expect(fake.labels.sorted() == ["feature", "status:in-progress"])
         #expect(fake.column == "In progress")
-        #expect(fake.notes.first?.contains("oby/build-116") == true)
-        #expect(desk.issueJobs.first?.outgoing?.count == 4)
-        #expect(fake.calls.contains { $0.contains("--add-assignee") && $0.contains("@me") })
+        #expect(IssueSync.claimant(fake.body) == original.id && fake.body.hasPrefix("## Build\n- [ ] First slice"))
+        #expect(desk.issueJobs.first?.outgoing?.map(\.action.rawValue) == ["issueClaim", "issueLabels", "projectStatus"])
+        #expect(desk.issueJobs.first?.claim == "Claimed: labeled status:in-progress.")
+        let started = fake.calls.count
         desk.issueSync.observe(original)
         await desk.issueSync.drain()
-        #expect(fake.notes.count == 1)
+        #expect(fake.calls.count == started)
         var job = desk.issueJobs.first!
         job.status = .done
         job.published = "https://github.com/deskree-inc/oby/pull/117"
         await send(job, to: desk)
         #expect(fake.labels.contains("status:in-review") && fake.column == "In review")
-        #expect(fake.notes.last?.contains("/pull/117") == true)
         job = desk.issueJobs.first!
         job.question = Plan.Question(text: "Which account?", options: [])
         await send(job, to: desk)
-        #expect(fake.labels.contains("status:blocked") && fake.notes.last?.contains("Which account?") == true)
+        #expect(fake.labels.contains("status:blocked") && fake.column == "Blocked")
         job = desk.issueJobs.first!
         job.question = nil
         job.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now)
@@ -117,8 +117,19 @@ struct IssueSyncTests {
         await send(job, to: desk)
         #expect(fake.body.contains("- [x] First slice") && fake.body.contains("- [ ] Second slice"))
         #expect(fake.labels.contains("status:in-progress"))
-        #expect(fake.notes.last?.contains("Merged") == true)
         #expect(desk.issueJobs.first?.sentLines?.contains("issueChecklist") == true)
+        #expect(fake.notes.isEmpty && !fake.calls.contains { $0.prefix(2) == ["issue", "comment"] })
+        #expect(!fake.calls.contains { $0.contains("--add-assignee") || $0.contains("--assignee") })
+    }
+
+    @Test func claimLineIsHiddenOneAndStable() {
+        let body = "## Build\r\n- [ ] First\r\n<!-- oby-claim: job old-job -->\r\n"
+        let claimed = IssueSync.claimed(body, by: "new-job")
+        #expect(claimed == "## Build\r\n- [ ] First\n\n<!-- oby-claim: job new-job -->")
+        #expect(IssueSync.claimant(claimed) == "new-job" && IssueSync.claimant(body) == "old-job")
+        #expect(IssueSync.claimed(claimed, by: "new-job") == claimed)
+        #expect(IssueSync.claimed("", by: "a") == "<!-- oby-claim: job a -->")
+        #expect(IssueSync.claimant("Oby is working on branch `oby/fix-1` (job a).") == nil)
     }
 
     @Test func completeBuildNeedsRealMacTest() async throws {
@@ -143,8 +154,10 @@ struct IssueSyncTests {
             let findings = texts.flatMap { Publish.findings(inText: $0.text, named: $0.name) }
             if !findings.isEmpty { throw Publish.Blocked(findings: findings) }
         }
+        // The claim line goes out with the issue's body, which is scanned whole.
         var job = original
-        job.branch = "oby/" + "ghp_" + String(repeating: "a", count: 36)
+        job.branch = "oby/fix-116"
+        fake.body += "\nToken: ghp_" + String(repeating: "a", count: 36)
         await send(job, to: desk)
         #expect(fake.mutations.isEmpty)
         #expect(desk.issueJobs.first?.claim?.contains("possible secret") == true)
@@ -162,7 +175,7 @@ struct IssueSyncTests {
         await desk.issueSync.drain()
         #expect(fake.calls.contains { $0.contains("cursor=next") })
         #expect(!fake.calls.contains { $0.prefix(2) == ["project", "item-add"] })
-        #expect(fake.notes.count == 1)
+        #expect(fake.notes.isEmpty)
     }
 
     @Test func conservativeLinking() throws {
@@ -192,10 +205,11 @@ struct IssueSyncTests {
         desk.issueSync.store.save(job)
         fake.labels = ["status:in-progress", "feature"]
         fake.column = "In progress"
-        fake.notes = [IssueSync.event(original)!.note!]
+        fake.body = IssueSync.claimed(fake.body, by: original.id)
         let day = Date(timeIntervalSince1970: 1_800_000_000)
         await desk.issueSync.audit(now: day)
         #expect(fake.labels == ["feature"] && fake.column == "In progress")
+        #expect(fake.notes.isEmpty && !fake.calls.contains { $0.prefix(2) == ["issue", "comment"] })
         #expect(desk.inbox.count == 1 && desk.inbox.first?.text == "Issue audit: fixed drift on 1 issue(s).")
         #expect(desk.issueJobs.first(where: { $0.id == original.id })?.outgoing?.count == 1)
         let count = fake.calls.count
@@ -233,8 +247,7 @@ struct IssueSyncTests {
         job.published = "https://github.com/deskree-inc/oby/pull/117"
         job.review = Review(verdict: .changesRequested, job: "review-2", agent: "claude", account: "Personal", round: Review.maxRounds)
         await send(job, to: desk)
-        #expect(fake.labels.contains("status:blocked"))
-        #expect(fake.notes.last?.contains(Review.stopLine) == true)
+        #expect(fake.labels.contains("status:blocked") && fake.notes.isEmpty)
         var other = original
         other.id = "another-slice"
         desk.issueSync.store.save(other)
@@ -415,7 +428,7 @@ struct IssueSyncTests {
         #expect(IssueSync.retryDelay(1) == 60 && IssueSync.retryDelay(2) == 120 && IssueSync.retryDelay(99) == 3600)
     }
 
-    @Test func auditBootstrapsQuietlyAndDeduplicatesOwnedPRsAcrossJobsAndRestarts() async throws {
+    @Test func auditNeverCommentsOnOwnedPRs() async throws {
         let (desk, fake, original) = try fixture()
         var job = original
         job.status = .done
@@ -424,26 +437,15 @@ struct IssueSyncTests {
         fake.openPRs = [["url": job.published!, "closingIssuesReferences": [["number": 116, "url": fake.issueURL]]]]
         let day = Date(timeIntervalSince1970: 1_800_000_000)
         await desk.issueSync.audit(now: day)
-        #expect(fake.notes.isEmpty && fake.labels.contains("status:in-review") && fake.column == "In review")
-        await desk.issueSync.audit(now: day.addingTimeInterval(86400))
-        #expect(fake.notes.isEmpty)
+        #expect(fake.labels.contains("status:in-review") && fake.column == "In review")
         job = desk.issueJobs.first!
         job.published = "https://github.com/deskree-inc/oby/pull/118"
         desk.issueSync.store.save(job)
         fake.openPRs = [["url": job.published!, "closingIssuesReferences": [["number": 116, "url": fake.issueURL]]]]
-        await desk.issueSync.audit(now: day.addingTimeInterval(2 * 86400))
-        #expect(fake.notes.count == 1 && fake.notes[0].contains("/pull/118"))
-        var duplicate = job
-        duplicate.id = "another-author-job"
-        duplicate.created = job.created.addingTimeInterval(1)
-        duplicate.outgoing = nil
-        desk.issueSync.store.save(duplicate)
-        let restarted = IssueSync(desk: desk, store: desk.issueSync.store)
-        restarted.enabled = true
-        restarted.auditURL = desk.issueSync.auditURL
-        restarted.gh = fake.run
-        await restarted.audit(now: day.addingTimeInterval(3 * 86400))
-        #expect(fake.notes.count == 1)
+        fake.labels = ["feature"]
+        await desk.issueSync.audit(now: day.addingTimeInterval(86400))
+        #expect(fake.labels.contains("status:in-review"))
+        #expect(fake.notes.isEmpty && !fake.calls.contains { $0.prefix(2) == ["issue", "comment"] })
     }
 
     @Test func firstAuditRepairsRunningStatusWithoutBranchComments() async throws {
@@ -451,32 +453,6 @@ struct IssueSyncTests {
         await desk.issueSync.audit()
         #expect(fake.labels.contains("status:in-progress") && fake.column == "In progress")
         #expect(fake.notes.isEmpty)
-    }
-
-    @Test func issueOneDoesNotDeduplicateAgainstTwelveOrThirteen() async throws {
-        let (desk, fake, original) = try fixture()
-        var job = original
-        job.id = "issue-one"
-        job.issue = 1
-        job.branch = "oby/build-1"
-        fake.number = 1
-        let key = try #require(IssueSync.event(job)?.key)
-        let outgoing = [12, 13].map { number in
-            Outgoing(action: .comment, repo: job.repo, id: "https://github.com/\(job.repo)/issues/\(number)#issuecomment-9", sync: IssueSync.marker(key))
-        }
-        let entries = try JSONSerialization.jsonObject(with: JSONEncoder().encode(outgoing))
-        try JSONSerialization.data(withJSONObject: ["outgoing": entries]).write(to: desk.issueSync.auditURL)
-        await send(job, to: desk)
-        #expect(fake.notes.count == 1)
-        #expect(!IssueSync.commentBelongs(outgoing[0].id, to: fake.issueURL))
-        #expect(!IssueSync.commentBelongs("https://github.com/\(job.repo)/issues/13 (comment)", to: fake.issueURL))
-        let restarted = IssueSync(desk: desk, store: desk.issueSync.store)
-        restarted.enabled = true
-        restarted.auditURL = desk.issueSync.auditURL
-        restarted.gh = fake.run
-        restarted.observe(job)
-        await restarted.drain()
-        #expect(fake.notes.count == 1)
     }
 
     @Test func runnerAuditPreservesWorkOwnedByTheMacDesk() async throws {
@@ -510,7 +486,7 @@ struct IssueSyncTests {
         macJob.branch = "oby/fix-116"
         macJob.started = Date(timeIntervalSince1970: 5678)
         await send(macJob, to: mac)
-        #expect(fake.notes.last?.contains("(job mac-job)") == true)
+        #expect(IssueSync.claimant(fake.body) == "mac-job" && fake.notes.isEmpty)
         var done = runner.issueJobs.first { $0.id == original.id }!
         done.status = .done
         await send(done, to: runner)

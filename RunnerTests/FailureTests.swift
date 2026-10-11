@@ -291,6 +291,8 @@ struct FailureTests {
         let body = try #require(test.github.issues.first?.body)
         #expect(body.contains("oby-failure-signature: simulator-hung-before-connecting") && body.contains("Reset the simulator"))
         #expect(test.github.created.first?.contains(Failures.label) == true)
+        // Filed with no assignee: assigning emails the owner (#162).
+        #expect(test.github.created.allSatisfy { !$0.contains { $0.contains("assignee") } && !$0.contains("-a") })
         // Everything that went out was scanned first.
         #expect(test.made.scanned.contains(body))
         // One inbox item for the signature, offering Fix it.
