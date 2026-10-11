@@ -374,6 +374,149 @@ struct GuardTests {
         #expect(Integrity.ref(work) == "1eb426a0c3")
     }
 
+    // MARK: From the second review
+
+    @Test func commentedOutOrAlwaysTrueAssertionsDontCount() {
+        let removed = ["        #expect(cart.total == 3)", "        XCTAssertEqual(total, 3)", "    assert total == 3", "        expect(cart).toEqual([])"]
+        for added in [["        // #expect(cart.total == 3)"], ["        #expect(true)"], ["        /* XCTAssertEqual(total, 3) */"], ["    # assert total == 3"],
+                      ["        XCTAssertTrue(true)"], ["    assert True"], ["        expect(true).toBe(true)"]] {
+            let change = Integrity.Change(old: "Tests/CartTests.swift", new: "Tests/CartTests.swift", added: added, removed: [removed[0]])
+            #expect(Integrity.report([change]).problems == ["removes 1 assertion from Tests/CartTests.swift"], "\(added)")
+        }
+        for line in removed { #expect(Integrity.asserts(line), "\(line)") }
+        // A changed expectation is an edit, not a weaker test.
+        let edited = Integrity.Change(old: "Tests/CartTests.swift", new: "Tests/CartTests.swift", added: ["        #expect(cart.total == 4)"], removed: [removed[0]])
+        #expect(Integrity.report([edited]) == Integrity.Report(notes: ["edits existing tests in Tests/CartTests.swift"]))
+    }
+
+    @Test func failingIdsComeFromAllOfTheOutput() async throws {
+        let filler = String(repeating: "x", count: 5000)
+        let first = await Rounds.run("echo '✘ Test aTest() failed'; echo \(filler); exit 1", in: folder, timeout: 10, boxed: false)
+        let second = await Rounds.run("echo '✘ Test bTest() failed'; echo \(filler); exit 1", in: folder, timeout: 10, boxed: false)
+        #expect(first.output.count == 4000 && !first.output.contains("aTest"))
+        #expect(first.failing == ["aTest()"] && second.failing == ["bTest()"])
+        #expect(Fingerprint.of(first) != Fingerprint.of(second))
+    }
+
+    @Test func wordsSentWhileTheCheckRunsStartATimedTurn() async throws {
+        desk.limits.round = 0.3
+        desk.runCheck = { _, command, _ in
+            try? await Task.sleep(for: .seconds(3))
+            return Rounds.Check(command: command, passed: true, output: "ok")
+        }
+        let agent = try await start("words")
+        agent.onEvent(.turnEnded(summary: "Done.", failed: false))
+        try await until { desk.job("words")?.phase == .check }
+        try desk.message("words", "Also rename the test.")
+        #expect(agent.sent == ["Also rename the test."])
+        try await until { desk.job("words")?.isActive == false }
+        try expectHeld("words", "the round ran past 0.3 seconds", agent: agent)
+    }
+
+    // MARK: From the third review
+
+    @Test func linesThatTurnExistingTestsOffFail() {
+        for line in ["        return", "    /* @Test func one() {", "#if false", "#if 0", "        if (false) {", "    if False:"] {
+            let change = Integrity.Change(old: "Tests/CartTests.swift", new: "Tests/CartTests.swift", added: [line])
+            #expect(Integrity.report([change]).problems == ["adds a line that turns tests off in Tests/CartTests.swift: \(line.trimmingCharacters(in: .whitespaces))"], "\(line)")
+        }
+        let fine = Integrity.Change(old: "Tests/CartTests.swift", new: "Tests/CartTests.swift",
+                                    added: ["        guard let cart else { return }", "        /* a note */", "        return cart.total"])
+        #expect(Integrity.report([fine]) == Integrity.Report())
+    }
+
+    @Test func xcodeAndPackageJSONTestSettingsCount() {
+        let scheme = Integrity.Change(old: "Oby.xcodeproj/xcshareddata/xcschemes/Oby.xcscheme", new: "Oby.xcodeproj/xcshareddata/xcschemes/Oby.xcscheme",
+                                      added: ["            <SkippedTests>", "               <Test Identifier = \"StopTests\">"])
+        #expect(Integrity.report([scheme]).problems == ["changes the test settings in Oby.xcodeproj/xcshareddata/xcschemes/Oby.xcscheme: <SkippedTests>"])
+
+        let before = "membershipExceptions = (\n\tInfo.plist,\n);\n", after = "membershipExceptions = (\n\tInfo.plist,\n\tStopTests.swift,\n);\n"
+        let excluded = Integrity.Change(old: "Oby.xcodeproj/project.pbxproj", new: "Oby.xcodeproj/project.pbxproj",
+                                        added: ["\tStopTests.swift,"], before: before, after: after)
+        #expect(Integrity.report([excluded]).problems == ["excludes StopTests.swift from its target in Oby.xcodeproj/project.pbxproj"])
+        let unlisted = Integrity.Change(old: "Oby.xcodeproj/project.pbxproj", new: "Oby.xcodeproj/project.pbxproj",
+                                        removed: ["\t\tA1 /* StopTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1; };"], before: before, after: before)
+        #expect(Integrity.report([unlisted]).problems == ["takes StopTests.swift out of a target's sources in Oby.xcodeproj/project.pbxproj"])
+
+        // A test script's value on a line of its own, and a new script, which is fine.
+        let script = Integrity.Change(old: "web/package.json", new: "web/package.json", added: ["    \"echo ok\""], removed: ["    \"vitest run\""],
+                                      before: "{\"scripts\": {\"test\":\n    \"vitest run\"}}", after: "{\"scripts\": {\"test\":\n    \"echo ok\"}}")
+        #expect(Integrity.report([script]).problems == ["changes the test script test in web/package.json"])
+        let more = Integrity.Change(old: "web/package.json", new: "web/package.json", added: ["    \"test:e2e\": \"playwright test\","],
+                                    before: "{\"scripts\": {\"test\": \"vitest run\"}}", after: "{\"scripts\": {\"test\": \"vitest run\", \"test:e2e\": \"playwright test\"}}")
+        #expect(Integrity.report([more]) == Integrity.Report())
+    }
+
+    @Test func aCheckForAnEarlierTurnEndsWhenTheNextTurnEnds() async throws {
+        var ends: [Date] = []
+        desk.runCheck = { [folder] _, command, _ in
+            let check = await Rounds.run("sleep 30", in: folder, timeout: 60, boxed: false)
+            ends.append(.now)
+            return check
+        }
+        let agent = try await start("earlier")
+        agent.onEvent(.turnEnded(summary: "Done.", failed: false))
+        try await until { desk.job("earlier")?.phase == .check }
+        try desk.message("earlier", "Also rename the test.")
+        try await Task.sleep(for: .milliseconds(200))
+        let ended = Date.now
+        agent.onEvent(.turnEnded(summary: "Renamed.", failed: false))
+        try await until { ends.count == 1 }
+        #expect(ends.first.map { $0.timeIntervalSince(ended) < 5 } == true)
+        desk.stop("earlier")
+        try await until { ends.count == 2 }
+    }
+
+    @Test func promptsDontStateTheRounds() {
+        var loop = job
+        loop.kind = .fix
+        loop.pr = nil
+        loop.rounds = 3
+        let prompt = Prompts.agent(loop)
+        #expect(prompt.contains("End your summary with a last line that is exactly `GOAL MET`"))
+        #expect(!prompt.contains("3 rounds") && !prompt.contains("up to"))
+    }
+}
+
+/// Test integrity on real git repositories, one at a time: each starts many git processes, and
+/// running them side by side loads the machine enough to slow the timing tests in other suites.
+@Suite(.serialized)
+struct IntegrityRepositoryTests {
+    let folder: URL
+
+    init() throws { folder = try temporaryFolder() }
+
+    /// A repository with a commit before the work's start, whose start has two tests and a test target.
+    func repository() async throws -> (URL, (String...) async throws -> String, String) {
+        let repo = folder.appending(path: "repo-\(UUID().uuidString.prefix(6))")
+        try FileManager.default.createDirectory(at: repo.appending(path: "Tests"), withIntermediateDirectories: true)
+        let git = { (arguments: String...) async throws -> String in
+            let result = try await Shell.run(["git", "-C", repo.path, "-c", "user.name=Oby", "-c", "user.email=oby@example.com", "-c", "commit.gpgsign=false"] + arguments)
+            #expect(result.status == 0, "\(arguments): \(result.err)")
+            return result.text
+        }
+        try "let a = 1\n".write(to: repo.appending(path: "Cart.swift"), atomically: true, encoding: .utf8)
+        _ = try await git("init", "-q", "-b", "dev")
+        _ = try await git("add", ".")
+        _ = try await git("commit", "-q", "-m", "before the tests")
+        try "@Test func one() {\n    #expect(cart.total == 3)\n}\n@Test func two() {\n    #expect(cart.isEmpty)\n}\n"
+            .write(to: repo.appending(path: "Tests/CartTests.swift"), atomically: true, encoding: .utf8)
+        try """
+            let package = Package(name: "Cart", targets: [
+                .target(name: "Cart"),
+                .testTarget(
+                    name: "CartTests",
+                    dependencies: ["Cart"]
+                ),
+            ])
+
+            """.write(to: repo.appending(path: "Package.swift"), atomically: true, encoding: .utf8)
+        _ = try await git("add", ".")
+        _ = try await git("commit", "-q", "-m", "tests")
+        _ = try await git("checkout", "-q", "-b", "oby/fix-64")
+        return (repo, git, try await git("rev-parse", "HEAD"))
+    }
+
     @Test func theIntegrityCheckReadsARealWorktree() async throws {
         let repo = folder.appending(path: "repo")
         try FileManager.default.createDirectory(at: repo.appending(path: "Tests"), withIntermediateDirectories: true)
@@ -410,39 +553,6 @@ struct GuardTests {
         #expect(await Integrity.check(worktree: repo, against: "dev") == Integrity.Report())
         #expect(await Integrity.check(worktree: repo, against: start) == weakened)
         #expect(await Integrity.check(worktree: repo, against: "main") == Integrity.Report(problems: ["Oby couldn't compare the tests with main"]))
-    }
-
-    // MARK: From the second review
-
-    /// A repository with a commit before the work's start, whose start has two tests and a test target.
-    func repository() async throws -> (URL, (String...) async throws -> String, String) {
-        let repo = folder.appending(path: "repo-\(UUID().uuidString.prefix(6))")
-        try FileManager.default.createDirectory(at: repo.appending(path: "Tests"), withIntermediateDirectories: true)
-        let git = { (arguments: String...) async throws -> String in
-            let result = try await Shell.run(["git", "-C", repo.path, "-c", "user.name=Oby", "-c", "user.email=oby@example.com", "-c", "commit.gpgsign=false"] + arguments)
-            #expect(result.status == 0, "\(arguments): \(result.err)")
-            return result.text
-        }
-        try "let a = 1\n".write(to: repo.appending(path: "Cart.swift"), atomically: true, encoding: .utf8)
-        _ = try await git("init", "-q", "-b", "dev")
-        _ = try await git("add", ".")
-        _ = try await git("commit", "-q", "-m", "before the tests")
-        try "@Test func one() {\n    #expect(cart.total == 3)\n}\n@Test func two() {\n    #expect(cart.isEmpty)\n}\n"
-            .write(to: repo.appending(path: "Tests/CartTests.swift"), atomically: true, encoding: .utf8)
-        try """
-            let package = Package(name: "Cart", targets: [
-                .target(name: "Cart"),
-                .testTarget(
-                    name: "CartTests",
-                    dependencies: ["Cart"]
-                ),
-            ])
-
-            """.write(to: repo.appending(path: "Package.swift"), atomically: true, encoding: .utf8)
-        _ = try await git("add", ".")
-        _ = try await git("commit", "-q", "-m", "tests")
-        _ = try await git("checkout", "-q", "-b", "oby/fix-64")
-        return (repo, git, try await git("rev-parse", "HEAD"))
     }
 
     @Test func agentAttributesCantHideTheDiff() async throws {
@@ -487,40 +597,15 @@ struct GuardTests {
         #expect(await Integrity.check(worktree: repo, against: start) == Integrity.Report())
     }
 
-    @Test func commentedOutOrAlwaysTrueAssertionsDontCount() {
-        let removed = ["        #expect(cart.total == 3)", "        XCTAssertEqual(total, 3)", "    assert total == 3", "        expect(cart).toEqual([])"]
-        for added in [["        // #expect(cart.total == 3)"], ["        #expect(true)"], ["        /* XCTAssertEqual(total, 3) */"], ["    # assert total == 3"],
-                      ["        XCTAssertTrue(true)"], ["    assert True"], ["        expect(true).toBe(true)"]] {
-            let change = Integrity.Change(old: "Tests/CartTests.swift", new: "Tests/CartTests.swift", added: added, removed: [removed[0]])
-            #expect(Integrity.report([change]).problems == ["removes 1 assertion from Tests/CartTests.swift"], "\(added)")
-        }
-        for line in removed { #expect(Integrity.asserts(line), "\(line)") }
-        // A changed expectation is an edit, not a weaker test.
-        let edited = Integrity.Change(old: "Tests/CartTests.swift", new: "Tests/CartTests.swift", added: ["        #expect(cart.total == 4)"], removed: [removed[0]])
-        #expect(Integrity.report([edited]) == Integrity.Report(notes: ["edits existing tests in Tests/CartTests.swift"]))
-    }
-
-    @Test func failingIdsComeFromAllOfTheOutput() async throws {
-        let filler = String(repeating: "x", count: 5000)
-        let first = await Rounds.run("echo '✘ Test aTest() failed'; echo \(filler); exit 1", in: folder, timeout: 10, boxed: false)
-        let second = await Rounds.run("echo '✘ Test bTest() failed'; echo \(filler); exit 1", in: folder, timeout: 10, boxed: false)
-        #expect(first.output.count == 4000 && !first.output.contains("aTest"))
-        #expect(first.failing == ["aTest()"] && second.failing == ["bTest()"])
-        #expect(Fingerprint.of(first) != Fingerprint.of(second))
-    }
-
-    @Test func wordsSentWhileTheCheckRunsStartATimedTurn() async throws {
-        desk.limits.round = 0.3
-        desk.runCheck = { _, command, _ in
-            try? await Task.sleep(for: .seconds(3))
-            return Rounds.Check(command: command, passed: true, output: "ok")
-        }
-        let agent = try await start("words")
-        agent.onEvent(.turnEnded(summary: "Done.", failed: false))
-        try await until { desk.job("words")?.phase == .check }
-        try desk.message("words", "Also rename the test.")
-        #expect(agent.sent == ["Also rename the test."])
-        try await until { desk.job("words")?.isActive == false }
-        try expectHeld("words", "the round ran past 0.3 seconds", agent: agent)
+    @Test func replacementObjectsAndPrefixConfigDontHideTheDiff() async throws {
+        let (repo, git, start) = try await repository()
+        try FileManager.default.removeItem(at: repo.appending(path: "Tests/CartTests.swift"))
+        _ = try await git("commit", "-q", "-am", "drop the tests")
+        // The start commit redefined as the weakened one, and paths without a/ and b/.
+        _ = try await git("replace", start, "HEAD")
+        _ = try await git("config", "diff.noprefix", "true")
+        _ = try await git("config", "diff.relative", "true")
+        let problems = await Integrity.check(worktree: repo, against: start).problems
+        #expect(problems.contains("deletes the test file Tests/CartTests.swift"))
     }
 }

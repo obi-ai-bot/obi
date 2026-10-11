@@ -118,14 +118,17 @@ nonisolated enum Integrity {
         guard let base = fixed ? ref : try? await Shell.ok(git + ["merge-base", ref, "HEAD"]) else {
             return Report(problems: ["Oby couldn't compare the tests with \(ref)"])
         }
-        // Nothing the agent wrote gets a say in what the diff shows: no text conversion or external
-        // diff, binary files as text, and the attributes from the commit compared with.
-        let env: [String: String?] = ["GIT_ATTR_SOURCE": base]
-        let diff = git + ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U0", "-M", base]
+        // Nothing the agent wrote gets a say in what the diff shows: no replacement objects or
+        // grafts (refs/replace would redefine the start commit), no text conversion or external
+        // diff, binary files as text, the attributes from the commit compared with, and the paths
+        // as the parser reads them, whatever the config says about prefixes.
+        let env: [String: String?] = ["GIT_ATTR_SOURCE": base, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": "/dev/null"]
+        let diff = git + ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "--no-relative",
+                          "--src-prefix=a/", "--dst-prefix=b/", "-U0", "-M", base]
         func diffed(_ arguments: [String], reading after: (String) async -> String?) async -> [Change]? {
             guard let result = try? await Shell.run(diff + arguments, env: env), result.status == 0 else { return nil }
             var changes = self.changes(String(decoding: result.out, as: UTF8.self))
-            for index in changes.indices where testSetting(in: changes[index].new ?? changes[index].old ?? "") != nil {
+            for index in changes.indices where isBuildFile(changes[index].new ?? changes[index].old ?? "") {
                 if let old = changes[index].old { changes[index].before = try? await Shell.ok(git + ["show", "\(base):\(old)"], env: env) }
                 if let new = changes[index].new { changes[index].after = await after(new) }
             }
@@ -188,16 +191,7 @@ nonisolated enum Integrity {
             if let config = [change.old, change.new].compactMap({ $0 }).first(where: isConfig) {
                 report.problems.append("changes test or CI config: \(config)")
             }
-            if let file = change.new ?? change.old, let setting = testSetting(in: file) {
-                let changed = (file.hasSuffix("Package.swift") ? [] : change.added) + change.removed
-                let targets = testTargets(in: change.before ?? "")
-                if let gone = targets.first(where: { !testTargets(in: change.after ?? "").contains($0) }) {
-                    let name = gone.firstMatch(of: /name:\s*"([^"]*)"/).map { "the test target \($0.1)" } ?? "a test target"
-                    report.problems.append("changes \(name) in \(file)")
-                } else if targets.isEmpty, let line = changed.first(where: { $0.contains(setting) }) {
-                    report.problems.append("changes the test settings in \(file): \(line.trimmingCharacters(in: .whitespaces).prefix(80))")
-                }
-            }
+            if let file = change.new ?? change.old, let problem = settings(change, in: file) { report.problems.append(problem) }
             let wasTest = change.old.map(isTest) ?? false, isTest = change.new.map(isTest) ?? false
             guard wasTest || isTest else { continue }
             if let old = change.old, wasTest {
@@ -207,7 +201,10 @@ nonisolated enum Integrity {
                     if isTest { report.notes.append("moves the test file \(old) to \(new)") }
                     else { report.problems.append("moves the test file \(old) out of the tests, to \(new)") }
                 }
-                if change.new != nil {
+                if let new = change.new {
+                    for line in change.added where line.contains(disabler) {
+                        report.problems.append("adds a line that turns tests off in \(new): \(line.trimmingCharacters(in: .whitespaces).prefix(80))")
+                    }
                     let lost = change.removed.count(where: asserts) - change.added.count(where: asserts)
                     if lost > 0 {
                         report.problems.append("removes \(lost) assertion\(lost == 1 ? "" : "s") from \(change.new ?? old)")
@@ -226,16 +223,71 @@ nonisolated enum Integrity {
         return report
     }
 
-    /// What a build file's test settings look like, for the build files that hold them: test
-    /// targets in Package.swift (only removing one counts), the test scripts in package.json, and
-    /// pytest's settings in pyproject.toml, setup.cfg and tox.ini.
-    static func testSetting(in path: String) -> Regex<Substring>? {
-        switch URL(filePath: path).lastPathComponent {
-        case "Package.swift": /\btestTarget\b/
-        case "package.json": /"test[\w:.-]*"\s*:/
-        case "pyproject.toml", "setup.cfg": /pytest|testpaths|addopts|python_(?:files|classes|functions)|norecursedirs/
-        default: nil
+    /// The build files whose test settings Oby compares: Package.swift, package.json, pytest's
+    /// pyproject.toml and setup.cfg, Xcode's schemes and projects.
+    static func isBuildFile(_ path: String) -> Bool {
+        ["Package.swift", "package.json", "pyproject.toml", "setup.cfg", "project.pbxproj"].contains(URL(filePath: path).lastPathComponent)
+            || path.hasSuffix(".xcscheme")
+    }
+
+    /// How a build file's change weakens the tests, if it does. Whole files are compared where
+    /// they were read (`before` and `after`), so a setting spread over lines counts; otherwise the
+    /// changed lines are.
+    static func settings(_ change: Change, in file: String) -> String? {
+        let line = { (text: String) in "changes the test settings in \(file): \(text.trimmingCharacters(in: .whitespaces).prefix(80))" }
+        let before = change.before ?? "", after = change.after ?? ""
+        switch URL(filePath: file).lastPathComponent {
+        case "Package.swift":
+            // Each test target whole, however many lines it spans (`exclude:`, `sources:`, `path:`); new ones are fine.
+            if let gone = testTargets(in: before).first(where: { !testTargets(in: after).contains($0) }) {
+                return "changes " + (gone.firstMatch(of: /name:\s*"([^"]*)"/).map { "the test target \($0.1)" } ?? "a test target") + " in \(file)"
+            }
+            return testTargets(in: before).isEmpty ? change.removed.first(where: { $0.contains(/\btestTarget\b/) }).map(line) : nil
+        case "package.json":
+            // The test scripts it had and the test runners' own sections, as JSON values.
+            if let old = json(before), let new = json(after) {
+                let scripts = { (package: [String: Any]) in package["scripts"] as? [String: Any] ?? [:] }
+                for (key, value) in scripts(old).sorted(by: { $0.key < $1.key }) where key.hasPrefix("test")
+                    && !same(value, scripts(new)[key]) {
+                    return "changes the test script \(key) in \(file)"
+                }
+                for key in ["jest", "vitest", "mocha", "ava", "c8", "nyc"] where !same(old[key], new[key]) {
+                    return "changes the \(key) settings in \(file)"
+                }
+                return nil
+            }
+            return (change.added + change.removed).first(where: { $0.contains(/"test[\w:.-]*"\s*:/) }).map(line)
+        case "pyproject.toml", "setup.cfg":
+            return (change.added + change.removed).first(where: { $0.contains(/pytest|testpaths|addopts|python_(?:files|classes|functions)|norecursedirs/) }).map(line)
+        case "project.pbxproj":
+            // A test file excluded from its target, or taken out of a target's sources.
+            if let excluded = exceptions(in: after).subtracting(exceptions(in: before)).sorted().first(where: isTest) {
+                return "excludes \(excluded) from its target in \(file)"
+            }
+            let sources = { (lines: [String]) in Set(lines.compactMap { $0.firstMatch(of: /(\S+)\s+in\s+Sources\b/).map { String($0.1) } }.filter(isTest)) }
+            return sources(change.removed).subtracting(sources(change.added)).sorted().first.map { "takes \($0) out of a target's sources in \(file)" }
+        default:
+            // An Xcode scheme: tests skipped, or a test target or plan taken out.
+            if let added = change.added.first(where: { $0.contains(/[Ss]kipped|<Test\s/) }) { return line(added) }
+            return change.removed.first(where: { $0.contains(/<TestableReference|<TestPlanReference/) }).map(line)
         }
+    }
+
+    /// The entries of every `membershipExceptions` list in an Xcode project: files kept out of a target.
+    static func exceptions(in project: String) -> Set<String> {
+        Set(project.matches(of: /membershipExceptions\s*=\s*\(([^)]*)\)/).flatMap { list in
+            list.1.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
+        }.filter { !$0.isEmpty })
+    }
+
+    private static func json(_ text: String) -> [String: Any]? {
+        (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any]
+    }
+
+    /// Two JSON values are the same: both missing, or equal written out with sorted keys.
+    private static func same(_ a: Any?, _ b: Any?) -> Bool {
+        let written = { (value: Any?) in value.flatMap { try? JSONSerialization.data(withJSONObject: [$0], options: .sortedKeys) } }
+        return written(a) == written(b)
     }
 
     /// A line that really asserts: not commented out, and not one that can't fail (`#expect(true)`).
@@ -278,6 +330,10 @@ nonisolated enum Integrity {
 
     /// A line that asserts, in the common frameworks.
     static let assertion = /#expect\b|#require\b|\bXCT(?:Assert\w*|Fail|Unwrap)\b|\bexpect\s*\(|\bassert\w*\s*[(\s!]|\bt\.(?:Error|Errorf|Fatal|Fatalf|Fail)\b|\bshould\b|\.to(?:Be|Equal|Have)\w*\(/
+
+    /// A line that keeps the tests below it from running: a bare `return`, a block comment opened
+    /// and not closed, a branch that's never taken.
+    static let disabler = /^\s*return\s*;?\s*$|^\s*\/\*(?!.*\*\/)|^\s*#if\s+(?:false|0)\b|^\s*if\s*\(?\s*(?:false|False|0)\s*\)?\s*[{:]\s*$/
 
     /// An assertion that can't fail.
     static let trivial = /#(?:expect|require)\s*\(\s*true\s*\)|\bXCTAssert(?:True)?\s*\(\s*true\s*[,)]|\bXCTAssertFalse\s*\(\s*false\s*[,)]|\bassert\s*\(?\s*(?:true|True|1)\s*\)?\s*$|\bexpect\s*\(\s*true\s*\)\.toBe(?:Truthy)?\(\s*(?:true)?\s*\)/

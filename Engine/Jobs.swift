@@ -928,7 +928,7 @@ nonisolated enum Workspace {
         }
         let worktree = worktree(job.id)
         try await git(["worktree", "add", "--quiet", "-b", job.branch, worktree.path, start])
-        job.startCommit = try await git(["rev-parse", "--verify", "\(start)^{commit}"])
+        job.startCommit = try await Shell.ok(["git", "-C", clone.path, "rev-parse", "--verify", "\(start)^{commit}"], env: ["GIT_NO_REPLACE_OBJECTS": "1"])
         try FileManager.default.createDirectory(at: worktree.appending(path: ".oby/inputs"), withIntermediateDirectories: true)
         job.attachments = Attachments.copy(job, into: worktree)
 
@@ -973,7 +973,7 @@ nonisolated enum Prompts {
         if let check = job.check {
             lines.append("The work counts as done only when `\(check)` succeeds in this directory; Oby runs it after you finish. Run it yourself first.")
         } else if job.maxRounds > 1 {
-            lines.append("You may take up to \(job.maxRounds) rounds. End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.")
+            lines.append("End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.")
         }
         lines.append("Finish with a short summary. Its first line is one sentence the user will see in the notch.")
         return lines.joined(separator: "\n\n")

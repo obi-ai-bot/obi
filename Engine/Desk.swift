@@ -700,6 +700,8 @@ final class Desk {
                 return
             }
             let heard = job.notes?.count ?? 0
+            // A check still running for an earlier turn (the user's words started this one) is over.
+            afterTurns[id]?.cancel()
             afterTurns[id] = Task { await afterTurn(id, summary: summary, failed: failed, heard: heard) }
         case .finished(let summary, let failed):
             finish(id, failed ? .failed : .done, summary)
