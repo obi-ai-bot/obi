@@ -12,7 +12,7 @@ struct BrainTurnTests {
         final class Learner: BrainAdapter, @unchecked Sendable {
             let name = "learner"
             var calls = 0
-            func complete(system: String, user: String, schema: Data, timeout: TimeInterval) async throws -> Data {
+            func complete(system: String, user: String, quoted: String?, schema: Data, timeout: TimeInterval) async throws -> Data {
                 calls += 1
                 let repo = calls == 1 ? "deskree-inc/nowhere" : "deskree-inc/oby"
                 return Data(#"{"action":"dispatch","reply":"Oby will build #62.","question":null,"dispatches":[{"agent":"auto","account":"auto","repo":"\#(repo)","base_branch":null,"pr":null,"issue":62,"epic":null,"kind":"build","task":"Work on #62","inputs":[],"rounds":5,"check":"swift test","complexity":"routine"}]}"#.utf8)

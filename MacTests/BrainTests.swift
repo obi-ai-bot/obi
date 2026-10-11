@@ -63,7 +63,7 @@ struct BrainTests {
     @Test func plannerFallsBackToRulesWhenTheBrainFails() async {
         struct Broken: BrainAdapter {
             let name = "broken"
-            func complete(system: String, user: String, schema: Data, timeout: TimeInterval) async throws -> Data { Data("prose".utf8) }
+            func complete(system: String, user: String, quoted: String?, schema: Data, timeout: TimeInterval) async throws -> Data { Data("prose".utf8) }
         }
         let result = await Planner(adapters: [Broken()]).plan("review oby #7", context: context)
         #expect(result.by == "rules")

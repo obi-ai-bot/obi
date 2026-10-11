@@ -33,6 +33,8 @@ final class RunnerFeed {
     /// What waits in the runner's inbox, put-off items too, oldest first: answered on the iPhone,
     /// it goes from here too.
     private(set) var inbox: [InboxItem] = []
+    /// The runner's accounts and their usage, as it last said: the brain tells them too.
+    private(set) var accounts: [AccountState] = []
     /// The name the runner reports in /v1/status, like "tetrix-lab".
     private(set) var host: String?
     /// When Clear done was last pressed, here or on the iPhone (the runner's clock), or nil: the
@@ -81,6 +83,7 @@ final class RunnerFeed {
         if url != self.url {
             jobs = []
             inbox = []
+            accounts = []
             host = nil
             clearedAt = nil
             notified = nil
@@ -115,6 +118,7 @@ final class RunnerFeed {
                         try Task.checkCancellation()
                         host = status.runner.host
                         clearedAt = status.clearedAt
+                        accounts = status.accounts
                         take(list)
                         inbox = items
                         down = false
@@ -123,7 +127,7 @@ final class RunnerFeed {
                     case .job(let job): apply(job)
                     case .cleared(let date): clearedAt = date
                     case .inbox(let item): apply(item)
-                    case .accounts: break
+                    case .accounts(let list): accounts = list
                     }
                 }
             } catch {

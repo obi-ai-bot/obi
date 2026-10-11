@@ -17,12 +17,17 @@ struct ConversationTests {
         let name = "fake"
         var plans: [String]
         var prompts: [String] = []
+        var systems: [String] = []
+        /// The quoted file each call came with (nil for none).
+        var quoted: [String?] = []
         /// The plans given back so far, slow ones once their wait is over.
         var answered: [String] = []
         var slow: (String) -> Duration = { _ in .zero }
         init(_ plans: [String]) { self.plans = plans }
-        func complete(system: String, user: String, schema: Data, timeout: TimeInterval) async throws -> Data {
+        func complete(system: String, user: String, quoted: String?, schema: Data, timeout: TimeInterval) async throws -> Data {
             prompts.append(user)
+            systems.append(system)
+            self.quoted.append(quoted)
             let plan = plans.count > 1 ? plans.removeFirst() : plans[0]
             let wait = slow(user)
             if wait > .zero { try await Task.sleep(for: wait) }
@@ -138,19 +143,54 @@ struct ConversationTests {
         let headings = ["### Needs you", "### Working", "### In review", "### Done"].compactMap { text.range(of: $0)?.lowerBound }
         #expect(headings == headings.sorted() && headings.count == 4)
         for part in ["User: how is it going?", "Oby: Fine.",
-                     "ab12cd34 · Vault secrets · deskree-inc/oby, issue #60 · Claude Code · running on this Mac · Stage 2 of 5, Work: Round 1 of 1 · Running swift test · started 12 min ago · asked: work on oby #60",
-                     "fa11ed00 · Mac runner notifications · deskree-inc/oby, PR #33 · Claude Code · failed · Stage 2 of 5, Work: Round 1 of 1 · Nothing committed: the tests still fail. More below. · ended 1 min ago · result: Nothing committed: the tests still fail.",
+                     "ab12cd34 · Vault secrets · deskree-inc/oby, issue #60 · Claude Code · running on this Mac · Stage 2 of 5, Work: Round 1 of 1 · started 12 min ago · asked: work on oby #60",
+                     "fa11ed00 · Mac runner notifications · deskree-inc/oby, PR #33 · Claude Code · failed · Stage 2 of 5, Work: Round 1 of 1 · ended 1 min ago · asked: Review oby PR #33",
                      "1e5e1e00 · Job progress screen", "Oby approved · PR https://github.com/deskree-inc/oby/pull/42 open · ended 1 h ago",
-                     "3e26ed00 · Inbox first slice", "PR https://github.com/deskree-inc/oby/pull/42 merged · ended 2 h ago",
-                     "- Question for job ab12cd34 (Vault secrets, this Mac), waiting 3 min: Keep the secrets in the keychain, or in a file? Options: Keychain | A file.",
+                     "3e26ed00 · Inbox first slice", "PR https://github.com/deskree-inc/oby/pull/42 merged · merged 1 min ago · ended 2 h ago",
+                     "- Question for job ab12cd34 (Vault secrets, this Mac), waiting 3 min: the question and its options are quoted in work.md",
                      "- Claude Code · Personal (Max): 12% of the 5-hour limit used, resets in 2 h 10 min (at",
                      "; 40% of the 7-day limit used, resets ", "; 1 job running",
                      "- Codex · Work: signed out"] {
             #expect(text.contains(part), "\(part)")
         }
-        // Without anything, it still says so.
-        let empty = Briefing(turns: [], places: [], accounts: [], now: now).text
-        #expect(empty.contains("(Nothing yet.)") && empty.contains("(No jobs running or finished lately.)") && empty.contains("(Empty.)") && empty.contains("(No accounts.)"))
+        // What agents wrote never reaches the prompt (AGENTS.md): it's quoted for a file instead.
+        for theirs in ["Running swift test", "the tests still fail", "Keep the secrets", "Keychain"] { #expect(!text.contains(theirs), "\(theirs)") }
+        let quoted = try #require(briefing.quoted)
+        #expect(quoted.hasPrefix("# What the agents wrote, quoted\n"))
+        for part in ["## Job ab12cd34 (Vault secrets)\nStep now: Running swift test",
+                     "## Job fa11ed00 (Mac runner notifications)\nResult: Nothing committed: the tests still fail.",
+                     "## Question for job ab12cd34 (Vault secrets)\nKeep the secrets in the keychain, or in a file?\nOptions: Keychain | A file"] {
+            #expect(quoted.contains(part), "\(part)")
+        }
+        #expect(!quoted.contains("01d00000"))
+        // Without anything, it still says so, and there's nothing to quote.
+        let empty = Briefing(turns: [], places: [], accounts: [], now: now)
+        #expect(empty.text.contains("(Nothing yet.)") && empty.text.contains("(No jobs running or finished lately.)") && empty.text.contains("(Empty.)") && empty.text.contains("(No accounts.)"))
+        #expect(empty.quoted == nil)
+    }
+
+    /// A job whose coding ended days ago but whose pull request merged today is recent; a
+    /// runner's accounts are told with their place.
+    @Test func theBriefingKeepsWhatMergedLatelyAndTellsTheRunnersAccounts() throws {
+        let now = Date(timeIntervalSince1970: 1_791_582_173)
+        var merged = job
+        merged.id = "3e26ed00"
+        merged.status = .done
+        merged.finished = now - 5 * 86_400
+        merged.published = "https://github.com/deskree-inc/oby/pull/42"
+        merged.pullRequest = PullRequestStatus(state: .merged, reviewDecision: .approved, base: "dev", mergedAt: now - 3600, checkedAt: now)
+        var stale = merged
+        stale.id = "57a1e000"
+        stale.pullRequest?.mergedAt = now - 4 * 86_400
+        var codex = AccountState(account: Account(id: "work", agent: "codex", name: "Deskree", payer: "", home: nil), label: "Plus · w@example.com")
+        codex.fiveHour = 0.9
+        codex.fiveHourResets = now + 45 * 60
+        let briefing = Briefing(turns: [], places: [Briefing.Place(name: "tetrix-lab", jobs: [merged, stale], inbox: [], accounts: [codex])],
+                                accounts: [], now: now)
+        #expect(briefing.jobs.map(\.job.id) == ["3e26ed00"])
+        #expect(briefing.text.contains("3e26ed00") && briefing.text.contains("merged 1 h ago · ended 5 days ago"))
+        #expect(briefing.text.contains("- Codex · Deskree (Plus) on tetrix-lab: 90% of the 5-hour limit used, resets in 45 min (at"))
+        #expect(!briefing.text.contains("(No accounts.)"))
     }
 
     @Test func plansNamingJobsAreChecked() throws {
@@ -195,6 +235,10 @@ struct ConversationTests {
         #expect(prompt.contains("## The conversation so far\n\n(Nothing yet.)"))
         #expect(prompt.contains("ab12cd34 · Vault secrets") && prompt.contains("running on this Mac"))
         #expect(prompt.hasSuffix("The user says now:\nhow is the vault job going?"))
+        // The agent's step is in the quoted file, which the system prompt tells the brain about; never in the prompt.
+        #expect(!prompt.contains("Starting Claude Code"))
+        #expect(brain.quoted.first??.contains("## Job ab12cd34 (Vault secrets)\nStep now: Starting Claude Code") == true)
+        #expect(brain.systems.first?.contains("quoted in the file work.md") == true)
         #expect(desk.turns.map(\.text) == ["how is the vault job going?", "Vault secrets is running its tests."])
 
         let second = await desk.converse("cancel it")
@@ -208,23 +252,130 @@ struct ConversationTests {
         #expect(Desk(accounts: AccountStore(root: folder), store: store()).turns.count == 4)
     }
 
-    @Test func aStopNamesJobsElsewhereToo() async throws {
+    @Test func aStopNamesJobsElsewhereTooAndWaitsForThem() async throws {
         var away = vaultJob()
         away.id = "fa5a5a5a"
         away.title = "Watch home"
         away.status = .running
         desk.elsewhere = { [Briefing.Place(name: "tetrix-lab", jobs: [away], inbox: [])] }
-        final class Stopped { var ids: [String] = [] }
+        final class Stopped { var ids: [String] = []; var failing = false }
         let stopped = Stopped()
-        desk.stopElsewhere = { stopped.ids += $0 }
-        brain.plans = [Self.stop(["fa5a5a5a"]), Self.stop(["fa5a5a5a"])]
+        desk.stopElsewhere = { ids in
+            stopped.ids += ids
+            return stopped.failing ? Dictionary(uniqueKeysWithValues: ids.map { ($0, "the runner hung up.") }) : [:]
+        }
+        brain.plans = [Self.stop(["fa5a5a5a"]), Self.stop(["fa5a5a5a"]), Self.stop(["fa5a5a5a"])]
         #expect(await desk.converse("stop the watch job") == .reply("Stopped Watch home."))
         #expect(stopped.ids == ["fa5a5a5a"])
         #expect(brain.prompts.first?.contains("fa5a5a5a · Watch home · deskree-inc/oby, issue #60 · Claude Code · running on tetrix-lab") == true)
-        // Gone meanwhile: nothing to stop, and the brain is told so.
+        // The runner couldn't: Oby says so instead of "Stopped".
+        stopped.failing = true
+        #expect(await desk.converse("stop it") == .reply("Couldn't stop Watch home: the runner hung up."))
+        // Gone between the briefing and the stop: nothing to stop. (The brain can't name a job the
+        // briefing didn't list: Swift refuses that plan.)
         desk.elsewhere = { [] }
-        brain.plans = [Self.reply("Nothing runs.")]
-        #expect(await desk.converse("stop it") == .reply("Nothing runs."))
+        let late = Planner.Result(plan: try Plan.decode(Data(Self.stop(["fa5a5a5a"]).utf8)), by: "fake")
+        #expect(await desk.card(for: late, said: "stop it") == .reply("That job isn't running any more."))
+    }
+
+    /// "Stop everything" stops the runner's jobs too, and counts only what did stop.
+    @Test func stopEverythingReachesTheRunner() async throws {
+        var away = vaultJob()
+        away.id = "fa5a5a5a"
+        away.title = "Watch home"
+        away.status = .running
+        var gone = away
+        gone.id = "d0ned0ne"
+        gone.status = .done
+        desk.elsewhere = { [Briefing.Place(name: "tetrix-lab", jobs: [away, gone], inbox: [])] }
+        final class Stopped { var ids: [String] = []; var failing = false }
+        let stopped = Stopped()
+        desk.stopElsewhere = { ids in
+            stopped.ids += ids
+            return stopped.failing ? Dictionary(uniqueKeysWithValues: ids.map { ($0, "the runner hung up.") }) : [:]
+        }
+        desk.enqueue(vaultJob())
+        try await until("the job runs") { desk.jobs.first?.status == .running }
+        brain.plans = [Self.stop([])]
+        stopped.failing = true
+        #expect(await desk.converse("stop everything") == .reply("Stopped 1 job. Couldn't stop Watch home: the runner hung up."))
+        #expect(stopped.ids == ["fa5a5a5a"] && desk.jobs.first?.status == .stopped)
+        stopped.failing = false
+        #expect(await desk.converse("stop everything") == .reply("Stopped 1 job."))
+        desk.elsewhere = { [] }
+        #expect(await desk.converse("stop everything") == .reply("Nothing is running."))
+    }
+
+    // MARK: Nothing happens for a turn that's over
+
+    /// Cancelled while the brain thought: its plan, a stop, does nothing when it comes.
+    @Test func aCancelledTurnStopsNothing() async throws {
+        desk.enqueue(vaultJob())
+        try await until("the job runs") { desk.jobs.first?.status == .running }
+        brain.plans = [Self.stop(["ab12cd34"])]
+        brain.slow = { _ in .milliseconds(200) }
+        desk.ask("cancel it")
+        desk.cancel()
+        try await until("the brain answers") { brain.answered.count == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(desk.jobs.first?.status == .running && desk.talk == .none && desk.turns.isEmpty)
+        // The turn is logged with why nothing happened.
+        #expect(store().turns().first?.refused.last == "the turn was cancelled before the plan came: nothing done")
+    }
+
+    /// Replaced by other words: the first plan does nothing, the second does its job.
+    @Test func aReplacedTurnStopsNothing() async throws {
+        desk.enqueue(vaultJob())
+        try await until("the job runs") { desk.jobs.first?.status == .running }
+        brain.plans = [Self.stop(["ab12cd34"]), Self.reply("Still running.")]
+        brain.slow = { $0.contains("cancel it") ? .milliseconds(200) : .zero }
+        desk.ask("cancel it")
+        desk.ask("how is it going?")
+        try await until("the brain answers twice") { brain.answered.count == 2 }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(desk.jobs.first?.status == .running && desk.talk == .reply("Still running."))
+        #expect(desk.turns.map(\.text) == ["how is it going?", "Still running."])
+    }
+
+    /// Given up on: a plan that comes after the time limit does nothing either.
+    @Test func aTurnGivenUpOnStopsNothing() async throws {
+        desk.enqueue(vaultJob())
+        try await until("the job runs") { desk.jobs.first?.status == .running }
+        desk.patience = .milliseconds(100)
+        brain.plans = [Self.stop(["ab12cd34"])]
+        brain.slow = { _ in .milliseconds(400) }
+        desk.ask("cancel it")
+        try await until("the turn gives up") { desk.talk == .reply(Conversation.timedOut) }
+        try await until("the brain answers") { brain.answered.count == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(desk.jobs.first?.status == .running && desk.talk == .reply(Conversation.timedOut))
+    }
+
+    /// A Lead goal cancelled while the Lead thought starts no job.
+    @Test func aCancelledGoalStartsNothing() async throws {
+        final class SlowLead: LeadAdapter, @unchecked Sendable {
+            let name = "slow"
+            var answered = 0
+            func turn(system: String, user: String, schema: Data, in directory: URL, timeout: TimeInterval) async throws -> Data {
+                try await Task.sleep(for: .milliseconds(200))
+                answered += 1
+                return Data(#"{"action":"start_jobs","reply":"","question":null,"jobs":[{"repo":"deskree-inc/oby","issue":7,"kind":"build","title":"Safe when nobody watches","goal":"Implement F3.","files":["Engine/Desk.swift"],"check":"swift test","out_of_scope":""}]}"#.utf8)
+            }
+        }
+        let lead = SlowLead()
+        desk.makeLead = { _ in [lead] }
+        desk.leadRoot = folder.appending(path: "leads")
+        desk.readBoard = { _ in
+            Board(title: "Oby — Roadmap", number: 1, owner: "well-prado", items: [
+                BoardItem(repo: "deskree-inc/oby", number: 7, title: "F3 Safe when nobody is watching", url: "https://github.com/deskree-inc/oby/issues/7", status: "Todo", labels: ["feature"]),
+            ], user: "well-prado")
+        }
+        desk.ask("work on the roadmap")
+        desk.cancel()
+        try await until("the Lead answers") { lead.answered == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(desk.jobs.isEmpty && desk.talk == .none)
+        #expect(store().leadTurns().first?.refused.last == "the turn was cancelled before the plan came: nothing started")
     }
 
     // MARK: Cancelling and replacing
@@ -329,6 +480,7 @@ struct ConversationTests {
                     (response.status, object(Data(response.body.readableBytesView)))
                 }
             }
+            @MainActor func texts() -> [String] { desk.turns.map(\.text) }
             let sent = #"{"said": "and the vault one?", "turns": [{"who": "user", "text": "how is the inbox job going?"}, {"who": "oby", "text": "Inbox is at its check."}]}"#
             let (status, answer) = try await post(sent)
             #expect(status == .ok && answer["kind"] as? String == "reply" && answer["text"] as? String == "Fine.")
@@ -336,13 +488,13 @@ struct ConversationTests {
             #expect(prompt.contains("User: how is the inbox job going?\nOby: Inbox is at its check.\n"))
             #expect(prompt.hasSuffix("The user says now:\nand the vault one?"))
             // The exchange joins the runner's own conversation, which is what it reads when a client sends none.
-            #expect(desk.turns.map(\.text) == ["and the vault one?", "Fine."])
+            #expect(await texts() == ["and the vault one?", "Fine."])
             _ = try await post(#"{"said": "thanks"}"#)
             #expect(brain.prompts.last?.contains("User: and the vault one?\nOby: Fine.\n") == true)
-            #expect(desk.turns.count == 4)
+            #expect(await texts().count == 4)
             // An answer to the brain's question shows as the option picked.
             _ = try await post(#"{"said": "Review PR 12", "answer": {"question": "Which repository is PR #12 in?", "option": "deskree-inc/oby"}}"#)
-            #expect(desk.turns.map(\.text).suffix(2) == ["deskree-inc/oby", "Fine."])
+            #expect(await texts().suffix(2) == ["deskree-inc/oby", "Fine."])
 
             for bad in [#"{"said": "hi", "turns": [{"who": "robot", "text": "x"}]}"#,
                         #"{"said": "hi", "turns": [{"who": "user", "text": " "}]}"#,

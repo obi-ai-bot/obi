@@ -42,8 +42,9 @@ final class Desk {
     var onReply: (_ text: String, _ spoken: Bool) -> Void = { _, _ in }
     /// Jobs and inbox items elsewhere for the brain's briefing: the runner's, on the Mac.
     @ObservationIgnored var elsewhere: () -> [Briefing.Place] = { [] }
-    /// Stops jobs elsewhere, by id, when the brain names one of them.
-    @ObservationIgnored var stopElsewhere: ([String]) -> Void = { _ in }
+    /// Stops jobs elsewhere, by id, when the brain names them or stops everything. Answers once
+    /// they're stopped, with why each that couldn't be wasn't, by id.
+    @ObservationIgnored var stopElsewhere: ([String]) async -> [String: String] = { _ in [:] }
     /// The brain's adapters, on the Claude account whose home is given. Tests put in their own.
     @ObservationIgnored var makeBrain: (_ home: String?, Vault) -> [any BrainAdapter] = { [ClaudeBrain(home: $0, vault: $1)] }
     /// How long `ask` waits for an answer before the turn ends with `Conversation.timedOut`, so
@@ -172,7 +173,7 @@ final class Desk {
         var choices = ["auto": ["auto"] + known.map(\.name)]
         for (agent, list) in Dictionary(grouping: known, by: \.agent) { choices[agent] = ["auto"] + list.map(\.name) }
         let briefing = briefing(turns: turns)
-        return BrainContext(accounts: choices, repos: repos, briefing: briefing.text, jobs: briefing.stoppable)
+        return BrainContext(accounts: choices, repos: repos, briefing: briefing.text, quoted: briefing.quoted, jobs: briefing.stoppable)
     }
 
     /// What the brain is told before the user's words (Engine/Conversation.swift).
@@ -199,13 +200,20 @@ final class Desk {
         add(turn)
         talk = .thinking(said)
         let limit = Lead.leads(said) ? patience * 2 : patience
+        let deadline = ContinuousClock.now + limit
         Task {
-            let result = await Self.within(limit) { await self.plan(said) } ?? .reply(Conversation.timedOut)
-            // Cancelled or replaced while the brain was thinking.
+            // Cancelled, replaced or past its time while the brain was thinking: its plan does
+            // nothing, whichever of the plan and the clock is heard first.
+            let live = { self.asking == mine && ContinuousClock.now < deadline }
+            let result = await Self.within(limit) { await self.plan(said, live: live) }
             guard asking == mine else { return }
+            // Too long: the turn ends here, and the plan, when it comes, is dead.
+            let late = result == nil || (result == .none && ContinuousClock.now >= deadline)
+            if late { asking += 1 }
+            let talk = late ? .reply(Conversation.timedOut) : result ?? .none
             pending = nil
-            talk = result
-            if let reply = Self.reply(in: result) {
+            self.talk = talk
+            if let reply = Self.reply(in: talk) {
                 add(Turn(who: .oby, text: reply))
                 onReply(reply, spoken)
             }
@@ -274,20 +282,27 @@ final class Desk {
     /// A vague goal ("work on the roadmap") goes to the Lead instead, when a Claude account is
     /// signed in: it starts the jobs itself and answers with a reply or a question. The brain reads
     /// `turns` as the conversation so far: the thread's, but for the words waiting for this answer.
-    func plan(_ said: String, turns given: [Turn]? = nil) async -> Talk {
+    /// `live` is asked before anything happens for the plan (a job stopped or started): false once
+    /// the turn was cancelled, replaced or given up on, and then nothing does, and the answer is `.none`.
+    func plan(_ said: String, turns given: [Turn]? = nil, live: @escaping () -> Bool = { true }) async -> Talk {
         if repos.isEmpty { await refresh() }
         // The brain and the Lead think with the least busy Claude account too, so a busy one doesn't slow them.
         let thinker = AccountStore.route(accounts.accounts, agent: "claude")
-        if Lead.leads(said), let thinker { return await lead(said, account: thinker) }
+        if Lead.leads(said), let thinker { return await lead(said, account: thinker, live: live) }
         let context = brainContext(turns: given ?? turns.filter { $0.id != pending })
         var result = await Planner(adapters: makeBrain(thinker?.home, vault)).plan(said, context: context)
+        guard live() else {
+            result.refused.append("the turn was cancelled before the plan came: nothing done")
+            record(BrainTurn(said: said, by: result.by, plan: result.plan, refused: result.refused))
+            return .none
+        }
         record(BrainTurn(said: said, by: result.by, plan: result.plan, refused: result.refused))
         var epics: [Int: Int] = [:]
         (result.plan.dispatches, epics) = await Self.expandEpics(result.plan.dispatches)
         if result.plan.action == .dispatch, result.plan.dispatches.isEmpty {
             return .reply(epics.isEmpty ? "Oby couldn't plan that. Try saying it another way." : "That epic has no open sub-issues to work on.")
         }
-        let talk = card(for: result, said: said)
+        let talk = await card(for: result, said: said)
         if case .plan(let list) = talk {
             // ponytail: the last 20 drafts, in memory; a plan made before a restart is made again.
             drafts.append(contentsOf: list)
@@ -313,7 +328,8 @@ final class Desk {
     /// One Lead turn for the user's words (Engine/Lead.swift): Swift reads the board, builds the
     /// skipped list and writes the context files; the Lead answers a typed plan; Swift checks it
     /// and starts its jobs right away, routed across the accounts with room. Nothing to confirm.
-    func lead(_ said: String, account thinker: Account) async -> Talk {
+    /// Unless `live` says the turn was cancelled meanwhile: then no job starts.
+    func lead(_ said: String, account thinker: Account, live: () -> Bool = { true }) async -> Talk {
         let goal = String(UUID().uuidString.prefix(8)).lowercased()
         let board: Board
         do {
@@ -351,6 +367,11 @@ final class Desk {
         let result = await LeadPlanner(adapters: adapters).plan(said, context: context, in: directory)
         Lead.prune(leadRoot)
         var turn = LeadTurn(goal: goal, said: said, by: result.by, plan: result.plan, refused: result.refused, skipped: skipped)
+        guard live() else {
+            turn.refused.append("the turn was cancelled before the plan came: nothing started")
+            record(turn)
+            return .none
+        }
         guard let plan = result.plan else {
             record(turn)
             // The last reason, without the refused plan's JSON after it.
@@ -429,8 +450,9 @@ final class Desk {
         "\(said)\n\n(Oby asked: \(question) The user answered: \(option))"
     }
 
-    /// What the user sees for the brain's plan. Stopping happens here: there's nothing to confirm.
-    func card(for result: Planner.Result, said: String) -> Talk {
+    /// What the user sees for the brain's plan. Stopping happens here: there's nothing to confirm,
+    /// and the reply says what stopped once it has, here and elsewhere.
+    func card(for result: Planner.Result, said: String) async -> Talk {
         let plan = result.plan
         switch plan.action {
         case .dispatch:
@@ -464,28 +486,33 @@ final class Desk {
         case .askUser:
             return plan.question.map { .question(said: said, $0) } ?? .reply(plan.reply)
         case .stopAgent:
-            // The jobs the brain named ("cancel it"), here or elsewhere; else everything. What
-            // was stopped, not the brain's reply: it doesn't know what was running.
+            // The jobs the brain named ("cancel it"), here or elsewhere; else everything, here and
+            // elsewhere. What was stopped, not the brain's reply: it doesn't know what was running.
             let named = plan.jobs ?? []
-            guard !named.isEmpty else {
-                let stopped = stopAll()
-                return .reply(stopped == 0 ? "Nothing is running." : "Stopped \(stopped) job\(stopped == 1 ? "" : "s").")
-            }
-            var titles: [String] = []
-            var away: [String] = []
-            let others = Dictionary(elsewhere().flatMap(\.jobs).map { ($0.id, $0) }) { first, _ in first }
-            for id in named {
-                if let job = job(id) {
-                    guard job.isActive else { continue }
-                    stop(id)
-                    titles.append(job.heading)
-                } else if let job = others[id], job.isActive {
-                    away.append(id)
-                    titles.append(job.heading)
+            let others = Dictionary(elsewhere().flatMap(\.jobs).filter(\.isActive).map { ($0.id, $0) }) { first, _ in first }
+            var here: [Job] = []
+            var away: [Job] = []
+            if named.isEmpty {
+                here = active
+                away = others.values.sorted { $0.created > $1.created }
+            } else {
+                for id in named {
+                    if let job = job(id), job.isActive { here.append(job) } else if let job = others[id] { away.append(job) }
                 }
             }
-            if !away.isEmpty { stopElsewhere(away) }
-            return .reply(titles.isEmpty ? "That job isn't running any more." : "Stopped \(titles.joined(separator: ", ")).")
+            for job in here { stop(job.id) }
+            let failed = away.isEmpty ? [:] : await stopElsewhere(away.map(\.id))
+            let stopped = here + away.filter { failed[$0.id] == nil }
+            var reply: String
+            if named.isEmpty {
+                reply = stopped.isEmpty ? "Nothing is running." : "Stopped \(stopped.count) job\(stopped.count == 1 ? "" : "s")."
+            } else {
+                reply = stopped.isEmpty && failed.isEmpty ? "That job isn't running any more." : stopped.isEmpty ? "" : "Stopped \(stopped.map(\.heading).joined(separator: ", "))."
+            }
+            for job in away where failed[job.id] != nil {
+                reply += (reply.isEmpty ? "" : " ") + "Couldn't stop \(job.heading): \(failed[job.id] ?? "")"
+            }
+            return .reply(reply)
         case .replyOnly, .ignore:
             return plan.reply.isEmpty ? .none : .reply(plan.reply)
         }

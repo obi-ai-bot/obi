@@ -117,14 +117,23 @@ final class IslandController {
             if item.kind == .question, item.isOpen, item.later == nil { self?.notify("Question: \(item.title)", happy: false) }
         }
         feed.onNotice = { [weak self] job, notice in self?.notify(RunnerFeed.title(notice, for: job), happy: notice == .ready && job.publishError == nil) }
-        // The brain's briefing takes in the runner's jobs and inbox too, and may stop one of its jobs.
+        // The brain's briefing takes in the runner's jobs, inbox and accounts too, and "stop" reaches its jobs.
         desk.elsewhere = { [weak self] in
             guard let self else { return [] }
-            return [Briefing.Place(name: feed.name, jobs: feed.jobs, inbox: feed.inbox)]
+            return [Briefing.Place(name: feed.name, jobs: feed.jobs, inbox: feed.inbox, accounts: feed.accounts)]
         }
         desk.stopElsewhere = { [weak self] ids in
-            guard let self, let runner = feed.runner else { return }
-            Task { for id in ids { if let job = try? await runner.stop(id) { self.feed.apply(job) } } }
+            guard let self else { return [:] }
+            var failed: [String: String] = [:]
+            for id in ids {
+                do {
+                    guard let runner = feed.runner else { throw RunnerError(message: "\(feed.name) isn't set up.") }
+                    feed.apply(try await runner.stop(id))
+                } catch {
+                    failed[id] = error.localizedDescription
+                }
+            }
+            return failed
         }
         desk.onReply = { [weak self] text, spoken in self?.replied(text, spoken: spoken) }
         feed.start()

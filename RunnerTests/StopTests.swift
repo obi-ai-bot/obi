@@ -43,7 +43,7 @@ struct StopEverythingTests {
         #expect(desk.job("running")?.status == .running && agent.started == 1)
         #expect(desk.job("queued")?.status == .queued)
 
-        #expect(desk.card(for: stop, said: "stop everything") == .reply("Stopped 2 jobs."))
+        #expect(await desk.card(for: stop, said: "stop everything") == .reply("Stopped 2 jobs."))
         #expect(desk.job("running")?.status == .stopped && desk.job("queued")?.status == .stopped)
         #expect(desk.active.isEmpty && agent.stopped == 1)
 
@@ -52,7 +52,7 @@ struct StopEverythingTests {
         try await Task.sleep(for: .milliseconds(100))
         #expect(desk.job("queued")?.status == .stopped && agent.started == 1)
 
-        #expect(desk.card(for: stop, said: "stop everything") == .reply("Nothing is running."))
+        #expect(await desk.card(for: stop, said: "stop everything") == .reply("Nothing is running."))
     }
 
     @Test func oneJobIsOneJob() async throws {
@@ -66,6 +66,6 @@ struct StopEverythingTests {
             return job
         }
         desk.dispatch(draft("queued"))
-        #expect(desk.card(for: stop, said: "stop it") == .reply("Stopped 1 job."))
+        #expect(await desk.card(for: stop, said: "stop it") == .reply("Stopped 1 job."))
     }
 }
