@@ -42,7 +42,8 @@ nonisolated enum Shell {
     }()
 
     /// Runs a tool found on the user's PATH. `env` adds variables, and a nil value removes one.
-    /// Cancelling the task ends the tool, with the tools it started.
+    /// After `timeout` seconds it's ended, with all it started (`Halt`), and so it is when the task
+    /// is cancelled.
     static func run(_ arguments: [String], in directory: URL? = nil, input: Data? = nil,
                     env: [String: String?] = [:], timeout: TimeInterval = 600) async throws -> Output {
         let running = Running()
@@ -68,12 +69,13 @@ nonisolated enum Shell {
                 process.standardInput = stdin
                 process.standardOutput = stdout
                 process.standardError = stderr
-                do { try process.run() } catch { done.resume(throwing: error); return }
-                running.started(process)
+                // What it leaves running ends with it, so its output ends too (a check's test can't hold it).
+                let group: ProcessGroup
+                do { group = try ProcessGroup.run(process) } catch { done.resume(throwing: error); return }
+                running.started(group)
 
-                // Past the timeout, the whole process group ends, so a tool it started can't hold the pipes open.
                 let expired = Collected()
-                let kill = DispatchWorkItem { expired.data = Data([1]); Halt.end(process) }
+                let kill = DispatchWorkItem { expired.data = Data([1]); group.end(after: Halt.dropping) }
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: kill)
                 // Read stderr on its own thread so a chatty tool can't fill the pipe and stall.
                 let err = Collected()
@@ -104,24 +106,24 @@ nonisolated enum Shell {
 
     private final class Collected: @unchecked Sendable { var data = Data() }
 
-    /// The process a run started, for cancelling it: whichever comes second, the start or the
-    /// cancel, ends it.
+    /// The process group a run started, for cancelling it: whichever comes second, the start or
+    /// the cancel, ends it.
     private final class Running: @unchecked Sendable {
         private let lock = NSLock()
-        private var process: Process?
+        private var group: ProcessGroup?
         private var cancelled = false
 
-        func started(_ process: Process) {
+        func started(_ group: ProcessGroup) {
             lock.withLock {
-                self.process = process
-                if cancelled { Halt.end(process) }
+                self.group = group
+                if cancelled { group.end(after: Halt.dropping) }
             }
         }
 
         func cancel() {
             lock.withLock {
                 cancelled = true
-                if let process { Halt.end(process) }
+                group?.end(after: Halt.dropping)
             }
         }
     }

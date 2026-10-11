@@ -185,6 +185,7 @@ final class CodexAgent: AgentRun {
 /// notifications and the server's own requests go to `onMessage`.
 final class CodexServer {
     private let process = Process()
+    private var group: ProcessGroup?
     private let input = Pipe()
     private let output = Pipe()
     private var nextID = 0
@@ -197,11 +198,11 @@ final class CodexServer {
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = Agents.sandboxed(["codex", "app-server"], in: directory, own: home?.path ?? "\(Agents.home)/.codex")
         process.currentDirectoryURL = directory
-        process.environment = Agents.environment(["CODEX_HOME": home?.path])
+        process.environment = try Agents.environment(["CODEX_HOME": home?.path])
         process.standardInput = input
         process.standardOutput = output
         process.standardError = log.flatMap { try? FileHandle(forWritingTo: $0) } ?? FileHandle.nullDevice
-        try process.run()
+        group = try ProcessGroup.run(process)
         Task { await read() }
     }
 
@@ -233,13 +234,14 @@ final class CodexServer {
         try? input.fileHandleForWriting.close()
     }
 
+    /// Ends it, with whatever it started (`Halt`).
     func kill() {
-        if process.isRunning { process.terminate() }
+        group?.end(after: Halt.dropping)
     }
 
-    /// Ends it now, with whatever it started (`Halt`).
+    /// Ends it now, with whatever it started: Stop's 2 seconds.
     func halt() {
-        Halt.end(process)
+        group?.end(after: Halt.stopping)
     }
 
     private func read() async {

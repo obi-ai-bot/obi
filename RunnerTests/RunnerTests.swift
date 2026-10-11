@@ -273,9 +273,9 @@ final class APITests {
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
         for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "check", "model", "notes", "pullRequest", "pullRequestError",
-                    "dismissed", "reviewing", "review", "reviewError", "reviewOf", "files", "lead", "claim", "limit", "startCommit"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
+                    "dismissed", "reviewing", "review", "reviewError", "reviewOf", "files", "lead", "claim", "question", "limit", "startCommit"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 43)
+        #expect(decoded.count == 44)
         #expect(json.contains(#""outgoing":[]"#))
         #expect(decoded["pipeline"] is [String: Any])
         #expect(decoded["title"] as? String == "Review oby #33")
@@ -619,12 +619,12 @@ struct SandboxTests {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = Agents.sandboxed(["sleep", "30"], in: nil, own: nil)
-        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, any Error>) in
-            DispatchQueue.global().async { done.resume(with: Result { try process.run() }) }
+        let group = try await withCheckedThrowingContinuation { (done: CheckedContinuation<ProcessGroup, any Error>) in
+            DispatchQueue.global().async { done.resume(with: Result { try ProcessGroup.run(process) }) }
         }
         try await Task.sleep(for: .seconds(8))
         #expect(process.isRunning)
-        process.terminate()
+        group.end(after: Halt.stopping)
     }
 
     /// Codex's own bubblewrap can't nest inside Oby's, so it runs none and asks Oby about every command.
@@ -640,9 +640,9 @@ struct SandboxTests {
 struct ConnectorTests {
     let worktree = URL(filePath: "/tmp/oby/jobs/9f08fd10")
 
-    @Test func agentsStartWithClaudeAIConnectorsOff() {
+    @Test func agentsStartWithClaudeAIConnectorsOff() throws {
         for account in [nil, URL(filePath: "/tmp/oby/accounts/personal")] {
-            let launch = ClaudeAgent.launch(worktree: worktree, configDirectory: account, model: "opus", resume: nil)
+            let launch = try ClaudeAgent.launch(worktree: worktree, configDirectory: account, model: "opus", resume: nil)
             #expect(launch.environment["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false")
             // Still the account's own login and config, where its mcpServers live.
             #expect(launch.environment["CLAUDE_CONFIG_DIR"] == account?.path)
@@ -652,18 +652,18 @@ struct ConnectorTests {
         }
     }
 
-    @Test func aResumedSessionKeepsThemOffToo() {
-        let launch = ClaudeAgent.launch(worktree: worktree, configDirectory: nil, model: nil, resume: "5f3c0d8e")
+    @Test func aResumedSessionKeepsThemOffToo() throws {
+        let launch = try ClaudeAgent.launch(worktree: worktree, configDirectory: nil, model: nil, resume: "5f3c0d8e")
         #expect(launch.arguments.suffix(2) == ["--resume", "5f3c0d8e"])
         #expect(launch.environment["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false")
     }
 
-    @Test func theBrainHasNoConnectorsAndNoGitHubToken() {
-        let env = ClaudeBrain(home: "/tmp/oby/accounts/personal").environment
+    @Test func theBrainHasNoConnectorsAndNoGitHubToken() throws {
+        let env = try ClaudeBrain(home: "/tmp/oby/accounts/personal").environment()
         #expect(env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false")
         #expect(env["CLAUDE_CONFIG_DIR"] == "/tmp/oby/accounts/personal")
         #expect(env["GH_TOKEN"] == .some(nil) && env["GITHUB_TOKEN"] == .some(nil))
-        #expect(ClaudeBrain().environment["CLAUDE_CONFIG_DIR"] == .some(nil))
+        #expect(try ClaudeBrain().environment()["CLAUDE_CONFIG_DIR"] == .some(nil))
     }
 }
 

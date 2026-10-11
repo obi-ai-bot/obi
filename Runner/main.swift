@@ -1,12 +1,14 @@
 import Foundation
 import Hummingbird
 @testable import ObyEngine
-#if canImport(OSLog)
-import OSLog
-#endif
 
 // The runner: Oby's engine as a service on an always-on machine, answering only its owner,
 // on 127.0.0.1, where `tailscale serve` publishes it to the tailnet.
+
+// `oby-runner vault …`: the vault from a terminal, then out (Runner/VaultCommand.swift).
+if CommandLine.arguments.dropFirst().first == "vault" {
+    exit(VaultCommand.run(Array(CommandLine.arguments.dropFirst(2))))
+}
 
 let environment = ProcessInfo.processInfo.environment
 guard let owner = environment["OBY_OWNER"], !owner.isEmpty else {
@@ -17,6 +19,13 @@ let port = environment["OBY_PORT"].flatMap { Int($0) } ?? 7777
 // A pipe to an agent that just exited must not take the runner down with it.
 signal(SIGPIPE, SIG_IGN)
 try FileManager.default.createDirectory(at: Workspace.root, withIntermediateDirectories: true)
+
+// The secret scan learns the vault now, so a vault it can't read shows in the journal at once.
+do {
+    _ = try Vault.shared.leaks()
+} catch {
+    Logger.runner.error("vault: \(error.localizedDescription, privacy: .public). Nothing is published until it's fixed.")
+}
 
 let desk = Desk()
 let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: "devices.json")),

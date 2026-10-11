@@ -93,8 +93,13 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// in a row", or nil. Such a job is `failed`, keeps its branch and pushed nothing; one more round
     /// is possible, by telling it something.
     var limit: String?
+    /// What the agent asked the user at the end of its turn (`QUESTION: …`, Inbox.question), or
+    /// nil. The job waits for the answer, which reaches the agent as its next message.
+    var question: Plan.Question?
 
     var maxRounds: Int { rounds ?? 1 }
+    /// Its agent asked the user something and waits for the answer: the inbox has it.
+    var waitsForAnswer: Bool { question != nil && dismissed == nil && status != .stopped }
     var currentRound: Int { round ?? 1 }
     /// It keeps going after a turn: there's a check to pass or more than one round.
     var loops: Bool { check != nil || maxRounds > 1 }
@@ -237,25 +242,116 @@ protocol AgentRun: AnyObject {
     func kill()
 }
 
-/// Ending an agent that was asked to stop: Stop all promises every agent ends within 2 seconds.
+/// Ending an agent with everything it started: SIGTERM to its process group, then SIGKILL.
+/// In bubblewrap the group holds the outer bwrap, the box's own bwrap (its pid 1) and the agent.
+/// What the agent's tools start in sessions of their own (Claude Code's commands) is only in the
+/// box, and ends with the box's pid 1, which only SIGKILL reaches from outside. Without
+/// --die-with-parent (Agents.sandboxed), nothing else ends the box: SIGTERM to the outer bwrap alone
+/// left agents running for hours (2026-10-11 on tetrix-lab).
 nonisolated enum Halt {
     /// How long an agent asked to stop gets to wrap up its turn before it's ended.
     static let grace: TimeInterval = 0.8
+    /// From SIGTERM to SIGKILL when Stop ends an agent: Stop all promises every agent ends within 2 seconds.
+    static let stopping: TimeInterval = 0.4
+    /// From SIGTERM to SIGKILL when an agent is dropped otherwise: moved to another account, its job
+    /// ended, a check timed out, Oby quitting.
+    static let dropping: TimeInterval = 3
 
-    /// Ends the process now: SIGTERM, then SIGKILL 0.4 seconds later. When it leads a process
-    /// group of its own (Foundation starts it in one), the whole group, so the tools it started end too.
-    static func end(_ process: Process) {
-        guard process.isRunning else { return }
-        let pid = process.processIdentifier
-        let target = getpgid(pid) == pid && pid != getpgrp() ? -pid : pid
+    /// Groups sent SIGTERM whose SIGKILL is still to come, and when it's due.
+    private static let pending = Mutex<[pid_t: ContinuousClock.Instant]>([:])
+
+    /// SIGTERM to `target` (a process group as -pgid, or one process) now, SIGKILL `after` seconds later.
+    static func end(_ target: pid_t, after: TimeInterval) {
+        pending.withLock { $0[target] = .now + .seconds(after) }
         _ = kill(target, SIGTERM)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { _ = kill(target, SIGKILL) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + after) {
+            if pending.withLock({ $0.removeValue(forKey: target) }) != nil { _ = kill(target, SIGKILL) }
+        }
+    }
+
+    /// Oby is quitting: waits for the SIGKILLs still to come (at most `dropping`), so nothing it
+    /// started outlives it. A group that's gone already isn't waited for.
+    static func settle() {
+        while true {
+            let due = pending.withLock { pending in
+                for (target, at) in pending where kill(target, 0) != 0 || at <= .now {
+                    pending[target] = nil
+                    _ = kill(target, SIGKILL)
+                }
+                return pending.isEmpty
+            }
+            if due { return }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+    }
+}
+
+/// A process Oby started, and the process group it leads: Foundation starts every process in a
+/// group of its own (posix_spawn's SETPGROUP, checked on Linux 2026-10-11), so no setsid goes in
+/// front, which would fork when it leads one already. Once the process ends, what's left of its
+/// group is killed, so nothing it started holds its output pipe open (a review sat running for 2.5
+/// hours on a test's leftover) or outlives it.
+/// Foundation on Linux hears of the end only once everything the process started has ended too (it
+/// watches a socket they all inherit), so the end is watched here, with waitid's WNOWAIT: the
+/// process stays for Foundation to reap, and its pid and group can't be reused until it does.
+nonisolated final class ProcessGroup: Sendable {
+    private struct State {
+        /// What's signalled: -pgid, or the process alone when it doesn't lead a group.
+        var target: pid_t?
+        var exited = false
+        /// `end` sent SIGTERM, and its SIGKILL is to come.
+        var ending = false
+    }
+    private let state = Mutex(State())
+
+    /// Starts `process`, with no signal blocked. A process starts with the mask of the thread that
+    /// starts it, and Dispatch's workers block nearly every signal: agents on tetrix-lab never got
+    /// SIGTERM (2026-10-11), and only SIGKILL ended them.
+    static func run(_ process: Process) throws -> ProcessGroup {
+        let group = ProcessGroup()
+        var none = sigset_t(), kept = sigset_t()
+        sigemptyset(&none)
+        pthread_sigmask(SIG_SETMASK, &none, &kept)
+        defer { pthread_sigmask(SIG_SETMASK, &kept, nil) }
+        try process.run()
+        let pid = process.processIdentifier
+        group.state.withLock { $0.target = getpgid(pid) == pid ? -pid : pid }
+        Thread.detachNewThread {
+            var info = siginfo_t()
+            // ECHILD: Foundation reaped it already (the Mac's does as soon as it ends).
+            while waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) == -1 && errno == EINTR {}
+            group.exited()
+        }
+        return group
+    }
+
+    /// The process ended: SIGKILL to what's left of its group, unless `end`'s own SIGKILL is to come,
+    /// after the grace it gave.
+    private func exited() {
+        let target = state.withLock { state -> pid_t? in
+            state.exited = true
+            return state.ending ? nil : state.target
+        }
+        if let target, target < 0 { _ = kill(target, SIGKILL) }
+    }
+
+    /// SIGTERM to the whole group now, SIGKILL `after` seconds later (`Halt`). Once: a second call,
+    /// or one after the process ended (its group is gone already), changes nothing.
+    func end(after: TimeInterval) {
+        let target = state.withLock { state -> pid_t? in
+            guard !state.ending, !state.exited, let target = state.target else { return nil }
+            state.ending = true
+            return target
+        }
+        if let target { Halt.end(target, after: after) }
     }
 }
 
 /// Claude Code, headless, speaking stream-json both ways (proven 2026-10-09).
 final class ClaudeAgent: AgentRun {
     private let process = Process()
+    /// Its process group, once it's started.
+    private var group: ProcessGroup?
     private let input = Pipe()
     private let output = Pipe()
     /// Writes to Claude Code's input, in order and off the main thread: a message with a screenshot
@@ -289,7 +385,7 @@ final class ClaudeAgent: AgentRun {
     }
 
     /// The command line and environment Claude Code starts with.
-    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil) -> (arguments: [String], environment: [String: String]) {
+    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil) throws -> (arguments: [String], environment: [String: String]) {
         // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
         // mcpServers (Tetrix) stay; only its claude.ai connectors are off.
         let arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
@@ -300,14 +396,14 @@ final class ClaudeAgent: AgentRun {
                             + (maxTurns.map { ["--max-turns", String($0)] } ?? [])
                             + (resume.map { ["--resume", $0] } ?? []),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude")
-        let environment = Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 })
+        let environment = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 })
         return (arguments, environment)
     }
 
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
         self.onEvent = onEvent
         process.executableURL = URL(filePath: "/usr/bin/env")
-        let launch = Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns)
+        let launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns)
         process.arguments = launch.arguments
         process.environment = launch.environment
         process.currentDirectoryURL = worktree
@@ -316,7 +412,7 @@ final class ClaudeAgent: AgentRun {
         let log = worktree.appending(path: ".oby/agent.log")
         _ = FileManager.default.createFile(atPath: log.path, contents: nil)
         process.standardError = (try? FileHandle(forWritingTo: log)) ?? FileHandle.nullDevice
-        try process.run()
+        group = try ProcessGroup.run(process)
 
         Task {
             do {
@@ -383,12 +479,12 @@ final class ClaudeAgent: AgentRun {
         guard process.isRunning else { return }
         send(["type": "control_request", "request_id": UUID().uuidString, "request": ["subtype": "interrupt"]])
         end()
-        let process = process
-        DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { Halt.end(process) }
+        let group = group
+        DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { group?.end(after: Halt.stopping) }
     }
 
     func kill() {
-        if process.isRunning { process.terminate() }
+        group?.end(after: Halt.dropping)
     }
 
     private func handle(_ line: Data) {
@@ -558,10 +654,24 @@ nonisolated enum Attachments {
 
     /// Copies the job's attachments into the worktree's .oby/inputs, under their own names, and
     /// returns the ones it copied: a file that's gone (kept too long) is left out, not the job.
-    static func copy(_ job: Job, into worktree: URL) -> [String]? {
-        let copied = (job.attachments ?? []).filter { path in
+    /// Text goes with the vault's secrets taken out; a binary file (a screenshot) can't be, so one
+    /// that holds a secret stops the job, naming it. Throws when the vault can't be read.
+    static func copy(_ job: Job, into worktree: URL, vault: Vault = .shared) throws -> [String]? {
+        let leaks = try vault.forAgents()
+        var copied: [String] = []
+        for path in job.attachments ?? [] {
             let file = URL(filePath: path)
-            return (try? FileManager.default.copyItem(at: file, to: worktree.appending(path: ".oby/inputs/\(file.lastPathComponent)"))) != nil
+            guard let data = try? Data(contentsOf: file) else { continue }
+            let target = worktree.appending(path: ".oby/inputs/\(file.lastPathComponent)")
+            if let text = String(data: data, encoding: .utf8) {
+                try Data(leaks.redact(text).utf8).write(to: target)
+            } else {
+                if let name = leaks.hits(in: String(decoding: data, as: UTF8.self)).first?.name {
+                    throw Shell.Failure(message: "The attachment \(file.lastPathComponent) holds the vault secret \(name): it isn't handed to the agent.")
+                }
+                try data.write(to: target)
+            }
+            copied.append(path)
         }
         return copied.isEmpty ? nil : copied
     }
@@ -688,12 +798,13 @@ nonisolated enum Policy {
     }
 }
 
-/// What every agent process gets: the user's PATH, no Claude or Anthropic variables, and no
-/// GitHub login, so nothing an agent runs can publish as the user.
+/// What every agent process gets: the user's PATH, no Claude or Anthropic variables, no GitHub
+/// login, so nothing an agent runs can publish as the user, and no variable that holds one of the
+/// vault's secrets. Throws when the vault can't be read: then no agent starts.
 nonisolated enum Agents {
-    static func environment(_ extra: [String: String?]) -> [String: String] {
-        var env = Shell.environment
-        for (key, value) in overrides.merging(extra, uniquingKeysWith: { $1 }) { env[key] = value }
+    static func environment(_ extra: [String: String?], vault: Vault = .shared, base: [String: String] = Shell.environment) throws -> [String: String] {
+        var env = base
+        for (key, value) in try overrides(vault: vault, base: base).merging(extra, uniquingKeysWith: { $1 }) { env[key] = value }
         return env
     }
 
@@ -702,8 +813,19 @@ nonisolated enum Agents {
     /// switch is Claude Code's own (checked in 2.1.296: "0", "false", "no" or "off" turn it off).
     static let noConnectors: [String: String?] = ["ENABLE_CLAUDEAI_MCP_SERVERS": "false"]
 
-    /// What changes from Oby's own environment, also for the checks Oby runs in a job's worktree.
-    static var overrides: [String: String?] { overrides(identity: identity.withLock { $0 }) }
+    /// What changes from Oby's own environment (`base`), also for the checks Oby runs in a job's
+    /// worktree: a variable of Oby's own that holds one of the vault's secrets (`export
+    /// STAGING_API_KEY=…` in the service's environment) doesn't pass through either. Throws when
+    /// the vault can't be read.
+    static func overrides(vault: Vault = .shared, base: [String: String] = Shell.environment) throws -> [String: String?] {
+        overrides(identity: identity.withLock { $0 }).merging(withheld(base, leaks: try vault.forAgents())) { $1 }
+    }
+
+    /// The variables in `env` that hold one of the vault's secrets, plain or encoded, each as a removal.
+    static func withheld(_ env: [String: String], leaks: Leaks) -> [String: String?] {
+        guard !leaks.isEmpty else { return [:] }
+        return Dictionary(uniqueKeysWithValues: env.filter { !leaks.hits(in: $0.value).isEmpty }.map { ($0.key, String?.none) })
+    }
 
     /// The owner's name and email from GitHub, for agents' commits; nil until `readIdentity` finds them.
     static let identity = Mutex<GitIdentity?>(nil)
@@ -753,7 +875,7 @@ nonisolated enum Agents {
 
     /// On Linux, `argv` inside bubblewrap. Agents run as the runner's Unix user, so home is empty but
     /// for `tools`, git's settings (read-only) and the job's own account, and so is all of `OBY_HOME`:
-    /// no gh token, APNs key, ssh key, other account, or anything else the user keeps there. Nothing
+    /// no gh token, APNs key, ssh key, vault, other account, or anything else the user keeps there. Nothing
     /// else an agent writes lasts, so it can't leave behind a program or a git config that the runner
     /// runs later outside the box. Writable for real: the worktree, the git data it commits to, and
     /// `own`, the job's account home (nil for none).
@@ -768,8 +890,8 @@ nonisolated enum Agents {
         let exists = { (path: String) in FileManager.default.fileExists(atPath: path) }
         // Never --die-with-parent: its death signal follows the thread that started bwrap, and Foundation
         // starts processes on Dispatch worker threads, which exit after about 5 s idle: agents died with
-        // SIGKILL mid-turn (proven 2026-10-10 on tetrix-lab). systemd ends them with the runner instead
-        // (KillMode=control-group).
+        // SIGKILL mid-turn (proven 2026-10-10 on tetrix-lab). Oby ends the box itself (Halt, ProcessGroup),
+        // and systemd ends them with the runner (KillMode=control-group).
         var args = ["bwrap", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
                     "--tmpfs", "/tmp", "--tmpfs", home]
         for folder in tools.map({ "\(home)/\($0)" }) where exists(folder) { args += ["--overlay-src", folder, "--tmp-overlay", folder] }
@@ -799,6 +921,11 @@ nonisolated enum Agents {
         if let own { args += ["--bind", own, own] }
         // The default Claude account keeps ~/.claude.json with ~/.claude.
         if own == "\(home)/.claude" { args += ["--bind-try", "\(home)/.claude.json", "\(home)/.claude.json"] }
+        // The vault is in OBY_HOME, hidden above: a bind that shows its folder again gets it covered.
+        let vault = Vault.folder.path
+        if ([worktree?.path, own].compactMap { $0 } + reading).contains(where: { vault == $0 || vault.hasPrefix($0 + "/") }) {
+            args += ["--tmpfs", vault]
+        }
         return args + ["--"] + argv
     }
 }
@@ -929,15 +1056,25 @@ nonisolated enum Workspace {
         let worktree = worktree(job.id)
         try await git(["worktree", "add", "--quiet", "-b", job.branch, worktree.path, start])
         job.startCommit = try await Shell.ok(["git", "-C", clone.path, "rev-parse", "--verify", "\(start)^{commit}"], env: ["GIT_NO_REPLACE_OBJECTS": "1"])
+        return try inputs(job, pullRequest: pullRequest, issue: issue, in: worktree)
+    }
+
+    /// Writes what the agent reads in `.oby/inputs`: the job's attachments, and its pull request or
+    /// issue quoted from GitHub, each with the vault's secrets taken out. Throws, and the job fails
+    /// saying why, when the vault can't be read.
+    static func inputs(_ job: Job, pullRequest: Data?, issue: Data?, in worktree: URL, vault: Vault = .shared) throws -> Job {
+        var job = job
         try FileManager.default.createDirectory(at: worktree.appending(path: ".oby/inputs"), withIntermediateDirectories: true)
-        job.attachments = Attachments.copy(job, into: worktree)
+        job.attachments = try Attachments.copy(job, into: worktree, vault: vault)
 
         if let pr = job.pr, let pullRequest, let info = try? JSONSerialization.jsonObject(with: pullRequest) as? [String: Any] {
             job.base = info["baseRefName"] as? String ?? job.base
-            try Prompts.quoted("Pull request", pr, info).write(to: worktree.appending(path: ".oby/inputs/pr-\(pr).md"), atomically: true, encoding: .utf8)
+            try vault.forAgent(Prompts.quoted("Pull request", pr, info))
+                .write(to: worktree.appending(path: ".oby/inputs/pr-\(pr).md"), atomically: true, encoding: .utf8)
         }
         if let number = job.issue, let issue, let info = try? JSONSerialization.jsonObject(with: issue) as? [String: Any] {
-            try Prompts.quoted("Issue", number, info).write(to: worktree.appending(path: ".oby/inputs/issue-\(number).md"), atomically: true, encoding: .utf8)
+            try vault.forAgent(Prompts.quoted("Issue", number, info))
+                .write(to: worktree.appending(path: ".oby/inputs/issue-\(number).md"), atomically: true, encoding: .utf8)
         }
         return job
     }
@@ -976,6 +1113,7 @@ nonisolated enum Prompts {
             lines.append("End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.")
         }
         lines.append("Finish with a short summary. Its first line is one sentence the user will see in the notch.")
+        lines.append(Inbox.howToAsk)
         return lines.joined(separator: "\n\n")
     }
 
@@ -1027,7 +1165,7 @@ nonisolated enum Prompts {
 
 /// The job list and the brain's recent turns, kept in SQLite in Oby's folder.
 nonisolated final class JobStore {
-    private var db: OpaquePointer?
+    private(set) var db: OpaquePointer?
 
     init(url: URL) {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -1035,6 +1173,8 @@ nonisolated final class JobStore {
         // ponytail: the job as JSON next to its id and time; add columns when something needs to query them.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS turns (created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
+        // The inbox (Engine/Inbox.swift), the same way.
+        sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
     }
 
     deinit { sqlite3_close(db) }

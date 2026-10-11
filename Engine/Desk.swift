@@ -36,6 +36,11 @@ final class Desk {
     var onFinish: (Job) -> Void = { _ in }
     /// Called with every job that's added or changes, for the runner's event stream.
     var onJobChange: (Job) -> Void = { _ in }
+    /// What only the user can answer (Engine/Inbox.swift), oldest first, done ones too: the same
+    /// need never comes back once it's done.
+    private(set) var inbox: [InboxItem] = []
+    /// Called with every inbox item that's added or changes, for the runner's event stream.
+    var onInboxChange: (InboxItem) -> Void = { _ in }
 
     private let store: JobStore
     /// The repositories the brain and the Lead may choose from; `refresh` reads them, tests set them.
@@ -47,6 +52,8 @@ final class Desk {
     /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
     private var drafts: [Draft] = []
     private var agents: [String: any AgentRun] = [:]
+    /// Agents told to stop whose own stop hasn't ended them yet (`Halt.grace`): quitting ends them too.
+    private var stopping: [ObjectIdentifier: any AgentRun] = [:]
     /// Jobs whose one turn ended: their agent is finishing and takes no more words.
     private var ending: Set<String> = []
     /// Jobs that ended done and are counting their commits and publishing.
@@ -75,6 +82,8 @@ final class Desk {
     /// Each looping job's work after a turn (its check, then the round that follows): stopping the
     /// job cancels it, which ends a check still running.
     private var afterTurns: [String: Task<Void, Never>] = [:]
+    /// Jobs failing now because every account hit its limit: their inbox item says so.
+    private var limited: Set<String> = []
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
     /// Gets a job's worktree ready, and makes its agent (nil for a tool that can't run jobs yet). Tests put in their own.
@@ -86,9 +95,10 @@ final class Desk {
     }
     /// The limits every job is held to (case 3.1). Tests put in their own.
     @ObservationIgnored var limits = JobLimits()
-    /// Runs a job's check in its worktree, ending it after `timeout` seconds. Tests put in their own.
-    @ObservationIgnored var runCheck: (_ id: String, _ command: String, _ timeout: TimeInterval) async -> Rounds.Check = { id, command, timeout in
-        await Rounds.run(command, in: Workspace.worktree(id), timeout: timeout)
+    /// Runs a job's check in its worktree with `env` (no vault secret), ending it after `timeout`
+    /// seconds. Tests put in their own.
+    @ObservationIgnored var runCheck: (_ id: String, _ command: String, _ timeout: TimeInterval, _ env: [String: String?]) async -> Rounds.Check = { id, command, timeout, env in
+        await Rounds.run(command, in: Workspace.worktree(id), timeout: timeout, env: env)
     }
     /// What a job's work does to the tests since its branch started (case 3.2): what weakens them,
     /// and other changes to existing tests. Tests put in their own.
@@ -109,6 +119,9 @@ final class Desk {
     /// secret scan, and quotes it as a file for the author's next round. Tests put in their own.
     @ObservationIgnored var postReview: (_ author: Job, _ body: String) async throws -> URL = Review.post
     @ObservationIgnored var quoteReview: (_ author: Job, _ file: String, _ text: String) throws -> Void = Review.quote
+    /// What everything on its way to an agent is checked against (Engine/Vault.swift): prompts,
+    /// messages, files, reviews and environments. Tests put in their own.
+    @ObservationIgnored var vault = Vault.shared
     /// The Lead (Engine/Lead.swift): reads the roadmap board before a turn, runs the turn on the
     /// Claude account whose home is given, and claims an issue when a job starts on it. Tests put in their own.
     @ObservationIgnored var readBoard: (_ repos: [String]) async throws -> Board = { try await Board.read(repos: $0) }
@@ -121,6 +134,16 @@ final class Desk {
         self.accounts = accounts
         self.store = store
         jobs = store.recent()
+        inbox = store.inbox()
+        // The jobs open inbox items are about, however old: answering one needs its job.
+        // A review item's One more round quotes the review, so that job comes too.
+        let asking = Set(inbox.filter(\.isOpen).map(\.job)).subtracting(jobs.map(\.id))
+        if !asking.isEmpty {
+            let all = Dictionary(store.recent(-1).map { ($0.id, $0) }) { first, _ in first }
+            let reviews = asking.compactMap { all[$0]?.review?.job }
+            let wanted = asking.union(reviews).subtracting(jobs.map(\.id))
+            jobs += all.values.filter { wanted.contains($0.id) }.sorted { $0.created > $1.created }
+        }
         // Running when Oby last quit (or crashed): it didn't finish.
         for index in jobs.indices where jobs[index].isActive {
             jobs[index].status = .interrupted
@@ -130,6 +153,8 @@ final class Desk {
         accounts.countRunning(jobs)
         // A review that was running: its author stops waiting for it.
         for job in jobs where job.reviewOf != nil && job.status == .interrupted { reviewEnded(job) }
+        // What the jobs need now, the interrupted ones too.
+        for job in jobs { syncInbox(job) }
     }
 
     var active: [Job] { jobs.filter(\.isActive) }
@@ -174,7 +199,7 @@ final class Desk {
         // The brain and the Lead think with the least busy Claude account too, so a busy one doesn't slow them.
         let thinker = AccountStore.route(accounts.accounts, agent: "claude")
         if Lead.leads(said), let thinker { return await lead(said, account: thinker) }
-        let brain = ClaudeBrain(home: thinker?.home)
+        let brain = ClaudeBrain(home: thinker?.home, vault: vault)
         var result = await Planner(adapters: [brain]).plan(said, context: brainContext)
         record(BrainTurn(said: said, by: result.by, plan: result.plan, refused: result.refused))
         var epics: [Int: Int] = [:]
@@ -225,7 +250,7 @@ final class Desk {
             checkouts[repo] = Workspace.clone(repo).path
         }
         do {
-            try Lead.writeContext(roadmap: Lead.roadmap(board, skipped: skipped, checkouts: checkouts), jobs: Lead.jobsList(jobs), to: directory)
+            try Lead.writeContext(roadmap: Lead.roadmap(board, skipped: skipped, checkouts: checkouts), jobs: Lead.jobsList(jobs), to: directory, vault: vault)
         } catch {
             record(LeadTurn(goal: goal, said: said, by: "none", refused: ["the context couldn't be written: \(error.localizedDescription)"], skipped: skipped))
             return .reply("Oby couldn't write the Lead's context: \(error.localizedDescription)")
@@ -516,9 +541,17 @@ final class Desk {
     }
 
     func stop(_ id: String) {
-        let agent = agents[id]
+        // Out before the job ends, so it's ended by its own stop, after the grace for its turn.
+        let agent = agents.removeValue(forKey: id)
         finish(id, .stopped, "Stopped by you.")
-        agent?.stop()
+        guard let agent else { return }
+        agent.stop()
+        let key = ObjectIdentifier(agent)
+        stopping[key] = agent
+        Task {
+            try? await Task.sleep(for: .seconds(Halt.grace + Halt.stopping))
+            stopping[key] = nil
+        }
     }
 
     /// The user lets go of a job that needs them (Publish, failed, interrupted): it stays as it
@@ -553,18 +586,34 @@ final class Desk {
                 throw Shell.Failure(message: job.status == .queued ? "\(job.agentName) hasn't started yet. Tell it again in a moment."
                                     : "\(job.agentName) is wrapping up. Tell it again once it's done.")
             }
+            let said = try vault.forAgent(text)
             replace(Self.heard(job, text))
             // Words between turns (while the check runs) start a turn: it gets a round timer too.
             if roundTimers[id] == nil { timeRound(id) }
-            agent.send(text)
+            agent.send(said)
         } else {
             guard let session = job.session else { throw Shell.Failure(message: "This job never started, so there's no session to pick up.") }
+            // Nothing is picked up while the vault can't be read: the user hears why.
+            _ = try vault.forAgents()
             let resumed = Self.resumed(job, text)
             replace(resumed)
+            if let author = resumed.reviewOf { reconnect(review: id, to: author) }
             asked.insert(id)
             roundMessage[id] = nil
             run(resumed, prompt: text, resume: session)
         }
+    }
+
+    /// A review that ended with no verdict runs again (Try again from the inbox, or the user's
+    /// words): it's its author's review once more, so its verdict counts when it ends
+    /// (`reviewEnded`). Not when the author has a review under way, this one's verdict already
+    /// counted, or a newer review of the author's came since.
+    private func reconnect(review id: String, to authorID: String) {
+        guard var author = job(authorID), author.reviewing == nil, author.review?.job != id,
+              jobs.filter({ $0.reviewOf == authorID }).max(by: { $0.created < $1.created })?.id == id else { return }
+        author.reviewing = id
+        author.reviewError = nil
+        replace(author)
     }
 
     /// The job with the user's words saved, and shown as its step until the agent moves on.
@@ -572,6 +621,8 @@ final class Desk {
         var job = job
         job.notes = (job.notes ?? []) + [text]
         job.step = "You: \(text)"
+        // An answer to its question, or words that take its place.
+        job.question = nil
         return job
     }
 
@@ -590,12 +641,17 @@ final class Desk {
         return job
     }
 
-    /// Oby is quitting: agents end now, and their jobs show as interrupted next time.
+    /// Oby is quitting: agents end now, and their jobs show as interrupted next time. Returns once
+    /// what they started is gone too, at most `Halt.dropping` from now.
     func quit() {
         for (id, agent) in agents {
             agent.kill()
             finish(id, .interrupted, "Oby quit while this was running.")
         }
+        // Stopped a moment ago: its stop would end it after the grace, which is past Oby's exit.
+        for agent in stopping.values { agent.kill() }
+        stopping = [:]
+        Halt.settle()
     }
 
     func job(_ id: String) -> Job? { jobs.first { $0.id == id } }
@@ -630,6 +686,14 @@ final class Desk {
 
     /// Starts the job's agent in its worktree: a new session, or the job's own picked up again.
     func run(_ job: Job, prompt: String, resume: String? = nil) {
+        // No vault secret reaches an agent, even one the user typed into the request; and when the
+        // vault can't be read, no agent starts, and the job says why.
+        let said: String
+        do {
+            said = try vault.forAgent(prompt)
+        } catch {
+            return finish(job.id, .failed, "\(job.agentName) didn't start: \(error.localizedDescription)")
+        }
         let home = accounts.state(job.account)?.account.home.map { URL(filePath: $0) }
         guard let agent = makeAgent(job, home, resume) else { return finish(job.id, .failed, "\(job.agentName) can't run jobs yet.") }
         agents[job.id] = agent
@@ -643,7 +707,7 @@ final class Desk {
         }
         do {
             // Only the job's current agent speaks for it: one that was stopped or ended may still report.
-            try agent.start(prompt: prompt) { [weak self, weak agent] event in
+            try agent.start(prompt: said) { [weak self, weak agent] event in
                 guard let self, let agent, self.agents[job.id] === agent else { return }
                 self.handle(event, job: job.id)
             }
@@ -692,6 +756,13 @@ final class Desk {
         case .turnEnded(let summary, let failed):
             roundTimers.removeValue(forKey: id)?.cancel()
             job.summaries = (job.summaries ?? []) + [summary]
+            // A question for the user (case I.1): the job waits for the answer, its agent idle, and
+            // the inbox has it. The answer comes as its next message (`message`); others keep going.
+            if !failed, let question = Inbox.question(in: summary) {
+                job.question = question
+                job.step = "Waiting for your answer"
+                return replace(job)
+            }
             replace(job)
             // One turn and no check: the job ends when the agent does, after any background work.
             guard job.loops else {
@@ -738,6 +809,7 @@ final class Desk {
             let first = accounts.accounts.filter(\.signedIn).compactMap(\.fullUntil).min()
             let soonest = first.map { " The first resets at \(Limits.clock($0))." } ?? ""
             Logger.jobs.error("job \(id, privacy: .public): \(from, privacy: .public) hit its limit, and no account has room")
+            limited.insert(id)
             return finish(id, .failed, "\(from) hit its usage limit\(when), and no other account has room.\(soonest)")
         }
         Logger.jobs.notice("job \(id, privacy: .public): \(from, privacy: .public) hit its limit\(when, privacy: .public); continuing on \(next.heading, privacy: .public)")
@@ -763,7 +835,15 @@ final class Desk {
             job.phase = .check
             job.step = "Checking: \(command)"
             replace(job)
-            var result = await runCheck(id, command, limits.testRun)
+            // The check runs the agent's code: it gets no variable that holds a vault secret, and doesn't run when the vault can't be read.
+            let env: [String: String?]
+            do {
+                env = try Agents.overrides(vault: vault)
+            } catch {
+                agent.end()
+                return finish(id, .failed, "The check didn't run: \(error.localizedDescription)")
+            }
+            var result = await runCheck(id, command, limits.testRun, env)
             // Stopped while the check ran.
             guard var latest = self.job(id), latest.isActive else { return }
             // Oby compares the tests with where the branch started too: weakening them fails the round (case 3.2).
@@ -782,6 +862,13 @@ final class Desk {
             agent.end()
             finish(id, status, text)
         case let .again(message):
+            let said: String
+            do {
+                said = try vault.forAgent(message)
+            } catch {
+                agent.end()
+                return finish(id, .failed, error.localizedDescription)
+            }
             failures[id] = check.map(Fingerprint.of)
             job.round = job.currentRound + 1
             job.phase = .work
@@ -789,7 +876,7 @@ final class Desk {
             replace(job)
             roundMessage[id] = message
             timeRound(id)
-            agent.send(message)
+            agent.send(said)
         case let .hold(limit, text):
             hold(id, limit, text)
         }
@@ -831,6 +918,9 @@ final class Desk {
     /// the reason and Publish offered.
     private func finish(_ id: String, _ status: Job.Status, _ summary: String) {
         guard var job = job(id), job.isActive else { return }
+        // Its agent ended while its question waits: the work isn't finished, so nothing is checked
+        // or published. It's interrupted, keeping its question; the answer picks its session up again.
+        if status == .done, job.question != nil { return end(id, .interrupted, summary) }
         guard status == .done, let base = job.base else { return end(id, status, summary) }
         // Already finishing: the agent's process ending after its last turn changes nothing.
         guard finishing.insert(id).inserted else { return }
@@ -901,7 +991,9 @@ final class Desk {
         job.step = ""
         job.finished = .now
         replace(job)
-        agents[id] = nil
+        // Its agent goes with it: one still finishing after its last turn (a check passed, a round
+        // limit) ends with what it started, rather than outlive its job.
+        agents.removeValue(forKey: id)?.kill()
         ranHere[id] = nil
         pickedUp.remove(id)
         ending.remove(id)
@@ -913,6 +1005,7 @@ final class Desk {
         afterTurns.removeValue(forKey: id)?.cancel()
         failures[id] = nil
         denials[id] = nil
+        limited.remove(id)
         waiting.removeAll { $0.id == id }
         // Oby reviews what was just published, and a review that ended reaches its author (Engine/Review.swift).
         if published != nil { reviewPublished(job) }
@@ -962,6 +1055,79 @@ final class Desk {
         jobs[index] = job
         if save { store.save(job) }
         onJobChange(job)
+        // A step changes nothing the user must answer.
+        if save { syncInbox(job) }
+    }
+
+    // MARK: The inbox
+
+    /// How the user settles an inbox item: an answer (one of its options, or their own words),
+    /// done without one, or later.
+    enum Settle: Equatable {
+        case answer(String)
+        case done
+        case later(Date)
+    }
+
+    /// The job's items as it is now: what it needs comes in (once: an item that's done stays done),
+    /// and what it needs no more is done by itself (it runs again, was dismissed, answered elsewhere).
+    private func syncInbox(_ job: Job) {
+        let need = Inbox.need(of: job, limited: limited.contains(job.id))
+        for index in inbox.indices where inbox[index].job == job.id && inbox[index].isOpen && inbox[index].id != need?.id {
+            inbox[index].done = .now
+            store.save(inbox[index])
+            onInboxChange(inbox[index])
+        }
+        guard let need, !inbox.contains(where: { $0.id == need.id }) else { return }
+        inbox.append(need)
+        store.save(need)
+        onInboxChange(need)
+    }
+
+    func item(_ id: String) -> InboxItem? { inbox.first { $0.id == id } }
+
+    /// The user settles an inbox item. An answer goes to its job: a question's answer as the
+    /// agent's next message; Dismiss lets the job go; Try again (or their own words) runs it
+    /// again; One more round hands the agent Oby's last review. Returns the item.
+    @discardableResult
+    func settle(_ id: String, _ how: Settle) throws -> InboxItem {
+        guard var item = item(id) else { throw Shell.Failure(message: "There's no inbox item \(id).") }
+        guard item.isOpen else { throw Shell.Failure(message: "That's done already.") }
+        switch how {
+        case .later(let date):
+            item.later = date
+        case .done:
+            item.done = .now
+        case .answer(let words):
+            let text = words.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Answer with 1 to 2,000 characters.") }
+            switch (item.kind, text) {
+            case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss): try dismiss(item.job)
+            case (.failed, Inbox.tryAgain), (.limit, Inbox.tryAgain), (.failed, Inbox.oneMoreRound): try message(item.job, Inbox.tryAgainMessage)
+            case (.review, Inbox.oneMoreRound): try message(item.job, reviewAgain(item.job))
+            default: try message(item.job, text)
+            }
+            // The job moved on, which settled the item already; the answer is what settled it.
+            item = self.item(id) ?? item
+            item.done = item.done ?? .now
+            item.answer = text
+        }
+        guard let index = inbox.firstIndex(where: { $0.id == id }) else { return item }
+        inbox[index] = item
+        store.save(item)
+        onInboxChange(item)
+        return item
+    }
+
+    /// What the agent hears for One more round, after Oby's last review: quoted in a file, as
+    /// review rounds are (Engine/Review.swift), when Oby still has it.
+    private func reviewAgain(_ id: String) -> String {
+        let plain = "Oby's last review of your pull request requested changes. Work on them, commit, and finish with a short summary."
+        guard let job = job(id), let review = job.review, let summary = self.job(review.job)?.summary,
+              let pr = Review.pullRequest(of: job) else { return plain }
+        let file = "review-\(review.round).md"
+        guard (try? quoteReview(job, file, Review.quoted(review, summary: summary, pr: pr))) != nil else { return plain }
+        return "Oby's last review of your pull request requested changes. It's quoted in .oby/inputs/\(file): work on it, commit, and finish with a short summary."
     }
 }
 
@@ -994,9 +1160,10 @@ nonisolated enum Rounds {
 
     /// Runs a check in the worktree, as Oby's agents run (in bubblewrap on Linux) but with no
     /// account, and ends it after `timeout` seconds: then it fails, saying so.
-    static func run(_ command: String, in worktree: URL, timeout: TimeInterval, boxed: Bool = Agents.bubblewrap) async -> Check {
+    /// `env` is what changes from Oby's environment: `Agents.overrides(vault:)`, so no vault secret reaches it.
+    static func run(_ command: String, in worktree: URL, timeout: TimeInterval, env: [String: String?], boxed: Bool = Agents.bubblewrap) async -> Check {
         let result = try? await Shell.run(Agents.sandboxed(["sh", "-c", command], in: worktree, own: nil, bubblewrap: boxed), in: worktree,
-                                          env: Agents.overrides, timeout: timeout)
+                                          env: env, timeout: timeout)
         var output = result.map { String(decoding: $0.out, as: UTF8.self) + $0.err } ?? "Oby couldn't run it."
         if result?.timedOut == true { output += "\n\nOby stopped it after \(JobLimits.span(timeout)), the most a test run may take." }
         return Check(command: command, passed: result?.status == 0 && result?.timedOut == false, output: String(output.suffix(4000)),

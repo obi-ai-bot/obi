@@ -70,7 +70,7 @@ struct GuardTests {
     /// Checks that fail with each of `outputs` in turn, noting the timeout they were given.
     func failing(_ outputs: [String]) {
         var left = outputs
-        desk.runCheck = { [made] _, command, timeout in
+        desk.runCheck = { [made] _, command, timeout, _ in
             made.checks.append(timeout)
             guard !left.isEmpty else { return Rounds.Check(command: command, passed: true, output: "ok") }
             return Rounds.Check(command: command, passed: false, output: left.removeFirst())
@@ -96,8 +96,10 @@ struct GuardTests {
         try await until { desk.job("round")?.isActive == false }
         try expectHeld("round", "the round ran past 0.2 seconds", agent: agent)
 
-        // One more round: telling it something runs one, and the limit is gone.
-        try desk.message("round", "One more round, please.")
+        // The inbox offers one more round, which picks the session up, and the limit is gone.
+        let item = try #require(desk.inbox.first { $0.job == "round" && $0.isOpen })
+        #expect(item.kind == .failed && item.options == [Inbox.oneMoreRound, Inbox.dismiss])
+        _ = try desk.settle(item.id, .answer(Inbox.oneMoreRound))
         let again = try #require(desk.job("round"))
         #expect(again.status == .running && again.limit == nil && again.round == 2 && again.rounds == 5)
     }
@@ -105,7 +107,7 @@ struct GuardTests {
     @Test func theRoundTimerCoversTheTurnNotTheCheck() async throws {
         desk.limits.round = 0.3
         var first = true
-        desk.runCheck = { _, command, _ in
+        desk.runCheck = { _, command, _, _ in
             // Longer than a round: the agent's turn has ended, so its timer doesn't count this.
             try? await Task.sleep(for: .milliseconds(500))
             defer { first = false }
@@ -123,7 +125,7 @@ struct GuardTests {
     @Test func aJobThatRunsPastItsCapStops() async throws {
         desk.limits.job = 0.5
         // A check slower than the cap: the cap covers checks too, unlike the round's timer.
-        desk.runCheck = { _, command, _ in
+        desk.runCheck = { _, command, _, _ in
             try? await Task.sleep(for: .seconds(10))
             return Rounds.Check(command: command, passed: false, output: "✘ Test a() failed")
         }
@@ -158,20 +160,20 @@ struct GuardTests {
     @Test func aTestRunPastItsTimeoutIsEndedAndFails() async throws {
         let started = Date.now
         // Long enough for the shell to print before it's ended, even on a busy machine.
-        let check = await Rounds.run("echo started; sleep 30", in: folder, timeout: 3, boxed: false)
+        let check = await Rounds.run("echo started; sleep 30", in: folder, timeout: 3, env: [:], boxed: false)
         #expect(Date.now.timeIntervalSince(started) < 15)
         #expect(!check.passed && !check.succeeded)
         #expect(check.output.hasPrefix("started\n"))
         #expect(check.output.hasSuffix("Oby stopped it after 3 seconds, the most a test run may take."))
-        let quick = await Rounds.run("echo fine", in: folder, timeout: 5, boxed: false)
+        let quick = await Rounds.run("echo fine", in: folder, timeout: 5, env: [:], boxed: false)
         #expect(quick.passed && quick.output == "fine\n")
     }
 
-    @Test func claudeCodeGetsMaxTurns() {
-        let launch = ClaudeAgent.launch(worktree: folder, configDirectory: nil, model: "claude-opus-5-5", resume: "s1", maxTurns: JobLimits().maxTurns)
+    @Test func claudeCodeGetsMaxTurns() throws {
+        let launch = try ClaudeAgent.launch(worktree: folder, configDirectory: nil, model: "claude-opus-5-5", resume: "s1", maxTurns: JobLimits().maxTurns)
         let at = launch.arguments.firstIndex(of: "--max-turns")
         #expect(at.map { launch.arguments[$0 + 1] } == "200")
-        #expect(!ClaudeAgent.launch(worktree: folder, configDirectory: nil, model: nil, resume: nil).arguments.contains("--max-turns"))
+        #expect(try !ClaudeAgent.launch(worktree: folder, configDirectory: nil, model: nil, resume: nil).arguments.contains("--max-turns"))
         let result: [String: Any] = ["type": "result", "subtype": "error_max_turns", "is_error": false, "num_turns": 200]
         #expect(StreamJSON.events(result) == [.maxTurns])
     }
@@ -228,8 +230,8 @@ struct GuardTests {
 
     @Test func stoppingAJobEndsItsCheck() async throws {
         var ended: Date?
-        desk.runCheck = { [folder] _, command, _ in
-            let check = await Rounds.run("sleep 30", in: folder, timeout: 60, boxed: false)
+        desk.runCheck = { [folder] _, command, _, _ in
+            let check = await Rounds.run("sleep 30", in: folder, timeout: 60, env: [:], boxed: false)
             ended = .now
             return check
         }
@@ -395,8 +397,8 @@ struct GuardTests {
 
     @Test func failingIdsComeFromAllOfTheOutput() async throws {
         let filler = String(repeating: "x", count: 5000)
-        let first = await Rounds.run("echo '✘ Test aTest() failed'; echo \(filler); exit 1", in: folder, timeout: 10, boxed: false)
-        let second = await Rounds.run("echo '✘ Test bTest() failed'; echo \(filler); exit 1", in: folder, timeout: 10, boxed: false)
+        let first = await Rounds.run("echo '✘ Test aTest() failed'; echo \(filler); exit 1", in: folder, timeout: 10, env: [:], boxed: false)
+        let second = await Rounds.run("echo '✘ Test bTest() failed'; echo \(filler); exit 1", in: folder, timeout: 10, env: [:], boxed: false)
         #expect(first.output.count == 4000 && !first.output.contains("aTest"))
         #expect(first.failing == ["aTest()"] && second.failing == ["bTest()"])
         #expect(Fingerprint.of(first) != Fingerprint.of(second))
@@ -404,7 +406,7 @@ struct GuardTests {
 
     @Test func wordsSentWhileTheCheckRunsStartATimedTurn() async throws {
         desk.limits.round = 0.3
-        desk.runCheck = { _, command, _ in
+        desk.runCheck = { _, command, _, _ in
             try? await Task.sleep(for: .seconds(3))
             return Rounds.Check(command: command, passed: true, output: "ok")
         }
@@ -453,8 +455,8 @@ struct GuardTests {
 
     @Test func aCheckForAnEarlierTurnEndsWhenTheNextTurnEnds() async throws {
         var ends: [Date] = []
-        desk.runCheck = { [folder] _, command, _ in
-            let check = await Rounds.run("sleep 30", in: folder, timeout: 60, boxed: false)
+        desk.runCheck = { [folder] _, command, _, _ in
+            let check = await Rounds.run("sleep 30", in: folder, timeout: 60, env: [:], boxed: false)
             ends.append(.now)
             return check
         }

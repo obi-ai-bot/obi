@@ -139,8 +139,11 @@ nonisolated enum Lead {
         return lines.joined(separator: "\n") + "\n"
     }
 
-    /// Writes both files where the turn reads them: `<directory>/.oby/context/`.
-    static func writeContext(roadmap: String, jobs: String, to directory: URL) throws {
+    /// Writes both files where the turn reads them: `<directory>/.oby/context/`, with the vault's
+    /// secrets taken out (a job's request or summary could hold one). Throws, writing nothing, when
+    /// the vault can't be read.
+    static func writeContext(roadmap: String, jobs: String, to directory: URL, vault: Vault = .shared) throws {
+        let roadmap = try vault.forAgent(roadmap), jobs = try vault.forAgent(jobs)
         let context = directory.appending(path: ".oby/context")
         try FileManager.default.createDirectory(at: context, withIntermediateDirectories: true)
         try roadmap.write(to: context.appending(path: "roadmap.md"), atomically: true, encoding: .utf8)
@@ -219,8 +222,12 @@ nonisolated enum Lead {
         }
         await step("assigned to you", ["gh", "issue", "edit", "\(issue)", "-R", job.repo, "--add-assignee", "@me"])
         await step("labeled status:in-progress", ["gh", "issue", "edit", "\(issue)", "-R", job.repo, "--add-label", "status:in-progress"])
-        await step("branch noted", ["gh", "issue", "comment", "\(issue)", "-R", job.repo, "--body",
-                                    "Oby is working on this on the branch `\(job.branch)` (job \(job.id))."])
+        do {
+            let note = try await claimNote(job)
+            await step("branch noted", ["gh", "issue", "comment", "\(issue)", "-R", job.repo, "--body", note])
+        } catch {
+            failed.append("branch noted failed: \(error.localizedDescription)")
+        }
         if let board, let item = board.items.first(where: { $0.repo == job.repo && $0.number == issue }) {
             await step("moved to In progress", ["gh", "project", "item-edit", "\(board.number)", "--owner", board.owner, "--url", item.url,
                                                 "--field", "Status", "--value", "In progress"])
@@ -228,6 +235,22 @@ nonisolated enum Lead {
         var line = done.isEmpty ? "Not claimed" : "Claimed: " + done.joined(separator: ", ")
         if !failed.isEmpty { line += (done.isEmpty ? ": " : "; ") + failed.joined(separator: "; ") }
         return line + "."
+    }
+
+    /// The comment that notes the job's branch on its issue, after the secret scan: the branch's
+    /// name comes from a plan. Throws, naming where, when the scan finds something or can't run.
+    static func claimNote(_ job: Job, vault: Vault = .shared) async throws -> String {
+        let note = "Oby is working on this on the branch `\(job.branch)` (job \(job.id))."
+        let findings: [Publish.Finding]
+        do {
+            findings = try await Publish.scan(texts: [("claim comment", note)], vault: vault)
+        } catch {
+            throw Shell.Failure(message: "Not posted: the secret scan couldn't run (\(error.localizedDescription)).")
+        }
+        guard findings.isEmpty else {
+            throw Shell.Failure(message: "Not posted: possible secret in " + findings.prefix(3).map(\.description).joined(separator: ", ") + ".")
+        }
+        return note
     }
 
     // MARK: The turn
@@ -507,16 +530,24 @@ nonisolated struct ClaudeLead: LeadAdapter {
     var home: String?
     /// Read-only checkouts the Lead may read besides its directory.
     var checkouts: [String] = []
+    var vault = Vault.shared
 
     var name: String { "claude \(AgentModels.name(model))" }
 
+    /// What the Lead is given: both prompts with the vault's secrets taken out, and its environment
+    /// without a variable that holds one. Throws when the vault can't be read: then the turn doesn't run.
+    func request(system: String, user: String, base: [String: String] = Shell.environment) throws -> (system: String, user: String, env: [String: String?]) {
+        let env = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": home]) { $1 }, vault: vault, base: base)
+        return (try vault.forAgent(system), try vault.forAgent(user), env.mapValues { Optional($0) })
+    }
+
     func turn(system: String, user: String, schema: Data, in directory: URL, timeout: TimeInterval) async throws -> Data {
+        let (system, user, environment) = try request(system: system, user: user)
         let argv = Agents.sandboxed(
             ["claude", "-p", "--model", model, "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob",
              "--strict-mcp-config", "--setting-sources", "", "--no-session-persistence", "--max-turns", "8",
              "--output-format", "json", "--system-prompt", system, "--json-schema", String(decoding: schema, as: UTF8.self)],
             in: nil, own: home ?? "\(Agents.home)/.claude", reading: [directory.path] + checkouts)
-        let environment = Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": home]) { $1 }).mapValues { Optional($0) }
         let result = try await Shell.run(argv, in: directory, input: Data(user.utf8), env: environment, timeout: timeout)
         // It can report success without structured_output, so the field is what counts.
         guard let reply = try? JSONSerialization.jsonObject(with: result.out) as? [String: Any],

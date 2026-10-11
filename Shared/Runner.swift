@@ -57,8 +57,12 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var reviewOf: String?
     /// Everything the runner sent out for the job, oldest first (newer runners only).
     var outgoing: [Outgoing]?
+    /// What its agent asked the user and waits for (the inbox has it), or nil. Older runners don't send it.
+    var question: Question?
 
     var isActive: Bool { status == .queued || status == .running }
+    /// Its agent asked the user something and waits for the answer: its alert stays until then.
+    var waitsForAnswer: Bool { question != nil && dismissed == nil && status != .stopped }
 
     /// The report's list of what Oby sent out for the job, or nil when nothing went out.
     var sentLines: String? {
@@ -228,6 +232,46 @@ nonisolated struct Question: Codable, Equatable, Sendable {
     var options: [String]
 }
 
+#if os(iOS) || os(watchOS)
+/// Something only the user can answer, waiting in the inbox (docs/runner-api.md). The Mac reads
+/// these into Engine's own InboxItem.
+nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
+    /// `question`, `review`, `failed` or `limit`; more may come.
+    var kind: String
+    var id: String
+    var job: String
+    var title: String
+    var text: String
+    var options: [String]
+    var created: Date
+    var done: Date?
+    var later: Date?
+    var answer: String?
+
+    var isOpen: Bool { done == nil }
+    func waiting(at now: Date = .now) -> Bool { done == nil && (later.map { $0 <= now } ?? true) }
+}
+#endif
+
+extension InboxItem {
+    /// "Failed · Mac runner notifications · waiting 3m": what kind of item, its job, how long it waited.
+    nonisolated func line(now: Date = .now) -> String {
+        // The Mac's `kind` is Engine's enum, the iPhone's a string: both read the same.
+        let label = switch "\(kind)" {
+        case "question": "Question"
+        case "review": "Out of reviews"
+        case "limit": "Out of usage"
+        default: "Failed"
+        }
+        return "\(label) · \(title) · \(Elapsed.waiting(since: created, now: now))"
+    }
+
+    /// The inbox as the apps show it: what waits now, the longest-waiting first.
+    nonisolated static func waiting(_ items: [InboxItem], now: Date = .now) -> [InboxItem] {
+        items.filter { $0.waiting(at: now) }.sorted { $0.created < $1.created }
+    }
+}
+
 /// What the brain made of the user's words.
 nonisolated enum PlanResult: Decodable, Equatable, Sendable {
     /// One draft per job, 1 to 10.
@@ -317,10 +361,15 @@ nonisolated struct StoppedJobs: Decodable, Sendable {
 
 /// One thing the runner reports while the app is open.
 nonisolated enum RunnerEvent: Equatable, Sendable {
+    /// The runner is following this app now: fetch what's there. Whatever changes meanwhile
+    /// arrives after this, so applying it over the fetched lists loses nothing.
+    case connected
     case job(Job)
     case accounts([Account])
     /// Clear done was pressed, here or on another app: jobs that finished by then are hidden.
     case cleared(Date)
+    /// An inbox item came, was answered, done or put off, here or on another app.
+    case inbox(InboxItem)
 }
 
 extension Job {
@@ -408,6 +457,8 @@ nonisolated enum NeedsYou {
 
 nonisolated struct RunnerError: LocalizedError {
     let message: String
+    /// The runner's HTTP status, when it answered with an error.
+    var status: Int? = nil
     var errorDescription: String? { message }
 }
 
@@ -440,6 +491,26 @@ nonisolated struct Runner: Sendable {
     func clear() async throws -> Date {
         let answer: ClearedAt = try await call("POST", "v1/clear")
         return answer.clearedAt
+    }
+
+    /// What waits in the inbox, put-off items too. A runner older than the inbox has none (it
+    /// doesn't know the path); any other failure throws, so the app tries again.
+    func inbox() async throws -> [InboxItem] {
+        do {
+            return try await call("GET", "v1/inbox")
+        } catch let error as RunnerError where error.status == 404 {
+            return []
+        }
+    }
+
+    /// One job, however old: the list has only the latest 50.
+    func job(_ id: String) async throws -> Job { try await call("GET", "v1/jobs/\(id)") }
+
+    /// Settles an inbox item: an answer (one of its options, or the user's words) goes to its job;
+    /// `done` lets it go without one; `later` puts it off until then. Send one of them.
+    func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws -> InboxItem {
+        struct Body: Encodable { var answer: String?; var done: Bool?; var later: Date? }
+        return try await call("POST", "v1/inbox/\(id)/answer", body: Body(answer: answer, done: done, later: later))
     }
 
     /// Tells the job's agent something. A finished job picks its session up again.
@@ -498,6 +569,8 @@ nonisolated struct Runner: Sendable {
                     request.timeoutInterval = 60
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     try Self.check(response, nil)
+                    // The runner answers once it follows this connection: from here, every change arrives.
+                    stream.yield(.connected)
                     var parser = EventParser()
                     var line = Data()
                     // Split on newlines only: summaries may hold U+2028, which `lines` would break at.
@@ -564,8 +637,9 @@ nonisolated struct Runner: Sendable {
     static func check(_ response: URLResponse, _ data: Data?) throws {
         guard let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) else { return }
         struct Problem: Decodable { var error: String }
-        if let data, let problem = try? JSONDecoder().decode(Problem.self, from: data) { throw RunnerError(message: problem.error) }
-        throw RunnerError(message: http.statusCode == 401 ? "The runner only answers its owner's Tailscale login." : "The runner answered \(http.statusCode).")
+        if let data, let problem = try? JSONDecoder().decode(Problem.self, from: data) { throw RunnerError(message: problem.error, status: http.statusCode) }
+        throw RunnerError(message: http.statusCode == 401 ? "The runner only answers its owner's Tailscale login." : "The runner answered \(http.statusCode).",
+                          status: http.statusCode)
     }
 }
 
@@ -598,6 +672,7 @@ nonisolated struct EventParser {
             case "job": return (try? Runner.decoder.decode(Job.self, from: json)).map(RunnerEvent.job)
             case "accounts": return (try? Runner.decoder.decode([Account].self, from: json)).map(RunnerEvent.accounts)
             case "clear": return (try? Runner.decoder.decode(ClearedAt.self, from: json)).map { .cleared($0.clearedAt) }
+            case "inbox": return (try? Runner.decoder.decode(InboxItem.self, from: json)).map(RunnerEvent.inbox)
             default: return nil
             }
         }

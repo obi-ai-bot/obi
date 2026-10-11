@@ -10,6 +10,8 @@ struct ObyAnimation: View {
     }
 
     let loop: Loop
+    /// Home gives the frames their own square inside its safe area.
+    var contentMode: ContentMode = .fit
 
     @State private var onScreen = false
     /// When the loop started, so a new loop plays from its first frame.
@@ -26,7 +28,7 @@ struct ObyAnimation: View {
         TimelineView(.animation(minimumInterval: 1 / Self.fps, paused: paused)) { context in
             Image(Self.frame(loop, paused ? 0 : Int(context.date.timeIntervalSince(start) * Self.fps)))
                 .resizable()
-                .scaledToFit()
+                .aspectRatio(contentMode: contentMode)
         }
         .onAppear { onScreen = true }
         .onDisappear { onScreen = false }
