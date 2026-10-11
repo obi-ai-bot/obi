@@ -302,7 +302,7 @@ final class StopAllTests {
 }
 
 /// Halt: an agent that ignores SIGTERM, and what it started, still end within Stop all's 2 seconds.
-@MainActor
+// Halt itself is nonisolated; shared main-actor fixture work must not delay its clock.
 struct HaltTests {
     @Test func anAgentThatIgnoresTermEndsWithinTwoSeconds() async throws {
         let folder = try temporaryFolder()

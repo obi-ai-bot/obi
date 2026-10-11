@@ -154,7 +154,8 @@ struct ReviewTests {
 
     @Test func aReviewWaitsForAnAccountWithRoomAndStartsWhenItsWindowResets() async throws {
         accounts.setLabel(nil, for: personal.id)
-        let resets = Date.now.addingTimeInterval(1.5)
+        // Keep the window closed while parallel tests and the author fixture finish.
+        var resets = Date.now.addingTimeInterval(300)
         accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: resets), for: work.id)
         let published = try await publishAuthor()
         let line = "Waiting for an account with room (resets \(Limits.clock(resets)))"
@@ -163,7 +164,10 @@ struct ReviewTests {
         #expect(stage?.state == .current && stage?.detail == line)
         #expect(made.agents.count == 1 && !published.needsYou && Push.notice(for: published) == nil)
 
-        // The Work account's window resets: Oby starts the review on it by itself.
+        // A usage update puts the reset near now, after the waiting assertions. The actual
+        // clock reset still wakes the review by itself; no manually supplied room or retry.
+        resets = Date.now.addingTimeInterval(0.1)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: resets), for: work.id)
         let (review, _) = try await reviewJob()
         #expect(review.account == work.id && review.agent == "codex")
         let author = try #require(desk.job("author"))
