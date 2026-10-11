@@ -1,4 +1,3 @@
-import _CryptoExtras
 import Foundation
 import Synchronization
 import Testing
@@ -33,8 +32,8 @@ struct GitHubAppTests {
             return .init(status: 201, body: Data(#"{"token":"ghs_\#(count)","expires_at":"\#(expires)"}"#.utf8))
         }
 
-        func app(key: _RSA.Signing.PrivateKey) -> GitHubApp {
-            GitHubApp(id: "5276623", sign: GitHubAppKey.signer(key), send: send, now: { [self] in clock.withLock { $0 } })
+        func app() throws -> GitHubApp {
+            GitHubApp(id: "5276623", sign: try GitHubAppKey.signer(pem: GitHubAppTests.key.pem), send: send, now: { [self] in clock.withLock { $0 } })
         }
     }
 
@@ -61,7 +60,41 @@ struct GitHubAppTests {
         }
     }
 
-    static let key = try! _RSA.Signing.PrivateKey(keySize: .bits2048)
+    /// A throwaway RSA key from openssl, made once for these tests: nothing secret is in the repository.
+    struct Key: Sendable {
+        let folder: URL
+        let pem: String
+
+        init() throws {
+            folder = try temporaryFolder()
+            try Self.openssl(["genrsa", "-out", folder.appending(path: "key.pem").path, "2048"])
+            try Self.openssl(["rsa", "-in", folder.appending(path: "key.pem").path, "-pubout", "-out", folder.appending(path: "public.pem").path])
+            pem = try String(contentsOf: folder.appending(path: "key.pem"), encoding: .utf8)
+        }
+
+        /// Whether `signature` is RS256 over `input` with this key, as openssl checks it.
+        func verifies(_ signature: Data, for input: Data) throws -> Bool {
+            let name = UUID().uuidString
+            let signed = folder.appending(path: "\(name).sig"), data = folder.appending(path: "\(name).txt")
+            try signature.write(to: signed)
+            try input.write(to: data)
+            return (try? Self.openssl(["dgst", "-sha256", "-verify", folder.appending(path: "public.pem").path, "-signature", signed.path, data.path])) != nil
+        }
+
+        @discardableResult
+        static func openssl(_ arguments: [String]) throws -> Int32 {
+            let process = Process()
+            process.executableURL = URL(filePath: "/usr/bin/env")
+            process.arguments = ["openssl"] + arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { throw Shell.Failure(message: "openssl \(arguments.first ?? ""): exit \(process.terminationStatus)") }
+            return process.terminationStatus
+        }
+    }
+    nonisolated static let key = try! Key()
 
     static func job(_ id: String = "app-151") -> Job {
         var job = Job(id: id, request: "Fix #151", agent: "claude", account: "default", repo: "deskree-inc/oby", branch: "oby/fix-151",
@@ -74,7 +107,7 @@ struct GitHubAppTests {
 
     @Test func theJWTIsRS256WithTheAppAsIssuerForNineMinutes() async throws {
         let github = GitHub()
-        let jwt = try await github.app(key: Self.key).jwt()
+        let jwt = try await github.app().jwt()
         let parts = jwt.split(separator: ".").map(String.init)
         try #require(parts.count == 3)
         func decoded(_ part: String) throws -> Data {
@@ -89,13 +122,13 @@ struct GitHubAppTests {
         #expect(claims["iss"] as? String == "5276623")
         #expect(claims["iat"] as? Int == now - 60 && claims["exp"] as? Int == now + 540)
         #expect((claims["exp"] as? Int ?? .max) - now <= 600)
-        let signature = _RSA.Signing.RSASignature(rawRepresentation: try decoded(parts[2]))
-        #expect(Self.key.publicKey.isValidSignature(signature, for: Data((parts[0] + "." + parts[1]).utf8), padding: .insecurePKCS1v1_5))
+        #expect(try Self.key.verifies(decoded(parts[2]), for: Data((parts[0] + "." + parts[1]).utf8)))
+        #expect(try !Self.key.verifies(decoded(parts[2]), for: Data((parts[0] + "." + parts[0]).utf8)))
     }
 
     @Test func tokensAreKeptUntilFiveMinutesBeforeTheyExpire() async throws {
         let github = GitHub()
-        let app = github.app(key: Self.key)
+        let app = try github.app()
         #expect(await app.token(for: "deskree-inc") == "ghs_1")
         #expect(await app.token(for: "Deskree-Inc") == "ghs_1")
         #expect(github.minted == 1 && app.works)
@@ -111,7 +144,7 @@ struct GitHubAppTests {
 
     @Test func aRefusedTokenIsMintedAgainAndTheCallRunsOnceMore() async throws {
         let github = GitHub()
-        let app = github.app(key: Self.key)
+        let app = try github.app()
         let ran = Ran { _, token in
             token == "ghs_1" ? Shell.Output(status: 1, out: Data(), err: "HTTP 401: Bad credentials (https://api.github.com/graphql)")
                              : Shell.Output(status: 0, out: Data("[]".utf8), err: "")
@@ -129,7 +162,7 @@ struct GitHubAppTests {
     @Test func withoutTheAppOrItsInstallationCallsGoAsTheOwner() async throws {
         let github = GitHub()
         let ran = Ran()
-        try await Shell.$stand.withValue(ran.stand(github.app(key: Self.key))) {
+        try await Shell.$stand.withValue(ran.stand(try github.app())) {
             _ = try await Shell.run(["gh", "issue", "list", "-R", "someone-else/repo"], as: .app)
             _ = try await Shell.run(["gh", "api", "user", "-q", ".login"], as: .app)
             _ = try await Shell.run(["gh", "issue", "edit", "1", "-R", "deskree-inc/oby", "--add-assignee", "@me"], as: .app)
@@ -142,7 +175,7 @@ struct GitHubAppTests {
         let refusing = GitHub()
         refusing.refuse.withLock { $0 = true }
         let stranded = Ran()
-        try await Shell.$stand.withValue(stranded.stand(refusing.app(key: Self.key))) {
+        try await Shell.$stand.withValue(stranded.stand(try refusing.app())) {
             _ = try await Shell.run(["gh", "pr", "view", "1", "-R", "deskree-inc/oby"], as: .app)
         }
         try await Shell.$stand.withValue(stranded.stand(nil)) {
@@ -185,7 +218,7 @@ struct GitHubAppTests {
         let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "jobs.sqlite")))
         let job = Self.job()
         let check = MacCheck.make(for: job, pr: 152, head: CheckTests.head)
-        try await Shell.$stand.withValue(ran.stand(github.app(key: Self.key))) {
+        try await Shell.$stand.withValue(ran.stand(try github.app())) {
             // Publishing: the open PR is looked up as the app, and opened as the owner.
             _ = try await Publish.pullRequest(job, base: "dev", title: "fix: #151")
             // Merging into dev, through the REST API.
@@ -244,7 +277,7 @@ struct GitHubAppTests {
         let missing = GitHubAppKey.load([GitHubApp.idVariable: "5276623", GitHubApp.keyVariable: file.path])
         #expect(missing.map { if case .failure(let failure) = $0 { failure.message.contains("no key") } else { false } } == true)
 
-        try Self.key.pemRepresentation.write(to: file, atomically: true, encoding: .utf8)
+        try Self.key.pem.write(to: file, atomically: true, encoding: .utf8)
         chmod(file.path, 0o644)
         let open = GitHubAppKey.load([GitHubApp.idVariable: "5276623", GitHubApp.keyVariable: file.path])
         #expect(open.map { if case .failure(let failure) = $0 { failure.message.contains("chmod 600") } else { false } } == true)
