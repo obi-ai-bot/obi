@@ -13,7 +13,7 @@ nonisolated struct PairingApproval: Encodable, Equatable, Sendable {
     }
 }
 
-/// What only the phone's key does (the key itself is Shared/DeviceKey.swift).
+/// What only the phone's key does (the key itself is Shared/DeviceKey.swift; two files named DeviceKey.swift can't share a target).
 extension DeviceKey {
     /// Signs a Watch's pairing: Face ID, then the runner lets that watch's key in. `publicKey` is base64.
     /// It blocks until the user answers, so call it off the main actor.
