@@ -2,8 +2,11 @@ import Foundation
 import Testing
 @testable import ObyEngine
 
-/// Limits in Swift, no-progress stops and test integrity (#64, cases 3.1 and 3.2).
+/// Limits in Swift, no-progress stops and test integrity (#64, cases 3.1 and 3.2). One test at a
+/// time: each polls the main actor while it waits, and many side by side starve the timing tests
+/// in other suites (HaltTests) on a busy machine.
 @MainActor
+@Suite(.serialized)
 struct GuardTests {
     /// An agent whose events the test sends, noting what Oby told it.
     final class Agent: AgentRun {
@@ -118,17 +121,17 @@ struct GuardTests {
     }
 
     @Test func aJobThatRunsPastItsCapStops() async throws {
-        desk.limits.job = 1
-        failing((0..<9).map { "✘ Test t\($0)() failed" })
-        let agent = try await start("cap", rounds: 10)
-        // Every round fails differently, so only the cap ends it.
-        for round in 1...3 {
-            agent.onEvent(.turnEnded(summary: "Round \(round).", failed: false))
-            try await until { agent.sent.count == round }
+        desk.limits.job = 0.5
+        // A check slower than the cap: the cap covers checks too, unlike the round's timer.
+        desk.runCheck = { _, command, _ in
+            try? await Task.sleep(for: .seconds(10))
+            return Rounds.Check(command: command, passed: false, output: "✘ Test a() failed")
         }
+        let agent = try await start("cap", rounds: 10)
+        agent.onEvent(.turnEnded(summary: "Round 1.", failed: false))
         try await until { desk.job("cap")?.isActive == false }
-        try expectHeld("cap", "the job ran past 1 second", agent: agent)
-        #expect(desk.job("cap")?.summary.hasSuffix("Round 3.") == true)
+        try expectHeld("cap", "the job ran past 0.5 seconds", agent: agent)
+        #expect(desk.job("cap")?.summary.hasSuffix("Round 1.") == true)
     }
 
     @Test func outOfRoundsIsALimitToo() async throws {
