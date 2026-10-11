@@ -318,18 +318,20 @@ struct HaltTests {
         // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt. The 2 seconds are the
         // grace plus the time Halt takes, measured on a thread of its own: on a loaded machine a
         // sleep or a poll on the cooperative pool can oversleep by seconds, and that isn't Halt's.
+        // That thread gives up after 5 seconds, so a Halt that fails fails the test rather than hang it.
         let leads = getpgid(process.processIdentifier) == process.processIdentifier
         try await Task.sleep(for: .seconds(Halt.grace))
         let start = ContinuousClock.now
         Halt.end(process)
-        let ended = await withCheckedContinuation { (done: CheckedContinuation<ContinuousClock.Instant, Never>) in
+        let ended = await withCheckedContinuation { (done: CheckedContinuation<ContinuousClock.Instant?, Never>) in
             DispatchQueue.global().async {
-                process.waitUntilExit()
-                done.resume(returning: ContinuousClock.now)
+                for _ in 0..<500 where process.isRunning { usleep(10_000) }
+                done.resume(returning: process.isRunning ? nil : ContinuousClock.now)
             }
         }
         #expect(!process.isRunning)
-        #expect(ended - start < .seconds(2 - Halt.grace))
+        #expect(ended.map { $0 - start < .seconds(2 - Halt.grace) } == true)
+        if process.isRunning { kill(-process.processIdentifier, SIGKILL) }
         // What it started ends too, when it leads its own process group.
         if leads {
             for _ in 0..<100 where kill(sleeper, 0) == 0 { try await Task.sleep(for: .milliseconds(10)) }

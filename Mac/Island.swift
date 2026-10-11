@@ -535,7 +535,9 @@ private struct OpenIsland: View {
             }
             .frame(minHeight: 92, alignment: .top)
 
-            if threaded, selected == nil {
+            // With a job's screen open the thread steps aside, unless Oby is thinking: then its
+            // bubble and × stay in sight.
+            if threaded, selected == nil || thinking {
                 ConversationThread(desk: desk, speaker: model.speaker, onCancel: { desk.cancel() })
             }
 
@@ -636,7 +638,7 @@ private struct OpenIsland: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
         }
-        .frame(height: min(contentHeight, threaded && selected == nil ? Self.maxHeightWithThread : Self.maxHeight))
+        .frame(height: min(contentHeight, threaded && (selected == nil || thinking) ? Self.maxHeightWithThread : Self.maxHeight))
     }
 
     /// The jobs under their groups' headings, as Home shows them on the iPhone.
