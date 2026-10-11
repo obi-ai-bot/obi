@@ -1,7 +1,5 @@
-import AVFoundation
 import Observation
 import OSLog
-import Speech
 import UIKit
 import UserNotifications
 import WatchConnectivity
@@ -18,6 +16,9 @@ final class WatchRelay: NSObject {
     static let shared = WatchRelay()
 
     private var phone: Phone?
+    private var liveVoice: PhoneSpeech?
+    private var preparingVoice: String?
+    private var planning: [String: Task<Void, Never>] = [:]
     private var session: WCSession? { WCSession.isSupported() ? WCSession.default : nil }
 
     /// Called once, when the app launches, so the session is up before the watch's first message.
@@ -141,17 +142,55 @@ final class WatchRelay: NSObject {
                 return [WatchWire.context: try Self.fit(context, clearedAt: clearedAt)]
             case .voice:
                 guard let audio = message[WatchWire.audio] as? Data else { return bad }
-                let said = try await Self.transcribe(audio)
+                let said = try await PhoneSpeech.transcribe(audio, context: PhoneSpeech.context(repos: phone.jobs.map(\.repo)))
                 guard !said.isEmpty else { return [WatchWire.error: "Oby didn't catch that."] }
-                Task { await self.inBackground("plan") { await self.plan(said, answer: nil, request: request) } }
+                startPlan(said, answer: nil, request: request)
                 return [WatchWire.text: said]
+            case .voiceStart:
+                guard !request.isEmpty, let rate = message[WatchWire.sampleRate] as? Double,
+                      rate == WatchWire.voiceSampleRate else { return bad }
+                liveVoice?.cancel()
+                liveVoice = nil
+                preparingVoice = request
+                defer { if preparingVoice == request { preparingVoice = nil } }
+                let live = try await PhoneSpeech.make(request: request, sampleRate: rate, context: PhoneSpeech.context(repos: phone.jobs.map(\.repo))) { [weak self] text in
+                    // Live words have no meaning after this hold: never queue them.
+                    guard let self, self.liveVoice?.request == request,
+                          let session = self.session, session.isReachable else { return }
+                    session.sendMessage([WatchWire.kind: WatchWire.Kind.transcript.rawValue,
+                                         WatchWire.request: request, WatchWire.text: text], replyHandler: nil, errorHandler: nil)
+                }
+                guard preparingVoice == request else { live.cancel(); return bad }
+                liveVoice = live
+                return [WatchWire.ok: true]
+            case .voiceChunk:
+                guard let live = liveVoice, live.request == request,
+                      let sequence = message[WatchWire.sequence] as? Int,
+                      let audio = message[WatchWire.audio] as? Data else { return bad }
+                do { try live.append(audio, sequence: sequence) }
+                catch { live.cancel(); liveVoice = nil; throw error }
+                return [WatchWire.ok: true]
+            case .voiceEnd:
+                guard let live = liveVoice, live.request == request,
+                      let sequence = message[WatchWire.sequence] as? Int else { return bad }
+                defer { if liveVoice === live { liveVoice = nil } }
+                let said = try await live.finish(sequence: sequence)
+                guard liveVoice === live, !live.cancelled else { return bad }
+                guard !said.isEmpty else { return [WatchWire.error: "Oby didn't catch that."] }
+                startPlan(said, answer: nil, request: request)
+                return [WatchWire.text: said]
+            case .voiceCancel:
+                if preparingVoice == request { preparingVoice = nil }
+                if liveVoice?.request == request { liveVoice?.cancel(); liveVoice = nil }
+                planning.removeValue(forKey: request)?.cancel()
+                return [WatchWire.ok: true]
             case .plan:
                 guard let said = message[WatchWire.said] as? String else { return bad }
                 var answer: (question: String, option: String)?
                 if let question = message[WatchWire.question] as? String, let option = message[WatchWire.option] as? String {
                     answer = (question, option)
                 }
-                Task { await self.inBackground("plan") { await self.plan(said, answer: answer, request: request) } }
+                startPlan(said, answer: answer, request: request)
                 return [WatchWire.ok: true]
             case .dispatch:
                 guard let data = message[WatchWire.draft] as? Data else { return bad }
@@ -177,11 +216,19 @@ final class WatchRelay: NSObject {
                 guard let id = message[WatchWire.job] as? String, let action = message[WatchWire.action] as? String else { return bad }
                 Task { await self.inBackground("publish") { await self.publish(id, action: action) } }
                 return [WatchWire.ok: true]
-            case .planned, .published:
+            case .transcript, .planned, .published:
                 return bad
             }
         } catch {
             return [WatchWire.error: error.localizedDescription]
+        }
+    }
+
+    private func startPlan(_ said: String, answer: (question: String, option: String)?, request: String) {
+        planning[request]?.cancel()
+        planning[request] = Task {
+            defer { planning[request] = nil }
+            await inBackground("plan") { await plan(said, answer: answer, request: request) }
         }
     }
 
@@ -195,6 +242,7 @@ final class WatchRelay: NSObject {
         } catch {
             message[WatchWire.error] = error.localizedDescription
         }
+        guard !Task.isCancelled else { return }
         send(message)
     }
 
@@ -255,37 +303,6 @@ final class WatchRelay: NSObject {
         session.sendMessage(message, replyHandler: nil) { _ in session.transferUserInfo(message) }
     }
 
-    // MARK: Spoken on the watch, written here
-
-    /// SpeechAnalyzer on device, in the phone's language. The first time, the speech model has to
-    /// come down: that starts here, and the watch is told to try again.
-    nonisolated static func transcribe(_ audio: Data) async throws -> String {
-        let file = FileManager.default.temporaryDirectory.appending(path: "watch-\(UUID().uuidString).m4a")
-        try audio.write(to: file)
-        defer { try? FileManager.default.removeItem(at: file) }
-        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: .current) else {
-            throw RunnerError(message: "Your iPhone can't write down \(Locale.current.localizedString(forIdentifier: Locale.current.identifier) ?? "this language") yet.")
-        }
-        let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
-        if await AssetInventory.status(forModules: [transcriber]) != .installed {
-            if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-                Task { @MainActor in
-                    await WatchRelay.shared.inBackground("speech model") { try? await request.downloadAndInstall() }
-                }
-            }
-            throw RunnerError(message: "Your iPhone is getting the speech model. Try again in a minute.")
-        }
-        let analyzer = SpeechAnalyzer(modules: [transcriber])
-        let recording = try AVAudioFile(forReading: file)
-        async let text = try transcriber.results.reduce(into: AttributedString()) { $0 += $1.text }
-        if let last = try await analyzer.analyzeSequence(from: recording) {
-            try await analyzer.finalizeAndFinish(through: last)
-        } else {
-            await analyzer.cancelAndFinishNow()
-        }
-        let written = try await text
-        return String(written.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 }
 
 // The session calls back on its own queue; everything hops to the main actor.

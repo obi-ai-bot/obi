@@ -155,6 +155,27 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         return report
     }
 
+    /// The steps a passing check must report, each passed: every command the Mac runs.
+    static let requiredSteps = commands(cache: URL(filePath: "/")).map(\.name)
+
+    /// A report as the runner counts it (`trimmed`, then): it passed only with every required step
+    /// passed and no failing test named. A pass that leaves out a step, or a failure that names
+    /// nothing that failed, says nothing about the code: the Mac's report is the problem.
+    static func validated(_ report: Report) -> Report {
+        var report = trimmed(report)
+        guard report.problem == nil else { return report }
+        if !report.failures.isEmpty { report.passed = false }
+        let missing = requiredSteps.filter { name in !report.steps.contains { $0.name == name } }
+        if report.passed, !missing.isEmpty || !requiredSteps.allSatisfy({ name in report.steps.contains { $0.name == name && $0.passed } }) {
+            report.passed = false
+            report.problem = "The Mac's report doesn't show " + (missing.isEmpty ? requiredSteps : missing).joined(separator: ", ") + " passing."
+        }
+        if !report.passed, report.failures.isEmpty, report.problem == nil, !report.steps.contains(where: { !$0.passed }) {
+            report.problem = "The Mac reported a failure without saying what failed."
+        }
+        return report
+    }
+
     private static func one(_ text: String, _ limit: Int) -> String {
         String((text.split(separator: "\n").first.map(String.init) ?? "").trimmingCharacters(in: .whitespaces).prefix(limit))
     }
@@ -388,6 +409,17 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// hears about everything that fails), then the worktree goes. The commands get no GitHub login
     /// and no variable that holds a vault secret, as a job's check doesn't. Off the main actor: the
     /// builds print megabytes.
+    /// A throwaway `OBY_HOME` for a check's commands, outside Oby's own folder.
+    static func disposableHome(_ check: MacCheck) -> URL {
+        FileManager.default.temporaryDirectory.appending(path: "oby-check-home-\(check.id)")
+    }
+
+    /// The variables that point every Oby a check starts at `home`: `swift test` and xcodebuild read
+    /// `OBY_HOME`; xcodebuild hands `TEST_RUNNER_`-prefixed ones to the test host, without the prefix.
+    static func home(_ home: URL) -> [String: String?] {
+        ["OBY_HOME": home.path, "TEST_RUNNER_OBY_HOME": home.path]
+    }
+
     @concurrent static func run(_ check: MacCheck, commands: [Command]? = nil) async -> Report {
         let worktree: URL
         do {
@@ -396,7 +428,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             return Report(passed: false, steps: [Step(name: "Check out the pull request", passed: false, seconds: 0)], failures: [],
                           problem: "Couldn't check out the pull request: \(error.localizedDescription)")
         }
-        let env: [String: String?]
+        var env: [String: String?]
         do {
             env = try Agents.overrides()
         } catch {
@@ -404,6 +436,11 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             return Report(passed: false, steps: [Step(name: "Read the vault", passed: false, seconds: 0)], failures: [],
                           problem: "Couldn't read the vault: \(error.localizedDescription)")
         }
+        // Oby's own data stays out of reach: a MacTests host is an Oby too, and opens oby.sqlite at launch.
+        let home = disposableHome(check)
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        env.merge(Self.home(home)) { $1 }
         var steps: [Step] = [], failures: [String] = [], logs: [String] = [], problems: [String] = []
         for command in commands ?? Self.commands(cache: Workspace.root.appending(path: "checks/cache")) {
             let start = Date.now
@@ -446,7 +483,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
 
     /// Runs one step to its end or its timeout, with what it prints going to a file, not a pipe: a
     /// process it left behind can't keep Oby waiting for the end of its output. At the timeout,
-    /// the step's whole process group ends (`Halt.end`: TERM, then KILL), and Oby stops waiting a
+    /// the step's whole process group ends (`ProcessGroup.end`: TERM, then KILL), and Oby stops waiting a
     /// few seconds later whatever is left.
     @concurrent static func execute(_ arguments: [String], in directory: URL, env: [String: String?], timeout: TimeInterval) async -> (status: Int32, output: String, timedOut: Bool) {
         let log = FileManager.default.temporaryDirectory.appending(path: "oby-check-\(UUID().uuidString).log")
@@ -481,15 +518,17 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         let timedOut = await withCheckedContinuation { (done: CheckedContinuation<Bool, Never>) in
             ending.done = done
             process.terminationHandler = { _ in ending.finish() }
-            do { try process.run() } catch { return ending.finish() }
+            // In a process group of its own: what it starts ends with it (Engine/Jobs.swift).
+            let group: ProcessGroup
+            do { group = try ProcessGroup.run(process) } catch { return ending.finish() }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
                 guard process.isRunning else { return }
                 ending.lock.lock()
                 ending.timedOut = true
                 ending.lock.unlock()
-                Halt.end(process)
+                group.end(after: Halt.dropping)
                 // A process that can't be ended doesn't keep the Mac busy for good.
-                DispatchQueue.global().asyncAfter(deadline: .now() + 5) { ending.finish() }
+                DispatchQueue.global().asyncAfter(deadline: .now() + Halt.dropping + 5) { ending.finish() }
             }
         }
         let status = process.isRunning ? -1 : process.terminationStatus
@@ -591,8 +630,11 @@ extension Desk {
     @discardableResult
     func macCheckEnded(_ id: String, _ report: MacCheck.Report, now: Date = .now) throws -> MacCheck {
         guard var author = jobs.first(where: { $0.macCheck?.id == id }), var check = author.macCheck else { throw MacCheck.Unknown() }
-        guard check.state == .running || check.state == .queued else { throw Shell.Failure(message: "That check has its result already.") }
-        let report = MacCheck.trimmed(report)
+        // Only a check a Mac took (`GET /v1/checks/next`) takes a result.
+        guard check.state == .running else {
+            throw Shell.Failure(message: check.state == .queued ? "No Mac has taken that check." : "That check has its result already.")
+        }
+        let report = MacCheck.validated(report)
         check.state = report.problem != nil ? .error : report.passed ? .passed : .failed
         check.finished = now
         check.steps = report.steps
@@ -637,14 +679,15 @@ extension Desk {
     /// After a restart, and every time the desk refreshes: a passed check whose job wasn't merged
     /// is finished again, when nothing was tried yet (the runner stopped while it posted or merged)
     /// or when the last try failed on something that may pass now (`gh`, the network, the scan
-    /// not running), `MacCheck.maxTries` times at most. A failed check whose results weren't posted
-    /// yet goes on to its comment and the author's round.
+    /// not running), `MacCheck.maxTries` times at most. A failed check whose round for the author
+    /// never started goes on to its comment, when it has none, and the round.
     func resumeChecks() {
         for job in jobs where job.status == .done && job.dismissed == nil && (job.pullRequest?.state ?? .open) == .open {
             guard let check = job.macCheck, check.head == job.pushedHead, !finishingChecks.contains(job.id) else { continue }
-            let unposted = check.comment == nil && check.postError == nil
             let again = job.mergeError == nil || check.transient == true && (check.tries ?? 0) < MacCheck.maxTries
-            guard check.state == .passed && again || check.state == .failed && unposted && job.mergeError == nil else { continue }
+            // A failed check whose round never started (posted or not when the runner stopped), and that has rounds left.
+            let handOff = check.handedOff != true && job.checkStop == nil && job.mergeError == nil
+            guard check.state == .passed && again || check.state == .failed && handOff else { continue }
             Logger.jobs.notice("job \(job.id, privacy: .public): finishing Mac check \(check.id, privacy: .public) again")
             Task { await finishCheck(job.id, log: nil) }
         }

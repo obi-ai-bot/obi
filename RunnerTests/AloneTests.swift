@@ -154,6 +154,9 @@ let bubblewrapRuns: Bool = {
     return process.terminationStatus == 0
 }()
 
+/// Inside a box bubblewrap made (a job's own `swift test` on the runner), its pid 1 is bwrap.
+let insideBubblewrap = (try? String(contentsOfFile: "/proc/1/comm", encoding: .utf8))?.hasPrefix("bwrap") == true
+
 struct SecretFenceTests {
     /// A job on the runner tries to read gh's login and the APNs key, and gets nothing (case 2.2).
     @Test(.enabled(if: bubblewrapRuns))

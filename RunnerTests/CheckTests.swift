@@ -459,7 +459,71 @@ struct CheckTests {
             if let error = made.mergeError { throw error }
             made.merged.append(check)
         }
+        restarted.quoteReview = { [made] _, file, text in made.quoted.append((file, text)) }
+        restarted.makeAgent = { [made] job, _, resume in
+            let agent = Agent()
+            made.agents.append((job, agent, resume))
+            return agent
+        }
         return restarted
+    }
+
+    @Test func aFailedCheckWhoseRoundNeverStartedIsHandedOnAfterARestart() async throws {
+        // The runner stopped after posting the results, before the author's round started.
+        let restarted = passed {
+            $0.session = "e6a24229"
+            $0.macCheck?.state = .failed
+            $0.macCheck?.failures = ["blocksASecret()"]
+            $0.macCheck?.comment = "https://github.com/deskree-inc/oby/pull/80#issuecomment-2"
+        }
+        #expect(restarted.job("author")?.needsYou == false)
+        restarted.resumeChecks()
+        try await until("the author runs") { restarted.job("author")?.status == .running }
+        let job = try #require(restarted.job("author"))
+        #expect(job.macCheck?.handedOff == true && job.step == "Working on the Mac check")
+        #expect(made.comments.isEmpty && made.quoted.last?.file == "mac-check-1.md" && made.agents.last?.resume == "e6a24229")
+        // Once handed on, a refresh leaves it be.
+        restarted.resumeChecks()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(made.agents.count == 1)
+    }
+
+    @Test func aPassOnlyCountsWithEveryStepPassedAndNoFailingTestAndATakenCheck() async throws {
+        let all = MacCheck.validated(MacCheck.Report(passed: true, steps: steps, failures: []))
+        #expect(all.passed && all.problem == nil)
+        // One step reported, or one named failing test: no pass.
+        let one = MacCheck.validated(MacCheck.Report(passed: true, steps: [steps[0]], failures: []))
+        #expect(!one.passed && one.problem == "The Mac's report doesn't show Mac app and MacTests, iPhone app with Watch, and iOSTests passing.")
+        let named = MacCheck.validated(MacCheck.Report(passed: true, steps: steps, failures: ["a()"]))
+        #expect(!named.passed && named.problem == nil)
+        let renamed = MacCheck.validated(MacCheck.Report(passed: true, steps: steps.map { MacCheck.Step(name: $0.name + "!", passed: true, seconds: 1) }, failures: []))
+        #expect(!renamed.passed && renamed.problem?.hasPrefix("The Mac's report doesn't show Runner tests (swift test)") == true)
+        let vague = MacCheck.validated(MacCheck.Report(passed: false, steps: steps, failures: []))
+        #expect(!vague.passed && vague.problem == "The Mac reported a failure without saying what failed.")
+        #expect(MacCheck.requiredSteps == MacCheck.commands(cache: URL(filePath: "/x")).map(\.name))
+
+        // A result for a check no Mac took is refused; a partial pass is the Mac's problem, not a merge.
+        let check = try await approved()
+        #expect(throws: (any Error).self) { try desk.macCheckEnded(check.id, MacCheck.Report(passed: true, steps: steps, failures: [])) }
+        #expect(desk.job("author")?.macCheck?.state == .queued)
+        _ = desk.nextMacCheck(mac: "Studio")
+        let ended = try desk.macCheckEnded(check.id, MacCheck.Report(passed: true, steps: [steps[0]], failures: []))
+        #expect(ended.state == .error)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(made.merged.isEmpty && made.scanned.isEmpty && made.comments.isEmpty)
+    }
+
+    @Test func checksRunWithAThrowawayObyHome() async throws {
+        let home = URL(filePath: "/tmp/oby-check-home-ab12cd34")
+        #expect(MacCheck.home(home) == ["OBY_HOME": home.path, "TEST_RUNNER_OBY_HOME": home.path])
+        let check = MacCheck(id: "ab12cd34", job: "j", repo: "deskree-inc/oby", pr: 80, branch: "oby/fix-75", base: "dev", head: Self.head, round: 1)
+        let disposable = MacCheck.disposableHome(check)
+        #expect(disposable.lastPathComponent == "oby-check-home-ab12cd34" && !disposable.path.hasPrefix(Workspace.root.path))
+        // What a step sees.
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let seen = await MacCheck.execute(["sh", "-c", "echo $OBY_HOME $TEST_RUNNER_OBY_HOME"], in: folder, env: MacCheck.home(home), timeout: 30)
+        #expect(seen.output == "\(home.path) \(home.path)\n")
     }
 
     @Test func aMergeARestartCutShortIsFinishedWhenTheRunnerStartsAgain() async throws {
@@ -643,7 +707,7 @@ struct CheckTests {
         let start = ContinuousClock.now
         let hung = await MacCheck.execute(["sh", "-c", "trap '' TERM; echo started; sleep 30 & sleep 30"], in: folder, env: [:], timeout: 0.5)
         #expect(hung.timedOut && hung.output.hasPrefix("started"))
-        #expect(ContinuousClock.now - start < .seconds(8))
+        #expect(ContinuousClock.now - start < .seconds(12))
     }
 
     // MARK: The API

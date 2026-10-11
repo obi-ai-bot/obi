@@ -512,7 +512,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, macCheck, mergeError }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError }
 
     private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou }
 
@@ -555,6 +555,8 @@ struct JobJSON: Encodable {
         if job.lead == nil { try nulls.encodeNil(forKey: .lead) }
         if job.claim == nil { try nulls.encodeNil(forKey: .claim) }
         if job.question == nil { try nulls.encodeNil(forKey: .question) }
+        if job.limit == nil { try nulls.encodeNil(forKey: .limit) }
+        if job.startCommit == nil { try nulls.encodeNil(forKey: .startCommit) }
         if job.macCheck == nil { try nulls.encodeNil(forKey: .macCheck) }
         if job.mergeError == nil { try nulls.encodeNil(forKey: .mergeError) }
         // What went out is always a list: empty before anything did.

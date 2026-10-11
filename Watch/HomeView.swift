@@ -1,14 +1,13 @@
 import SwiftUI
 
-/// Oby, edge to edge, and the microphone. Oby's pose is the status: waving while something needs
-/// you (with the count on its corner), busy while agents work, calm otherwise. Tapping Oby opens
-/// the jobs; holding the microphone talks to it.
+/// Home stays inside the navigation safe area (including the watch's clock). The mic has its
+/// own row, so neither Oby's frames nor the needs-you dot can cover it.
 struct HomeView: View {
     @Environment(Watch.self) private var watch
-    /// The screens open, so a notification can open its job.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var locked = false
+    @State private var listening = false
     @State private var path: [Screen] = []
-    /// The talk's sheet is up: sending, thinking, the plan, a question or a reply.
-    @State private var talking = false
 
     enum Screen: Hashable {
         case jobs
@@ -17,78 +16,72 @@ struct HomeView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            ZStack(alignment: .bottom) {
-                Button { path.append(.jobs) } label: {
-                    // The whole screen, whatever its shape: Oby fills it and the overflow is cut.
-                    Color.clear
-                        .overlay {
-                            ObyAnimation(loop: loop, contentMode: .fill)
-                                .overlay { GeometryReader { frame in badge.position(x: frame.size.width * Self.corner.x, y: frame.size.height * Self.corner.y) } }
-                        }
-                        .clipped()
-                        .contentShape(Rectangle())
+            GeometryReader { geometry in
+                // GeometryReader's proposal already excludes the navigation safe areas. The
+                // frames have transparent margins: ~2/3 of their width is Oby's body.
+                let width = geometry.size.width
+                let height = geometry.size.height
+                let mic = min(52, max(44, height * 0.25))
+                let quiet = watch.talk == .none
+                // Idle/needs frames have 58+ empty rows above Oby; trim 32% of the
+                // square there. Working keeps its dots. Both give the body ~half the width.
+                let trim: CGFloat = loop == .working ? 0 : 0.32
+                let fraction: CGFloat = loop == .working ? (quiet ? 0.64 : 0.38) : (quiet ? 0.76 : 0.44)
+                let space = max(0, min(height * (quiet ? 0.68 : 0.30), height - mic - 12 - (quiet ? 18 : 44)))
+                let side = min(width * fraction, space / (1 - trim))
+                VStack(spacing: 6) {
+                    Button { watch.leaveHome(); path.append(.jobs) } label: {
+                        ObyAnimation(loop: loop)
+                            .frame(width: side, height: side)
+                            .offset(y: -side * trim / 2)
+                            .frame(width: side, height: side * (1 - trim))
+                            .clipped()
+                            .overlay(alignment: .topLeading) {
+                                if !watch.needing.isEmpty {
+                                    Circle().fill(.orange).frame(width: 10, height: 10)
+                                        .position(x: side * 0.82, y: side * (0.44 - trim))
+                                        .accessibilityHidden(true)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Oby")
+                    .accessibilityValue(watch.loaded ? watch.line : "")
+                    .accessibilityHint("Shows the jobs")
+                    if watch.talk != .none {
+                        TalkView(locked: locked, listening: listening).frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .transition(.opacity)
+                    } else {
+                        Spacer(minLength: 0)
+                    }
+                    if quiet {
+                        Text("Hold to talk").font(.caption2).foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                    }
+                    TalkButton(size: mic, locked: $locked, listening: $listening)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Oby")
-                .accessibilityValue(watch.loaded ? watch.line : "")
-                .accessibilityHint("Shows the jobs")
-                .ignoresSafeArea()
-                TalkButton(talking: $talking)
+                .frame(width: width, height: height)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: watch.talk == .none)
             }
+            .padding(.vertical, 4)
             .navigationDestination(for: Screen.self) { screen in
                 switch screen {
                 case .jobs: JobListScreen()
                 case .job(let id): JobScreen(id: id)
                 }
             }
-            .sheet(isPresented: $talking) { TalkView() }
-            .onChange(of: watch.talk) {
-                // The plan (or what stands for it) comes up by itself, and goes once it's dispatched.
-                switch watch.talk {
-                case .none: talking = false
-                case .recording: break
-                default: talking = true
-                }
-            }
-            .onChange(of: talking) {
-                // Closed: the ask is dropped, unless it waits for the phone to come back in reach.
-                if !talking, !isQueued { watch.cancel() }
-            }
             .onChange(of: watch.opening, initial: true) {
                 guard let id = watch.opening else { return }
                 watch.opening = nil
-                // Dropped before the microphone leaves the screen, so a recording under way isn't
-                // sent on the release that follows. A request waiting for the phone stays.
-                if !isQueued { watch.cancel() }
-                talking = false
+                // Stop a hold before its release can send it. Navigation keeps replies,
+                // plans and requests queued for the phone; it isn't a dismissal.
+                watch.leaveHome()
                 path = [.job(id)]
             }
         }
     }
 
-    private var isQueued: Bool {
-        if case .queued = watch.talk { return true }
-        return false
-    }
-
-    /// Oby's top-right corner in the needs frames, as a fraction of the frame: Oby sits low in
-    /// them (rows 68 to 155 of 160, the busy dots of `working` above), at columns 27 to 133.
-    private static let corner = CGPoint(x: 0.82, y: 0.44)
-
-    /// The count of what needs you, on Oby's corner. VoiceOver reads it in Oby's value.
-    @ViewBuilder private var badge: some View {
-        if !watch.needing.isEmpty {
-            Text("\(watch.needing.count)")
-                .font(.caption2.weight(.bold).monospacedDigit())
-                .foregroundStyle(.white)
-                .frame(minWidth: 20, minHeight: 20)
-                .background(.orange, in: Capsule())
-                .accessibilityHidden(true)
-        }
-    }
-
-    /// Waving while something needs you, busy while agents work, calm otherwise (and before the
-    /// iPhone has sent anything).
     private var loop: ObyAnimation.Loop {
         if !watch.needing.isEmpty { return .needs }
         return watch.working.isEmpty ? .idle : .working
