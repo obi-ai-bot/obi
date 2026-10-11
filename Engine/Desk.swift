@@ -1009,9 +1009,10 @@ final class Desk {
             job.step = "Checking: \(command)"
             replace(job)
             // The check runs the agent's code: it gets no variable that holds a vault secret, and doesn't run when the vault can't be read.
+            // It finds `oby-check` as the agent did (Engine/AppleChecks.swift).
             let env: [String: String?]
             do {
-                env = try Agents.overrides(vault: vault)
+                env = try Agents.overrides(vault: vault).merging(AppleCheck.environment(worktree: Workspace.worktree(id))) { $1 }
             } catch {
                 agent.end()
                 return finish(id, .failed, "The check didn't run: \(error.localizedDescription)")
