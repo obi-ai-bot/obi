@@ -455,6 +455,33 @@ struct IssueSyncTests {
         #expect(fake.notes.isEmpty)
     }
 
+    @Test func issueOneDoesNotDeduplicateAgainstTwelveOrThirteen() async throws {
+        let (desk, fake, original) = try fixture()
+        var job = original
+        job.id = "issue-one"
+        job.issue = 1
+        job.branch = "oby/build-1"
+        fake.number = 1
+        let outgoing = [12, 13].map { number in
+            Outgoing(action: .init(rawValue: "issueClaim"), repo: job.repo, id: "https://github.com/\(job.repo)/issues/\(number) (issueClaim)")
+        }
+        let entries = try JSONSerialization.jsonObject(with: JSONEncoder().encode(outgoing))
+        try JSONSerialization.data(withJSONObject: ["outgoing": entries]).write(to: desk.issueSync.auditURL)
+        await send(job, to: desk)
+        #expect(IssueSync.claimant(fake.body) == "issue-one")
+        #expect(fake.labels.contains("status:in-progress") && fake.column == "In progress")
+        #expect(desk.issueJobs.first { $0.id == "issue-one" }?.outgoing?.first?.id == "https://github.com/\(job.repo)/issues/1 (issueClaim)")
+        let edits = fake.mutations.count
+        let restarted = IssueSync(desk: desk, store: desk.issueSync.store)
+        restarted.enabled = true
+        restarted.auditURL = desk.issueSync.auditURL
+        restarted.gh = fake.run
+        restarted.observe(job)
+        await restarted.drain()
+        #expect(fake.mutations.count == edits)
+        #expect(fake.notes.isEmpty && !fake.calls.contains { $0.prefix(2) == ["issue", "comment"] })
+    }
+
     @Test func runnerAuditPreservesWorkOwnedByTheMacDesk() async throws {
         let (mac, fake, macJob) = try fixture()
         await send(macJob, to: mac)
