@@ -221,7 +221,7 @@ struct GitHubAppTests {
         let check = MacCheck.make(for: job, pr: 152, head: CheckTests.head)
         try await Shell.$stand.withValue(ran.stand(try github.app())) {
             // Publishing: the open PR is looked up as the app, and opened as the owner.
-            _ = try await Publish.pullRequest(job, base: "dev", title: "fix: #151")
+            _ = try await Publish.pullRequest(job, base: "dev", title: "fix: #151", closes: true)
             // Merging into dev, through the REST API.
             try await MacCheck.merge(job, check)
             // Reviews and check results.
