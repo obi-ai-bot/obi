@@ -208,13 +208,20 @@ nonisolated struct Review: Codable, Equatable, Sendable {
 
     /// Keeps `text` as `file` until review job `id`'s worktree is ready: Workspace.prepare copies a
     /// job's attachments into its .oby/inputs, with the vault's secrets taken out. Returns its path.
+    /// `forget` takes it away when the review ends.
     static func keep(_ text: String, file: String, for id: String) throws -> String {
-        let folder = FileManager.default.temporaryDirectory.appending(path: "oby-review-\(id)")
+        let folder = kept(id)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let url = folder.appending(path: file)
         try text.write(to: url, atomically: true, encoding: .utf8)
         return url.path
     }
+
+    /// Where `keep` keeps review job `id`'s files.
+    static func kept(_ id: String) -> URL { FileManager.default.temporaryDirectory.appending(path: "oby-review-\(id)") }
+
+    /// The review ended: what `keep` kept for it is in its worktree, or no longer needed.
+    static func forget(_ id: String) { try? FileManager.default.removeItem(at: kept(id)) }
 
     /// The reviewer's verdict: its review's last line, `VERDICT: APPROVED` or `VERDICT: CHANGES
     /// REQUESTED` (the word VERDICT may be left out). Nil when the line isn't there.
@@ -230,21 +237,24 @@ nonisolated struct Review: Codable, Equatable, Sendable {
 
     /// The verdict that counts: blocking findings request changes and nothing else does, so a
     /// review that sorts its findings (`findings`) is approved when none is blocking, whatever its
-    /// last line says. One that doesn't sort them keeps its last line's verdict. Nil when the last
-    /// line gives none.
+    /// last line says. One that doesn't sort them all keeps its last line's verdict: a finding Oby
+    /// couldn't place may be the one that blocks. Nil when the last line gives none.
     static func decide(_ summary: String) -> Verdict? {
         guard let said = verdict(summary) else { return nil }
         guard let findings = findings(summary) else { return said }
-        return findings.blocking.isEmpty ? .approved : .changesRequested
+        if !findings.blocking.isEmpty { return .changesRequested }
+        return findings.unsorted.isEmpty ? .approved : said
     }
 
     /// The review's findings under the headings the prompt asks for, `Blocking:` and `Worth doing
     /// later:`, one per list item or line (an indented line continues the item above it), and list
     /// items that label themselves `Blocking:` or `Worth doing later:`. A heading's list ends at a
-    /// paragraph after a blank line, another heading, or the verdict. "None" isn't a finding. Nil
-    /// when the review has neither heading nor label: it didn't sort its findings.
-    static func findings(_ summary: String) -> (blocking: [String], later: [String])? {
-        var found: (blocking: [String], later: [String]) = ([], [])
+    /// paragraph after a blank line, another heading, or the verdict. A heading counts by how it
+    /// starts: "Blocking issues" is blocking. List items under no heading, or under one it doesn't
+    /// know, are `unsorted`. "None" isn't a finding. Nil when the review has neither heading nor
+    /// label: it didn't sort its findings.
+    static func findings(_ summary: String) -> (blocking: [String], later: [String], unsorted: [String])? {
+        var found: (blocking: [String], later: [String], unsorted: [String]) = ([], [], [])
         var sorted = false
         // The heading the lines are under, the finding the next indented line continues, and
         // whether a blank line came since.
@@ -275,8 +285,10 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             let label = (head.first.map(String.init) ?? "").replacing(/\s*\(.*\)/, with: "").trimmingCharacters(in: .whitespaces).lowercased()
             // What follows the label, as written: "**Blocking:** `x`" is "`x`".
             let rest = text.firstIndex(of: ":").map { String(text[text.index(after: $0)...].drop { " *_".contains($0) }) } ?? ""
-            let blocking: Bool? = ["blocking", "blocking findings", "blocker", "blockers"].contains(label) ? true
-                : ["worth doing later", "non-blocking", "nonblocking", "not blocking", "later"].contains(label) ? false : nil
+            // A few words at most: "Blocking the main thread drops frames: …" is a finding, not a heading.
+            let short = label.split(separator: " ").count <= 4
+            let blocking: Bool? = short && (label.hasPrefix("blocking") || label.hasPrefix("blocker")) ? true
+                : short && (label == "later" || ["worth doing later", "non-blocking", "nonblocking", "not blocking"].contains { label.hasPrefix($0) }) ? false : nil
             // A heading, or an item that labels itself: the label ends with a colon, or is the whole line.
             if let blocking, head.count > 1 || head.first.map({ $0.contains("(") }) == true || plain.lowercased() == label {
                 sorted = true
@@ -286,12 +298,17 @@ nonisolated struct Review: Codable, Equatable, Sendable {
                 continue
             }
             let indented = raw.first?.isWhitespace == true
-            if plain.uppercased().hasPrefix("VERDICT") || (item == nil && line.hasPrefix("#")) || (item == nil && !indented && blank && last != nil) {
+            // The verdict, a heading it doesn't know, or a paragraph after the list.
+            if plain.uppercased().hasPrefix("VERDICT") || (item == nil && (line.hasPrefix("#") || line.hasSuffix(":") || line.hasSuffix(":**")))
+                || (item == nil && !indented && blank && last != nil) {
                 section = nil
                 last = nil
                 continue
             }
-            guard let section else { continue }
+            guard let section else {
+                if item != nil { found.unsorted.append(text) }
+                continue
+            }
             if item == nil, indented, let last {
                 // The item above, going on.
                 if last { found.blocking[found.blocking.count - 1] += " " + line } else { found.later[found.later.count - 1] += " " + line }
@@ -329,8 +346,17 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             \(summary)
             \(fence)
 
-            by Oby: \(review.agentName) reviewed this pull request on the \(review.account) account for Oby, review \(review.round) of at most \(maxRounds). GitHub doesn't let a pull request's own author approve it or request changes, so this comment stands in. A person reviews it before it merges.
+            \(overruled(review, summary: summary).map { $0 + "\n\n" } ?? "")by Oby: \(review.agentName) reviewed this pull request on the \(review.account) account for Oby, review \(review.round) of at most \(maxRounds). GitHub doesn't let a pull request's own author approve it or request changes, so this comment stands in. A person reviews it before it merges.
             """
+    }
+
+    /// Why the heading's verdict isn't the review's last line, when Oby decided otherwise
+    /// (`decide`), or nil when they agree.
+    static func overruled(_ review: Review, summary: String) -> String? {
+        guard let said = verdict(summary), said != review.verdict else { return nil }
+        return review.verdict == .approved
+            ? "Oby counts this review as approved: the reviewer asked for changes, but nothing it found is blocking. The rest are follow-ups."
+            : "Oby counts this review as changes requested: the reviewer approved, but it listed blocking findings."
     }
 
     /// A possible secret in the review itself: the built-in rules on every line, and gitleaks when
@@ -468,6 +494,7 @@ extension Desk {
     /// worth doing later goes in the author's report as follow-ups. A review that
     /// didn't end with a verdict leaves the author waiting for a person, saying why.
     func reviewEnded(_ review: Job) {
+        Review.forget(review.id)
         guard let id = review.reviewOf, var author = job(id), author.reviewing == review.id else { return }
         author.reviewing = nil
         let first = review.summary.split(separator: "\n").first.map(String.init) ?? ""

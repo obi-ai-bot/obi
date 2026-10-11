@@ -311,6 +311,8 @@ struct HaltTests {
         let process = Process()
         process.executableURL = URL(filePath: "/bin/sh")
         process.arguments = ["-c", "trap '' TERM; sleep 30 & echo $! > '\(child.path)'; wait"]
+        let ended = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in ended.signal() }
         try process.run()
         for _ in 0..<200 where (try? String(contentsOf: child, encoding: .utf8))?.isEmpty ?? true { try await Task.sleep(for: .milliseconds(10)) }
         let sleeper = try #require(Int32((try String(contentsOf: child, encoding: .utf8)).trimmingCharacters(in: .whitespacesAndNewlines)))
@@ -318,12 +320,15 @@ struct HaltTests {
         // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt.
         let leads = getpgid(process.processIdentifier) == process.processIdentifier
         try await Task.sleep(for: .seconds(Halt.grace))
-        Halt.end(process)
-        for _ in 0..<200 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
-        #expect(!process.isRunning)
-        // Within Stop all's 2 seconds: the grace, then Halt ends it. Not timed on the clock, which a
-        // loaded machine stretches far past the grace itself.
+        // Within Stop all's 2 seconds: the grace, then Halt ends it in what's left. Halt is timed
+        // on its own, waiting on the exit itself: a loaded machine stretches the test's sleeps far
+        // past the grace, never the kill.
         #expect(Halt.grace < 2)
+        let start = ContinuousClock.now
+        Halt.end(process)
+        #expect(ended.wait(timeout: .now() + (2 - Halt.grace)) == .success)
+        #expect(ContinuousClock.now - start < .seconds(2 - Halt.grace))
+        #expect(!process.isRunning)
         // What it started ends too, when it leads its own process group.
         if leads {
             for _ in 0..<100 where kill(sleeper, 0) == 0 { try await Task.sleep(for: .milliseconds(10)) }

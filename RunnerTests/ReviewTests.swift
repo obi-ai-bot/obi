@@ -436,6 +436,7 @@ struct ReviewTests {
         #expect(verdict.verdict == .approved && verdict.blocking == nil && verdict.branch == "oby/review-80")
         #expect(verdict.followUps == ["Rename `next` to `nextRound`", "Document the empty case"])
         #expect(made.posted.first?.body.hasPrefix("### Oby review · Codex · Work: Approved") == true)
+        #expect(made.posted.first?.body.contains("Oby counts this review as approved") == true)
         // The follow-ups are in the job's report, below what the agent said.
         #expect(reviewed.summary == "fix(engine): open the PR by itself\n\nFollow-ups from Oby's review:\n- Rename `next` to `nextRound`\n- Document the empty case")
         // No round for the author, and no second review.
@@ -474,6 +475,9 @@ struct ReviewTests {
         #expect(agent.prompt.contains("git log oby/review-80..HEAD") && agent.prompt.contains("quoted in .oby/inputs/review-1.md"))
         #expect(agent.prompt.contains("Check only that each blocking finding in that file is fixed, and that the new commits don't break anything."))
         #expect(!agent.prompt.contains("Judge whether the changes do what the user asked") && !agent.prompt.contains("drops the last round"))
+        // Carrying the review it follows up doesn't make the review job itself look reviewed.
+        #expect(followUp.pipeline.stages.allSatisfy { $0.detail != "Changes requested" && $0.detail != "Oby requested changes" && $0.reason != "Oby requested changes." })
+        #expect(!followUp.needsYou && !followUp.reviewNeedsYou)
 
         // Fixed, with one new thing for later: approved, and the follow-ups add up in the report.
         let approved = try await review("Fixed.\n\nWorth doing later:\n- Test `rounds` of 0\n\nVERDICT: APPROVED")
@@ -481,6 +485,8 @@ struct ReviewTests {
         #expect(approved.review?.followUps == ["Rename `next` to `nextRound`", "Test `rounds` of 0"])
         #expect(approved.summary == "fix(engine): keep the last round\n\nFollow-ups from Oby's review:\n- Rename `next` to `nextRound`\n- Test `rounds` of 0")
         #expect(approved.pipeline.stages.last?.detail == "Ready to merge" && !approved.needsYou)
+        // What Oby kept for the follow-up is gone once it ended.
+        #expect(!FileManager.default.fileExists(atPath: URL(filePath: input).deletingLastPathComponent().path))
     }
 
     @Test func afterTwoReviewsTheJobStopsAndAsksYou() async throws {

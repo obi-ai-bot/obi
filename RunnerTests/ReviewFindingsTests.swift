@@ -61,6 +61,49 @@ struct ReviewFindingsTests {
         #expect(Review.decide("Fine.\n\n- Worth doing later: a comment on `keep`\n\nVERDICT: CHANGES REQUESTED") == .approved)
     }
 
+    @Test func aHeadingCountsByHowItStarts() throws {
+        // "Blocking issues" is blocking: the bug under it requests changes.
+        let issues = "One bug.\n\nBlocking issues:\n- `Rounds.next` drops the last round\n\nWorth doing later (2):\n- Rename it\n- Document it\n\nVERDICT: CHANGES REQUESTED"
+        let found = try #require(Review.findings(issues))
+        #expect(found.blocking == ["`Rounds.next` drops the last round"] && found.later == ["Rename it", "Document it"] && found.unsorted.isEmpty)
+        #expect(Review.decide(issues) == .changesRequested)
+        #expect(Review.decide("Bugs.\n\n**Blockers found:**\n- It crashes\n\nVERDICT: CHANGES REQUESTED") == .changesRequested)
+        // A sentence that starts the same way is a finding, not a heading.
+        let sentence = try #require(Review.findings("Fine.\n\nWorth doing later:\n- Blocking the main thread drops frames: move it off\n\nVERDICT: APPROVED"))
+        #expect(sentence.blocking.isEmpty && sentence.later == ["Blocking the main thread drops frames: move it off"])
+    }
+
+    @Test func findingsOutsideTheKnownHeadingsKeepTheReviewersVerdict() throws {
+        // Listed before the first heading Oby knows: it may be the one that blocks.
+        let before = "One bug.\n\n- The token is logged in plain text\n\nWorth doing later:\n- Rename it\n\nVERDICT: CHANGES REQUESTED"
+        #expect(Review.findings(before)?.unsorted == ["The token is logged in plain text"] && Review.findings(before)?.blocking == [])
+        #expect(Review.decide(before) == .changesRequested)
+        // Under a heading Oby doesn't know.
+        let unknown = "Close.\n\nMust fix before merging:\n- It crashes\n\nWorth doing later:\n- Rename it\n\nVERDICT: CHANGES REQUESTED"
+        #expect(Review.findings(unknown)?.unsorted == ["It crashes"] && Review.decide(unknown) == .changesRequested)
+        // Even after a known one: the list ends at the heading it doesn't know.
+        let after = "Close.\n\nWorth doing later:\n- Rename it\n\nWorth knowing before merging, but not blocking:\n- It crashes\n\nVERDICT: CHANGES REQUESTED"
+        #expect(Review.findings(after)?.later == ["Rename it"] && Review.findings(after)?.unsorted == ["It crashes"])
+        #expect(Review.decide(after) == .changesRequested)
+        // The reviewer approved: it stays approved.
+        #expect(Review.decide(before.replacing("VERDICT: CHANGES REQUESTED", with: "VERDICT: APPROVED")) == .approved)
+    }
+
+    @Test func theCommentSaysWhenObyOverrulesTheLastLine() {
+        let summary = "Fine.\n\nWorth doing later:\n- Rename it\n\nVERDICT: CHANGES REQUESTED"
+        let approved = Review(verdict: .approved, job: "rev1", agent: "codex", account: "Work", round: 1)
+        let comment = Review.comment(approved, summary: summary)
+        #expect(comment.hasPrefix("### Oby review · Codex · Work: Approved"))
+        #expect(comment.contains("```\n\nOby counts this review as approved: the reviewer asked for changes, but nothing it found is blocking. The rest are follow-ups.\n\nby Oby:"))
+        var requested = approved
+        requested.verdict = .changesRequested
+        #expect(Review.comment(requested, summary: "Bug.\n\nBlocking:\n- It crashes\n\nVERDICT: APPROVED")
+            .contains("Oby counts this review as changes requested: the reviewer approved, but it listed blocking findings."))
+        // They agree: nothing more.
+        #expect(Review.overruled(approved, summary: "Fine.\n\nVERDICT: APPROVED") == nil)
+        #expect(Review.comment(approved, summary: "Fine.\n\nVERDICT: APPROVED").contains("```\n\nby Oby:"))
+    }
+
     // MARK: Follow-ups in the report
 
     @Test func theReportListsTheFollowUpsOnce() {
