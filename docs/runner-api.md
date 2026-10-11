@@ -214,12 +214,12 @@ An app or API the user connected (F17, #60), which agents use through Oby while 
 
 **The broker.** In the runner's own process, outside every agent's sandbox: no broker process runs in a sandbox, and no secret goes in an agent's environment. When anything is connected, each job's agent gets an MCP server named `oby` in its MCP config: Claude Code a `--mcp-config` file in the worktree (`.oby/mcp.json`, readable only by the runner's user), Codex `-c mcp_servers.oby.url=…` with the token in `OBY_MCP_TOKEN`. It points at `POST /v1/agent/mcp/{job}` on 127.0.0.1 with a token for that job only: another job's token, and the job's own once the job ends (done, failed, stopped, interrupted), get `401`.
 
-- `tools/list` lists every connection's tools, named `<connection>_<tool>`. An MCP connection's are its server's own (the broker initializes a session per job and connection, and follows `Mcp-Session-Id`); a server that can't be reached is left out. An API connection has two: `<name>_get` (`path` under the base URL, starting with `/`, and `query`), which reads, and `<name>_send` (`method`, `path`, `query`, `body`), which acts as the user.
+- `tools/list` lists the tools of every connection the job started with that is still unchanged, named `<connection>_<tool>`. An MCP connection's are its server's own (the broker initializes a session per job and connection, and follows `Mcp-Session-Id`); a server that can't be reached is left out. An API connection has two: `<name>_get` (`path` under the base URL, starting with `/`, and `query`), which reads, and `<name>_send` (`method`, `path`, `query`, `body`), which acts as the user.
 - `tools/call` forwards a read with the secret in the connection's header, read from the vault for that request alone. Reads are tools whose MCP `readOnlyHint` is true (and `destructiveHint` isn't), unless their name says they act (send, post, create, delete, pay, update, reply, …), and `<name>_get`. Everything else acts as the user and is refused, answering the tool call with `isError` and `Acting as you needs your OK, which arrives with permission modes.` (#134 brings them).
 - An API's path stays on its host (no `//host`, scheme or bad escapes), and no redirect is followed, from either kind: the login is for the connection's host only. An API answer is `HTTP <status>`, a blank line and the body, cut at 256 KB.
 - Every answer, tool lists included, has every vault value taken out of its strings and keys, plain, base64, hex or URL-encoded, even when the server echoes the login back; an answer that would still hold one, or one written while the vault can't be read, is replaced by an error.
 - Every call goes in the job's `connectionUses` and the vault's use log (`uses.jsonl` beside the runner's vault, readable only by the runner's user), and one line in the journal: the job, connection, tool, read or write, allowed or refused, the secret's name and the host. Never a value.
-- Not yet: OAuth sign-ins, the Mac app's side, website logins, binding a connection to repositories or kinds of job, and asking the user to allow a write.
+- Not yet: OAuth sign-ins, the apps' side (the iPhone signing a change, Settings listing them), website logins, binding a connection to repositories or kinds of job, and asking the user to allow a write.
 
 ### Inbox item
 
@@ -564,7 +564,17 @@ The connected apps (Connection, above). `GET` lists them, sorted by name. `POST`
 {"name": "people", "api": "https://api.example.com/v2", "secret": "people-key", "header": "X-Api-Key"}
 ```
 
-`422` for a wrong name, URL or header, both or neither of `mcp` and `api`, or a body with a `value`: a secret's value never goes through the API. `DELETE` removes one and answers `{"removed": "mail"}` (`404` for a name the runner doesn't know); its secret stays in the vault. Jobs already running keep the broker until they end; a job that starts with nothing connected gets none.
+`422` for a wrong name, URL or header, both or neither of `mcp` and `api`, or a body with a `value`: a secret's value never goes through the API. `DELETE` removes one and answers `{"removed": "mail"}` (`404` for a name the runner doesn't know); its secret stays in the vault.
+
+**Changes need the user's phone.** Agents share the runner's machine and reach this API as the owner (the tailnet header isn't a gate on 127.0.0.1), and a connection an agent made could carry any vault secret to its own host. So `POST` and `DELETE` go through only with `"approval"`: a registered device's signature over the runner's own sentence for the change, as publishing by hand does. Without one, the answer is `403` with the sentence to show and sign:
+
+```json
+{"error": "Approve this on your iPhone first: Connect mail: …", "action": "Connect mail: agents' read-only calls to the MCP server https://mcp.example.com/mcp carry the vault secret mail-token as Authorization: Bearer."}
+```
+
+The app shows `action`, then sends the same body again with `"approval": {"device": "<id>", "action": "<the sentence>", "signedAt": "2026-10-11T16:02:07Z", "signature": "MEUCIQ…"}`, the signature (ECDSA P-256 with SHA-256, DER, base64, made with the device's Secure Enclave key behind Face ID) over the UTF-8 bytes of `"oby-connection\n<action>\n<signedAt>"`. `DELETE` takes `{"approval": …}` as its body, for the sentence `"Disconnect mail."`. A signature works once, within two minutes, for exactly that sentence; anything else is `403`.
+
+A job uses the connections there were when it started, while they stay as they were: one added, replaced or removed since never reaches a running job, and a job that starts with nothing connected gets no broker.
 
 ### `POST /v1/agent/mcp/{job}`
 

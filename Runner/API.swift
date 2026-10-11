@@ -90,7 +90,14 @@ final class API {
         router.delete("v1/agent/mcp/:job") { _, _ in Response(status: .methodNotAllowed) }
         router.get("v1/connections") { _, _ in await self.connections() }
         router.post("v1/connections") { request, _ in try await self.connect(try await Self.decode(NewConnection.self, from: request)) }
-        router.delete("v1/connections/:name") { _, context in try await self.disconnect(context.parameters.require("name")) }
+        router.delete("v1/connections/:name") { request, context in
+            var request = request
+            // The body is optional: without one, the answer says what to approve.
+            let body = try await request.collectBody(upTo: 64 * 1024)
+            let removal = body.readableBytes == 0 ? ConnectionRemoval() : try? JSONDecoder().decode(ConnectionRemoval.self, from: Data(body.readableBytesView))
+            guard let removal else { throw APIError(.badRequest, "That isn't the JSON \(request.uri.path) takes.") }
+            return try await self.disconnect(context.parameters.require("name"), removal.approval)
+        }
         router.post("v1/checks/:id/result") { request, context in
             try await self.checkResult(context.parameters.require("id"), try await Self.decode(MacCheck.Report.self, from: request))
         }
@@ -317,13 +324,19 @@ final class API {
         return Self.json(broker.connections.all.map { ConnectionJSON($0, saved: saved.contains($0.secret), lastUsed: broker.uses.lastUsed[$0.name]) })
     }
 
-    /// Adds a connection, or replaces the one with its name. The secret is named, never sent: it
-    /// goes in the vault with `oby-runner vault add`.
+    /// Adds a connection, or replaces the one with its name, once a registered phone signed the
+    /// runner's sentence for it (`Connection.action`): agents share the runner's machine and reach
+    /// this API as the owner, and a connection they made could carry any secret to their own host.
+    /// Without an approval, `403` says what to approve. The secret is named, never sent: it goes in
+    /// the vault with `oby-runner vault add`.
     func connect(_ new: NewConnection) throws -> Response {
         guard new.value == nil else {
             throw APIError(.unprocessableContent, "A secret's value never goes through the API: add it on the runner with oby-runner vault add \(new.secret).")
         }
         let connection = Connection(name: new.name, mcp: new.mcp, api: new.api, secret: new.secret, header: new.header)
+        if let problem = connection.problem { throw APIError(.unprocessableContent, problem) }
+        guard let approval = new.approval else { return Self.approve(connection.action) }
+        try devices.checkConnection(approval, action: connection.action)
         do {
             try broker.connections.save(connection)
         } catch {
@@ -333,8 +346,11 @@ final class API {
         return Self.json(ConnectionJSON(connection, saved: saved, lastUsed: broker.uses.lastUsed[connection.name]), status: .created)
     }
 
-    /// Removes a connection. Its secret stays in the vault.
-    func disconnect(_ name: String) throws -> Response {
+    /// Removes a connection, once a registered phone signed `Connection.removal`. Its secret stays in the vault.
+    func disconnect(_ name: String, _ approval: Approval?) throws -> Response {
+        guard broker.connections.named(name) != nil else { throw APIError(.notFound, "There's no connection \(name).") }
+        guard let approval else { return Self.approve(Connection.removal(name)) }
+        try devices.checkConnection(approval, action: Connection.removal(name))
         let removed: Bool
         do {
             removed = try broker.connections.remove(name)
@@ -343,6 +359,11 @@ final class API {
         }
         guard removed else { throw APIError(.notFound, "There's no connection \(name).") }
         return Self.json(["removed": name])
+    }
+
+    /// `403`, with the sentence a registered phone signs to let the change through.
+    nonisolated static func approve(_ action: String) -> Response {
+        json(["error": "Approve this on your iPhone first: \(action)", "action": action], status: .forbidden)
     }
 
     /// A Mac's result for a check it took: passed merges, failed goes back to the author.
@@ -788,6 +809,13 @@ struct NewConnection: Decodable {
     var secret: String
     var header: String?
     var value: String?
+    /// A registered phone's signature over the runner's sentence (`Connection.action`).
+    var approval: Approval?
+}
+
+/// What `DELETE /v1/connections/{name}` takes: a registered phone's signature over `Connection.removal`.
+struct ConnectionRemoval: Decodable {
+    var approval: Approval?
 }
 
 /// An inbox item with every key the API promises, and its state: `open`, `later` (put off until

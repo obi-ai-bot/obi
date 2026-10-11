@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -112,6 +113,10 @@ struct ConnectionTests {
     let desk: Desk
     let vault: Vault
     let broker: Broker
+    let devices: Devices
+    /// The user's phone, registered with the runner: only its signature changes the connections.
+    let phone = P256.Signing.PrivateKey()
+    let phoneID: String
     let made = Made()
     let service: FakeService
     let owner: HTTPFields = [.tailscaleUserLogin: "well@example.com"]
@@ -132,6 +137,9 @@ struct ConnectionTests {
         desk.vault = vault
         broker = Broker(desk: desk, connections: ConnectionStore(file: folder.appending(path: "connections.json")),
                         uses: UseLog(file: folder.appending(path: "vault/uses.jsonl")), base: "http://127.0.0.1:7777")
+        devices = Devices(file: folder.appending(path: "devices.json"))
+        FileManager.default.createFile(atPath: devices.pairing.path, contents: nil)
+        phoneID = try devices.register(name: "Test iPhone", publicKey: phone.publicKey.x963Representation.base64EncodedString())
         let opened = desk.openBroker
         desk.openBroker = { [made] job in
             let mcp = opened(job)
@@ -158,10 +166,16 @@ struct ConnectionTests {
 
 
     @Test func agentsUseConnectedAppsWithoutEverSeeingTheLogin() async throws {
-        let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")), broker: broker)
+        let api = API(desk: desk, devices: devices, broker: broker)
         let app = Application(router: api.router(owner: "well@example.com"))
         let fake = Application(router: service.router())
-        let (desk, made, owner, service) = (desk, made, owner, service)
+        let (desk, made, owner, service, phone, phoneID) = (desk, made, owner, service, phone, phoneID)
+        /// What the phone sends for a change: the runner's sentence, signed behind Face ID, with `key`.
+        let approval: @Sendable (String, P256.Signing.PrivateKey?) throws -> [String: Any] = { action, key in
+            let signedAt = Date.now.formatted(.iso8601)
+            let signature = try (key ?? phone).signature(for: Data("oby-connection\n\(action)\n\(signedAt)".utf8))
+            return ["device": phoneID, "action": action, "signedAt": signedAt, "signature": signature.derRepresentation.base64EncodedString()]
+        }
         // Whether a text holds a vault secret, plain or encoded.
         let known = try vault.leaks()
         let leaks: @Sendable (String) -> Bool = { !known.hits(in: $0).isEmpty }
@@ -176,15 +190,25 @@ struct ConnectionTests {
                         (Int(response.status.code), String(decoding: response.body.readableBytesView, as: UTF8.self))
                     }
                 }
+                /// The sentence a refused change asks the phone to sign.
+                func action(_ refused: (status: Int, text: String)) -> String {
+                    ((try? JSONSerialization.jsonObject(with: Data(refused.text.utf8))) as? [String: Any])?["action"] as? String ?? ""
+                }
+                /// Adds a connection as the user does: asked, approved on the phone, sent again.
+                func connect(_ body: [String: Any]) async throws -> (status: Int, text: String) {
+                    let asked = try await send(.post, "/v1/connections", body, headers: owner)
+                    #expect(asked.status == 403 && !action(asked).isEmpty)
+                    return try await send(.post, "/v1/connections", body.merging(["approval": try approval(action(asked), nil)]) { $1 }, headers: owner)
+                }
 
                 // MARK: Connections: the secret is named, never sent or shown.
                 let mail = ["name": "mail", "mcp": "http://127.0.0.1:\(port)/mcp", "secret": "mail-token"]
                 let withValue = try await send(.post, "/v1/connections", mail.merging(["value": service.mailSecret]) { $1 }, headers: owner)
                 #expect(withValue.status == 422 && withValue.text.contains("oby-runner vault add mail-token") && !(leaks(withValue.text)))
-                let added = try await send(.post, "/v1/connections", mail, headers: owner)
+                let added = try await connect(mail)
                 #expect(added.status == 201 && added.text.contains(#""secretSaved":true"#) && added.text.contains(#""header":"Authorization""#))
                 let people = ["name": "people", "api": "http://127.0.0.1:\(port)/api", "secret": "people-key", "header": "X-Api-Key"]
-                #expect(try await send(.post, "/v1/connections", people, headers: owner).status == 201)
+                #expect(try await connect(people).status == 201)
                 // In the clear only on this machine; names that couldn't split from a tool's; one place to reach.
                 for wrong in [["name": "web", "mcp": "http://example.com/mcp", "secret": "mail-token"],
                               ["name": "Mail_2", "mcp": "https://example.com/mcp", "secret": "mail-token"],
@@ -249,6 +273,31 @@ struct ConnectionTests {
                 #expect(text(escape.result).contains("stays on 127.0.0.1"))
                 let post = try await rpc("mailjob1", first.token, "tools/call", ["name": "people_send", "arguments": ["method": "POST", "path": "/v1/me"]])
                 #expect(text(post.result) == Broker.acting)
+
+                // MARK: An agent reaching the API as the owner can't send a secret to its own host.
+                // Its forged owner header gets it as far as the question; only the phone answers it.
+                let evil: [String: Any] = ["name": "evil", "api": "http://127.0.0.1:\(port)/api", "secret": "mail-token", "header": "X-Api-Key"]
+                let asked = try await send(.post, "/v1/connections", evil, headers: owner)
+                #expect(asked.status == 403 && action(asked).contains("the vault secret mail-token"))
+                for forged in [try approval(action(asked), P256.Signing.PrivateKey()), try approval(Connection.removal("evil"), nil)] {
+                    #expect(try await send(.post, "/v1/connections", evil.merging(["approval": forged]) { $1 }, headers: owner).status == 403)
+                }
+                #expect(try await send(.delete, "/v1/connections/people", headers: owner).status == 403)
+                #expect(!(try await send(.get, "/v1/connections", headers: owner).text.contains(#""name":"evil""#)))
+                // A connection added or replaced since a job started never reaches it, even the user's own.
+                #expect(try await connect(evil).status == 201)
+                #expect(try await connect(people.merging(["secret": "mail-token"]) { $1 }).status == 201)
+                let since = try await rpc("mailjob1", first.token, "tools/list")
+                #expect(!since.text.contains("evil_") && !since.text.contains("people_") && since.text.contains("mail_search"))
+                for tool in ["evil_get", "people_get"] {
+                    let gone = try await rpc("mailjob1", first.token, "tools/call", ["name": tool, "arguments": ["path": "/v1/me"]])
+                    #expect(text(gone.result).hasPrefix("There's no connected app") && !(leaks(gone.text)))
+                }
+                // Removing one takes the phone too.
+                let removing = try await send(.delete, "/v1/connections/evil", headers: owner)
+                #expect(removing.status == 403 && action(removing) == "Disconnect evil.")
+                #expect(try await send(.delete, "/v1/connections/evil", ["approval": try approval("Disconnect evil.", nil)], headers: owner).status == 200)
+                #expect(try await send(.delete, "/v1/connections/evil", headers: owner).status == 404)
 
                 // MARK: Tokens: another job's, none, and an ended job's are refused.
                 #expect(try await rpc("mailjob1", second.token, "tools/list").status == 401)

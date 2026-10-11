@@ -61,6 +61,16 @@ struct Connection: Codable, Equatable {
         return header.flatMap(Self.problem(header:))
     }
 
+    /// What the user approves on their phone to add it: the runner's own sentence, signed exactly.
+    var action: String {
+        let header = header.flatMap { $0.lowercased() == "authorization" ? nil : $0 }
+        return "Connect \(name): agents' read-only calls to \(mcp.map { "the MCP server \($0)" } ?? "the API \(api ?? "")") carry the vault secret \(secret)"
+            + (header.map { " in the header \($0)." } ?? " as Authorization: Bearer.")
+    }
+
+    /// What the user approves on their phone to remove the connection named `name`.
+    static func removal(_ name: String) -> String { "Disconnect \(name)." }
+
     /// Puts the secret in its header. A value that spans lines can't be a header.
     func authorize(_ request: inout URLRequest, with value: String) throws {
         guard !value.contains(where: \.isNewline) else {

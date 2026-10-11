@@ -74,6 +74,18 @@ final class Devices {
         try use(message, from: device, signedAt: approval.signedAt, now: now)
     }
 
+    /// Lets a change to the connected apps through once (Runner/Broker.swift): the phone signed
+    /// `"oby-connection\n<action>\n<signedAt>"` behind Face ID, within two minutes, for exactly the
+    /// runner's own sentence. Agents reach the API as the owner, so the tailnet header can't be the gate.
+    func checkConnection(_ approval: Approval, action: String, now: Date = .now) throws {
+        let message = Data("oby-connection\n\(approval.action)\n\(approval.signedAt)".utf8)
+        let device = try signer(approval.device, of: message, signature: approval.signature)
+        guard approval.action == action else {
+            throw APIError(.forbidden, "The phone approved something else. Approve it again.")
+        }
+        try use(message, from: device, signedAt: approval.signedAt, now: now)
+    }
+
     /// Lets a Watch's pairing through once (Runner/Watches.swift): the phone signed
     /// `"oby-pair-watch\n<the Watch's public key>\n<signedAt>"` behind Face ID, within two minutes.
     func checkPairing(_ approval: PairingApproval, publicKey: String, now: Date = .now) throws {

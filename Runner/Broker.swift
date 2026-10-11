@@ -34,6 +34,9 @@ final class Broker {
 
     /// Each live token, and the job it's for.
     private var tokens: [String: String] = [:]
+    /// The connections each job started with: a job uses one only while it's still the same,
+    /// so one added or replaced since (by anyone reaching the API) never reaches a running job.
+    private var snapshots: [String: [Connection]] = [:]
     /// What each job's agent has from each MCP connection, by "job/connection": the server's
     /// session, and its tools as it last listed them.
     private var upstreams: [String: Upstream] = [:]
@@ -59,7 +62,8 @@ final class Broker {
     /// The endpoint for job `id`'s agent, with its token (the same one while the job runs), or nil
     /// when nothing is connected.
     func open(_ id: String) -> AgentMCP? {
-        guard !connections.all.isEmpty else { return nil }
+        if snapshots[id] == nil { snapshots[id] = connections.all }
+        guard !usable(id).isEmpty else { return nil }
         let token = tokens.first { $0.value == id }?.key ?? Self.newToken()
         tokens[token] = id
         return AgentMCP(url: "\(base)/v1/agent/mcp/\(id)", token: token)
@@ -68,12 +72,18 @@ final class Broker {
     /// Job `id` ended: its token is useless from now on, and its sessions are forgotten.
     func close(_ id: String) {
         tokens = tokens.filter { $0.value != id }
+        snapshots[id] = nil
         upstreams = upstreams.filter { !$0.key.hasPrefix(id + "/") }
     }
 
     /// Whether `token` is job `id`'s, and the job runs.
     func allows(_ token: String, job id: String) -> Bool {
         !token.isEmpty && tokens[token] == id && desk.job(id)?.isActive == true
+    }
+
+    /// The connections job `id` may use: the ones it started with that are still there, unchanged.
+    func usable(_ id: String) -> [Connection] {
+        (snapshots[id] ?? []).filter(connections.all.contains)
     }
 
     private static func newToken() -> String {
@@ -113,7 +123,7 @@ final class Broker {
     /// left out, and the log says why.
     private func tools(job id: String) async -> [[String: Any]] {
         var listed: [[String: Any]] = []
-        for connection in connections.all {
+        for connection in usable(id) {
             if connection.api != nil {
                 listed += Self.apiTools(connection)
                 continue
@@ -137,7 +147,7 @@ final class Broker {
     /// One tool call: refused when it acts as the user, else forwarded with the secret attached.
     /// Either way it goes in the job's report and the vault's use log.
     private func call(_ name: String, arguments: [String: Any], job id: String) async -> [String: Any] {
-        guard let connection = connections.all.filter({ name.hasPrefix($0.name + "_") }).max(by: { $0.name.count < $1.name.count }) else {
+        guard let connection = usable(id).filter({ name.hasPrefix($0.name + "_") }).max(by: { $0.name.count < $1.name.count }) else {
             return Self.failure("There's no connected app with a tool named \(name).")
         }
         let tool = String(name.dropFirst(connection.name.count + 1))
