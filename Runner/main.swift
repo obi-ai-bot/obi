@@ -9,6 +9,10 @@ import Hummingbird
 if CommandLine.arguments.dropFirst().first == "vault" {
     exit(VaultCommand.run(Array(CommandLine.arguments.dropFirst(2))))
 }
+// `oby-check apple` in an agent's sandbox: an Apple build and test on the user's Mac (Runner/CheckCommand.swift).
+if CommandLine.arguments.dropFirst().first == "check" {
+    exit(await CheckCommand.run(Array(CommandLine.arguments.dropFirst(2))))
+}
 
 let environment = ProcessInfo.processInfo.environment
 guard let owner = environment["OBY_OWNER"], !owner.isEmpty else {
@@ -35,8 +39,16 @@ catch {
 }
 let desk = Desk()
 desk.issueSync.enabled = true
-// Macs that follow the runner take its merge checks (Engine/Checks.swift).
+// Macs that follow the runner take its merge checks (Engine/Checks.swift), and the Apple checks
+// agents ask for with `oby-check apple` (Engine/AppleChecks.swift), which runs this executable.
 desk.queuesMacChecks = true
+do {
+    let executable = URL(filePath: (try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/self/exe"))
+                         ?? Bundle.main.executablePath ?? CommandLine.arguments[0])
+    AppleCheck.installed = try AppleCheck.install(executable: executable, port: port)
+} catch {
+    Logger.runner.error("oby-check couldn't be installed: \(error.localizedDescription, privacy: .public). Agents can't ask for Apple checks.")
+}
 let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: "devices.json")),
               push: Push(desk: desk, folder: Workspace.root.appending(path: "apns")),
               cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")), speech: speech)

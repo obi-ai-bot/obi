@@ -155,6 +155,15 @@ final class Desk {
     /// Whether an approval queues a Mac check: on the runner, which Macs ask for checks. The Mac's
     /// own desk has no one to take them, so its approved jobs wait for a person to merge them.
     @ObservationIgnored var queuesMacChecks = false
+    /// Apple checks agents ask for (Engine/AppleChecks.swift): the commit a job's worktree is on,
+    /// the git bundle a Mac fetches a check's commits from, and what each check printed (by the
+    /// check's id: a job's latest and the latest that ran), for its agent and its reviewer, never
+    /// stored. Tests put in their own.
+    @ObservationIgnored var worktreeHead: (_ id: String) async -> String? = { id in
+        try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-parse", "--verify", "HEAD^{commit}"])
+    }
+    @ObservationIgnored var bundleCommits: (MacCheck) async throws -> Data = { try await AppleCheck.bundle($0) }
+    @ObservationIgnored var appleLogs: [String: String] = [:]
     /// What everything on its way to an agent is checked against (Engine/Vault.swift): prompts,
     /// messages, files, reviews and environments. Tests put in their own.
     @ObservationIgnored var vault = Vault.shared
@@ -836,7 +845,7 @@ final class Desk {
         job.started = .now
         job.step = "Starting \(job.agentName)"
         replace(job)
-        run(job, prompt: Prompts.agent(job))
+        run(job, prompt: Prompts.agent(job, apple: offersAppleChecks))
     }
 
     /// Starts the job's agent in its worktree: a new session, or the job's own picked up again.
@@ -978,7 +987,7 @@ final class Desk {
         moved.step = "\(from) hit its limit; continuing on \(next.heading)"
         replace(moved)
         pickedUp.remove(id)
-        run(moved, prompt: Prompts.takeover(moved, from: from, round: roundMessage[id]))
+        run(moved, prompt: Prompts.takeover(moved, from: from, round: roundMessage[id], apple: offersAppleChecks))
     }
 
     /// Runs the job's check, if it has one, then ends the job or sends the agent another round.

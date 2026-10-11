@@ -68,7 +68,14 @@ final class API {
             try await self.answer(context.parameters.require("id"), try await Self.decode(InboxAnswer.self, from: request))
         }
         router.get("v1/events") { _, _ in await self.events() }
-        router.get("v1/checks/next") { request, _ in await self.nextCheck(mac: request.uri.queryParameters.get("mac").map { String($0) }) }
+        router.get("v1/checks/next") { request, _ in
+            await self.nextCheck(mac: request.uri.queryParameters.get("mac").map { String($0) },
+                                 kinds: request.uri.queryParameters.get("kinds").map { String($0) })
+        }
+        router.get("v1/checks/:id/bundle") { _, context in try await self.bundle(context.parameters.require("id")) }
+        // An agent's `oby-check apple`, with its job's token rather than the owner's login (`Gate`).
+        router.post("v1/agent/apple-check") { request, _ in try await self.appleCheck(request.headers[.authorization], ask: true) }
+        router.get("v1/agent/apple-check") { request, _ in try await self.appleCheck(request.headers[.authorization], ask: false) }
         router.post("v1/checks/:id/result") { request, context in
             try await self.checkResult(context.parameters.require("id"), try await Self.decode(MacCheck.Report.self, from: request))
         }
@@ -229,10 +236,52 @@ final class API {
     }
 
     /// A Mac that runs merge checks asks for the next one (Engine/Checks.swift): the oldest queued
-    /// check, now that Mac's, or none.
-    func nextCheck(mac: String?) -> Response {
+    /// check, now that Mac's, or none. `kinds` (`merge,apple`) says which it takes: merge checks
+    /// only when it says nothing, as Macs from before Apple checks do.
+    func nextCheck(mac: String?, kinds: String? = nil) -> Response {
         let name = mac.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)) }.flatMap { $0.isEmpty ? nil : $0 } ?? "a Mac"
-        return Self.json(CheckAnswer(check: desk.nextMacCheck(mac: name).map(MacCheckJSON.init)))
+        let taken = kinds.map { Set($0.split(separator: ",").compactMap { MacCheck.Kind(rawValue: String($0)) }) } ?? [.merge]
+        return Self.json(CheckAnswer(check: desk.nextMacCheck(mac: name, kinds: taken).map(MacCheckJSON.init)))
+    }
+
+    /// The commits of an Apple check, as a git bundle, for the Mac that took it (empty when the
+    /// commit is on its base already).
+    func bundle(_ id: String) async throws -> Response {
+        let data: Data
+        do {
+            data = try await desk.appleBundle(id)
+        } catch let unknown as MacCheck.Unknown {
+            throw APIError(.notFound, unknown.localizedDescription)
+        } catch {
+            throw APIError(.conflict, error.localizedDescription)
+        }
+        return Response(status: .ok, headers: [.contentType: "application/octet-stream"], body: ResponseBody(byteBuffer: ByteBuffer(bytes: data)))
+    }
+
+    /// An agent asks for an Apple check of its worktree's commit (`ask`), or where its latest one
+    /// is (Engine/AppleChecks.swift). Only with its job's token, while the job runs.
+    func appleCheck(_ authorization: String?, ask: Bool) async throws -> Response {
+        let token = authorization.flatMap { $0.hasPrefix("Bearer ") ? String($0.dropFirst("Bearer ".count)) : nil } ?? ""
+        guard let id = AppleCheck.job(forToken: token) else {
+            throw APIError(.unauthorized, "oby-check works only inside an Oby job on the runner.")
+        }
+        if ask {
+            do {
+                _ = try await desk.askAppleCheck(id)
+            } catch {
+                throw APIError(.conflict, error.localizedDescription)
+            }
+        }
+        guard let check = desk.appleCheck(id) else { throw APIError(.notFound, "This job hasn't asked for an Apple check.") }
+        let line = AppleCheck.line(check, busy: desk.busyMac().flatMap { $0.id == check.id ? nil : $0 })
+        let report: String?
+        do {
+            // What the build printed goes to the agent with the vault's secrets taken out.
+            report = try AppleCheck.report(check, log: desk.appleLogs[check.id]).map { try desk.vault.forAgent($0) }
+        } catch {
+            throw APIError(.serviceUnavailable, "The runner can't read its vault: \(error.localizedDescription)")
+        }
+        return Self.json(AppleCheckAnswer(check: MacCheckJSON(check: check), line: line, report: report))
     }
 
     /// A Mac's result for a check it took: passed merges, failed goes back to the author.
@@ -428,7 +477,8 @@ struct Gate<Context: RequestContext>: RouterMiddleware {
     @concurrent func handle(_ request: Request, context: Context,
                             next: @concurrent (Request, Context) async throws -> Response) async throws -> Response {
         do {
-            guard request.headers[values: .tailscaleUserLogin] == [owner] else {
+            // An agent's own requests (`API.appleCheck`) carry its job's token instead.
+            guard request.uri.path.hasPrefix("/v1/agent/") || request.headers[values: .tailscaleUserLogin] == [owner] else {
                 throw APIError(.unauthorized, "This runner answers only its owner.")
             }
             return try await next(request, context)
@@ -533,7 +583,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan }
 
     private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou }
 
@@ -580,6 +630,8 @@ struct JobJSON: Encodable {
         if job.startCommit == nil { try nulls.encodeNil(forKey: .startCommit) }
         if job.macCheck == nil { try nulls.encodeNil(forKey: .macCheck) }
         if job.mergeError == nil { try nulls.encodeNil(forKey: .mergeError) }
+        if job.appleCheck == nil { try nulls.encodeNil(forKey: .appleCheck) }
+        if job.appleRan == nil { try nulls.encodeNil(forKey: .appleRan) }
         // What went out is always a list: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
     }
@@ -601,11 +653,13 @@ struct CheckAnswer: Encodable {
 struct MacCheckJSON: Encodable {
     var check: MacCheck
 
-    private enum Nullable: String, CodingKey { case started, finished, mac, steps, failures, comment, postError }
+    private enum Nullable: String, CodingKey { case started, finished, mac, steps, failures, comment, postError, kind }
 
     func encode(to encoder: any Encoder) throws {
         try check.encode(to: encoder)
         var nulls = encoder.container(keyedBy: Nullable.self)
+        // Checks from before Apple checks have no kind: they're merge checks.
+        if check.kind == nil { try nulls.encode(MacCheck.Kind.merge, forKey: .kind) }
         if check.started == nil { try nulls.encodeNil(forKey: .started) }
         if check.finished == nil { try nulls.encodeNil(forKey: .finished) }
         if check.mac == nil { try nulls.encodeNil(forKey: .mac) }
@@ -613,6 +667,23 @@ struct MacCheckJSON: Encodable {
         if check.failures == nil { try nulls.encodeNil(forKey: .failures) }
         if check.comment == nil { try nulls.encodeNil(forKey: .comment) }
         if check.postError == nil { try nulls.encodeNil(forKey: .postError) }
+    }
+}
+
+/// What `POST` and `GET /v1/agent/apple-check` answer: the job's Apple check, where it is in one
+/// line, and, once it ended, what `oby-check apple` prints (null before then).
+struct AppleCheckAnswer: Encodable {
+    var check: MacCheckJSON
+    var line: String
+    var report: String?
+
+    private enum Keys: String, CodingKey { case check, line, report }
+
+    func encode(to encoder: any Encoder) throws {
+        var keys = encoder.container(keyedBy: Keys.self)
+        try keys.encode(check, forKey: .check)
+        try keys.encode(line, forKey: .line)
+        try keys.encode(report, forKey: .report)
     }
 }
 

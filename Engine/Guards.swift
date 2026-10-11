@@ -1,16 +1,17 @@
 import Foundation
 
-/// The limits Oby holds every job to (case 3.1). Swift enforces them; no prompt states them, so an
+/// The limits Oby holds every job to (case 3.1): 45 minutes a round, 3 hours a job, 20 minutes a
+/// test run, decided 2026-10-11 after real rounds took 20 to 47 minutes. Swift enforces them; no prompt states them, so an
 /// agent can't talk its way past one. A job that hits one stops, keeps its branch, pushes nothing,
 /// and says one more round is possible (`Job.limit`).
 // ponytail: the same for every repository; Oby tunes them per repo once it learns how you decide (X.4).
 nonisolated struct JobLimits: Equatable, Sendable {
     /// How long one round's agent turn may take, in seconds.
-    var round: TimeInterval = 15 * 60
+    var round: TimeInterval = 45 * 60
     /// How long a whole job may take, every round and check included, in seconds.
-    var job: TimeInterval = 45 * 60
+    var job: TimeInterval = 3 * 3600
     /// How long one run of the job's check may take, in seconds: then it's ended and fails.
-    var testRun: TimeInterval = 10 * 60
+    var testRun: TimeInterval = 20 * 60
     /// Claude Code's `--max-turns`: the most tool turns it takes for one message, so for one round.
     /// Codex has no such switch: the round's timer alone holds it.
     var maxTurns = 200

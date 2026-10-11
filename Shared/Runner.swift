@@ -608,12 +608,23 @@ nonisolated struct Runner: Sendable {
     }
 
     #if os(macOS)
-    /// The next merge check for this Mac to run, now this Mac's, or nil when none waits.
-    func nextCheck(mac: String) async throws -> MacCheck? {
+    /// The next check for this Mac to run, now this Mac's, or nil when none waits: merge checks,
+    /// Apple checks agents asked for (Engine/AppleChecks.swift), or both.
+    func nextCheck(mac: String, merge: Bool = true, apple: Bool = false) async throws -> MacCheck? {
         struct Answer: Decodable { var check: MacCheck? }
         let name = mac.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
-        let answer: Answer = try await call("GET", "v1/checks/next?mac=\(name)")
+        let kinds = [merge ? "merge" : nil, apple ? "apple" : nil].compactMap { $0 }.joined(separator: ",")
+        let answer: Answer = try await call("GET", "v1/checks/next?mac=\(name)&kinds=\(kinds)")
         return answer.check
+    }
+
+    /// The commits of an Apple check this Mac took, as a git bundle (empty when they're on GitHub already).
+    func bundle(_ id: String) async throws -> Data {
+        var request = URLRequest(url: base.appending(path: "v1/checks/\(id)/bundle"))
+        request.timeoutInterval = 120
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try Self.check(response, data)
+        return data
     }
 
     /// What this Mac found running a check it took.
