@@ -42,8 +42,12 @@ final class RunnerFeed {
     /// When Clear done was last pressed, here or on the iPhone (the runner's clock), or nil: the
     /// island hides the jobs that finished by then, the runner's and this Mac's alike.
     private(set) var clearedAt: Date?
+    /// How the line to the runner is: Settings › Runner says it.
+    private(set) var connection = RunnerConnection.connecting
     /// The runner didn't answer the last try; the feed keeps trying.
-    private(set) var down = false
+    var down: Bool { if case .offline = connection { true } else { false } }
+    /// The model and effort the runner's jobs use, as it last said (Settings › Models).
+    private(set) var models: ModelSettings?
     /// Merge checks this Mac runs for the runner (Settings › Runner, on by default).
     let checks = MacChecks()
     /// A job's notice just changed to something that needs the user: the notch's heads-up.
@@ -96,12 +100,13 @@ final class RunnerFeed {
             jobs = []
             inbox = []
             accounts = []
+            models = nil
             host = nil
             clearedAt = nil
             notified = nil
         }
         self.url = url
-        down = false
+        connection = .connecting
         loop?.cancel()
         loop = nil
         guard let runner = Self.runner(url) else { return }
@@ -131,9 +136,10 @@ final class RunnerFeed {
                         host = status.runner.host
                         clearedAt = status.clearedAt
                         accounts = status.accounts
+                        models = status.models
                         take(list)
                         inbox = items
-                        down = false
+                        connection = .live
                         wait = 1
                         Self.ask()
                         checks.look(runner)
@@ -147,7 +153,7 @@ final class RunnerFeed {
             } catch {
                 if Task.isCancelled { return }
                 if !down { Logger.feed.error("following the runner failed: \(error.localizedDescription, privacy: .public)") }
-                down = true
+                connection = .offline(error.localizedDescription)
             }
             try? await Task.sleep(for: .seconds(wait))
             wait = min(wait * 2, 30)
@@ -159,6 +165,12 @@ final class RunnerFeed {
     func clear() async throws {
         guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to clear done jobs.") }
         clearedAt = try await runner.clear()
+    }
+
+    /// Saves the model and effort the runner's jobs use (Settings › Models).
+    func setModels(_ models: ModelSettings) async throws {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+        self.models = try await runner.setModels(models)
     }
 
     /// Settles one of the runner's inbox items: an answer goes to its job, `done` lets it go, `later` puts it off.

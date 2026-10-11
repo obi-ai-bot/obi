@@ -5,8 +5,8 @@ import OSLog
 import Speech
 
 /// What you say while you hold the talk key, written down on this Mac as you speak:
-/// SpeechTranscriber streaming from AVAudioEngine. English only for now. The microphone is open
-/// only between `start` and `finish` (or `cancel`).
+/// SpeechTranscriber streaming from AVAudioEngine, in the language Settings › Voice picks
+/// (`VoiceSettings`). The microphone is open only between `start` and `finish` (or `cancel`).
 @Observable
 final class Voice {
     enum Phase { case idle, listening, finishing }
@@ -31,14 +31,17 @@ final class Voice {
     @ObservationIgnored private var results: Task<Void, Never>?
 
     private static let silence = [Float](repeating: 0, count: 32)
-    private static let locale = Locale(identifier: "en-US")
+    /// The language picked in Settings › Voice, read on each start: changing it needs no restart.
+    private static var locale: Locale { VoiceSettings.locale }
+    /// "English", "Português (Brasil)".
+    private static var language: String { VoiceSettings.name(locale) }
 
     struct Problem: LocalizedError {
         var errorDescription: String?
         init(_ text: String) { errorDescription = text }
     }
 
-    /// Fetches the English speech model with AssetInventory if this Mac doesn't have it yet.
+    /// Fetches the speech model for the language with AssetInventory if this Mac doesn't have it yet.
     func prepare() {
         Task {
             do {
@@ -103,7 +106,7 @@ final class Voice {
         // Let go (or cancelled) before the microphone could open: nothing to hear.
         var stillListening: Bool { phase == .listening && self.session == session }
         guard stillListening else { return }
-        if downloading { throw Problem("Oby is getting the English speech model. Try again in a minute.") }
+        if downloading { throw Problem("Oby is getting the \(Self.language) speech model. Try again in a minute.") }
         guard await Self.microphoneAllowed() else {
             throw Problem("Oby can't hear you. Allow the microphone in System Settings › Privacy & Security › Microphone.")
         }
@@ -112,7 +115,7 @@ final class Voice {
         let transcriber = try await Self.transcriber()
         guard await AssetInventory.status(forModules: [transcriber]) == .installed else {
             prepare()
-            throw Problem("Oby is getting the English speech model. Try again in a minute.")
+            throw Problem("Oby is getting the \(Self.language) speech model. Try again in a minute.")
         }
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
             throw Problem("This Mac can't write down speech right now.")
@@ -209,7 +212,7 @@ final class Voice {
 
     private static func transcriber() async throws -> SpeechTranscriber {
         guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
-            throw Problem("This Mac can't write down English yet.")
+            throw Problem("This Mac can't write down \(language) yet.")
         }
         return SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [.volatileResults], attributeOptions: [])
     }

@@ -329,8 +329,11 @@ nonisolated struct ModelChoice: Codable, Equatable, Sendable {
 extension ModelChoice {
     /// "Opus 5.5 · Extra high"
     nonisolated var label: String {
-        "\(Self.name(model)) · \(effort == "xhigh" ? "Extra high" : effort.capitalized)"
+        "\(Self.name(model)) · \(Self.effortName(effort))"
     }
+
+    /// "Extra high", "Medium".
+    nonisolated static func effortName(_ effort: String) -> String { effort == "xhigh" ? "Extra high" : effort.capitalized }
 
     /// "Fable 5.1", "GPT-6-Astra", or the id as it is.
     nonisolated static func name(_ model: String) -> String {
@@ -512,6 +515,22 @@ nonisolated enum NeedsYou {
     }
 }
 
+/// How an app's line to the runner is: Settings says it under the runner's address.
+nonisolated enum RunnerConnection: Equatable, Sendable {
+    case connecting
+    case live
+    case offline(String)
+
+    /// "Connected to tetrix-lab", "Connecting…", or why it's offline.
+    func status(host: String) -> String {
+        switch self {
+        case .live: "Connected to \(host)"
+        case .connecting: "Connecting…"
+        case .offline(let why): why
+        }
+    }
+}
+
 nonisolated struct RunnerError: LocalizedError {
     let message: String
     /// The runner's HTTP status, when it answered with an error.
@@ -609,9 +628,16 @@ nonisolated struct Runner: Sendable {
     }
     #endif
 
-    #if os(iOS)
-    /// The Apple Watches paired with the runner, for its Watch API.
+    /// The Apple Watches paired with the runner, for its Watch API. The Mac lists and removes them
+    /// too; pairing one takes the iPhone, with the watch at hand.
     func watches() async throws -> [PairedWatch] { try await call("GET", "v1/watches") }
+
+    func removeWatch(_ id: String) async throws {
+        struct Answer: Decodable { var removed: String }
+        let _: Answer = try await call("DELETE", "v1/watches/\(id)")
+    }
+
+    #if os(iOS)
 
     /// Pairs a watch's key, approved with Face ID, and hands the runner the Access service token
     /// for its vault. Answers the watch's id and the Watch API's address.
@@ -621,11 +647,6 @@ nonisolated struct Runner: Sendable {
         let answer: Answer = try await call("POST", "v1/watches", body: Body(name: name, publicKey: publicKey.base64EncodedString(),
                                                                           accessClientId: clientID, accessClientSecret: clientSecret, approval: approval))
         return (answer.id, answer.url)
-    }
-
-    func removeWatch(_ id: String) async throws {
-        struct Answer: Decodable { var removed: String }
-        let _: Answer = try await call("DELETE", "v1/watches/\(id)")
     }
     #endif
 
@@ -748,14 +769,12 @@ nonisolated struct Runner: Sendable {
     }
 }
 
-#if os(iOS)
 /// A watch paired with the runner, as `GET /v1/watches` lists it.
 nonisolated struct PairedWatch: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var name: String
     var registered: Date
 }
-#endif
 
 /// The job `POST /v1/jobs` sends back. Swift leaves nils out, but a missing check keeps the plan's,
 /// so no check and the usual model go as null.
