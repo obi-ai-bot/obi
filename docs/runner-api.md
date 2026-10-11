@@ -11,6 +11,7 @@ This document is the contract between the runner and its clients. Change it in t
 - **Who you are:** `tailscale serve` adds `Tailscale-User-Login` to every request. The runner answers only its owner's login (set when it's installed) and returns `401` to anyone else. The app sends no token and stores no secret for this.
 - **JSON** everywhere, camelCase keys, dates as ISO 8601 strings (`2026-10-09T21:43:30Z`). Errors are `{"error": "One line a person can read."}` with a 4xx or 5xx status.
 - **No vault secret** in an answer or an event: every string has the vault's secrets, plain or encoded, taken out. When the runner can't read its vault, answers are `503` with the reason, and events aren't sent.
+- **The Apple Watch** can't run Tailscale, so without its iPhone it uses a second, smaller API through a Cloudflare Tunnel: [The Watch API](#the-watch-api), below.
 
 ## Objects
 
@@ -481,6 +482,81 @@ Each tool's model and effort, as in `status.models`. `GET /v1/settings/models/op
 {"claude": {"models": [{"id": "claude-opus-5-5", "name": "Opus 5.5"}], "efforts": ["low", "medium", "high", "xhigh", "max"]},
  "codex": {"models": [{"id": "gpt-6-sol", "name": "GPT-6-Sol", "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]}]}}
 ```
+
+### `GET /v1/watches`, `POST /v1/watches` and `DELETE /v1/watches/{id}`
+
+The Apple Watches paired with the runner, for [the Watch API](#the-watch-api). On this API, so only the owner's iPhone over the tailnet reaches them.
+
+`POST /v1/watches` pairs one. The Watch makes its key in its Secure Enclave and hands the public half to the iPhone over WatchConnectivity; the iPhone signs the pairing with its Face ID key and sends it with the Cloudflare Access service token it gives the Watch:
+
+```json
+{"name": "Wellington's Apple Watch", "publicKey": "BK9…",
+ "accessClientId": "4a1c….access", "accessClientSecret": "9f2e…",
+ "approval": {"device": "d7c1…", "signedAt": "2026-10-11T09:12:30Z", "signature": "MEUCIQ…"}}
+```
+
+- `publicKey`: the Watch's P-256 key, X9.63, base64. `approval.signature`: ECDSA P-256 with SHA-256 (DER, base64) by the registered phone's key (`POST /v1/devices`) over `"oby-pair-watch\n<publicKey>\n<signedAt>"`, within 2 minutes, once. Agents on the runner's machine reach this API as the owner, but they can't make that signature.
+- The service token goes to the runner's vault (`watch-access-client-id`, `watch-access-client-token`), where no agent sees it and the secret scan learns it, so nothing outgoing carries it. A newer pairing replaces it. No answer or event carries it.
+- It returns `201` with `{"id": "5e0f…", "url": "https://oby-watch.example.com"}`: the Watch's id and the Watch API's address, which the iPhone hands the Watch with the token. A key the runner knows keeps its id. `409` when the runner has no `watch.json` yet, `403` for an approval that doesn't pass, `422` for a key or token that isn't one.
+
+`GET /v1/watches` lists them, `[{"id": "5e0f…", "name": "Wellington's Apple Watch", "registered": "2026-10-11T09:12:31Z"}]`, never a key or the token. `DELETE /v1/watches/{id}` removes one (the iPhone's Settings): its requests fail from then on and its push tokens are dropped; with the last Watch gone, the service token leaves the vault. `404` for a Watch the runner doesn't know.
+
+## The Watch API
+
+The Watch works without its iPhone. While the phone is in reach, the Watch goes through it as before (WatchConnectivity, `Shared/WatchWire.swift`); otherwise it calls this API itself, and goes back to the phone once it's in reach again. watchOS has no Tailscale or VPN, and only plain HTTPS through `URLSession` (no WebSockets), so:
+
+- **Where:** the runner listens on a second address, `127.0.0.1:7778` (`OBY_WATCH_PORT`), which serves only the endpoints below. A Cloudflare Tunnel (`cloudflared`) publishes it at a hostname of the owner's, and a Cloudflare Access application on that hostname lets through only requests carrying its service token (`CF-Access-Client-Id` and `CF-Access-Client-Secret` headers, a Service Auth policy).
+- **Set up** on the runner's machine, in `$OBY_HOME/watch.json`, read again whenever it changes:
+
+  ```json
+  {"url": "https://oby-watch.example.com", "team": "example",
+   "audience": "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2",
+   "keys": [{"kid": "…", "kty": "RSA", "alg": "RS256", "n": "…", "e": "AQAB"}]}
+  ```
+
+  `url` is the tunnel's hostname, `team` the Zero Trust team name, `audience` the Access application's AUD tag, and `keys` the `keys` list from `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`. Cloudflare rotates those keys every six weeks: paste the new list in. Without a usable `watch.json`, every request is `503`.
+- **Never** `Tailscale-User-Login`: it means nothing here. Every request needs both of these, or it's `401` with the reason:
+  1. **`Cf-Access-Jwt-Assertion`**, which Access adds to every request it lets through: an RS256 JWT, checked against `keys` (by `kid`), with `audience` in `aud`, `iss` `https://<team>.cloudflareaccess.com`, and `exp`, `nbf` and `iat` current (a minute of clock difference allowed).
+  2. **A signature from a paired Watch**, over the request:
+     - `Oby-Watch`: the Watch's id from pairing.
+     - `Oby-Time`: when it was signed, in seconds since 1970. Within 2 minutes of the runner's clock, and not before the runner started.
+     - `Oby-Nonce`: 16 to 64 letters, digits, `-` or `_`, new for every request. A nonce the runner has seen from that Watch is refused, so a replayed request fails.
+     - `Oby-Signature`: ECDSA P-256 with SHA-256 (DER, base64), by the Watch's Secure Enclave key, over the UTF-8 bytes of `"oby-watch\n<METHOD>\n<path and query, as sent>\n<Oby-Time>\n<Oby-Nonce>\n<hex SHA-256 of the body>"` (the body's hash is that of no bytes for a `GET`).
+- Answers and errors are as on the tailnet API, vault secrets taken out the same way.
+
+The endpoints, each as on the tailnet API unless it says otherwise:
+
+| Endpoint | |
+|---|---|
+| `GET /v1/jobs?limit=50` | The jobs. |
+| `GET /v1/jobs/{id}` | One job. |
+| `GET /v1/events` | The event stream. The Watch follows it only while Oby is on screen. |
+| `POST /v1/plans` | Planning, from what was dictated. |
+| `POST /v1/jobs` | Dispatch. |
+| `POST /v1/jobs/{id}/messages` | A word to the job's agent. |
+| `POST /v1/jobs/{id}/dismiss` | Dismiss. |
+| `GET /v1/jobs/{id}/publish` | The sentence publishing would carry out. |
+| `POST /v1/jobs/{id}/publish` | Publish, approved on the Watch (below). |
+| `POST /v1/notifications` | The Watch's push tokens (below). |
+| `POST /v1/speech` | A piece of a held recording (below). |
+
+### `POST /v1/jobs/{id}/publish` on the Watch API
+
+The Watch approves with a turn of the crown, after showing the runner's sentence. `{"action": "Push oby/fix-ab12cd to deskree-inc/oby and open a pull request into dev."}`: the signed request is the approval (fresh, once, from a paired Watch's key), and `action` must be the runner's own sentence exactly, else `403`. Then Publish runs as for `POST /v1/jobs/{id}/publish` above, and returns `{"url": …}`.
+
+### `POST /v1/notifications` on the Watch API
+
+The Watch's own push tokens: `{"token": "5b0e9c…", "topic": "dev.wellprado.oby.watchkitapp", "environment": "production", "kind": "alert"}`.
+
+- `kind` `"alert"` (the default) is the Watch app's device token. The runner sends it exactly the alerts and clearing pushes it sends the iPhone (`POST /v1/notifications` above), the same payload with the same `apns-collapse-id`, so the Watch shows each alert once.
+- `kind` `"widget"` is the complications' WidgetKit push token. When the number of jobs that need you or are working changes, the runner sends `{"aps": {"content-changed": true}}` (`apns-push-type: widgets`, topic `<topic>.push-type.widgets`), and the complications fetch the jobs themselves. A newer widget token replaces the Watch's older one.
+- It returns `{"push": true}` or `{"push": false}`, and `422`, as `POST /v1/notifications` does. Unpairing the Watch drops its tokens.
+
+### `POST /v1/speech?request={id}&sequence={n}` on the Watch API
+
+A piece of the recording the user is holding the talk button for: the body is mono signed 16-bit little-endian PCM at 16 kHz (`application/octet-stream`), up to 32,000 bytes (one second), `request` the hold's id (8 to 64 letters, digits or `-`) and `sequence` 0, 1, 2… in order.
+
+The runner can't write speech down yet: a well-formed piece is answered `501`, `{"error": "Speech-to-text isn't set up on the runner yet. Dictate instead."}`, and the Watch stops recording and offers the system's dictation. `400` without `request` and `sequence`, `422` for an empty, odd or too-long piece.
 
 ## What the runner never does
 

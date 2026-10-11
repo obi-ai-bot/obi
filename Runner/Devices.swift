@@ -66,18 +66,37 @@ final class Devices {
     /// Lets an approval through once: from a registered phone, signed by its key, for exactly the
     /// runner's own `action`, signed within two minutes, and never used before.
     func check(_ approval: Approval, job: String, action: String, now: Date = .now) throws {
-        guard let device = saved.devices.first(where: { $0.id == approval.device }), let key = Self.key(device.publicKey) else {
-            throw APIError(.forbidden, "That device isn't registered with this runner.")
-        }
         let message = Data("oby-publish\n\(job)\n\(approval.action)\n\(approval.signedAt)".utf8)
-        guard let der = Data(base64Encoded: approval.signature), let signature = try? P256.Signing.ECDSASignature(derRepresentation: der),
-              key.isValidSignature(signature, for: message) else {
-            throw APIError(.forbidden, "The signature doesn't match the device's key.")
-        }
+        let device = try signer(approval.device, of: message, signature: approval.signature)
         guard approval.action == action else {
             throw APIError(.forbidden, "The phone approved something else. Approve it again.")
         }
-        guard let signedAt = try? Date(approval.signedAt, strategy: .iso8601), abs(signedAt.timeIntervalSince(now)) <= 120 else {
+        try use(message, from: device, signedAt: approval.signedAt, now: now)
+    }
+
+    /// Lets a Watch's pairing through once (Runner/Watches.swift): the phone signed
+    /// `"oby-pair-watch\n<the Watch's public key>\n<signedAt>"` behind Face ID, within two minutes.
+    func checkPairing(_ approval: PairingApproval, publicKey: String, now: Date = .now) throws {
+        let message = Data("oby-pair-watch\n\(publicKey)\n\(approval.signedAt)".utf8)
+        let device = try signer(approval.device, of: message, signature: approval.signature)
+        try use(message, from: device, signedAt: approval.signedAt, now: now)
+    }
+
+    /// The registered phone whose key signed `message`.
+    private func signer(_ id: String, of message: Data, signature: String) throws -> Device {
+        guard let device = saved.devices.first(where: { $0.id == id }), let key = Self.key(device.publicKey) else {
+            throw APIError(.forbidden, "That device isn't registered with this runner.")
+        }
+        guard let der = Data(base64Encoded: signature), let signature = try? P256.Signing.ECDSASignature(derRepresentation: der),
+              key.isValidSignature(signature, for: message) else {
+            throw APIError(.forbidden, "The signature doesn't match the device's key.")
+        }
+        return device
+    }
+
+    /// Uses up a signed message: signed within two minutes and never used before.
+    private func use(_ message: Data, from device: Device, signedAt text: String, now: Date) throws {
+        guard let signedAt = try? Date(text, strategy: .iso8601), abs(signedAt.timeIntervalSince(now)) <= 120 else {
             throw APIError(.forbidden, "The approval is more than two minutes old. Approve it again.")
         }
         // The signed message, not the signature: an ECDSA signature can be rewritten into another valid one.

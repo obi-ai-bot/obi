@@ -41,8 +41,9 @@ Put the owner's Tailscale login in place of `you@example.com` (`tailscale status
 | Variable | What it is |
 | --- | --- |
 | `OBY_OWNER` | The owner's Tailscale login. Required. |
-| `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs, and the brain's latest 200 turns), `accounts.json`, `devices.json` (the phones that may approve publishing; to add one, `touch $OBY_HOME/pairing` and open the app within 10 minutes), `cleared.json` (when Clear done was last pressed, on any app), `apns/` (the APNs key and the phones' Live Activity tokens), `vault/` (the secrets Oby uses but never shows), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
+| `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs, and the brain's latest 200 turns), `accounts.json`, `devices.json` (the phones that may approve publishing; to add one, `touch $OBY_HOME/pairing` and open the app within 10 minutes), `cleared.json` (when Clear done was last pressed, on any app), `apns/` (the APNs key and the phones' Live Activity tokens), `vault/` (the secrets Oby uses but never shows), `watch.json` and `watches.json` (the Watch API's Cloudflare Access settings and the paired Apple Watches), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
 | `OBY_PORT` | The port on `127.0.0.1`. 7777 by default. |
+| `OBY_WATCH_PORT` | The Watch API's port on `127.0.0.1`, for the Cloudflare Tunnel. 7778 by default. |
 
 The models and efforts the app picks in Settings › Models are kept in `~/.config/oby-runner.plist`.
 
@@ -90,7 +91,22 @@ The runner listens on `127.0.0.1` only. `tailscale serve` publishes it on the ta
 tailscale serve --bg --https=8443 http://127.0.0.1:7777
 ```
 
-On `tetrix-lab`, port 443 belongs to the Tetrix stack, so the runner is on 8443: the iPhone app's base URL is `https://tetrix-lab.tail8de49b.ts.net:8443`. Nothing is reachable from the internet.
+On `tetrix-lab`, port 443 belongs to the Tetrix stack, so the runner is on 8443: the iPhone app's base URL is `https://tetrix-lab.tail8de49b.ts.net:8443`. Nothing on the tailnet API is reachable from the internet.
+
+## The Apple Watch without its iPhone
+
+watchOS can't run Tailscale, so the Watch reaches a second, smaller API (`docs/runner-api.md`, "The Watch API") through a Cloudflare Tunnel, behind Cloudflare Access. The runner always listens for it on `127.0.0.1:7778`, and lets nothing through until `watch.json` is set up.
+
+1. In Cloudflare Zero Trust, make a service token (Access › Service auth) and a self-hosted Access application for a hostname of yours, say `oby-watch.example.com`, with one policy: **Service Auth**, that token. Note the application's AUD tag.
+2. Run the tunnel on the runner's machine, pointing that hostname at the Watch API: `cloudflared tunnel create oby-watch`, then in its config `ingress: [{hostname: oby-watch.example.com, service: http://127.0.0.1:7778}, {service: http_status:404}]`, and `cloudflared service install`.
+3. Write `$OBY_HOME/watch.json` (mode 600), with the team's keys from `curl https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`:
+
+   ```json
+   {"url": "https://oby-watch.example.com", "team": "<team>", "audience": "<AUD tag>", "keys": [<the "keys" list>]}
+   ```
+
+   Cloudflare rotates those keys every six weeks: paste the new list in (the runner reads the file again when it changes; the journal says when it can't use it).
+4. On the iPhone, Settings › Apple Watch without iPhone: paste the service token's client ID and secret, open Oby on the watch, and tap **Pair Apple Watch** (Face ID). The runner keeps the token in its vault (`watch-access-client-id`, `watch-access-client-token`), so no agent sees it and nothing outgoing carries it; swipe a watch there to remove it.
 
 ## Logs
 

@@ -22,7 +22,7 @@ nonisolated struct Glance: Codable, Equatable {
 
     private static let key = "glance"
     /// The app group both targets share; its name is in each Info.plist (`ObyAppGroup`).
-    private static var defaults: UserDefaults? {
+    static var defaults: UserDefaults? {
         (Bundle.main.object(forInfoDictionaryKey: "ObyAppGroup") as? String).flatMap(UserDefaults.init(suiteName:))
     }
 

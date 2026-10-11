@@ -8,7 +8,8 @@ What it does today:
 - **Publish with the crown:** on a job ready to publish, Publish shows the exact sentence the runner would carry out, and turning the Digital Crown confirms it: the ring fills as it turns, and a full turn publishes. A tap can't do it by mistake. The signature is the iPhone's (below).
 - **Notifications:** the alerts the runner sends the iPhone ("Couldn't publish", "Failed", "Interrupted") reach the watch as mirrored notifications. The watch registers the same categories, so a "ready" alert offers **Publish** (the job opens and asks for the crown) and **Open**; tapping one opens the job.
 - **Talk to Oby:** hold the round microphone to talk, up to 15 seconds. Permission is asked when Home opens. The microphone opens synchronously on the hold and closes on release, the limit, leaving Home, or the app becoming inactive. Leaving Home or a notification opening a job cancels the recording. During a hold, the watch converts the microphone to mono 16 kHz Int16 PCM (32 KB/s) and sends it to the iPhone in sequence, each chunk after the last one's acknowledgement. The watch keeps the whole hold's audio (at most ~512 KB), so a slow phone delays the words instead of dropping the request, and a backlog goes in chunks of up to a second to catch up. Audio captured before the release still reaches the phone. SpeechAnalyzer with SpeechTranscriber volatile results sends back the whole evolving transcript; tentative words replace earlier guesses. Home shows those words and a level meter below a smaller Oby. Release sends an explicit end after the last chunk, finalizes the text, then asks the runner's brain. The reply, question or plan stays in a card below Oby, scrollable with the crown; dispatch takes one tap. Done/Cancel dismisses it, and a new hold cancels the previous pending answer. If the iPhone is out of reach, microphone permission is denied, or streaming fails, tapping the mic opens system dictation/scribble instead. Dictated requests queue for the phone if needed; dismissing cancels an undelivered transfer. Live audio and partial words are never queued for background delivery. The phone expires a stream after 30 seconds without a new chunk, or when its background time expires.
-- **Tell the agent** and **Stop job** on a job's screen, as on the iPhone.
+- **Tell the agent**, **Dismiss** and **Stop job** on a job's screen, as on the iPhone.
+- **Without the iPhone:** once paired, the watch calls the runner itself when the phone is out of reach, and goes back to the phone when it's back (below).
 - **Complications and the Smart Stack:** how many things need you, with Oby in a still pose (below).
 
 ## Oby animated
@@ -47,6 +48,19 @@ The watch can't reach the tailnet, so the iPhone stands in between (WatchConnect
 - Spoken requests are transcribed on the iPhone (watchOS has no SpeechAnalyzer). The first time, the phone downloads the speech model for its language and asks the watch to try again in a minute.
 
 The watch keeps the last application context and the id of the ask it waits for. Live audio is buffered only in memory during a hold; no recording file is kept.
+
+### Without the iPhone
+
+watchOS has no Tailscale or VPN, so a paired watch reaches the runner's Watch API through a Cloudflare Tunnel behind Cloudflare Access (`docs/runner-api.md`, "The Watch API"; setting it up: `Runner/README.md`). `Watch/WatchLink.swift` is that line: plain HTTPS from `URLSession`.
+
+- **Pairing** (`iOS/WatchPairing.swift`, Settings › Apple Watch without iPhone on the phone): the watch makes a P-256 key in its Secure Enclave (CryptoKit) and hands the public half to the phone over WatchConnectivity; Face ID on the phone approves it; the runner keeps the key, and the Access service token in its vault; the watch gets its id, the Watch API's address and the token, kept in the keychain of the app group, so the widget can use them too. Swiping the watch away on the phone unpairs it.
+- **Every request** carries the service token (Access lets it through and adds its JWT) and the watch's signature over the method, path, body, time and a fresh nonce, so a replayed request fails.
+- **Which way:** with the phone reachable, the relay as above; otherwise the Watch API, switching back by itself when the phone is in reach. The runner's events stream only while Oby is on screen (`ObyWatchApp` tells `Watch`); otherwise the jobs come with each refresh, push and complication reload.
+- **Publish** without the phone: the crown's full turn sends the runner's sentence back in a request signed by the watch's key; there's no Face ID on the watch, and the watch locks itself off the wrist.
+- **Stop** waits for the phone: the Watch API has none.
+- **Notifications:** the watch registers its own device token with the runner, which sends it the same alerts as the phone, with the same payload and collapse ID, so each shows once. A background push clears an alert once its job needs nothing.
+- **Complications:** the widget registers a WidgetKit push token (`GlancePushHandler`); the runner pushes when the counts change, and the widget fetches the jobs itself.
+- **Talking:** the hold's audio goes to the runner in pieces (`POST /v1/speech`); the runner can't write speech down yet and says so at the first piece, so the watch stops recording and the mic opens the system's dictation instead.
 
 ## Run it
 
@@ -87,6 +101,18 @@ The Linux runner can parse Swift syntax and exercise the Watch model with a mock
 - Reachable but locked/backgrounded iPhone, disconnection during a hold, slow transport, mic denial, system dictation fallback, and queued request dismissal.
 - Short holds, release during setup, 15-second limit, navigation, notifications and inactive scene: the mic must close and cancelled requests must never dispatch.
 - Crown scrolling for long replies/plans, one-tap dispatch, and a new hold while transcription/planning/dispatch is pending.
+
+## Verification for the Watch without its iPhone
+
+The runner's side (the Watch API, the JWT and signature checks, replays, pairing, pushes) is tested in `RunnerTests/WatchTests.swift`. Nothing on the Apple side could be built or run here (no Xcode on the Linux runner). To verify on Xcode and real devices:
+
+- The watch app, the widget (it now compiles `Shared/` too, except `Character.swift`) and the iPhone app build; `WKRunsIndependentlyOfCompanionApp` is on.
+- The Secure Enclave key on the watch, and the keychain items shared with the widget through the app group (`kSecAttrAccessGroup` set to the group).
+- Pairing from the phone's Settings with Face ID, and removing a watch.
+- With the phone off or in airplane mode, over Wi-Fi or LTE: jobs, events while on screen, planning, dispatch, a message, Dismiss, Publish with the crown, and the switch back to the relay when the phone returns.
+- The watch's own APNs token (`aps-environment` in both entitlements), alerts arriving once with both devices near, and the clearing push.
+- WidgetKit push (`pushHandler`, topic `<watch app bundle ID>.push-type.widgets`) reloading the complication.
+- The talk button falling back to dictation at the runner's `501`.
 
 ## Coming next
 

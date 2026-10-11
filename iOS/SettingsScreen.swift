@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// The runner Oby talks to, the accounts signed in there, and each tool's model and effort.
+/// The runner Oby talks to, the accounts signed in there, each tool's model and effort, and the
+/// Apple Watches that reach it without this iPhone.
 struct SettingsScreen: View {
     @Environment(Phone.self) private var phone
     @Environment(\.dismiss) private var dismiss
@@ -8,6 +9,8 @@ struct SettingsScreen: View {
     @State private var options: ModelOptions?
     @State private var models: ModelSettings?
     @State private var problem: String?
+    @State private var watchPairing = WatchPairing()
+    @State private var watchProblem: String?
 
     var body: some View {
         NavigationStack {
@@ -62,6 +65,36 @@ struct SettingsScreen: View {
                 }
 
                 Section {
+                    TextField("Client ID", text: $watchPairing.clientID)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Client secret", text: $watchPairing.clientSecret)
+                    Button(watchPairing.busy ? "Pairing…" : "Pair Apple Watch") {
+                        Task {
+                            watchProblem = nil
+                            do { try await watchPairing.pair(phone) } catch { watchProblem = error.localizedDescription }
+                        }
+                    }
+                    .disabled(!watchPairing.canPair)
+                    ForEach(watchPairing.watches) { watch in
+                        LabeledContent(watch.name, value: "Paired")
+                    }
+                    .onDelete { offsets in
+                        let ids = offsets.map { watchPairing.watches[$0].id }
+                        Task {
+                            for id in ids {
+                                do { try await watchPairing.remove(id, phone) } catch { watchProblem = error.localizedDescription }
+                            }
+                        }
+                    }
+                    if let watchProblem { Text(watchProblem).foregroundStyle(.red) }
+                } header: {
+                    Text("Apple Watch without iPhone")
+                } footer: {
+                    Text("Away from this iPhone, your watch reaches the runner through your Cloudflare Tunnel. Paste the Cloudflare Access service token; pairing asks for Face ID, with Oby open on the watch. Swipe a watch to remove it.")
+                }
+
+                Section {
                     LabeledContent("Publishing key", value: DeviceKey.isAvailable ? (phone.deviceID == nil ? "Not registered yet" : "Registered, Face ID") : "Needs a real iPhone")
                     if let problem { Text(problem).foregroundStyle(.red) }
                 } footer: {
@@ -75,6 +108,8 @@ struct SettingsScreen: View {
                 address = phone.runnerURL.absoluteString
                 models = phone.models
                 do { options = try await phone.modelOptions() } catch { problem = error.localizedDescription }
+                // A runner older than the Watch API has no list: then there's nothing to show.
+                try? await watchPairing.load(phone)
             }
         }
     }

@@ -3,23 +3,39 @@ import Foundation
 import HTTPTypes
 @testable import ObyEngine
 
-/// Push to the iPhone, through Apple's push service: the Live Activity keeps the Lock Screen and
-/// Dynamic Island in step with the jobs while Oby is suspended, and an alert says when a job needs
-/// the user (its own publish failed, it failed, or it was interrupted), and nothing else. On only when `folder`
+/// Push to the iPhone and the Apple Watch, through Apple's push service: the Live Activity keeps the
+/// Lock Screen and Dynamic Island in step with the jobs while Oby is suspended, an alert says when
+/// a job needs the user (its own publish failed, it failed, or it was interrupted), and nothing
+/// else, to the phone and the Watch alike, and a WidgetKit push refreshes the Watch's complications
+/// when what they count changes. On only when `folder`
 /// holds `apns.json` (`{"team": …, "key": …}`) and that key's `AuthKey_<key>.p8`, which never
 /// leaves the folder.
 @MainActor
 final class Push {
-    /// A push token from a phone, as `POST /v1/activities` and `POST /v1/notifications` take it.
+    /// A push token from a phone, as `POST /v1/activities` and `POST /v1/notifications` take it,
+    /// or from a Watch, through the Watch API's `POST /v1/notifications`.
     struct Token: Codable, Equatable {
         /// Hex.
         var token: String
-        /// "update" (one activity), "start" (push-to-start) or "alert" (the app's device token).
+        /// "update" (one activity), "start" (push-to-start), "alert" (the app's device token) or
+        /// "widget" (the Watch's complications).
         var kind: String
         /// The app's bundle ID.
         var topic: String
         /// "development" or "production".
         var environment: String
+        /// The paired Watch it came from, or nil for the phone's.
+        var watch: String? = nil
+    }
+
+    /// One push to send.
+    struct Delivery: Equatable {
+        var token: Token
+        var body: Data
+        /// `apns-push-type`.
+        var type: String
+        var priority: Int
+        var collapse: String?
     }
 
     /// The Live Activity's `ContentState` (LiveActivity/ObyActivity.swift), as ActivityKit decodes
@@ -75,13 +91,15 @@ final class Push {
     private let desk: Desk
     private let signer: Signer?
     private let file: URL
-    private var tokens: [Token] = []
+    private(set) var tokens: [Token] = []
     /// What each job's alert last said, kept in `notices.json` so a restart doesn't say it again.
     private let noticesFile: URL
     private var notified: [String: Notice] = [:]
     /// Push-to-start went out for the jobs running now.
     private var started = false
     private var lastSent: State?
+    /// What the Watch's complications counted when they were last pushed.
+    private var lastGlance: Glance?
     private var jwt: (token: String, made: Date)?
     private var sending: Task<Void, Never>?
     private var waiting = false
@@ -126,7 +144,7 @@ final class Push {
               token.token.allSatisfy(\.isHexDigit) else {
             throw APIError(.unprocessableContent, "token isn't a push token in hex.")
         }
-        guard ["update", "start", "alert"].contains(token.kind) else { throw APIError(.unprocessableContent, "kind is update or start.") }
+        guard ["update", "start", "alert", "widget"].contains(token.kind) else { throw APIError(.unprocessableContent, "kind is update or start.") }
         guard ["development", "production"].contains(token.environment) else {
             throw APIError(.unprocessableContent, "environment is development or production.")
         }
@@ -136,10 +154,18 @@ final class Push {
         guard isOn else { return false }
         var token = token
         token.token = token.token.lowercased()
-        tokens.removeAll { $0.token == token.token || (token.kind == "start" && $0.kind == "start" && $0.topic == token.topic && $0.environment == token.environment) }
+        tokens.removeAll { $0.token == token.token || (token.kind == "start" && $0.kind == "start" && $0.topic == token.topic && $0.environment == token.environment)
+            || (token.kind == "widget" && $0.kind == "widget" && $0.watch == token.watch) }
         tokens.append(token)
         save()
         return true
+    }
+
+    /// A Watch was unpaired: nothing goes to it any more.
+    func forget(watch: String) {
+        guard tokens.contains(where: { $0.watch == watch }) else { return }
+        tokens.removeAll { $0.watch == watch }
+        save()
     }
 
     /// A job changed: two seconds later (time for an open app to hand over its own activity's
@@ -154,6 +180,7 @@ final class Push {
             waiting = false
             await send()
             await notify(now: .now)
+            await refreshComplications(now: .now)
         }
     }
 
@@ -201,17 +228,49 @@ final class Push {
         guard notified != self.notified else { return }
         self.notified = notified
         saveNotices()
+        for delivery in Self.alerts(changes, to: tokens) {
+            await deliver(delivery.body, to: delivery.token, type: delivery.type, priority: delivery.priority, collapse: delivery.collapse, now: now)
+        }
+    }
+
+    /// The alerts for `changes`, to every alert token, the phone's and the Watches' alike: the same
+    /// payload with the same collapse ID, so a Watch that gets its own and the phone's shows one.
+    static func alerts(_ changes: [(Job, Notice?)], to tokens: [Token]) -> [Delivery] {
         let alerts = tokens.filter { $0.kind == "alert" }
-        for (job, notice) in changes {
-            guard let body = try? Self.notification(notice, for: job) else { continue }
-            for token in alerts {
-                if notice == nil {
-                    await deliver(body, to: token, type: "background", priority: 5, now: now)
-                } else {
-                    await deliver(body, to: token, type: "alert", priority: 10, collapse: job.id, now: now)
-                }
+        return changes.flatMap { job, notice -> [Delivery] in
+            guard let body = try? notification(notice, for: job) else { return [] }
+            return alerts.map { token in
+                notice == nil ? Delivery(token: token, body: body, type: "background", priority: 5)
+                    : Delivery(token: token, body: body, type: "alert", priority: 10, collapse: job.id)
             }
         }
+    }
+
+    /// The Watch's complications count what needs the user and what's working: when either
+    /// changes, a WidgetKit push has them reload (they fetch the jobs themselves).
+    private func refreshComplications(now: Date) async {
+        let glance = Self.glance(desk.jobs)
+        guard glance != lastGlance else { return }
+        lastGlance = glance
+        for delivery in Self.complications(to: tokens) {
+            await deliver(delivery.body, to: delivery.token, type: delivery.type, priority: delivery.priority, now: now)
+        }
+    }
+
+    /// What the complications count.
+    struct Glance: Equatable {
+        var needs: Int
+        var working: Int
+    }
+
+    static func glance(_ jobs: [Job]) -> Glance {
+        Glance(needs: jobs.count(where: \.needsYou), working: jobs.count(where: \.isActive))
+    }
+
+    /// A WidgetKit push to every Watch's widget token: `{"aps": {"content-changed": true}}`.
+    static func complications(to tokens: [Token]) -> [Delivery] {
+        let body = Data(#"{"aps":{"content-changed":true}}"#.utf8)
+        return tokens.filter { $0.kind == "widget" }.map { Delivery(token: $0, body: body, type: "widgets", priority: 10) }
     }
 
     private func activity(_ aps: [String: any Encodable], to token: Token, priority: Int, now: Date) async {
@@ -240,7 +299,11 @@ final class Push {
             bearer = made
         }
         let host = token.environment == "production" ? "api.push.apple.com" : "api.sandbox.push.apple.com"
-        let topic = type == "liveactivity" ? "\(token.topic).push-type.liveactivity" : token.topic
+        let topic = switch type {
+        case "liveactivity": "\(token.topic).push-type.liveactivity"
+        case "widgets": "\(token.topic).push-type.widgets"
+        default: token.topic
+        }
         let config = [
             "url = \(Self.quoted("https://\(host)/3/device/\(token.token)"))",
             "request = \"POST\"",

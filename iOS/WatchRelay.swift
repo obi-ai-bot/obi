@@ -211,6 +211,11 @@ final class WatchRelay: NSObject {
                 let job = try await phone.runner.stop(id)
                 _ = await refresh()
                 return [WatchWire.job: try Runner.encoder.encode(job)]
+            case .dismiss:
+                guard let id = message[WatchWire.job] as? String else { return bad }
+                let job = try await phone.runner.dismiss(id)
+                _ = await refresh()
+                return [WatchWire.job: try Runner.encoder.encode(job)]
             case .publishAction:
                 guard let id = message[WatchWire.job] as? String else { return bad }
                 return [WatchWire.action: try await phone.runner.publishAction(id)]
@@ -218,7 +223,7 @@ final class WatchRelay: NSObject {
                 guard let id = message[WatchWire.job] as? String, let action = message[WatchWire.action] as? String else { return bad }
                 Task { await self.inBackground("publish") { await self.publish(id, action: action) } }
                 return [WatchWire.ok: true]
-            case .transcript, .planned, .published:
+            case .transcript, .planned, .published, .pairKey, .paired, .unpaired:
                 return bad
             }
         } catch {

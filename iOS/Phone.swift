@@ -319,7 +319,7 @@ final class Phone {
 
     /// Registers the phone's Face ID key with the runner and returns its id. On every connection it
     /// registers `again`: the runner keeps a known key's id, and a reinstalled runner learns it anew.
-    private func registerDevice(again: Bool = false) async throws -> String {
+    func registerDevice(again: Bool = false) async throws -> String {
         if !again, let deviceID { return deviceID }
         guard DeviceKey.isAvailable else { throw RunnerError(message: "Publishing needs Face ID on your iPhone.") }
         let id = try await runner.register(name: "iPhone", publicKey: try DeviceKey.publicKey())

@@ -15,6 +15,18 @@ nonisolated struct Approval: Encodable, Equatable, Sendable {
     }
 }
 
+/// The phone's approval for pairing one Apple Watch's key with the runner (docs/runner-api.md,
+/// `POST /v1/watches`).
+nonisolated struct PairingApproval: Encodable, Equatable, Sendable {
+    var device: String
+    var signedAt: String
+    var signature: String
+
+    static func message(publicKey: String, signedAt: String) -> Data {
+        Data("oby-pair-watch\n\(publicKey)\n\(signedAt)".utf8)
+    }
+}
+
 /// The phone's publishing key. It lives in the Secure Enclave and signs only after Face ID, so the
 /// runner can tell a publish was approved on this phone, by its owner, just now.
 nonisolated enum DeviceKey {
@@ -33,6 +45,16 @@ nonisolated enum DeviceKey {
         let signedAt = ISO8601DateFormatter().string(from: .now)
         let signature = try key(context: context).signature(for: Approval.message(job: job, action: action, signedAt: signedAt))
         return Approval(device: device, action: action, signedAt: signedAt, signature: signature.derRepresentation.base64EncodedString())
+    }
+
+    /// Signs a Watch's pairing: Face ID, then the runner lets that watch's key in. `publicKey` is base64.
+    /// It blocks until the user answers, so call it off the main actor.
+    static func approvePairing(publicKey: String, device: String) throws -> PairingApproval {
+        let context = LAContext()
+        context.localizedReason = "Let your Apple Watch reach the runner without this iPhone"
+        let signedAt = ISO8601DateFormatter().string(from: .now)
+        let signature = try key(context: context).signature(for: PairingApproval.message(publicKey: publicKey, signedAt: signedAt))
+        return PairingApproval(device: device, signedAt: signedAt, signature: signature.derRepresentation.base64EncodedString())
     }
 
     private static func key(context: LAContext?) throws -> SecureEnclave.P256.Signing.PrivateKey {

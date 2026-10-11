@@ -35,6 +35,7 @@ let package = Package(
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HTTPTypes", package: "swift-http-types"),
                 .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "_CryptoExtras", package: "swift-crypto"),
             ],
             path: "Runner",
             exclude: ["CSQLite", "README.md", "oby-runner.service"],

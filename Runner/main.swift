@@ -16,6 +16,8 @@ guard let owner = environment["OBY_OWNER"], !owner.isEmpty else {
     exit(1)
 }
 let port = environment["OBY_PORT"].flatMap { Int($0) } ?? 7777
+// The Watch API's own port, which a Cloudflare Tunnel publishes (Runner/WatchAPI.swift).
+let watchPort = environment["OBY_WATCH_PORT"].flatMap { Int($0) } ?? 7778
 // A pipe to an agent that just exited must not take the runner down with it.
 signal(SIGPIPE, SIG_IGN)
 try FileManager.default.createDirectory(at: Workspace.root, withIntermediateDirectories: true)
@@ -69,7 +71,17 @@ Task {
     }
 }
 
-let app = Application(router: api.router(owner: owner),
+let watchAPI = WatchAPI(api: api, watches: Watches(file: Workspace.root.appending(path: "watches.json")),
+                        access: AccessFile(file: Workspace.root.appending(path: "watch.json")))
+let router = api.router(owner: owner)
+watchAPI.pairing(on: router)
+let app = Application(router: router,
                       configuration: .init(address: .hostname("127.0.0.1", port: port), serverName: "oby-runner"))
+// Always up, so writing watch.json is enough; without it, it answers 503 to everything.
+let watchApp = Application(router: watchAPI.router(),
+                           configuration: .init(address: .hostname("127.0.0.1", port: watchPort), serverName: "oby-runner"))
 Logger.runner.notice("Oby's runner \(API.version, privacy: .public) in \(Workspace.root.path, privacy: .public), for \(owner, privacy: .public)")
-try await app.runService(gracefulShutdownSignals: [])
+try await withThrowingDiscardingTaskGroup { group in
+    group.addTask { try await app.runService(gracefulShutdownSignals: []) }
+    group.addTask { try await watchApp.runService(gracefulShutdownSignals: []) }
+}

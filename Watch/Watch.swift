@@ -1,12 +1,14 @@
 import Foundation
 import OSLog
+import UserNotifications
 import WatchConnectivity
 import WatchKit
 import WidgetKit
 
 /// The watch's view of the runner, through the iPhone (iOS/WatchRelay.swift): the jobs the
 /// phone keeps here, and the requests it carries out. What they say to each other is in
-/// Shared/WatchWire.swift.
+/// Shared/WatchWire.swift. With the phone out of reach, a paired watch calls the runner's Watch
+/// API itself (Watch/WatchLink.swift), and goes back to the phone once it's in reach again.
 @Observable
 final class Watch: NSObject {
     enum Talk: Equatable {
@@ -27,8 +29,14 @@ final class Watch: NSObject {
     private(set) var host = ""
     /// The jobs arrived at least once, so an empty list really is empty.
     private(set) var loaded = false
-    /// The phone is near and answers now. Without it, requests queue until it is.
+    /// The phone is near and answers now. Without it, a paired watch calls the runner itself;
+    /// an unpaired one queues requests until the phone is back.
     private(set) var reachable = false
+    /// The Watch API, once the iPhone paired this watch with the runner.
+    private(set) var link = WatchLink.saved
+    /// Oby is on screen: only then does the watch follow the runner's events itself.
+    @ObservationIgnored private var isOnScreen = false
+    @ObservationIgnored private var following: Task<Void, Never>?
     var talk: Talk = .none
     private(set) var words = ""
     private(set) var level = 0.0
@@ -67,6 +75,13 @@ final class Watch: NSObject {
 
     // MARK: What Home shows
 
+    /// Paired with the runner: the watch works without its iPhone.
+    var paired: Bool { link != nil }
+    /// The runner directly, while the phone is out of reach.
+    private var direct: WatchLink? { reachable ? nil : link }
+    /// Hold-to-talk works through the phone, or through the runner when paired.
+    var canTalk: Bool { reachable || paired }
+
     var needing: [Job] { jobs.filter(\.needsYou) }
     var working: [Job] { jobs.filter(\.isActive) }
     /// What needs you first, then what's running.
@@ -84,12 +99,15 @@ final class Watch: NSObject {
 
     // MARK: The jobs
 
-    /// Asks the phone for the jobs as the runner has them now; the context it keeps here is
-    /// the fallback.
+    /// Asks the phone for the jobs as the runner has them now, or the runner itself when the
+    /// phone is out of reach; the context the phone keeps here is the fallback.
     func refresh() {
-        guard reachable else { return }
-        Task {
-            if let reply = try? await request([WatchWire.kind: WatchWire.Kind.refresh.rawValue]) { load(reply) }
+        if reachable {
+            Task {
+                if let reply = try? await request([WatchWire.kind: WatchWire.Kind.refresh.rawValue]) { load(reply) }
+            }
+        } else if let link {
+            Task { await fetch(link) }
         }
     }
 
@@ -100,9 +118,65 @@ final class Watch: NSObject {
         accounts = context.accounts
         host = context.host
         loaded = true
-        // The complications and the Smart Stack (Watch/Widget) draw from the app group.
-        if Glance.save(Glance(needs: needing.count, working: working.count, top: needing.first?.heading)) {
+        saveGlance()
+    }
+
+    /// The jobs from the runner, trimmed as the phone trims them: what needs you, what's working,
+    /// and what finished in the last two days.
+    private func fetch(_ link: WatchLink) async {
+        do {
+            let now = Date.now
+            let all = try await link.jobs()
+            let recent = all.filter { !$0.needsYou && !$0.isActive && ($0.finished ?? now) > now.addingTimeInterval(-2 * 86400) }
+            jobs = Array((all.filter(\.needsYou) + all.filter { $0.isActive && !$0.needsYou } + recent).prefix(20))
+            loaded = true
+            saveGlance()
+        } catch {
+            Logger.watch.error("fetching the jobs from the runner failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// The complications and the Smart Stack (Watch/Widget) draw from the app group.
+    private func saveGlance() {
+        if Glance.save(Glance.of(jobs)) {
             WidgetCenter.shared.reloadTimelines(ofKind: Glance.kind)
+        }
+    }
+
+    /// Oby came on screen or left it.
+    func onScreen(_ active: Bool) {
+        isOnScreen = active
+        follow()
+        if active { refresh() }
+    }
+
+    /// While Oby is on screen and the phone is out of reach, the runner's events keep the jobs
+    /// current (watchOS streams only for an app on screen). Reconnects after a drop.
+    private func follow() {
+        guard isOnScreen, let link = direct else {
+            following?.cancel()
+            following = nil
+            return
+        }
+        guard following == nil else { return }
+        following = Task {
+            while !Task.isCancelled {
+                do {
+                    for try await event in link.events() {
+                        switch event {
+                        case .connected: await fetch(link)
+                        case .job(let job):
+                            apply(job)
+                            saveGlance()
+                        case .accounts(let accounts): self.accounts = accounts
+                        case .cleared, .inbox: break
+                        }
+                    }
+                } catch {
+                    Logger.watch.error("the runner's events stopped: \(error.localizedDescription, privacy: .public)")
+                }
+                try? await Task.sleep(for: .seconds(5))
+            }
         }
     }
 
@@ -137,7 +211,7 @@ final class Watch: NSObject {
 
     func dispatch(_ draft: Draft) async throws {
         let previous = talk
-        try apply(try await request([WatchWire.kind: WatchWire.Kind.dispatch.rawValue, WatchWire.draft: try Runner.encoder.encode(draft)]))
+        try await send(draft)
         if talk == previous { talk = .none }
     }
 
@@ -145,21 +219,46 @@ final class Watch: NSObject {
     func dispatch(all drafts: [Draft]) async throws {
         let previous = talk
         for draft in drafts where !jobs.contains(where: { $0.id == draft.job.id }) {
-            try apply(try await request([WatchWire.kind: WatchWire.Kind.dispatch.rawValue, WatchWire.draft: try Runner.encoder.encode(draft)]))
+            try await send(draft)
         }
         if talk == previous { talk = .none }
     }
 
+    private func send(_ draft: Draft) async throws {
+        if let link = direct {
+            apply(try await link.dispatch(draft.job))
+        } else {
+            try apply(try await request([WatchWire.kind: WatchWire.Kind.dispatch.rawValue, WatchWire.draft: try Runner.encoder.encode(draft)]))
+        }
+    }
+
+    /// The Watch API has no Stop: that waits for the phone.
     func stop(_ id: String) async throws {
+        guard direct == nil else { throw RunnerError(message: "Stopping a job needs your iPhone in reach.") }
         try apply(try await request([WatchWire.kind: WatchWire.Kind.stop.rawValue, WatchWire.job: id]))
     }
 
     func tell(_ id: String, _ text: String) async throws {
-        try apply(try await request([WatchWire.kind: WatchWire.Kind.tell.rawValue, WatchWire.job: id, WatchWire.text: text]))
+        if let link = direct {
+            apply(try await link.tell(id, text))
+        } else {
+            try apply(try await request([WatchWire.kind: WatchWire.Kind.tell.rawValue, WatchWire.job: id, WatchWire.text: text]))
+        }
+    }
+
+    /// Lets go of a job that needs you: it then needs nothing.
+    func dismiss(_ id: String) async throws {
+        if let link = direct {
+            apply(try await link.dismiss(id))
+        } else {
+            try apply(try await request([WatchWire.kind: WatchWire.Kind.dismiss.rawValue, WatchWire.job: id]))
+        }
+        saveGlance()
     }
 
     /// The exact sentence publishing this job would carry out.
     func publishAction(_ id: String) async throws -> String {
+        if let link = direct { return try await link.publishAction(id) }
         guard let action = try await request([WatchWire.kind: WatchWire.Kind.publishAction.rawValue, WatchWire.job: id])[WatchWire.action] as? String else {
             throw RunnerError(message: "Your iPhone sent no action back.")
         }
@@ -167,7 +266,21 @@ final class Watch: NSObject {
     }
 
     /// The phone signs with Face ID and publishes; how it went arrives as a `published` message.
+    /// Without the phone, the crown's turn is the approval: the watch's signed request carries it.
     func publish(_ id: String, action: String) async throws {
+        if let link = direct {
+            outcomes[id] = "Publishing…"
+            do {
+                _ = try await link.publish(id, action: action)
+                outcomes[id] = "Published: the pull request is open."
+                apply(try await link.job(id))
+                saveGlance()
+            } catch {
+                outcomes[id] = nil
+                throw error
+            }
+            return
+        }
         outcomes[id] = "Publishing on your iPhone…"
         do {
             _ = try await request([WatchWire.kind: WatchWire.Kind.publish.rawValue, WatchWire.job: id, WatchWire.action: action])
@@ -191,15 +304,30 @@ final class Watch: NSObject {
         voiceBacklog = Data()
         let (stream, input) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
         voiceInput = input
+        let link = direct
         voiceTask = Task {
             do {
                 try Task.checkCancellation()
+                if let link {
+                    // The phone is out of reach: the pieces go to the runner. It can't write speech
+                    // down yet and says so at the first one, so the system's dictation takes over.
+                    let send: (Data, Int) async throws -> Void = { try await link.speech(request: id, sequence: $1, audio: $0) }
+                    var sequence = 0
+                    for await _ in stream { try await sendBacklog(id, sequence: &sequence, send: send) }
+                    try await sendBacklog(id, sequence: &sequence, send: send)
+                    throw WatchLink.SpeechUnavailable(message: "Speech-to-text isn't set up on the runner yet.")
+                }
                 _ = try await request([WatchWire.kind: WatchWire.Kind.voiceStart.rawValue,
                                        WatchWire.request: id, WatchWire.sampleRate: sampleRate])
+                let send: (Data, Int) async throws -> Void = { audio, sequence in
+                    _ = try await self.request([WatchWire.kind: WatchWire.Kind.voiceChunk.rawValue,
+                                                WatchWire.request: id, WatchWire.sequence: sequence,
+                                                WatchWire.audio: audio])
+                }
                 var sequence = 0
-                for await _ in stream { try await sendBacklog(id, sequence: &sequence) }
+                for await _ in stream { try await sendBacklog(id, sequence: &sequence, send: send) }
                 // The stream finishes on release; the last of the audio may have come with it.
-                try await sendBacklog(id, sequence: &sequence)
+                try await sendBacklog(id, sequence: &sequence, send: send)
                 guard asking == id else { return }
                 let reply = try await request([WatchWire.kind: WatchWire.Kind.voiceEnd.rawValue,
                                                WatchWire.request: id, WatchWire.sequence: sequence])
@@ -209,6 +337,11 @@ final class Watch: NSObject {
                 }
                 words = said
                 if talk == .sending { talk = .thinking(said) }
+            } catch let unavailable as WatchLink.SpeechUnavailable {
+                guard asking == id, !Task.isCancelled else { return }
+                cancel()
+                useDictation = true
+                talk = .reply(unavailable.message + " Tap the mic to dictate instead.")
             } catch {
                 guard asking == id, !Task.isCancelled else { return }
                 // The session may know the phone is gone before its reachability update arrives.
@@ -221,17 +354,15 @@ final class Watch: NSObject {
         }
     }
 
-    /// Sends what's waiting, in order, each chunk after the phone acknowledged the last.
-    private func sendBacklog(_ id: String, sequence: inout Int) async throws {
+    /// Sends what's waiting, in order, each chunk after the last was acknowledged.
+    private func sendBacklog(_ id: String, sequence: inout Int, send: (Data, Int) async throws -> Void) async throws {
         while true {
             try Task.checkCancellation()
             guard asking == id else { throw CancellationError() }
             guard !voiceBacklog.isEmpty else { return }
             let audio = Data(voiceBacklog.prefix(WatchWire.chunkLimit))
             voiceBacklog.removeFirst(audio.count)
-            _ = try await request([WatchWire.kind: WatchWire.Kind.voiceChunk.rawValue,
-                                   WatchWire.request: id, WatchWire.sequence: sequence,
-                                   WatchWire.audio: audio])
+            try await send(audio, sequence)
             sequence += 1
         }
     }
@@ -302,6 +433,20 @@ final class Watch: NSObject {
             message[WatchWire.question] = answer.question
             message[WatchWire.option] = answer.option
         }
+        if !reachable, let link {
+            talk = .thinking(said)
+            Task {
+                do {
+                    let plan = RelayedPlan(try await link.plan(said, answer: answer))
+                    guard asking == request else { return }
+                    asking = nil
+                    show(plan)
+                } catch {
+                    if asking == request, talk == .thinking(said) { talk = .reply(error.localizedDescription) }
+                }
+            }
+            return
+        }
         guard reachable else {
             WCSession.default.transferUserInfo(message)
             talk = .queued(said)
@@ -332,10 +477,7 @@ final class Watch: NSObject {
             if let error = message[WatchWire.error] as? String {
                 talk = .reply(error)
             } else if let data = message[WatchWire.plan] as? Data, let plan = try? Runner.decoder.decode(RelayedPlan.self, from: data) {
-                if !plan.drafts.isEmpty { talk = .plan(plan.drafts) }
-                else if let question = plan.question { talk = .question(said: plan.questionSaid ?? "", question) }
-                else if let reply = plan.reply { talk = .reply(reply) }
-                else { talk = .none }
+                show(plan)
             }
         case .published:
             guard let id = message[WatchWire.job] as? String else { return }
@@ -344,6 +486,75 @@ final class Watch: NSObject {
             else if let error = message[WatchWire.error] as? String { outcomes[id] = error }
         default:
             break
+        }
+    }
+
+    private func show(_ plan: RelayedPlan) {
+        if !plan.drafts.isEmpty { talk = .plan(plan.drafts) }
+        else if let question = plan.question { talk = .question(said: plan.questionSaid ?? "", question) }
+        else if let reply = plan.reply { talk = .reply(reply) }
+        else { talk = .none }
+    }
+
+    // MARK: Pairing and pushes
+
+    /// What the phone asks while it pairs this watch (iOS/WatchPairing.swift), or unpairs it.
+    private func answer(_ message: [String: Any]) -> [String: Any] {
+        switch (message[WatchWire.kind] as? String).flatMap(WatchWire.Kind.init(rawValue:)) {
+        case .pairKey:
+            do {
+                return [WatchWire.publicKey: try WatchLink.publicKey(), WatchWire.name: WKInterfaceDevice.current().name]
+            } catch {
+                return [WatchWire.error: error.localizedDescription]
+            }
+        case .paired:
+            guard let watch = message[WatchWire.watch] as? String, let url = (message[WatchWire.url] as? String).flatMap(URL.init(string:)),
+                  let clientID = message[WatchWire.clientID] as? String, let clientSecret = message[WatchWire.clientSecret] as? String else {
+                return [WatchWire.error: "The pairing was incomplete."]
+            }
+            do {
+                try WatchLink.save(WatchLink.Pairing(watch: watch, url: url, clientID: clientID, clientSecret: clientSecret))
+            } catch {
+                return [WatchWire.error: error.localizedDescription]
+            }
+            link = WatchLink.saved
+            askForAlerts()
+            follow()
+            return [WatchWire.ok: true]
+        case .unpaired:
+            // Only this watch's own pairing: the phone may be removing another watch.
+            if let watch = message[WatchWire.watch] as? String, link?.pairing.watch == watch {
+                WatchLink.forget()
+                link = nil
+                follow()
+            }
+            return [WatchWire.ok: true]
+        default:
+            take(message)
+            return [WatchWire.ok: true]
+        }
+    }
+
+    /// Alerts straight from the runner, the same ones the phone gets: asks once, then registers
+    /// for this watch's own device token (WatchNotifications hands it to `registerPush`).
+    func askForAlerts() {
+        guard paired else { return }
+        Task {
+            _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+            WKApplication.shared().registerForRemoteNotifications()
+        }
+    }
+
+    /// Hands the runner this watch's device token, and the complications' WidgetKit token when
+    /// the widget has one.
+    func registerPush(_ token: Data) async {
+        guard let link else { return }
+        let topic = Bundle.main.bundleIdentifier ?? ""
+        do {
+            _ = try await link.registerPush(token, kind: "alert", topic: topic)
+            if let widget = Glance.widgetToken { _ = try await link.registerPush(widget, kind: "widget", topic: topic) }
+        } catch {
+            Logger.watch.error("handing the runner the push tokens failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -372,6 +583,7 @@ extension Watch: WCSessionDelegate {
             self.load(context)
             self.reachable = reachable
             if reachable { self.useDictation = false }
+            self.follow()
             self.refresh()
             self.finishDelivered()
         }
@@ -382,8 +594,13 @@ extension Watch: WCSessionDelegate {
         Task { @MainActor in
             self.reachable = reachable
             if reachable { self.useDictation = false }
+            self.follow()
             self.refresh()
         }
+    }
+
+    nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
+        Task { @MainActor in replyHandler(self.answer(message)) }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
