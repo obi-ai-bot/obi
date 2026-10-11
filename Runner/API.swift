@@ -11,6 +11,7 @@ final class API {
     static let version = "0.2.0"
 
     let desk: Desk
+    var updates: Updates?
     let speech: Speech
     let devices: Devices
     /// Push to the iPhone (Live Activity and alerts), or nil when this runner has none.
@@ -84,7 +85,7 @@ final class API {
     // MARK: Endpoints
 
     func status() -> Response {
-        Self.json(Status(runner: .init(version: Self.version, host: ProcessInfo.processInfo.hostName),
+        Self.json(Status(runner: .init(version: Self.version, host: ProcessInfo.processInfo.hostName, update: updates?.status),
                          accounts: accounts, models: .current, clearedAt: cleared.at))
     }
 
@@ -467,6 +468,7 @@ struct Status: Encodable {
     struct Runner: Encodable {
         var version: String
         var host: String
+        var update: Updates.Status? = nil
     }
 
     var runner: Runner
