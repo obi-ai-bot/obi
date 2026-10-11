@@ -41,10 +41,10 @@ struct InboxSection: View {
     private func card(_ item: InboxItem, now: Date) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(item.line(now: now)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            Text(item.text).font(.headline).fixedSize(horizontal: false, vertical: true)
+            ReadingText(item.text, weight: .semibold)
             ForEach(item.options, id: \.self) { option in
                 Button { settle(item, answer: option) } label: {
-                    Text(option).font(.subheadline.weight(.medium))
+                    Text(option).fontWeight(.medium).readingText()
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16).padding(.vertical, 12)
                         .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -55,6 +55,7 @@ struct InboxSection: View {
                 HStack(spacing: 8) {
                     TextField(item.options.isEmpty ? "Your answer" : "Or type your answer", text: $reply, axis: .vertical)
                         .lineLimit(1...4)
+                        .readingText()
                         .submitLabel(.send)
                         .onSubmit { answerTyped(item) }
                     Button { answerTyped(item) } label: {

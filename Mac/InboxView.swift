@@ -61,11 +61,11 @@ struct IslandInbox: View {
     private func card(_ entry: Entry, now: Date) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(entry.item.line(now: now)).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.5))
-            Text(entry.item.text).font(.system(size: 15, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+            ReadingText(entry.item.text, weight: .semibold)
             ForEach(Array(entry.item.options.prefix(9).enumerated()), id: \.offset) { index, option in
                 Button { settle(entry, answer: option) } label: {
                     HStack {
-                        Text(option).font(.system(size: 13, weight: .medium))
+                        Text(option).fontWeight(.medium).readingText()
                         Spacer(minLength: 8)
                         Text("⌘\(index + 1)").font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.4))
                     }
@@ -79,7 +79,7 @@ struct IslandInbox: View {
             if entry.item.kind == .question {
                 HStack(spacing: 8) {
                     TextField(entry.item.options.isEmpty ? "Your answer" : "Or type your answer", text: $reply)
-                        .textFieldStyle(.plain).font(.system(size: 13))
+                        .textFieldStyle(.plain).readingText()
                         .onSubmit { answerTyped(entry) }
                     Button { answerTyped(entry) } label: {
                         Image(systemName: "arrow.up").font(.system(size: 12, weight: .bold)).foregroundStyle(.black)

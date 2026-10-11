@@ -37,7 +37,7 @@ struct JobScreen: View {
                     }
                     result(job)
                     DisclosureGroup("What you asked", isExpanded: $requestExpanded) {
-                        Text(job.request).font(.body).textSelection(.enabled)
+                        ReadingText(job.request).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
                     }
                     details(job)
@@ -45,7 +45,7 @@ struct JobScreen: View {
                         DisclosureGroup("You told the agent (\(notes.count))") {
                             VStack(alignment: .leading, spacing: 10) {
                                 ForEach(notes.indices, id: \.self) { index in
-                                    Label(notes[index], systemImage: "text.bubble").font(.callout)
+                                    Label(notes[index], systemImage: "text.bubble").readingText()
                                 }
                             }.padding(.top, 8)
                         }
@@ -105,8 +105,8 @@ struct JobScreen: View {
         if !job.summary.isEmpty || job.commits != nil || job.published != nil || job.needsYou || job.dismissed != nil {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Result").font(.headline).accessibilityAddTraits(.isHeader)
-                if !job.summary.isEmpty { Text(job.summary).font(.callout).textSelection(.enabled) }
-                if let sent = job.sentLines { Text(sent).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled) }
+                if !job.summary.isEmpty { ReadingText(job.summary).textSelection(.enabled) }
+                if let sent = job.sentLines { ReadingText(sent, secondary: true).textSelection(.enabled) }
                 if let commits = job.commits {
                     Label("\(commits) \(commits == 1 ? "commit" : "commits")", systemImage: "point.3.connected.trianglepath.dotted")
                         .font(.subheadline).foregroundStyle(.secondary)
@@ -163,7 +163,7 @@ struct JobScreen: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .bottom, spacing: 10) {
                 TextField("Tell the agent…", text: $note, axis: .vertical)
-                    .lineLimit(1...5).padding(12)
+                    .lineLimit(1...5).readingText().padding(12)
                     .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
                 Button { send(text, to: job.id) } label: {
                     if telling { ProgressView().frame(minWidth: 44, minHeight: 44) }
@@ -191,7 +191,7 @@ struct JobScreen: View {
 
     @ViewBuilder private func publishActions(_ job: Job) -> some View {
         if let action {
-            Text(action).font(.subheadline)
+            ReadingText(action)
             Button(busy ? "Publishing…" : "Publish with Face ID", systemImage: "faceid") {
                 Task {
                     await run {

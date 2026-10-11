@@ -29,7 +29,7 @@ struct JobView: View {
             pipeline
             result
             DisclosureGroup("What you asked", isExpanded: $requestExpanded) {
-                Text(job.request).font(.system(size: 13)).textSelection(.enabled)
+                ReadingText(job.request).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
             }
             .font(.system(size: 13, weight: .semibold))
@@ -38,7 +38,7 @@ struct JobView: View {
                 DisclosureGroup("You told the agent (\(notes.count))") {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(notes.indices, id: \.self) { index in
-                            Label(notes[index], systemImage: "text.bubble").font(.system(size: 13))
+                            Label(notes[index], systemImage: "text.bubble").readingText()
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
@@ -100,11 +100,11 @@ struct JobView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Result").font(.system(size: 14, weight: .semibold)).accessibilityAddTraits(.isHeader)
                 if !job.summary.isEmpty {
-                    Text(job.summary).font(.system(size: 13)).foregroundStyle(.white.opacity(0.85)).textSelection(.enabled)
+                    ReadingText(job.summary).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if let sent = job.sentLines {
-                    Text(sent).font(.system(size: 12)).foregroundStyle(.white.opacity(0.6)).textSelection(.enabled)
+                    ReadingText(sent, secondary: true).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if let commits = job.commits {
@@ -149,7 +149,7 @@ struct JobView: View {
             }
         } else if confirming {
             VStack(alignment: .leading, spacing: 8) {
-                Text(Publish.action(for: job, base: job.base ?? "")).font(.system(size: 13, weight: .medium))
+                ReadingText(Publish.action(for: job, base: job.base ?? ""), weight: .medium)
                 if let problem {
                     Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(3)
                 }
@@ -212,7 +212,7 @@ struct JobView: View {
             HStack(spacing: 8) {
                 TextField("Tell the agent…", text: $note)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .readingText()
                     .onSubmit(tell)
                 Button(action: tell) {
                     Image(systemName: "arrow.up")

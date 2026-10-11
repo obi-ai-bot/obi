@@ -77,13 +77,13 @@ struct TalkView: View {
                         }
                         let heard = watch.heard
                         Text(heard.isEmpty ? (listening ? "Listening…" : "Writing down…") : heard)
-                            .font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
+                            .readingText().frame(maxWidth: .infinity, alignment: .leading)
                             .accessibilityAddTraits(.updatesFrequently)
                         if !listening, !heard.isEmpty {
                             Label("Writing down…", systemImage: "ellipsis").font(.caption2).foregroundStyle(.secondary)
                         }
                     case .draft(let words):
-                        Text(words).font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
+                        ReadingText(words).frame(maxWidth: .infinity, alignment: .leading)
                         if let notice = watch.notice {
                             Text(notice).font(.caption2).foregroundStyle(.orange)
                         }
@@ -95,14 +95,14 @@ struct TalkView: View {
                         waiting(said)
                     case .queued(let said):
                         Text("Your iPhone isn't in reach. Oby plans it when it is.").font(.footnote)
-                        Text(said).font(.footnote)
+                        ReadingText(said)
                         Button("Dismiss") { watch.cancel() }
                     case .plan(let drafts):
                         PlanCard(drafts: drafts)
                     case .question(let said, let question):
                         QuestionCard(said: said, question: question)
                     case .reply(let text):
-                        Text(text).font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
+                        ReadingText(text).frame(maxWidth: .infinity, alignment: .leading)
                         Button("Done") { watch.cancel() }
                     }
                 }
@@ -123,7 +123,7 @@ struct TalkView: View {
     private func waiting(_ said: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ProgressView().frame(maxWidth: .infinity)
-            Text(said).font(.footnote)
+            ReadingText(said)
             Button("Cancel") { watch.cancel() }
         }
     }
@@ -351,7 +351,7 @@ struct QuestionCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(question.text).font(.footnote.weight(.semibold))
+            ReadingText(question.text, weight: .semibold)
             ForEach(question.options, id: \.self) { option in
                 Button(option) { watch.answer(option, said: said, question: question) }
             }
