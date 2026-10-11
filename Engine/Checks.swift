@@ -1359,12 +1359,14 @@ extension Desk {
             }
         }
         if let problem {
+            Logger.jobs.error("job \(id, privacy: .public): \(problem, privacy: .public)")
+            // A conflict Oby rebases by itself isn't a merge error: nothing needs the user, and no
+            // failure is recorded (#209). Only one the rebase can't settle is.
+            if conflicted { return await rebaseConflicted(id, problem, check: check.id) }
             latest = self.job(id) ?? latest
             latest.mergeError = problem
             latest.macCheck?.transient = transient
-            Logger.jobs.error("job \(id, privacy: .public): \(problem, privacy: .public)")
             replace(latest)
-            if conflicted { await rebaseConflicted(id) }
             return
         }
         sent(id, Outgoing(action: .merge, repo: latest.repo, id: latest.published ?? "", branch: latest.branch))
@@ -1381,27 +1383,37 @@ extension Desk {
     /// as GitHub has it now (fetched here: its sandbox has no GitHub login), as its next round in the
     /// same session and worktree. Its commits publish by themselves when the round ends, with
     /// `--force-with-lease` (Engine/Publish.swift), and are reviewed, checked and merged again; one
-    /// more review is allowed for that. Once per commit of the base: the same conflict with the same
-    /// base again needs you, its merge error saying so.
-    func rebaseConflicted(_ id: String) async {
-        guard let author = job(id), !author.isActive, let base = author.base else { return }
-        guard let session = author.session else {
-            var stuck = author
-            stuck.mergeError = (author.mergeError ?? "Not merged: it conflicts with \(base).") + " The job has no session to rebase it."
-            return replace(stuck)
+    /// more review is allowed for that. A conflict handled so is no merge error (#209). One the
+    /// rebase can't settle is, `problem` saying why the merge stopped and then why: the same base
+    /// again (the last rebase didn't resolve it), `Job.rebasesPerDay` rebases in a day already, no
+    /// session, or no base to rebase onto. `check` is the Mac check whose merge conflicted.
+    func rebaseConflicted(_ id: String, _ problem: String, check: String) async {
+        func stop(_ why: String) {
+            guard var latest = job(id), !latest.isActive, latest.macCheck?.id == check else { return }
+            latest.mergeError = problem + " " + why
+            latest.macCheck?.transient = false
+            Logger.jobs.error("job \(id, privacy: .public): \(latest.mergeError ?? "", privacy: .public)")
+            replace(latest)
+        }
+        guard let author = job(id), !author.isActive, author.macCheck?.id == check else { return }
+        guard let base = author.base else { return stop("The job has no base branch to rebase onto.") }
+        guard let session = author.session else { return stop("The job has no session to rebase it.") }
+        let today = (author.rebases ?? []).filter { Date.now.timeIntervalSince($0) < 86_400 }
+        guard today.count < Job.rebasesPerDay else {
+            return stop("Oby rebased it \(today.count) times today already: a person takes it from here.")
         }
         let onto: String
         do {
             onto = try await fetchBase(author, base)
         } catch {
-            guard var latest = job(id), !latest.isActive else { return }
-            latest.mergeError = (latest.mergeError ?? "Not merged: it conflicts with \(base).") + " Oby couldn't fetch \(base) to rebase onto: \(error.localizedDescription)"
-            return replace(latest)
+            return stop("Oby couldn't fetch \(base) to rebase onto: \(error.localizedDescription)")
         }
-        guard var latest = job(id), !latest.isActive, latest.mergeError != nil else { return }
+        guard var latest = job(id), !latest.isActive, latest.macCheck?.id == check else { return }
         // Rebased onto that commit already, and it still conflicts: a person takes it from here.
-        guard latest.rebasedOnto != onto else { return }
+        guard latest.rebasedOnto != onto else { return stop("Oby rebased it onto \(onto.prefix(12)) already, and it still conflicts.") }
         latest.rebasedOnto = onto
+        latest.rebases = today + [.now]
+        latest.mergeError = nil
         latest.extraReviews = max(latest.extraReviews ?? 0, (latest.review?.round ?? 0) + 1 - Review.maxRounds)
         var again = Review.round(latest)
         again.step = "Rebasing onto \(base)"
