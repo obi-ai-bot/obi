@@ -197,7 +197,7 @@ final class Desk {
     /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
     private var drafts: [Draft] = []
     var agents: [String: any AgentRun] = [:]
-    /// Each job's permission prompts waiting for the user, oldest first (Engine/PermissionPolicy.swift):
+    /// Each job's permission prompts waiting for the user, oldest first (Engine/Permissions.swift):
     /// the first is the job's `permission`, or its plan question.
     var asks: [String: [Desk.Ask]] = [:]
     /// Agents told to stop whose own stop hasn't ended them yet (`Halt.grace`): quitting ends them too.
