@@ -82,6 +82,8 @@ final class Push {
         case question
         /// Oby's merge stopped: it couldn't merge, or the Mac check failed with no round left.
         case merge
+        /// Its agent waits for the user's OK on a command or an edit (the inbox has it).
+        case permission
     }
 
     private struct Signer {
@@ -349,6 +351,7 @@ final class Push {
 
     /// Nothing for a job the user dismissed: its alert clears.
     static func notice(for job: Job) -> Notice? {
+        if job.waitsForPermission { return .permission }
         if job.waitsForAnswer { return .question }
         guard job.needsYou else { return nil }
         if job.canPublish { return .ready }
@@ -390,6 +393,7 @@ final class Push {
         case .review: "Changes requested: \(state.title)"
         case .question: "Question: \(state.title)"
         case .merge: "Not merged: \(state.title)"
+        case .permission: "\(job.permission?.title ?? "Allow it")?"
         }
         // Why its own publish failed, when that's what it needs; why Oby's review stopped.
         let body = switch notice {
@@ -398,9 +402,10 @@ final class Push {
         case .question: job.question?.text ?? state.line
         case .merge: job.mergeError ?? job.macCheck.map { $0.problem ?? $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? state.line
         case .failed, .interrupted: state.line
+        case .permission: "\(state.title): \(job.permission.map { String(($0.detail.isEmpty ? $0.title : $0.detail).prefix(200)) } ?? state.line)"
         }
         let aps: [String: any Encodable] = ["alert": ["title": title, "body": body], "sound": "default",
-                                            "category": notice == .ready ? "ready" : "job", "thread-id": "jobs"]
+                                            "category": notice == .ready ? "ready" : notice == .permission ? "permission" : "job", "thread-id": "jobs"]
         return try encoder.encode(Fields(["aps": Fields(aps), "job": job.id]))
     }
 

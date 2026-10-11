@@ -200,7 +200,7 @@ struct ConversationTests {
         #expect(try Plan.decode(Data(Self.stop(["zz"]).utf8)).problems(in: context, canary: "zq9") == ["zz isn't a job Oby can stop"])
         var dispatch = try Plan.decode(Data(Self.reply("ok").utf8))
         dispatch.jobs = ["ab12cd34"]
-        #expect(dispatch.problems(in: context, canary: "zq9") == ["only stop_agent names jobs"])
+        #expect(dispatch.problems(in: context, canary: "zq9") == ["only stop_agent, answer_permission and set_mode name jobs"])
         // Stopping everything is said in so many words, never by naming no job.
         #expect(try Plan.decode(Data(Self.stop([]).utf8)).problems(in: context, canary: "zq9").isEmpty)
         var bare = try Plan.decode(Data(Self.stop([]).utf8))

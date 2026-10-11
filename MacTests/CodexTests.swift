@@ -23,6 +23,22 @@ struct CodexTests {
         #expect(plain["config"] == nil && plain["sandbox"] as? String == "workspace-write")
     }
 
+    /// Permission modes (#134) on the Mac: Bypass keeps Codex's own sandbox answering, the others
+    /// send every command and file change to Oby, and Plan runs read-only.
+    @Test func threadStartFollowsTheMode() {
+        let git = "/tmp/oby/repos/deskree-inc/oby/.git"
+        #expect(CodexRPC.threadStart(worktree: worktree, git: git, mode: .bypass)["approvalPolicy"] as? String == "on-request")
+        for mode in [PermissionMode.ask, .acceptEdits] {
+            let params = CodexRPC.threadStart(worktree: worktree, git: git, mode: mode)
+            #expect(params["approvalPolicy"] as? String == "untrusted" && params["sandbox"] as? String == "workspace-write", "\(mode)")
+        }
+        let plan = CodexRPC.threadStart(worktree: worktree, git: git, mode: .plan)
+        #expect(plan["sandbox"] as? String == "read-only" && plan["approvalPolicy"] as? String == "untrusted")
+        let approval = message(#"{"id": 3, "method": "item/commandExecution/requestApproval", "params": {"threadId": "t", "turnId": "u", "command": "/bin/zsh -lc 'swift test'"}}"#)
+        #expect(CodexRPC.call(approval, files: [:]) == ToolCall(request: "3", tool: "Bash", command: "swift test"))
+        #expect(Permissions.decide(ToolCall(request: "3", tool: "Bash", command: "swift test"), mode: .ask, rules: [], worktree: worktree) == .ask)
+    }
+
     @Test func commandSteps() {
         let cat = message(#"{"method":"item/started","params":{"item":{"type":"commandExecution","id":"exec-c7d8352a","command":"/bin/zsh -lc 'cat hello.txt'","cwd":"/tmp/oby/jobs/abc","status":"inProgress","commandActions":[{"type":"read","command":"cat hello.txt","name":"hello.txt","path":"/tmp/oby/jobs/abc/hello.txt"}]},"threadId":"01a1228b-a556","turnId":"01a1228b-a5fb"}}"#)
         #expect(CodexRPC.events(cat) == [.step("Reading hello.txt")])

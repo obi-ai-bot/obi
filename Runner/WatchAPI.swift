@@ -41,6 +41,12 @@ final class WatchAPI {
             try await self.api.message(context.parameters.require("id"), try await API.decode(NewMessage.self, from: request))
         }
         router.post("v1/jobs/:id/dismiss") { _, context in try await self.api.dismiss(context.parameters.require("id")) }
+        router.post("v1/jobs/:id/mode") { request, context in
+            try await self.api.mode(context.parameters.require("id"), try await API.decode(ModeJSON.self, from: request))
+        }
+        router.post("v1/jobs/:id/permission") { request, context in
+            try await self.api.permission(context.parameters.require("id"), try await API.decode(PermissionAnswer.self, from: request))
+        }
         router.get("v1/jobs/:id/publish") { _, context in try await self.api.publishAction(context.parameters.require("id")) }
         router.post("v1/jobs/:id/publish") { request, context in
             try await self.publish(context.parameters.require("id"), try await API.decode(WatchPublish.self, from: request))

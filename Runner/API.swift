@@ -55,6 +55,12 @@ final class API {
         router.post("v1/jobs/:id/stop") { _, context in try await self.stop(context.parameters.require("id")) }
         router.post("v1/stop-all") { _, _ in await self.stopAll() }
         router.post("v1/jobs/:id/dismiss") { _, context in try await self.dismiss(context.parameters.require("id")) }
+        router.post("v1/jobs/:id/mode") { request, context in
+            try await self.mode(context.parameters.require("id"), try await Self.decode(ModeJSON.self, from: request))
+        }
+        router.post("v1/jobs/:id/permission") { request, context in
+            try await self.permission(context.parameters.require("id"), try await Self.decode(PermissionAnswer.self, from: request))
+        }
         router.post("v1/jobs/:id/messages") { request, context in
             try await self.message(context.parameters.require("id"), try await Self.decode(NewMessage.self, from: request))
         }
@@ -85,6 +91,10 @@ final class API {
         router.get("v1/settings/models") { _, _ in Self.json(Models.current) }
         router.put("v1/settings/models") { request, _ in try Self.change(try await Self.decode(Models.self, from: request)) }
         router.get("v1/settings/models/options") { _, _ in await Self.options() }
+        router.get("v1/settings/permissions") { _, _ in await self.permissionSettings() }
+        router.put("v1/settings/permissions") { request, _ in try await self.changePermissions(try await Self.decode(ModeJSON.self, from: request)) }
+        router.get("v1/permissions/rules") { _, _ in await self.rules() }
+        router.delete("v1/permissions/rules/:id") { _, context in try await self.forget(context.parameters.require("id")) }
         return router
     }
 
@@ -92,7 +102,7 @@ final class API {
 
     func status() -> Response {
         Self.json(Status(runner: .init(version: Self.version, host: ProcessInfo.processInfo.hostName),
-                         accounts: accounts, models: .current, clearedAt: cleared.at))
+                         accounts: accounts, models: .current, clearedAt: cleared.at, permissions: ModeJSON(mode: desk.defaultMode.rawValue)))
     }
 
     /// Clear done, on the iPhone or the Mac: the runner records now, answers it, and tells every
@@ -134,8 +144,9 @@ final class API {
 
     func dispatch(_ request: DispatchRequest) throws -> Response {
         do {
+            let mode = try request.job.mode.map { try Self.mode($0) }
             let job = try desk.dispatch(request.job.id, branch: request.job.branch, account: request.job.account,
-                                        rounds: request.job.rounds, check: request.job.check, model: request.job.model)
+                                        rounds: request.job.rounds, check: request.job.check, model: request.job.model, mode: mode)
             return Self.json(JobJSON(job: job), status: .created)
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
@@ -206,6 +217,63 @@ final class API {
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
         return Self.json(JobJSON(job: try known(id)))
+    }
+
+    /// The job's mode changes: a waiting permission the new mode allows is answered, and a plan
+    /// waiting for approval is approved in it.
+    func mode(_ id: String, _ body: ModeJSON) throws -> Response {
+        _ = try known(id)
+        let mode = try Self.mode(body.mode)
+        do {
+            try desk.setMode(id, mode)
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+        return Self.json(JobJSON(job: try known(id)))
+    }
+
+    /// The user answers the job's waiting permission: allow, always (a rule for the repository) or deny.
+    func permission(_ id: String, _ answer: PermissionAnswer) throws -> Response {
+        let job = try known(id)
+        guard let decision = PermissionDecision(rawValue: answer.decision) else {
+            throw APIError(.unprocessableContent, "decision is allow, always or deny.")
+        }
+        guard job.permission?.id == answer.id else { throw APIError(.conflict, "That permission isn't waiting any more.") }
+        do {
+            try desk.answerPermission(id, answer.id, decision, message: answer.message)
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+        return Self.json(JobJSON(job: try known(id)))
+    }
+
+    func permissionSettings() -> Response {
+        Self.json(ModeJSON(mode: desk.defaultMode.rawValue))
+    }
+
+    /// Settings › Permissions: the mode new jobs get.
+    func changePermissions(_ body: ModeJSON) throws -> Response {
+        desk.defaultMode = try Self.mode(body.mode)
+        return permissionSettings()
+    }
+
+    func rules() -> Response {
+        Self.json(desk.permissionRules)
+    }
+
+    /// Forgets a saved rule: answers with the rules left.
+    func forget(_ id: String) throws -> Response {
+        do {
+            try desk.forgetRule(id)
+        } catch {
+            throw APIError(.notFound, error.localizedDescription)
+        }
+        return rules()
+    }
+
+    nonisolated static func mode(_ name: String) throws -> PermissionMode {
+        guard let mode = PermissionMode(rawValue: name) else { throw APIError(.unprocessableContent, "mode is ask, acceptEdits, plan or bypass.") }
+        return mode
     }
 
     /// What only the user can answer and hasn't settled, the longest-waiting first. Items put off
@@ -526,8 +594,10 @@ struct Status: Encodable {
     var models: Models
     /// When Clear done was last pressed, or null: the API promises the key either way.
     var clearedAt: Date?
+    /// Settings › Permissions: the mode new jobs get.
+    var permissions: ModeJSON
 
-    private enum Keys: String, CodingKey { case runner, accounts, models, clearedAt }
+    private enum Keys: String, CodingKey { case runner, accounts, models, clearedAt, permissions }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -535,7 +605,21 @@ struct Status: Encodable {
         try keys.encode(accounts, forKey: .accounts)
         try keys.encode(models, forKey: .models)
         try keys.encode(clearedAt, forKey: .clearedAt)
+        try keys.encode(permissions, forKey: .permissions)
     }
+}
+
+/// A mode, as `POST /v1/jobs/{id}/mode`, Settings › Permissions and the status carry it.
+struct ModeJSON: Codable {
+    var mode: String
+}
+
+/// How `POST /v1/jobs/{id}/permission` answers the job's waiting permission.
+struct PermissionAnswer: Decodable {
+    var id: String
+    var decision: String
+    /// The user's words for the agent, with a deny.
+    var message: String?
 }
 
 /// What `POST /v1/clear` answers and the `clear` event carries.
@@ -585,7 +669,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, mode, permission }
 
     private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou }
 
@@ -634,6 +718,9 @@ struct JobJSON: Encodable {
         if job.mergeError == nil { try nulls.encodeNil(forKey: .mergeError) }
         if job.appleCheck == nil { try nulls.encodeNil(forKey: .appleCheck) }
         if job.appleRan == nil { try nulls.encodeNil(forKey: .appleRan) }
+        // Older jobs ran before modes: Oby answered everything, as Bypass does.
+        try nulls.encode(job.currentMode, forKey: .mode)
+        if job.permission == nil { try nulls.encodeNil(forKey: .permission) }
         // What went out is always a list: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
     }
@@ -824,8 +911,10 @@ struct DispatchRequest: Decodable {
         var check: String??
         /// The draft's suggested model to use it, or null to stay on Settings › Models.
         var model: String??
+        /// How the job asks (`ask`, `acceptEdits`, `plan` or `bypass`); left out, Settings' default.
+        var mode: String?
 
-        private enum Keys: String, CodingKey { case id, branch, account, rounds, check, model }
+        private enum Keys: String, CodingKey { case id, branch, account, rounds, check, model, mode }
 
         init(from decoder: any Decoder) throws {
             let keys = try decoder.container(keyedBy: Keys.self)
@@ -835,6 +924,7 @@ struct DispatchRequest: Decodable {
             rounds = try keys.decodeIfPresent(Int.self, forKey: .rounds)
             check = keys.contains(.check) ? .some(try keys.decodeIfPresent(String.self, forKey: .check)) : nil
             model = keys.contains(.model) ? .some(try keys.decodeIfPresent(String.self, forKey: .model)) : nil
+            mode = try keys.decodeIfPresent(String.self, forKey: .mode)
         }
     }
 

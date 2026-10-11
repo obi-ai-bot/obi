@@ -23,6 +23,8 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         case audit
         /// Oby's merge stopped: it couldn't merge, or the Mac check failed with no round left (`Job.mergeNeedsYou`).
         case merge
+        /// The job's agent waits for the user's OK to run a command or edit a file (`Job.permission`, #134).
+        case permission
     }
 
     /// The job, what it needs and when it came: the same need never comes twice, even once it's done.
@@ -60,6 +62,21 @@ nonisolated enum Inbox {
     static let oneMoreRound = "One more round"
     /// What the agent hears for Try again.
     static let tryAgainMessage = "Try again, picking up where you left off. Finish with a short summary as asked."
+    /// What a permission's item offers; words of the user's own say no, and reach the agent.
+    static let allow = "Allow"
+    static let alwaysAllow = "Always allow"
+    static let deny = "Deny"
+
+    /// The decision a permission item's answer stands for, and the user's words for the agent:
+    /// any other answer is a no with those words.
+    static func decision(_ answer: String) -> (PermissionDecision, message: String?) {
+        switch answer.lowercased() {
+        case allow.lowercased(), "yes": (.allow, nil)
+        case alwaysAllow.lowercased(): (.always, nil)
+        case deny.lowercased(), "no": (.deny, nil)
+        default: (.deny, answer)
+        }
+    }
 
     /// The item `job` calls for now, or nil when it needs nothing from the user. `limited`: it
     /// failed because no account had room.
@@ -67,6 +84,9 @@ nonisolated enum Inbox {
         guard job.dismissed == nil else { return nil }
         func item(_ kind: InboxItem.Kind, _ id: String, _ text: String, _ options: [String]) -> InboxItem {
             InboxItem(id: "\(job.id)-\(id)", kind: kind, job: job.id, title: job.shortTitle, text: text, options: options, created: .now)
+        }
+        if let permission = job.permission, job.status != .stopped {
+            return item(.permission, "permission-\(permission.id)", permission.title, permission.always == nil ? [allow, deny] : [allow, alwaysAllow, deny])
         }
         if let question = job.question, job.status != .stopped {
             // One per question: what the user said so far tells them apart.
@@ -99,10 +119,11 @@ nonisolated enum Inbox {
     // MARK: Questions from agents
 
     /// What agents are told about asking (Prompts.agent).
-    static let howToAsk = "If you need a decision only the user can make, don't guess and don't bury it in your summary: end your summary with a line `QUESTION: <one question>` and, when it has set answers, a last line `OPTIONS: <first> | <second>`. Oby puts it in the user's inbox and your job waits; their answer comes back to you as your next message."
+    static let howToAsk = "If you need a decision only the user can make, don't guess and don't bury it in your summary: end your summary with a line `QUESTION: <one question>` and, when it has set answers, a last line `OPTIONS: <first> | <second>` with at most 3 options, the one you recommend first and marked `(recommended)`, like `OPTIONS: Keep it (recommended) | Remove it`. Oby puts it in the user's inbox and your job waits; their answer, one of yours or their own words, comes back to you as your next message."
 
     /// The question at the end of an agent's summary (`QUESTION: …`, then optionally `OPTIONS: a | b`),
-    /// or nil. Only the summary's last lines count: a question quoted mid-report isn't one.
+    /// or nil. Only the summary's last lines count: a question quoted mid-report isn't one. At most
+    /// 3 options; the one marked `(recommended)` loses the mark and becomes `recommended`.
     static func question(in summary: String) -> Plan.Question? {
         let lines = summary.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         // Only the Markdown around the label goes (`**QUESTION:** …`, `` `QUESTION: …` ``): the
@@ -116,13 +137,23 @@ nonisolated enum Inbox {
             return text
         }
         var options: [String] = []
+        var recommended: Int?
         var last = lines.count - 1
         if last >= 0, let listed = value(lines[last], "OPTIONS") {
-            options = listed.split(separator: "|").map { String($0.trimmingCharacters(in: .whitespaces).prefix(80)) }.filter { !$0.isEmpty }
+            for option in listed.split(separator: "|") {
+                var text = option.trimmingCharacters(in: .whitespaces)
+                if let mark = text.firstRange(of: /(?i)\s*[(\[]recommended[)\]]/) {
+                    text.removeSubrange(mark)
+                    text = text.trimmingCharacters(in: .whitespaces)
+                    if !text.isEmpty, recommended == nil { recommended = options.count }
+                }
+                if !text.isEmpty { options.append(String(text.prefix(80))) }
+            }
             last -= 1
         }
         guard last >= 0, let text = value(lines[last], "QUESTION"), !text.isEmpty else { return nil }
-        return Plan.Question(text: String(text.prefix(500)), options: Array(options.prefix(6)))
+        options = Array(options.prefix(Plan.Question.mostOptions))
+        return Plan.Question(text: String(text.prefix(500)), options: options, recommended: recommended.flatMap { $0 < options.count ? $0 : nil })
     }
 }
 

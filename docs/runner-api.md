@@ -61,6 +61,8 @@ This document is the contract between the runner and its clients. Change it in t
   "startCommit": null,
   "outgoing": [],
   "question": null,
+  "mode": "bypass",
+  "permission": null,
   "macCheck": null,
   "mergeError": null,
   "appleCheck": null,
@@ -122,6 +124,17 @@ This document is the contract between the runner and its clients. Change it in t
 - `title`: what to call the job in rows, the job screen, the notch and alerts. It's the brain's short title (3 to 6 words, like `"Mac runner notifications"`), which every planned dispatch gets and the job keeps. Jobs without one (the rules' plans when the brain is down, an epic's sub-issue jobs, jobs from before titles) get `"<Kind> <repo name> #<number>"` when `pr` or `issue` is set, otherwise the first line of `task` (falling back to `request`), capped at 60 characters. It's always a string; older runners don't send it, so clients fall back the same way. Show "Round 2 of 5" when `rounds` is above 1.
 - `files` and `lead` are set on jobs the Lead started (below), null otherwise. `files`: the files or folders (ending in `/`) the job is expected to touch, relative to the repository, from the Lead's brief. `lead`: the goal (one Lead turn) that started it. `claim` also reports issue-sync errors on any job; successful changes are listed in `outgoing`. Older runners don't send these keys.
 - `question`: what the job's agent asked the user, `{"text": "Should a job that commits nothing end as failed, or get a new status?", "options": ["Failed", "A new status"]}` (`options` may be empty), or null. Agents are told to end their summary with `QUESTION: …` and optionally `OPTIONS: a | b` rather than bury a decision in their report; the runner reads those last lines when a turn ends. Markdown around the label (`**QUESTION:**`) is ignored; the question and its options keep every character, like `*.swift`. The job then waits for the answer: it stays `running` with `step` `"Waiting for your answer"`, its agent idle, and its round doesn't move on (no check runs). Other jobs keep going. The question lands in the inbox (below) and alerts the phone. The answer reaches the agent as its next message, exactly as `POST /v1/jobs/{id}/messages` would send it, and `question` goes back to null. Telling the job anything else answers it too; stopping it drops it. A job whose agent ends while its question waits (it exited, or the runner restarted) is `interrupted` and keeps `question`: nothing is checked or published until it's answered, and answering picks its session up again. Older runners don't send the key.
+  - `recommended`: the index of the option the agent recommends, or null. Agents are told to give at most 3 options, the recommended one first and marked `(recommended)` on the `OPTIONS:` line (`OPTIONS: Keep it (recommended) | Remove it`); the runner takes the mark off and sets `recommended`. Options stay at most 3 (the runner keeps the first 3). Show the recommended option first, and let the user type or say an answer of their own, sent as the answer text.
+  - `plan`: an agent's plan waiting for approval, in Markdown, or null (Permission modes, below). Older runners send neither key.
+- `mode`: how much the job asks the user, `ask`, `acceptEdits`, `plan` or `bypass` (Permission modes, below). Jobs from before modes are `bypass`. Older runners don't send the key.
+- `permission`: the command or edit the job's agent waits for the user's OK on, or null:
+
+  ```json
+  {"id": "p1a2b3c", "tool": "Bash", "title": "Run swift test", "detail": "swift test --filter SpeechTests",
+   "rule": "Bash(swift test:*)", "always": "Yes, and don't ask again for swift test in deskree-inc/oby"}
+  ```
+
+  `tool` is Claude Code's tool name (Codex's commands are `Bash`, its file changes `Edit`). `title` is what the card asks ("Run swift test", "Edit Jobs.swift", "Fetch example.com"), `detail` the whole command, the files (relative to the repository) or the address. `rule` is what "always" saves, in Claude Code's syntax, and `always` the sentence to show for it; both are null when the runner can't make a safe rule (a command chained with `&&`, `;` or a pipe): then it can only be allowed once. While it's set the job stays `running` with `step` `"Waiting for your OK"`, its agent idle, and its round and job clocks paused: waiting doesn't count toward the 45-minute round or the 3-hour job. Other jobs keep going. It lands in the inbox (kind `permission`) and alerts the phone and the Watch. Answer it with `POST /v1/jobs/{id}/permission`, the inbox, or in words. When it's answered, the agent's next waiting prompt (if any) takes its place. Stopping the job drops it. A job whose agent ends while one waits (the runner restarted) is `interrupted` and keeps `permission`: answering it picks the session up again and tells the agent the answer. Older runners don't send the key.
 - A job whose `files` overlap an earlier queued or running job's in the same repository (the same path, or one inside a folder the other names) waits, queued, until that job ends: its `step` reads `Waiting for <title> (<id>): both touch <files>`. Then it starts by itself. Jobs without `files` (the brain's) never wait or block.
 
 ### Job pipeline and pull request following
@@ -215,8 +228,9 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
   | `limit` | the job failed because its account hit its usage limit and no other had room | the summary's first line | `Try again`, `Dismiss` |
   | `merge` | Oby's merge stopped (`mergeNeedsYou`, Mac check below) | `mergeError`, or why the check failed and that a person takes it from here | `Try again` and `Dismiss` when it couldn't merge (merge again, or hand the check to the author again), when the Mac couldn't run the check, or when the round brought no new commit (check the same commit again); only `Dismiss` after the last failed check |
   | `audit` | the runner's daily issue/board reconciliation found drift or errors | one line with the drift count and any failures | none; mark done or put off |
+  | `permission` | the job's agent waits for the user's OK (`permission` on the job) | the permission's `title` | `Allow`, `Always allow`, `Deny` (only `Allow` and `Deny` when it has no `rule`) |
 
-  More kinds will come (permissions, hands-on steps): show one you don't know with its `text` and `options`.
+  More kinds will come (hands-on steps): show one you don't know with its `text` and `options`. A plan waiting for approval is a `question` item (its job's `question` has the `plan`).
 - `job`: the job's `id`, or empty for an audit report without a job. `title`: the job's title or "Daily issue audit". Optional `outgoing` on audits lists repairs using the same records as a job's report.
 - `created`: when it came. Apps list the open ones longest-waiting first, with how long each has waited ("waiting 3m").
 - `done`: when it was settled, or null. `answer`: what the user answered, or null (done without an answer, or settled by itself).
@@ -261,8 +275,11 @@ What the plan card shows before anything runs:
 {"runner": {"version": "0.2.0", "host": "tetrix-lab"},
  "accounts": [ …Account ],
  "models": {"claude": {"model": "claude-opus-5-5", "effort": "xhigh"}, "codex": {"model": "gpt-6-sol", "effort": "high"}},
- "clearedAt": "2026-10-10T08:12:00Z"}
+ "clearedAt": "2026-10-10T08:12:00Z",
+ "permissions": {"mode": "bypass"}}
 ```
+
+`permissions.mode` is Settings › Permissions: the mode new jobs get (`PUT /v1/settings/permissions`). Older runners don't send the key.
 
 `clearedAt` is when Clear done was last pressed, on any app (`POST /v1/clear`), or null when it never was. Every app hides the jobs that finished at that second or before (`finished` not after `clearedAt`); running jobs, and finished ones that ran again since, stay. Older runners don't send the key.
 
@@ -306,12 +323,16 @@ The answer is one of:
 
 ```json
 {"kind": "plan", "drafts": [ …Draft ], "draft": { …the first Draft }}
-{"kind": "question", "said": "Review PR 12", "question": {"text": "Which repository is PR #12 in?", "options": ["deskree-inc/oby", "deskree-inc/blok"]}}
+{"kind": "question", "said": "Review PR 12", "question": {"text": "Which repository is PR #12 in?", "options": ["deskree-inc/oby", "deskree-inc/blok"], "recommended": 0, "plan": null}}
 {"kind": "reply", "text": "Oby can't merge pull requests."}
 {"kind": "none"}
 ```
 
 Words that ask to stop work stop jobs right away, with nothing to confirm, and answer once they have, with a reply saying what stopped. "Stop everything" or "stop all jobs" stops every queued and running job: `"Stopped 2 jobs."`, or `"Nothing is running."`. "Cancel it" or "stop the vault job" stops the job the conversation is about, by its id from the briefing: `"Stopped Vault secrets."`, or `"That job isn't running any more."`. The brain's plan says which (the jobs by id, or everything in so many words), and Swift refuses a stop that says neither; a stop that names no job while several run is answered with a question (which one, or everything?) or `"Say which job to stop, or “stop everything”."`. (On the Mac, whose brain also sees the runner's jobs, inbox and accounts, both reach the runner's jobs through `POST /v1/jobs/{id}/stop`, and a job the runner couldn't stop is said so: `"Couldn't stop Watch home: …"`.)
+
+The brain's `question` has at most 3 options and `recommended` (the index of the one it recommends, shown first, or null), like a job's; the user may also answer in words of their own.
+
+Words about permissions act right away too, checked in Swift like a stop, and answer with a reply saying what happened (never the command itself). "Allow it", "always allow that" and "no, run only the runner tests" answer the permission waiting on the job the conversation is about (allow, always, or deny with the user's words for the agent): `"Allowed it for Vault secrets."`, `"Allowed it for Vault secrets, and saved the rule for oby: it won't ask again for that."`, `"Told Vault secrets no, with your words."`. On a job whose plan waits, a yes approves it in Accept edits and a no sends it back with the words. "Stop asking on the Watch job" (`bypass`), "ask me before anything" (`ask`), "let it edit but ask before commands" (`acceptEdits`) and "plan first for the vault job" (`plan`) change a running job's mode, as `POST /v1/jobs/{id}/mode` does: `"Watch home is in Bypass mode now."`. New work said with "plan first" is planned with that mode on its draft's job. The brain names the job by its id from the briefing, and Swift refuses a plan that names a job that isn't running or waiting for the user's OK. (On the Mac, the runner's jobs need the app to pass these on to `POST /v1/jobs/{id}/permission` and `POST /v1/jobs/{id}/mode`; until it does, the reply says Oby can't reach that job.)
 
 One message can plan up to 10 jobs ("work on oby #12, #15 and #18", or "work on epic #30", which becomes one job per open sub-issue). Each draft is already routed to the least busy account; dispatch each with its own `POST /v1/jobs`. `draft` is kept for apps that know only one job.
 
@@ -343,6 +364,7 @@ Dispatches the draft's job. The user may have changed:
 - `rounds`: 1 to 10.
 - `check`: one line of up to 200 characters, or `null` for none. Leaving it out keeps the plan's check, so to clear it send `"check": null` explicitly (Swift's encoder leaves nils out).
 - `model`: `claude-fable-5-1` or `gpt-6-astra` to take the stronger model, or `null` (or left out) to stay on Settings › Models. It works only on a draft that came with a `suggestedModel`. The job runs the stronger model of the tool its account uses, so a Claude draft moved to a Codex account runs GPT-6-Astra. Any other model is refused.
+- `mode`: `ask`, `acceptEdits`, `plan` or `bypass`. Left out, the job keeps its draft's `mode`: Settings › Permissions' default, or the one the user named ("plan first"). Older apps leave it out. Anything else is `422`.
 
 Leave `rounds` or `check` out to keep the plan's values (older apps do). Everything else comes from the draft unchanged.
 
@@ -385,6 +407,42 @@ With nothing running: `{"stopped": 0, "jobs": []}`.
 Lets go of a job that needs you (`done` with commits it couldn't publish, `failed` or `interrupted`): it stays as it ended, in the list and in history, and needs nothing. Its alert clears (the runner sends the clearing push below), Home stops counting it, and Publish isn't offered. Returns the job with `dismissed` set. A job dismissed already comes back as it is. No device signature: nothing goes out.
 
 `404` for an unknown job. `409` when the job doesn't need you (running, stopped, done and published, or done with nothing to publish).
+
+### `POST /v1/jobs/{id}/mode`
+
+Changes how much the job asks, from now on: `{"mode": "acceptEdits"}`. Returns the `Job`. Claude Code's session follows at once; Codex's next turn runs with the mode's sandbox and approvals. A permission waiting now that the new mode allows is answered (switching to `bypass` answers every waiting one, and the ones after it), and a plan waiting for approval is approved in the new mode. A finished job keeps the mode for when it runs again. `404` for an unknown job, `422` for a mode that isn't one.
+
+### `POST /v1/jobs/{id}/permission`
+
+Answers the job's waiting `permission`:
+
+```json
+{"id": "p1a2b3c", "decision": "allow" | "always" | "deny", "message": "optional words for the agent"}
+```
+
+- `allow`: it goes ahead, once (Claude Code's `control_response` allow with its `updatedInput`; Codex's `accept`).
+- `always`: it goes ahead, and the permission's `rule` is saved for the repository in `oby.sqlite` (`GET /v1/permissions/rules`): later prompts it covers, in this job and every other in that repository, go through without asking. Claude Code also gets the prompt's own suggested rules for its session (`updatedPermissions`, never a mode); Codex gets `acceptForSession`. Only for a permission with a `rule` (`422` otherwise).
+- `deny`: it doesn't happen, and the agent hears `message` as why (Claude Code's deny `message`; Codex's `decline`, then the words as a message to its turn), or a plain no without one. The user's own no never counts toward the runner's limit on denials in a row.
+
+Returns the `Job`, with the next waiting permission or null. `404` for an unknown job, `409` when `id` isn't the permission waiting now, `422` for another `decision`, a `message` over 2,000 characters, or `always` without a rule. A job interrupted with its permission kept picks its session up again, the agent told what it asked and the answer. Telling a job something (`POST /v1/jobs/{id}/messages`) while a permission waits is a deny with those words.
+
+### Permission modes
+
+How much a job asks, like Claude Code's modes. Each job has its `mode`; new jobs get Settings › Permissions' default (`bypass`, as before modes).
+
+| Mode | Reads | File edits in the worktree | Commands and everything else |
+|---|---|---|---|
+| `ask` | go | ask | ask |
+| `acceptEdits` | go | go | ask |
+| `plan` | go | refused | ask |
+| `bypass` | go | go | go |
+
+- First, in every mode, `bypass` too, the runner's fixed rules: no pushing or posting (only Publish does), the worktree only, no background work, and among MCP tools only Tetrix's reads. Bypass skips questions, not fences: a push is refused in every mode.
+- Then the saved rules for the job's repository: a deny rule refuses, and beats an allow rule; an allow rule lets it go without asking. A rule like `Bash(swift test:*)` covers that command with anything after it, `Bash(make lint)` exactly that, `Edit` every file edit and `Edit(Engine/*)` a folder's. An allow rule never covers a chained command (`&&`, `;`, a pipe); a deny rule covers one when any of its commands matches.
+- Then the mode, as in the table. Reads (Read, Grep, Glob, Tetrix's graph reads) and the agent's own bookkeeping (its to-do list, a helper agent, whose own actions ask) never ask.
+- The runner never starts Claude Code with its own bypass: it answers every prompt over stdio, so the fixed rules hold.
+- **Plan:** Claude Code runs in its own plan mode and the agent is told to read only, then present its plan. Its `ExitPlanMode` request becomes the job's `question`: `{"text": "Approve the plan?", "plan": "…", "options": ["Approve: Accept edits", "Approve: Bypass", "Change it"], "recommended": 0}`, with `step` `"Waiting for your OK on the plan"` and the clocks paused. `Approve: <mode>` (any mode but plan, through the inbox, `POST /v1/jobs/{id}/messages` or `POST /v1/jobs/{id}/mode`) sets the job's `mode`, switches the session out of plan mode and lets it go on. `Change it`, or the user's own words, sends the plan back with them. Codex runs a read-only turn (its own `read-only` sandbox on the Mac) that ends with its plan as its summary: the same question, and approving it runs the next turn in the mode picked. An agent whose plan-mode turn ends without `ExitPlanMode` is treated the same way.
+- **Codex:** in `ask`, `acceptEdits` and `plan` its approval policy is `untrusted`, so every command that isn't a known read, and every file change, comes to the runner; `bypass` keeps `on-request`. Answers are `accept`, `acceptForSession` (always) and `decline`. The runner applies saved rules to later Codex jobs itself.
 
 ### `POST /v1/jobs/{id}/messages`
 
@@ -447,7 +505,8 @@ Settles an item, on the iPhone or the Mac. The body is exactly one of:
 ```
 
 - `answer`: one of its `options`, or the user's own words (1 to 2,000 characters). It goes to the job:
-  - `question`: the answer is the agent's next message (as `POST /v1/jobs/{id}/messages`): a waiting job goes on, an ended one picks its session up again.
+  - `question`: the answer is the agent's next message (as `POST /v1/jobs/{id}/messages`): a waiting job goes on, an ended one picks its session up again. A plan's question takes `Approve: <mode>` or `Change it` (Permission modes, below).
+  - `permission`: `Allow`, `Always allow` or `Deny`, as `POST /v1/jobs/{id}/permission`; any other words are a deny with those words as the message for the agent.
   - `Dismiss` (on `review`, `failed`, `limit` and `merge`): dismisses the job (`POST /v1/jobs/{id}/dismiss`).
   - `Try again` (on `merge`): the merge is tried again, or the Mac check is handed to the author again or queued again on the same commit (Mac check, above).
   - `Try again` (on `failed` and `limit`): the job runs again in its session, told to pick up where it left off.
@@ -582,16 +641,31 @@ Two seconds after a job changes, the runner sends an alert push (`apns-push-type
 | `interrupted` | `Interrupted: <title>` | the reason | `job` |
 | Oby's fourth review requested changes | `Changes requested: <title>` | `Oby requested changes 4 times. Take it from here.` | `job` |
 | Its agent asked a question (`question`), which waits in the inbox | `Question: <title>` | the question | `job` |
+| Its agent waits for the user's OK (`permission`), which waits in the inbox | `<permission title>?`, like `Run swift test?` | `<title>: <detail>` | `permission` |
 
 ```json
 {"aps": {"alert": {"title": "Couldn't publish: Review oby #33", "body": "Couldn't push oby/review-33: the remote hung up."},
          "category": "ready", "sound": "default", "thread-id": "jobs"}, "job": "9f08fd10"}
 ```
 
-- `job` is the job's `id`: tapping the notification opens it. The `ready` category offers **Publish** (it unlocks the phone and brings the app forward, where Face ID signs the approval as in the app) and **Open**; `job` offers **Open**.
+- `job` is the job's `id`: tapping the notification opens it. The `ready` category offers **Publish** (it unlocks the phone and brings the app forward, where Face ID signs the approval as in the app) and **Open**; `job` offers **Open**; `permission` is for **Allow**, **Always allow** and **Deny** (`POST /v1/jobs/{id}/permission` with the job's `permission.id`) and **Open**.
 - `apns-collapse-id` is the job's `id`, so a newer state replaces the older notification.
 - When a job stops needing you (published, from the iPhone or the Mac, dismissed, or running again after a message), the runner sends a background push (`apns-push-type: background`, priority 5), `{"aps": {"content-available": 1}, "clear": "<job id>"}`, and the app removes that job's notification. The app also removes them whenever it opens and sees the job needs nothing.
 - The runner remembers what it last said for each job in `apns/notices.json`, so a restart doesn't say it again, and jobs a restart interrupted notify once it's back.
+
+### `GET /v1/settings/permissions` and `PUT /v1/settings/permissions`
+
+Settings › Permissions: `{"mode": "ask"}`, the mode new jobs get (`bypass` until changed), kept in the runner's `oby.sqlite`. `PUT` answers with the setting; `422` for a mode that isn't one. Jobs already dispatched keep theirs.
+
+### `GET /v1/permissions/rules` and `DELETE /v1/permissions/rules/{id}`
+
+The saved rules, oldest first:
+
+```json
+[{"id": "r1a2b3c4d", "rule": "Bash(swift test:*)", "repo": "deskree-inc/oby", "decision": "allow", "created": "2026-10-11T09:12:00Z"}]
+```
+
+`decision` is `allow` or `deny`; deny beats allow. "Always" on a permission saves one. `DELETE` forgets one and answers with the rules left; `404` for a rule the runner doesn't know.
 
 ### `GET /v1/settings/models` and `PUT /v1/settings/models`
 
@@ -685,6 +759,8 @@ The endpoints, each as on the tailnet API unless it says otherwise:
 | `POST /v1/jobs` | Dispatch. |
 | `POST /v1/jobs/{id}/messages` | A word to the job's agent. |
 | `POST /v1/jobs/{id}/dismiss` | Dismiss. |
+| `POST /v1/jobs/{id}/permission` | Answer a waiting permission. |
+| `POST /v1/jobs/{id}/mode` | Change a job's mode. |
 | `GET /v1/jobs/{id}/publish` | The sentence publishing would carry out. |
 | `POST /v1/jobs/{id}/publish` | Publish, approved on the Watch (below). |
 | `POST /v1/notifications` | The Watch's push tokens (below). |

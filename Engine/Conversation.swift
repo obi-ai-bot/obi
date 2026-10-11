@@ -92,6 +92,8 @@ nonisolated struct Briefing: Equatable, Sendable {
 
     /// The ids the brain may stop: every job that's queued or running.
     var stoppable: [String] { jobs.filter { $0.job.isActive }.map(\.job.id) }
+    /// The ids whose permission prompt waits for the user: the ones the brain may answer.
+    var permissions: [String] { jobs.filter { $0.job.waitsForPermission || ($0.job.waitsForAnswer && $0.job.question?.plan != nil) }.map(\.job.id) }
 
     /// Running, needing the user, in review, or finished lately: by its end, or by its pull
     /// request's merge when that came later.
@@ -132,6 +134,8 @@ nonisolated struct Briefing: Equatable, Sendable {
             let what = switch item.kind {
             // What the agent asked, and its options, are its own words: in the quoted file.
             case .question: "the question and its options are quoted in \(ClaudeBrain.quotedFile)"
+            // What it asks to run or edit is the agent's own: in the quoted file.
+            case .permission: "what it asks to do is quoted in \(ClaudeBrain.quotedFile). Options: \(item.options.joined(separator: " | "))."
             case .review, .merge, .audit: "\(Self.line(item.text, cap: 160)) Options: \(item.options.joined(separator: " | "))."
             case .failed, .limit: "why is quoted in \(ClaudeBrain.quotedFile). Options: \(item.options.joined(separator: " | "))."
             }
@@ -177,10 +181,15 @@ nonisolated struct Briefing: Equatable, Sendable {
         parts.append("\(job.repo)\(about)")
         parts.append(job.agentName)
         let state = switch job.status {
-        case .queued, .running: job.waitsForAnswer ? "waiting for the user's answer" : "\(job.status.rawValue) on \(place)"
+        case .queued, .running:
+            job.waitsForPermission ? "waiting for the user's OK on a permission"
+                : job.question?.plan != nil ? "waiting for the user's OK on its plan"
+                : job.waitsForAnswer ? "waiting for the user's answer" : "\(job.status.rawValue) on \(place)"
         default: job.status.rawValue + (job.dismissed == nil ? "" : ", dismissed")
+            + (job.waitsForPermission ? ", its permission still waiting for the user's OK" : "")
         }
         parts.append(state)
+        if job.isActive, job.currentMode != .bypass { parts.append("mode \(job.currentMode.title)") }
         let pipeline = job.pipeline
         if let stage = pipeline.stages.first(where: { $0.state == .current || $0.state == .failed }) {
             let detail = switch stage.id {
@@ -237,6 +246,7 @@ nonisolated struct Briefing: Equatable, Sendable {
         case .limit: "Out of usage"
         case .merge: "Merge stopped"
         case .audit: "Issue audit"
+        case .permission: "Permission"
         }
     }
 
