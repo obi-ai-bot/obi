@@ -89,11 +89,12 @@ struct MoveJobTests {
         var onEvent: (AgentEvent) -> Void = { _ in }
         var prompt = ""
         var stopped = 0
+        var sent: [String] = []
         func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
             self.prompt = prompt
             self.onEvent = onEvent
         }
-        func send(_ text: String) {}
+        func send(_ text: String) { sent.append(text) }
         func end() {}
         func stop() { stopped += 1 }
         func kill() {}
@@ -130,7 +131,7 @@ struct MoveJobTests {
     }
 
     /// A fix job on the Codex account, running.
-    func running(_ id: String, rounds: Int? = nil) async throws -> Agent {
+    func running(_ id: String, rounds: Int? = nil, check: String? = nil) async throws -> Agent {
         var fix = job
         fix.id = id
         fix.kind = .fix
@@ -141,6 +142,7 @@ struct MoveJobTests {
         fix.account = codex.id
         fix.agent = "codex"
         fix.rounds = rounds
+        fix.check = check
         desk.dispatch(Desk.Draft(said: "work on oby #75", reply: "", job: fix, guessed: false))
         try await until { desk.job(id)?.status == .running }
         return try #require(made.agents.last?.agent)
@@ -176,6 +178,31 @@ struct MoveJobTests {
         #expect(ended.summary.hasPrefix("fix(vault): done") && ended.summary.hasSuffix("\n\nMoved from Codex · Deskree to Claude Code · Personal by you."))
         // The history lasts.
         #expect(JobStore(url: folder.appending(path: "oby.sqlite")).recent().first { $0.id == "moving" }?.moves?.count == 1)
+    }
+
+    /// Moved while its check runs: the check is over, its failure counts for nothing, and the job
+    /// goes on where it was moved, on its last round and on an earlier one alike.
+    @Test(arguments: [nil, 3])
+    func aMoveDuringTheCheckLeavesTheMovedJobRunning(rounds: Int?) async throws {
+        let gate = AsyncStream<Void>.makeStream()
+        desk.runCheck = { _, command, _, _ in
+            for await _ in gate.stream { break }
+            return Rounds.Check(command: command, passed: false, output: "1 test failed")
+        }
+        desk.integrity = { _ in Integrity.Report() }
+        let first = try await running("checking", rounds: rounds, check: "swift test")
+        first.onEvent(.session("thread-1"))
+        first.onEvent(.turnEnded(summary: "Fixed it.", failed: false))
+        try await until { desk.job("checking")?.phase == .check }
+        try desk.move("checking", to: MoveTarget(agent: "claude"))
+        let second = try #require(made.agents.last?.agent)
+        // The check ends after the move, failing as a cancelled check would.
+        gate.continuation.yield()
+        gate.continuation.finish()
+        try await Task.sleep(for: .milliseconds(100))
+        let moved = try #require(desk.job("checking"))
+        #expect(moved.status == .running && moved.agent == "claude" && moved.limit == nil)
+        #expect(moved.currentRound == 1 && second.stopped == 0 && first.sent.isEmpty && second.sent.isEmpty)
     }
 
     @Test func aFinishedJobsNextRoundRunsWhereItWasMoved() async throws {
