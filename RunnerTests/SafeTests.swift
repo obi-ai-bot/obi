@@ -315,14 +315,21 @@ struct HaltTests {
         for _ in 0..<200 where (try? String(contentsOf: child, encoding: .utf8))?.isEmpty ?? true { try await Task.sleep(for: .milliseconds(10)) }
         let sleeper = try #require(Int32((try String(contentsOf: child, encoding: .utf8)).trimmingCharacters(in: .whitespacesAndNewlines)))
 
-        // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt.
-        let start = ContinuousClock.now
+        // As ClaudeAgent.stop and CodexAgent.stop do: the grace, then Halt. The 2 seconds are the
+        // grace plus the time Halt takes, measured on a thread of its own: on a loaded machine a
+        // sleep or a poll on the cooperative pool can oversleep by seconds, and that isn't Halt's.
         let leads = getpgid(process.processIdentifier) == process.processIdentifier
         try await Task.sleep(for: .seconds(Halt.grace))
+        let start = ContinuousClock.now
         Halt.end(process)
-        for _ in 0..<200 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
+        let ended = await withCheckedContinuation { (done: CheckedContinuation<ContinuousClock.Instant, Never>) in
+            DispatchQueue.global().async {
+                process.waitUntilExit()
+                done.resume(returning: ContinuousClock.now)
+            }
+        }
         #expect(!process.isRunning)
-        #expect(ContinuousClock.now - start < .seconds(2))
+        #expect(ended - start < .seconds(2 - Halt.grace))
         // What it started ends too, when it leads its own process group.
         if leads {
             for _ in 0..<100 where kill(sleeper, 0) == 0 { try await Task.sleep(for: .milliseconds(10)) }

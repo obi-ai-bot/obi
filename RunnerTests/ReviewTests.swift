@@ -154,16 +154,20 @@ struct ReviewTests {
 
     @Test func aReviewWaitsForAnAccountWithRoomAndStartsWhenItsWindowResets() async throws {
         accounts.setLabel(nil, for: personal.id)
-        let resets = Date.now.addingTimeInterval(1.5)
-        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: resets), for: work.id)
+        // A reset well ahead: on a loaded machine publishing can take seconds, and the review must still be waiting.
+        let far = Date.now.addingTimeInterval(60)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: far), for: work.id)
         let published = try await publishAuthor()
-        let line = "Waiting for an account with room (resets \(Limits.clock(resets)))"
+        let line = "Waiting for an account with room (resets \(Limits.clock(far)))"
         #expect(published.reviewing == nil && published.reviewError == line && published.waitsForReviewer)
         let stage = published.pipeline.stages.first { $0.id == .review }
         #expect(stage?.state == .current && stage?.detail == line)
         #expect(made.agents.count == 1 && !published.needsYou && Push.notice(for: published) == nil)
 
-        // The Work account's window resets: Oby starts the review on it by itself.
+        // The tool says the window resets sooner (any account change re-arms the wake-up), and
+        // when it does, Oby starts the review on the Work account by itself.
+        let resets = Date.now.addingTimeInterval(0.3)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: resets), for: work.id)
         let (review, _) = try await reviewJob()
         #expect(review.account == work.id && review.agent == "codex")
         let author = try #require(desk.job("author"))
