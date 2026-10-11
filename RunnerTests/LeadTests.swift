@@ -173,6 +173,25 @@ struct LeadTests {
         #expect(try String(contentsOf: directory.appending(path: ".oby/context/jobs.md"), encoding: .utf8) == jobs)
     }
 
+    @Test func aPullRequestThatIsPartOfAnIssueStillShowsOnTheBoard() async throws {
+        let board = try await Board.read(repos: ["deskree-inc/oby"], gh: { args in
+            switch Array(args.dropFirst().prefix(2)) {
+            case ["api", "user"]: return "well-prado"
+            case ["project", "list"]: return #"{"projects": [{"title": "Oby — Roadmap", "number": 1}]}"#
+            case ["project", "item-list"]:
+                return #"{"items": [{"content": {"type": "Issue", "number": 116, "repository": "deskree-inc/oby"}, "status": "In progress"}, {"content": {"type": "Issue", "number": 20, "repository": "deskree-inc/oby"}, "status": "Todo"}]}"#
+            case ["issue", "list"]:
+                return #"[{"number": 116, "title": "Oby does it all itself", "url": "u116"}, {"number": 20, "title": "The Watch", "url": "u20"}]"#
+            case ["pr", "list"]:
+                // #142 says `Part of #116`; #121 closes #20 and its title names it too.
+                return #"[{"number": 142, "title": "feat(runner): jobs carry on after any runner restart (#116)", "closingIssuesReferences": []}, {"number": 121, "title": "feat(watch): alone (#20)", "closingIssuesReferences": [{"number": 20}]}]"#
+            default: throw Shell.Failure(message: "unexpected \(args)")
+            }
+        })
+        #expect(board.items.first { $0.number == 116 }?.openPullRequests == [142])
+        #expect(board.items.first { $0.number == 20 }?.openPullRequests == [121])
+    }
+
     @Test func theBoardIsFoundByTitleHoweverItsDashIsSpelled() {
         #expect(Board.sameTitle("Oby — Roadmap", "Oby - roadmap") && Board.sameTitle("Oby – Roadmap", "oby —  Roadmap"))
         #expect(!Board.sameTitle("Oby — Roadmap", "Oby Roadmap"))

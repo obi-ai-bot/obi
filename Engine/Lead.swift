@@ -323,17 +323,21 @@ nonisolated struct Board: Equatable, Sendable {
                     labels: Self.names(issue["labels"], key: "name"), milestone: (issue["milestone"] as? [String: Any])?["title"] as? String,
                     assignees: Self.names(issue["assignees"], key: "login"))
             }
-            let pulls = (try? await gh(["gh", "pr", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,closingIssuesReferences"])) ?? "[]"
+            let pulls = (try? await gh(["gh", "pr", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,closingIssuesReferences"])) ?? "[]"
             for pull in (try? JSONSerialization.jsonObject(with: Data(pulls.utf8))) as? [[String: Any]] ?? [] {
                 guard let pr = Self.int(pull["number"]) else { continue }
+                var numbers: [Int] = []
                 for closed in pull["closingIssuesReferences"] as? [[String: Any]] ?? [] {
                     guard let number = Self.int(closed["number"]) else { continue }
                     // A reference names its repository when it's another one; by number alone, it's this one.
                     let owner = ((closed["repository"] as? [String: Any])?["owner"] as? [String: Any])?["login"] as? String
                     let name = (closed["repository"] as? [String: Any])?["name"] as? String
                     if let owner, let name, "\(owner)/\(name)" != repo { continue }
-                    open["\(repo)#\(number)"]?.openPullRequests.append(pr)
+                    numbers.append(number)
                 }
+                // A slice of an issue with a checklist says `Part of #N`, which closes nothing: Oby's titles end `(#N)`.
+                if let suffix = (pull["title"] as? String)?.firstMatch(of: /\(#(\d+)\)$/), let number = Int(suffix.output.1) { numbers.append(number) }
+                for number in Set(numbers) { open["\(repo)#\(number)"]?.openPullRequests.append(pr) }
             }
         }
         var board = Board(title: title, number: found.number, owner: found.owner, items: [], user: user)
