@@ -97,9 +97,10 @@ final class InboxRewriteTests {
         let json = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(InboxJSON(item: rewritten))) as? [String: Any])
         #expect(json["headline"] as? String == "Pick a status for empty jobs" && json["recommended"] as? Int == 1)
         #expect(json["text"] as? String == item.text)
-        // The brain's briefing names it by its headline; the rest stays in the quoted file.
+        // The brain reads its plain words only in the quoted file: a model wrote them from the agent's words.
         let briefing = desk.briefing(turns: [])
-        #expect(briefing.text.contains("\"Pick a status for empty jobs\"") && !briefing.text.contains("MARKER-7f"))
+        #expect(!briefing.text.contains("Pick a status for empty jobs") && !briefing.text.contains("MARKER-7f"))
+        #expect(briefing.quoted?.contains("Headline: Pick a status for empty jobs") == true)
         #expect(briefing.quoted?.contains("Oby recommends: A new status. A new status keeps real failures apart.") == true)
         // Once per item and text: turning it on again asks nothing more.
         desk.rewritesInbox = true

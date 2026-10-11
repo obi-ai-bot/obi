@@ -41,10 +41,10 @@ nonisolated enum Conversation {
 
 /// What the brain is told before the user's words, so it can answer questions about the work and
 /// read follow-ups: the conversation so far, the jobs with their titles and stages, the inbox, and
-/// each account's usage. `text` holds only what Oby and the user wrote, what Swift knows and
-/// inbox headlines Swift checked (InboxRewriter);
-/// what agents wrote (results, steps, questions) is `quoted`, which reaches the brain as a quoted
-/// file it may read, never in a prompt (AGENTS.md).
+/// each account's usage. `text` holds only what Oby and the user wrote and what Swift knows;
+/// what agents wrote (results, steps, questions) and the inbox's plain words the cheap model made
+/// of it (InboxRewriter) are `quoted`, which reaches the brain as a quoted file it may read, never
+/// in a prompt (AGENTS.md).
 nonisolated struct Briefing: Equatable, Sendable {
     /// Jobs, the inbox and the accounts of one place: this Mac, or the runner.
     struct Place: Equatable, Sendable {
@@ -139,9 +139,7 @@ nonisolated struct Briefing: Equatable, Sendable {
             case .review, .merge, .audit: "\(Self.line(item.text, cap: 160)) Options: \(item.options.joined(separator: " | "))."
             case .failed, .limit, .failure: "why is quoted in \(ClaudeBrain.quotedFile). Options: \(item.options.joined(separator: " | "))."
             }
-            // Its headline, in plain words that Swift checked (InboxRewriter): what it's about at a glance.
-            let headline = item.headline.map { "\"\(Self.line($0, cap: InboxRewrite.headlineLength))\", " } ?? ""
-            lines.append("- \(Self.kind(item.kind)) for job \(item.job) (\(Self.line(item.title, cap: 60)), \(place)), waiting \(Self.elapsed(since: item.created, now: now)): \(headline)\(what)")
+            lines.append("- \(Self.kind(item.kind)) for job \(item.job) (\(Self.line(item.title, cap: 60)), \(place)), waiting \(Self.elapsed(since: item.created, now: now)): \(what)")
         }
         if !failures.isEmpty {
             lines += ["", "## Failures this week, newest first", ""] + failureLines
@@ -187,7 +185,8 @@ nonisolated struct Briefing: Equatable, Sendable {
 
     /// What agents wrote, quoted, for the brain to read as a file when the user asks about it:
     /// each job's current step and result, and each inbox question with its options or a failure's
-    /// reason. Nil when there's nothing.
+    /// reason, with the item's headline, what happened and what Oby recommends when it has them.
+    /// Nil when there's nothing.
     var quoted: String? {
         var sections: [String] = []
         for (_, job) in jobs {
@@ -198,8 +197,12 @@ nonisolated struct Briefing: Equatable, Sendable {
             }
             if !lines.isEmpty { sections.append("## Job \(job.id) (\(Self.line(job.heading, cap: 60)))\n" + lines.joined(separator: "\n")) }
         }
-        for (_, item) in waiting where item.kind != .review {
-            var lines = ["## \(Self.kind(item.kind)) for job \(item.job) (\(Self.line(item.title, cap: 60)))", Self.line(item.text, cap: 500)]
+        // A review item's text is Oby's own and in the briefing; it's here only for its plain words.
+        for (_, item) in waiting where item.kind != .review || item.headline != nil {
+            var lines = ["## \(Self.kind(item.kind)) for job \(item.job) (\(Self.line(item.title, cap: 60)))"]
+            // A model's rewording of agents' and GitHub's words: quoted like them, never in the prompt.
+            if let headline = item.headline { lines.append("Headline: " + Self.line(headline, cap: InboxRewrite.headlineLength)) }
+            lines.append(Self.line(item.text, cap: 500))
             if item.kind == .question, !item.options.isEmpty { lines.append("Options: " + item.options.map { Self.line($0, cap: 80) }.joined(separator: " | ")) }
             if let happened = item.happened { lines.append("In short: " + Self.line(happened, cap: InboxRewrite.happenedLength)) }
             if let recommended = item.recommended, item.options.indices.contains(recommended) {
