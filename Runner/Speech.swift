@@ -1,5 +1,8 @@
 import Foundation
 import Hummingbird
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 #if os(Linux)
 import Glibc
 #else
@@ -10,11 +13,15 @@ import Darwin
 /// Runner-owned CPU transcription. Audio is never passed through Shell, agents or the journal.
 actor Speech {
     struct Config: Sendable {
-        var cli: URL
+        var server: URL
         var fastModel: URL
         var finalModel: URL
         var folder: URL
         var threads: Int = 8
+        var fastPort: Int = 8171
+        var finalPort: Int = 8172
+        var startupTimeout: Double = 120
+        var warmup: Bool = true
         /// Optional owner override; otherwise use product names and the desk's current repositories.
         var names: [String]?
         var timeout: Double = 120
@@ -22,11 +29,13 @@ actor Speech {
 
         static func environment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> Self {
             let root = Workspace.root.appending(path: "whisper")
-            return Self(cli: URL(filePath: env["OBY_WHISPER_CLI"] ?? root.appending(path: "bin/whisper-cli").path),
+            return Self(server: URL(filePath: env["OBY_WHISPER_SERVER"] ?? root.appending(path: "bin/whisper-server").path),
                         fastModel: URL(filePath: env["OBY_WHISPER_FAST_MODEL"] ?? root.appending(path: "models/ggml-base-q5_1.bin").path),
-                        finalModel: URL(filePath: env["OBY_WHISPER_FINAL_MODEL"] ?? root.appending(path: "models/ggml-large-v3-turbo.bin").path),
+                        finalModel: URL(filePath: env["OBY_WHISPER_FINAL_MODEL"] ?? root.appending(path: "models/ggml-small-q5_1.bin").path),
                         folder: root.appending(path: "audio"),
                         threads: Int(env["OBY_WHISPER_THREADS"] ?? "8") ?? 0,
+                        fastPort: Int(env["OBY_WHISPER_FAST_PORT"] ?? "8171") ?? 0,
+                        finalPort: Int(env["OBY_WHISPER_FINAL_PORT"] ?? "8172") ?? 0,
                         names: env["OBY_SPEECH_NAMES"].map { $0.split(separator: ",").map(String.init) })
         }
 
@@ -46,6 +55,10 @@ actor Speech {
         }
     }
 
+    struct Transcript: Sendable {
+        var text: String
+        var language: String?
+    }
     struct Answer: Encodable, Sendable {
         var utterance: String
         var text: String
@@ -56,6 +69,7 @@ actor Speech {
         var language: String
         var pcm: Data
         var expiry: UUID
+        var detectedLanguage: String? = nil
     }
     static let maxBytes = 60 * 16_000 * 2
     // Each request is a short chunk (up to ten seconds, plus WAV metadata).
@@ -63,6 +77,8 @@ actor Speech {
     let config: Config
     private var sessions: [String: Session] = [:]
     private var busy: Set<String> = []
+    private var servers: [URL: WhisperServer] = [:]
+    private var stopping = false
 
     init(config: Config = .environment()) { self.config = config }
 
@@ -100,11 +116,12 @@ actor Speech {
 
     func transcribe(device: String, utterance: String, audio: Data, wav: Bool = false,
                     final: Bool = false, language: String = "auto", repos: [String] = []) async throws -> Answer {
+        guard !stopping else { throw APIError(.serviceUnavailable, "The speech service is stopping.") }
         guard !busy.contains(device) else { throw APIError(.conflict, "This device already has a transcription running.") }
         guard busy.count < 2 else { throw APIError(.serviceUnavailable, "The speech service is busy. Try again later.") }
         guard config.threads > 0 else { throw APIError(.notImplemented, "OBY_WHISPER_THREADS must be positive.") }
-        guard Self.regularNonempty(config.cli), FileManager.default.isExecutableFile(atPath: config.cli.path) else {
-            throw APIError(.notImplemented, "whisper-cli is missing or not an executable file. Run Runner/scripts/setup-whisper.sh on the runner.")
+        guard Self.regularNonempty(config.server), FileManager.default.isExecutableFile(atPath: config.server.path) else {
+            throw APIError(.notImplemented, "whisper-server is missing or not an executable file. Run Runner/scripts/setup-whisper.sh on the runner.")
         }
         for model in [config.fastModel, config.finalModel] {
             guard Self.regularNonempty(model), FileManager.default.isReadableFile(atPath: model.path) else {
@@ -130,10 +147,13 @@ actor Speech {
         busy.insert(device)
         defer { busy.remove(device) }
         do {
-            let config = config, fullAudio = session.pcm, prompt = config.prompt(repos: repos)
-            let text = try await Task.detached {
-                try Self.run(config: config, pcm: fullAudio, final: final, language: language, prompt: prompt)
-            }.value
+            let model = final ? config.finalModel : config.fastModel
+            let inferenceLanguage = final && language == "auto" ? (session.detectedLanguage ?? language) : language
+            let result = try await server(for: model).transcribe(pcm: session.pcm, language: inferenceLanguage, prompt: config.prompt(repos: repos))
+            if !final, language == "auto", session.pcm.count >= 5 * 32_000 {
+                session.detectedLanguage = result.language
+                sessions[device] = session
+            }
             if final { sessions[device] = nil }
             else {
                 let token = session.expiry, idleTimeout = config.idleTimeout
@@ -142,9 +162,10 @@ actor Speech {
                     await self?.expire(device: device, token: token)
                 }
             }
-            return Answer(utterance: utterance, text: text, final: final)
+            return Answer(utterance: utterance, text: result.text, final: final)
         } catch {
             sessions[device] = nil
+            if let error = error as? APIError, error.status == .serviceUnavailable { throw error }
             // No subprocess output, transcript, audio, or file paths in errors/logs.
             throw APIError(.internalServerError, "Whisper couldn't transcribe the audio. The utterance was discarded.")
         }
@@ -182,6 +203,10 @@ actor Speech {
         return samples
     }
 
+    static func audioContext(bytes: Int) -> Int {
+        min(1500, max(600, ((bytes + 31_999) / 32_000 + 1) * 50))
+    }
+
     static func wave(_ pcm: Data) -> Data {
         var result = Data()
         func tag(_ value: String) { result.append(contentsOf: value.utf8) }
@@ -197,36 +222,183 @@ actor Speech {
         return values.isRegularFile == true && (values.fileSize ?? 0) > 0
     }
 
-    private static func run(config: Config, pcm: Data, final: Bool, language: String, prompt: String) throws -> String {
-        let fm = FileManager.default
-        try fm.createDirectory(at: config.folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let folder = config.folder.appending(path: UUID().uuidString)
-        try fm.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        defer { try? fm.removeItem(at: folder) }
-        let audio = folder.appending(path: "audio.wav"), output = folder.appending(path: "text")
-        try wave(pcm).write(to: audio)
-        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: audio.path)
-        let process = Process()
-        process.executableURL = config.cli
-        process.currentDirectoryURL = folder
-        process.arguments = ["--model", (final ? config.finalModel : config.fastModel).path,
-                             "--threads", String(config.threads), "--language", language,
-                             "--prompt", prompt, "--no-gpu", "--no-prints",
-                             "--output-txt", "--output-file", output.path, "--file", audio.path]
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        // A hung CLI cannot retain audio forever. SIGKILL also handles a CLI ignoring SIGTERM.
-        let timer = DispatchSource.makeTimerSource(queue: .global())
-        timer.schedule(deadline: .now() + config.timeout)
-        timer.setEventHandler { if process.isRunning { _ = kill(process.processIdentifier, SIGKILL) } }
-        timer.resume()
-        defer { timer.cancel() }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw APIError(.internalServerError, "Whisper failed.") }
-        let text = try String(contentsOf: output.appendingPathExtension("txt"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-        try fm.removeItem(at: folder)
-        return text
+    private func server(for model: URL) -> WhisperServer {
+        if let server = servers[model] { return server }
+        let server = WhisperServer(config: config, model: model,
+                                   port: model == config.fastModel ? config.fastPort : config.finalPort)
+        servers[model] = server
+        return server
+    }
+
+    /// Start outside Agents.sandboxed; a missing installation leaves the rest of the API usable.
+    func startServers() async throws {
+        guard FileManager.default.isExecutableFile(atPath: config.server.path),
+              Self.regularNonempty(config.fastModel), Self.regularNonempty(config.finalModel) else {
+            throw APIError(.notImplemented, "Run Runner/scripts/setup-whisper.sh.")
+        }
+        var failure: (any Error)?
+        for model in Set([config.fastModel, config.finalModel]) {
+            do { try await server(for: model).start() }
+            catch { failure = error }
+        }
+        if let failure { throw failure }
+    }
+
+    func maintainServers() async {
+        guard !stopping else { return }
+        for server in servers.values { try? await server.start() }
+    }
+
+    func stopServers() async {
+        stopping = true
+        for server in servers.values { await server.shutdown() }
+    }
+}
+
+/// One model per resident process. No Shell, credentials, files containing audio, or log pipes.
+private actor WhisperServer {
+    let config: Speech.Config
+    let model: URL
+    let port: Int
+    let prefix = "/" + UUID().uuidString
+    private var process: Process?
+    private var busy = false
+    private var closed = false
+    private let http: URLSession
+
+    init(config: Speech.Config, model: URL, port: Int) {
+        self.config = config; self.model = model; self.port = port
+        let settings = URLSessionConfiguration.ephemeral
+        settings.timeoutIntervalForResource = config.timeout
+        settings.connectionProxyDictionary = [:]
+        settings.httpShouldSetCookies = false
+        settings.urlCache = nil
+        http = URLSession(configuration: settings)
+    }
+
+    deinit {
+        if let process, process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
+        http.invalidateAndCancel()
+    }
+
+    func shutdown() {
+        closed = true
+        stop()
+    }
+
+    private func stop() {
+        if let process, process.isRunning {
+            _ = kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
+        }
+        process = nil
+    }
+
+    func start() async throws {
+        if process?.isRunning == true { return }
+        guard !busy else { throw APIError(.serviceUnavailable, "This speech model is busy. Try again later.") }
+        busy = true
+        defer { busy = false }
+        try await ensureStarted()
+    }
+
+    private func ensureStarted() async throws {
+        guard !closed else { throw APIError(.serviceUnavailable, "The speech service is stopping.") }
+        if process?.isRunning == true { return }
+        guard (1...65535).contains(port), config.threads > 0 else {
+            throw APIError(.notImplemented, "Invalid Whisper port or thread count.")
+        }
+        let child = Process()
+        child.executableURL = config.server
+        child.arguments = ["--model", model.path, "--threads", String(config.threads),
+                           "--host", "127.0.0.1", "--port", String(port), "--request-path", prefix,
+                           "--no-gpu", "--no-context", "--no-timestamps"]
+        child.standardInput = FileHandle.nullDevice
+        child.standardOutput = FileHandle.nullDevice
+        child.standardError = FileHandle.nullDevice
+        // No agent account, vault or CLI login environment reaches the server.
+        child.environment = ["PATH": "/usr/bin:/bin"]
+        try child.run()
+        process = child
+        let deadline = Date().addingTimeInterval(config.startupTimeout)
+        do {
+            while child.isRunning && Date() < deadline {
+                if await ready(), child.isRunning {
+                    if config.warmup {
+                        // Initialize the short encoder/decoder graph before accepting speech.
+                        // This is generated silence, never a recording from a device.
+                        _ = try await infer(pcm: Data(repeating: 0, count: 32_000), language: "en", prompt: "",
+                                            timeout: max(0.001, deadline.timeIntervalSinceNow))
+                    }
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            throw APIError(.serviceUnavailable, "Whisper server did not become ready.")
+        } catch {
+            stop()
+            throw error
+        }
+    }
+
+    private func ready() async -> Bool {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(prefix)/")!)
+        request.timeoutInterval = 0.5
+        guard let (_, response) = try? await http.data(for: request) else { return false }
+        return (response as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    func transcribe(pcm: Data, language: String, prompt: String) async throws -> Speech.Transcript {
+        guard !busy else { throw APIError(.serviceUnavailable, "This speech model is busy. Try again later.") }
+        busy = true
+        defer { busy = false }
+        do {
+            try await ensureStarted()
+            do { return try await infer(pcm: pcm, language: language, prompt: prompt) }
+            catch let error as URLError where [.cannotConnectToHost, .networkConnectionLost].contains(error.code) {
+                // Exit notifications can lag behind socket closure. Inference is stateless;
+                // retry once on a fresh owned server without appending PCM a second time.
+                stop()
+                try await ensureStarted()
+                return try await infer(pcm: pcm, language: language, prompt: prompt)
+            }
+        } catch {
+            // Timeout/cancellation must release the model and its audio, including hung inference.
+            stop()
+            throw APIError(.internalServerError, "Whisper failed or timed out.")
+        }
+    }
+
+    private func infer(pcm: Data, language: String, prompt: String, timeout: Double? = nil) async throws -> Speech.Transcript {
+        let boundary = UUID().uuidString
+        var body = Data()
+        func field(_ name: String, _ value: String) {
+            body.append(contentsOf: "--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".utf8)
+        }
+        field("language", language)
+        field("prompt", prompt)
+        field("response_format", "verbose_json")
+        field("no_language_probabilities", "true")
+        field("no_context", "true")
+        // Whisper otherwise pads every short utterance to a 30-second encoder window.
+        // Keep at least 12 seconds, plus a second beyond the audio, and use the full
+        // window for long utterances so whisper.cpp can process successive 30s blocks.
+        field("audio_ctx", String(Speech.audioContext(bytes: pcm.count)))
+        body.append(contentsOf: "--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n".utf8)
+        body.append(Speech.wave(pcm))
+        body.append(contentsOf: "\r\n--\(boundary)--\r\n".utf8)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(prefix)/inference")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = min(config.timeout, timeout ?? config.timeout)
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        let (data, response) = try await http.data(for: request)
+        struct Result: Decodable { let text: String; let language: String? }
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let result = try? JSONDecoder().decode(Result.self, from: data) else {
+            throw APIError(.internalServerError, "Whisper failed.")
+        }
+        return Speech.Transcript(text: result.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                                 language: ["english": "en", "portuguese": "pt"][result.language?.lowercased() ?? ""])
     }
 }

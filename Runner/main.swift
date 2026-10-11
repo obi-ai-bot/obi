@@ -33,6 +33,14 @@ catch {
     Logger.runner.error("Couldn't delete abandoned speech audio; refusing to start.")
     exit(1)
 }
+do { try await speech.startServers() }
+catch { Logger.runner.error("Speech servers unavailable; run setup-whisper.sh and check the models and loopback ports.") }
+Task {
+    while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(5))
+        await speech.maintainServers()
+    }
+}
 let desk = Desk()
 // Macs that follow the runner take its merge checks (Engine/Checks.swift).
 desk.queuesMacChecks = true
@@ -47,7 +55,10 @@ let stops = [SIGTERM, SIGINT].map { number in
     let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
     source.setEventHandler {
         MainActor.assumeIsolated { desk.quit() }
-        exit(0)
+        Task {
+            await speech.stopServers()
+            exit(0)
+        }
     }
     source.resume()
     return source

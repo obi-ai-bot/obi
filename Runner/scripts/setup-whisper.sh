@@ -25,11 +25,12 @@ fi
 cmake -S "$whisper_source" -B "$whisper_root/build" \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=ON \
     -DGGML_CUDA=OFF -DGGML_METAL=OFF -DGGML_VULKAN=OFF \
-    -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF
-cmake --build "$whisper_root/build" --config Release --target whisper-cli --parallel "${OBY_WHISPER_THREADS:-16}"
+    -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=ON
+cmake --build "$whisper_root/build" --config Release --target whisper-cli whisper-server --parallel "${OBY_WHISPER_THREADS:-16}"
 mkdir -p "$whisper_root/bin" "$whisper_root/models"
 install -m 700 "$whisper_root/build/bin/whisper-cli" "$whisper_root/bin/whisper-cli"
-for model in base-q5_1 large-v3-turbo; do
+install -m 700 "$whisper_root/build/bin/whisper-server" "$whisper_root/bin/whisper-server"
+for model in base-q5_1 large-v3-turbo-q5_0 small-q5_1; do
     model_path="$whisper_root/models/ggml-$model.bin"
     if [[ ! -s "$model_path" ]]; then
         # Atomic rename: interruptions/HTTP errors never become an installed model.
@@ -39,4 +40,4 @@ for model in base-q5_1 large-v3-turbo; do
         mv "$model_path.partial" "$model_path"
     fi
 done
-echo "Whisper CPU setup ready in $whisper_root (base-q5_1 and large-v3-turbo)."
+echo "Whisper CPU setup ready in $whisper_root (base-q5_1, large-v3-turbo-q5_0 and small-q5_1)."
