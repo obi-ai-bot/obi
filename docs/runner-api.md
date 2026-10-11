@@ -60,6 +60,9 @@ This document is the contract between the runner and its clients. Change it in t
   "startCommit": null,
   "outgoing": [],
   "question": null,
+  "macCheck": null,
+  "mergeError": null,
+  "mergeNeedsYou": false,
   "title": "Review oby #33",
   "pipeline": {
     "number": 2,
@@ -93,7 +96,7 @@ This document is the contract between the runner and its clients. Change it in t
 - `publishError`: why the runner couldn't publish the job by itself, or null. Show it instead of "Published".
 - `pushed`: how many of `commits` were on the pull request when it was last published, or null before then. A published job that ran again (`POST /v1/jobs/{id}/messages`) and ended `done` with new commits pushes them to the same branch by itself, so they land on the open pull request.
 - `summaries`: every round's summary from the agent, oldest first, or null. The pull request's description quotes them all.
-- `outgoing`: everything the runner sent out for the job, oldest first: the job's report lists it. Always a list, empty before anything went out. Each is `{"action": "push", "repo": "deskree-inc/oby", "id": "<commit>", "branch": "oby/fix-75", "date": "2026-10-09T22:01:40Z"}`; `action` is `push` (`id` the commit pushed, `branch` where), `pullRequest` (opened; `id` its URL), `pullRequestEdit` (its description brought up to date; `id` its URL) or `comment` (Oby's review posted on the job's pull request; `id` the comment's URL). `branch` is present on pushes only. More actions may come: show one you don't know as its `action` and `id`. Ids only, never what was sent; the runner's journal keeps one line per action, ids only too.
+- `outgoing`: everything the runner sent out for the job, oldest first: the job's report lists it. Always a list, empty before anything went out. Each is `{"action": "push", "repo": "deskree-inc/oby", "id": "<commit>", "branch": "oby/fix-75", "date": "2026-10-09T22:01:40Z"}`; `action` is `push` (`id` the commit pushed, `branch` where), `pullRequest` (opened; `id` its URL), `pullRequestEdit` (its description brought up to date; `id` its URL), `comment` (Oby's review, or a Mac check's results, posted on the job's pull request; `id` the comment's URL) or `merge` (squash-merged into `dev` by the runner; `id` the pull request's URL, `branch` the branch it deleted). `branch` is present on pushes and merges only. More actions may come: show one you don't know as its `action` and `id`. Ids only, never what was sent; the runner's journal keeps one line per action, ids only too.
 - What needs you: a job that's `done` with commits the runner couldn't publish (`publishError`), `failed` or `interrupted`, or one Oby's review requested changes on for the fourth time (`review`, below), unless it's dismissed. Say so where the apps would otherwise say nothing needs you.
 - `dismissed`: when the user let the job go (`POST /v1/jobs/{id}/dismiss`), or null. A dismissed job needs nothing: it sends no alert, offers no Publish, and its `pipeline` shows Publish as `skipped` with the detail `Dismissed`. It stays in the list and in history. Telling it something (`POST /v1/jobs/{id}/messages`) clears `dismissed`.
 - `issue`: the GitHub issue the work is about. The runner fetches it for the agent, which has no GitHub login, and the pull request says `Closes #N`.
@@ -129,7 +132,7 @@ Every job response (list, detail, dispatch, stop, message, wait, plan and `job` 
 - `pullRequest`: null until a successful read, otherwise `{"state":"OPEN","reviewDecision":"REVIEW_REQUIRED","base":"dev","mergedAt":null,"checkedAt":"2026-10-09T21:43:30Z"}`. State is `OPEN`, `CLOSED` or `MERGED`; review decision is `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, `APPROVED`, or absent/null (no decision yet). `mergedAt` is present only after a merge. All dates are ISO 8601.
 - The runner polls published PRs on startup and every three minutes while open/unknown, using its own `gh pr view` outside the agents' sandbox. It follows `published`, not the input `pr`, including saved jobs older than the latest 50. Closed and merged PRs stop polling. Fresh saved observations wait for the next interval after restart.
 - `pullRequestError`: null after a successful refresh; otherwise a short retry message. Network/authentication/JSON failures preserve the last successful observation and retry at the next interval. `checkedAt` remains the date of that last success. Updates are saved and sent as `job` events without overwriting a concurrent agent step or resumed round.
-- Following is read-only: it never posts a review, pushes, or merges. [`gh pr view` JSON fields](https://cli.github.com/manual/gh_pr_view) supply only typed status data; GitHub prose never enters an agent prompt.
+- Following is read-only: it never posts a review, pushes, or merges (merging is the Mac check's, below). [`gh pr view` JSON fields](https://cli.github.com/manual/gh_pr_view) supply only typed status data; GitHub prose never enters an agent prompt.
 - Older clients ignore these additive fields. New clients accept an absent pipeline from an older runner and show its ordinary status/step instead.
 
 ### Oby's review
@@ -146,10 +149,36 @@ When a job publishes (or pushes new commits to its pull request), the runner has
 
   `verdict` is `approved` or `changesRequested`; `job` the review job; `agent` and `account` the reviewer's tool and account name; `round` which of Oby's reviews of this pull request it is (1 to 4); `comment` the pull request comment it was posted as, or null with `postError` saying why it wasn't (a possible secret in the review, or `gh` failing). `reviewError` says why no review ran or none gave a verdict (no account with room, the reviewer failed, was stopped or interrupted, or gave no verdict), else null.
 - **The comment.** GitHub doesn't let the user approve or request changes on their own pull request, so the runner posts the review as a regular comment, after the secret scan like everything outgoing, headed `### Oby review · Claude Code · Personal: Approved` (or `Changes requested`), the review itself in a code block, and a `by Oby` line. The secret scan gates it, with the same rules and encoded copies as publishing: a possible secret means no comment, and the verdict still counts. A posted comment is listed in the author job's `outgoing`.
-- **The Review stage** shows GitHub's decision when it has one, else Oby's: `Oby is reviewing` (current), `Approved by Oby` (done, with Merged `current` and `Ready to merge`), or `Changes requested` (failed, reason `Oby requested changes.`). A failed review leaves it current with `Waiting for review · <reviewError>`. A merged pull request with no GitHub decision reads `Approved by Oby` or `Oby requested changes` instead of `Merged without review`.
+- **The Review stage** shows GitHub's decision when it has one, else Oby's: `Oby is reviewing` (current), `Approved by Oby` (done, with Merged following the Mac check, below), or `Changes requested` (failed, reason `Oby requested changes.`). A failed review leaves it current with `Waiting for review · <reviewError>`. A merged pull request with no GitHub decision reads `Approved by Oby` or `Oby requested changes` instead of `Merged without review`.
 - **Changes requested** go to the author's agent as its next round, in the same session and worktree: the review is quoted in a file (`.oby/inputs/review-<round>.md`), never pasted into the prompt. The job goes back to `running` with a new `round` (and one more on `rounds`, as a message does), `step` `Working on Oby's review`, and ends as usual: when its check passes and it publishes the new commits, the review runs again. At most 4 reviews per job; when the fourth requests changes, the job stays `done`, needs you (`reviewNeedsYou`, below), and the runner reviews it no more, even after you talk to it.
-- **Approved:** the job shows it's ready to merge. The runner doesn't merge: nothing checks the Mac and iPhone builds before a merge yet.
-- What needs you now also includes a `done`, published job whose `review` is `changesRequested` with `round` 4 while the pull request is open. Say so where the apps list what needs you ("1 job needs your review").
+- **Approved:** the commit the reviewer read is checked on the user's Mac, and the runner merges it into `dev` when that passes (below).
+- What needs you now also includes a `done`, published job whose `review` is `changesRequested` with `round` 4 while the pull request is open, and one whose merge stopped (`mergeNeedsYou`, Mac check below). Say so where the apps list what needs you ("1 job needs your review").
+
+### Mac check
+
+GitHub Actions doesn't run for deskree-inc/oby, so the user's Mac checks a pull request before the runner merges it (#66). Only the runner queues checks: on the Mac's own Oby, an approved job's Merged stage reads `Ready to merge`, for a person. When Oby's review approves a job's pull request, the runner queues a check of the commit the reviewer read, when that's still the commit the runner last pushed to the pull request. A Mac running Oby that follows the runner, with Settings › Runner › "Run merge checks on this Mac" on (the default), takes it, runs it and reports the result.
+
+```json
+{"id": "c0ffee12", "job": "9f08fd10", "repo": "deskree-inc/oby", "pr": 80, "branch": "oby/fix-75", "base": "dev",
+ "head": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", "round": 1, "state": "failed",
+ "created": "2026-10-11T09:00:00Z", "started": "2026-10-11T09:00:02Z", "finished": "2026-10-11T09:14:40Z", "mac": "Studio",
+ "steps": [{"name": "Runner tests (swift test)", "passed": true, "seconds": 125},
+           {"name": "Mac app and MacTests", "passed": false, "seconds": 301},
+           {"name": "iPhone app with Watch, and iOSTests", "passed": true, "seconds": 412}],
+ "failures": ["MacTests.PublishTests/blocksASecret()"],
+ "comment": "https://github.com/deskree-inc/oby/pull/80#issuecomment-2", "postError": null}
+```
+
+- `job`: the author job. `head`: the commit checked. `round`: which of the job's checks it is (1 to 3).
+- `state`: `queued`, `running` (a Mac took it: `mac` is the name it gave, `started` when), `passed`, `failed`, or `error`: the Mac couldn't run it, and `problem` says why (its checkout or the vault failed, a tool or the simulator is missing, xcodebuild failed other than with a failing build or test, or a step was stopped at its timeout without naming a failing test). An `error` is nothing the code can fix: no comment is posted, nothing goes to the author, it needs you, and Try again checks the same commit again. `handedOff` is true once a failed check's tests went to the author as a round. `steps` and `failures` (the failing tests' names) come with the result; `comment` is the pull request comment with the results, or null with `postError` saying why there's none.
+- **On the Mac:** a clean worktree of `head`, detached, in Oby's own clone, then, one at a time and each with a timeout: `swift test` (30 minutes), the `Oby` scheme's build with `MacTests` (30 minutes), and the `ObyPhone` scheme (with `ObyWatch` embedded) with `iOSTests` on an iPhone 17 simulator (40 minutes), all signed ad hoc as docs/ci.md describes. Every step runs, so a failing check names everything that fails. A step writes to a file, not a pipe; at its timeout its whole process group is ended (TERM, then KILL), and the Mac stops waiting on it a few seconds later whatever is left, so a hung test can't keep the Mac busy. The commands get no GitHub login and no variable holding a vault secret, and a throwaway `OBY_HOME` (also as `TEST_RUNNER_OBY_HOME`, which xcodebuild hands to the test host without the prefix), so the MacTests host, an Oby itself, never opens the Mac's own `oby.sqlite` or marks its running jobs interrupted. They still run with the user's access to the Mac: Oby's review is the gate before pull request code runs there. The worktree is removed afterwards; build caches are kept between checks.
+- **On the author job:** `macCheck` is the latest check, null before one; besides the keys above it may carry `tries` (merge attempts since it passed) and `transient` (the last attempt failed on something that may pass later). `mergeError` says why Oby couldn't check or merge the pull request, or null. `mergeNeedsYou` (always sent, derived by the runner) is true when the merge stopped where a person takes over (below).
+- **The comment.** The runner posts the results on the pull request, after the secret scan: `### Oby Mac check · Studio: Passed` (or `Failed`), a table of the steps with their times, the failing tests in a code block, and a `by Oby` line. Never the build's output. It's listed in the job's `outgoing`. Results for a commit the job moved on from (it ran again, or pushed since) are kept on `macCheck` but not posted, and change nothing else.
+- **Passed:** the runner merges when all of these hold: Oby's review approved, the check passed on the commit the pull request has (`head` is the last commit pushed, nothing unpushed), the pull request is open with no change request on GitHub, its base is `dev`, and the secret scan of what the merge lands (every commit not on `dev`, and their files, as publishing scans them) is clean. It reads the pull request from GitHub once more (open, into `dev`, `head` as its head), then `gh pr merge --squash --delete-branch --match-head-commit <head>`. The merge is listed in `outgoing`, `pullRequest` becomes `MERGED` and the Merged stage completes. Anything that fails leaves the job unmerged, with `mergeError` saying why (`Not merged: possible secret in README.md:3 (AWS access key).`). Never into `main`.
+- **Recovery.** When the runner starts, and every five minutes, it finishes again a passed check whose pull request isn't merged: one it never finished (it stopped while posting the results or merging), and one whose last attempt failed on `gh`, the network or a scan that couldn't run, up to 3 attempts. A possible secret or a refusal isn't tried again by itself. A failed check with rounds left whose round for the author never started (the runner stopped before or after posting the results) goes on to its comment, when it has none, and the round.
+- **Failed:** the failing tests go to the author's agent as its next round, in the same session and worktree, quoted in a file (`.oby/inputs/mac-check-<round>.md`, with each step's result and the end of what the failing steps printed), never in the prompt. The job goes back to `running` with a new `round` and `step` `Working on the Mac check`; when it publishes the fix, Oby reviews it again, and an approval queues the next check. After the third failed check, or when Oby's reviews are used up (its 4th review was the one that approved, so a fix could never be reviewed), no round starts: the job stays `done` and the Merged stage says so. A round that ends with no new commit leaves the failed check on the pull request's head: that needs you too, and Try again checks the same commit again (as the same round).
+- **What needs you:** a merge that stopped, while the pull request is open, Oby's review approved the checked commit and the job isn't dismissed: `mergeError` set after the check, a check the Mac couldn't run (`error`), a failed check with no round left, or one whose round brought no new commit. It counts in what needs you, sends an alert (`Not merged: <title>`) and brings a `merge` inbox item.
+- **The Merged stage** while Oby's review approved it: `Waiting for a Mac check` (`current`), `Checking on Studio` (`current`), `Mac check passed · merging` (`current`), `Mac check failed` (`failed`, reason like `1 test failed on Studio: MacTests.PublishTests/blocksASecret()`, plus `The Mac check failed 3 times. Take it from here.` after the third), `Mac check couldn't run` (`failed`, reason `problem`), `Not merged` (`failed`, reason `mergeError`), then `done` once merged. Before a check is queued, and wherever none is (the Mac's own jobs, older ones), `Ready to merge`.
 
 ### Inbox item
 
@@ -169,6 +198,7 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
   | `review` | Oby's fourth review requested changes (`reviewNeedsYou`) | `Oby requested changes 4 times. Take it from here.` | `One more round`, `Dismiss` |
   | `failed` | the job ended `failed` or `interrupted` | the summary's first line | `Try again`, `Dismiss` (only `Dismiss` for a job that never started) |
   | `limit` | the job failed because its account hit its usage limit and no other had room | the summary's first line | `Try again`, `Dismiss` |
+  | `merge` | Oby's merge stopped (`mergeNeedsYou`, Mac check below) | `mergeError`, or why the check failed and that a person takes it from here | `Try again` and `Dismiss` when it couldn't merge (merge again, or hand the check to the author again), when the Mac couldn't run the check, or when the round brought no new commit (check the same commit again); only `Dismiss` after the last failed check |
 
   More kinds will come (permissions, hands-on steps): show one you don't know with its `text` and `options`.
 - `job`: the job's `id`. `title`: the job's `title` when the item came.
@@ -366,12 +396,16 @@ data: {"clearedAt": "2026-10-10T08:12:00Z"}
 
 event: inbox
 data: { …InboxItem }
+
+event: check
+data: { …Mac check }
 ```
 
-- A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`, `dismissed`, a move to another account. The app replaces the job with that `id`.
+- A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`, `dismissed`, `macCheck`, `mergeError`, a move to another account. The app replaces the job with that `id`.
 - `accounts` comes when sign-ins, usage, reset times, running counts or `fullUntil` change.
 - `clear` comes when Clear done is pressed on any app (`POST /v1/clear`): hide the jobs that finished by `clearedAt`.
 - `inbox` comes with every inbox item that arrives or changes: answered, done or put off, on any app, or settled by itself. Replace the item with that `id`; one whose `state` is `done` leaves the inbox.
+- `check` comes when a Mac check (below) is queued, taken by a Mac or ends. A Mac that runs merge checks asks for one (`GET /v1/checks/next`) when one is `queued`; other apps can ignore it, since the job's own event carries `macCheck` too.
 - A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop. Fetch what you show (`GET /v1/status`, `GET /v1/jobs`, `GET /v1/inbox`; a runner older than the inbox answers `404` there, which means an empty inbox, and any other failure means try again) only once the events' response has arrived, and apply the events that came meanwhile over it: the runner follows a connection before it answers, so nothing that changes in between is lost.
 
 ### `GET /v1/inbox`
@@ -394,7 +428,8 @@ Settles an item, on the iPhone or the Mac. The body is exactly one of:
 
 - `answer`: one of its `options`, or the user's own words (1 to 2,000 characters). It goes to the job:
   - `question`: the answer is the agent's next message (as `POST /v1/jobs/{id}/messages`): a waiting job goes on, an ended one picks its session up again.
-  - `Dismiss` (on `review`, `failed` and `limit`): dismisses the job (`POST /v1/jobs/{id}/dismiss`).
+  - `Dismiss` (on `review`, `failed`, `limit` and `merge`): dismisses the job (`POST /v1/jobs/{id}/dismiss`).
+  - `Try again` (on `merge`): the merge is tried again, or the Mac check is handed to the author again or queued again on the same commit (Mac check, above).
   - `Try again` (on `failed` and `limit`): the job runs again in its session, told to pick up where it left off.
   - `One more round` (on `review`): Oby's last review is quoted in `.oby/inputs/review-4.md` and the agent works on it, as a message does. The runner doesn't review it again.
   - Other words: sent to the job as a message.
@@ -432,6 +467,27 @@ Publishes by hand, for a job whose own publish failed, after the user approved o
   - `signedAt` is within 2 minutes;
   - this signature hasn't been used before.
 - Then it runs Publish, as a job's own publish does: guards, the secret scan, push one pinned commit, then the pull request, ready for review (the one already open for the branch, if there is one). It returns `{"url": "https://github.com/…/pull/42"}`, or an error line (for example the scan's findings, never the secret).
+
+### `GET /v1/checks/next?mac=Studio`
+
+For a Mac that runs merge checks. Answers `{"check": { …Mac check }}` with the oldest queued check, now `running` and that Mac's (`mac` is the query's name, up to 100 characters, or `a Mac`), or `{"check": null}` when none waits. A check whose job runs again or pushed a newer commit isn't handed out. A Mac that took a check and reported nothing for 2 hours went away: the next Mac to ask gets it again. Ask when a `check` event says one is `queued`, on every (re)connection, and every 10 minutes.
+
+### `POST /v1/checks/{id}/result`
+
+What the Mac found:
+
+```json
+{"passed": false,
+ "steps": [{"name": "Mac app and MacTests", "passed": false, "seconds": 301}],
+ "failures": ["MacTests.PublishTests/blocksASecret()"],
+ "log": "Mac app and MacTests:\nPublishTests.swift:12: error: Expectation failed"}
+```
+
+- `problem` (optional): why the Mac couldn't run the check (one line, up to 500 characters). With it, the check is `error`, whatever else the result says.
+- A pass counts only when every step the Mac runs (`Runner tests (swift test)`, `Mac app and MacTests`, `iPhone app with Watch, and iOSTests`) is in `steps` and passed, and `failures` is empty. A failing test name fails the check; a pass that leaves out a step, or a failure that names nothing that failed, is the Mac's problem (`error`).
+- `log` (optional): the end of what the failing steps printed. It goes to the author's agent only, quoted, with the vault's secrets taken out; it's never stored or posted.
+- The runner keeps at most 10 steps, 50 failing tests (each one line of up to 300 characters) and 8,000 characters of `log`. A failed step, or no steps, fails the check whatever `passed` says.
+- Answers `{"check": { …Mac check }}` with the result on it. `404` for a check the runner doesn't have, `409` for one no Mac has taken (`GET /v1/checks/next`) or that has its result already.
 
 ### `POST /v1/devices`
 
@@ -508,7 +564,8 @@ Each tool's model and effort, as in `status.models`. `GET /v1/settings/models/op
 
 ## What the runner never does
 
-- **Merge, force-push or push to main:** not for anyone, not even with an approval.
-- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comments that go out are Oby's own review of its own pull request, after the secret scan, and the Lead's claim on an issue a job starts on (the branch name, written by the runner); no GitHub review, approval or comment on anyone else's work.
+- **Force-push or push to main:** not for anyone, not even with an approval.
+- **Merge, except into `dev` after the Mac check:** the runner squash-merges a pull request it opened only into `dev`, only when Oby's review approved it, the Mac check passed on the same commit and the secret scan is clean (Mac check, above). Never into `main`.
+- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comments that go out are Oby's own review of its own pull request and the Mac check's results on it, after the secret scan, and the Lead's claim on an issue a job starts on (the branch name, written by the runner); no GitHub review, approval or comment on anyone else's work.
 - **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
 - **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.

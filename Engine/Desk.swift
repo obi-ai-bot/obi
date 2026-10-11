@@ -139,6 +139,21 @@ final class Desk {
     /// secret scan, and quotes it as a file for the author's next round. Tests put in their own.
     @ObservationIgnored var postReview: (_ author: Job, _ body: String) async throws -> URL = Review.post
     @ObservationIgnored var quoteReview: (_ author: Job, _ file: String, _ text: String) throws -> Void = Review.quote
+    /// Merge checks on the user's Mac (Engine/Checks.swift): the commit a review job read, the
+    /// results' comment, the secret scan of what a merge lands, and the merge. Tests put in their own.
+    @ObservationIgnored var reviewedHead: (_ review: String) async -> String? = { id in
+        try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-parse", "--verify", "HEAD^{commit}"])
+    }
+    @ObservationIgnored var postCheck: (_ author: Job, _ body: String) async throws -> URL = MacCheck.post
+    @ObservationIgnored var scanForMerge: (_ job: Job, _ head: String) async throws -> [Publish.Finding] = MacCheck.scan
+    @ObservationIgnored var mergePullRequest: (_ job: Job, _ check: MacCheck) async throws -> Void = MacCheck.merge
+    /// Called with every Mac check that's queued, taken or ends, for the runner's event stream.
+    var onCheckChange: (MacCheck) -> Void = { _ in }
+    /// Jobs whose Mac check result is being posted and merged or handed back (`finishCheck`), once at a time.
+    @ObservationIgnored var finishingChecks: Set<String> = []
+    /// Whether an approval queues a Mac check: on the runner, which Macs ask for checks. The Mac's
+    /// own desk has no one to take them, so its approved jobs wait for a person to merge them.
+    @ObservationIgnored var queuesMacChecks = false
     /// What everything on its way to an agent is checked against (Engine/Vault.swift): prompts,
     /// messages, files, reviews and environments. Tests put in their own.
     @ObservationIgnored var vault = Vault.shared
@@ -187,6 +202,8 @@ final class Desk {
         // Reviews that were waiting for an account with room when Oby last ran: start them now that
         // the sign-ins are known, or watch for room (also a five-minute safety net).
         startWaitingReviews()
+        // Merges a restart cut short, or that failed on something that may pass now (Engine/Checks.swift).
+        resumeChecks()
     }
 
     /// The brain picks "auto" or an account by name; Swift turns that into a real account. With
@@ -1258,7 +1275,8 @@ final class Desk {
             let text = words.trimmingCharacters(in: .whitespacesAndNewlines)
             guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Answer with 1 to 2,000 characters.") }
             switch (item.kind, text) {
-            case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss): try dismiss(item.job)
+            case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss), (.merge, Inbox.dismiss): try dismiss(item.job)
+            case (.merge, Inbox.tryAgain): try retryMerge(item.job)
             case (.failed, Inbox.tryAgain), (.limit, Inbox.tryAgain), (.failed, Inbox.oneMoreRound): try message(item.job, Inbox.tryAgainMessage)
             case (.review, Inbox.oneMoreRound): try message(item.job, reviewAgain(item.job))
             default: try message(item.job, text)

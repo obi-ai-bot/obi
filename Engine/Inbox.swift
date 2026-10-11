@@ -6,8 +6,8 @@ import CSQLite
 #endif
 
 /// Something only the user can answer (docs/pipeline-cases.md, "Your inbox"): a job's question
-/// (I.1), a job out of Oby's review rounds, a failure, or a job whose accounts all hit their
-/// limits. Like email, it waits for the user, with no timeout: they answer it, mark it done, or
+/// (I.1), a job out of Oby's review rounds, a failure, a job whose accounts all hit their
+/// limits, or a merge that stopped. Like email, it waits for the user, with no timeout: they answer it, mark it done, or
 /// put it off until later. Its job waits; the others keep going.
 nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
     enum Kind: String, Codable, Sendable {
@@ -19,6 +19,8 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         case failed
         /// The job's account hit its usage limit, and no other account had room.
         case limit
+        /// Oby's merge stopped: it couldn't merge, or the Mac check failed with no round left (`Job.mergeNeedsYou`).
+        case merge
     }
 
     /// The job, what it needs and when it came: the same need never comes twice, even once it's done.
@@ -69,6 +71,15 @@ nonisolated enum Inbox {
         guard !job.isActive else { return nil }
         if job.reviewNeedsYou, let review = job.review {
             return item(.review, "review-\(review.job)", Review.stopLine, [oneMoreRound, dismiss])
+        }
+        if job.mergeNeedsYou, let check = job.macCheck {
+            // A merge that failed can be tried again; each try that fails is its own item.
+            if let error = job.mergeError { return item(.merge, "merge-\(check.id)-\(check.tries ?? 0)", error, [tryAgain, dismiss]) }
+            // The Mac couldn't run it, or its round brought nothing new: check the same commit again.
+            if check.state == .error { return item(.merge, "merge-\(check.id)-error", check.problem ?? "The Mac couldn't run the check.", [tryAgain, dismiss]) }
+            let text = check.failureLine + (job.checkStop.map { " " + $0 } ?? "")
+            if check.handedOff == true { return item(.merge, "merge-\(check.id)-nothing-new", text, [tryAgain, dismiss]) }
+            return item(.merge, "merge-\(check.id)-stopped", text, [dismiss])
         }
         guard job.status == .failed || job.status == .interrupted else { return nil }
         let line = job.summary.split(separator: "\n").first.map(String.init) ?? job.status.rawValue.capitalized

@@ -28,6 +28,8 @@ do {
 }
 
 let desk = Desk()
+// Macs that follow the runner take its merge checks (Engine/Checks.swift).
+desk.queuesMacChecks = true
 let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: "devices.json")),
               push: Push(desk: desk, folder: Workspace.root.appending(path: "apns")),
               cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")))

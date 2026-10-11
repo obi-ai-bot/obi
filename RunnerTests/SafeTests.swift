@@ -272,8 +272,8 @@ final class StopAllTests {
         #expect(outgoing.compactMap { $0["action"] as? String } == ["push", "pullRequest"])
         #expect(outgoing.first?["id"] as? String == "1a2b3c4d5e" && outgoing.first?["branch"] as? String == "oby/fix-7-sent")
         // An action this build doesn't know still reads (an older Mac, a newer runner).
-        let future = try JSONDecoder().decode(Outgoing.self, from: Data(#"{"action":"merge","repo":"deskree-inc/oby","id":"https://github.com/deskree-inc/oby/pull/80","date":0}"#.utf8))
-        #expect(future.line == "merge https://github.com/deskree-inc/oby/pull/80")
+        let future = try JSONDecoder().decode(Outgoing.self, from: Data(#"{"action":"release","repo":"deskree-inc/oby","id":"https://github.com/deskree-inc/oby/pull/80","date":0}"#.utf8))
+        #expect(future.line == "release https://github.com/deskree-inc/oby/pull/80")
         // Nothing sent yet: an empty list, never missing.
         #expect((object(try API.encode(JobJSON(job: job)))["outgoing"] as? [Any])?.isEmpty == true)
     }

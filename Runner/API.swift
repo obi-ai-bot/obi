@@ -33,6 +33,7 @@ final class API {
             self?.push?.changed()
         }
         desk.onInboxChange = { [weak self] item in self?.send("inbox", InboxJSON(item: item)) }
+        desk.onCheckChange = { [weak self] check in self?.send("check", MacCheckJSON(check: check)) }
         watchAccounts()
     }
 
@@ -62,6 +63,10 @@ final class API {
             try await self.answer(context.parameters.require("id"), try await Self.decode(InboxAnswer.self, from: request))
         }
         router.get("v1/events") { _, _ in await self.events() }
+        router.get("v1/checks/next") { request, _ in await self.nextCheck(mac: request.uri.queryParameters.get("mac").map { String($0) }) }
+        router.post("v1/checks/:id/result") { request, context in
+            try await self.checkResult(context.parameters.require("id"), try await Self.decode(MacCheck.Report.self, from: request))
+        }
         router.post("v1/devices") { request, _ in try await self.register(try await Self.decode(NewDevice.self, from: request)) }
         router.post("v1/activities") { request, _ in try await self.activity(try await Self.decode(Push.Token.self, from: request)) }
         router.post("v1/notifications") { request, _ in try await self.notifications(try await Self.decode(NotificationToken.self, from: request)) }
@@ -215,6 +220,24 @@ final class API {
             return Self.json(InboxJSON(item: try desk.settle(id, how)))
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+    }
+
+    /// A Mac that runs merge checks asks for the next one (Engine/Checks.swift): the oldest queued
+    /// check, now that Mac's, or none.
+    func nextCheck(mac: String?) -> Response {
+        let name = mac.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)) }.flatMap { $0.isEmpty ? nil : $0 } ?? "a Mac"
+        return Self.json(CheckAnswer(check: desk.nextMacCheck(mac: name).map(MacCheckJSON.init)))
+    }
+
+    /// A Mac's result for a check it took: passed merges, failed goes back to the author.
+    func checkResult(_ id: String, _ report: MacCheck.Report) throws -> Response {
+        do {
+            return Self.json(CheckAnswer(check: MacCheckJSON(check: try desk.macCheckEnded(id, report))))
+        } catch let unknown as MacCheck.Unknown {
+            throw APIError(.notFound, unknown.localizedDescription)
+        } catch {
+            throw APIError(.conflict, error.localizedDescription)
         }
     }
 
@@ -505,9 +528,9 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError }
 
-    private enum Derived: String, CodingKey { case pipeline, title }
+    private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou }
 
     func encode(to encoder: any Encoder) throws {
         // Oby's own review makes no commits; the ones in its worktree are the pull request's. Saying 0
@@ -518,6 +541,7 @@ struct JobJSON: Encodable {
         var derived = encoder.container(keyedBy: Derived.self)
         try derived.encode(job.pipeline, forKey: .pipeline)
         try derived.encode(job.shortTitle, forKey: .title)
+        try derived.encode(job.mergeNeedsYou, forKey: .mergeNeedsYou)
         var nulls = encoder.container(keyedBy: Nullable.self)
         if job.base == nil { try nulls.encodeNil(forKey: .base) }
         if job.pr == nil { try nulls.encodeNil(forKey: .pr) }
@@ -549,8 +573,41 @@ struct JobJSON: Encodable {
         if job.question == nil { try nulls.encodeNil(forKey: .question) }
         if job.limit == nil { try nulls.encodeNil(forKey: .limit) }
         if job.startCommit == nil { try nulls.encodeNil(forKey: .startCommit) }
+        if job.macCheck == nil { try nulls.encodeNil(forKey: .macCheck) }
+        if job.mergeError == nil { try nulls.encodeNil(forKey: .mergeError) }
         // What went out is always a list: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
+    }
+}
+
+/// What `GET /v1/checks/next` and `POST /v1/checks/{id}/result` answer: a check, or null for none.
+struct CheckAnswer: Encodable {
+    var check: MacCheckJSON?
+
+    private enum Keys: String, CodingKey { case check }
+
+    func encode(to encoder: any Encoder) throws {
+        var keys = encoder.container(keyedBy: Keys.self)
+        try keys.encode(check, forKey: .check)
+    }
+}
+
+/// A Mac check with every key the API promises, null where Swift would leave one out.
+struct MacCheckJSON: Encodable {
+    var check: MacCheck
+
+    private enum Nullable: String, CodingKey { case started, finished, mac, steps, failures, comment, postError }
+
+    func encode(to encoder: any Encoder) throws {
+        try check.encode(to: encoder)
+        var nulls = encoder.container(keyedBy: Nullable.self)
+        if check.started == nil { try nulls.encodeNil(forKey: .started) }
+        if check.finished == nil { try nulls.encodeNil(forKey: .finished) }
+        if check.mac == nil { try nulls.encodeNil(forKey: .mac) }
+        if check.steps == nil { try nulls.encodeNil(forKey: .steps) }
+        if check.failures == nil { try nulls.encodeNil(forKey: .failures) }
+        if check.comment == nil { try nulls.encodeNil(forKey: .comment) }
+        if check.postError == nil { try nulls.encodeNil(forKey: .postError) }
     }
 }
 

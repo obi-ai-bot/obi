@@ -56,8 +56,9 @@ struct ReviewTests {
             return agent
         }
         desk.countCommits = { _, _ in 2 }
-        desk.publishOnItsOwn = { [made, url] job, _, _ in
+        desk.publishOnItsOwn = { [made, url] job, _, hooks in
             made.published.append(job)
+            hooks.sent(Outgoing(action: .push, repo: job.repo, id: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", branch: job.branch))
             return url
         }
         desk.postReview = { [made] author, body in
@@ -376,7 +377,7 @@ struct ReviewTests {
         let body = try #require(made.posted.first?.body)
         #expect(body.hasPrefix("### Oby review · Codex · Work: Approved\n\n```\nThe change does what was asked and the tests cover it.\n\nVERDICT: APPROVED\n```"))
         #expect(body.contains("by Oby:"))
-        // Ready to merge, and nothing merges: no author round, no second review.
+        // Ready to merge where no Mac takes checks (this desk, as the Mac's own): no author round, no second review.
         let stages = reviewed.pipeline.stages
         #expect(stages.first { $0.id == .review }?.state == .done && stages.first { $0.id == .review }?.detail == "Approved by Oby")
         #expect(stages.last?.state == .current && stages.last?.detail == "Ready to merge")
@@ -542,7 +543,7 @@ struct ReviewTests {
         _ = try await publishAuthor()
         made.postError = Shell.Failure(message: "Not posted: possible secret in the review at line 3 (AWS access key).")
         let reviewed = try await review("Hmm.\n\n- Remove the key\n\nVERDICT: CHANGES REQUESTED")
-        #expect(reviewed.review?.comment == nil && reviewed.outgoing == nil)
+        #expect(reviewed.review?.comment == nil && reviewed.outgoing?.map(\.action) == [.push])
         #expect(reviewed.review?.postError == "Not posted: possible secret in the review at line 3 (AWS access key).")
         try await until("the author runs again") { desk.job("author")?.status == .running }
         #expect(made.quoted.first?.text.contains("- Not posted on the pull request: Not posted: possible secret in the review at line 3 (AWS access key).") == true)

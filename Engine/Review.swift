@@ -14,8 +14,8 @@ import OSLog
 /// own pull request) and keeps it on the job. Changes requested go back to the author's agent as
 /// its next round, as a quoted file, never in the prompt; the round that publishes gets a
 /// follow-up review, which checks only the blocking findings and the new commits, `maxRounds`
-/// reviews at most, then the job stops and needs the user. Approved: the job shows it's ready to
-/// merge. Oby doesn't merge: nothing checks the Mac and iPhone builds yet.
+/// reviews at most, then the job stops and needs the user. Approved: the user's Mac checks the
+/// commit, and Oby merges it into dev when that passes (Engine/Checks.swift).
 nonisolated struct Review: Codable, Equatable, Sendable {
     enum Verdict: String, Codable, Sendable { case approved, changesRequested }
 
@@ -346,7 +346,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             \(summary)
             \(fence)
 
-            \(overruled(review, summary: summary).map { $0 + "\n\n" } ?? "")by Oby: \(review.agentName) reviewed this pull request on the \(review.account) account for Oby, review \(review.round) of at most \(maxRounds). GitHub doesn't let a pull request's own author approve it or request changes, so this comment stands in. A person reviews it before it merges.
+            \(overruled(review, summary: summary).map { $0 + "\n\n" } ?? "")by Oby: \(review.agentName) reviewed this pull request on the \(review.account) account for Oby, review \(review.round) of at most \(maxRounds). GitHub doesn't let a pull request's own author approve it or request changes, so this comment stands in. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
             """
     }
 
@@ -518,6 +518,7 @@ extension Desk {
         author.summary = Review.report(author.summary, followUps: result.followUps)
         author.reviewError = nil
         replace(author)
+        if verdict == .approved { reviewApproved(id, review: review.id) }
         Task {
             do {
                 let url = try await postReview(author, Review.comment(result, summary: review.summary)).absoluteString
