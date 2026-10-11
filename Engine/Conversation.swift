@@ -129,17 +129,22 @@ nonisolated struct Briefing: Equatable, Sendable {
         return "\(active.count == 1 ? "1 agent is" : "\(active.count) agents are") working: \(named.joined(separator: ", "))\(more)."
     }
 
-    /// Whether a reply says nothing is running ("No jobs are running right now", "nothing is
-    /// running", "no agents are working"). With agents working, Oby says `workingLine` instead, so
-    /// its reply never contradicts the header over it (#11).
+    /// Whether a reply says no job is running ("No jobs are running right now", "nothing is
+    /// running", "there are no agents working", "Oby isn't running anything"). Only that: a reply
+    /// about something else ("no jobs failed", "there are no jobs waiting for review") is Oby's
+    /// own to give. With agents working, Oby says `workingLine` instead of a reply that says none
+    /// is, so its reply never contradicts the header over it (#11).
     static func contradicts(_ reply: String) -> Bool {
         let text = reply.lowercased().replacing(/[’]/, with: "'")
         let patterns: [Regex<Substring>] = [
-            /\bno (?:jobs?|agents?|work|tasks?)\b[^.!?]{0,40}?\b(?:running|working|active|in progress|under way|underway)\b/,
-            /\bnothing(?:'s| is|'s currently| is currently)? (?:running|working|in progress|under way|underway)\b/,
-            /\b(?:not|aren't|isn't|are not|is not) (?:currently )?(?:running|working on) (?:any|anything)\b/,
+            // "no jobs are running", "no agents working", "no job is currently active".
+            /\bno (?:jobs?|agents?|work|tasks?)(?: (?:is|are))?(?: currently)? (?:running|working|active|in progress|under way|underway)\b/,
+            // "nothing is running", "nothing's in progress", "nothing running".
+            /\bnothing(?:'s| is)?(?: currently)? (?:running|working|in progress|under way|underway)\b/,
+            // "isn't running anything", "is not running any jobs", "aren't working on anything".
+            /\b(?:not|aren't|isn't|are not|is not)(?: currently)? (?:running|working on) (?:any|anything)\b/,
+            // "no running jobs", "zero active agents".
             /\b(?:no|zero) (?:running|active|working) (?:jobs?|agents?|tasks?)\b/,
-            /\b(?:there (?:are|is) no|there aren't any|there isn't any) (?:jobs?|agents?|work)\b/,
         ]
         return patterns.contains { text.contains($0) }
     }

@@ -55,6 +55,7 @@ struct SidebarTests {
         #expect(Summary.line(working: header, needs: nil) == "3 agents are working. Nothing needs you.")
         #expect(briefing.text.contains("Working now: 3 agents are working: Job q1 on this Mac, Job a1 on tetrix-lab, Job r1 on this Mac."))
         #expect(Briefing.contradicts("No jobs are running right now.") && !Briefing.contradicts("3 agents are working."))
+        #expect(!Briefing.contradicts("There are no jobs that failed today.") && !Briefing.contradicts("No jobs failed; Vault secrets is still running."))
     }
 
     @Test func liveProgressFollowsThePipeline() {

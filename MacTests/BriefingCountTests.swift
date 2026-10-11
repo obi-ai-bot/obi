@@ -51,7 +51,11 @@ struct BriefingCountTests {
         #expect(talk == .reply("2 agents are working: Vault secrets on tetrix-lab, Watch home on tetrix-lab."))
         #expect(brain.prompts.last?.contains("Working now: 2 agents are working: Vault secrets on tetrix-lab, Watch home on tetrix-lab.") == true)
         #expect(desk.turns.last?.text == "2 agents are working: Vault secrets on tetrix-lab, Watch home on tetrix-lab.")
+        // A reply about something else stands, agents or not.
+        brain.reply = "There are no jobs waiting for review."
+        #expect(await desk.converse("anything in review?") == .reply("There are no jobs waiting for review."))
         // With nothing running, the brain's words stand.
+        brain.reply = "No jobs are running right now."
         desk.elsewhere = { [] }
         #expect(await desk.converse("anything running?") == .reply("No jobs are running right now."))
         #expect(desk.briefing(turns: []).working == 0)

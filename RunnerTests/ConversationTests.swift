@@ -611,9 +611,21 @@ struct ConversationTests {
                      "No running jobs.", "There's nothing in progress.", "Oby is not running any jobs."] {
             #expect(Briefing.contradicts(said), "\(said)")
         }
-        for said in ["Vault secrets is running its tests.", "2 agents are working.", "No jobs failed this week.", "Nothing needs you."] {
+        // A reply about something else is Oby's own to give, whatever runs: only "no job is
+        // running" is a contradiction, never "no jobs failed" or "no jobs waiting for review".
+        for said in ["Vault secrets is running its tests.", "2 agents are working.", "No jobs failed this week.", "Nothing needs you.",
+                     "There are no jobs that failed today.", "There are no jobs waiting for review.",
+                     "No jobs failed; Vault secrets is still running.", "There isn't any work that needs you.",
+                     "No jobs are waiting for your review, and nothing failed.", "There are no jobs in review."] {
             #expect(!Briefing.contradicts(said), "\(said)")
         }
+        // And such a reply reaches the user as it is while agents work.
+        var again = vaultJob()
+        again.id = "a6a1a6a1"
+        desk.enqueue(again)
+        try await until("the job runs") { desk.jobs.first?.status == .running }
+        brain.plans = [Self.reply("No jobs failed; Vault secrets is still running.")]
+        #expect(await desk.converse("did anything fail?") == .reply("No jobs failed; Vault secrets is still running."))
     }
 
     // MARK: The runner's API
