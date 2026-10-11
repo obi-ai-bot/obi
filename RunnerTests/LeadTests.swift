@@ -177,7 +177,8 @@ struct LeadTests {
 
     // MARK: Validation
 
-    let context = LeadContext(repos: ["deskree-inc/oby"], refused: ["deskree-inc/oby#14": "job a41c9e02 is running on it", "deskree-inc/oby#8": "PR #70 is open"])
+    let context = LeadContext(repos: ["deskree-inc/oby"], workable: ["deskree-inc/oby#7", "deskree-inc/oby#12", "deskree-inc/oby#13", "deskree-inc/oby#30"],
+                              refused: ["deskree-inc/oby#14": "job a41c9e02 is running on it", "deskree-inc/oby#8": "PR #70 is open"])
 
     func brief(_ issue: Int, files: [String] = ["Engine/Lead.swift"], check: String = "swift test", title: String = "Lead context files", goal: String = "Write the files.") -> LeadPlan.Brief {
         LeadPlan.Brief(repo: "deskree-inc/oby", issue: issue, kind: .build, title: title, goal: goal, files: files, check: check, outOfScope: "The Mac app.")
@@ -191,12 +192,16 @@ struct LeadTests {
         #expect(taken.problems(in: context, canary: "zq9") == ["deskree-inc/oby#14 is refused: job a41c9e02 is running on it", "deskree-inc/oby#8 is refused: PR #70 is open"])
         let twice = LeadPlan(action: .startJobs, reply: "", jobs: [brief(7), brief(7)], question: nil)
         #expect(twice.problems(in: context, canary: "zq9") == ["two jobs are about deskree-inc/oby#7"])
+        // Only issues the board lists as workable: not a closed, made-up or off-board one, which Oby would claim on GitHub.
+        #expect(LeadPlan.problems(of: brief(99), in: context) == ["deskree-inc/oby#99 isn't a workable issue on the board"])
+        #expect(LeadPlan.problems(of: brief(5), in: context) == ["deskree-inc/oby#5 isn't a workable issue on the board"])
         // Every part of a brief is checked.
         var bad = brief(0, files: [], check: "echo ok\necho done", title: "", goal: " ")
         bad.repo = "deskree-inc/nowhere"
         bad.outOfScope = String(repeating: "x", count: 1001)
         #expect(LeadPlan.problems(of: bad, in: context) == [
-            "deskree-inc/nowhere isn't a known repository", "issue must be a positive number", "title must be one line of 1 to 60 characters",
+            "deskree-inc/nowhere isn't a known repository", "issue must be a positive number", "deskree-inc/nowhere#0 isn't a workable issue on the board",
+            "title must be one line of 1 to 60 characters",
             "goal is empty", "files must name at least one file or folder the job will touch", "check must be one line of 1 to 200 characters",
             "out_of_scope is longer than 1,000 characters",
         ])
@@ -244,7 +249,9 @@ struct LeadTests {
                      "pick the next open issues", "what's next?", "work on the board", "Clear the backlog"] {
             #expect(Lead.leads(said), Comment(rawValue: said))
         }
-        for said in ["Review oby PR #33", "Work on oby #12 and #13 until the tests pass", "Stop", "Merge it", "Work on epic #30", "fix the keyboard"] {
+        // Stopping stays with the brain, which stops the jobs: the Lead has no stop action.
+        for said in ["Review oby PR #33", "Work on oby #12 and #13 until the tests pass", "Stop", "Merge it", "Work on epic #30", "fix the keyboard",
+                     "Stop working on the roadmap", "cancel the roadmap jobs", "Obi, stop the next issue"] {
             #expect(!Lead.leads(said), Comment(rawValue: said))
         }
     }
@@ -393,8 +400,41 @@ struct LeadTests {
         let argv = Agents.sandboxed(["claude", "-p"], in: nil, own: "\(Agents.home)/.claude", reading: [directory.path, "/nowhere/at/all"], bubblewrap: true)
         #expect(argv.contains(["--ro-bind", directory.path, directory.path]))
         #expect(!argv.contains("/nowhere/at/all"))
-        #expect(Lead.adapters(home: "/h").map(\.name) == ["claude Fable 5.1", "claude Sonnet 5.5"])
+        // The model the spike proved (6 to 20 s a turn), on the account given.
+        #expect(Lead.adapters(home: "/h").map(\.name) == ["claude Sonnet 5.5"])
         #expect((Lead.adapters(home: "/h").first as? ClaudeLead)?.home == "/h")
+    }
+
+    /// The same request from the Mac and the iPhone at once, or repeated after the app gave up
+    /// waiting: the briefs are checked against the live jobs right before each starts.
+    @Test func twoTurnsAtOnceStartOneJobOnAnIssue() async throws {
+        let one = #"{"action":"start_jobs","reply":"","question":null,"jobs":[{"repo":"deskree-inc/oby","issue":7,"kind":"build","title":"Safe when nobody watches","goal":"Implement F3.","files":["Engine/Desk.swift"],"check":"swift test","out_of_scope":""}]}"#
+        /// Takes a moment to answer, as a real turn does, so both turns read the board before either starts a job.
+        final class SlowLead: LeadAdapter, @unchecked Sendable {
+            let name = "slow"
+            let plan: String
+            init(_ plan: String) { self.plan = plan }
+            func turn(system: String, user: String, schema: Data, in directory: URL, timeout: TimeInterval) async throws -> Data {
+                try await Task.sleep(for: .milliseconds(100))
+                return Data(plan.utf8)
+            }
+        }
+        desk.makeLead = { _ in [SlowLead(one)] }
+        async let mac = desk.plan("Work on the roadmap")
+        async let phone = desk.plan("work on the roadmap")
+        let replies = await [mac, phone]
+        #expect(replies.contains(.reply("Started 1 job: Safe when nobody watches (#7). Skipped 8 on the board.")))
+        #expect(replies.contains(.reply("Nothing new to start: #7 already has a job.")))
+        try await until("the job runs") { desk.jobs.count == 1 && desk.jobs.first?.status == .running }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(desk.jobs.count == 1 && made.agents.count == 1 && made.claims.count == 1)
+        let turns = JobStore(url: folder.appending(path: "oby.sqlite")).leadTurns()
+        #expect(turns.count == 2 && turns.map(\.started.count).sorted() == [0, 1])
+        #expect(turns.contains { $0.refused.contains { $0.hasPrefix("#7 not started: job ") && $0.hasSuffix(" on it already") } })
+        // Older goals' context folders are pruned, the newest kept.
+        for n in 0..<25 { try FileManager.default.createDirectory(at: desk.leadRoot.appending(path: "old-\(n)"), withIntermediateDirectories: true) }
+        Lead.prune(desk.leadRoot, keep: 3)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: desk.leadRoot.path).count == 3)
     }
 }
 

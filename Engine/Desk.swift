@@ -210,7 +210,11 @@ final class Desk {
             return .reply("Oby couldn't write the Lead's context: \(error.localizedDescription)")
         }
         var context = LeadContext(repos: Array(Set(repos + board.items.map(\.repo))).sorted())
-        for item in skipped { context.refused["\(item.repo)#\(item.number)"] = item.reason }
+        context.workable = Set(board.items.map { "\($0.repo)#\($0.number)" })
+        for item in skipped {
+            context.refused["\(item.repo)#\(item.number)"] = item.reason
+            context.workable.remove("\(item.repo)#\(item.number)")
+        }
         // Issues off the board with a running job are refused too.
         for job in jobs where job.isActive && job.pr == nil {
             guard let issue = job.issue, context.refused["\(job.repo)#\(issue)"] == nil else { continue }
@@ -219,6 +223,7 @@ final class Desk {
         var adapters = makeLead(thinker.home)
         for index in adapters.indices { if var claude = adapters[index] as? ClaudeLead { claude.checkouts = Array(checkouts.values); adapters[index] = claude } }
         let result = await LeadPlanner(adapters: adapters).plan(said, context: context, in: directory)
+        Lead.prune(leadRoot)
         var turn = LeadTurn(goal: goal, said: said, by: result.by, plan: result.plan, refused: result.refused, skipped: skipped)
         guard let plan = result.plan else {
             record(turn)
@@ -237,17 +242,29 @@ final class Desk {
         case .startJobs:
             var states = accounts.accounts
             var started: [Job] = []
+            var taken: [Int] = []
+            var unrouted = 0
             for brief in plan.jobs {
-                guard let account = AccountStore.pick(&states, agent: nil) else { break }
+                // The turn took a while: a repeated request (the Mac and the iPhone, a retry after the
+                // app gave up waiting) may have started a job on this issue meanwhile.
+                if let job = Lead.taken(brief, by: jobs) {
+                    taken.append(brief.issue)
+                    turn.refused.append("#\(brief.issue) not started: job \(job.id) is \(job.status.rawValue) on it already")
+                    continue
+                }
+                guard let account = AccountStore.pick(&states, agent: nil) else { unrouted += 1; continue }
                 started.append(enqueue(Lead.job(brief, said: said, goal: goal, account: account)))
             }
             turn.started = started.map(\.id)
             record(turn)
-            guard !started.isEmpty else { return .reply("No account is signed in with room to spare. Check Settings › Accounts.") }
-            let left = plan.jobs.count - started.count
+            guard !started.isEmpty else {
+                if !taken.isEmpty, unrouted == 0 { return .reply("Nothing new to start: " + taken.map { "#\($0)" }.joined(separator: ", ") + " already \(taken.count == 1 ? "has" : "have") a job.") }
+                return .reply("No account is signed in with room to spare. Check Settings › Accounts.")
+            }
             var text = "Started \(started.count) job\(started.count == 1 ? "" : "s"): "
                 + started.map { "\($0.heading) (#\($0.issue ?? 0))" }.joined(separator: ", ") + "."
-            if left > 0 { text += " \(left) more had no account with room." }
+            if !taken.isEmpty { text += " " + taken.map { "#\($0)" }.joined(separator: ", ") + " already \(taken.count == 1 ? "has" : "have") a job." }
+            if unrouted > 0 { text += " \(unrouted) more had no account with room." }
             if !skipped.isEmpty { text += " Skipped \(skipped.count) on the board." }
             return .reply(text)
         }
