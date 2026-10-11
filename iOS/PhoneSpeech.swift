@@ -100,6 +100,14 @@ final class PhoneSpeech {
         } catch { await analyzer.cancelAndFinishNow(); throw error }
     }
 
+    static let phoneTapFrames: AVAudioFrameCount = 2048
+
+    /// Tap size is ~43 ms at 48 kHz, much smaller than the Watch's 250 ms packets.
+    /// Use a duration budget for phone buffers, rather than reuse the Watch's packet count.
+    static func phoneBufferCapacity(sampleRate: Double) -> Int {
+        max(128, Int(ceil(sampleRate * 8 / Double(phoneTapFrames))))
+    }
+
     static func make(request: String, sampleRate: Double, sourceFormat: AVAudioFormat? = nil, context: [String] = [], onCancel: (() -> Void)? = nil, partial: @escaping (String) -> Void) async throws -> PhoneSpeech {
         let transcriber = try await transcriber()
         guard let source = sourceFormat ?? AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate,
@@ -109,7 +117,10 @@ final class PhoneSpeech {
             throw RunnerError(message: "Your iPhone can't use this audio format.")
         }
         converter.primeMethod = .none
-        let (stream, input) = AsyncStream.makeStream(of: AnalyzerInput.self, bufferingPolicy: .bufferingOldest(64))
+        // Phone conversion can yield more than one analyzer buffer per tap; allow twice
+        // the capture queue's budget. Watch packets keep their separate 64-chunk (~16 s) bound.
+        let capacity = sourceFormat == nil ? 64 : phoneBufferCapacity(sampleRate: source.sampleRate) * 2
+        let (stream, input) = AsyncStream.makeStream(of: AnalyzerInput.self, bufferingPolicy: .bufferingOldest(capacity))
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         let hints = AnalysisContext()
         hints.contextualStrings[.general] = context

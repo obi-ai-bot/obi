@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import NaturalLanguage
 import Observation
 import Speech
 import UIKit
@@ -105,7 +106,9 @@ final class PhoneVoice {
                     return
                 }
                 self.speech = speech
-                let (stream, buffers) = AsyncStream.makeStream(of: AVAudioPCMBuffer.self, bufferingPolicy: .bufferingOldest(16))
+                // Hold at least eight seconds of tap audio if the main actor briefly falls behind.
+                let capacity = PhoneSpeech.phoneBufferCapacity(sampleRate: source.sampleRate)
+                let (stream, buffers) = AsyncStream.makeStream(of: AVAudioPCMBuffer.self, bufferingPolicy: .bufferingOldest(capacity))
                 self.buffers = buffers
                 feeding = Task {
                     for await buffer in stream {
@@ -114,7 +117,7 @@ final class PhoneVoice {
                         catch { fail(error, token: token); return }
                     }
                 }
-                engine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: source) { buffer, _ in
+                engine.inputNode.installTap(onBus: 0, bufferSize: PhoneSpeech.phoneTapFrames, format: source) { buffer, _ in
                     // The tap's buffer is reused by AVAudioEngine. Own a copy before leaving its thread.
                     guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else { return }
                     copy.frameLength = buffer.frameLength
@@ -163,7 +166,11 @@ final class PhoneVoice {
         stopMicrophone()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         // Preparation still pending: cancel it, and discard this hold.
-        guard let speech else { cancel(); return }
+        guard let speech else {
+            cancel()
+            problem = "Hold to talk. Release to send."
+            return
+        }
         finishing = true
         let token = generation
         let feeding = feeding
@@ -175,7 +182,9 @@ final class PhoneVoice {
                 self.speech = nil
                 finishing = false
                 words = ""
-                if !transcript.isEmpty { done?(transcript) }
+                if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    problem = "Hold to talk. Release to send."
+                } else { done?(transcript) }
             } catch { fail(error, token: token) }
         }
     }
@@ -236,8 +245,13 @@ final class PhoneSpeaker: NSObject, AVSpeechSynthesizerDelegate {
 
     func say(_ text: String) {
         stop()
-        let locale = PhoneSpeech.locale.identifier.replacingOccurrences(of: "_", with: "-")
-        let language = locale.split(separator: "-").first.map(String.init) ?? "en"
+        // Replies can use a different language from the request. Never choose pronunciation
+        // from the speech-input setting; use the reply itself, with the system language for ambiguous text.
+        let detected = NLLanguageRecognizer.dominantLanguage(for: text)?.rawValue
+            ?? Locale.current.language.languageCode?.identifier ?? "en"
+        let fallback = AVSpeechSynthesisVoice(language: detected)
+        let locale = fallback?.language ?? detected
+        let language = locale.split(separator: "-").first.map(String.init) ?? detected
         let voices = AVSpeechSynthesisVoice.speechVoices().filter {
             $0.language.hasPrefix(language) && !$0.voiceTraits.contains(.isNoveltyVoice)
                 && ($0.quality == .enhanced || $0.quality == .premium)
@@ -245,7 +259,7 @@ final class PhoneSpeaker: NSObject, AVSpeechSynthesizerDelegate {
         let exact = voices.filter { $0.language == locale }
         let preferred = (exact.isEmpty ? voices : exact).sorted { $0.quality.rawValue > $1.quality.rawValue }.first
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = preferred ?? AVSpeechSynthesisVoice(language: locale)
+        utterance.voice = preferred ?? fallback
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
         try? AVAudioSession.sharedInstance().setActive(true)
         current = utterance
