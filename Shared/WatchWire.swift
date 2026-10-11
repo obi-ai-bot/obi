@@ -53,6 +53,8 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 /// - `tell`: `job` (its id) and `text`; answered with `job`.
 /// - `stop`: `job` (its id); answered with `job`.
 /// - `dismiss`: `job` (its id); answered with `job`.
+/// - `permission`: `job` (its id), `permission` (the prompt's id), `decision` ("allow", "always" or
+///   "deny") and, with a deny, `text` for the agent; answered with `job`.
 /// - `publishAction`: `job` (its id); answered with `action`.
 /// - `publish`: `job` (its id) and `action`; answered with `ok`, then a `published` message.
 ///
@@ -70,7 +72,7 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 ///
 /// Any reply may carry `error` instead of what was asked for.
 nonisolated enum WatchWire {
-    enum Kind: String { case refresh, voice, voiceStart, voiceChunk, voiceEnd, voiceCancel, transcript, plan, dispatch, tell, stop, dismiss, publishAction, publish, planned, published, pairKey, paired, unpaired }
+    enum Kind: String { case refresh, voice, voiceStart, voiceChunk, voiceEnd, voiceCancel, transcript, plan, dispatch, tell, stop, dismiss, permission, publishAction, publish, planned, published, pairKey, paired, unpaired }
 
     static let kind = "kind"
     static let ok = "ok"
@@ -86,6 +88,8 @@ nonisolated enum WatchWire {
     static let option = "option"
     static let draft = "draft"
     static let job = "job"
+    static let permission = "permission"
+    static let decision = "decision"
     static let action = "action"
     static let url = "url"
     static let pending = "pending"

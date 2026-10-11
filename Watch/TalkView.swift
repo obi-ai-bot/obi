@@ -343,7 +343,7 @@ struct PlanCard: View {
     }
 }
 
-/// The brain needs one more thing: pick an option.
+/// The brain needs one more thing: pick an option, the recommended one first, or dictate your own.
 struct QuestionCard: View {
     @Environment(Watch.self) private var watch
     let said: String
@@ -351,12 +351,9 @@ struct QuestionCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ReadingText(question.text, weight: .semibold)
-            ForEach(question.options, id: \.self) { option in
-                Button { watch.answer(option, said: said, question: question) } label: {
-                    ReadingText(option).frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
+            DecisionCard(title: question.text, plan: question.plan, options: question.cardOptions,
+                         onChoose: { watch.answer($0.answer, said: said, question: question) },
+                         onWords: { watch.answer($0, said: said, question: question) })
             Button("Cancel") { watch.cancel() }
         }
     }

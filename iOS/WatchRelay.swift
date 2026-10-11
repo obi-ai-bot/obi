@@ -116,6 +116,8 @@ final class WatchRelay: NSObject {
                 job.notes = nil
                 job.request = String(job.request.prefix(300))
                 job.summary = String(job.summary.prefix(600))
+                // A plan to approve can be long: the wrist gets its start.
+                if let plan = job.question?.plan, plan.count > 1500 { job.question?.plan = String(plan.prefix(1500)) + "…" }
                 return job
             }
         while true {
@@ -211,6 +213,12 @@ final class WatchRelay: NSObject {
             case .dismiss:
                 guard let id = message[WatchWire.job] as? String else { return bad }
                 let job = try await phone.runner.dismiss(id)
+                _ = await refresh()
+                return [WatchWire.job: try Runner.encoder.encode(job)]
+            case .permission:
+                guard let id = message[WatchWire.job] as? String, let prompt = message[WatchWire.permission] as? String,
+                      let decision = (message[WatchWire.decision] as? String).flatMap(RunnerPermission.Decision.init(rawValue:)) else { return bad }
+                let job = try await phone.runner.answer(id, permission: prompt, decision, message: message[WatchWire.text] as? String)
                 _ = await refresh()
                 return [WatchWire.job: try Runner.encoder.encode(job)]
             case .publishAction:

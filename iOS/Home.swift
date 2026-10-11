@@ -307,6 +307,31 @@ struct HomeView: View {
     }
 }
 
+/// The dispatch card's mode: one of the four, or the runner's default (Settings › Permissions).
+struct ModeMenu: View {
+    @Binding var mode: RunnerMode?
+    let fallback: RunnerMode?
+
+    var body: some View {
+        Menu {
+            Picker("Mode", selection: $mode) {
+                Text("Default (\(fallback?.label ?? "the runner's"))").tag(RunnerMode?.none)
+                ForEach(RunnerMode.allCases) { mode in
+                    Label {
+                        Text(mode.label)
+                        Text(mode.help)
+                    } icon: {
+                        Image(systemName: mode.symbol)
+                    }
+                    .tag(RunnerMode?.some(mode))
+                }
+            }
+        } label: {
+            Label((mode ?? fallback)?.label ?? "Default", systemImage: (mode ?? fallback)?.symbol ?? "hand.raised").lineLimit(1)
+        }
+    }
+}
+
 /// Oby's leap between the middle of Home and its corner.
 private struct Hop {
     var y: CGFloat = 0
@@ -424,6 +449,8 @@ struct PlanCard: View {
     @State private var rounds = 1
     @State private var check = ""
     @State private var stronger = false
+    /// The mode picked for this job, or nil for the runner's default.
+    @State private var mode: RunnerMode?
     @State private var sending = false
     @State private var problem: String?
 
@@ -498,6 +525,12 @@ struct PlanCard: View {
                     }
                     .gridCellColumns(2)
                 }
+                if phone.defaultMode != nil {
+                    GridRow {
+                        tile("Mode · tap to change") { ModeMenu(mode: $mode, fallback: phone.defaultMode) }
+                            .gridCellColumns(2)
+                    }
+                }
             }
             if let model = draft.strongerModel(for: account?.agent ?? draft.job.agent) {
                 tile("This looks complex") { StrongerModel(model: model, plan: account?.label, on: $stronger) }
@@ -530,6 +563,7 @@ struct PlanCard: View {
             accountID = draft.job.account
             rounds = draft.job.rounds ?? 1
             check = draft.job.check ?? ""
+            mode = RunnerMode(draft.job.mode)
         }
     }
 
@@ -546,6 +580,7 @@ struct PlanCard: View {
         let command = check.trimmingCharacters(in: .whitespaces)
         draft.job.check = command.isEmpty ? nil : command
         draft.job.model = model
+        draft.job.mode = mode?.rawValue
         sending = true
         Task {
             defer { sending = false }
@@ -564,6 +599,8 @@ struct PlansCard: View {
     @State private var picked: [String: String] = [:]
     /// The drafts whose stronger model is on, by job id.
     @State private var stronger: Set<String> = []
+    /// The mode every job gets, or nil for the runner's default.
+    @State private var mode: RunnerMode?
     @State private var sending = false
     @State private var problem: String?
 
@@ -576,6 +613,9 @@ struct PlansCard: View {
                 Text("Oby will start \(drafts.count) jobs.").font(.title3.weight(.semibold))
             }
             ForEach(drafts, id: \.job.id) { row($0) }
+            if phone.defaultMode != nil {
+                tile("Mode for all · tap to change") { ModeMenu(mode: $mode, fallback: phone.defaultMode) }
+            }
             Label("Each works in Oby's own copy of its repository. Nothing is pushed or posted.", systemImage: "checkmark.shield")
                 .font(.footnote).foregroundStyle(.secondary)
             if drafts.contains(where: \.guessed) {
@@ -658,6 +698,7 @@ struct PlansCard: View {
             var edited = draft
             let account = account(of: draft)
             edited.job.model = stronger.contains(draft.job.id) ? draft.strongerModel(for: account?.agent ?? draft.job.agent) : nil
+            edited.job.mode = mode?.rawValue
             if let account {
                 edited.job.account = account.id
                 edited.job.agent = account.agent
@@ -717,27 +758,19 @@ private func pill(_ title: String, action: @escaping () -> Void) -> some View {
     .buttonStyle(.plain)
 }
 
-/// The brain needs one more thing: pick an option, or close and type it.
+/// The brain needs one more thing: pick an option, the recommended one first, or say your own.
 struct QuestionSheet: View {
     @Environment(Phone.self) private var phone
     let said: String
     let question: Question
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ReadingText(question.text, weight: .semibold).padding(.bottom, 6)
-            ForEach(question.options, id: \.self) { option in
-                Button { phone.answer(option, said: said, question: question) } label: {
-                    ReadingText(option, weight: .medium)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16).padding(.vertical, 13)
-                        .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
+        ScrollView {
+            DecisionCard(title: question.text, plan: question.plan, options: question.cardOptions,
+                         onChoose: { phone.answer($0.answer, said: said, question: question) },
+                         onWords: { phone.answer($0, said: said, question: question) })
+                .padding(20)
         }
-        .padding(20)
-        .frame(maxHeight: .infinity, alignment: .top)
         .background(Color(uiColor: .systemGroupedBackground))
     }
 }

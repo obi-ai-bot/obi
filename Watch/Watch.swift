@@ -259,6 +259,19 @@ final class Watch: NSObject {
         }
     }
 
+    /// Allow, Always allow or Deny on what a job's agent waits for; words go with a deny.
+    func answer(_ job: Job, _ decision: RunnerPermission.Decision, message: String? = nil) async throws {
+        guard let permission = job.permission else { return }
+        if let link = direct {
+            apply(try await link.answer(job.id, permission: permission.id, decision, message: message))
+        } else {
+            var request: [String: Any] = [WatchWire.kind: WatchWire.Kind.permission.rawValue, WatchWire.job: job.id,
+                                          WatchWire.permission: permission.id, WatchWire.decision: decision.rawValue]
+            if let message { request[WatchWire.text] = message }
+            try apply(try await self.request(request))
+        }
+    }
+
     /// Lets go of a job that needs you: it then needs nothing.
     func dismiss(_ id: String) async throws {
         if let link = direct {
