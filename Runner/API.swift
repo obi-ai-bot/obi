@@ -32,6 +32,7 @@ final class API {
             self?.send("job", JobJSON(job: job))
             self?.push?.changed()
         }
+        desk.onInboxChange = { [weak self] item in self?.send("inbox", InboxJSON(item: item)) }
         watchAccounts()
     }
 
@@ -56,6 +57,10 @@ final class API {
             try await self.publish(context.parameters.require("id"), try await Self.decode(Approval.self, from: request))
         }
         router.post("v1/clear") { _, _ in try await self.clear() }
+        router.get("v1/inbox") { _, _ in await self.inbox() }
+        router.post("v1/inbox/:id/answer") { request, context in
+            try await self.answer(context.parameters.require("id"), try await Self.decode(InboxAnswer.self, from: request))
+        }
         router.get("v1/events") { _, _ in await self.events() }
         router.post("v1/devices") { request, _ in try await self.register(try await Self.decode(NewDevice.self, from: request)) }
         router.post("v1/activities") { request, _ in try await self.activity(try await Self.decode(Push.Token.self, from: request)) }
@@ -168,6 +173,33 @@ final class API {
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
         return Self.json(JobJSON(job: try known(id)))
+    }
+
+    /// What only the user can answer and hasn't settled, the longest-waiting first. Items put off
+    /// until later are in it too, saying so.
+    func inbox() -> Response {
+        Self.json(desk.inbox.filter(\.isOpen).map { InboxJSON(item: $0) })
+    }
+
+    /// The user settles an inbox item: answers it (the answer goes to its job), marks it done, or
+    /// puts it off until later.
+    func answer(_ id: String, _ answer: InboxAnswer) throws -> Response {
+        guard let item = desk.item(id) else { throw APIError(.notFound, "There's no inbox item \(id).") }
+        guard item.isOpen else { throw APIError(.conflict, "That's done already.") }
+        let how: Desk.Settle
+        switch (answer.answer, answer.done, answer.later) {
+        case (let words?, nil, nil): how = .answer(words)
+        case (nil, true?, nil): how = .done
+        case (nil, nil, let later?):
+            guard let date = try? Date(later, strategy: .iso8601) else { throw APIError(.unprocessableContent, "later is a date, like 2026-10-10T09:00:00Z.") }
+            how = .later(date)
+        default: throw APIError(.unprocessableContent, "Send one of answer, done or later.")
+        }
+        do {
+            return Self.json(InboxJSON(item: try desk.settle(id, how)))
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
     }
 
     func publishAction(_ id: String) throws -> Response {
@@ -448,7 +480,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question }
 
     private enum Derived: String, CodingKey { case pipeline, title }
 
@@ -489,9 +521,43 @@ struct JobJSON: Encodable {
         if job.files == nil { try nulls.encodeNil(forKey: .files) }
         if job.lead == nil { try nulls.encodeNil(forKey: .lead) }
         if job.claim == nil { try nulls.encodeNil(forKey: .claim) }
+        if job.question == nil { try nulls.encodeNil(forKey: .question) }
         // What went out is always a list: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
     }
+}
+
+/// An inbox item with every key the API promises, and its state: `open`, `later` (put off until
+/// a time still to come) or `done`.
+struct InboxJSON: Encodable {
+    var item: InboxItem
+
+    private enum Keys: String, CodingKey { case id, kind, job, title, text, options, created, done, later, answer, state }
+
+    func encode(to encoder: any Encoder) throws {
+        var keys = encoder.container(keyedBy: Keys.self)
+        try keys.encode(item.id, forKey: .id)
+        try keys.encode(item.kind, forKey: .kind)
+        try keys.encode(item.job, forKey: .job)
+        try keys.encode(item.title, forKey: .title)
+        try keys.encode(item.text, forKey: .text)
+        try keys.encode(item.options, forKey: .options)
+        try keys.encode(item.created, forKey: .created)
+        try keys.encode(item.done, forKey: .done)
+        try keys.encode(item.later, forKey: .later)
+        try keys.encode(item.answer, forKey: .answer)
+        try keys.encode(item.done != nil ? "done" : item.waiting() ? "open" : "later", forKey: .state)
+    }
+}
+
+/// How `POST /v1/inbox/{id}/answer` settles an item: exactly one of these.
+struct InboxAnswer: Decodable {
+    /// One of the item's options, or the user's own words.
+    var answer: String?
+    /// Done without an answer.
+    var done: Bool?
+    /// Put off until this time, ISO 8601.
+    var later: String?
 }
 
 struct AccountJSON: Encodable {

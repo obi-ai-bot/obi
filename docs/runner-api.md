@@ -56,6 +56,7 @@ This document is the contract between the runner and its clients. Change it in t
   "lead": null,
   "claim": null,
   "outgoing": [],
+  "question": null,
   "title": "Review oby #33",
   "pipeline": {
     "number": 2,
@@ -101,6 +102,7 @@ This document is the contract between the runner and its clients. Change it in t
 - `notes`: what the user told the agent along the way (`POST /v1/jobs/{id}/messages`), oldest first, or null.
 - `title`: what to call the job in rows, the job screen, the notch and alerts. It's the brain's short title (3 to 6 words, like `"Mac runner notifications"`), which every planned dispatch gets and the job keeps. Jobs without one (the rules' plans when the brain is down, an epic's sub-issue jobs, jobs from before titles) get `"<Kind> <repo name> #<number>"` when `pr` or `issue` is set, otherwise the first line of `task` (falling back to `request`), capped at 60 characters. It's always a string; older runners don't send it, so clients fall back the same way. Show "Round 2 of 5" when `rounds` is above 1.
 - `files`, `lead` and `claim` are set on jobs the Lead started (below), null otherwise. `files`: the files or folders (ending in `/`) the job is expected to touch, relative to the repository, from the Lead's brief. `lead`: the goal (one Lead turn) that started it. `claim`: how the runner claimed the job's issue when the job started (`"Claimed: assigned to you, labeled status:in-progress, branch noted, moved to In progress."`), or what failed, null until then. Older runners don't send these keys.
+- `question`: what the job's agent asked the user, `{"text": "Should a job that commits nothing end as failed, or get a new status?", "options": ["Failed", "A new status"]}` (`options` may be empty), or null. Agents are told to end their summary with `QUESTION: …` and optionally `OPTIONS: a | b` rather than bury a decision in their report; the runner reads those last lines when a turn ends. Markdown around the label (`**QUESTION:**`) is ignored; the question and its options keep every character, like `*.swift`. The job then waits for the answer: it stays `running` with `step` `"Waiting for your answer"`, its agent idle, and its round doesn't move on (no check runs). Other jobs keep going. The question lands in the inbox (below) and alerts the phone. The answer reaches the agent as its next message, exactly as `POST /v1/jobs/{id}/messages` would send it, and `question` goes back to null. Telling the job anything else answers it too; stopping it drops it. A job whose agent ends while its question waits (it exited, or the runner restarted) is `interrupted` and keeps `question`: nothing is checked or published until it's answered, and answering picks its session up again. Older runners don't send the key.
 - A job whose `files` overlap an earlier queued or running job's in the same repository (the same path, or one inside a folder the other names) waits, queued, until that job ends: its `step` reads `Waiting for <title> (<id>): both touch <files>`. Then it starts by itself. Jobs without `files` (the brain's) never wait or block.
 
 ### Job pipeline and pull request following
@@ -135,6 +137,33 @@ When a job publishes (or pushes new commits to its pull request), the runner has
 - **Changes requested** go to the author's agent as its next round, in the same session and worktree: the review is quoted in a file (`.oby/inputs/review-<round>.md`), never pasted into the prompt. The job goes back to `running` with a new `round` (and one more on `rounds`, as a message does), `step` `Working on Oby's review`, and ends as usual: when its check passes and it publishes the new commits, the review runs again. At most 4 reviews per job; when the fourth requests changes, the job stays `done`, needs you (`reviewNeedsYou`, below), and the runner reviews it no more, even after you talk to it.
 - **Approved:** the job shows it's ready to merge. The runner doesn't merge: nothing checks the Mac and iPhone builds before a merge yet.
 - What needs you now also includes a `done`, published job whose `review` is `changesRequested` with `round` 4 while the pull request is open. Say so where the apps list what needs you ("1 job needs your review").
+
+### Inbox item
+
+Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like email, it waits for them with no timeout, and its job waits too; the others keep going.
+
+```json
+{"id": "ab12cd34-question-0", "kind": "question", "job": "ab12cd34", "title": "Nothing committed status",
+ "text": "Should a job that commits nothing end as failed, or get a new status?", "options": ["Failed", "A new status"],
+ "created": "2026-10-10T09:12:00Z", "done": null, "later": null, "answer": null, "state": "open"}
+```
+
+- `kind`, and what each offers in `options`:
+
+  | `kind` | Comes when | `text` | `options` |
+  |---|---|---|---|
+  | `question` | the job's agent asked (`question` on the job) | the question | the agent's, possibly none |
+  | `review` | Oby's fourth review requested changes (`reviewNeedsYou`) | `Oby requested changes 4 times. Take it from here.` | `One more round`, `Dismiss` |
+  | `failed` | the job ended `failed` or `interrupted` | the summary's first line | `Try again`, `Dismiss` (only `Dismiss` for a job that never started) |
+  | `limit` | the job failed because its account hit its usage limit and no other had room | the summary's first line | `Try again`, `Dismiss` |
+
+  More kinds will come (permissions, hands-on steps): show one you don't know with its `text` and `options`.
+- `job`: the job's `id`. `title`: the job's `title` when the item came.
+- `created`: when it came. Apps list the open ones longest-waiting first, with how long each has waited ("waiting 3m").
+- `done`: when it was settled, or null. `answer`: what the user answered, or null (done without an answer, or settled by itself).
+- `later`: put off until then, or null. `state`: `open`, `later` (put off until a time still to come) or `done`. Apps show a `later` item again once its time has passed.
+- An item comes once: each failure (even a retry that fails again within the same second), each question and each fourth review has its own `id`, and one that's done never comes back. It's done by itself, with no `answer`, when its job needs it no more: the job runs again (told something, or Try again from either app), was dismissed or stopped, or its question was answered with a message.
+- Kept in `oby.sqlite` with the jobs, so a restart keeps the inbox, and the runner loads the job of every open item however old it is (and, for a `review` item, its review), so it can still be answered. A job's own alert (below) still says it needs you; the inbox is where you answer.
 
 ### Account
 
@@ -254,7 +283,7 @@ The latest jobs, newest first.
 
 ### `GET /v1/jobs/{id}`
 
-One job.
+One job, however old: fetch it when an inbox item or a notification names a job that isn't in `GET /v1/jobs`'s latest 50.
 
 ### `GET /v1/jobs/{id}/wait`
 
@@ -309,12 +338,45 @@ data: [ …Account ]
 
 event: clear
 data: {"clearedAt": "2026-10-10T08:12:00Z"}
+
+event: inbox
+data: { …InboxItem }
 ```
 
 - A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`, `dismissed`, a move to another account. The app replaces the job with that `id`.
 - `accounts` comes when sign-ins, usage, reset times, running counts or `fullUntil` change.
 - `clear` comes when Clear done is pressed on any app (`POST /v1/clear`): hide the jobs that finished by `clearedAt`.
-- A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop, then refetch `GET /v1/jobs` to catch up.
+- `inbox` comes with every inbox item that arrives or changes: answered, done or put off, on any app, or settled by itself. Replace the item with that `id`; one whose `state` is `done` leaves the inbox.
+- A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop. Fetch what you show (`GET /v1/status`, `GET /v1/jobs`, `GET /v1/inbox`; a runner older than the inbox answers `404` there, which means an empty inbox, and any other failure means try again) only once the events' response has arrived, and apply the events that came meanwhile over it: the runner follows a connection before it answers, so nothing that changes in between is lost.
+
+### `GET /v1/inbox`
+
+The inbox items not yet done, the longest-waiting first, items put off `later` included (say so, or hide them until their time).
+
+```json
+[{"id": "ab12cd34-question-0", "kind": "question", …InboxItem}]
+```
+
+### `POST /v1/inbox/{id}/answer`
+
+Settles an item, on the iPhone or the Mac. The body is exactly one of:
+
+```json
+{"answer": "A new status"}
+{"done": true}
+{"later": "2026-10-10T10:12:00Z"}
+```
+
+- `answer`: one of its `options`, or the user's own words (1 to 2,000 characters). It goes to the job:
+  - `question`: the answer is the agent's next message (as `POST /v1/jobs/{id}/messages`): a waiting job goes on, an ended one picks its session up again.
+  - `Dismiss` (on `review`, `failed` and `limit`): dismisses the job (`POST /v1/jobs/{id}/dismiss`).
+  - `Try again` (on `failed` and `limit`): the job runs again in its session, told to pick up where it left off.
+  - `One more round` (on `review`): Oby's last review is quoted in `.oby/inputs/review-4.md` and the agent works on it, as a message does. The runner doesn't review it again.
+  - Other words: sent to the job as a message.
+- `done`: settled without an answer; the job is left as it is.
+- `later`: put off until that time (ISO 8601).
+
+Returns the item. `404` for an item the runner doesn't know, `409` when it's done already, `422` for a body that isn't exactly one of these, a `later` that isn't a date, an empty or too-long answer, or a job that can't take it (the same reasons as `POST /v1/jobs/{id}/messages`). Every app following events hears the item (`inbox`) and its job (`job`).
 
 ### `GET /v1/jobs/{id}/publish`
 
@@ -398,6 +460,7 @@ Two seconds after a job changes, the runner sends an alert push (`apns-push-type
 | `failed` | `Failed: <title>` | the reason (the summary's first line) | `job` |
 | `interrupted` | `Interrupted: <title>` | the reason | `job` |
 | Oby's fourth review requested changes | `Changes requested: <title>` | `Oby requested changes 4 times. Take it from here.` | `job` |
+| Its agent asked a question (`question`), which waits in the inbox | `Question: <title>` | the question | `job` |
 
 ```json
 {"aps": {"alert": {"title": "Couldn't publish: Review oby #33", "body": "Couldn't push oby/review-33: the remote hung up."},

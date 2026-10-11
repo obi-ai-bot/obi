@@ -69,6 +69,27 @@ nonisolated enum JobList {
         guard let finished, let clearedAt else { return true }
         return finished > clearedAt
     }
+
+    /// A new list from the runner (its latest 50), keeping the jobs whose screens are open even
+    /// when they're older than those: the list, newest first, and the ids it doesn't have, to
+    /// fetch again so they're current (`GET /v1/jobs/{id}`).
+    static func keeping<J>(_ fresh: [J], old: [J], onScreen: Set<String>, id: (J) -> String, created: (J) -> Date) -> (jobs: [J], refetch: [String]) {
+        let missing = onScreen.subtracting(fresh.map(id))
+        var list = fresh
+        for job in old where missing.contains(id(job)) { list = placed(job, in: list, id: id, created: created) }
+        return (list, missing.sorted())
+    }
+
+    /// `job` in the list: in place of the one with its id, else where its age puts it (newest first).
+    static func placed<J>(_ job: J, in list: [J], id: (J) -> String, created: (J) -> Date) -> [J] {
+        var list = list
+        if let index = list.firstIndex(where: { id($0) == id(job) }) {
+            list[index] = job
+        } else {
+            list.insert(job, at: list.firstIndex { created($0) < created(job) } ?? list.count)
+        }
+        return list
+    }
 }
 
 #if canImport(SwiftUI)

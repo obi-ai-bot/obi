@@ -65,6 +65,8 @@ final class Push {
         case interrupted
         /// Oby's review requested changes for the last time it may: a person takes it from here.
         case review
+        /// Its agent asked the user something and waits for the answer (the inbox has it).
+        case question
     }
 
     private struct Signer {
@@ -277,6 +279,7 @@ final class Push {
 
     /// Nothing for a job the user dismissed: its alert clears.
     static func notice(for job: Job) -> Notice? {
+        if job.waitsForAnswer { return .question }
         guard job.needsYou else { return nil }
         if job.canPublish { return .ready }
         if job.reviewNeedsYou { return .review }
@@ -314,11 +317,13 @@ final class Push {
         case .failed: "Failed: \(state.title)"
         case .interrupted: "Interrupted: \(state.title)"
         case .review: "Changes requested: \(state.title)"
+        case .question: "Question: \(state.title)"
         }
         // Why its own publish failed, when that's what it needs; why Oby's review stopped.
         let body = switch notice {
         case .ready: job.publishError ?? state.line
         case .review: Review.stopLine
+        case .question: job.question?.text ?? state.line
         case .failed, .interrupted: state.line
         }
         let aps: [String: any Encodable] = ["alert": ["title": title, "body": body], "sound": "default",

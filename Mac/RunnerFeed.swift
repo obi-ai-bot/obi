@@ -17,6 +17,8 @@ final class RunnerFeed {
         case interrupted
         /// Oby's review requested changes for the last time it may: a person takes it from here.
         case review
+        /// Its agent asked the user something and waits for the answer (the inbox has it).
+        case question
     }
 
     private(set) var jobs: [Job] = [] {
@@ -28,6 +30,9 @@ final class RunnerFeed {
     /// Agents working on the runner now. The closed notch reads this, not `jobs`, so a new step
     /// doesn't redraw it.
     private(set) var working = 0
+    /// What waits in the runner's inbox, put-off items too, oldest first: answered on the iPhone,
+    /// it goes from here too.
+    private(set) var inbox: [InboxItem] = []
     /// The name the runner reports in /v1/status, like "tetrix-lab".
     private(set) var host: String?
     /// When Clear done was last pressed, here or on the iPhone (the runner's clock), or nil: the
@@ -75,6 +80,7 @@ final class RunnerFeed {
         let first = self.url == nil
         if url != self.url {
             jobs = []
+            inbox = []
             host = nil
             clearedAt = nil
             notified = nil
@@ -90,27 +96,33 @@ final class RunnerFeed {
         }
     }
 
-    /// Fetches the jobs, then follows the runner's events; after any drop it tries again, waiting
-    /// a little longer each time, up to half a minute.
+    /// Follows the runner's events and, once it's following, fetches the jobs and the inbox; after
+    /// any drop it tries again, waiting a little longer each time, up to half a minute.
     private func run(_ runner: Runner) async {
         var wait = 1.0
         while !Task.isCancelled {
             do {
-                // Status every time: a Clear done while the connection was down is in it.
-                let status = try await runner.status()
-                let list = try await runner.jobs()
-                // Settings › Runner changed, or the Mac woke, while these were on their way.
-                try Task.checkCancellation()
-                host = status.runner.host
-                clearedAt = status.clearedAt
-                take(list)
-                down = false
-                wait = 1
-                Self.ask()
+                // Following first, then fetching: what changes in between waits in the stream and
+                // applies over what was fetched.
                 for try await event in runner.events() {
                     switch event {
+                    case .connected:
+                        // Status every time: a Clear done while the connection was down is in it.
+                        let status = try await runner.status()
+                        let list = try await runner.jobs()
+                        let items = try await runner.inbox()
+                        // Settings › Runner changed, or the Mac woke, while these were on their way.
+                        try Task.checkCancellation()
+                        host = status.runner.host
+                        clearedAt = status.clearedAt
+                        take(list)
+                        inbox = items
+                        down = false
+                        wait = 1
+                        Self.ask()
                     case .job(let job): apply(job)
                     case .cleared(let date): clearedAt = date
+                    case .inbox(let item): apply(item)
                     case .accounts: break
                     }
                 }
@@ -129,6 +141,18 @@ final class RunnerFeed {
     func clear() async throws {
         guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to clear done jobs.") }
         clearedAt = try await runner.clear()
+    }
+
+    /// Settles one of the runner's inbox items: an answer goes to its job, `done` lets it go, `later` puts it off.
+    func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to answer it.") }
+        apply(try await runner.settle(id, answer: answer, done: done, later: later))
+    }
+
+    /// An inbox item as the runner last said it: one that's done leaves the list.
+    func apply(_ item: InboxItem) {
+        inbox.removeAll { $0.id == item.id }
+        if item.isOpen { inbox.append(item) }
     }
 
     /// The runner's answer to Stop or a message, or one of its events: the job with that id.
@@ -165,6 +189,7 @@ final class RunnerFeed {
 
     /// Nothing for a job the user dismissed: its alert clears.
     static func notice(for job: Job) -> Notice? {
+        if job.waitsForAnswer { return .question }
         guard job.needsYou else { return nil }
         if job.canPublish { return .ready }
         if job.reviewNeedsYou { return .review }
@@ -196,6 +221,7 @@ final class RunnerFeed {
         case .failed: "Failed: \(job.heading)"
         case .interrupted: "Interrupted: \(job.heading)"
         case .review: "Changes requested: \(job.heading)"
+        case .question: "Question: \(job.heading)"
         }
     }
 
@@ -204,6 +230,7 @@ final class RunnerFeed {
         let line = job.summary.split(separator: "\n").first.map(String.init)
         if notice == .ready { return job.publishError ?? line ?? "Done" }
         if notice == .review { return Review.stopLine }
+        if notice == .question, let question = job.question { return question.text }
         return line ?? job.status.rawValue.capitalized
     }
 
