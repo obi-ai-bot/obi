@@ -1,74 +1,40 @@
 import SwiftUI
 
-/// Home stays inside the navigation safe area (including the watch's clock). The mic has its
-/// own row, so neither Oby's frames nor the needs-you dot can cover it.
+/// Home and the jobs are vertical pages: the crown (or a swipe up) goes from Oby to the jobs and
+/// back. Home stays inside the navigation safe area (including the watch's clock). The mic has
+/// its own row, so neither Oby's frames nor the needs-you dot can cover it.
 struct HomeView: View {
     @Environment(Watch.self) private var watch
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var path: [Screen] = []
+    @State private var page = Page.oby
+    @State private var pokes = Pokes()
+    /// Every tap on Oby, for its haptic; the reaction plays only with Reduce Motion off.
+    @State private var taps = 0
+    @State private var reaction: ObyAnimation.Once?
+
+    enum Page: Hashable {
+        case oby, jobs
+    }
 
     enum Screen: Hashable {
-        case jobs
         case job(String)
     }
 
     var body: some View {
         NavigationStack(path: $path) {
-            GeometryReader { geometry in
-                // GeometryReader's proposal already excludes the navigation safe areas. The
-                // frames have transparent margins: ~2/3 of their width is Oby's body.
-                let width = geometry.size.width
-                let height = geometry.size.height
-                let mic = min(52, max(44, height * 0.25))
-                let quiet = watch.talk == .none
-                // Idle/needs frames have 58+ empty rows above Oby; trim 32% of the
-                // square there. Working keeps its dots. Both give the body ~half the width.
-                let trim: CGFloat = loop == .working ? 0 : 0.32
-                let fraction: CGFloat = loop == .working ? (quiet ? 0.64 : 0.38) : (quiet ? 0.76 : 0.44)
-                let space = max(0, min(height * (quiet ? 0.68 : 0.30), height - mic - 12 - (quiet ? 18 : 44)))
-                let side = min(width * fraction, space / (1 - trim))
-                VStack(spacing: 6) {
-                    Button { watch.leaveHome(); path.append(.jobs) } label: {
-                        ObyAnimation(loop: loop)
-                            .frame(width: side, height: side)
-                            .offset(y: -side * trim / 2)
-                            .frame(width: side, height: side * (1 - trim))
-                            .clipped()
-                            .overlay(alignment: .topLeading) {
-                                if !watch.needing.isEmpty {
-                                    Circle().fill(.orange).frame(width: 10, height: 10)
-                                        .position(x: side * 0.82, y: side * (0.44 - trim))
-                                        .accessibilityHidden(true)
-                                }
-                            }
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Oby")
-                    .accessibilityValue(watch.loaded ? watch.line : "")
-                    .accessibilityHint("Shows the jobs")
-                    if watch.talk != .none {
-                        TalkView().frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .transition(.opacity)
-                    } else {
-                        Spacer(minLength: 0)
-                    }
-                    if quiet {
-                        Text("Tap to talk").font(.caption2).foregroundStyle(.secondary)
-                            .accessibilityHidden(true)
-                    }
-                    TalkButton(size: mic)
-                }
-                .frame(width: width, height: height)
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: watch.talk == .none)
+            TabView(selection: $page) {
+                home.tag(Page.oby)
+                JobListScreen().tag(Page.jobs)
             }
-            .padding(.vertical, 4)
+            .tabViewStyle(.verticalPage)
             .navigationDestination(for: Screen.self) { screen in
                 switch screen {
-                case .jobs: JobListScreen()
                 case .job(let id): JobScreen(id: id)
                 }
             }
+            // Listening stops and keeps its words, as for any way out of Home.
+            .onChange(of: page) { if page == .jobs { watch.leaveHome() } }
             .onChange(of: watch.opening, initial: true) {
                 guard let id = watch.opening else { return }
                 watch.opening = nil
@@ -78,6 +44,68 @@ struct HomeView: View {
                 path = [.job(id)]
             }
         }
+    }
+
+    /// Oby, and the mic. While the talk card is up, the crown scrolls it before it turns the page.
+    private var home: some View {
+        GeometryReader { geometry in
+            // GeometryReader's proposal already excludes the navigation safe areas. The
+            // frames have transparent margins: ~2/3 of their width is Oby's body.
+            let width = geometry.size.width
+            let height = geometry.size.height
+            let mic = min(52, max(44, height * 0.25))
+            let quiet = watch.talk == .none
+            // Idle/needs frames have 58+ empty rows above Oby; trim 32% of the
+            // square there. Working keeps its dots. Both give the body ~half the width.
+            let trim: CGFloat = loop == .working ? 0 : 0.32
+            let fraction: CGFloat = loop == .working ? (quiet ? 0.64 : 0.38) : (quiet ? 0.76 : 0.44)
+            let space = max(0, min(height * (quiet ? 0.68 : 0.30), height - mic - 12 - (quiet ? 18 : 44)))
+            let side = min(width * fraction, space / (1 - trim))
+            VStack(spacing: 6) {
+                Button(action: poke) {
+                    ObyAnimation(loop: loop, once: reaction)
+                        .frame(width: side, height: side)
+                        .offset(y: -side * trim / 2)
+                        .frame(width: side, height: side * (1 - trim))
+                        .clipped()
+                        .overlay(alignment: .topLeading) {
+                            if !watch.needing.isEmpty {
+                                Circle().fill(.orange).frame(width: 10, height: 10)
+                                    .position(x: side * 0.82, y: side * (0.44 - trim))
+                                    .accessibilityHidden(true)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Oby")
+                .accessibilityValue(watch.loaded ? watch.line : "")
+                .accessibilityHint("Turn the Digital Crown or swipe up for the jobs.")
+                .accessibilityAction(named: "Show jobs") { page = .jobs }
+                .sensoryFeedback(.impact(weight: .light), trigger: taps)
+                if watch.talk != .none {
+                    TalkView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .transition(.opacity)
+                } else {
+                    Spacer(minLength: 0)
+                }
+                if quiet {
+                    Text("Tap to talk").font(.caption2).foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                }
+                TalkButton(size: mic)
+            }
+            .frame(width: width, height: height)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: watch.talk == .none)
+        }
+        .padding(.vertical, 4)
+    }
+
+    /// A tap on Oby plays his reaction (oby.html's), then he goes back to his loop.
+    private func poke() {
+        let played = pokes.tap()
+        taps += 1
+        if !reduceMotion { reaction = .init(reaction: played, tap: taps) }
     }
 
     private var loop: ObyAnimation.Loop {

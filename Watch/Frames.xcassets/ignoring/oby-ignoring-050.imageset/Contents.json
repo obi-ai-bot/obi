@@ -1,0 +1,13 @@
+{
+  "info": {
+    "author": "xcode",
+    "version": 1
+  },
+  "images": [
+    {
+      "filename": "oby-ignoring-050.png",
+      "idiom": "universal",
+      "scale": "2x"
+    }
+  ]
+}
