@@ -286,12 +286,30 @@ nonisolated enum Publish {
     /// ("GitHub token, base64"), and the vault's secrets it holds, first ("vault secret npm-token, hex").
     static func matches(_ text: String, leaks: Leaks = .empty) -> [String] {
         let vault = leaks.found(in: text)
-        let plain = rules.filter { text.contains($0.pattern) }.map(\.name)
+        let plain = rules.filter { breaks($0, text) }.map(\.name)
         guard plain.isEmpty else { return vault + plain }
         var seen = Set<String>()
         return vault + decoded(text).flatMap { how, text in
-            rules.filter { text.contains($0.pattern) }.map { "\($0.name), \(how)" }
+            rules.filter { breaks($0, text) }.map { "\($0.name), \(how)" }
         }.filter { seen.insert($0).inserted }
+    }
+
+    /// Whether `text` breaks `rule`. A "password or secret" assignment counts unless its value is
+    /// only the name of one: words in camelCase or joined by - _ . with no digits, one of which says
+    /// what it names ("clientSecret", "watch-access-client-token"), as code's keys and vault entry
+    /// names are. A weak password ("hunter2hunter2"), a passphrase ("correct-horse-battery-staple")
+    /// and real keys still count. Every other rule counts on its own.
+    static func breaks(_ rule: (name: String, pattern: Regex<Substring>), _ text: String) -> Bool {
+        guard rule.name == "password or secret" else { return text.contains(rule.pattern) }
+        return text.matches(of: rule.pattern).contains { !onlyNames(String($0.output)) }
+    }
+
+    /// The quoted value of a "password or secret" match is a name for one, not one.
+    static func onlyNames(_ assignment: String) -> Bool {
+        guard let value = assignment.split(whereSeparator: { $0 == "\"" || $0 == "'" }).last.map(String.init),
+              value.wholeMatch(of: /[a-z]+(?:[A-Z][a-z]+)+/) != nil || value.wholeMatch(of: /[a-z]+(?:[-_.][a-z]+)+/) != nil else { return false }
+        let lower = value.lowercased()
+        return ["secret", "token", "password", "passwd", "key", "client", "vault", "entry", "access", "name", "id"].contains { lower.contains($0) }
     }
 
     /// The text's encoded runs, decoded: URL-encoding, base64 (standard or URL-safe) and hex, and
