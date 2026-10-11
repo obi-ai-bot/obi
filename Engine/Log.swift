@@ -16,9 +16,10 @@ nonisolated struct Logger: Sendable {
         FileHandle.standardError.write(Data(line(level, message).utf8))
     }
 
-    /// The line `write` puts out, with what the vault's scan has learned taken out.
-    func line(_ level: String, _ message: Message, leaks: Leaks? = Vault.shared.known) -> String {
-        "\(level) [\(category)] \(leaks?.redact(message.text) ?? message.text)\n"
+    /// The line `write` puts out, with the vault's secrets taken out: as the vault is now, or the
+    /// latest values known when it can't be read.
+    func line(_ level: String, _ message: Message, vault: Vault = .shared) -> String {
+        "\(level) [\(category)] \(vault.redacting().redact(message.text))\n"
     }
 
     enum Privacy { case `public`, `private` }

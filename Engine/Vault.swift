@@ -13,9 +13,17 @@ import Security
 // Developer ID, F4), the phone-held key on the runner, the broker and connections come later.
 nonisolated final class Vault: Sendable {
     let store: any VaultStore
-    /// What the scanner looks for, read from the store on first use and again after each change
-    /// (here, or to the store's file by another process: `stamp`).
-    private let learned = Mutex<(stamp: String?, leaks: Leaks)?>(nil)
+    /// What the scanner looks for, read from the store on first use and again whenever its
+    /// `stamp` changes (a change here, or by another process, or to the file's permissions).
+    private let learned = Mutex(Learned())
+
+    private struct Learned {
+        /// The store's stamp when `leaks` was read from it; nil until then, and after a change here.
+        var stamp: String?
+        /// The latest values known, kept when the store can't be read, so log lines stay redacted.
+        var values: [String: String] = [:]
+        var leaks = Leaks.empty
+    }
 
     init(store: any VaultStore) {
         self.store = store
@@ -49,14 +57,18 @@ nonisolated final class Vault: Sendable {
         if let problem = Self.problem(name: name) ?? Self.problem(value: value) { throw Shell.Failure(message: problem) }
         try learned.withLock { learned in
             try store.save(value, as: name)
-            learned = nil
+            learned.values[name] = value
+            learned.leaks = Leaks(learned.values)
+            learned.stamp = nil
         }
     }
 
     func remove(_ name: String) throws {
         try learned.withLock { learned in
             try store.remove(name)
-            learned = nil
+            learned.values[name] = nil
+            learned.leaks = Leaks(learned.values)
+            learned.stamp = nil
         }
     }
 
@@ -75,24 +87,27 @@ nonisolated final class Vault: Sendable {
         return nil
     }
 
-    /// Every value and its encoded copies, for the secret scan. Throws when the vault can't be read:
-    /// then the scan can't run, and nothing goes out.
+    /// Every value and its encoded copies, for the secret scan. The store is checked each time
+    /// (on the runner, the file's permissions too) and read again when it changed. Throws when the
+    /// vault can't be read: then the scan can't run, and nothing goes out.
     func leaks() throws -> Leaks {
         try learned.withLock { learned in
-            let stamp = store.stamp()
-            if let learned, learned.stamp == stamp { return learned.leaks }
+            let stamp = try store.stamp()
+            if learned.stamp == stamp { return learned.leaks }
             var values: [String: String] = [:]
             for name in try store.names() {
                 if let value = try store.value(name) { values[name] = value }
             }
-            let leaks = Leaks(values)
-            learned = (stamp, leaks)
-            return leaks
+            learned = Learned(stamp: stamp, values: values, leaks: Leaks(values))
+            return learned.leaks
         }
     }
 
-    /// What the scan has learned so far, without reading the vault: for redacting log lines.
-    var known: Leaks? { learned.withLock { $0?.leaks } }
+    /// What to redact log lines with: the vault as it is now, or the latest values known when it
+    /// can't be read.
+    func redacting() -> Leaks {
+        (try? leaks()) ?? learned.withLock { $0.leaks }
+    }
 
     /// Hands the value to `body`, for Oby's own call on a connection the user made. Nothing else reads it.
     func use<T>(_ name: String, _ body: (String) throws -> T) throws -> T {
@@ -107,12 +122,9 @@ nonisolated protocol VaultStore: Sendable {
     func value(_ name: String) throws -> String?
     func save(_ value: String, as name: String) throws
     func remove(_ name: String) throws
-    /// Changes when the secrets change outside this process; nil when nothing else changes them.
-    func stamp() -> String?
-}
-
-extension VaultStore {
-    func stamp() -> String? { nil }
+    /// Changes whenever the secrets may have changed, here or elsewhere. Cheap: no value is read.
+    /// Throws when the store can't be read as it is now.
+    func stamp() throws -> String
 }
 
 // MARK: The runner's file
@@ -137,11 +149,19 @@ nonisolated final class FileVault: VaultStore {
 
     func names() throws -> [String] { try lock.withLock { _ in try Array(read().keys) } }
 
-    /// `oby-runner vault add` changes the file while the service runs: a new file has a new date.
-    func stamp() -> String? {
-        let info = try? FileManager.default.attributesOfItem(atPath: file.path)
-        return "\((info?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0) \(info?[.size] ?? 0)"
+    /// The file's inode, size and time, after the same checks as reading it: `oby-runner vault add`
+    /// changes the file while the service runs (each save is a new file), and a chmod that lets
+    /// others read it makes the scan fail even with the values learned.
+    func stamp() throws -> String {
+        guard try Self.private(folder, directory: true) != nil, let info = try Self.private(file, directory: false) else { return "none" }
+        #if os(Linux)
+        let time = info.st_mtim
+        #else
+        let time = info.st_mtimespec
+        #endif
+        return "\(info.st_ino) \(info.st_size) \(time.tv_sec).\(time.tv_nsec)"
     }
+
     func value(_ name: String) throws -> String? { try lock.withLock { _ in try read()[name] } }
 
     func save(_ value: String, as name: String) throws {
@@ -162,7 +182,7 @@ nonisolated final class FileVault: VaultStore {
 
     /// Every secret, or none when there's no file yet.
     private func read() throws -> [String: String] {
-        guard try Self.private(folder, directory: true), try Self.private(file, directory: false) else { return [:] }
+        guard try Self.private(folder, directory: true) != nil, try Self.private(file, directory: false) != nil else { return [:] }
         do {
             return try JSONDecoder().decode(Saved.self, from: Data(contentsOf: file)).secrets
         } catch {
@@ -176,7 +196,7 @@ nonisolated final class FileVault: VaultStore {
         if mkdir(folder.path, 0o700) != 0, errno != EEXIST {
             throw Shell.Failure(message: "Can't make the vault's folder \(folder.path) (errno \(errno)).")
         }
-        _ = try Self.private(folder, directory: true)
+        try Self.private(folder, directory: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(Saved(secrets: secrets))
@@ -196,12 +216,14 @@ nonisolated final class FileVault: VaultStore {
         }
     }
 
-    /// True when `url` is there and only the runner's user may read it; false when it isn't there.
-    /// Throws when it's the wrong kind of thing (a link), someone else owns it, or anyone else may read it.
-    static func `private`(_ url: URL, directory: Bool) throws -> Bool {
+    /// What `lstat` says of `url` when it's there and only the runner's user may read it; nil when
+    /// it isn't there. Throws when it's the wrong kind of thing (a link), someone else owns it, or
+    /// anyone else may read it.
+    @discardableResult
+    static func `private`(_ url: URL, directory: Bool) throws -> stat? {
         var info = stat()
         guard lstat(url.path, &info) == 0 else {
-            if errno == ENOENT { return false }
+            if errno == ENOENT { return nil }
             throw Shell.Failure(message: "Can't read the vault at \(url.path) (errno \(errno)).")
         }
         // S_IFMT, S_IFDIR and S_IFREG, which Glibc's module doesn't spell the same way.
@@ -215,7 +237,7 @@ nonisolated final class FileVault: VaultStore {
         guard mode & 0o077 == 0 else {
             throw Shell.Failure(message: "Others may read the vault's \(url.path) (mode \(String(mode, radix: 8))): run chmod \(directory ? "700" : "600") on it.")
         }
-        return true
+        return info
     }
 }
 
@@ -235,6 +257,20 @@ nonisolated struct KeychainVault: VaultStore {
     }
 
     func names() throws -> [String] {
+        try items().compactMap { $0[kSecAttrAccount as String] as? String }
+    }
+
+    /// Each item's name and when it last changed: Keychain Access or `security` can change one
+    /// outside Oby.
+    func stamp() throws -> String {
+        try items().map { item in
+            let date = (item[kSecAttrModificationDate as String] as? Date)?.timeIntervalSince1970 ?? 0
+            return "\(item[kSecAttrAccount as String] as? String ?? "?") \(date)"
+        }.sorted().joined(separator: "\n")
+    }
+
+    /// Every item's attributes, never its data.
+    private func items() throws -> [[String: Any]] {
         var query = base
         query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitAll
@@ -242,7 +278,7 @@ nonisolated struct KeychainVault: VaultStore {
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return [] }
         try check(status, "list the vault")
-        return (result as? [[String: Any]] ?? []).compactMap { $0[kSecAttrAccount as String] as? String }
+        return result as? [[String: Any]] ?? []
     }
 
     func value(_ name: String) throws -> String? {
@@ -320,6 +356,10 @@ nonisolated struct Leaks: Sendable {
         for line in value.split(whereSeparator: \.isNewline) where line.utf8.count >= Vault.shortest && line != Substring(value) {
             needles.append(Needle(name: name, how: "", text: String(line), anyCase: false))
         }
+        // The same value with Windows line ends, as a file in the diff may have it.
+        if value.utf8.contains(10), !value.contains("\r\n") {
+            needles.append(Needle(name: name, how: "", text: value.replacing("\n", with: "\r\n"), anyCase: false))
+        }
         for run in base64(bytes) {
             needles.append(Needle(name: name, how: "base64", text: run, anyCase: false))
             let safe = run.replacing("+", with: "-").replacing("/", with: "_")
@@ -349,6 +389,11 @@ nonisolated struct Leaks: Sendable {
     /// The vault's secrets `text` holds, as the scan's rule names: "vault secret staging-key" or
     /// "vault secret staging-key, base64". Also looks in what the text's encoded runs decode to.
     func found(in text: String) -> [String] {
+        hits(in: text).map { "vault secret \($0.name)" + ($0.how.isEmpty ? "" : ", \($0.how)") }
+    }
+
+    /// Each secret `text` holds, once, and how: "" for the value itself, "base64", "hex in base64"…
+    func hits(in text: String) -> [(name: String, how: String)] {
         guard !isEmpty else { return [] }
         var places = [(how: "", text: text)]
         if text.contains("%") {
@@ -357,26 +402,62 @@ nonisolated struct Leaks: Sendable {
         }
         places += Publish.decoded(text)
         var seen = Set<String>()
-        var rules: [String] = []
+        var hits: [(name: String, how: String)] = []
         for place in places {
             for needle in needles where !seen.contains(needle.name) && contains(place.text, needle) {
                 seen.insert(needle.name)
-                let how = [needle.how, place.how].filter { !$0.isEmpty }.joined(separator: " in ")
-                rules.append("vault secret \(needle.name)" + (how.isEmpty ? "" : ", \(how)"))
+                hits.append((needle.name, [needle.how, place.how].filter { !$0.isEmpty }.joined(separator: " in ")))
             }
         }
-        return rules
+        return hits
     }
 
-    /// `text` with every vault value, plain or encoded, replaced by `[vault: name]`.
+    /// The secrets whose value spans lines, found in `lines` joined as they were: each once, with
+    /// the index of the line it starts on. A line on its own never holds the whole value.
+    func spanning(_ lines: [String]) -> [(name: String, line: Int)] {
+        let joined = lines.joined(separator: "\n")
+        var seen = Set<String>()
+        return needles.compactMap { needle in
+            guard needle.how.isEmpty, needle.text.utf8.contains(10), !seen.contains(needle.name),
+                  let range = joined.range(of: needle.text) else { return nil }
+            seen.insert(needle.name)
+            // By byte: "\r\n" is one Character.
+            return (needle.name, joined[..<range.lowerBound].utf8.count { $0 == 10 })
+        }
+    }
+
+    /// Whether any value spans lines, so `spanning` has something to find.
+    var spans: Bool { needles.contains { $0.how.isEmpty && $0.text.utf8.contains(10) } }
+
+    /// `text` with every vault value the scan would find in it replaced by `[vault: name]`: each
+    /// copy, plain or encoded, then any encoded run that decodes to one (a partly URL-encoded value,
+    /// hex inside base64), then, if something is still found, the lines that hold it, and last the whole text.
     func redact(_ text: String) -> String {
+        guard !isEmpty else { return text }
         var text = text
         for needle in needles where contains(text, needle) {
-            text = needle.anyCase ? text.replacingOccurrences(of: needle.text, with: "[vault: \(needle.name)]", options: .caseInsensitive)
-                : text.replacing(needle.text, with: "[vault: \(needle.name)]")
+            text = needle.anyCase ? text.replacingOccurrences(of: needle.text, with: marker([needle.name]), options: .caseInsensitive)
+                : text.replacing(needle.text, with: marker([needle.name]))
         }
-        return text
+        guard !hits(in: text).isEmpty else { return text }
+        let runs = [/[^\s"'<>]*%[0-9A-Fa-f]{2}[^\s"'<>]*/, /[A-Za-z0-9+\/_-]{16,}={0,2}/, /[0-9A-Fa-f]{16,}/,
+                    /(?:\\x[0-9A-Fa-f]{2}){8,}|(?:0x[0-9A-Fa-f]{2}[\s,]*){8,}/]
+        for run in runs {
+            text = text.replacing(run) { match in
+                let names = hits(in: String(match.output)).map(\.name)
+                return names.isEmpty ? String(match.output) : marker(names)
+            }
+        }
+        guard !hits(in: text).isEmpty else { return text }
+        text = text.split(separator: "\n", omittingEmptySubsequences: false).map { line in
+            let names = hits(in: String(line)).map(\.name)
+            return names.isEmpty ? String(line) : marker(names)
+        }.joined(separator: "\n")
+        let names = hits(in: text).map(\.name)
+        return names.isEmpty ? text : marker(names)
     }
+
+    private func marker(_ names: [String]) -> String { "[vault: \(names.joined(separator: ", "))]" }
 
     private func contains(_ text: String, _ needle: Needle) -> Bool {
         needle.anyCase ? text.range(of: needle.text, options: .caseInsensitive) != nil : text.contains(needle.text)

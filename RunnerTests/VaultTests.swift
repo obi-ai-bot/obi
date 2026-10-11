@@ -144,6 +144,30 @@ struct VaultScanTests {
         #expect(Leaks.empty.redact("nothing to take out") == "nothing to take out")
     }
 
+    /// Whatever the scan finds, redaction takes out: partly URL-encoded, encoded twice, split over lines.
+    @Test func redactionTakesOutWhatTheScanFinds() {
+        let value = secret()
+        let leaks = Leaks(["staging-api-key": value])
+        let partly = value.replacing("/", with: "%2F").replacing("=", with: "%3d")
+        let texts = [
+            "curl 'https://api.example.com/?k=\(partly)' -v",
+            "blob \(Fake.base64(Fake.hex(value))) end",
+            "blob \(Fake.hex(Fake.base64(value))) end",
+            "key = \(Fake.hex(value).chunks(2).map { "\\x\($0)" }.joined())",
+            "multi\n\(value)\nlines",
+        ]
+        for text in texts {
+            #expect(!leaks.hits(in: text).isEmpty, Comment(rawValue: text))
+            let redacted = leaks.redact(text)
+            #expect(leaks.hits(in: redacted).isEmpty, Comment(rawValue: redacted))
+            #expect(redacted.contains("[vault: staging-api-key]"), Comment(rawValue: redacted))
+        }
+        #expect(leaks.redact("blob \(Fake.base64(Fake.hex(value))) end") == "blob [vault: staging-api-key] end")
+        // A value over lines, posted as it is, goes too.
+        let lines = Leaks(["two-lines": "aaaa!\nbbbb?"])
+        #expect(lines.hits(in: lines.redact("x aaaa!\nbbbb? y")).isEmpty)
+    }
+
     @Test func everyEncodingIsBlockedNamingTheSecret() throws {
         let value = secret()
         let leaks = Leaks(["staging-api-key": value])
@@ -204,12 +228,55 @@ struct VaultScanTests {
                 == [Publish.Finding(file: "comment", line: 1, rule: "vault secret added-elsewhere")])
     }
 
+    /// A value over several lines, short lines and all, posted verbatim.
+    @Test func aValueOverLinesIsBlocked() async throws {
+        let leaks = Leaks(["two-lines": "aaaa!\nbbbb?"])
+        #expect(Publish.findings(inText: "Notes:\naaaa!\nbbbb?\nend", named: "comment", leaks: leaks)
+                == [Publish.Finding(file: "comment", line: 2, rule: "vault secret two-lines")])
+        #expect(Publish.findings(inText: "aaaa! and\nbbbb? apart", named: "comment", leaks: leaks).isEmpty)
+        let diff = """
+            diff --git a/notes.txt b/notes.txt
+            --- a/notes.txt
+            +++ b/notes.txt
+            @@ -4,1 +4,3 @@
+             keep
+            +aaaa!
+            +bbbb?
+            """
+        #expect(Publish.findings(inDiff: diff, leaks: leaks) == [Publish.Finding(file: "notes.txt", line: 5, rule: "vault secret two-lines")])
+        // With Windows line ends.
+        #expect(!Leaks(["two-lines": "aaaa!\nbbbb?"]).hits(in: "aaaa!\r\nbbbb?").isEmpty)
+    }
+
+    /// A file named with a secret is blocked even when what's in it is clean, and the finding doesn't show the name as it is.
+    @Test func aFileNamedWithASecretIsBlocked() {
+        let leaks = Leaks(["short-key": "abcdefgh"])
+        let diff = """
+            diff --git a/abcdefgh.txt b/abcdefgh.txt
+            new file mode 100644
+            --- /dev/null
+            +++ b/abcdefgh.txt
+            @@ -0,0 +1,1 @@
+            +nothing here
+            """
+        let findings = Publish.findings(inDiff: diff, leaks: leaks)
+        #expect(findings == [Publish.Finding(file: "[vault: short-key].txt", line: nil, rule: "vault secret short-key in the file's name")])
+        #expect(!Publish.blocked(by: findings).contains("abcdefgh"))
+    }
+
     @Test func aVaultTheScanCantReadBlocksPublishing() async throws {
         let (vault, store, folder) = scratch()
         defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
         try vault.add(secret(), as: "npm-token")
+        // Learned first: the cache doesn't hide a vault others may read now.
+        #expect(try await Publish.scan(texts: [("comment", "fine")], vault: vault).isEmpty)
         chmod(store.file.path, 0o640)
-        await #expect(throws: Shell.Failure.self) { try await Publish.scan(texts: [("comment", "fine")], vault: Vault(store: store)) }
+        await #expect(throws: Shell.Failure.self) { try await Publish.scan(texts: [("comment", "fine")], vault: vault) }
+        chmod(folder.path, 0o750)
+        chmod(store.file.path, 0o600)
+        await #expect(throws: Shell.Failure.self) { try await Publish.scan(texts: [("comment", "fine")], vault: vault) }
+        chmod(folder.path, 0o700)
+        chmod(store.file.path, 0o640)
         let error = await #expect(throws: Shell.Failure.self) {
             try await Publish.scan(FileManager.default.temporaryDirectory, base: "main", vault: Vault(store: store))
         }
@@ -259,14 +326,26 @@ struct VaultNeverShownTests {
     }
 
     #if !canImport(OSLog)
-    @Test func logLinesLeaveSecretsOut() {
+    @Test func logLinesLeaveSecretsOut() throws {
+        let (vault, store, folder) = scratch()
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
         let value = secret()
-        let leaks = Leaks(["staging-api-key": value])
+        try vault.add(value, as: "staging-api-key")
         let logger = Logger(subsystem: "com.deskree.oby", category: "test")
-        let line = logger.line("error", "call failed: \("401 for token \(value), sent as \(Fake.base64(value))", privacy: .public)", leaks: leaks)
-        #expect(line == "error [test] call failed: 401 for token [vault: staging-api-key], sent as [vault: staging-api-key]\n")
+        let said = { (text: String) in logger.line("error", "call failed: \(text, privacy: .public)", vault: vault) }
+        // Right after adding it: no scan has run since.
+        #expect(said("401 for token \(value), sent as \(Fake.base64(value))")
+                == "error [test] call failed: 401 for token [vault: staging-api-key], sent as [vault: staging-api-key]\n")
+        // Added by another process, with no scan since.
+        let elsewhere = secret()
+        try Vault(store: FileVault(folder: folder)).add(elsewhere, as: "added-elsewhere")
+        #expect(said("got \(elsewhere)") == "error [test] call failed: got [vault: added-elsewhere]\n")
+        // A vault it can't read any more: the latest values known are still taken out.
+        chmod(store.file.path, 0o644)
+        #expect(said("got \(value) and \(elsewhere)") == "error [test] call failed: got [vault: staging-api-key] and [vault: added-elsewhere]\n")
+        chmod(store.file.path, 0o600)
         // Private values stay out, as in OSLog.
-        #expect(logger.line("notice", "token \(value)", leaks: nil) == "notice [test] token <private>\n")
+        #expect(logger.line("notice", "token \(value)", vault: vault) == "notice [test] token <private>\n")
     }
     #endif
 }

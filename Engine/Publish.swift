@@ -170,13 +170,37 @@ nonisolated enum Publish {
         return (files, lines)
     }
 
-    /// What the built-in scanner finds in a diff, each place once, with the vault's secrets in `leaks`.
+    /// What the built-in scanner finds in a diff, each place once, with the vault's secrets in `leaks`:
+    /// in the lines it adds, and in the names of the files it touches. A file's name with a secret
+    /// in it is shown redacted.
     static func findings(inDiff diff: String, leaks: Leaks = .empty) -> [Finding] {
         let (files, lines) = parse(diff)
-        let named = files.compactMap { file in secretFile(file).map { Finding(file: file, line: nil, rule: $0) } }
+        let named = files.flatMap { file in
+            [secretFile(file)].compactMap { $0 }.map { Finding(file: file, line: nil, rule: $0) }
+                + leaks.found(in: file).map { Finding(file: file, line: nil, rule: "\($0) in the file's name") }
+        }
         let found = lines.flatMap { line in matches(line.text, leaks: leaks).map { Finding(file: line.file, line: line.number, rule: $0) } }
         var seen = Set<Finding>()
-        return (named + found + wrapped(lines, leaks: leaks)).filter { seen.insert($0).inserted }
+        return (named + found + wrapped(lines, leaks: leaks) + spanning(lines, leaks: leaks))
+            .map { leaks.isEmpty ? $0 : Finding(file: leaks.redact($0.file), line: $0.line, rule: $0.rule) }
+            .filter { seen.insert($0).inserted }
+    }
+
+    /// Vault secrets whose value spans lines, posted as they are: runs of adjacent lines in one
+    /// file, joined, and found at the line the value starts on.
+    static func spanning(_ lines: [Line], leaks: Leaks) -> [Finding] {
+        guard leaks.spans else { return [] }
+        var runs: [[Line]] = []
+        for line in lines {
+            if let last = runs.last?.last, last.file == line.file, last.number + 1 == line.number {
+                runs[runs.count - 1].append(line)
+            } else {
+                runs.append([line])
+            }
+        }
+        return runs.filter { $0.count > 1 }.flatMap { run in
+            leaks.spanning(run.map(\.text)).map { Finding(file: run[$0.line].file, line: run[$0.line].number, rule: "vault secret \($0.name)") }
+        }
     }
 
     /// Base64 or hex wrapped over several lines (`base64` and `openssl` wrap at 76 or 64): runs of
@@ -303,7 +327,7 @@ nonisolated enum Publish {
         let lines = lines(of: text, named: name)
         var seen = Set<Finding>()
         return (lines.flatMap { line in matches(line.text, leaks: leaks).map { Finding(file: name, line: line.number, rule: $0) } }
-                + wrapped(lines, leaks: leaks))
+                + wrapped(lines, leaks: leaks) + spanning(lines, leaks: leaks))
             .filter { seen.insert($0).inserted }
     }
 
@@ -339,8 +363,10 @@ nonisolated enum Publish {
         let since = "refs/remotes/origin/\(base)"
         let diff: String
         do {
-            let commits = try await Shell.ok(["git", "-C", worktree.path, "log", "-p", "--no-merges", "--format="] + options + ["\(since)..\(head)"])
-            let total = try await Shell.ok(["git", "-C", worktree.path, "diff"] + options + ["\(since)...\(head)"])
+            // Files' names as they are, not escaped, so the vault's secrets are found in them too.
+            let git = ["git", "-C", worktree.path, "-c", "core.quotePath=false"]
+            let commits = try await Shell.ok(git + ["log", "-p", "--no-merges", "--format="] + options + ["\(since)..\(head)"])
+            let total = try await Shell.ok(git + ["diff"] + options + ["\(since)...\(head)"])
             diff = commits + "\n" + total
         } catch {
             throw Shell.Failure(message: "Not published: the secret scan couldn't read the changes (\(error.localizedDescription)).")
