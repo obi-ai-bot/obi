@@ -3,7 +3,9 @@ import ApplicationServices
 import CoreGraphics
 
 /// Hold fn (or Control-Option, on keyboards without fn) to talk to Oby; let go to send.
-/// fn + Space keeps listening hands-free until the key is pressed again. An active event tap on
+/// fn + Space keeps listening hands-free until fn is pressed again (⌃⌥Space stays macOS's: it
+/// switches input sources, and it's VoiceOver's main command). Control-Option is off while
+/// VoiceOver runs, since its users hold it for every command. An active event tap on
 /// the session, so it needs Accessibility; fn's own events are swallowed so the Globe key's
 /// action (emoji, dictation) doesn't fire, if macOS lets an event tap stop it (see `GlobeKey`).
 final class TalkKey {
@@ -79,7 +81,7 @@ final class TalkKey {
                 release(.controlOption)
             }
             return false
-        case .keyDown where code == Self.spaceCode && held != nil:
+        case .keyDown where code == Self.spaceCode && held == .fn:
             if !repeating { keepListening() }
             swallowSpaceUp = true
             return true
@@ -102,6 +104,7 @@ final class TalkKey {
         // Hands-free ends at the next press, of either key.
         if handsFree { stop(.send); return }
         guard held == nil, !talking else { return }
+        if key == .controlOption, NSWorkspace.shared.isVoiceOverEnabled { return }
         held = key
         wait?.cancel()
         wait = Task {

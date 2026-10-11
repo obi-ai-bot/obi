@@ -22,6 +22,8 @@ final class Voice {
     private(set) var problem: String?
 
     @ObservationIgnored private var work: Task<Void, Never>?
+    /// Counts starts: an `open` that a later start overtook doesn't open the microphone.
+    @ObservationIgnored private var session = 0
     @ObservationIgnored private var downloading = false
     @ObservationIgnored private var engine: AVAudioEngine?
     @ObservationIgnored private var analyzer: SpeechAnalyzer?
@@ -60,9 +62,11 @@ final class Voice {
         levels = Self.silence
         problem = nil
         phase = .listening
+        session += 1
+        let session = session
         queue {
             do {
-                try await self.open(context)
+                try await self.open(context, session: session)
             } catch {
                 self.problem = error.localizedDescription
                 Logger.voice.error("listening didn't start: \(error.localizedDescription, privacy: .public)")
@@ -95,15 +99,16 @@ final class Voice {
         }
     }
 
-    private func open(_ context: [String]) async throws {
+    private func open(_ context: [String], session: Int) async throws {
         // Let go (or cancelled) before the microphone could open: nothing to hear.
-        guard phase == .listening else { return }
+        var stillListening: Bool { phase == .listening && self.session == session }
+        guard stillListening else { return }
         if downloading { throw Problem("Oby is getting the English speech model. Try again in a minute.") }
         guard await Self.microphoneAllowed() else {
             throw Problem("Oby can't hear you. Allow the microphone in System Settings › Privacy & Security › Microphone.")
         }
         // The first time, you may have let go while macOS asked about the microphone.
-        guard phase == .listening else { return }
+        guard stillListening else { return }
         let transcriber = try await Self.transcriber()
         guard await AssetInventory.status(forModules: [transcriber]) == .installed else {
             prepare()
@@ -125,6 +130,8 @@ final class Voice {
             var settled = ""
             do {
                 for try await result in transcriber.results {
+                    // Given up on (see `close`): these words belong to no one now.
+                    guard !Task.isCancelled else { return }
                     let text = String(result.text.characters).trimmingCharacters(in: .whitespaces)
                     let all = [settled, text].filter { !$0.isEmpty }.joined(separator: " ")
                     if result.isFinal { settled = all }
@@ -142,6 +149,8 @@ final class Voice {
         guard let tap = Self.feed(from: source, to: format, into: input, level: { [weak self] level in
             Task { @MainActor in self?.heard(level) }
         }) else { throw Problem("Oby can't read this microphone.") }
+        // Setting up took a while: let go or cancelled since, the microphone stays off.
+        guard stillListening else { return }
         microphone.installTap(onBus: 0, bufferSize: 2048, format: source, block: tap)
         self.engine = engine
         engine.prepare()
@@ -155,18 +164,42 @@ final class Voice {
         engine = nil
         input?.finish()
         input = nil
+        let analyzer = self.analyzer, results = self.results
+        self.analyzer = nil
+        self.results = nil
         if let analyzer {
-            if cancel {
-                await analyzer.cancelAndFinishNow()
-            } else {
-                do { try await analyzer.finalizeAndFinishThroughEndOfInput() } catch { await analyzer.cancelAndFinishNow() }
+            // A transcriber that never ends must not hold up every later talk: after the limit,
+            // the words so far are the words.
+            let ended = await Self.within(.seconds(cancel ? 1 : 5)) {
+                if cancel {
+                    await analyzer.cancelAndFinishNow()
+                } else {
+                    do { try await analyzer.finalizeAndFinishThroughEndOfInput() } catch { await analyzer.cancelAndFinishNow() }
+                }
+                await results?.value
+            }
+            if !ended {
+                Logger.voice.error("the transcriber didn't finish in time")
+                results?.cancel()
+                Task { await analyzer.cancelAndFinishNow() }
             }
         }
-        analyzer = nil
-        if cancel { results?.cancel() }
-        await results?.value
-        results = nil
         return cancel ? "" : words.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Runs `work`, waiting for it at most `limit`: true if it finished. Work that never ends is left behind.
+    private static func within(_ limit: Duration, _ work: @escaping () async -> Void) async -> Bool {
+        let (first, done) = AsyncStream.makeStream(of: Bool.self)
+        Task {
+            await work()
+            done.yield(true)
+        }
+        Task {
+            try? await Task.sleep(for: limit)
+            done.yield(false)
+        }
+        for await ended in first { return ended }
+        return false
     }
 
     private func heard(_ level: Float) {

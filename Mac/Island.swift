@@ -89,7 +89,8 @@ final class IslandController {
     private var lastMouse: CGPoint?
     private var clickMonitor: Any?
     private var noticeTask: Task<Void, Never>?
-    /// Every repository the user pushed to lately: names the voice listens for.
+    /// Every repository the user pushed to lately: names the voice listens for. Fetched when you
+    /// first talk, and again each time until it works.
     private var repos: [String] = []
 
     init() { model = IslandModel(desk: desk, feed: feed) }
@@ -109,7 +110,6 @@ final class IslandController {
         talkKey.on = { [weak self] in self?.talk($0) }
         talkKey.start()
         model.voice.prepare()
-        Task { repos = (try? await Workspace.knownRepos()) ?? [] }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.place() }
         }
@@ -159,6 +159,7 @@ final class IslandController {
             model.notice = nil
             // Your own jobs' repositories first: they're the ones you're likeliest to name.
             voice.start(key: key, context: Voice.context(repos: desk.jobs.map(\.repo) + repos))
+            if repos.isEmpty { Task { repos = (try? await Workspace.knownRepos()) ?? [] } }
             set(.listening)
         case .handsFree:
             voice.handsFree = true
@@ -181,7 +182,8 @@ final class IslandController {
             notify(problem ?? "Oby didn't catch that", happy: false)
         } else {
             open()
-            if key == .fn { GlobeKey.guideOnce() }
+            // Not in the voice's queue: the alert waits for you, and talking mustn't.
+            if key == .fn { Task { GlobeKey.guideOnce() } }
         }
     }
 
