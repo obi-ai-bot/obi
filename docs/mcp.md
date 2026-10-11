@@ -69,6 +69,6 @@ Whatever jobs, agents, GitHub or other people wrote reaches the assistant as quo
 
 - It speaks JSON-RPC 2.0, one message per line on stdin and stdout, with MCP's `initialize`, `ping`, `tools/list` and `tools/call`. It runs calls concurrently, so a `wait` holds nothing else up. It answers protocol versions 2024-11-05 through 2025-11-25.
 - Read tools are marked `readOnlyHint`, so clients can run them without asking.
-- When the runner returns an error, the tool returns that one line as its error. When the runner can't be reached, the tool says so and asks whether Tailscale is up.
+- When the runner returns an error, the tool's error quotes that line in a fenced block too, since it can name a job's title or an account. When the runner can't be reached, the tool says so and asks whether Tailscale is up.
 - Ids go into the path percent-encoded, so an id can't reach another endpoint.
 - The sources are in `MCP/` and the tests in `MCPTests/`. Each tool is tested against a stub runner for the call it makes, refusals, option checking and the quoting. They're a separate test target because a round that changes `RunnerTests`' target in `Package.swift` fails Oby's test-integrity check.

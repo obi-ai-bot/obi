@@ -163,7 +163,9 @@ actor Server {
         } catch let refusal as Refusal {
             return Reply(text: refusal.message, isError: true)
         } catch let failure as RunnerAPI.Failure {
-            return Reply(text: failure.status == 0 ? failure.message : "The runner answered \(failure.status): \(failure.message)", isError: true)
+            // The runner's error line can name a job's title, an account or what GitHub said.
+            return Reply(text: failure.status == 0 ? failure.message
+                         : "The runner answered \(failure.status).\n" + Render.quoted("Its error", failure.message), isError: true)
         } catch {
             return Reply(text: error.localizedDescription, isError: true)
         }
@@ -358,7 +360,8 @@ actor Server {
         let ofTool = accounts.filter { tool != nil && $0["agent"]?.string == tool }
         if ofTool.count == 1 { return ofTool[0] }
         let names = (ofTool.isEmpty ? accounts : ofTool).compactMap { $0["name"]?.string }
-        throw Refusal(message: "Which account? \(ofTool.isEmpty ? "None is called \(named)" : "\(named) has several"): \(names.joined(separator: ", ")).")
+        throw Refusal(message: "Which account? \(ofTool.isEmpty ? "None has that id or name" : "That tool has several"); ask the user, then dispatch with one of these.\n"
+                      + Render.quoted("The accounts", names.joined(separator: "\n")))
     }
 
     /// Settles an item with one of its own options, or, on a question, the user's words.
