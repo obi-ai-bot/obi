@@ -4,7 +4,7 @@ The watch app is the `ObyWatch` target in `Oby.xcodeproj` (on the wrist it's cal
 
 What it does today:
 
-- **Home:** Oby is centered in the upper safe area, about half the screen's width, with a separate round microphone below. There is no title or status text. The layout uses the available safe-area size, and trims only the idle/needs frames' transparent top margin; working keeps its busy dots. A small orange needs-you dot stays on Oby's corner, and VoiceOver reads the counts. Tapping Oby opens the jobs and their stages and results.
+- **Home:** Oby is centered in the upper safe area, about half the screen's width, with a separate round microphone below. There is no title or status text. The layout uses the available safe-area size, and trims only the idle/needs frames' transparent top margin; working keeps its busy dots. A small orange needs-you dot stays on Oby's corner, and VoiceOver reads the counts. Home and the job list are vertical pages: turning the Digital Crown down (or swiping up) goes to the jobs, and turning it up comes back to Oby; while the talk card is up, the crown scrolls the card first. Tapping a job opens its stages and results, and a notification still lands on its job. Tapping Oby plays a reaction, as `Character/oby.html` does for clicks: taps within 6 seconds of the last one count up; taps 1 to 3 startle him (poked), the 4th and 5th annoy him, and from the 6th on he ignores you (a tap starts that again); 6 seconds without a tap start the count over (`Shared/Pokes.swift`). Each tap gives a light haptic, and when the reaction ends Oby goes back to his loop. With Reduce Motion on, a tap gives only the haptic. VoiceOver's hint on Oby says to turn the crown or swipe up for the jobs, and Oby has a **Show jobs** action.
 - **Publish with the crown:** on a job ready to publish, Publish shows the exact sentence the runner would carry out, and turning the Digital Crown confirms it: the ring fills as it turns, and a full turn publishes. A tap can't do it by mistake. The signature is the iPhone's (below).
 - **Notifications:** the alerts the runner sends the iPhone ("Couldn't publish", "Failed", "Interrupted") reach the watch as mirrored notifications. The watch registers the same categories, so a "ready" alert offers **Publish** (the job opens and asks for the crown) and **Open**; tapping one opens the job.
 - **Talk to Oby:** tap the round microphone and speak; tap it again (now a red Stop) to stop. The words appear live in a card under Oby as you speak: from the iPhone's transcription when it's in reach, or from the runner's Whisper through the Watch API when it isn't (below). Stopping keeps them as a draft and sends nothing; **Send** asks Oby with one tap, the mic adds more words (joined with a space), and **Clear** drops them. Listening also stops, keeping the words, after 60 seconds, when the screen turns off (wrist down, the app inactive), on leaving Home and when a notification opens a job. The microphone opens synchronously on the tap and is open only while listening: Stop, the limit, any of those, or an error closes it before anything else happens. A tap and a stop within 0.4 s with no words leaves the draft as it was, and so does an empty result ("Oby didn't catch that"). Permission is asked when Home opens. While listening, the watch converts the microphone to mono 16 kHz Int16 PCM (32 KB/s) and sends it in sequence, each chunk after the last one's acknowledgement. The watch keeps everything not yet sent (at most 60 s, ~1.9 MB), so a slow line delays the words instead of dropping them, and a backlog goes in chunks of up to a second to catch up. Audio captured before Stop still goes. Through the phone, SpeechAnalyzer with SpeechTranscriber volatile results sends back the whole evolving transcript (tentative words replace earlier guesses); Stop sends an explicit end, and the phone answers with the final words and plans nothing: only Send does (`plan`, `Shared/WatchWire.swift`). Home shows a level meter while listening, below a smaller Oby. The reply, question or plan stays in the card, scrollable with the crown; dispatch takes one tap. Done/Cancel dismisses it, and tapping the mic replaces it. If the iPhone is out of reach and the watch isn't paired, microphone permission is denied, or the line fails, what was heard stays in the draft and the mic opens system dictation/scribble instead; its words join the draft too. Requests sent while the phone is out of reach (unpaired) queue for it; dismissing cancels an undelivered transfer. Live audio and partial words are never queued for background delivery. The phone expires a stream after 30 seconds without a new chunk, or when its background time expires.
@@ -14,9 +14,9 @@ What it does today:
 
 ## Oby animated
 
-watchOS has no WebKit, so Oby plays as frames rendered from `Character/oby.html`, as the preview's Oby and the icon were (`Icon/render.mjs`). There are three loops at 15 fps, 160 px (80 pt at 2x): `idle` (breathes and blinks, 4.3 s), `working` (spins round with busy dots, 4.4 s) and `needs` (Hello's bounce and wiggle, then a beat of calm, 4.5 s). They are one image set per frame in `Frames.xcassets` (`oby-idle-000`…), about 1 MB in all.
+watchOS has no WebKit, so Oby plays as frames rendered from `Character/oby.html`, as the preview's Oby and the icon were (`Icon/render.mjs`). There are three loops at 15 fps, 160 px (80 pt at 2x): `idle` (breathes and blinks, 4.3 s), `working` (spins round with busy dots, 4.4 s) and `needs` (Hello's bounce and wiggle, then a beat of calm, 4.5 s). Three reactions to taps play once, at the same rate and crop, each ending calm: `poked` (startled, 1.7 s, 26 frames), `annoyed` (2.5 s, 38 frames) and `ignoring` (turns away, peeks, then shakes it off, 5.3 s, 80 frames). They are one image set per frame in `Frames.xcassets` (`oby-idle-000`…), about 1.9 MB in all.
 
-`ObyAnimation.swift` plays them with a `TimelineView`. It runs only while it's on screen, the app is in front, the wrist is up (not Always On) and Reduce Motion is off; otherwise it holds the loop's first frame. A new loop starts from its first frame.
+`ObyAnimation.swift` plays them with a `TimelineView`. It runs only while it's on screen, the app is in front, the wrist is up (not Always On) and Reduce Motion is off; otherwise it holds the loop's first frame. A new loop starts from its first frame. A reaction plays once over the loop, and a new tap starts it again; when it ends, the current loop (which may have changed meanwhile) starts from its first frame. Oby stopping (the wrist down, the app in the background) drops the reaction.
 
 To render them again after the character changes:
 
@@ -26,8 +26,8 @@ node Watch/Frames/render.mjs "$TMPDIR/oby-watch"
 python3 Watch/Frames/compose.py "$TMPDIR/oby-watch" .   # needs Pillow
 ```
 
-- `render.mjs` serves `Character/` itself, loads `oby.html?embed` in headless Chromium and drives Oby's clock by hand: every frame is exactly 1/30 s after the last, one in two is kept, and `Math.random` is pinned, so Oby looks straight ahead, blinks on a steady beat, and two runs give the same frames. The loops, their lengths and the expression each plays are `LOOPS` at the top.
-- `compose.py` crops every loop the same way (Oby doesn't jump when the loop changes), crossfades each loop's last frames into the calm frames rendered just before it so the end runs into the start, scales them down and writes `Frames.xcassets`. It also writes the complications' still poses to `Widget/Assets.xcassets`. `ObyAnimation` counts the frames at launch, so other loop lengths need no code change.
+- `render.mjs` serves `Character/` itself, loads `oby.html?embed` in headless Chromium and drives Oby's clock by hand: every frame is exactly 1/30 s after the last, one in two is kept, and `Math.random` is pinned, so Oby looks straight ahead, blinks on a steady beat, and two runs give the same frames. The loops and reactions, their lengths and the expression each plays are `LOOPS` at the top; a reaction's `poke` is how many clicks land on Oby's drawn body at once (oby.html plays the last one's reaction).
+- `compose.py` takes its crop from the three loops and crops every sequence the same way (Oby doesn't jump when the loop changes or a reaction plays), crossfades each sequence's last frames into the calm frames rendered just before it so the end runs into the start, scales them down and writes `Frames.xcassets`. It also writes the complications' still poses to `Widget/Assets.xcassets`. `ObyAnimation` counts the frames at launch, so other lengths need no code change.
 
 ## Complications and the Smart Stack
 
@@ -69,11 +69,11 @@ watchOS has no Tailscale or VPN, so a paired watch reaches the runner's Watch AP
 - **TestFlight:** the iPhone build carries the watch app. Keep `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` the same on `ObyWatch` and `ObyPhone` (Apple requires it), and raise both for every upload.
 - **Bundle ID:** `$(OBY_IPHONE_BUNDLE_ID).watchkitapp`, and `.watchkitapp.widget` for the complications, so moving to Deskree's team is the same switch as for the iPhone (`iOS/README.md`). Both use the app group `group.$(OBY_IPHONE_BUNDLE_ID).watch` (`Oby.entitlements`, `Widget/ObyWidget.entitlements`); automatic signing registers it.
 - **Complications:** run `ObyWatch`, then long-press the watch face, Edit, and pick Oby in a complication slot; or scroll the Smart Stack.
-- **Tests:** `iOSTests/WatchRelayTests.swift` checks the trimming of the job list and the relayed plan.
+- **Tests:** `iOSTests/WatchRelayTests.swift` checks the trimming of the job list and the relayed plan; `iOSTests/PokesTests.swift` checks how taps on Oby count.
 
 ## Size
 
-The watch app is Swift, Oby's frames (about 1 MB of PNGs, 198 frames), the widget with three small still poses, and the icon: far under the 75 MB cap on watch apps.
+The watch app is Swift, Oby's frames (about 1.9 MB of PNGs, 342 frames), the widget with three small still poses, and the icon: far under the 75 MB cap on watch apps.
 
 ## Part of #20
 
@@ -100,9 +100,18 @@ The Linux runner can parse Swift syntax and exercise the Watch model with a mock
 - Live SpeechAnalyzer results, corrections without duplicate words, finalization on Stop with no plan until Send, language/model availability, PCM conversion and first-use download.
 - Reachable but locked/backgrounded iPhone, disconnection while listening, slow transport, mic denial, system dictation fallback, and queued request dismissal.
 - The microphone reason in `Watch/en.lproj` and `Watch/pt.lproj` (`InfoPlist.strings`) replaces the project's old hold-to-talk wording, as on the iPhone: check that Xcode bundles it (the widget picks the files up too, harmlessly) and that a fresh install shows it.
-- Tap to listen and tap Stop: start/stop haptics, the red Stop, the meter, and the microphone indicator only while listening. Stop, the 60-second limit, the screen turning off, the jobs tap and a notification all close the mic and keep the words; none sends anything.
+- Tap to listen and tap Stop: start/stop haptics, the red Stop, the meter, and the microphone indicator only while listening. Stop, the 60-second limit, the screen turning off, paging to the jobs and a notification all close the mic and keep the words; none sends anything.
 - Live words under Oby through the phone and through the runner, the draft after Stop, Send with one tap, the mic adding more words to a draft, Clear, and a quick tap-stop or silence leaving the draft as it was.
 - Crown scrolling for long drafts/replies/plans (Send scrolls into view), one-tap dispatch, and tapping the mic while planning/dispatch is pending.
+
+## Verification for Home's pages and tap reactions
+
+Not built here (no Xcode on the Linux runner). On a real watch:
+
+- The crown down (or a swipe up) from Home goes to the jobs, and up comes back to Oby; the page indicator shows two pages. With a long reply or draft up, the crown scrolls the card first, then turns the page.
+- Tapping a job opens it; a notification opens its job from either page; the needs-you dot stays on Oby; going to the jobs while listening stops and keeps the words.
+- Taps on Oby: poked for 1 to 3, annoyed for 4 and 5, ignoring from 6 on (restarting on each tap), back to poked after 6 seconds alone; a light haptic on every tap; back to idle, working or needs at the end without a jump. With Reduce Motion on, only the haptic.
+- VoiceOver: Oby's hint, and the **Show jobs** action in the actions rotor.
 
 ## Verification for the Watch without its iPhone
 
