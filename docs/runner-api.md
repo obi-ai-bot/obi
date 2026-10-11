@@ -60,6 +60,7 @@ This document is the contract between the runner and its clients. Change it in t
   "limit": null,
   "startCommit": null,
   "outgoing": [],
+  "connectionUses": [],
   "question": null,
   "macCheck": null,
   "mergeError": null,
@@ -120,6 +121,7 @@ This document is the contract between the runner and its clients. Change it in t
 - `model`: a stronger model the user chose for this job, or null for the one in Settings › Models.
 - `notes`: what the user told the agent along the way (`POST /v1/jobs/{id}/messages`), oldest first, or null.
 - `title`: what to call the job in rows, the job screen, the notch and alerts. It's the brain's short title (3 to 6 words, like `"Mac runner notifications"`), which every planned dispatch gets and the job keeps. Jobs without one (the rules' plans when the brain is down, an epic's sub-issue jobs, jobs from before titles) get `"<Kind> <repo name> #<number>"` when `pr` or `issue` is set, otherwise the first line of `task` (falling back to `request`), capped at 60 characters. It's always a string; older runners don't send it, so clients fall back the same way. Show "Round 2 of 5" when `rounds` is above 1.
+- `connectionUses`: every call the job's agent made to a connected app through the broker (Connected apps, below), oldest first: the job's report lists them. Always a list, empty before the first. Each is `{"job": "9f08fd10", "connection": "mail", "tool": "send_message", "access": "write", "allowed": false, "secret": "mail-token", "host": "mcp.example.com", "date": "2026-10-11T16:20:03Z"}`: `tool` as the connected server names it, `access` `read` or `write`, `allowed` false when it was refused, `secret` the vault secret's name. Names only, never a value or what the call sent or got back.
 - `files` and `lead` are set on jobs the Lead started (below), null otherwise. `files`: the files or folders (ending in `/`) the job is expected to touch, relative to the repository, from the Lead's brief. `lead`: the goal (one Lead turn) that started it. `claim` also reports issue-sync errors on any job; successful changes are listed in `outgoing`. Older runners don't send these keys.
 - `question`: what the job's agent asked the user, `{"text": "Should a job that commits nothing end as failed, or get a new status?", "options": ["Failed", "A new status"]}` (`options` may be empty), or null. Agents are told to end their summary with `QUESTION: …` and optionally `OPTIONS: a | b` rather than bury a decision in their report; the runner reads those last lines when a turn ends. Markdown around the label (`**QUESTION:**`) is ignored; the question and its options keep every character, like `*.swift`. The job then waits for the answer: it stays `running` with `step` `"Waiting for your answer"`, its agent idle, and its round doesn't move on (no check runs). Other jobs keep going. The question lands in the inbox (below) and alerts the phone. The answer reaches the agent as its next message, exactly as `POST /v1/jobs/{id}/messages` would send it, and `question` goes back to null. Telling the job anything else answers it too; stopping it drops it. A job whose agent ends while its question waits (it exited, or the runner restarted) is `interrupted` and keeps `question`: nothing is checked or published until it's answered, and answering picks its session up again. Older runners don't send the key.
 - A job whose `files` overlap an earlier queued or running job's in the same repository (the same path, or one inside a folder the other names) waits, queued, until that job ends: its `step` reads `Waiting for <title> (<id>): both touch <files>`. Then it starts by itself. Jobs without `files` (the brain's) never wait or block.
@@ -194,6 +196,30 @@ Agents run on the runner, which has no Xcode, so an agent that changes the Apple
 - **No Mac:** a check no Mac took within a minute while no Mac was busy, or within an hour at all, is `error` with `problem` saying so, and the agent is told to carry on and say in its summary that the Apple apps weren't built.
 - **Security:** the Mac runs the agent's code (its build phases and tests) before Oby's review has read it, with the user's access to the Mac. The setting turns it off; a merge check still needs the review.
 - **Reviews:** when a job's pull request is reviewed, the reviewer gets the latest Apple build and test that ran (passed or failed), the job's Apple check (`appleCheck`, else `appleRan`) or its merge check, whichever ended last, quoted in `.oby/inputs/apple-check.md` with its commit (and whether it's the pull request's head), its steps, failing tests and, for an Apple check, the end of what the failing steps printed. It's told not to request changes because the code wasn't compiled.
+
+### Connection
+
+An app or API the user connected (F17, #60), which agents use through Oby while the login stays in Oby, like a password manager filling the fields: no agent ever sees the secret (not in a prompt, its environment, a file, an argument, a log or a tool's result).
+
+```json
+{"name": "mail", "mcp": "https://mcp.example.com/mcp", "api": null, "secret": "mail-token", "header": "Authorization",
+ "created": "2026-10-11T16:02:11Z", "secretSaved": true, "lastUsed": "2026-10-11T16:20:03Z"}
+```
+
+- `name`: up to 32 lower-case letters, digits or dashes. Agents see its tools as `<name>_<tool>`.
+- `mcp`: a remote MCP server's URL (Streamable HTTP), or `api`: an API's base URL; exactly one of them. HTTPS, with no login, query or fragment in it; plain HTTP only on 127.0.0.1 or localhost.
+- `secret`: the name of the vault secret it uses. The value goes in the vault only the way it always does, `oby-runner vault add mail-token` on the runner (the value on stdin); the API never takes or returns one. `secretSaved` says whether the vault has it now.
+- `header`: where the secret goes: `Authorization` (the default) sends `Authorization: Bearer <secret>`; any other header name (`X-Api-Key`) sends the secret as it is.
+- `lastUsed`: when an agent last called it, allowed or refused, or null.
+
+**The broker.** In the runner's own process, outside every agent's sandbox: no broker process runs in a sandbox, and no secret goes in an agent's environment. When anything is connected, each job's agent gets an MCP server named `oby` in its MCP config: Claude Code a `--mcp-config` file in the worktree (`.oby/mcp.json`, readable only by the runner's user), Codex `-c mcp_servers.oby.url=…` with the token in `OBY_MCP_TOKEN`. It points at `POST /v1/agent/mcp/{job}` on 127.0.0.1 with a token for that job only: another job's token, and the job's own once the job ends (done, failed, stopped, interrupted), get `401`.
+
+- `tools/list` lists every connection's tools, named `<connection>_<tool>`. An MCP connection's are its server's own (the broker initializes a session per job and connection, and follows `Mcp-Session-Id`); a server that can't be reached is left out. An API connection has two: `<name>_get` (`path` under the base URL, starting with `/`, and `query`), which reads, and `<name>_send` (`method`, `path`, `query`, `body`), which acts as the user.
+- `tools/call` forwards a read with the secret in the connection's header, read from the vault for that request alone. Reads are tools whose MCP `readOnlyHint` is true (and `destructiveHint` isn't), unless their name says they act (send, post, create, delete, pay, update, reply, …), and `<name>_get`. Everything else acts as the user and is refused, answering the tool call with `isError` and `Acting as you needs your OK, which arrives with permission modes.` (#134 brings them).
+- An API's path stays on its host (no `//host`, scheme or bad escapes), and no redirect is followed, from either kind: the login is for the connection's host only. An API answer is `HTTP <status>`, a blank line and the body, cut at 256 KB.
+- Every answer, tool lists included, has every vault value taken out of its strings and keys, plain, base64, hex or URL-encoded, even when the server echoes the login back; an answer that would still hold one, or one written while the vault can't be read, is replaced by an error.
+- Every call goes in the job's `connectionUses` and the vault's use log (`uses.jsonl` beside the runner's vault, readable only by the runner's user), and one line in the journal: the job, connection, tool, read or write, allowed or refused, the secret's name and the host. Never a value.
+- Not yet: OAuth sign-ins, the Mac app's side, website logins, binding a connection to repositories or kinds of job, and asking the user to allow a write.
 
 ### Inbox item
 
@@ -529,6 +555,21 @@ For `oby-check apple` in an agent's sandbox, with `Authorization: Bearer <its jo
 
 `oby-check apple [--wait SECONDS]` asks, prints `line` when it changes, polls every 5 seconds, and prints `report`. `--wait` (1 to 3,000; 110 by default, under a 2-minute command timeout) bounds the whole wait, the requests to the runner included: a request still unanswered at the deadline is dropped. It notes uncommitted changes, which aren't in the check. Exit status: `0` passed, `1` failed, `2` couldn't run (no Mac, the Mac's problem, no runner), `3` still running (run it again: it picks up the same check), `64` a wrong command line. Jobs whose Lead brief names `iOS/`, `Watch/`, `Mac/` or `Shared/`, or, without a brief, in a repository that has them, are told about it in their prompt.
 
+### `GET /v1/connections`, `POST /v1/connections` and `DELETE /v1/connections/{name}`
+
+The connected apps (Connection, above). `GET` lists them, sorted by name. `POST` adds one, or replaces the one with its name, and answers `201` with it:
+
+```json
+{"name": "mail", "mcp": "https://mcp.example.com/mcp", "secret": "mail-token"}
+{"name": "people", "api": "https://api.example.com/v2", "secret": "people-key", "header": "X-Api-Key"}
+```
+
+`422` for a wrong name, URL or header, both or neither of `mcp` and `api`, or a body with a `value`: a secret's value never goes through the API. `DELETE` removes one and answers `{"removed": "mail"}` (`404` for a name the runner doesn't know); its secret stays in the vault. Jobs already running keep the broker until they end; a job that starts with nothing connected gets none.
+
+### `POST /v1/agent/mcp/{job}`
+
+The broker's MCP endpoint for job `{job}`'s agent (Streamable HTTP, JSON answers, no sessions of its own), with `Authorization: Bearer <that job's token>` instead of a Tailscale login. It answers `initialize`, `ping`, `tools/list` and `tools/call`; a notification gets `202`, anything else a JSON-RPC error. `GET` and `DELETE` get `405`. `401` with another job's token, none, or once the job ended.
+
 ### `POST /v1/devices`
 
 Registers the phone's publishing key, once per device:
@@ -714,4 +755,5 @@ The Watch API doesn't pass pieces on to the runner's speech service (`POST /v1/s
 - **Merge, except into `dev` after the Mac check:** the runner squash-merges a pull request it opened only into `dev`, only when Oby's review approved it, the Mac check passed on the same commit and the secret scan is clean (Mac check, above). Never into `main`.
 - **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comments that go out are Oby's own review of its own pull request and the Mac check's results on it (an Apple check posts nothing), and the runner's own issue lifecycle and audit updates (Engine/IssueSync.swift), all after the secret scan; no agent posts to GitHub, and no GitHub review, approval or comment goes on anyone else's work.
 - **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
+- **Hand a vault secret to an agent:** a connected app's login goes only from the broker, in the runner's process, to that connection's host, and what comes back has it taken out. Acting as the user through a connection is refused until permission modes arrive.
 - **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.

@@ -51,9 +51,12 @@ do {
 } catch {
     Logger.runner.error("oby-check couldn't be installed: \(error.localizedDescription, privacy: .public). Agents can't ask for Apple checks.")
 }
+// Connected apps: agents call them through the broker, in this process, which holds the logins (Runner/Broker.swift).
+let broker = Broker(desk: desk, connections: ConnectionStore(file: Workspace.root.appending(path: "connections.json")),
+                    uses: UseLog(file: Vault.folder.appending(path: "uses.jsonl")), base: "http://127.0.0.1:\(port)")
 let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: "devices.json")),
               push: Push(desk: desk, folder: Workspace.root.appending(path: "apns")),
-              cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")), speech: speech)
+              cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")), speech: speech, broker: broker)
 
 // systemd stops the runner with SIGTERM: agents end now, and their jobs show as interrupted.
 // The sources live as long as the runner.

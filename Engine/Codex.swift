@@ -23,6 +23,8 @@ final class CodexAgent: AgentRun {
     private var result: (summary: String, failed: Bool)?
     /// This job's model, or nil for Settings › Models.
     var model: String?
+    /// The broker's endpoint for this job (Engine/Connected.swift), or nil when nothing is connected.
+    var mcp: AgentMCP?
 
     init(worktree: URL, home: URL?, resume: String? = nil) {
         self.worktree = worktree
@@ -34,7 +36,7 @@ final class CodexAgent: AgentRun {
         self.onEvent = onEvent
         let log = worktree.appending(path: ".oby/agent.log")
         _ = FileManager.default.createFile(atPath: log.path, contents: nil)
-        let server = try CodexServer(home: home, in: worktree, log: log)
+        let server = try CodexServer(home: home, in: worktree, log: log, mcp: mcp)
         self.server = server
         server.onMessage = { [weak self] in self?.handle($0) }
         server.onExit = { [weak self] in
@@ -194,11 +196,13 @@ final class CodexServer {
     var onExit: () -> Void = {}
     var isRunning: Bool { process.isRunning }
 
-    init(home: URL?, in directory: URL?, log: URL?) throws {
+    /// `mcp`: the broker, as Codex's `oby` MCP server, its token in the environment.
+    init(home: URL?, in directory: URL?, log: URL?, mcp: AgentMCP? = nil) throws {
         process.executableURL = URL(filePath: "/usr/bin/env")
-        process.arguments = Agents.sandboxed(["codex", "app-server"], in: directory, own: home?.path ?? "\(Agents.home)/.codex")
+        process.arguments = Agents.sandboxed(["codex"] + (mcp?.codexArguments ?? []) + ["app-server"], in: directory, own: home?.path ?? "\(Agents.home)/.codex")
         process.currentDirectoryURL = directory
-        process.environment = try Agents.environment(AppleCheck.environment(worktree: directory).merging(["CODEX_HOME": home?.path]) { $1 })
+        process.environment = try Agents.environment(AppleCheck.environment(worktree: directory)
+            .merging(["CODEX_HOME": home?.path, AgentMCP.tokenVariable: mcp?.token]) { $1 })
         process.standardInput = input
         process.standardOutput = output
         process.standardError = log.flatMap { try? FileHandle(forWritingTo: $0) } ?? FileHandle.nullDevice

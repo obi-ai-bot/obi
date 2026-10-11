@@ -106,6 +106,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The latest of them that ran (passed or failed), kept when a newer one is asked for: what
     /// its reviewer reads (`AppleCheck.latest`). Nil before one ran.
     var appleRan: MacCheck?
+    /// Every call its agent made to a connected app through the broker (Engine/Connected.swift),
+    /// allowed or refused, oldest first, or nil before the first.
+    var connectionUses: [ConnectionUse]?
 
     var maxRounds: Int { rounds ?? 1 }
     /// Its agent asked the user something and waits for the answer: the inbox has it.
@@ -376,6 +379,8 @@ final class ClaudeAgent: AgentRun {
     var model: String?
     /// The most turns it takes for one message (`JobLimits.maxTurns`), or nil for no limit.
     var maxTurns: Int?
+    /// The broker's endpoint for this job (Engine/Connected.swift), or nil when nothing is connected.
+    var mcp: AgentMCP?
     private var onEvent: (AgentEvent) -> Void = { _ in }
     private var finished = false
     /// The latest turn's result. The job ends when Claude Code exits, not when a turn ends.
@@ -397,14 +402,17 @@ final class ClaudeAgent: AgentRun {
     }
 
     /// The command line and environment Claude Code starts with.
-    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil) throws -> (arguments: [String], environment: [String: String]) {
+    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil,
+                                   mcp: AgentMCP? = nil) throws -> (arguments: [String], environment: [String: String]) {
         // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
-        // mcpServers (Tetrix) stay; only its claude.ai connectors are off.
+        // mcpServers (Tetrix) stay; only its claude.ai connectors are off. The broker joins them as
+        // `oby`, from a file, with the job's token only.
         let arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                              "--verbose", "--replay-user-messages", "--permission-prompt-tool", "stdio",
                              // Only the account's own settings: a repo's .claude/settings.json could allow tools past Oby.
                              "--setting-sources", "user",
                              "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
+                            + (try mcp.map { ["--mcp-config", try $0.writeClaudeConfig(in: worktree)] } ?? [])
                             + (maxTurns.map { ["--max-turns", String($0)] } ?? [])
                             + (resume.map { ["--resume", $0] } ?? []),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude")
@@ -416,7 +424,7 @@ final class ClaudeAgent: AgentRun {
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
         self.onEvent = onEvent
         process.executableURL = URL(filePath: "/usr/bin/env")
-        let launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns)
+        let launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mcp: mcp)
         process.arguments = launch.arguments
         process.environment = launch.environment
         process.currentDirectoryURL = worktree
@@ -783,8 +791,10 @@ nonisolated enum Policy {
         // mcp__<server>__<tool>, where the server can be "tetrix" or a connector like "claude_ai_Tetrix".
         let mcp = tool.components(separatedBy: "__")
         if mcp.first == "mcp" {
+            // Oby's own broker (Runner/Broker.swift) holds the logins and refuses what acts as the user.
+            if mcp.count >= 3, mcp[1] == AgentMCP.server { return nil }
             guard mcp.count == 3, mcp[1].lowercased().contains("tetrix"), tetrixReads.contains(mcp[2]) else {
-                return "Oby's agents use only Tetrix's graph reads among MCP tools. Say in your summary what you'd have done with \(tool)."
+                return "Oby's agents use only Tetrix's graph reads and the apps Oby connects (the oby server) among MCP tools. Say in your summary what you'd have done with \(tool)."
             }
             return nil
         }

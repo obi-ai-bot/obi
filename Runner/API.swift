@@ -17,18 +17,22 @@ final class API {
     let push: Push?
     /// When Clear done was last pressed, on any app (Runner/Cleared.swift).
     let cleared: Cleared
+    /// Connected apps, used by agents through the broker (Runner/Broker.swift).
+    let broker: Broker
     /// Everyone following `GET /v1/events`.
     private var streams: [UUID: AsyncStream<String>.Continuation] = [:]
     /// The accounts as last sent, so an unchanged list isn't sent again.
     private var sentAccounts = Data()
 
-    /// Without `cleared` (the tests), the clear time lives in memory only.
-    init(desk: Desk, devices: Devices, push: Push? = nil, cleared: Cleared? = nil, speech: Speech = Speech()) {
+    /// Without `cleared` (the tests), the clear time lives in memory only; without `broker`, so do
+    /// the connections and their use log.
+    init(desk: Desk, devices: Devices, push: Push? = nil, cleared: Cleared? = nil, speech: Speech = Speech(), broker: Broker? = nil) {
         self.speech = speech
         self.desk = desk
         self.devices = devices
         self.push = push
         self.cleared = cleared ?? Cleared(file: nil)
+        self.broker = broker ?? Broker(desk: desk, connections: ConnectionStore(file: nil), uses: UseLog(file: nil), base: "http://127.0.0.1:7777")
         sentAccounts = (try? Self.encode(accounts)) ?? Data()
         desk.onJobChange = { [weak self] job in
             self?.send("job", JobJSON(job: job))
@@ -76,6 +80,17 @@ final class API {
         // An agent's `oby-check apple`, with its job's token rather than the owner's login (`Gate`).
         router.post("v1/agent/apple-check") { request, _ in try await self.appleCheck(request.headers[.authorization], ask: true) }
         router.get("v1/agent/apple-check") { request, _ in try await self.appleCheck(request.headers[.authorization], ask: false) }
+        // Connected apps: an agent's MCP endpoint, with its job's token rather than the owner's login.
+        router.post("v1/agent/mcp/:job") { request, context in
+            var request = request
+            let body = try await request.collectBody(upTo: 4 << 20)
+            return try await self.mcp(context.parameters.require("job"), request.headers[.authorization], body)
+        }
+        router.get("v1/agent/mcp/:job") { _, _ in Response(status: .methodNotAllowed) }
+        router.delete("v1/agent/mcp/:job") { _, _ in Response(status: .methodNotAllowed) }
+        router.get("v1/connections") { _, _ in await self.connections() }
+        router.post("v1/connections") { request, _ in try await self.connect(try await Self.decode(NewConnection.self, from: request)) }
+        router.delete("v1/connections/:name") { _, context in try await self.disconnect(context.parameters.require("name")) }
         router.post("v1/checks/:id/result") { request, context in
             try await self.checkResult(context.parameters.require("id"), try await Self.decode(MacCheck.Report.self, from: request))
         }
@@ -282,6 +297,52 @@ final class API {
             throw APIError(.serviceUnavailable, "The runner can't read its vault: \(error.localizedDescription)")
         }
         return Self.json(AppleCheckAnswer(check: MacCheckJSON(check: check), line: line, report: report))
+    }
+
+    /// One MCP message from job `id`'s agent to the broker (Runner/Broker.swift), only with that
+    /// job's token while it runs: `202` for a notification, else the answer.
+    func mcp(_ id: String, _ authorization: String?, _ body: ByteBuffer) async throws -> Response {
+        let token = authorization.flatMap { $0.hasPrefix("Bearer ") ? String($0.dropFirst("Bearer ".count)) : nil } ?? ""
+        guard broker.allows(token, job: id) else {
+            throw APIError(.unauthorized, "Oby's broker answers only the agent of a running job, with that job's token.")
+        }
+        guard let answer = await broker.handle(Data(body.readableBytesView), job: id) else { return Response(status: .accepted) }
+        let data = (try? JSONSerialization.data(withJSONObject: answer, options: [.withoutEscapingSlashes])) ?? Data()
+        return Response(status: .ok, headers: [.contentType: "application/json"], body: ResponseBody(byteBuffer: ByteBuffer(bytes: data)))
+    }
+
+    /// The connections, never a secret's value: whether the vault has the secret, and when each was last used.
+    func connections() -> Response {
+        let saved = Set((try? desk.vault.names()) ?? [])
+        return Self.json(broker.connections.all.map { ConnectionJSON($0, saved: saved.contains($0.secret), lastUsed: broker.uses.lastUsed[$0.name]) })
+    }
+
+    /// Adds a connection, or replaces the one with its name. The secret is named, never sent: it
+    /// goes in the vault with `oby-runner vault add`.
+    func connect(_ new: NewConnection) throws -> Response {
+        guard new.value == nil else {
+            throw APIError(.unprocessableContent, "A secret's value never goes through the API: add it on the runner with oby-runner vault add \(new.secret).")
+        }
+        let connection = Connection(name: new.name, mcp: new.mcp, api: new.api, secret: new.secret, header: new.header)
+        do {
+            try broker.connections.save(connection)
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+        let saved = ((try? desk.vault.names()) ?? []).contains(connection.secret)
+        return Self.json(ConnectionJSON(connection, saved: saved, lastUsed: broker.uses.lastUsed[connection.name]), status: .created)
+    }
+
+    /// Removes a connection. Its secret stays in the vault.
+    func disconnect(_ name: String) throws -> Response {
+        let removed: Bool
+        do {
+            removed = try broker.connections.remove(name)
+        } catch {
+            throw APIError(.internalServerError, "The runner couldn't save the connections: \(error.localizedDescription)")
+        }
+        guard removed else { throw APIError(.notFound, "There's no connection \(name).") }
+        return Self.json(["removed": name])
     }
 
     /// A Mac's result for a check it took: passed merges, failed goes back to the author.
@@ -585,7 +646,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, connectionUses }
 
     private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou }
 
@@ -636,6 +697,8 @@ struct JobJSON: Encodable {
         if job.appleRan == nil { try nulls.encodeNil(forKey: .appleRan) }
         // What went out is always a list: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
+        // So are the calls its agent made to connected apps.
+        if job.connectionUses == nil { try nulls.encode([ConnectionUse](), forKey: .connectionUses) }
     }
 }
 
@@ -687,6 +750,44 @@ struct AppleCheckAnswer: Encodable {
         try keys.encode(line, forKey: .line)
         try keys.encode(report, forKey: .report)
     }
+}
+
+/// A connection with every key the API promises: never a secret's value.
+struct ConnectionJSON: Encodable {
+    var connection: Connection
+    /// The vault has the secret it names.
+    var secretSaved: Bool
+    var lastUsed: Date?
+
+    init(_ connection: Connection, saved: Bool, lastUsed: Date?) {
+        self.connection = connection
+        secretSaved = saved
+        self.lastUsed = lastUsed
+    }
+
+    private enum Keys: String, CodingKey { case name, mcp, api, secret, header, created, secretSaved, lastUsed }
+
+    func encode(to encoder: any Encoder) throws {
+        var keys = encoder.container(keyedBy: Keys.self)
+        try keys.encode(connection.name, forKey: .name)
+        try keys.encode(connection.mcp, forKey: .mcp)
+        try keys.encode(connection.api, forKey: .api)
+        try keys.encode(connection.secret, forKey: .secret)
+        try keys.encode(connection.header ?? "Authorization", forKey: .header)
+        try keys.encode(connection.created, forKey: .created)
+        try keys.encode(secretSaved, forKey: .secretSaved)
+        try keys.encode(lastUsed, forKey: .lastUsed)
+    }
+}
+
+/// What `POST /v1/connections` takes. `value` is only there to be refused.
+struct NewConnection: Decodable {
+    var name: String
+    var mcp: String?
+    var api: String?
+    var secret: String
+    var header: String?
+    var value: String?
 }
 
 /// An inbox item with every key the API promises, and its state: `open`, `later` (put off until
