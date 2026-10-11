@@ -619,12 +619,12 @@ struct SandboxTests {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = Agents.sandboxed(["sleep", "30"], in: nil, own: nil)
-        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, any Error>) in
-            DispatchQueue.global().async { done.resume(with: Result { try process.run() }) }
+        let group = try await withCheckedThrowingContinuation { (done: CheckedContinuation<ProcessGroup, any Error>) in
+            DispatchQueue.global().async { done.resume(with: Result { try ProcessGroup.run(process) }) }
         }
         try await Task.sleep(for: .seconds(8))
         #expect(process.isRunning)
-        process.terminate()
+        group.end(after: Halt.stopping)
     }
 
     /// Codex's own bubblewrap can't nest inside Oby's, so it runs none and asks Oby about every command.

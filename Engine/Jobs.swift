@@ -225,25 +225,110 @@ protocol AgentRun: AnyObject {
     func kill()
 }
 
-/// Ending an agent that was asked to stop: Stop all promises every agent ends within 2 seconds.
+/// Ending an agent with everything it started: SIGTERM to its process group, then SIGKILL.
+/// In bubblewrap the group holds the outer bwrap, the box's own bwrap (its pid 1) and the agent.
+/// What the agent's tools start in sessions of their own (Claude Code's commands) is only in the
+/// box, and ends with the box's pid 1, which only SIGKILL reaches from outside. Without
+/// --die-with-parent (Agents.sandboxed), nothing else ends the box: SIGTERM to the outer bwrap alone
+/// left agents running for hours (2026-10-11 on tetrix-lab).
 nonisolated enum Halt {
     /// How long an agent asked to stop gets to wrap up its turn before it's ended.
     static let grace: TimeInterval = 0.8
+    /// From SIGTERM to SIGKILL when Stop ends an agent: Stop all promises every agent ends within 2 seconds.
+    static let stopping: TimeInterval = 0.4
+    /// From SIGTERM to SIGKILL when an agent is dropped otherwise: moved to another account, its job
+    /// ended, a check timed out, Oby quitting.
+    static let dropping: TimeInterval = 3
 
-    /// Ends the process now: SIGTERM, then SIGKILL 0.4 seconds later. When it leads a process
-    /// group of its own (Foundation starts it in one), the whole group, so the tools it started end too.
-    static func end(_ process: Process) {
-        guard process.isRunning else { return }
-        let pid = process.processIdentifier
-        let target = getpgid(pid) == pid && pid != getpgrp() ? -pid : pid
+    /// Groups sent SIGTERM whose SIGKILL is still to come, and when it's due.
+    private static let pending = Mutex<[pid_t: ContinuousClock.Instant]>([:])
+
+    /// SIGTERM to `target` (a process group as -pgid, or one process) now, SIGKILL `after` seconds later.
+    static func end(_ target: pid_t, after: TimeInterval) {
+        pending.withLock { $0[target] = .now + .seconds(after) }
         _ = kill(target, SIGTERM)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { _ = kill(target, SIGKILL) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + after) {
+            if pending.withLock({ $0.removeValue(forKey: target) }) != nil { _ = kill(target, SIGKILL) }
+        }
+    }
+
+    /// Oby is quitting: waits for the SIGKILLs still to come (at most `dropping`), so nothing it
+    /// started outlives it. A group that's gone already isn't waited for.
+    static func settle() {
+        while true {
+            let due = pending.withLock { pending in
+                for (target, at) in pending where kill(target, 0) != 0 || at <= .now {
+                    pending[target] = nil
+                    _ = kill(target, SIGKILL)
+                }
+                return pending.isEmpty
+            }
+            if due { return }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+    }
+}
+
+/// A process Oby started, and the process group it leads: Foundation starts every process in a
+/// group of its own (posix_spawn's SETPGROUP, checked on Linux 2026-10-11), so no setsid goes in
+/// front, which would fork when it leads one already. Once the process ends, what's left of its
+/// group is killed, so nothing it started holds its output pipe open (a review sat running for 2.5
+/// hours on a test's leftover) or outlives it.
+/// Foundation on Linux hears of the end only once everything the process started has ended too (it
+/// watches a socket they all inherit), so the end is watched here, with waitid's WNOWAIT: the
+/// process stays for Foundation to reap, and its pid and group can't be reused until it does.
+nonisolated final class ProcessGroup: Sendable {
+    private struct State {
+        /// What's signalled: -pgid, or the process alone when it doesn't lead a group.
+        var target: pid_t?
+        var exited = false
+        /// `end` sent SIGTERM, and its SIGKILL is to come.
+        var ending = false
+    }
+    private let state = Mutex(State())
+
+    /// Starts `process`.
+    static func run(_ process: Process) throws -> ProcessGroup {
+        let group = ProcessGroup()
+        try process.run()
+        let pid = process.processIdentifier
+        group.state.withLock { $0.target = getpgid(pid) == pid ? -pid : pid }
+        Thread.detachNewThread {
+            var info = siginfo_t()
+            // ECHILD: Foundation reaped it already (the Mac's does as soon as it ends).
+            while waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) == -1 && errno == EINTR {}
+            group.exited()
+        }
+        return group
+    }
+
+    /// The process ended: SIGKILL to what's left of its group, unless `end`'s own SIGKILL is to come,
+    /// after the grace it gave.
+    private func exited() {
+        let target = state.withLock { state -> pid_t? in
+            state.exited = true
+            return state.ending ? nil : state.target
+        }
+        if let target, target < 0 { _ = kill(target, SIGKILL) }
+    }
+
+    /// SIGTERM to the whole group now, SIGKILL `after` seconds later (`Halt`). Once: a second call,
+    /// or one after the process ended (its group is gone already), changes nothing.
+    func end(after: TimeInterval) {
+        let target = state.withLock { state -> pid_t? in
+            guard !state.ending, !state.exited, let target = state.target else { return nil }
+            state.ending = true
+            return target
+        }
+        if let target { Halt.end(target, after: after) }
     }
 }
 
 /// Claude Code, headless, speaking stream-json both ways (proven 2026-10-09).
 final class ClaudeAgent: AgentRun {
     private let process = Process()
+    /// Its process group, once it's started.
+    private var group: ProcessGroup?
     private let input = Pipe()
     private let output = Pipe()
     /// Writes to Claude Code's input, in order and off the main thread: a message with a screenshot
@@ -301,7 +386,7 @@ final class ClaudeAgent: AgentRun {
         let log = worktree.appending(path: ".oby/agent.log")
         _ = FileManager.default.createFile(atPath: log.path, contents: nil)
         process.standardError = (try? FileHandle(forWritingTo: log)) ?? FileHandle.nullDevice
-        try process.run()
+        group = try ProcessGroup.run(process)
 
         Task {
             do {
@@ -368,12 +453,12 @@ final class ClaudeAgent: AgentRun {
         guard process.isRunning else { return }
         send(["type": "control_request", "request_id": UUID().uuidString, "request": ["subtype": "interrupt"]])
         end()
-        let process = process
-        DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { Halt.end(process) }
+        let group = group
+        DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { group?.end(after: Halt.stopping) }
     }
 
     func kill() {
-        if process.isRunning { process.terminate() }
+        group?.end(after: Halt.dropping)
     }
 
     private func handle(_ line: Data) {
@@ -748,8 +833,8 @@ nonisolated enum Agents {
         let exists = { (path: String) in FileManager.default.fileExists(atPath: path) }
         // Never --die-with-parent: its death signal follows the thread that started bwrap, and Foundation
         // starts processes on Dispatch worker threads, which exit after about 5 s idle: agents died with
-        // SIGKILL mid-turn (proven 2026-10-10 on tetrix-lab). systemd ends them with the runner instead
-        // (KillMode=control-group).
+        // SIGKILL mid-turn (proven 2026-10-10 on tetrix-lab). Oby ends the box itself (Halt, ProcessGroup),
+        // and systemd ends them with the runner (KillMode=control-group).
         var args = ["bwrap", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
                     "--tmpfs", "/tmp", "--tmpfs", home]
         for folder in tools.map({ "\(home)/\($0)" }) where exists(folder) { args += ["--overlay-src", folder, "--tmp-overlay", folder] }

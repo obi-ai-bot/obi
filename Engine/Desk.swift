@@ -494,7 +494,8 @@ final class Desk {
     }
 
     func stop(_ id: String) {
-        let agent = agents[id]
+        // Out before the job ends, so it's ended by its own stop, after the grace for its turn.
+        let agent = agents.removeValue(forKey: id)
         finish(id, .stopped, "Stopped by you.")
         agent?.stop()
     }
@@ -565,12 +566,14 @@ final class Desk {
         return job
     }
 
-    /// Oby is quitting: agents end now, and their jobs show as interrupted next time.
+    /// Oby is quitting: agents end now, and their jobs show as interrupted next time. Returns once
+    /// what they started is gone too, at most `Halt.dropping` from now.
     func quit() {
         for (id, agent) in agents {
             agent.kill()
             finish(id, .interrupted, "Oby quit while this was running.")
         }
+        Halt.settle()
     }
 
     func job(_ id: String) -> Job? { jobs.first { $0.id == id } }
@@ -824,7 +827,9 @@ final class Desk {
         job.step = ""
         job.finished = .now
         replace(job)
-        agents[id] = nil
+        // Its agent goes with it: one still finishing after its last turn (a check passed, a round
+        // limit) ends with what it started, rather than outlive its job.
+        agents.removeValue(forKey: id)?.kill()
         ranHere[id] = nil
         pickedUp.remove(id)
         ending.remove(id)
