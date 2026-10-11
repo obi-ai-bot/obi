@@ -121,14 +121,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// A possible secret in the review itself: the built-in rules on every line, and gitleaks when
     /// it's installed. Throws when the scan can't run: then nothing is posted.
     static func scan(_ text: String) async throws -> [Publish.Finding] {
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).enumerated().map { index, line in
-            Publish.Line(file: "review", number: index + 1, text: String(line))
-        }
-        let found = lines.flatMap { line in
-            Publish.rules.filter { line.text.contains($0.pattern) }.map { Publish.Finding(file: line.file, line: line.number, rule: $0.name) }
-        }
-        var seen = Set<Publish.Finding>()
-        return (found + (try await Publish.gitleaks(lines))).filter { seen.insert($0).inserted }
+        try await Publish.scan(texts: [("review", text)])
     }
 
     /// Posts `body` as a comment on `author`'s own pull request, after the secret scan. Returns the
@@ -259,7 +252,9 @@ extension Desk {
         replace(author)
         Task {
             do {
-                result.comment = try await postReview(author, Review.comment(result, summary: review.summary)).absoluteString
+                let url = try await postReview(author, Review.comment(result, summary: review.summary)).absoluteString
+                result.comment = url
+                sent(id, Outgoing(action: .comment, repo: author.repo, id: url))
             } catch {
                 result.postError = error.localizedDescription
                 Logger.jobs.error("job \(id, privacy: .public): the review wasn't posted: \(error.localizedDescription, privacy: .public)")

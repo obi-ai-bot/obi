@@ -103,6 +103,10 @@ struct JobView: View {
                     Text(job.summary).font(.system(size: 13)).foregroundStyle(.white.opacity(0.85)).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                if let sent = job.sentLines {
+                    Text(sent).font(.system(size: 12)).foregroundStyle(.white.opacity(0.6)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 if let commits = job.commits {
                     Label("\(commits) \(commits == 1 ? "commit" : "commits") on \(job.branch)", systemImage: "point.3.connected.trianglepath.dotted")
                         .font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))

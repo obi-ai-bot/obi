@@ -71,7 +71,7 @@ struct UsageTests {
                              fiveHourResets: now + 2 * 3600, sevenDayResets: now + 3 * 86_400 + 2 * 3600, running: 1)
         // Weekday text follows the current locale, so compare up to it.
         let spoken = Usage.spoken(codex, now: now)
-        #expect(spoken.hasPrefix("Codex, Deskree: 63% of the 5-hour limit used, resets in 2 hours, 12% of the 7-day limit used, resets "))
+        #expect(spoken.hasPrefix("Codex, Deskree: 63% of the 5-hour limit used, resets in 2 hours, 12% of the 7-day limit used, 56% of the week gone, resets "))
         #expect(spoken.hasSuffix(", 1 agent running"))
         #expect(Usage.spoken(snapshot("Deskree", running: 3), now: now) == "Claude Code, Deskree: No usage yet: it updates after its next job, 3 agents running")
         #expect(Usage.spoken(snapshot("Personal", label: nil), now: now) == "Claude Code, Personal: Signed out")

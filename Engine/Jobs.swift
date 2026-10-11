@@ -73,6 +73,16 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var reviewError: String?
     /// The job whose pull request this job reviews: set on the review jobs Oby starts itself.
     var reviewOf: String?
+    /// The files the job is expected to touch, from the Lead's brief: jobs whose files overlap
+    /// run one after another (case 2.1). Nil on jobs the brain planned.
+    var files: [String]?
+    /// The goal (a Lead turn, Engine/Lead.swift) that started the job, or nil for the brain's jobs.
+    var lead: String?
+    /// How Oby claimed the job's issue when it started (assigned, labeled, moved on the board),
+    /// or why it couldn't; nil until then, and on jobs the Lead didn't start.
+    var claim: String?
+    /// Everything Oby sent out for it, oldest first (Engine/Outgoing.swift), or nil before anything went out.
+    var outgoing: [Outgoing]?
     /// Files the user attached to the request (a screenshot, what they copied), as paths on this
     /// machine. Workspace.prepare copies them into the worktree's .oby/inputs.
     var attachments: [String]?
@@ -190,6 +200,22 @@ protocol AgentRun: AnyObject {
     func stop()
     /// Ends it now: Oby is quitting.
     func kill()
+}
+
+/// Ending an agent that was asked to stop: Stop all promises every agent ends within 2 seconds.
+nonisolated enum Halt {
+    /// How long an agent asked to stop gets to wrap up its turn before it's ended.
+    static let grace: TimeInterval = 0.8
+
+    /// Ends the process now: SIGTERM, then SIGKILL 0.4 seconds later. When it leads a process
+    /// group of its own (Foundation starts it in one), the whole group, so the tools it started end too.
+    static func end(_ process: Process) {
+        guard process.isRunning else { return }
+        let pid = process.processIdentifier
+        let target = getpgid(pid) == pid && pid != getpgrp() ? -pid : pid
+        _ = kill(target, SIGTERM)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { _ = kill(target, SIGKILL) }
+    }
 }
 
 /// Claude Code, headless, speaking stream-json both ways (proven 2026-10-09).
@@ -320,7 +346,7 @@ final class ClaudeAgent: AgentRun {
         send(["type": "control_request", "request_id": UUID().uuidString, "request": ["subtype": "interrupt"]])
         end()
         let process = process
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { if process.isRunning { process.terminate() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { Halt.end(process) }
     }
 
     func kill() {
@@ -688,11 +714,13 @@ nonisolated enum Agents {
     /// else an agent writes lasts, so it can't leave behind a program or a git config that the runner
     /// runs later outside the box. Writable for real: the worktree, the git data it commits to, and
     /// `own`, the job's account home (nil for none).
+    /// `reading` are folders the process may read but not write, inside what's hidden otherwise
+    /// (the Lead's own directory and the repositories' checkouts, under `OBY_HOME`).
     /// On the Mac, `argv` as it is: gh's login is in the keychain, and agents have no credential helper.
     // ponytail: one Unix user, hidden by path. Sockets that run commands for this user (docker is
     // hidden, nothing else is) and the runner's API on 127.0.0.1 stay reachable; a Unix user of its
     // own for agents is the upgrade.
-    static func sandboxed(_ argv: [String], in worktree: URL?, own: String?, bubblewrap: Bool = Agents.bubblewrap) -> [String] {
+    static func sandboxed(_ argv: [String], in worktree: URL?, own: String?, reading: [String] = [], bubblewrap: Bool = Agents.bubblewrap) -> [String] {
         guard bubblewrap else { return argv }
         let exists = { (path: String) in FileManager.default.fileExists(atPath: path) }
         // Never --die-with-parent: its death signal follows the thread that started bwrap, and Foundation
@@ -724,6 +752,7 @@ nonisolated enum Agents {
                 args += ["--bind", admin, admin, "--ro-bind", "\(admin)/commondir", "\(admin)/commondir"]
             }
         }
+        for folder in reading where exists(folder) { args += ["--ro-bind", folder, folder] }
         if let own { args += ["--bind", own, own] }
         // The default Claude account keeps ~/.claude.json with ~/.claude.
         if own == "\(home)/.claude" { args += ["--bind-try", "\(home)/.claude.json", "\(home)/.claude.json"] }
@@ -999,29 +1028,57 @@ nonisolated final class JobStore {
     /// Keeps a brain turn, and only the latest `keptTurns`.
     func save(_ turn: BrainTurn) {
         guard let body = try? JSONEncoder().encode(turn) else { return }
+        saveTurn(turn.date, body)
+    }
+
+    /// Keeps a Lead turn in the same table as the brain's (Engine/Lead.swift).
+    func save(_ turn: LeadTurn) {
+        guard let body = try? JSONEncoder().encode(turn) else { return }
+        saveTurn(turn.date, body)
+    }
+
+    private func saveTurn(_ date: Date, _ body: Data) {
         var statement: OpaquePointer?
         sqlite3_prepare_v2(db, "INSERT INTO turns (created, body) VALUES (?, ?)", -1, &statement, nil)
         defer { sqlite3_finalize(statement) }
-        sqlite3_bind_double(statement, 1, turn.date.timeIntervalSince1970)
+        sqlite3_bind_double(statement, 1, date.timeIntervalSince1970)
         sqlite3_bind_text(statement, 2, String(decoding: body, as: UTF8.self), -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-        if sqlite3_step(statement) != SQLITE_DONE { Logger.jobs.error("saving a brain turn failed") }
+        if sqlite3_step(statement) != SQLITE_DONE { Logger.jobs.error("saving a turn failed") }
         sqlite3_exec(db, "DELETE FROM turns WHERE rowid NOT IN (SELECT rowid FROM turns ORDER BY created DESC, rowid DESC LIMIT \(Self.keptTurns))", nil, nil, nil)
     }
 
     /// The brain's latest turns, newest first.
     func turns(_ limit: Int = 50) -> [BrainTurn] {
+        rows(limit).compactMap { $0.kind == nil ? try? JSONDecoder().decode(BrainTurn.self, from: $0.body) : nil }
+    }
+
+    /// The Lead's latest turns, newest first.
+    func leadTurns(_ limit: Int = 50) -> [LeadTurn] {
+        rows(limit).compactMap { $0.kind == "lead" ? try? JSONDecoder().decode(LeadTurn.self, from: $0.body) : nil }
+    }
+
+    /// Which kind of turn a row holds: `"lead"`, or nil for the brain's (which carry no kind).
+    private struct Row: Decodable {
+        var kind: String?
+        var body = Data()
+        private enum Keys: String, CodingKey { case kind }
+        init(from decoder: any Decoder) throws { kind = try decoder.container(keyedBy: Keys.self).decodeIfPresent(String.self, forKey: .kind) }
+    }
+
+    private func rows(_ limit: Int) -> [Row] {
         var statement: OpaquePointer?
         sqlite3_prepare_v2(db, "SELECT body FROM turns ORDER BY created DESC, rowid DESC LIMIT ?", -1, &statement, nil)
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int(statement, 1, Int32(limit))
-        var turns: [BrainTurn] = []
+        var rows: [Row] = []
         while sqlite3_step(statement) == SQLITE_ROW {
-            if let text = sqlite3_column_text(statement, 0),
-               let turn = try? JSONDecoder().decode(BrainTurn.self, from: Data(String(cString: text).utf8)) {
-                turns.append(turn)
-            }
+            guard let text = sqlite3_column_text(statement, 0) else { continue }
+            let body = Data(String(cString: text).utf8)
+            guard var row = try? JSONDecoder().decode(Row.self, from: body) else { continue }
+            row.body = body
+            rows.append(row)
         }
-        return turns
+        return rows
     }
 }
 

@@ -209,6 +209,11 @@ final class Phone {
         apply(.job(try await runner.stop(id)))
     }
 
+    /// Stop all: every job on the runner stops now, and shows here as stopped.
+    func stopAll() async throws {
+        for job in try await runner.stopAll().jobs { apply(.job(job)) }
+    }
+
     /// Lets go of a job that needs you; its alert clears with the runner's answer.
     func dismiss(_ id: String) async throws {
         apply(.job(try await runner.dismiss(id)))
