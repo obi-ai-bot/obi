@@ -1025,8 +1025,16 @@ final class Desk {
             }
             let started = Date.now
             var result = await runCheck(id, command, limits.testRun, env)
-            // An Apple check no Mac took didn't fail: the Apple apps weren't built.
-            if !result.passed { result.appleUnbuilt = appleUnbuilt(id, since: started) }
+            // No Mac took the Apple check it asked for (#68): the Apple apps weren't built, and the
+            // rest of the command still decides. When it failed, it runs again with `oby-check` skipped.
+            if appleUnbuilt(id, since: started) {
+                if !result.passed, var again = self.job(id), again.isActive {
+                    again.step = "Checking without the Apple build: \(command)"
+                    replace(again, save: false)
+                    result = await runCheck(id, command, limits.testRun, env.merging([AppleCheck.skipVariable: "1"]) { $1 })
+                }
+                result.appleUnbuilt = true
+            }
             // Stopped while the check ran.
             guard var latest = self.job(id), latest.isActive else { return }
             // Oby compares the tests with where the branch started too: weakening them fails the round (case 3.2).
@@ -1339,7 +1347,8 @@ nonisolated enum Rounds {
         /// The failing tests' ids, read from all of the output before it's cut to its end; nil to
         /// read them from `output`.
         var failing: [String]? = nil
-        /// It failed because the Apple check it asked for found no Mac (`Desk.appleUnbuilt`), not on the agent's code.
+        /// No Mac took the Apple check it asked for (`Desk.appleUnbuilt`): it ran, or ran again, with
+        /// `oby-check` skipped, so it passed without the Apple build.
         var appleUnbuilt = false
 
         var succeeded: Bool { passed && problems.isEmpty }
@@ -1384,10 +1393,10 @@ nonisolated enum Rounds {
         if failed { return .finish(.failed, summary) }
         if let check {
             let notes = check.notes.isEmpty ? "" : "\n\nChanged in the existing tests, for review:\n" + check.notes.map { "- " + $0 }.joined(separator: "\n")
-            if check.succeeded { return .finish(.done, summary + "\n\nChecked: `\(check.command)` passed." + notes) }
-            // No Mac took its Apple check (#68): nothing another round could fix, and not the same failure twice.
-            if check.appleUnbuilt, check.problems.isEmpty {
-                return .finish(.done, summary + "\n\n`\(check.command)` didn't finish: " + AppleCheck.unbuiltLine + notes)
+            if check.succeeded {
+                // No Mac took its Apple check (#68): the rest of it passed, and the merge stage's Mac check builds the apps.
+                let passed = check.appleUnbuilt ? "passed without its Apple build. " + AppleCheck.unbuiltLine : "passed."
+                return .finish(.done, summary + "\n\nChecked: `\(check.command)` " + passed + notes)
             }
             if let previous, Fingerprint.of(check) == previous { return .hold("the same failure twice in a row", summary) }
             if last {

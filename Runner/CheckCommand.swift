@@ -9,6 +9,8 @@ import FoundationNetworking
 /// `OBY_CHECK_TOKEN`, then waits, saying where the check is, up to `--wait` seconds in all,
 /// requests to the runner included: 110 by default, under a 2-minute command timeout, or
 /// `OBY_CHECK_WAIT` when a job's final check runs it (#68). Asking again picks up the same check.
+/// In a job's final check run again without the Apple build (`AppleCheck.skipVariable`), it says so
+/// and exits 0.
 /// Exits 0 when everything passed, 1 when something failed, 2 when the check couldn't run (no Mac
 /// took it, the Mac couldn't, no runner), 3 when it's still running, 64 for a wrong command line.
 enum CheckCommand {
@@ -16,6 +18,7 @@ enum CheckCommand {
     typealias Send = @Sendable (_ method: String, _ path: String) async throws -> (status: Int, body: Data)
 
     static let usage = "usage: oby-check apple [--wait SECONDS]"
+    static let skipLine = "No Mac took the Apple check, so Oby runs the job's check again without it: the Apple apps aren't built here, and the rest of the check decides."
     static let defaultWait = 110
     static let maxWait = 3000
     /// How often it asks where the check is, in seconds.
@@ -46,6 +49,10 @@ enum CheckCommand {
         guard let wait = Self.wait(arguments, default: environment["OBY_CHECK_WAIT"].flatMap { Int($0) }) else {
             out(usage)
             return 64
+        }
+        if environment["OBY_CHECK_SKIP"] == "1" {
+            out(skipLine)
+            return 0
         }
         guard let url = environment["OBY_CHECK_URL"], let token = environment["OBY_CHECK_TOKEN"], !url.isEmpty, !token.isEmpty else {
             out("oby-check works only inside an Oby job on the runner: there's no runner to ask here.")
