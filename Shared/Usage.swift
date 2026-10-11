@@ -45,6 +45,37 @@ nonisolated enum Usage {
         }
         /// The busier window, or nil without usage.
         var busiest: Double? { [fiveHour, sevenDay].compactMap { $0 }.max() }
+        /// At 80% of its weekly limit the account takes only jobs the user sends to it by name
+        /// (`AccountState.isReserved` in the engine).
+        var reserved: Bool { (sevenDay ?? 0) >= Usage.reserve }
+    }
+
+    /// How the weekly window is going against the clock.
+    nonisolated struct Pace: Equatable, Sendable {
+        /// The share of the week gone, 0...1.
+        var gone: Double
+        /// When the limit runs out at this rate, before it resets; nil when it lasts the week.
+        var runsOut: Date?
+
+        /// Using the week faster than it passes.
+        var ahead: Bool { runsOut != nil }
+    }
+
+    /// The share of the weekly limit kept for jobs sent to the account by name, as routing keeps it.
+    static let reserve = 0.8
+    static let reservedText = "Reserved: only jobs you send it"
+
+    /// How the 7-day window is paced, or nil for another window or one without a reset time. At
+    /// this rate, used/gone of the limit is gone by the reset, so it runs out early when used > gone.
+    static func pace(_ window: Window, now: Date = .now) -> Pace? {
+        guard window.hours == 168, let resets = window.resets else { return nil }
+        let length = Double(window.hours) * 3600
+        let elapsed = min(max(length - resets.timeIntervalSince(now), 0), length)
+        let gone = elapsed / length
+        // In the week's first minute there's no rate to go by yet.
+        guard window.used > gone, elapsed >= 60 else { return Pace(gone: gone, runsOut: nil) }
+        let runsOut = window.used >= 1 ? now : now.addingTimeInterval(elapsed * (1 - window.used) / window.used)
+        return Pace(gone: gone, runsOut: runsOut)
     }
 
     static func level(_ used: Double) -> Level { used >= 0.9 ? .critical : used >= 0.7 ? .warning : .fine }
@@ -94,35 +125,68 @@ nonisolated enum Usage {
     /// `spoken` says "resets in 2 hours 10 minutes" for VoiceOver.
     static func resetText(_ resets: Date, now: Date = .now, spoken: Bool = false,
                           locale: Locale = .current, timeZone: TimeZone = .current) -> String {
-        let seconds = Int(resets.timeIntervalSince(now).rounded())
-        if seconds < 60 { return "resets soon" }
+        when(resets, now: now, spoken: spoken, locale: locale, timeZone: timeZone).map { "resets \($0)" } ?? "resets soon"
+    }
+
+    /// "in 2 h 10 min" within the day, else "Tue 14:00"; `weekday` gives just "Tue".
+    private static func when(_ date: Date, now: Date, spoken: Bool, weekday: Bool = false,
+                              locale: Locale, timeZone: TimeZone) -> String? {
+        let seconds = Int(date.timeIntervalSince(now).rounded())
+        if seconds < 60 { return nil }
         if seconds < 24 * 3600 {
             let hours = seconds / 3600, minutes = seconds % 3600 / 60
             var parts: [String] = []
             if hours > 0 { parts.append(spoken ? "\(hours) hour\(hours == 1 ? "" : "s")" : "\(hours) h") }
             if minutes > 0 { parts.append(spoken ? "\(minutes) minute\(minutes == 1 ? "" : "s")" : "\(minutes) min") }
-            return "resets in " + parts.joined(separator: " ")
+            return "in " + parts.joined(separator: " ")
         }
-        let day = resets.formatted(Date.FormatStyle(locale: locale, timeZone: timeZone).weekday(.abbreviated).hour().minute())
-        return "resets \(day)"
+        let style = Date.FormatStyle(locale: locale, timeZone: timeZone).weekday(.abbreviated)
+        return date.formatted(weekday ? style : style.hour().minute())
     }
 
-    /// "63% used · resets in 2 h 10 min", under a bar.
-    static func line(_ window: Window, now: Date = .now) -> String {
-        [percent(window.used) + " used", window.resets.map { resetText($0, now: now) }].compactMap { $0 }.joined(separator: " · ")
+    /// "30% of the week gone · runs out Tue at this pace" when ahead of pace, else "50% of the week
+    /// gone · resets Wed 14:00". Nil for a window without pace.
+    static func paceText(_ window: Window, now: Date = .now, locale: Locale = .current, timeZone: TimeZone = .current) -> String? {
+        paceParts(window, now: now, locale: locale, timeZone: timeZone)?.joined(separator: " · ")
+    }
+
+    private static func paceParts(_ window: Window, now: Date, spoken: Bool = false, locale: Locale, timeZone: TimeZone) -> [String]? {
+        guard let pace = pace(window, now: now), let resets = window.resets else { return nil }
+        let gone = "\(percent(pace.gone)) of the week gone"
+        guard let runsOut = pace.runsOut else {
+            return [gone, resetText(resets, now: now, spoken: spoken, locale: locale, timeZone: timeZone)]
+        }
+        let at = when(runsOut, now: now, spoken: spoken, weekday: true, locale: locale, timeZone: timeZone)
+        return [gone, at.map { "runs out \($0) at this pace" } ?? "runs out now"]
+    }
+
+    /// "63% used", then the reset time ("resets in 2 h 10 min") or, on the weekly bar, the pace.
+    static func used(_ window: Window) -> String { percent(window.used) + " used" }
+
+    /// "63% used · resets in 2 h 10 min" under a bar; the weekly one says "62% used · 30% of the
+    /// week gone · runs out Tue at this pace".
+    static func line(_ window: Window, now: Date = .now, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        let after = paceText(window, now: now, locale: locale, timeZone: timeZone)
+            ?? window.resets.map { resetText($0, now: now, locale: locale, timeZone: timeZone) }
+        return [used(window), after].compactMap { $0 }.joined(separator: " · ")
     }
 
     /// What VoiceOver reads for a card: "Codex, Deskree: 63% of the 5-hour limit used, resets in
-    /// 2 hours, 12% of the 7-day limit used, resets Tue 14:00, 1 agent running".
-    static func spoken(_ snapshot: Snapshot, now: Date = .now) -> String {
+    /// 2 hours, 12% of the 7-day limit used, 30% of the week gone, resets Tue 14:00, 1 agent running".
+    static func spoken(_ snapshot: Snapshot, now: Date = .now, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
         var parts: [String] = []
         if let notice = notice(snapshot) {
             parts.append(notice)
         } else {
             for window in snapshot.windows {
                 parts.append("\(percent(window.used)) of the \(window.name) limit used")
-                if let resets = window.resets { parts.append(resetText(resets, now: now, spoken: true)) }
+                if let pace = paceParts(window, now: now, spoken: true, locale: locale, timeZone: timeZone) {
+                    parts += pace
+                } else if let resets = window.resets {
+                    parts.append(resetText(resets, now: now, spoken: true, locale: locale, timeZone: timeZone))
+                }
             }
+            if snapshot.reserved { parts.append(reservedText) }
         }
         if snapshot.running > 0 { parts.append(runningText(snapshot.running)) }
         return "\(snapshot.tool), \(snapshot.name): " + parts.joined(separator: ", ")
@@ -145,7 +209,8 @@ nonisolated enum Usage {
 
 #if canImport(SwiftUI)
 /// One account's usage card, the same on the iPhone and the Mac: its tool, name and plan, a bar per
-/// limit window with its reset time, and how many agents run on it. The countdowns tick every minute.
+/// limit window with its reset time (the weekly one with its pace), whether the account is reserved,
+/// and how many agents run on it. The countdowns tick every minute.
 struct UsageCard: View {
     var snapshot: Usage.Snapshot
 
@@ -169,14 +234,18 @@ struct UsageCard: View {
                 } else {
                     ForEach(snapshot.windows, id: \.hours) { window in
                         VStack(alignment: .leading, spacing: 3) {
-                            HStack {
+                            HStack(alignment: .firstTextBaseline) {
                                 Text(window.name)
                                 Spacer()
-                                Text(Usage.line(window, now: context.date)).monospacedDigit()
+                                Self.line(window, now: context.date).monospacedDigit().multilineTextAlignment(.trailing)
                             }
                             .font(.caption).foregroundStyle(.secondary)
                             ProgressView(value: min(max(window.used, 0), 1)).tint(Self.color(window.level))
                         }
+                    }
+                    if snapshot.reserved {
+                        Label(Usage.reservedText, systemImage: "lock")
+                            .font(.caption.weight(.medium)).foregroundStyle(.orange)
                     }
                 }
             }
@@ -184,6 +253,13 @@ struct UsageCard: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Usage.spoken(snapshot, now: context.date))
         }
+    }
+
+    /// `Usage.line`, with the pace in amber while the week is used faster than it passes.
+    static func line(_ window: Usage.Window, now: Date) -> Text {
+        guard let pace = Usage.paceText(window, now: now) else { return Text(Usage.line(window, now: now)) }
+        let ahead = Usage.pace(window, now: now)?.ahead == true
+        return Text("\(Usage.used(window)) · \(Text(pace).foregroundStyle(ahead ? Color.orange : Color.secondary))")
     }
 
     static func color(_ level: Usage.Level) -> Color {

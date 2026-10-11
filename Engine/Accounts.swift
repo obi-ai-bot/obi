@@ -35,6 +35,23 @@ nonisolated struct AccountState: Equatable, Sendable {
 
     var signedIn: Bool { label != nil }
     func isFull(at now: Date = .now) -> Bool { (fullUntil ?? .distantPast) > now }
+
+    /// The share of its weekly limit an account keeps for jobs the user sends to it by name.
+    static let reserve = 0.8
+    /// At 80% of its weekly limit an account gets no automatic work, only jobs sent to it by name.
+    var isReserved: Bool { (sevenDay ?? 0) >= Self.reserve }
+
+    /// How much of the 7-day window has passed, 0...1, or nil when its reset time is unknown.
+    func weekGone(at now: Date = .now) -> Double? {
+        sevenDayResets.map { min(max(1 - $0.timeIntervalSince(now) / (7 * 86_400), 0), 1) }
+    }
+
+    /// How far the weekly usage is ahead of the share of the week gone, 0 when on pace or unknown:
+    /// 62% used with 30% of the week gone is 0.32 ahead.
+    func ahead(at now: Date = .now) -> Double {
+        guard let sevenDay, let gone = weekGone(at: now) else { return 0 }
+        return max(sevenDay - gone, 0)
+    }
 }
 
 /// The accounts Oby spreads jobs across, saved in `accounts.json`. Homes Oby makes live in
@@ -148,15 +165,16 @@ final class AccountStore {
     }
 
     /// The account for a new job, keeping every account in balance: a signed-in account of that
-    /// agent (any agent if nil) under 95% of both its windows and not marked full, with the lowest
-    /// score, the busier of its two windows plus 0.15 per running job. Each account's usage is
-    /// measured against its own plan, so a small plan fills up faster and gets fewer jobs. Unknown
-    /// usage counts as 0; ties keep list order.
+    /// agent (any agent if nil) under 95% of its 5-hour window, not reserved for the week
+    /// (`isReserved`) and not marked full, with the lowest `score`. Each account's usage is measured
+    /// against its own plan, so a small plan fills up faster and gets fewer jobs. Unknown usage
+    /// counts as 0; ties keep list order. Every automatic choice goes through here (the brain's
+    /// dispatch, failover, reviews); only a job the user sends to an account by name skips it.
     nonisolated static func route(_ accounts: [AccountState], agent: String?, now: Date = .now) -> Account? {
         accounts.enumerated()
             .filter { $0.element.signedIn && (agent == nil || $0.element.account.agent == agent) && !$0.element.isFull(at: now)
-                && ($0.element.fiveHour ?? 0) < 0.95 && ($0.element.sevenDay ?? 0) < 0.95 }
-            .min { (score($0.element), $0.offset) < (score($1.element), $1.offset) }?
+                && ($0.element.fiveHour ?? 0) < 0.95 && !$0.element.isReserved }
+            .min { (score($0.element, now: now), $0.offset) < (score($1.element, now: now), $1.offset) }?
             .element.account
     }
 
@@ -165,8 +183,10 @@ final class AccountStore {
         route(accounts, agent: agent, now: now) ?? route(accounts, agent: nil, now: now)
     }
 
-    nonisolated static func score(_ state: AccountState) -> Double {
-        max(state.fiveHour ?? 0, state.sevenDay ?? 0) + 0.15 * Double(state.running)
+    /// The busier of its two windows, plus how far its week is ahead of pace (`ahead`), plus 0.15
+    /// per running job. Lower is better.
+    nonisolated static func score(_ state: AccountState, now: Date = .now) -> Double {
+        max(state.fiveHour ?? 0, state.sevenDay ?? 0) + state.ahead(at: now) + 0.15 * Double(state.running)
     }
 
     /// "Max · name@example.com" from `claude auth status --json`, or nil when it isn't signed in.
