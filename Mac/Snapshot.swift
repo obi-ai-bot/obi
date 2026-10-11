@@ -45,9 +45,10 @@ final class Tray {
     static let folder = Workspace.root.appending(path: "attachments")
 
     init() {
-        // ponytail: a job copies its attachments when its worktree is ready, so they're kept a week
-        // rather than tracked; a request dispatched later than that goes without them.
-        let old = Date.now.addingTimeInterval(-7 * 24 * 3600)
+        // ponytail: a job copies its attachments when its worktree is ready, so they're kept a day
+        // rather than tracked (the clipboard can hold secrets); a plan dispatched later than that
+        // goes without them.
+        let old = Date.now.addingTimeInterval(-24 * 3600)
         let files = (try? FileManager.default.contentsOfDirectory(at: Self.folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
         for file in files where ((try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .now) < old {
             try? FileManager.default.removeItem(at: file)
