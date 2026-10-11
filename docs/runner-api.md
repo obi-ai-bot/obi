@@ -264,6 +264,12 @@ What the plan card shows before anything runs:
  "clearedAt": "2026-10-10T08:12:00Z"}
 ```
 
+`runner.version` is the running API version. `runner.update` adds `{"commit": "<dev SHA>", "waiting": "<candidate SHA>", "phase": "draining"}` for Settings › Runner. `commit` is the running executable's dev commit, or null before its first self-install or after an untracked manual install. `waiting` is null when no update is pending. `phase` is `idle`, `building`, `draining`, `restarting` or `failed`. Clients of older runners accept an absent `update`; refresh status to observe progress.
+
+The runner checks `dev` every three minutes, using its own checkout in `OBY_HOME/updates/source`, outside agent sandboxes. It pins the fetched commit, runs `swift build -c release` then `swift test`, and drains only after both pass. Drain pauses new jobs, reviews and follow-up rounds while current rounds finish, for at most 30 minutes. The tested executable atomically replaces the installed binary, then the runner exits with code 75 so the systemd user service (`Restart=on-failure`) restarts it. Its journal is `OBY_HOME/updates/state.json`.
+
+Jobs interrupted by an update resume automatically in their own saved sessions with `the runner restarted for an update: pick up where you left off`, preserving their round. Queued jobs start when their worktree is ready. Questions continue to wait for the user's answer; ordinary stops and crashes are not automatically resumed. A failed build, test or install keeps the old binary and adds one durable inbox item (`kind: failed`, `job: runner-update`, no answer options) naming the failing step; mark it done after reading. That commit is not retried on later polls or restarts; the next dev commit is tried. Fetch failures are deduplicated and retried on later polls. No build output or credentials enter the inbox.
+
 `clearedAt` is when Clear done was last pressed, on any app (`POST /v1/clear`), or null when it never was. Every app hides the jobs that finished at that second or before (`finished` not after `clearedAt`); running jobs, and finished ones that ran again since, stay. Older runners don't send the key.
 
 ### `POST /v1/clear`
