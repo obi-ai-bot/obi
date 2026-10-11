@@ -294,22 +294,50 @@ nonisolated enum Publish {
         }.filter { seen.insert($0).inserted }
     }
 
-    /// Whether `text` breaks `rule`. A "password or secret" assignment counts unless its value is
-    /// only the name of one: words in camelCase or joined by - _ . with no digits, one of which says
-    /// what it names ("clientSecret", "watch-access-client-token"), as code's keys and vault entry
-    /// names are. A weak password ("hunter2hunter2"), a passphrase ("correct-horse-battery-staple")
-    /// and real keys still count. Every other rule counts on its own.
+    /// Whether `text` breaks `rule`. A "password or secret" assignment counts unless its value is only
+    /// a name: the assigned key's own name (`clientSecret = "clientSecret"`, `apiKey = "api_key"`), or
+    /// three or more words, camelCase or joined by - _ . with no digits, ending in what it names: id,
+    /// name, entry, key, token or secret (`"watch-access-client-token"`). Whole words only, and never
+    /// one holding "password": `my-secret-password` and `monkeyForestTree` still count. Every other
+    /// rule counts on its own.
     static func breaks(_ rule: (name: String, pattern: Regex<Substring>), _ text: String) -> Bool {
         guard rule.name == "password or secret" else { return text.contains(rule.pattern) }
-        return text.matches(of: rule.pattern).contains { !onlyNames(String($0.output)) }
+        return text.matches(of: rule.pattern).contains { match in
+            // The whole key the value is assigned to: the match starts at its keyword ("Secret" in clientSecret).
+            var start = match.range.lowerBound
+            while start > text.startIndex, let before = Optional(text[text.index(before: start)]), before.isLetter || before.isNumber || before == "_" {
+                start = text.index(before: start)
+            }
+            let key = String(text[start..<match.range.upperBound].prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+            return !onlyNames(String(match.output), key: key)
+        }
     }
 
-    /// The quoted value of a "password or secret" match is a name for one, not one.
-    static func onlyNames(_ assignment: String) -> Bool {
-        guard let value = assignment.split(whereSeparator: { $0 == "\"" || $0 == "'" }).last.map(String.init),
-              value.wholeMatch(of: /[a-z]+(?:[A-Z][a-z]+)+/) != nil || value.wholeMatch(of: /[a-z]+(?:[-_.][a-z]+)+/) != nil else { return false }
-        let lower = value.lowercased()
-        return ["secret", "token", "password", "passwd", "key", "client", "vault", "entry", "access", "name", "id"].contains { lower.contains($0) }
+    /// The quoted value of a "password or secret" match, assigned to `key`, is a name for one, not one.
+    static func onlyNames(_ assignment: String, key: String) -> Bool {
+        let parts = assignment.split(whereSeparator: { $0 == "\"" || $0 == "'" }).map(String.init)
+        guard let value = parts.last, value.wholeMatch(of: /[A-Za-z]+(?:[-_.]?[A-Za-z]+)*/) != nil else { return false }
+        let words = Self.words(value)
+        guard !words.contains(where: { $0.hasPrefix("pass") }) else { return false }
+        // The key's own name, as words: "clientSecret", "client_secret" or "CLIENT_SECRET".
+        if words == Self.words(key) { return true }
+        return words.count >= 3 && ["id", "name", "entry", "key", "token", "secret"].contains(words.last ?? "")
+    }
+
+    /// "watch-access-client-token", "clientSecret" or "CLIENT_SECRET" as lowercased words.
+    static func words(_ text: String) -> [String] {
+        var words: [String] = [], current = ""
+        for character in text {
+            if character == "-" || character == "_" || character == "." || character == " " {
+                if !current.isEmpty { words.append(current.lowercased()); current = "" }
+            } else if character.isUppercase, let last = current.last, last.isLowercase {
+                words.append(current.lowercased()); current = String(character)
+            } else {
+                current.append(character)
+            }
+        }
+        if !current.isEmpty { words.append(current.lowercased()) }
+        return words
     }
 
     /// The text's encoded runs, decoded: URL-encoding, base64 (standard or URL-safe) and hex, and
