@@ -421,6 +421,10 @@ struct HaltTests {
         #expect(try String(contentsOf: said, encoding: .utf8) == "term\n")
     }
 
+    /// A leftover that says `leftover` on the output if it ends by itself, after its sleep: output
+    /// without it was cut by the kill, however slow the machine (#193).
+    func leftover(_ mark: String) -> String { "\(mark) && echo leftover & echo started" }
+
     /// The agent ended by itself, but a tool it started still runs and holds its output: that's
     /// killed, so reading the output ends (a review sat running for 2.5 hours on a test's leftover).
     @Test(.timeLimit(.minutes(1)))
@@ -428,13 +432,14 @@ struct HaltTests {
         let mark = mark()
         let process = Process(), out = Pipe()
         process.executableURL = URL(filePath: "/bin/sh")
-        process.arguments = ["-c", "\(mark) & echo started"]
+        process.arguments = ["-c", leftover(mark)]
         process.standardOutput = out
         _ = try ProcessGroup.run(process)
         let start = ContinuousClock.now
         let read = try await Task.detached { try out.fileHandleForReading.readToEnd() }.value
         #expect(read.map { String(decoding: $0, as: UTF8.self) } == "started\n")
-        #expect(ContinuousClock.now - start < .seconds(10))
+        // Under the leftover's 31 s: killed, not waited out, however busy the machine (13 s, #193).
+        #expect(ContinuousClock.now - start < .seconds(30))
         #expect(try await gone(mark))
     }
 
@@ -443,9 +448,9 @@ struct HaltTests {
     func aChecksLeftoversDontHoldItsOutput() async throws {
         let mark = mark()
         let start = ContinuousClock.now
-        let result = try await Shell.run(["sh", "-c", "\(mark) & echo started"])
+        let result = try await Shell.run(["sh", "-c", leftover(mark)])
         #expect(result.text == "started" && result.status == 0)
-        #expect(ContinuousClock.now - start < .seconds(10))
+        #expect(ContinuousClock.now - start < .seconds(30))
         #expect(try await gone(mark))
     }
 

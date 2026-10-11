@@ -17,6 +17,21 @@ func temporaryFolder() throws -> URL {
     return folder
 }
 
+/// Writes `script` at `url` as an executable, through `install`, a process of its own. A file this
+/// process writes is open for writing for a moment in any process another test starts just then,
+/// until that one execs, and running the file in that moment fails with "Text file busy" (#193).
+func executable(_ script: String, at url: URL) throws {
+    let source = url.appendingPathExtension("source")
+    try script.write(to: source, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: source) }
+    let install = Process()
+    install.executableURL = URL(filePath: "/usr/bin/install")
+    install.arguments = ["-m", "700", source.path, url.path]
+    try install.run()
+    install.waitUntilExit()
+    guard install.terminationStatus == 0 else { throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path]) }
+}
+
 /// The job from docs/runner-api.md.
 let job = Job(id: "9f08fd10", request: "Review oby PR #33", agent: "claude", account: "default", repo: "deskree-inc/oby",
               branch: "oby/review-33", pr: 33, kind: .review, task: "Review pull request #33 in deskree-inc/oby.",

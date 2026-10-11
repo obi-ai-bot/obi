@@ -370,10 +370,8 @@ struct IssueSyncTests {
     @Test func realGhMultilineScopeDiagnosticReachesSyncAndLead() async throws {
         let (desk, _, job) = try fixture()
         let folder = try temporaryFolder()
-        let executable = folder.appending(path: "gh")
         let diagnostic = "error: your authentication token is missing required scopes [read:project]\nTo request it, run: gh auth refresh -s read:project"
-        try "#!/bin/sh\nprintf '%s\\n' 'error: your authentication token is missing required scopes [read:project]' 'To request it, run: gh auth refresh -s read:project' >&2\nexit 1\n".write(to: executable, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        try executable("#!/bin/sh\nprintf '%s\\n' 'error: your authentication token is missing required scopes [read:project]' 'To request it, run: gh auth refresh -s read:project' >&2\nexit 1\n", at: folder.appending(path: "gh"))
         let environment: [String: String?] = ["PATH": folder.path + ":/usr/bin:/bin"]
         let raw = await #expect(throws: Shell.Failure.self) { try await Shell.ok(["gh", "project", "list"], env: environment) }
         #expect(raw?.localizedDescription.contains(diagnostic) == true)
