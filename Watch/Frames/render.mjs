@@ -23,6 +23,12 @@ const LOOPS = [
   { name: 'working', play: 'Working', frames: 66, pre: 8, every: 2 },
   // A happy bounce and a wiggle to say something is waiting, then a beat of calm.
   { name: 'needs', play: 'Hello', frames: 68, pre: 8, every: 2 },
+  // Tapping Oby, played once each, as oby.html reacts to clicks: the first pokes startle it, the
+  // 4th annoys it, the 6th makes it turn away and then shake it off. `poke` is how many clicks
+  // land at once (oby.html counts them; only the last one's reaction plays).
+  { name: 'poked', poke: 1, frames: 26, pre: 6, every: 2 },
+  { name: 'annoyed', poke: 4, frames: 38, pre: 6, every: 2 },
+  { name: 'ignoring', poke: 6, frames: 80, pre: 6, every: 2 },
 ];
 
 function findChrome() {
@@ -123,6 +129,22 @@ for (const loop of LOOPS) {
     await shot(join(dir, `pre-${String(i).padStart(3, '0')}.png`));
   }
   if (loop.play) await js(`oby.play('${loop.play}'); true`);
+  if (loop.poke) {
+    // Clicks land only on Oby's drawn body (oby.html reads the pixel), so the first click searches
+    // the stage for it, and the rest land on the same spot.
+    const pokes = await js(`(async () => {
+      let count = 0; const off = oby.on('poke', (e) => { count = e.count; });
+      const settle = () => new Promise((r) => queueMicrotask(r));  // oby.html emits in a microtask
+      const stage = document.getElementById('stage');
+      const click = (x, y) => stage.dispatchEvent(new PointerEvent('pointerdown', { clientX: x, clientY: y, bubbles: true }));
+      let hit;
+      for (let y = innerHeight * 0.3; y < innerHeight * 0.8 && !hit; y += 6)
+        for (let x = innerWidth * 0.3; x < innerWidth * 0.7 && !hit; x += 6) { click(x, y); await settle(); if (count) hit = [x, y]; }
+      for (let i = 1; hit && i < ${loop.poke}; i++) click(...hit);
+      await settle(); off(); return count;
+    })()`);
+    if (pokes !== loop.poke) throw new Error(`${loop.name}: ${pokes} pokes landed, wanted ${loop.poke}`);
+  }
   for (let i = 0; i < loop.frames; i++) {
     await js(`__step(${loop.every})`);
     await sleep(30);
