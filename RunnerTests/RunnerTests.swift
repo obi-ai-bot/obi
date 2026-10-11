@@ -273,9 +273,9 @@ final class APITests {
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
         for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "check", "model", "notes", "pullRequest", "pullRequestError",
-                    "dismissed", "reviewing", "review", "reviewError", "reviewOf", "files", "lead", "claim", "question"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
+                    "dismissed", "reviewing", "review", "reviewError", "reviewOf", "files", "lead", "claim", "question", "limit", "startCommit"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 42)
+        #expect(decoded.count == 44)
         #expect(json.contains(#""outgoing":[]"#))
         #expect(decoded["pipeline"] is [String: Any])
         #expect(decoded["title"] as? String == "Review oby #33")
@@ -619,12 +619,12 @@ struct SandboxTests {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = Agents.sandboxed(["sleep", "30"], in: nil, own: nil)
-        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, any Error>) in
-            DispatchQueue.global().async { done.resume(with: Result { try process.run() }) }
+        let group = try await withCheckedThrowingContinuation { (done: CheckedContinuation<ProcessGroup, any Error>) in
+            DispatchQueue.global().async { done.resume(with: Result { try ProcessGroup.run(process) }) }
         }
         try await Task.sleep(for: .seconds(8))
         #expect(process.isRunning)
-        process.terminate()
+        group.end(after: Halt.stopping)
     }
 
     /// Codex's own bubblewrap can't nest inside Oby's, so it runs none and asks Oby about every command.

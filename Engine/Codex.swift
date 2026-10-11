@@ -128,9 +128,11 @@ final class CodexAgent: AgentRun {
         switch CodexRPC.answer(request, files: files, worktree: worktree) {
         case .accept:
             server.reply(id, ["decision": "accept"])
+            onEvent(.permission(denied: nil))
         case let .decline(reason):
             Logger.jobs.notice("declined \(request["method"] as? String ?? "", privacy: .public): \(reason, privacy: .public)")
             server.reply(id, ["decision": "decline"])
+            onEvent(.permission(denied: reason))
             // The decision has no room for a reason, so it reaches Codex as a word from Oby.
             let params = request["params"] as? [String: Any] ?? [:]
             if let thread = params["threadId"] as? String, let turn = params["turnId"] as? String {
@@ -183,6 +185,7 @@ final class CodexAgent: AgentRun {
 /// notifications and the server's own requests go to `onMessage`.
 final class CodexServer {
     private let process = Process()
+    private var group: ProcessGroup?
     private let input = Pipe()
     private let output = Pipe()
     private var nextID = 0
@@ -199,7 +202,7 @@ final class CodexServer {
         process.standardInput = input
         process.standardOutput = output
         process.standardError = log.flatMap { try? FileHandle(forWritingTo: $0) } ?? FileHandle.nullDevice
-        try process.run()
+        group = try ProcessGroup.run(process)
         Task { await read() }
     }
 
@@ -231,13 +234,14 @@ final class CodexServer {
         try? input.fileHandleForWriting.close()
     }
 
+    /// Ends it, with whatever it started (`Halt`).
     func kill() {
-        if process.isRunning { process.terminate() }
+        group?.end(after: Halt.dropping)
     }
 
-    /// Ends it now, with whatever it started (`Halt`).
+    /// Ends it now, with whatever it started: Stop's 2 seconds.
     func halt() {
-        Halt.end(process)
+        group?.end(after: Halt.stopping)
     }
 
     private func read() async {

@@ -49,7 +49,8 @@ nonisolated enum Inbox {
     /// What a failed job's item offers: run it again from where it was, or let it go.
     static let tryAgain = "Try again"
     static let dismiss = "Dismiss"
-    /// What an item out of review rounds offers besides Dismiss.
+    /// What an item out of review rounds, or for a job Oby stopped at one of its limits (case 3.1),
+    /// offers besides Dismiss.
     static let oneMoreRound = "One more round"
     /// What the agent hears for Try again.
     static let tryAgainMessage = "Try again, picking up where you left off. Finish with a short summary as asked."
@@ -73,8 +74,9 @@ nonisolated enum Inbox {
         let line = job.summary.split(separator: "\n").first.map(String.init) ?? job.status.rawValue.capitalized
         // Each failure its own: a retry that fails within the same second is another round.
         let ended = Int((job.finished ?? job.created).timeIntervalSince1970 * 1000)
-        // Try again picks the job's session up: one that never started has none.
-        let options = job.session == nil ? [dismiss] : [tryAgain, dismiss]
+        // Try again picks the job's session up: one that never started has none. A job stopped at a
+        // limit gets one more round the same way.
+        let options = job.session == nil ? [dismiss] : [job.limit == nil ? tryAgain : oneMoreRound, dismiss]
         // The same id either way: after a restart Oby no longer knows it was the limits, and the item stays.
         return item(limited ? .limit : .failed, "failed-\(job.currentRound)-\(ended)", line, options)
     }

@@ -10,8 +10,7 @@ struct ObyAnimation: View {
     }
 
     let loop: Loop
-    /// `.fill` covers the space it's given (Home, edge to edge): Oby keeps clear of the frames'
-    /// sides, so a watch screen's height crops only empty space.
+    /// Home gives the frames their own square inside its safe area.
     var contentMode: ContentMode = .fit
 
     @State private var onScreen = false
