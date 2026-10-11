@@ -21,7 +21,10 @@ struct HomeView: View {
                 Button { path.append(.jobs) } label: {
                     // The whole screen, whatever its shape: Oby fills it and the overflow is cut.
                     Color.clear
-                        .overlay { ObyAnimation(loop: loop, contentMode: .fill) }
+                        .overlay {
+                            ObyAnimation(loop: loop, contentMode: .fill)
+                                .overlay { GeometryReader { frame in badge.position(x: frame.size.width * Self.corner.x, y: frame.size.height * Self.corner.y) } }
+                        }
                         .clipped()
                         .contentShape(Rectangle())
                 }
@@ -32,21 +35,9 @@ struct HomeView: View {
                 .ignoresSafeArea()
                 TalkButton(talking: $talking)
             }
-            // Oby's top corner, below the clock: the count of what needs you. VoiceOver reads it on Oby.
-            .overlay(alignment: .topTrailing) {
-                if !watch.needing.isEmpty {
-                    Text("\(watch.needing.count)")
-                        .font(.caption2.weight(.bold).monospacedDigit())
-                        .foregroundStyle(.white)
-                        .frame(minWidth: 20, minHeight: 20)
-                        .background(.orange, in: Capsule())
-                        .padding(.trailing, 4)
-                        .accessibilityHidden(true)
-                }
-            }
             .navigationDestination(for: Screen.self) { screen in
                 switch screen {
-                case .jobs: JobList()
+                case .jobs: JobListScreen()
                 case .job(let id): JobScreen(id: id)
                 }
             }
@@ -80,6 +71,22 @@ struct HomeView: View {
         return false
     }
 
+    /// Oby's top-right corner in the needs frames, as a fraction of the frame: Oby sits low in
+    /// them (rows 68 to 155 of 160, the busy dots of `working` above), at columns 27 to 133.
+    private static let corner = CGPoint(x: 0.82, y: 0.44)
+
+    /// The count of what needs you, on Oby's corner. VoiceOver reads it in Oby's value.
+    @ViewBuilder private var badge: some View {
+        if !watch.needing.isEmpty {
+            Text("\(watch.needing.count)")
+                .font(.caption2.weight(.bold).monospacedDigit())
+                .foregroundStyle(.white)
+                .frame(minWidth: 20, minHeight: 20)
+                .background(.orange, in: Capsule())
+                .accessibilityHidden(true)
+        }
+    }
+
     /// Waving while something needs you, busy while agents work, calm otherwise (and before the
     /// iPhone has sent anything).
     private var loop: ObyAnimation.Loop {
@@ -89,7 +96,7 @@ struct HomeView: View {
 }
 
 /// The jobs that need you, then the ones running.
-struct JobList: View {
+struct JobListScreen: View {
     @Environment(Watch.self) private var watch
 
     var body: some View {
