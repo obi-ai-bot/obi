@@ -178,6 +178,7 @@ final class Watch: NSObject {
     /// One ordered, acknowledged stream per hold. Buffering is bounded: a slow connection
     /// fails explicitly rather than silently dropping words or retaining unbounded audio.
     func beginVoice(sampleRate: Double) {
+        useDictation = false
         let id = UUID().uuidString
         asking = id
         words = ""
@@ -211,9 +212,10 @@ final class Watch: NSObject {
                 if talk == .sending { talk = .thinking(said) }
             } catch {
                 guard asking == id, !Task.isCancelled else { return }
+                let connectionFailed = !reachable || (error as NSError).domain == WCErrorDomain
                 cancel()
-                useDictation = true
-                talk = .reply("\(error.localizedDescription) Tap the mic to dictate instead.")
+                useDictation = connectionFailed
+                talk = .reply(error.localizedDescription + (connectionFailed ? " Tap the mic to dictate instead." : ""))
             }
         }
     }
@@ -238,6 +240,8 @@ final class Watch: NSObject {
 
     /// Dictated or typed.
     func ask(_ words: String) {
+        // One fallback input doesn't permanently replace hold-to-talk on a reachable phone.
+        useDictation = false
         let said = words.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !said.isEmpty else { return }
         plan(said, answer: nil)
@@ -246,6 +250,11 @@ final class Watch: NSObject {
     /// The user picked one of the brain's options.
     func answer(_ option: String, said: String, question: Question) {
         plan(said, answer: (question.text, option))
+    }
+
+    /// A jobs tap or notification leaves Home without dismissing its answer or queued ask.
+    func leaveHome() {
+        if talk == .recording { cancel() }
     }
 
     func cancel() {

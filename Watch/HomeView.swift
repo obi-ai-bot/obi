@@ -28,7 +28,7 @@ struct HomeView: View {
                 let space = max(0, min(height * (quiet ? 0.68 : 0.30), height - mic - 12 - (quiet ? 0 : 44)))
                 let side = min(width * fraction, space / (1 - trim))
                 VStack(spacing: 6) {
-                    Button { watch.cancel(); path.append(.jobs) } label: {
+                    Button { watch.leaveHome(); path.append(.jobs) } label: {
                         ObyAnimation(loop: loop)
                             .frame(width: side, height: side)
                             .offset(y: -side * trim / 2)
@@ -68,7 +68,9 @@ struct HomeView: View {
             .onChange(of: watch.opening, initial: true) {
                 guard let id = watch.opening else { return }
                 watch.opening = nil
-                watch.cancel()
+                // Stop a hold before its release can send it. Navigation keeps replies,
+                // plans and requests queued for the phone; it isn't a dismissal.
+                watch.leaveHome()
                 path = [.job(id)]
             }
         }

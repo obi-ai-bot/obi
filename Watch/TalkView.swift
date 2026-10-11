@@ -149,7 +149,7 @@ struct TalkView: View {
     }
 }
 
-/// Mono Float32 PCM, batched into roughly 1/4-second messages. No audio file stays on the watch.
+/// Mono 16 kHz Int16 PCM (WatchWire), batched into 1/4-second messages. No audio file stays on the watch.
 @Observable
 final class Recorder {
     static let limit = WatchWire.voiceSeconds
@@ -180,23 +180,41 @@ final class Recorder {
             let format = input.outputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0,
                   format.commonFormat == .pcmFormatFloat32,
-                  format.channelCount == 1 || !format.isInterleaved else {
+                  format.channelCount == 1 || !format.isInterleaved,
+                  let wire = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: WatchWire.voiceSampleRate,
+                                           channels: 1, interleaved: false),
+                  let made = AVAudioConverter(from: format, to: wire) else {
                 throw RunnerError(message: "The microphone's audio format isn't available.")
             }
+            made.downmix = true
+            // Used only on the audio thread, one buffer at a time, so its resampling state carries over.
+            nonisolated(unsafe) let converter = made
             let id = UUID()
             generation = id
-            chunkBytes = min(WatchWire.chunkLimit, Int(format.sampleRate * 0.25) * MemoryLayout<Float>.size)
+            chunkBytes = min(WatchWire.chunkLimit, Int(WatchWire.voiceSampleRate * 0.25) * WatchWire.voiceSampleBytes)
             self.deliver = deliver
             self.engine = engine
             input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
                 guard let samples = buffer.floatChannelData?[0] else { return }
-                // Copy before AVAudioEngine reuses its buffer. Nothing from the audio callback
-                // touches observed state; stale callbacks are rejected by the generation below.
                 let count = Int(buffer.frameLength)
-                let audio = Data(bytes: samples, count: count * MemoryLayout<Float>.size)
                 var power: Float = 0
                 for index in 0..<count { power += samples[index] * samples[index] }
                 let level = min(1, Double(sqrt(power / Float(max(1, count)))) * 8)
+                // Converted and copied before AVAudioEngine reuses its buffer. Nothing from the audio
+                // callback touches observed state; stale callbacks are rejected by the generation below.
+                let capacity = AVAudioFrameCount(ceil(Double(count) * wire.sampleRate / format.sampleRate)) + 32
+                guard let output = AVAudioPCMBuffer(pcmFormat: wire, frameCapacity: capacity) else { return }
+                var supplied = false
+                var error: NSError?
+                let status = converter.convert(to: output, error: &error) { _, status in
+                    if supplied { status.pointee = .noDataNow; return nil }
+                    supplied = true
+                    status.pointee = .haveData
+                    return buffer
+                }
+                guard status != .error, error == nil, output.frameLength > 0,
+                      let converted = output.int16ChannelData?[0] else { return }
+                let audio = Data(bytes: converted, count: Int(output.frameLength) * WatchWire.voiceSampleBytes)
                 Task { @MainActor in self.receive(audio, level: level, generation: id) }
             }
             engine.prepare()
@@ -212,7 +230,7 @@ final class Recorder {
                     if seconds == Self.limit { closeMicrophone() }
                 }
             }
-            return format.sampleRate
+            return WatchWire.voiceSampleRate
         } catch {
             cancel()
             try? session.setActive(false)

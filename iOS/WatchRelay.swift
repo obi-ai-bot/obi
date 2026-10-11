@@ -150,7 +150,7 @@ final class WatchRelay: NSObject {
                 return [WatchWire.text: said]
             case .voiceStart:
                 guard !request.isEmpty, let rate = message[WatchWire.sampleRate] as? Double,
-                      rate.isFinite, (8_000...192_000).contains(rate) else { return bad }
+                      rate == WatchWire.voiceSampleRate else { return bad }
                 liveVoice?.cancel()
                 liveVoice = nil
                 preparingVoice = request
@@ -385,7 +385,7 @@ private final class LiveWatchSpeech {
             }
             throw RunnerError(message: "Your iPhone is getting the speech model. Try again in a minute.")
         }
-        guard let source = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
+        guard let source = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate,
                                          channels: 1, interleaved: false),
               let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]),
               let converter = AVAudioConverter(from: source, to: format) else {
@@ -409,9 +409,18 @@ private final class LiveWatchSpeech {
         }
         do { try await analyzer.start(inputSequence: stream) }
         catch { live.cancel(); throw error }
+        // UIKit requires the expired task ended inside this callback, before async cleanup.
+        // Match inBackground's synchronous ownership handoff to avoid ending the id twice.
+        nonisolated(unsafe) var background = UIBackgroundTaskIdentifier.invalid
         live.background = UIApplication.shared.beginBackgroundTask(withName: "watch live speech") { [weak live] in
-            Task { @MainActor in live?.cancel() }
+            UIApplication.shared.endBackgroundTask(background)
+            background = .invalid
+            Task { @MainActor in
+                live?.background = .invalid
+                live?.cancel()
+            }
         }
+        background = live.background
         // Also close if the watch vanishes without an end/cancel packet. Covers finalization too.
         live.expiry = Task { [weak live] in
             try? await Task.sleep(for: .seconds(30))
@@ -423,13 +432,13 @@ private final class LiveWatchSpeech {
 
     func append(_ audio: Data, sequence: Int) throws {
         guard !cancelled, !ending, sequence == nextSequence, !audio.isEmpty,
-              audio.count <= WatchWire.chunkLimit, audio.count.isMultiple(of: MemoryLayout<Float>.size) else {
+              audio.count <= WatchWire.chunkLimit, audio.count.isMultiple(of: WatchWire.voiceSampleBytes) else {
             throw RunnerError(message: "The watch's audio stream was interrupted. Try again.")
         }
-        let count = audio.count / MemoryLayout<Float>.size
+        let count = audio.count / WatchWire.voiceSampleBytes
         guard frames + count <= Int(sourceFormat.sampleRate * Double(WatchWire.voiceSeconds + 1)),
               let buffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: AVAudioFrameCount(count)),
-              let samples = buffer.floatChannelData?[0] else {
+              let samples = buffer.int16ChannelData?[0] else {
             throw RunnerError(message: "The watch's audio stream was too long.")
         }
         buffer.frameLength = AVAudioFrameCount(count)

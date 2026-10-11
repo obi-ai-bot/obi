@@ -37,8 +37,8 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 /// - `refresh`: nothing; answered with `context`.
 /// - `voice`: `audio` (an AAC recording) and `request`; answered with `text` (what was said),
 ///   then the plan arrives as a `planned` message.
-/// - `voiceStart`: `request`, `sampleRate`; opens a live transcription (answered with `ok`).
-/// - `voiceChunk`: `request`, zero-based `sequence`, `audio` (mono Float32 PCM at that rate);
+/// - `voiceStart`: `request`, `sampleRate` (must be 16000); opens a live transcription (answered with `ok`).
+/// - `voiceChunk`: `request`, zero-based `sequence`, `audio` (mono signed little-endian Int16 PCM at 16 kHz);
 ///   acknowledged with `ok`. Each chunk is <= `chunkLimit`; chunks are sent in order.
 /// - `voiceEnd`: `request`, `sequence` (total chunks); finishes text, answered with `text`,
 ///   then `planned`. Nothing is planned before this explicit end.
@@ -82,8 +82,10 @@ nonisolated enum WatchWire {
 
     /// What WatchConnectivity carries in one message or context, with room to spare.
     static let limit = 60_000
-    /// 1/4 second even at 48 kHz, and well below the message limit.
-    static let chunkLimit = 48_000
+    /// 1/4 second of mono 16-bit PCM at 16 kHz: 32 KB/s, 6x less than 48 kHz Float32.
+    static let voiceSampleRate = 16_000.0
+    static let voiceSampleBytes = 2
+    static let chunkLimit = 8_000
     static let voiceSeconds = 15
 }
 #endif
