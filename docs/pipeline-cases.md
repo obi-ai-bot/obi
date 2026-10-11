@@ -250,7 +250,8 @@ From your goal to a list of jobs, then on to stage 2.
 - **Codex:** not found.
 - **Others:** Devin's preflight script dedupes by item id and version. Copilot: not found.
 - **Open for Oby:** nobody has a claim check.
-  - Decided 2026-10-10: when a job starts, Oby assigns the issue to you and moves it to In progress. Swift refuses a job on an issue that already has a running job or an open PR.
+  - Decided 2026-10-10: when a job starts, Oby moves the issue to In progress. Swift refuses a job on an issue that already has a running job or an open PR.
+  - Decided 2026-10-11 (#162): Oby neither assigns the issue nor comments on it. Done as the Oby app, both email you; the `status:` label, the board and Oby's inbox say it already.
 
 ### 1.4 Unclear or misheard: "OB", "Obi"
 - **What happens:** resolve against known repos, the conversation's last repo and similar names. Ask only when two readings lead to different work. Goes to 2, or to one question with options.
