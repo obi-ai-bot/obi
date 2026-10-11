@@ -33,10 +33,10 @@ final class Phone {
     func holdMic() {
         guard !voice.held, !voice.finishing else { return }
         cancel()
-        voice.start(context: PhoneSpeech.context(repos: jobs.map(\.repo)))
+        voice.start(context: PhoneSpeech.context(repos: jobs.map(\.repo))) { [weak self] in self?.ask($0, spoken: true) }
     }
 
-    func releaseMic() { voice.release { [weak self] in self?.ask($0, spoken: true) } }
+    func releaseMic() { voice.release() }
 
     func cancelVoice() {
         spoken = false

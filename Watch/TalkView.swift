@@ -7,18 +7,54 @@ struct TalkButton: View {
     @Environment(Watch.self) private var watch
     @Environment(\.scenePhase) private var scenePhase
     let size: CGFloat
+    @Binding var locked: Bool
+    @Binding var listening: Bool
     @State private var recorder = Recorder()
     @GestureState private var pressing = false
     @State private var holding = false
+    @State private var gestureStarted = false
 
     var body: some View {
-        Group {
-            if holding || (watch.reachable && recorder.allowed != false && !watch.useDictation) {
-                circle(holding ? "waveform" : "mic.fill")
+        // Keep lifecycle modifiers on a stable container when the held mic becomes Stop.
+        HStack(spacing: 0) {
+            if locked {
+                HStack(spacing: 12) {
+                    Button("Cancel", action: abort).buttonStyle(.plain)
+                    Button(action: finish) {
+                        circle("stop.fill")
+                            .overlay(alignment: .topTrailing) {
+                                Image(systemName: "lock.fill").font(.caption2)
+                                    .padding(3).background(.black, in: Circle())
+                                    .accessibilityHidden(true)
+                            }
+                    }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Stop and send")
+                }
+            } else if holding || (watch.reachable && recorder.allowed != false && !watch.useDictation) {
+                circle(recorder.listening ? "waveform" : "mic.fill")
                     .gesture(DragGesture(minimumDistance: 0)
-                        .updating($pressing) { _, pressing, _ in pressing = true })
-                    .onChange(of: pressing) { if pressing { start() } else { release() } }
+                        .updating($pressing) { _, pressing, _ in pressing = true }
+                        .onChanged { value in
+                            if !gestureStarted {
+                                gestureStarted = true
+                                start()
+                            }
+                            if recorder.listening, !locked, value.translation.height <= -50,
+                               abs(value.translation.height) >= abs(value.translation.width) {
+                                locked = true
+                            }
+                        }
+                        .onEnded { _ in if !locked { finish() } })
+                    .onChange(of: pressing) {
+                        if !pressing {
+                            gestureStarted = false
+                            // A cancelled gesture has no onEnded: discard unless explicitly locked.
+                            if !locked { abort() }
+                        }
+                    }
                     .accessibilityLabel("Hold to talk")
+                    .accessibilityHint("Slide up to lock. Release to send.")
             } else {
                 // The shown answer stays until something is submitted: closing dictation keeps it.
                 TextFieldLink(prompt: Text("What should Oby do?")) { circle("mic.fill") }
@@ -28,9 +64,10 @@ struct TalkButton: View {
             }
         }
         .sensoryFeedback(trigger: holding) { _, held in held ? .start : .stop }
-        .sensoryFeedback(.warning, trigger: recorder.seconds) { _, seconds in seconds >= Recorder.limit }
+        .sensoryFeedback(.impact(weight: .light), trigger: locked) { _, locked in locked }
         .task { await recorder.prepare() }
-        .onChange(of: recorder.seconds) { if recorder.seconds >= Recorder.limit { release() } }
+        .onChange(of: recorder.seconds) { if recorder.seconds >= Recorder.limit { finish() } }
+        .onChange(of: recorder.listening) { listening = recorder.listening }
         .onChange(of: watch.talk) { if watch.talk != .recording, holding { abort() } }
         .onChange(of: scenePhase) { if scenePhase != .active { abort() } }
         .onChange(of: watch.reachable) {
@@ -48,39 +85,48 @@ struct TalkButton: View {
             .font(.title3.weight(.semibold))
             .foregroundStyle(.white)
             .frame(width: size, height: size)
-            .background(holding ? Color.red : Color.accentColor, in: Circle())
+            .background(recorder.listening ? Color.red : Color.accentColor, in: Circle())
     }
 
     private func start() {
-        guard !holding else { return }
+        guard !holding, !locked else { return }
         watch.cancel()
         do {
             // No await between the press and capture: a release can always close the mic.
             let rate = try recorder.start { audio, level in watch.stream(audio, level: level) }
             watch.beginVoice(sampleRate: rate)
             holding = true
+            listening = recorder.listening
         } catch {
+            gestureStarted = false
             recorder.cancel()
             if recorder.allowed == true { watch.useDictation = true }
             watch.talk = .reply(error.localizedDescription)
         }
     }
 
-    private func release() {
+    /// A normal release, Stop and send, and the 60-second cutoff all send the same captured words.
+    private func finish() {
         guard holding else { return }
+        gestureStarted = pressing
         holding = false
+        locked = false
         let heard = recorder.stop()
+        listening = false
         if watch.talk == .recording {
             if heard >= 0.4 { watch.endVoice() }
             else {
                 watch.cancel()
-                watch.talk = .reply("Hold the button while you talk.")
+                watch.talk = .reply("Hold to talk. Release to send.")
             }
         }
     }
 
     private func abort() {
+        gestureStarted = pressing
         recorder.cancel()
+        listening = false
+        locked = false
         if holding {
             holding = false
             if watch.talk == .recording { watch.cancel() }
@@ -92,6 +138,8 @@ struct TalkButton: View {
 /// dispatch, or the next hold. No sheet takes the microphone away.
 struct TalkView: View {
     @Environment(Watch.self) private var watch
+    let locked: Bool
+    let listening: Bool
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -101,17 +149,21 @@ struct TalkView: View {
                     case .none:
                         EmptyView()
                     case .recording:
+                        if listening {
+                            Label(locked ? "Listening · Locked" : "Slide up to lock", systemImage: locked ? "lock.fill" : "arrow.up")
+                                .font(.caption2)
+                        }
                         HStack(alignment: .center, spacing: 3) {
                             ForEach(0..<9) { index in
-                                Capsule().fill(Color.accentColor)
+                                Capsule().fill(listening ? Color.accentColor : Color.secondary)
                                     .frame(width: 4, height: 3 + 15 * max(0, watch.level - Double(abs(index - 4)) * 0.08))
                             }
                         }
                         .frame(maxWidth: .infinity, minHeight: 20)
-                        .accessibilityLabel("Microphone level")
-                        Text(watch.words.isEmpty ? "…" : watch.words)
+                        .accessibilityLabel(listening ? "Microphone level" : "Writing down")
+                        Text(watch.words.isEmpty ? (listening ? "Listening…" : "Writing down…") : watch.words)
                             .font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
-                            .accessibilityLabel(watch.words.isEmpty ? "Listening" : watch.words)
+                            .accessibilityLabel(watch.words.isEmpty ? (listening ? "Listening" : "Writing down") : watch.words)
                     case .sending:
                         ProgressView().frame(maxWidth: .infinity)
                         if !watch.words.isEmpty { Text(watch.words).font(.footnote) }
@@ -153,7 +205,9 @@ struct TalkView: View {
 /// Mono 16 kHz Int16 PCM (WatchWire), delivered in 1/4-second pieces. No audio file stays on the watch.
 @Observable
 final class Recorder {
-    static let limit = WatchWire.voiceSeconds
+    // UI cutoff; the transport job owns WatchWire.voiceSeconds and its matching stream bounds.
+    static let limit = 60
+    private(set) var listening = false
     private(set) var seconds = 0
     private(set) var allowed: Bool?
     private var engine: AVAudioEngine?
@@ -229,15 +283,16 @@ final class Recorder {
             }
             engine.prepare()
             try engine.start()
+            listening = true
             began = .now
             seconds = 0
             ticking = Task {
                 while !Task.isCancelled, seconds < Self.limit {
                     try? await Task.sleep(for: .seconds(1))
                     guard !Task.isCancelled else { return }
-                    seconds += 1
                     // Close independently of view updates at the limit.
-                    if seconds == Self.limit { pending.append(closeMicrophone()) }
+                    if seconds + 1 == Self.limit { pending.append(closeMicrophone()) }
+                    seconds += 1
                 }
             }
             return WatchWire.voiceSampleRate
@@ -277,6 +332,7 @@ final class Recorder {
     /// Returns what was captured and not yet received; later callbacks are dropped.
     @discardableResult
     private func closeMicrophone() -> Data {
+        listening = false
         generation = nil
         if let engine {
             engine.stop()

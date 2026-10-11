@@ -3,12 +3,14 @@ import Observation
 import Speech
 import UIKit
 
-/// Owns the microphone for one held touch. Every async preparation checks the hold again before
-/// opening it; release stops hardware synchronously, then finalizes the words already captured.
+/// Owns the microphone for a held touch or an explicitly locked recording. Async preparation
+/// checks the hold before opening it. Release or Stop closes hardware before finalizing words.
 @MainActor @Observable
 final class PhoneVoice {
     private(set) var held = false
     private(set) var finishing = false
+    private(set) var listening = false
+    private(set) var locked = false
     private(set) var words = ""
     private(set) var problem: String?
     @ObservationIgnored private var generation = 0
@@ -17,12 +19,14 @@ final class PhoneVoice {
     @ObservationIgnored private var speech: PhoneSpeech?
     @ObservationIgnored private var buffers: AsyncStream<AVAudioPCMBuffer>.Continuation?
     @ObservationIgnored private var feeding: Task<Void, Never>?
+    @ObservationIgnored private var done: ((String) -> Void)?
     @ObservationIgnored private var timeout: Task<Void, Never>?
 
-    func start(context: [String]) {
+    func start(context: [String], done: @escaping (String) -> Void) {
         guard !held, !finishing else { return }
         cancel()
         held = true
+        self.done = done
         words = ""
         problem = nil
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -84,18 +88,34 @@ final class PhoneVoice {
                 self.engine = engine
                 engine.prepare()
                 try engine.start()
+                listening = true
                 timeout = Task {
                     try? await Task.sleep(for: .seconds(60))
                     guard !Task.isCancelled, generation == token else { return }
-                    fail(RunnerError(message: "That hold was too long. Release and try again."), token: token)
+                    finish()
                 }
             } catch { fail(error, token: token) }
         }
     }
 
-    func release(_ done: @escaping (String) -> Void) {
+    func lock() {
+        guard listening, held, !locked else { return }
+        locked = true
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    func release() {
+        guard !locked else { return }
+        finish()
+    }
+
+    /// Stop (or the 60-second limit) sends, including when the touch already ended after locking.
+    func finish() {
         guard held else { return }
+        let done = self.done
+        self.done = nil
         held = false
+        locked = false
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         stopMicrophone()
         // Preparation still pending: cancel it, and discard this hold.
@@ -111,7 +131,7 @@ final class PhoneVoice {
                 self.speech = nil
                 finishing = false
                 words = ""
-                if !transcript.isEmpty { done(transcript) }
+                if !transcript.isEmpty { done?(transcript) }
             } catch { fail(error, token: token) }
         }
     }
@@ -120,6 +140,8 @@ final class PhoneVoice {
         if held { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
         generation += 1
         held = false
+        locked = false
+        done = nil
         finishing = false
         stopMicrophone()
         work?.cancel()
@@ -130,6 +152,7 @@ final class PhoneVoice {
     }
 
     private func stopMicrophone() {
+        listening = false
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
         engine = nil

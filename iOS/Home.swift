@@ -180,7 +180,20 @@ struct HomeView: View {
     private var field: some View {
         VStack(alignment: .leading, spacing: 6) {
             if phone.voice.held || phone.voice.finishing {
-                Text(phone.voice.words.isEmpty ? (phone.voice.finishing ? "Writing down…" : "Listening…") : phone.voice.words)
+                if phone.voice.listening {
+                    Label(phone.voice.locked ? "Listening · Locked" : "Slide up to lock", systemImage: phone.voice.locked ? "lock.fill" : "arrow.up")
+                        .font(.caption).padding(.horizontal, 12)
+                    if phone.voice.locked {
+                        HStack {
+                            Button("Cancel") { phone.cancelVoice() }
+                            Spacer()
+                            Button("Stop and send") { phone.voice.finish() }
+                        }.padding(.horizontal, 12)
+                    } else {
+                        Text("Slide left to cancel").font(.caption).padding(.horizontal, 12)
+                    }
+                }
+                Text(phone.voice.words.isEmpty ? (phone.voice.finishing ? "Writing down…" : phone.voice.listening ? "Listening…" : "Getting ready…") : phone.voice.words)
                     .font(.subheadline).padding(.horizontal, 12)
                     .accessibilityAddTraits(.updatesFrequently)
             }
@@ -193,9 +206,10 @@ struct HomeView: View {
                     .focused($typing)
                     .submitLabel(.send)
                     .onSubmit(send)
-                HoldMic(held: phone.voice.held, enabled: !phone.voice.finishing,
-                        start: { typing = false; phone.holdMic() },
-                        release: { phone.releaseMic() }, cancel: { phone.cancelVoice() })
+                HoldMic(listening: phone.voice.listening, locked: phone.voice.locked, enabled: !phone.voice.finishing,
+                        start: { typing = false; phone.holdMic() }, lock: { phone.voice.lock(); return phone.voice.locked },
+                        release: { phone.releaseMic() }, cancel: { phone.cancelVoice() },
+                        stop: { phone.voice.finish() })
                     .frame(width: 44, height: 44)
                 Button(action: send) {
                     Image(systemName: "arrow.up")
