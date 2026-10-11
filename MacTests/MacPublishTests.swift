@@ -92,6 +92,19 @@ struct MacPublishTests {
         await #expect(throws: RunnerError.self) { try await device.publish("ab12cd34", action: sentence, with: stub.runner) }
         #expect(stub.requests.isEmpty && device.status == "Needs Touch ID")
     }
+
+    /// A job older than the latest 50 (an inbox item's Open job, or an alert's Publish) is fetched
+    /// by its id, so its screen and its Publish open; one already listed isn't asked for again.
+    @Test func olderJobIsFetched() async throws {
+        let job = #"{"account":"default","agent":"claude","base":"dev","branch":"oby/fix-152","commits":2,"created":"2026-10-01T09:00:00Z","finished":"2026-10-01T09:20:00Z","id":"0ld0b152","kind":"fix","publishError":"GitHub's rate limit","repo":"deskree-inc/oby","request":"fix oby #152","session":"s","status":"done","step":"","summary":"Done.","task":"Fix #152."}"#
+        let stub = RunnerStub { request in request.path == "/v1/jobs/0ld0b152" ? (200, job) : (404, #"{"error": "No."}"#) }
+        let feed = RunnerFeed()
+        try await feed.fetch("0ld0b152", from: stub.runner)
+        let fetched = try #require(feed.jobs.first { $0.id == "0ld0b152" })
+        #expect(fetched.canPublish && fetched.publishError == "GitHub's rate limit")
+        try await feed.fetch("0ld0b152", from: stub.runner)
+        #expect(stub.requests.count == 1 && feed.jobs.count == 1)
+    }
 }
 
 /// Signs as the Touch ID key does, with a software key, or cancels as the user would.

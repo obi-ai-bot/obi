@@ -580,6 +580,20 @@ private struct OpenIsland: View {
         .onAppear { typing = true }
         // A notification opened the island on a runner's job: its screen opens.
         .onChange(of: model.focus, initial: true) { if let focus = model.focus { selected = Row.id(focus, local: false) } }
+        // A runner's job open here stays across new lists; one older than the latest 50 (an inbox
+        // item's or an alert's) is fetched, and its screen opens once it's here.
+        .onChange(of: selected, initial: true) { old, new in
+            if let id = Row.runnerJob(old) { feed.showing(id, false) }
+            guard let id = Row.runnerJob(new) else { return }
+            feed.showing(id, true)
+            Task {
+                do { try await feed.fetch(id) } catch {
+                    if selected == new { selected = nil }
+                    problem = error.localizedDescription
+                }
+            }
+        }
+        .onDisappear { if let id = Row.runnerJob(selected) { feed.showing(id, false) } }
     }
 
     /// A job in the list, and the runner it's on (nil: this Mac).
@@ -588,6 +602,11 @@ private struct OpenIsland: View {
         var host: String?
         var id: String { Self.id(job.id, local: host == nil) }
         static func id(_ job: String, local: Bool) -> String { "\(local ? "mac" : "runner")/\(job)" }
+        /// The runner's job a Row's id names, or nil for this Mac's own or none.
+        static func runnerJob(_ id: String?) -> String? {
+            guard let id, id.hasPrefix("runner/") else { return nil }
+            return String(id.dropFirst("runner/".count))
+        }
     }
 
     /// Every job, this Mac's and the runner's, newest first.

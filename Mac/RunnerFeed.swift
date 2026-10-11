@@ -68,6 +68,9 @@ final class RunnerFeed {
     /// What each job's alert last said, or nil until the first list arrives: what the jobs already
     /// need when Oby starts isn't news.
     @ObservationIgnored private var notified: [String: Notice]?
+    /// The runner's jobs whose screen the island shows: new lists keep them even when they're
+    /// older than the latest 50, as on the iPhone.
+    @ObservationIgnored private var onScreen: Set<String> = []
 
     var runner: Runner? { Self.runner(url ?? "") }
     var active: [Job] { jobs.filter(\.isActive) }
@@ -152,7 +155,7 @@ final class RunnerFeed {
                         models = status.models
                         defaultMode = RunnerMode(status.permissions?.mode)
                         self.extras = extras
-                        take(list)
+                        await take(list, from: runner)
                         inbox = items
                         inboxWords = words
                         connection = .live
@@ -269,12 +272,35 @@ final class RunnerFeed {
         noticeChanges()
     }
 
-    /// The whole list, on every (re)connection: what changed while the connection was down alerts now.
-    private func take(_ list: [Job]) {
+    /// A job's screen opened or closed on the island: while it's open, new lists keep its job.
+    func showing(_ id: String, _ shown: Bool) {
+        if shown { onScreen.insert(id) } else { onScreen.remove(id) }
+    }
+
+    /// A job older than the list's 50 (an inbox item or an alert opened it): fetched, and kept
+    /// among the others in age order.
+    func fetch(_ id: String, from runner: Runner? = nil) async throws {
+        guard !jobs.contains(where: { $0.id == id }) else { return }
+        guard let runner = runner ?? self.runner else { throw RunnerError(message: "Set the runner's URL in Settings to open it.") }
+        let job = try await runner.job(id)
+        guard !jobs.contains(where: { $0.id == id }) else { return }
+        jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
+        noticeChanges()
+    }
+
+    /// The whole list, the latest 50, on every (re)connection: what changed while the connection
+    /// was down alerts now. A job whose screen is open stays, fetched again so it's current.
+    private func take(_ fresh: [Job], from runner: Runner) async {
+        let (list, refetch) = JobList.keeping(fresh, old: jobs, onScreen: onScreen, id: \.id, created: \.created)
         jobs = list
+        // Settings › Runner changed meanwhile: these were the other runner's.
+        for id in refetch where !Task.isCancelled {
+            guard let job = try? await runner.job(id) else { continue }
+            jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
+        }
         noticeChanges()
         // Alerts left in Notification Center, from before a drop or a restart, whose job needs nothing now.
-        let gone = list.filter { Self.notice(for: $0) == nil }.map(\.id)
+        let gone = jobs.filter { Self.notice(for: $0) == nil }.map(\.id)
         if !gone.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: gone) }
     }
 
