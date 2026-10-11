@@ -68,14 +68,15 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     }
 
     /// The account to review `author`'s pull request: never the author's own, the other tool's
-    /// when one of its accounts is signed in with room on its limits (`AccountStore.route`), else
-    /// another account of the same tool. A window whose reset time has passed has room again. Nil
-    /// when no account can.
-    static func reviewer(_ accounts: [AccountState], for author: Job, now: Date = .now) -> Account? {
+    /// when one of its accounts is signed in with room on its limits, else another account of the
+    /// same tool. A review is short, so it takes an account ahead of its weekly pace first
+    /// (`AccountStore.choose`), keeping the ones on pace for new work. A window whose reset time
+    /// has passed has room again. Nil when no account can.
+    static func reviewer(_ accounts: [AccountState], for author: Job, now: Date = .now) -> AccountStore.Route? {
         let others = candidates(accounts, for: author).map { reset($0, at: now) }
         let otherTool = author.agent == "claude" ? "codex" : author.agent == "codex" ? "claude" : nil
-        if let otherTool, let account = AccountStore.route(others, agent: otherTool, now: now) { return account }
-        return AccountStore.route(others, agent: nil, now: now)
+        if let otherTool, let route = AccountStore.choose(others, agent: otherTool, for: .review, now: now) { return route }
+        return AccountStore.choose(others, agent: nil, for: .review, now: now)
     }
 
     /// The accounts that could review `author`'s pull request, room or not: signed in, not the
@@ -497,7 +498,7 @@ extension Desk {
             author.reviewError = "Oby reviewed it \(job.reviewCap) times already: a person reviews it from here."
             return replace(author)
         }
-        guard let account = Review.reviewer(accounts.accounts, for: job) else {
+        guard let route = Review.reviewer(accounts.accounts, for: job) else {
             guard !Review.candidates(accounts.accounts, for: job).isEmpty else {
                 author.reviewError = "No other account is signed in with room to review it."
                 return replace(author)
@@ -507,6 +508,7 @@ extension Desk {
             if author.reviewError != job.reviewError { replace(author) }
             return watchForRoom()
         }
+        let account = route.account
         var review = Review.make(for: job, pr: pr, account: account)
         if let previous = job.review, previous.verdict == .changesRequested,
            let text = Review.previous(previous, summary: self.job(previous.job)?.summary, pr: pr) {
@@ -520,7 +522,8 @@ extension Desk {
         author.reviewing = review.id
         author.reviewError = nil
         replace(author)
-        Logger.jobs.notice("job \(job.id, privacy: .public): \(review.agentName, privacy: .public) (\(account.name, privacy: .public)) reviews pull request #\(pr, privacy: .public) as job \(review.id, privacy: .public)")
+        Logger.jobs.notice("job \(job.id, privacy: .public): \(review.agentName, privacy: .public) (\(account.name, privacy: .public)) reviews pull request #\(pr, privacy: .public) as job \(review.id, privacy: .public). \(route.why, privacy: .public)")
+        // Why it went there is logged, not in its report: a review's last line is its verdict.
         enqueue(review)
     }
 

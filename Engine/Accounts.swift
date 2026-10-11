@@ -56,11 +56,25 @@ nonisolated struct AccountState: Equatable, Sendable {
         sevenDayResets.map { min(max(1 - $0.timeIntervalSince(now) / (7 * 86_400), 0), 1) }
     }
 
-    /// How far the weekly usage is ahead of the share of the week gone, 0 when on pace or unknown:
-    /// 62% used with 30% of the week gone is 0.32 ahead.
-    func ahead(at now: Date = .now) -> Double {
-        guard let sevenDay, let gone = weekGone(at: now) else { return 0 }
-        return max(sevenDay - gone, 0)
+    /// How fast the week is burning against its pace: the share used over the share of the week
+    /// gone, counting at least a seventh gone so the first hours of a week don't swing it. Above 1
+    /// it runs out before its reset: 33% used with 7.6% of the week gone is 2.3. Nil when the usage
+    /// or the reset time is unknown.
+    func pace(at now: Date = .now) -> Double? {
+        guard let sevenDay, let gone = weekGone(at: now) else { return nil }
+        return sevenDay / max(gone, 1.0 / 7)
+    }
+
+    /// Burning its week faster than it lasts (`pace` above 1). Unknown is not ahead.
+    func isAhead(at now: Date = .now) -> Bool { (pace(at: now) ?? 0) > 1 }
+
+    /// The weekly room per day until the week resets: 57% left with 4.8 days to go is 0.12/day.
+    /// At least a quarter of a day counts as left; without a reset time, the whole week. Nil when
+    /// the weekly usage is unknown.
+    func roomPerDay(at now: Date = .now) -> Double? {
+        guard let sevenDay else { return nil }
+        let days = sevenDayResets.map { max($0.timeIntervalSince(now) / 86_400, 0.25) } ?? 7
+        return max(1 - sevenDay, 0) / days
     }
 }
 
@@ -191,37 +205,100 @@ final class AccountStore {
         try encoder.encode(accounts.map(\.account)).write(to: file, options: .atomic)
     }
 
-    /// The account for a new job, keeping every account in balance: a signed-in account of that
-    /// agent (any agent if nil) under 95% of its 5-hour window, not reserved for the week
-    /// (`isReserved`) and not marked full, with the lowest `score`. Each account's usage is measured
-    /// against its own plan, so a small plan fills up faster and gets fewer jobs. Unknown usage
-    /// counts as 0; ties keep list order. Every automatic choice goes through here (the brain's
-    /// dispatch, failover, reviews); only a job the user sends to an account by name skips it.
-    nonisolated static func route(_ accounts: [AccountState], agent: String?, now: Date = .now) -> Account? {
-        accounts.enumerated()
-            .filter { $0.element.signedIn && (agent == nil || $0.element.account.agent == agent) && !$0.element.isFull(at: now)
-                && ($0.element.fiveHour ?? 0) < 0.95 && !$0.element.isReserved(at: now) }
-            .min { (score($0.element, now: now), $0.offset) < (score($1.element, now: now), $1.offset) }?
-            .element.account
+    /// What a job is for routing: new work keeps to accounts on pace, a review is short and goes
+    /// to one ahead of it.
+    nonisolated enum Work: Sendable { case new, review }
+
+    /// The account `choose` chose, and why, for the job's report.
+    nonisolated struct Route: Equatable, Sendable {
+        var account: Account
+        /// "most weekly room per day left (0.12/day); Codex · Deskree is 2.3× ahead of pace"
+        var reason: String
+        var id: String { account.id }
+        /// "On Claude Code · Deskree: most weekly room per day left (0.12/day); Codex · Deskree is 2.3× ahead of pace."
+        var why: String { "On \(account.heading): \(reason)." }
     }
 
-    /// The account for the next of several jobs started together (the Lead's): `route`, with the
+    /// Prefer accounts under this share of their 5-hour window: one above it may stop mid-job.
+    nonisolated static let busy = 0.8
+    /// Accounts this close in weekly room per day count as even, and the fewer running jobs wins.
+    nonisolated static let even = 0.01
+
+    /// The account for a job, budgeted by each account's weekly pace: a signed-in account of that
+    /// agent (any agent if nil) under 95% of its 5-hour window, not reserved for the week
+    /// (`isReserved`) and not marked full. Of those, in order:
+    /// - one under 80% of its 5-hour window, when there is one;
+    /// - for new work, one on pace (`isAhead` false) with its usage known, then one whose usage
+    ///   isn't known yet, then one ahead of pace; a review takes one ahead of pace first, then
+    ///   on pace, then unknown;
+    /// - the most weekly room per day left (`roomPerDay`); within 0.01/day of it, the fewest
+    ///   running jobs, then the most room, then list order.
+    /// Each account's usage is measured against its own plan. Every automatic choice goes through
+    /// here (the brain's dispatch, the Lead's picks, failure fixes, failover, reviews); only a job
+    /// the user sends to an account by name skips it.
+    nonisolated static func choose(_ accounts: [AccountState], agent: String?, for work: Work = .new, now: Date = .now) -> Route? {
+        let open = accounts.filter { $0.signedIn && (agent == nil || $0.account.agent == agent) && !$0.isFull(at: now)
+            && ($0.fiveHour ?? 0) < 0.95 && !$0.isReserved(at: now) }
+        let calm = open.filter { ($0.fiveHour ?? 0) < busy }
+        let pool = calm.isEmpty ? open : calm
+        func tier(_ state: AccountState) -> Int {
+            guard state.sevenDay != nil else { return 2 }
+            switch work {
+            case .new: return state.isAhead(at: now) ? 3 : 1
+            case .review: return state.isAhead(at: now) ? 0 : 1
+            }
+        }
+        guard let first = pool.map(tier).min() else { return nil }
+        let tied = pool.filter { tier($0) == first }
+        let room = { (state: AccountState) in state.roomPerDay(at: now) ?? 0 }
+        let most = tied.map(room).max() ?? 0
+        let close = tied.filter { room($0) >= most - even }
+        let chosen = close.enumerated().min { (a, b) in
+            (a.element.running, -room(a.element), a.offset) < (b.element.running, -room(b.element), b.offset)
+        }!.element
+        return Route(account: chosen.account, reason: reason(chosen, over: open, close: close, work: work, now: now))
+    }
+
+    /// Why `chosen` was taken over the other `open` accounts.
+    nonisolated static func reason(_ chosen: AccountState, over open: [AccountState], close: [AccountState], work: Work, now: Date) -> String {
+        var reasons: [String] = []
+        if let room = chosen.roomPerDay(at: now) {
+            var line = "most weekly room per day left (\(String(format: "%.2f", room))/day)"
+            if close.count > 1 { line += " and the fewest jobs running" }
+            if let pace = chosen.pace(at: now), chosen.isAhead(at: now) {
+                line += work == .review ? ", \(times(pace)) ahead of pace, so a short review suits it" : ", though \(times(pace)) ahead of pace: none is on pace"
+            }
+            reasons.append(line)
+        } else {
+            reasons.append("its usage isn't known yet" + (close.count > 1 ? ", and the fewest jobs running" : ""))
+        }
+        if (chosen.fiveHour ?? 0) >= busy { reasons.append("every account is above 80% of its 5-hour window") }
+        if work == .new, let ahead = open.filter({ $0.account.id != chosen.account.id && $0.isAhead(at: now) })
+            .max(by: { ($0.pace(at: now) ?? 0) < ($1.pace(at: now) ?? 0) }), let pace = ahead.pace(at: now) {
+            reasons.append("\(ahead.account.heading) is \(times(pace)) ahead of pace")
+        }
+        return reasons.joined(separator: "; ")
+    }
+
+    /// 2.31 as "2.3×".
+    nonisolated static func times(_ pace: Double) -> String { String(format: "%.1f×", pace) }
+
+    /// The account `choose` chose, without the why.
+    nonisolated static func route(_ accounts: [AccountState], agent: String?, for work: Work = .new, now: Date = .now) -> Account? {
+        choose(accounts, agent: agent, for: work, now: now)?.account
+    }
+
+    /// The account for the next of several jobs started together (the Lead's): `choose`, with the
     /// pick counted as running in `states`, so the next pick spreads out.
-    nonisolated static func pick(_ states: inout [AccountState], agent: String?, now: Date = .now) -> Account? {
-        guard let account = route(states, agent: agent, now: now) else { return nil }
-        if let index = states.firstIndex(where: { $0.account.id == account.id }) { states[index].running += 1 }
-        return account
+    nonisolated static func pick(_ states: inout [AccountState], agent: String?, now: Date = .now) -> Route? {
+        guard let route = choose(states, agent: agent, now: now) else { return nil }
+        if let index = states.firstIndex(where: { $0.account.id == route.id }) { states[index].running += 1 }
+        return route
     }
 
     /// Where a job goes on from an account that hit its limit: the same tool first, then any.
-    nonisolated static func next(_ accounts: [AccountState], agent: String, now: Date = .now) -> Account? {
-        route(accounts, agent: agent, now: now) ?? route(accounts, agent: nil, now: now)
-    }
-
-    /// The busier of its two windows, plus how far its week is ahead of pace (`ahead`), plus 0.15
-    /// per running job. Lower is better.
-    nonisolated static func score(_ state: AccountState, now: Date = .now) -> Double {
-        max(state.fiveHour ?? 0, state.sevenDay ?? 0) + state.ahead(at: now) + 0.15 * Double(state.running)
+    nonisolated static func next(_ accounts: [AccountState], agent: String, now: Date = .now) -> Route? {
+        choose(accounts, agent: agent, now: now) ?? choose(accounts, agent: nil, now: now)
     }
 
     /// "Max · name@example.com" from `claude auth status --json`, or nil when it isn't signed in.

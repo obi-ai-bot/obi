@@ -109,7 +109,14 @@ Before stage 1. People connect only what they have. That decides which model the
 ### 0.5 Several tools
 - **What happens:** one tool thinks, and jobs spread across every account by usage. First launch shows "Oby thinks with X and works with Y and Z". Goes to 1.
 - **Lead thinks with:** the best planner connected: Claude (enforced schema), then Codex, then Cursor, then Gemini.
-- **Jobs work with:** every connected account, routed by usage. The score is the higher of the 5-hour and 7-day use, plus 0.15 per running job.
+- **Jobs work with:** every connected account, budgeted by each subscription's weekly pace, not just the 5-hour window (decided 2026-10-10, repeated 2026-10-11, #176). New work goes to accounts on pace; accounts running ahead of pace get reviews or nothing; among them, the account with the most weekly room per remaining day wins. A week burned early can't recover until its reset days later, which leaves the team without that tool.
+  - **Room per remaining day:** the share of the week left over the days until it resets (at least a quarter of a day; a whole week when the tool didn't say when). 57% left with 4.8 days to go is 0.12/day.
+  - **Ahead of pace:** the share of the week used over the share of it gone (at least a seventh, so the first hours of a week don't swing it) is above 1: at this burn it runs out before its reset.
+  - **New work** (the brain's dispatch, the Lead's picks, failure fixes, failover) goes to an account on pace first, then one whose usage isn't known yet (Claude Code reports it only during a job, so after a restart it reads unknown), and only when none is left to the one ahead of pace with the most room per day. **Reviews** are short, so they take an account ahead of pace first; the other tool still comes first.
+  - **The 5-hour window:** at 95% an account gets nothing; above 80% it gets work only when every account is.
+  - **Running jobs** only break ties: within 0.01/day of room, the fewer running jobs wins.
+  - At 80% of its week an account is kept for jobs sent to it by name until its week resets, and a job named to an account skips routing.
+  - The job's report says why, once: `On Claude Code · Deskree: most weekly room per day left (0.12/day), though 1.4× ahead of pace: none is on pace; Codex · Deskree is 2.3× ahead of pace.`
 - **Oby today:** Partial. Jobs are routed across Claude and Codex, and the brain is always Claude.
 - **Decided 2026-10-10:** you pick the Lead's model at first launch, like the jobs' models. If you connect a new tool later, Oby asks in the conversation whether to change anything: no pop-ups.
 - **Approved 2026-10-10:** the Lead's own usage counts toward routing.
@@ -308,7 +315,7 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
 
 ### 2.4 Usage limit: the account runs out mid-job
 - **What happens:** the job pauses, then carries on with another account of the same tool (same worktree, a new session given the summary so far) or waits for the reset. Goes back to 2.
-- **Oby today:** Partial. Routing skips accounts at 95% of their 5-hour window or 80% of their week (kept for jobs sent to them by name, until the week resets) and ranks an account lower the further its week is ahead of pace. A job whose account hits its limit carries on with the next account with room, or fails when none has.
+- **Oby today:** Partial. Routing skips accounts at 95% of their 5-hour window or 80% of their week (kept for jobs sent to them by name, until the week resets) and sends new work to accounts on their weekly pace, with the most weekly room per remaining day (case 0.5). A job whose account hits its limit carries on with the next account with room, or fails when none has.
 - **Claude Code:** shows the reset time, and interactive sessions can continue at the reset. Headless auto-resume is undocumented. Project threads retry after the reset.
 - **Cursor:** not found.
 - **Codex:** 5-hour and weekly limits. What happens mid-task: not found.
