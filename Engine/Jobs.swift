@@ -71,6 +71,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var reviewing: String?
     var review: Review?
     var reviewError: String?
+    /// Reviews the user allowed beyond `Review.maxRounds` (One more round on a merge that stopped
+    /// because Oby's reviews were used up), or nil.
+    var extraReviews: Int?
     /// The job whose pull request this job reviews: set on the review jobs Oby starts itself.
     var reviewOf: String?
     /// The files the job is expected to touch, from the Lead's brief: jobs whose files overlap
@@ -110,6 +113,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var tetrix: TetrixUse?
 
     var maxRounds: Int { rounds ?? 1 }
+    /// How many times Oby may review its pull request: `Review.maxRounds`, and what the user allowed beyond.
+    var reviewCap: Int { Review.maxRounds + (extraReviews ?? 0) }
     /// Its agent asked the user something and waits for the answer: the inbox has it.
     var waitsForAnswer: Bool { question != nil && dismissed == nil && status != .stopped }
     var currentRound: Int { round ?? 1 }

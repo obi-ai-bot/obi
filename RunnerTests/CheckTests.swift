@@ -163,6 +163,10 @@ struct CheckTests {
         #expect(desk.job("author")?.macCheck == taken && made.events.last == taken)
         #expect(desk.job("author")?.pipeline.stages.last?.detail == "Checking on Studio")
         #expect(desk.nextMacCheck(mac: "Laptop", now: now + 60) == nil)
+        // The lease outlasts the longest check: every step to its timeout, each xcodebuild step twice.
+        let longest = MacCheck.commands(cache: URL(filePath: "/")).reduce(0) { $0 + $1.timeout * ($1.xcodebuild ? 2 : 1) }
+        #expect(MacCheck.lease > longest && longest == 170 * 60)
+        #expect(desk.nextMacCheck(mac: "Laptop", now: now + longest) == nil)
         // A Mac that went quiet past the lease: the next one to ask gets it.
         let again = try #require(desk.nextMacCheck(mac: "Laptop", now: now + MacCheck.lease + 1))
         #expect(again.id == check.id && again.mac == "Laptop")
@@ -348,7 +352,7 @@ struct CheckTests {
         #expect(author.checkStop == MacCheck.stopLine && author.mergeNeedsYou && author.needsYou)
         #expect(Push.notice(for: author) == .merge)
         let item = try #require(Inbox.need(of: author))
-        #expect(item.kind == .merge && item.options == [Inbox.dismiss] && item.text == "1 test failed on Studio: A() " + MacCheck.stopLine)
+        #expect(item.kind == .merge && item.options == [Inbox.tryAgain, Inbox.dismiss] && item.text == "1 test failed on Studio: A() " + MacCheck.stopLine)
         let alert = object(try Push.notification(.merge, for: author))
         let aps = (alert["aps"] as? [String: Any])?["alert"] as? [String: Any]
         #expect(aps?["body"] as? String == "1 test failed on Studio: A() " + MacCheck.stopLine)
@@ -390,6 +394,65 @@ struct CheckTests {
         let stopped = try #require(desk.job("author"))
         #expect(stopped.status == .done && made.agents.count == 2 && made.quoted.isEmpty)
         #expect(stopped.mergeNeedsYou && stopped.needsYou && desk.inbox.last?.kind == .merge && desk.inbox.last?.isOpen == true)
+    }
+
+    @Test func aFailedCheckAfterTheLastReviewIsNeverADeadEnd() async throws {
+        // PR #140: the check failed after Oby's last review approved it.
+        let check = try await approved()
+        var job = try #require(desk.job("author"))
+        job.review?.round = Review.maxRounds
+        desk.replace(job)
+        _ = desk.nextMacCheck(mac: "Studio")
+        var failing = steps
+        failing[2].passed = false
+        failing[2].failing = [MacCheck.FailingTest(test: "iOSTests/JobRowTests/testTitle()", message: "XCTAssertEqual failed")]
+        try desk.macCheckEnded(check.id, MacCheck.Report(passed: false, steps: failing, failures: ["iOSTests/JobRowTests/testTitle()"]))
+        try await until("the inbox has it") { desk.inbox.contains { $0.isOpen && $0.kind == .merge } }
+        // Tests named, reviews used up: one more round first, then the same commit again, or let it go.
+        var item = try #require(desk.inbox.last { $0.isOpen })
+        #expect(item.options == [Inbox.oneMoreRound, Inbox.tryAgain, Inbox.dismiss] && made.quoted.isEmpty && made.agents.count == 2)
+        // Try again checks the same commit again, as the same round.
+        _ = try desk.settle(item.id, .answer(Inbox.tryAgain))
+        job = try #require(desk.job("author"))
+        let again = try #require(job.macCheck)
+        #expect(again.state == .queued && again.head == Self.head && again.round == 1 && again.id != check.id && !job.needsYou)
+        // It fails the same way: One more round hands the tests to the author, and Oby may review the fix once more.
+        _ = desk.nextMacCheck(mac: "Studio")
+        try desk.macCheckEnded(again.id, MacCheck.Report(passed: false, steps: failing, failures: ["iOSTests/JobRowTests/testTitle()"]))
+        try await until("the inbox has it again") { desk.inbox.contains { $0.isOpen && $0.kind == .merge } }
+        item = try #require(desk.inbox.last { $0.isOpen })
+        #expect(item.options.first == Inbox.oneMoreRound)
+        _ = try desk.settle(item.id, .answer(Inbox.oneMoreRound))
+        try await until("the author runs again") { desk.job("author")?.status == .running && made.agents.count == 3 }
+        job = try #require(desk.job("author"))
+        #expect(job.step == "Working on the Mac check" && job.macCheck?.handedOff == true && job.extraReviews == 1 && job.reviewCap == Review.maxRounds + 1)
+        #expect(made.quoted.last?.text.contains("> iOSTests/JobRowTests/testTitle(): XCTAssertEqual failed") == true)
+        // The fix publishes and gets its one more review.
+        made.pushes = [Self.next]
+        desk.countCommits = { _, _ in 3 }
+        try await endRound(try #require(made.agents.last?.agent), "fix(ios): the title test passes")
+        try await until("a review job runs") { made.agents.last?.job.reviewOf == "author" }
+        #expect(desk.job("author")?.reviewError == nil)
+    }
+
+    @Test func aStoppedCheckThatNamedNoTestOffersTryAgainFirst() throws {
+        var author = author
+        author.status = .done
+        author.published = url.absoluteString
+        author.outgoing = [Outgoing(action: .push, repo: author.repo, id: Self.head, branch: author.branch)]
+        author.review = Review(verdict: .approved, job: "r", agent: "codex", account: "Work", round: Review.maxRounds)
+        var check = MacCheck.make(for: author, pr: 80, head: Self.head)
+        check.state = .failed
+        check.steps = [MacCheck.Step(name: "Mac app and MacTests", passed: false, seconds: 1)]
+        check.failures = []
+        author.macCheck = check
+        #expect(author.checkStop == MacCheck.reviewsUsedLine)
+        #expect(Inbox.need(of: author)?.options == [Inbox.tryAgain, Inbox.dismiss])
+        author.macCheck?.failures = ["A()"]
+        #expect(Inbox.need(of: author)?.options == [Inbox.oneMoreRound, Inbox.tryAgain, Inbox.dismiss])
+        // Allowed one more review, a failed check goes back to the author by itself.
+        author.extraReviews = 1
+        #expect(author.checkStop == nil && !author.mergeNeedsYou)
     }
 
     @Test func aCheckTheMacCouldNotRunIsTheUsersToRunAgainNotTheAuthors() async throws {
@@ -671,7 +734,7 @@ struct CheckTests {
         // A build that broke: its errors, each once; else the end of what it printed.
         let broken = "Compiling A.swift\n/x/A.swift:3:5: error: cannot find 'foo' in scope\n/x/A.swift:3:5: error: cannot find 'foo' in scope\n** BUILD FAILED **"
         #expect(MacCheck.excerpt(broken) == "/x/A.swift:3:5: error: cannot find 'foo' in scope")
-        #expect(MacCheck.excerpt((1...100).map(String.init).joined(separator: "\n")).hasPrefix("41\n"))
+        #expect(MacCheck.excerpt((1...100).map(String.init).joined(separator: "\n")).hasPrefix("61\n"))
         #expect(MacCheck.duration(59) == "59s" && MacCheck.duration(3725) == "62m 05s")
         // The three steps CI runs, ad hoc signed, each with a timeout.
         let commands = MacCheck.commands(cache: URL(filePath: "/cache"))
@@ -724,6 +787,278 @@ struct CheckTests {
         // The runner keeps a problem to one line, and a problem fails the check.
         let kept = MacCheck.trimmed(MacCheck.Report(passed: true, steps: steps, failures: [], problem: "Xcode broke\nbadly"))
         #expect(!kept.passed && kept.problem == "Xcode broke")
+    }
+
+    // MARK: Whose a failed step is (#118)
+
+    /// A result bundle's summary as `xcresulttool get test-results summary` prints it, with `failures`
+    /// as (identifier, target, name, message).
+    func summary(_ failures: [(String?, String, String, String)], total: Int = 12) -> Data {
+        let tests: [[String: Any]] = failures.enumerated().map { index, failure in
+            var test: [String: Any] = ["targetName": failure.1, "testName": failure.2, "failureText": failure.3, "testIdentifier": index]
+            if let identifier = failure.0 { test["testIdentifierString"] = identifier }
+            return test
+        }
+        let json: [String: Any] = ["title": "Test - ObyPhone", "result": "Failed", "totalTestCount": total, "passedTests": total - failures.count,
+                                   "failedTests": failures.count, "expectedFailures": 0, "statistics": [] as [Any],
+                                   "topInsights": [] as [Any], "devicesAndConfigurations": [] as [Any], "testFailures": tests]
+        return try! JSONSerialization.data(withJSONObject: json)
+    }
+
+    func attempt(_ status: Int32, _ output: String, summary: Data? = nil, timedOut: Bool = false, bundled: Bool = true, seconds: Int = 10) -> MacCheck.Attempt {
+        MacCheck.Attempt(status: status, output: output, timedOut: timedOut, summary: summary, bundled: bundled, seconds: seconds)
+    }
+
+    /// What PRs #128 and #132 got: the runner hung before it connected, after about 400 seconds, and no test failed.
+    let hungOutput = """
+        Testing started
+        2026-10-11 14:02:11.120 xcodebuild[4242:99] [MT] IDETestOperationsObserverDebug: 402.511 elapsed -- Testing started completed.
+        Testing failed:
+        \tiOSTests-Runner (12345) encountered an error (The test runner hung before establishing connection.)
+        ** TEST FAILED **
+        """
+
+    @Test func aFailedStepIsClassifiedFromItsResultBundleAndOutput() {
+        let commands = MacCheck.commands(cache: URL(filePath: "/cache"))
+        let (swift, mac, phone) = (commands[0], commands[1], commands[2])
+        // A hung runner: in the output, in the bundle's summary, or as the bundle's only "failure".
+        #expect(MacCheck.verdict(phone, attempt(65, hungOutput, summary: summary([]))) == .trouble(.hung))
+        #expect(MacCheck.verdict(phone, attempt(65, "** TEST FAILED **", summary: summary([(nil, "iOSTests", "iOSTests",
+                                                                                              "The test runner hung before establishing connection.")]))) == .trouble(.hung))
+        #expect(MacCheck.verdict(mac, attempt(65, "Lost connection to the test manager service.\n** TEST FAILED **")) == .trouble(.lostConnection))
+        #expect(MacCheck.Trouble.in("Unable to boot the Simulator.") == .boot)
+        #expect(MacCheck.Trouble.in("Failed to install the requested application") == .install)
+        // What followed a hung runner once dtdeviceinfod had crashed.
+        #expect(MacCheck.verdict(phone, attempt(65, "Testing failed:\n\tFailed to install or launch the test runner. (Underlying Error: (Mach error -308 - (ipc/mig) server died))\n** TEST FAILED **"))
+                == .trouble(.install))
+        #expect(MacCheck.Trouble.in("(ipc/mig) server died") == .install)
+        #expect(MacCheck.Trouble.in("Timed out waiting for testmanagerd to become ready") == .daemon)
+        #expect(MacCheck.Trouble.in("** TEST FAILED **") == nil)
+        // A real failure: the bundle names the tests and their messages, whatever else the output says.
+        let real = summary([("iOSTests/JobRowTests/testTitle()", "iOSTests", "testTitle()", "XCTAssertEqual failed: (\"a\") is not equal to (\"b\")"),
+                            ("iOSTests/JobRowTests/testTitle()", "iOSTests", "testTitle()", "XCTAssertTrue failed"),
+                            (nil, "iOSTests", "testBadge()", "Expectation failed: 1 == 2\nsecond line")])
+        let failed = MacCheck.verdict(phone, attempt(65, "Lost connection to the test manager service.\n** TEST FAILED **", summary: real))
+        #expect(failed == .failed([MacCheck.FailingTest(test: "iOSTests/JobRowTests/testTitle()", message: "XCTAssertEqual failed: (\"a\") is not equal to (\"b\"); XCTAssertTrue failed"),
+                                   MacCheck.FailingTest(test: "iOSTests/testBadge()", message: "Expectation failed: 1 == 2\nsecond line")], log: nil))
+        // A test's own assertion that quotes an infrastructure phrase is the code's, and so is any failure of a test function.
+        let quoting = summary([("iOSTests/InstallTests/testMessage()", "iOSTests", "testMessage()", "XCTAssertEqual failed: (\"Failed to install\") is not equal to (\"ok\")")])
+        #expect(MacCheck.verdict(phone, attempt(65, "** TEST FAILED **", summary: quoting))
+                == .failed([MacCheck.FailingTest(test: "iOSTests/InstallTests/testMessage()", message: "XCTAssertEqual failed: (\"Failed to install\") is not equal to (\"ok\")")], log: nil))
+        #expect(MacCheck.diagnostic(MacCheck.FailingTest(test: "iOSTests/testInstall()", message: "Failed to install the app")) == nil)
+        #expect(MacCheck.diagnostic(MacCheck.FailingTest(test: "iOSTests", message: "Expectation failed: hung before establishing connection")) == nil)
+        #expect(MacCheck.diagnostic(MacCheck.FailingTest(test: "iOSTests", message: "Failed to install or launch the test runner.")) == .install)
+        // Without a bundle, the output names them, and Swift Testing's issues are their messages.
+        let swiftTest = "✘ Test blocksASecret() recorded an issue at PublishTests.swift:12:9: Expectation failed: 1 == 2\n✘ Test blocksASecret() failed after 0.002 seconds with 1 issue."
+        #expect(MacCheck.verdict(swift, attempt(1, swiftTest)) == .failed([MacCheck.FailingTest(test: "blocksASecret()", message: "PublishTests.swift:12:9: Expectation failed: 1 == 2")], log: nil))
+        // A build the compiler stopped: its errors go to the author, even when a source line quotes a hang.
+        let broken = "/x/A.swift:3:5: error: cannot find 'foo' in scope\n    let s = \"hung before establishing connection\"\n** TEST BUILD FAILED **"
+        #expect(MacCheck.verdict(phone, attempt(65, broken)) == .failed([], log: "/x/A.swift:3:5: error: cannot find 'foo' in scope"))
+        // No named test and no trouble: the last 40 lines.
+        let long = (1...100).map { "line \($0)" }.joined(separator: "\n")
+        guard case let .failed(tests, log) = MacCheck.verdict(mac, attempt(65, long)) else { Issue.record("not the code's"); return }
+        #expect(tests.isEmpty && log?.hasPrefix("line 61\n") == true && log?.hasSuffix("line 100") == true)
+        // `swift test` runs no simulator: what it prints is never the Mac's trouble.
+        #expect(MacCheck.verdict(swift, attempt(1, "error: hung before establishing connection")) != .trouble(.hung))
+        #expect(MacCheck.verdict(phone, attempt(0, hungOutput)) == .passed)
+    }
+
+    @Test func aStepTheMacGotInTheWayOfRunsOnceMoreAndOnlyOnce() async {
+        let phone = MacCheck.commands(cache: URL(filePath: "/cache"))[2]
+        let real = summary([("iOSTests/JobRowTests/testTitle()", "iOSTests", "testTitle()", "XCTAssertEqual failed")])
+        func run(_ attempts: [MacCheck.Attempt]) async -> (outcome: MacCheck.Outcome, runs: [Int], resets: Int) {
+            var runs: [Int] = [], resets = 0
+            let outcome = await MacCheck.step(phone) { run, _ in
+                runs.append(run)
+                return attempts[run - 1]
+            } reset: {
+                resets += 1
+            }
+            return (outcome, runs, resets)
+        }
+        // Hung, then passed: the simulators were reset in between, and the step passed on its second run.
+        var (outcome, runs, resets) = await run([attempt(65, hungOutput, seconds: 400), attempt(0, "** TEST SUCCEEDED **", seconds: 90)])
+        #expect(runs == [1, 2] && resets == 1)
+        #expect(outcome == MacCheck.Outcome(step: MacCheck.Step(name: phone.name, passed: true, seconds: 490, retried: true)))
+        // Hung twice: the check couldn't run, with nothing for the author.
+        (outcome, runs, resets) = await run([attempt(65, hungOutput), attempt(65, hungOutput)])
+        #expect(runs == [1, 2] && resets == 1 && !outcome.step.passed && outcome.step.failing == nil && outcome.log == nil)
+        #expect(outcome.problem == "Mac check couldn't run: the iPhone simulator's test runner hung, and again after Oby restarted the simulators and ran iPhone app with Watch, and iOSTests once more.")
+        // Hung, then a real failure: that goes to the author.
+        (outcome, runs, resets) = await run([attempt(65, hungOutput), attempt(65, "** TEST FAILED **", summary: real)])
+        #expect(runs == [1, 2] && outcome.problem == nil && outcome.step.retried == true)
+        #expect(outcome.step.failing == [MacCheck.FailingTest(test: "iOSTests/JobRowTests/testTitle()", message: "XCTAssertEqual failed")])
+        // A real failure, or a build error, runs once.
+        (outcome, runs, resets) = await run([attempt(65, "** TEST FAILED **", summary: real)])
+        #expect(runs == [1] && resets == 0 && outcome.step.retried == nil && outcome.step.failing?.count == 1)
+        (outcome, runs, resets) = await run([attempt(65, "/x/A.swift:3:5: error: cannot find 'foo' in scope")])
+        #expect(runs == [1] && resets == 0 && outcome.log == "/x/A.swift:3:5: error: cannot find 'foo' in scope" && outcome.problem == nil)
+        // Between the runs: the simulators shut down, CoreSimulatorService and dtdeviceinfod ended, then what the check built.
+        #expect(MacCheck.resetCommands(derived: URL(filePath: "/cache/DerivedData")) == [
+            ["xcrun", "simctl", "shutdown", "all"],
+            ["killall", "-9", "com.apple.CoreSimulator.CoreSimulatorService"],
+            ["killall", "-9", "dtdeviceinfod"],
+            ["pkill", "-KILL", "-f", "/cache/DerivedData"],
+        ])
+        // xcodebuild writes its result bundle where the Mac reads it, before its action.
+        let bundled = phone.bundled(at: URL(filePath: "/tmp/1-1.xcresult")).arguments
+        #expect(bundled.suffix(3) == ["-resultBundlePath", "/tmp/1-1.xcresult", "test"])
+        #expect(MacCheck.commands(cache: URL(filePath: "/c"))[0].bundled(at: URL(filePath: "/tmp/x")).arguments.contains("-resultBundlePath") == false)
+    }
+
+    @Test func aStepThatLeavesNoResultBundleAndNamesNoTestIsTheMacsNeverAFailure() async {
+        let commands = MacCheck.commands(cache: URL(filePath: "/cache"))
+        let (swift, phone) = (commands[0], commands[2])
+        // PR #140: the iPhone step ended after 1011 seconds, with no result bundle and no test named.
+        let ended = "Testing started\n** TEST FAILED **"
+        #expect(MacCheck.verdict(phone, attempt(65, ended, bundled: false)) == .trouble(.noResults))
+        #expect(MacCheck.verdict(phone, attempt(15, "◇ Test hangs() started.", timedOut: true, bundled: false)) == .trouble(.noResults))
+        // A build that failed, or a test the output names, is still the code's; so is anything `swift test` prints.
+        #expect(MacCheck.verdict(phone, attempt(65, "/x/A.swift:3:5: error: cannot find 'foo' in scope\n** TEST BUILD FAILED **", bundled: false))
+                == .failed([], log: "/x/A.swift:3:5: error: cannot find 'foo' in scope"))
+        #expect(MacCheck.verdict(phone, attempt(65, "Undefined symbols\nclang: error: linker command failed with exit code 1", bundled: false)) != .trouble(.noResults))
+        #expect(MacCheck.verdict(phone, attempt(65, "Test Case '-[iOSTests.A b]' failed (0.1 seconds).", bundled: false))
+                == .failed([MacCheck.FailingTest(test: "-[iOSTests.A b]", message: "")], log: nil))
+        #expect(MacCheck.verdict(swift, attempt(1, ended, bundled: false)) != .trouble(.noResults))
+        // It runs once more after the reset; the same again, and the check couldn't run, saying how it ended.
+        var runs = 0, resets = 0
+        var outcome = await MacCheck.step(phone) { _, _ in
+            runs += 1
+            return attempt(65, ended, bundled: false, seconds: 500)
+        } reset: {
+            resets += 1
+        }
+        #expect(runs == 2 && resets == 1 && !outcome.step.passed && outcome.step.retried == true && outcome.step.seconds == 1000 && outcome.log == nil)
+        #expect(outcome.problem == "Mac check couldn't run: the iPhone app's tests ended without a result bundle or a failing test, and again after Oby restarted the simulators and ran iPhone app with Watch, and iOSTests once more. xcodebuild exited 65: ** TEST FAILED **")
+        outcome = await MacCheck.step(phone) { run, _ in
+            run == 1 ? attempt(65, ended, bundled: false) : attempt(15, "◇ Test hangs() started.", timedOut: true, bundled: false)
+        } reset: {}
+        #expect(outcome.problem?.hasSuffix("once more. It was stopped after 40 minutes; the last test that started was hangs().") == true)
+        #expect(outcome.log?.hasPrefix("Oby stopped it after 40 minutes; the last test that started was hangs().") == true)
+    }
+
+    // MARK: Simulator runtimes
+
+    /// `xcrun simctl list runtimes --json` and `list devices --json` on a Mac with iOS 27.0, 26.5 and 26.2
+    /// (no iPhone 17 on 26.2) and watchOS.
+    let simctl: (runtimes: Data, devices: Data) = {
+        let runtimes = #"{"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-5", "version": "26.5", "buildversion": "23F77", "isAvailable": true, "platform": "iOS"}, {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-0", "version": "27.0", "buildversion": "24A434", "isAvailable": true, "platform": "iOS"}, {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2", "version": "26.2", "buildversion": "23C54", "isAvailable": true, "platform": "iOS"}, {"identifier": "com.apple.CoreSimulator.SimRuntime.watchOS-27-0", "version": "27.0", "buildversion": "24R300", "isAvailable": true, "platform": "watchOS"}]}"#
+        let devices = #"{"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-27-0": [{"name": "iPhone 17", "isAvailable": true}], "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPhone 17 Pro", "isAvailable": true}, {"name": "iPhone 17", "isAvailable": true}], "com.apple.CoreSimulator.SimRuntime.iOS-26-2": [{"name": "iPhone 16", "isAvailable": true}], "com.apple.CoreSimulator.SimRuntime.watchOS-27-0": [{"name": "iPhone 17", "isAvailable": true}]}}"#
+        return (Data(runtimes.utf8), Data(devices.utf8))
+    }()
+
+    @Test func theIPhoneStepFallsBackToAnOlderRuntimeAndRemembersWhichOneWorks() async throws {
+        let installed = MacCheck.runtimes(simctl.runtimes, devices: simctl.devices)
+        let (new, old) = (MacCheck.Runtime(version: "27.0", build: "24A434"), MacCheck.Runtime(version: "26.5", build: "23F77"))
+        #expect(installed == [new, old] && new.label == "iOS 27.0 (24A434)" && old.older(than: new) && !new.older(than: old))
+        #expect(MacCheck.Runtime(version: "9.0", build: "").older(than: MacCheck.Runtime(version: "10.0", build: "")))
+        #expect(MacCheck.runtimes(Data("nope".utf8), devices: simctl.devices).isEmpty)
+        let phone = MacCheck.commands(cache: URL(filePath: "/cache"))[2]
+        #expect(phone.on(old).arguments.contains("platform=iOS Simulator,name=iPhone 17,OS=26.5") && !phone.on(old).arguments.contains(MacCheck.iPhone))
+        #expect(MacCheck.commands(cache: URL(filePath: "/cache"))[1].on(old).runtime == nil)
+
+        // Nothing learned yet: the newest first, the newest older one after trouble.
+        var memory = MacCheck.RuntimeMemory()
+        #expect(memory.first(of: installed) == new && memory.retry(after: new, of: installed) == old && memory.retry(after: old, of: installed) == nil)
+        // 27.0 hangs, 26.5 passes: the step passed on 26.5, and the comment says so.
+        var destinations: [String] = []
+        let outcome = await MacCheck.step(phone.on(new), retry: phone.on(old)) { run, command in
+            destinations.append(command.arguments[command.arguments.firstIndex(of: "-destination")! + 1])
+            return run == 1 ? attempt(65, hungOutput) : attempt(0, "** TEST SUCCEEDED **")
+        } reset: {}
+        #expect(destinations == ["platform=iOS Simulator,name=iPhone 17,OS=27.0", "platform=iOS Simulator,name=iPhone 17,OS=26.5"])
+        #expect(outcome.step.passed && outcome.step.retried == true && outcome.step.runtime == "iOS 26.5 (23F77)" && !outcome.troubled)
+        memory.learn(first: new, retry: old, from: outcome)
+        #expect(memory == MacCheck.RuntimeMemory(hung: ["iOS 27.0 (24A434)"], working: "iOS 26.5 (23F77)"))
+        // The next check runs on 26.5 straight away, and keeps it until it fails; then the hung 27.0 isn't tried again.
+        #expect(memory.first(of: installed) == old && memory.retry(after: old, of: installed) == nil)
+        var check = MacCheck.make(for: author, pr: 80, head: Self.head)
+        check.state = .passed
+        check.steps = [outcome.step]
+        #expect(MacCheck.comment(check).contains("| iPhone app with Watch, and iOSTests on iOS 26.5 (23F77) | Passed (second run) |"))
+        #expect(MacCheck.stepLine(outcome.step).hasPrefix("- iPhone app with Watch, and iOSTests on iOS 26.5 (23F77): passed"))
+        // Both hang: the check couldn't run, saying where it tried last, and neither counts as working.
+        let both = await MacCheck.step(phone.on(new), retry: phone.on(old)) { _, _ in attempt(65, hungOutput) } reset: {}
+        #expect(both.troubled && both.problem?.hasSuffix("ran iPhone app with Watch, and iOSTests once more on iOS 26.5 (23F77).") == true)
+        var hung = MacCheck.RuntimeMemory(working: "iOS 26.5 (23F77)")
+        hung.learn(first: old, retry: nil, from: both)
+        #expect(hung == MacCheck.RuntimeMemory(hung: ["iOS 26.5 (23F77)"], working: nil) && hung.first(of: installed) == new)
+        // A run that failed in the code still got past the simulator.
+        var failed = MacCheck.RuntimeMemory(hung: ["iOS 27.0 (24A434)"])
+        failed.learn(first: old, retry: nil, from: MacCheck.Outcome(step: MacCheck.Step(name: phone.name, passed: false, seconds: 1, failing: [MacCheck.FailingTest(test: "a()", message: "")])))
+        #expect(failed.working == "iOS 26.5 (23F77)")
+        // It's kept between checks.
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appending(path: "checks/runtimes.json")
+        memory.save(file)
+        #expect(MacCheck.RuntimeMemory.load(file) == memory && MacCheck.RuntimeMemory.load(folder.appending(path: "none.json")) == MacCheck.RuntimeMemory())
+    }
+
+    @Test func aStepStoppedAtItsTimeoutNamesTheLastTestThatStartedAndItsLastLines() {
+        let swift = MacCheck.commands(cache: URL(filePath: "/cache"))[0]
+        let output = """
+            ◇ Test run started.
+            ◇ Test quick() started.
+            ◇ Test hangs() started.
+            ◇ Test alsoQuick() started.
+            ✔ Test quick() passed after 0.001 seconds.
+            ✔ Test alsoQuick() passed after 0.001 seconds.
+            """
+        #expect(MacCheck.lastStarted(in: output) == "hangs()")
+        #expect(MacCheck.lastStarted(in: "Test Case '-[MacTests.A b]' started.\nTest Case '-[MacTests.A b]' passed (0.1 seconds).\nTest Case '-[MacTests.A c]' started.") == "-[MacTests.A c]")
+        #expect(MacCheck.lastStarted(in: "Building…") == nil)
+        guard case let .problem(problem, log) = MacCheck.verdict(swift, attempt(15, output, timedOut: true)) else { Issue.record("not the Mac's"); return }
+        #expect(problem == "Runner tests (swift test) was stopped after 30 minutes without naming a failing test; the last test that started was hangs().")
+        #expect(log?.hasPrefix("Oby stopped it after 30 minutes; the last test that started was hangs(). What it printed last:\n◇ Test run started.") == true)
+        #expect(log?.hasSuffix("✔ Test alsoQuick() passed after 0.001 seconds.") == true)
+    }
+
+    @Test func eachFailedStepNamesItsTestsAndMessagesInTheHandOffAndTheComment() async throws {
+        let check = try await approved()
+        _ = desk.nextMacCheck(mac: "Studio")
+        var failing = steps
+        failing[1].passed = false
+        failing[1].failing = [MacCheck.FailingTest(test: "MacTests/PublishTests/blocksASecret()", message: "Expectation failed: 1 == 2")]
+        failing[2].passed = false
+        failing[2].failing = [MacCheck.FailingTest(test: "iOSTests/JobRowTests/testTitle()", message: "")]
+        failing[2].retried = true
+        try desk.macCheckEnded(check.id, MacCheck.Report(passed: false, steps: failing,
+                                                         failures: ["MacTests/PublishTests/blocksASecret()", "iOSTests/JobRowTests/testTitle()"]))
+        try await until("the author runs again") { desk.job("author")?.status == .running && made.agents.count == 3 }
+        let quoted = try #require(made.quoted.last).text
+        #expect(quoted.contains("- iPhone app with Watch, and iOSTests: failed (6m 52s, on its second run)"))
+        #expect(quoted.contains("Failing tests in Mac app and MacTests:\n\n> MacTests/PublishTests/blocksASecret(): Expectation failed: 1 == 2"))
+        #expect(quoted.contains("Failing tests in iPhone app with Watch, and iOSTests:\n\n> iOSTests/JobRowTests/testTitle()"))
+        let comment = try #require(made.comments.first)
+        #expect(comment.contains("| iPhone app with Watch, and iOSTests | Failed (second run) | 6m 52s |"))
+        #expect(comment.contains("Failing tests in Mac app and MacTests:\n\n```\nMacTests/PublishTests/blocksASecret(): Expectation failed: 1 == 2\n```"))
+        #expect(comment.contains("Failing tests in iPhone app with Watch, and iOSTests:\n\n```\niOSTests/JobRowTests/testTitle()\n```"))
+    }
+
+    @Test func theMacsOwnTroubleNeverBecomesAHandOff() async throws {
+        let check = try await approved()
+        _ = desk.nextMacCheck(mac: "Studio")
+        var failing = steps
+        failing[2].passed = false
+        failing[2].retried = true
+        let problem = "Mac check couldn't run: the iPhone simulator's test runner hung, and again after Oby restarted the simulators and ran iPhone app with Watch, and iOSTests once more."
+        let ended = try desk.macCheckEnded(check.id, MacCheck.Report(passed: false, steps: failing, failures: [], problem: problem))
+        #expect(ended.state == .error)
+        try await Task.sleep(for: .milliseconds(100))
+        let job = try #require(desk.job("author"))
+        #expect(made.comments.isEmpty && made.quoted.isEmpty && made.agents.count == 2 && job.macCheck?.handedOff == nil && job.mergeNeedsYou)
+        #expect(job.pipeline.stages.last?.detail == "Mac check couldn't run"
+                && job.pipeline.stages.last?.reason?.hasPrefix("The iPhone simulator's test runner hung, and again") == true)
+        let item = try #require(desk.inbox.last { $0.isOpen })
+        #expect(item.kind == .merge && item.text == problem && item.options == [Inbox.tryAgain, Inbox.dismiss])
+        // A Mac from before this reports the hang as a plain failure: the runner still keeps it from the author.
+        var old = steps
+        old[2].passed = false
+        let report = MacCheck.validated(MacCheck.Report(passed: false, steps: old, failures: [], log: "iPhone app with Watch, and iOSTests:\n" + hungOutput))
+        #expect(report.problem == "Mac check couldn't run: the iPhone simulator's test runner hung.")
+        let compiled = MacCheck.validated(MacCheck.Report(passed: false, steps: old, failures: [], log: "iPhone app with Watch, and iOSTests:\n/x/A.swift:3:5: error: hung before establishing connection"))
+        #expect(compiled.problem == nil)
     }
 
     @Test func aStepThatHangsIsEndedWithWhatItStartedAndNothingWaitsOnItsOutput() async throws {
