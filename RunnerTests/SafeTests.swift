@@ -438,7 +438,8 @@ struct HaltTests {
         let start = ContinuousClock.now
         let read = try await Task.detached { try out.fileHandleForReading.readToEnd() }.value
         #expect(read.map { String(decoding: $0, as: UTF8.self) } == "started\n")
-        #expect(ContinuousClock.now - start < .seconds(10))
+        // Under the leftover's 31 s: killed, not waited out, however busy the machine (13 s, #193).
+        #expect(ContinuousClock.now - start < .seconds(30))
         #expect(try await gone(mark))
     }
 
@@ -449,7 +450,7 @@ struct HaltTests {
         let start = ContinuousClock.now
         let result = try await Shell.run(["sh", "-c", leftover(mark)])
         #expect(result.text == "started" && result.status == 0)
-        #expect(ContinuousClock.now - start < .seconds(10))
+        #expect(ContinuousClock.now - start < .seconds(30))
         #expect(try await gone(mark))
     }
 
