@@ -46,6 +46,8 @@ final class Phone {
             JobWaiter.shared.wait(for: jobs, runner: runnerURL)
         }
     }
+    /// The jobs whose screens are open (JobScreen): a new list keeps them, even older than its 50.
+    @ObservationIgnored private var onScreen: Set<String> = []
     /// The Live Activity's latest update, so a background wake can wait for it to land.
     @ObservationIgnored private var syncing: Task<Void, Never>?
     private(set) var accounts: [Account] = []
@@ -108,7 +110,7 @@ final class Phone {
         accounts = status.accounts
         models = status.models
         clearedAt = status.clearedAt
-        jobs = try await runner.jobs()
+        await take(try await runner.jobs())
         inbox = try await runner.inbox()
         loaded = true
         // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
@@ -126,14 +128,14 @@ final class Phone {
     func catchUp() async {
         JobWaiter.shared.reconnect()
         guard let fresh = try? await runner.jobs() else { return }
-        jobs = fresh
+        await take(fresh)
         await syncing?.value
     }
 
     /// Pull to refresh: fetch the job list now, without waiting for the runner's next event.
     func reload() async {
         do {
-            jobs = try await runner.jobs()
+            await take(try await runner.jobs())
             inbox = try await runner.inbox()
             loaded = true
         } catch {
@@ -250,6 +252,22 @@ final class Phone {
         apply(.inbox(try await runner.settle(id, answer: answer, done: done, later: later)))
     }
 
+    /// A job's screen opened or closed: while it's open, new lists keep its job.
+    func showing(_ id: String, _ shown: Bool) {
+        if shown { onScreen.insert(id) } else { onScreen.remove(id) }
+    }
+
+    /// A new list from the runner, the latest 50. A job whose screen is open stays even when it's
+    /// older than those, fetched again so it's current.
+    private func take(_ fresh: [Job]) async {
+        let (list, refetch) = JobList.keeping(fresh, old: jobs, onScreen: onScreen, id: \.id, created: \.created)
+        jobs = list
+        for id in refetch {
+            guard let job = try? await runner.job(id) else { continue }
+            jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
+        }
+    }
+
     /// A job older than the list's 50 (an inbox item or a notification opened it): fetched, and
     /// kept among the others in age order.
     func fetch(_ id: String) async {
@@ -257,7 +275,7 @@ final class Phone {
         do {
             let job = try await runner.job(id)
             guard !jobs.contains(where: { $0.id == id }) else { return }
-            jobs.insert(job, at: jobs.firstIndex { $0.created < job.created } ?? jobs.count)
+            jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
         } catch {
             Logger.phone.error("fetching job \(id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
         }

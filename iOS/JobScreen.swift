@@ -76,6 +76,9 @@ struct JobScreen: View {
             await phone.fetch(id)
             looked = true
         }
+        // While it's open, a new job list keeps this job even when it's older than the latest 50.
+        .onAppear { phone.showing(id, true) }
+        .onDisappear { phone.showing(id, false) }
     }
 
     private func header(_ job: Job) -> some View {

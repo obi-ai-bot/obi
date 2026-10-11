@@ -556,10 +556,23 @@ final class Desk {
             guard let session = job.session else { throw Shell.Failure(message: "This job never started, so there's no session to pick up.") }
             let resumed = Self.resumed(job, text)
             replace(resumed)
+            if let author = resumed.reviewOf { reconnect(review: id, to: author) }
             asked.insert(id)
             roundMessage[id] = nil
             run(resumed, prompt: text, resume: session)
         }
+    }
+
+    /// A review that ended with no verdict runs again (Try again from the inbox, or the user's
+    /// words): it's its author's review once more, so its verdict counts when it ends
+    /// (`reviewEnded`). Not when the author has a review under way, this one's verdict already
+    /// counted, or a newer review of the author's came since.
+    private func reconnect(review id: String, to authorID: String) {
+        guard var author = job(authorID), author.reviewing == nil, author.review?.job != id,
+              jobs.filter({ $0.reviewOf == authorID }).max(by: { $0.created < $1.created })?.id == id else { return }
+        author.reviewing = id
+        author.reviewError = nil
+        replace(author)
     }
 
     /// The job with the user's words saved, and shown as its step until the agent moves on.

@@ -233,6 +233,75 @@ final class InboxTests {
         #expect(restarted.job("reviewed")?.notes?.first?.contains(".oby/inputs/review-4.md") == true)
     }
 
+    /// Try again on a review that failed makes it its author's review again: its verdict counts.
+    @Test func aRetriedReviewCountsForItsAuthor() async throws {
+        var author = fix
+        author.id = "author"
+        author.status = .done
+        author.session = "e6a24229"
+        author.commits = 1
+        author.published = "https://github.com/deskree-inc/oby/pull/80"
+        author.reviewError = "Oby's review failed: Codex hit an error."
+        author.finished = Date(timeIntervalSince1970: 1_791_582_200)
+        var review = fix
+        review.id = "rev1"
+        review.kind = .review
+        review.reviewOf = "author"
+        review.status = .failed
+        review.session = "5c1e"
+        review.summary = "Codex hit an error."
+        review.created = author.created + 60
+        review.finished = review.created + 30
+        let desk = makeDesk([author, review])
+        let agent = Agent()
+        desk.makeAgent = { _, _, _ in agent }
+        desk.countCommits = { _, _ in 0 }
+        desk.postReview = { _, _ in URL(string: "https://github.com/deskree-inc/oby/pull/80#issuecomment-1")! }
+        let item = try #require(desk.inbox.first { $0.job == "rev1" })
+        try desk.settle(item.id, .answer("Try again"))
+        #expect(desk.job("author")?.reviewing == "rev1" && desk.job("author")?.reviewError == nil)
+
+        agent.onEvent(.turnEnded(summary: "It does what was asked.\n\nVERDICT: APPROVED", failed: false))
+        agent.onEvent(.finished(summary: "It does what was asked.\n\nVERDICT: APPROVED", failed: false))
+        for _ in 0..<500 where desk.job("rev1")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
+        let reviewed = try #require(desk.job("author"))
+        #expect(reviewed.reviewing == nil && reviewed.review?.verdict == .approved && reviewed.review?.job == "rev1")
+
+        // An older review run again doesn't take the place of the newer one.
+        var newer = review
+        newer.id = "rev2"
+        newer.created = review.created + 600
+        var older = review
+        older.id = "rev0"
+        older.created = review.created - 600
+        var waiting = author
+        waiting.review = nil
+        let again = makeDesk([waiting, older, newer])
+        again.makeAgent = { _, _, _ in agent }
+        try again.message("rev0", "Try again.")
+        #expect(again.job("author")?.reviewing == nil)
+    }
+
+    /// The iPhone's job list reloads with the latest 50 (Shared/JobList.swift): a job whose screen
+    /// is open stays even when it's older, in age order, and is fetched again.
+    @Test func anOpenScreenKeepsItsOlderJob() {
+        struct Row: Equatable { var id: String; var created: Date }
+        let now = Date(timeIntervalSince1970: 1_791_582_173)
+        let fresh = [Row(id: "new2", created: now), Row(id: "new1", created: now - 10)]
+        let old = [Row(id: "new1", created: now - 10), Row(id: "asking", created: now - 1000), Row(id: "gone", created: now - 2000)]
+        let kept = JobList.keeping(fresh, old: old, onScreen: ["asking"], id: \.id, created: \.created)
+        #expect(kept.jobs.map(\.id) == ["new2", "new1", "asking"] && kept.refetch == ["asking"])
+        // Nothing open: just the new list.
+        #expect(JobList.keeping(fresh, old: old, onScreen: [], id: \.id, created: \.created).jobs == fresh)
+        // A screen whose job is in the new list needs nothing fetched.
+        #expect(JobList.keeping(fresh, old: old, onScreen: ["new1"], id: \.id, created: \.created).refetch.isEmpty)
+        // Fetched again, it takes its own place: replaced where it is, else by age.
+        let current = Row(id: "asking", created: now - 1000)
+        #expect(JobList.placed(current, in: kept.jobs, id: \.id, created: \.created) == kept.jobs)
+        #expect(JobList.placed(current, in: fresh, id: \.id, created: \.created).map(\.id) == ["new2", "new1", "asking"])
+        #expect(JobList.placed(Row(id: "mid", created: now - 5), in: fresh, id: \.id, created: \.created).map(\.id) == ["new2", "mid", "new1"])
+    }
+
     /// A retry that fails again, even within the same second, is a new item: the settled one doesn't hide it.
     @Test func aRetryThatFailsAgainIsANewItem() {
         var again = failed
