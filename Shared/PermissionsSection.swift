@@ -1,29 +1,38 @@
+#if os(iOS) || os(macOS)
 import SwiftUI
 
-/// Settings › Permissions: the mode jobs on the runner get when a dispatch doesn't pick one, and
-/// the rules Always allow (or Deny) saved there, each removed with a swipe or its button.
+/// Settings › Permissions, on the iPhone and in the Mac's Runner tab alike (as the sections in
+/// Shared/SettingsSections.swift): the mode the runner's jobs get when a dispatch doesn't pick one,
+/// and the rules Always allow (or Deny) saved there, each removed with its button (or a swipe on
+/// the iPhone).
 struct PermissionsSection: View {
-    @Environment(Phone.self) private var phone
+    /// The runner, or nil while none is set.
+    var runner: Runner?
+    /// The default mode, as the runner last said, or nil from a runner without modes.
+    var defaultMode: RunnerMode?
+    var setDefault: (RunnerMode) async throws -> Void
     /// Nil until the runner answered, or when it has no rules to list (older runners).
     @State private var rules: [RunnerRule]?
     @State private var problem: String?
 
     var body: some View {
         Section {
-            if phone.defaultMode == nil && rules == nil {
+            if runner == nil {
+                Text("Set the runner's address first.").foregroundStyle(.secondary)
+            } else if defaultMode == nil && rules == nil {
                 Text("This runner doesn't ask before agents act.").foregroundStyle(.secondary)
             } else {
-                Picker("Default mode", selection: Binding { phone.defaultMode } set: { mode in
+                Picker("Default mode", selection: Binding { defaultMode } set: { mode in
                     guard let mode else { return }
                     Task {
-                        do { try await phone.setDefaultMode(mode); problem = nil } catch { problem = error.localizedDescription }
+                        do { try await setDefault(mode); problem = nil } catch { problem = error.localizedDescription }
                     }
                 }) {
                     ForEach(RunnerMode.allCases) { mode in
                         Text(mode.label).tag(RunnerMode?.some(mode))
                     }
                 }
-                if let mode = phone.defaultMode {
+                if let mode = defaultMode {
                     Text(mode.help).font(.footnote).foregroundStyle(.secondary)
                 }
                 if let rules, rules.isEmpty {
@@ -32,13 +41,13 @@ struct PermissionsSection: View {
                 ForEach(rules ?? []) { rule in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(rule.rule).font(.subheadline.monospaced())
+                            Text(rule.rule).font(.body.monospaced())
                             Text([rule.decision == "deny" ? "Denied" : "Allowed", rule.repo].compactMap(\.self).joined(separator: " · "))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Remove", systemImage: "minus.circle") { remove([rule.id]) }
-                            .labelStyle(.iconOnly).foregroundStyle(.red).buttonStyle(.borderless)
+                        Button("Remove", role: .destructive) { remove([rule.id]) }
+                            .buttonStyle(.borderless)
                             .accessibilityLabel("Remove \(rule.rule)")
                     }
                 }
@@ -48,14 +57,15 @@ struct PermissionsSection: View {
         } header: {
             Text("Permissions")
         } footer: {
-            Text("Ask: the agent asks before it edits or runs anything. Always allow saves a rule, so it doesn't ask again. Swipe a rule to remove it.")
+            Text("Ask: the agent asks before it edits or runs anything. Always allow saves a rule, so it doesn't ask again; remove the rule to be asked again.")
         }
-        .task(id: phone.host) { await load() }
+        .task(id: runner?.base) { await load() }
     }
 
     private func load() async {
+        guard let runner else { rules = nil; return }
         do {
-            rules = try await phone.runner.permissionRules()
+            rules = try await runner.permissionRules()
             problem = nil
         } catch let error as RunnerError where error.status == 404 {
             // A runner without permissions.
@@ -66,10 +76,11 @@ struct PermissionsSection: View {
     }
 
     private func remove(_ ids: [String]) {
+        guard let runner else { return }
         Task {
             for id in ids {
                 do {
-                    try await phone.runner.removeRule(id)
+                    try await runner.removeRule(id)
                     rules?.removeAll { $0.id == id }
                     problem = nil
                 } catch {
@@ -79,3 +90,4 @@ struct PermissionsSection: View {
         }
     }
 }
+#endif

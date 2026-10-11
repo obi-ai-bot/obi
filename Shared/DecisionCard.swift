@@ -26,17 +26,19 @@ struct DecisionCard: View {
     @State private var showsDetails = false
     @State private var words = ""
     @FocusState private var focused: Bool
+    /// Dynamic Type's scale, for the plan's inline code.
+    @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
 
     private var typed: String { words.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Style.spacing) {
-            Text(title).font(Style.title).fixedSize(horizontal: false, vertical: true)
+            ReadingText(title, weight: .semibold)
             if let happened, !happened.isEmpty {
-                Text(happened).font(Style.body).fixedSize(horizontal: false, vertical: true)
+                ReadingText(happened)
             }
             if let detail, !detail.isEmpty {
-                Text(detail).font(Style.code).foregroundStyle(Style.secondary)
+                Text(detail).readingCode()
                     .selectable()
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(Style.inset)
@@ -63,9 +65,7 @@ struct DecisionCard: View {
         .buttonStyle(.plain)
         .accessibilityValue(showsDetails ? "Shown" : "Hidden")
         if showsDetails {
-            Text(text).font(Style.body).foregroundStyle(Style.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .selectable()
+            ReadingText(text, secondary: true).selectable()
         }
     }
 
@@ -75,18 +75,18 @@ struct DecisionCard: View {
         let text = VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(PlanBlock.blocks(plan).enumerated()), id: \.offset) { _, block in
                 switch block {
-                case .heading(let text): Text(Self.inline(text)).font(Style.planHeading)
+                case .heading(let text): Text(inline(text)).fontWeight(.semibold)
                 case .item(let marker, let text):
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(marker).foregroundStyle(Style.secondary)
-                        Text(Self.inline(text))
+                        Text(inline(text))
                     }
-                case .code(let text): Text(text).font(Style.code)
-                case .text(let text): Text(Self.inline(text))
+                case .code(let text): Text(text).readingCode()
+                case .text(let text): Text(inline(text))
                 }
             }
         }
-        .font(Style.plan)
+        .readingText()
         .selectable()
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(Style.inset)
@@ -108,7 +108,7 @@ struct DecisionCard: View {
         Button { onChoose(option) } label: {
             VStack(alignment: .leading, spacing: 1) {
                 if option.recommended { Text("Recommended").font(.caption2.weight(.semibold)).foregroundStyle(.secondary) }
-                Text(option.label).fixedSize(horizontal: false, vertical: true)
+                ReadingText(option.label)
                 if let detail = option.detail { Text(detail).font(.caption2).foregroundStyle(.secondary).lineLimit(3) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -119,8 +119,11 @@ struct DecisionCard: View {
         Button { onChoose(option) } label: {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(option.label).font(Style.option)
-                        .foregroundStyle(option.role == .destructive ? Color.red : Style.ink)
+                    if option.role == .destructive {
+                        Text(option.label).font(Reading.current.prose).fontWeight(.medium).foregroundStyle(Color.red)
+                    } else {
+                        ReadingText(option.label, weight: .medium)
+                    }
                     if let detail = option.detail {
                         Text(detail).font(Style.small).foregroundStyle(Style.secondary).fixedSize(horizontal: false, vertical: true)
                     }
@@ -153,9 +156,10 @@ struct DecisionCard: View {
         #endif
     }
 
-    /// Bold, italics, code and links in a line of the plan.
-    private static func inline(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+    /// Bold, italics, code and links in a line of the plan, as the reading style sets them (Shared/ReadingText.swift).
+    private func inline(_ text: String) -> AttributedString {
+        let reading = Reading.current
+        return Reading.markdown(text, code: reading.code(scale: reading.style == nil ? 1 : scale))
     }
 
     private static func hint(_ option: CardOption) -> String { option.recommended ? "Recommended" : "" }
@@ -214,7 +218,7 @@ struct DecisionCard: View {
             TextField("Type your own…", text: $words, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...4)
-                .font(Style.option)
+                .readingText()
                 .focused($focused)
                 .submitLabel(.send)
                 .onSubmit(go)
@@ -233,20 +237,16 @@ struct DecisionCard: View {
     }
     #endif
 
-    /// Each app's look: the Mac's island is dark with its own sizes, the iPhone follows the system.
+    /// Each app's look around the text: the Mac's island is dark, the iPhone follows the system.
+    /// Long text itself takes the reading style (Shared/ReadingText.swift).
     private enum Style {
         #if os(macOS)
         static let ink = Color.white
         static let paper = Color.black
         static let secondary = Color.white.opacity(0.55)
         static let fill = Color.white.opacity(0.09)
-        static let title = Font.system(size: 15, weight: .semibold)
-        static let body = Font.system(size: 13)
         static let option = Font.system(size: 13, weight: .medium)
         static let small = Font.system(size: 11)
-        static let code = Font.system(size: 12).monospaced()
-        static let plan = Font.system(size: 13)
-        static let planHeading = Font.system(size: 13, weight: .semibold)
         static let planHeight: CGFloat = 220
         static let spacing: CGFloat = 8
         static let inset: CGFloat = 10
@@ -255,12 +255,7 @@ struct DecisionCard: View {
         #elseif os(watchOS)
         static let secondary = Color.secondary
         static let fill = Color.primary.opacity(0.12)
-        static let title = Font.footnote.weight(.semibold)
-        static let body = Font.caption
         static let small = Font.caption2
-        static let code = Font.caption2.monospaced()
-        static let plan = Font.caption2
-        static let planHeading = Font.caption.weight(.semibold)
         static let spacing: CGFloat = 6
         static let inset: CGFloat = 6
         #else
@@ -268,13 +263,8 @@ struct DecisionCard: View {
         static let paper = Color(uiColor: .systemBackground)
         static let secondary = Color.secondary
         static let fill = Color.primary.opacity(0.08)
-        static let title = Font.headline
-        static let body = Font.subheadline
         static let option = Font.subheadline.weight(.medium)
         static let small = Font.caption
-        static let code = Font.footnote.monospaced()
-        static let plan = Font.subheadline
-        static let planHeading = Font.subheadline.weight(.semibold)
         static let planHeight: CGFloat = 280
         static let spacing: CGFloat = 10
         static let inset: CGFloat = 12

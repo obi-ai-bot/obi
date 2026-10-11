@@ -58,6 +58,8 @@ struct RunnerSettingsView: View {
             } footer: {
                 Text("The runner does the work while your Mac is closed. The island lists the jobs running there too, and Oby tells you when one needs you. It answers only your Tailscale login, so this Mac needs Tailscale on. Leave it empty to turn this off.")
             }
+            // As on the iPhone (Shared/PermissionsSection.swift). This Mac's own jobs don't ask yet (#134).
+            PermissionsSection(runner: feed.runner, defaultMode: feed.defaultMode, setDefault: feed.setDefaultMode)
             Section("Checks on this Mac") {
                 Toggle("Run merge checks on this Mac", isOn: $runMergeChecks)
                 Text("When Oby's review approves a pull request, this Mac runs its tests and builds the Mac and iPhone apps, one at a time, before Oby merges it into dev.")
