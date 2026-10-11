@@ -68,7 +68,7 @@ nonisolated struct Reading: Sendable {
     static func paragraphs(_ text: String) -> [String] {
         var paragraphs: [String] = []
         var lines: [Substring] = []
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) + [""] {
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) + [Substring()] {
             if line.allSatisfy(\.isWhitespace) {
                 if !lines.isEmpty { paragraphs.append(lines.joined(separator: "\n")) }
                 lines = []
