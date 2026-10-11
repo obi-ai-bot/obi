@@ -58,7 +58,7 @@ catch {
     Logger.runner.error("Couldn't delete abandoned speech audio; refusing to start.")
     exit(1)
 }
-let desk = Desk()
+let desk = Desk(updateRecovery: Updates.recoveryIDs())
 desk.issueSync.enabled = true
 // Every failure is recorded, studied and acted on (Engine/Failures.swift).
 desk.failureLog.enabled = true
@@ -77,6 +77,24 @@ do {
 let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: "devices.json")),
               push: Push(desk: desk, folder: Workspace.root.appending(path: "apns")),
               cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")), speech: speech)
+
+let updates = Updates(desk: desk)
+api.updates = updates
+try updates.recover()
+Task {
+    while !Task.isCancelled {
+        await updates.poll()
+        do { try await Task.sleep(for: .seconds(Updates.interval)) }
+        catch { return }
+    }
+}
+Task {
+    while !Task.isCancelled {
+        do { try await Task.sleep(for: .seconds(1)) }
+        catch { return }
+        updates.deployIfReady()
+    }
+}
 
 // systemd stops the runner with SIGTERM: agents end now, and their jobs show as interrupted.
 // The sources live as long as the runner.
