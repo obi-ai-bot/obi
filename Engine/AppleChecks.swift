@@ -259,6 +259,12 @@ extension Job {
     }
 }
 
+extension MacCheck {
+    /// An Apple check no Mac took (#157): the Mac app is closed or not following the runner. Not a
+    /// failure: the agent carries on without it, and a Mac that comes back may still take it.
+    nonisolated var unclaimed: Bool { isApple && state == .error && started == nil }
+}
+
 extension Desk {
     /// Whether agents here have `oby-check apple`: on the runner, once it installed the command.
     var offersAppleChecks: Bool { queuesMacChecks && appleTool() != nil }
@@ -357,16 +363,22 @@ extension Desk {
     }
 
     /// The oldest queued Apple check whose agent still runs, or one a Mac took and went quiet on:
-    /// the asking Mac's now.
-    func nextAppleCheck(mac: String, now: Date = .now) -> MacCheck? {
+    /// the asking Mac's now. `late`: one no Mac took within a minute instead (#157), while its agent
+    /// still runs and within `AppleCheck.stale` of being queued: a Mac that reconnects, after the
+    /// runner restarted or the Mac app opened, still builds it, and the agent asking again for the
+    /// same commit picks it up. Not a final check's: that one passed without it already.
+    func nextAppleCheck(mac: String, late: Bool = false, now: Date = .now) -> MacCheck? {
         let ready = jobs.filter { job in
             guard job.isActive, let check = job.appleCheck else { return false }
+            if late { return check.unclaimed && check.finalCheck == nil && now.timeIntervalSince(check.created) <= AppleCheck.stale }
             return check.state == .queued || check.state == .running && now.timeIntervalSince(check.started ?? now) > MacCheck.lease
         }
         guard var job = ready.min(by: { ($0.appleCheck?.created ?? now) < ($1.appleCheck?.created ?? now) }), var check = job.appleCheck else { return nil }
         check.state = .running
         check.started = now
         check.mac = mac
+        check.finished = nil
+        check.problem = nil
         job.appleCheck = check
         replace(job)
         onCheckChange(check)

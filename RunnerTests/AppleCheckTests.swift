@@ -225,6 +225,19 @@ struct AppleCheckTests {
         let none = try #require(desk.appleCheck("apple118", now: again.created + AppleCheck.unclaimed + 1))
         #expect(none.state == .error && none.problem == AppleCheck.noMacLine && made.events.last == none)
         #expect(AppleCheck.report(none, log: nil) == "The Apple check of commit aaaabbbbcccc couldn't run: " + AppleCheck.noMacLine)
+        #expect(none.unclaimed)
+
+        // A Mac that comes back (#157), after the runner restarted or the Mac app opened, takes it
+        // late, within an hour: not one that takes only merge checks, and not past the hour.
+        #expect(desk.nextMacCheck(mac: "Studio", now: again.created + 120) == nil)
+        #expect(desk.nextMacCheck(mac: "Studio", kinds: [.apple], now: again.created + AppleCheck.stale + 1) == nil)
+        let late = try #require(desk.nextMacCheck(mac: "Studio", kinds: [.merge, .apple], now: again.created + 120))
+        #expect(late.id == again.id && late.state == .running && late.mac == "Studio" && late.problem == nil && late.finished == nil)
+        // The agent asking again for the same commit waits for it, and gets its result.
+        let asked = try await desk.askAppleCheck("apple118")
+        #expect(asked.id == again.id && asked.state == .running)
+        let passed = try desk.macCheckEnded(again.id, MacCheck.Report(passed: true, steps: steps.map { MacCheck.Step(name: $0.name, passed: true, seconds: 1) }, failures: []))
+        #expect(passed.state == .passed && desk.job("apple118")?.appleRan == passed)
         #expect(desk.nextMacCheck(mac: "Studio", kinds: [.apple]) == nil)
     }
 

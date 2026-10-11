@@ -660,15 +660,18 @@ extension Desk {
 
     /// A Mac asks for work: the oldest queued check whose job still waits for it, or one a Mac
     /// took and went quiet on (`MacCheck.lease`). It's the asking Mac's now. A Mac that takes Apple
-    /// checks (`kinds`) gets those first: an agent waits for them mid-round.
+    /// checks (`kinds`) gets those first: an agent waits for them mid-round. Then merge checks, then
+    /// an Apple check no Mac took in time, late (`Desk.nextAppleCheck`).
     func nextMacCheck(mac: String, kinds: Set<MacCheck.Kind> = [.merge], now: Date = .now) -> MacCheck? {
         if kinds.contains(.apple), let check = nextAppleCheck(mac: mac, now: now) { return check }
-        guard kinds.contains(.merge) else { return nil }
+        guard kinds.contains(.merge) else { return kinds.contains(.apple) ? nextAppleCheck(mac: mac, late: true, now: now) : nil }
         let ready = jobs.filter { job in
             guard let check = job.macCheck, !job.isActive, check.head == job.pushedHead else { return false }
             return check.state == .queued || check.state == .running && now.timeIntervalSince(check.started ?? now) > MacCheck.lease
         }
-        guard var author = ready.min(by: { ($0.macCheck?.created ?? now) < ($1.macCheck?.created ?? now) }), var check = author.macCheck else { return nil }
+        guard var author = ready.min(by: { ($0.macCheck?.created ?? now) < ($1.macCheck?.created ?? now) }), var check = author.macCheck else {
+            return kinds.contains(.apple) ? nextAppleCheck(mac: mac, late: true, now: now) : nil
+        }
         check.state = .running
         check.started = now
         check.mac = mac
