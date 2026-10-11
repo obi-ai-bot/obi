@@ -202,12 +202,15 @@ struct ConnectionTests {
                 }
 
                 // MARK: Connections: the secret is named, never sent or shown.
-                let mail = ["name": "mail", "mcp": "http://127.0.0.1:\(port)/mcp", "secret": "mail-token"]
+                // The fake server listens where HummingbirdTesting binds it, `localhost`: 127.0.0.1 on
+                // Linux, but ::1 on macOS, where 127.0.0.1 would be refused.
+                let fakeURL = "http://localhost:\(port)"
+                let mail = ["name": "mail", "mcp": "\(fakeURL)/mcp", "secret": "mail-token"]
                 let withValue = try await send(.post, "/v1/connections", mail.merging(["value": service.mailSecret]) { $1 }, headers: owner)
                 #expect(withValue.status == 422 && withValue.text.contains("oby-runner vault add mail-token") && !(leaks(withValue.text)))
                 let added = try await connect(mail)
                 #expect(added.status == 201 && added.text.contains(#""secretSaved":true"#) && added.text.contains(#""header":"Authorization""#))
-                let people = ["name": "people", "api": "http://127.0.0.1:\(port)/api", "secret": "people-key", "header": "X-Api-Key"]
+                let people = ["name": "people", "api": "\(fakeURL)/api", "secret": "people-key", "header": "X-Api-Key"]
                 #expect(try await connect(people).status == 201)
                 // In the clear only on this machine; names that couldn't split from a tool's; one place to reach.
                 for wrong in [["name": "web", "mcp": "http://example.com/mcp", "secret": "mail-token"],
@@ -270,13 +273,13 @@ struct ConnectionTests {
                 let away = try await rpc("mailjob1", first.token, "tools/call", ["name": "people_get", "arguments": ["path": "/away"]])
                 #expect(text(away.result).contains("Oby doesn't follow") && away.result["isError"] as? Bool == true)
                 let escape = try await rpc("mailjob1", first.token, "tools/call", ["name": "people_get", "arguments": ["path": "//evil.example/steal"]])
-                #expect(text(escape.result).contains("stays on 127.0.0.1"))
+                #expect(text(escape.result).contains("stays on localhost"))
                 let post = try await rpc("mailjob1", first.token, "tools/call", ["name": "people_send", "arguments": ["method": "POST", "path": "/v1/me"]])
                 #expect(text(post.result) == Broker.acting)
 
                 // MARK: An agent reaching the API as the owner can't send a secret to its own host.
                 // Its forged owner header gets it as far as the question; only the phone answers it.
-                let evil: [String: Any] = ["name": "evil", "api": "http://127.0.0.1:\(port)/api", "secret": "mail-token", "header": "X-Api-Key"]
+                let evil: [String: Any] = ["name": "evil", "api": "\(fakeURL)/api", "secret": "mail-token", "header": "X-Api-Key"]
                 let asked = try await send(.post, "/v1/connections", evil, headers: owner)
                 #expect(asked.status == 403 && action(asked).contains("the vault secret mail-token"))
                 for forged in [try approval(action(asked), P256.Signing.PrivateKey()), try approval(Connection.removal("evil"), nil)] {
@@ -314,7 +317,7 @@ struct ConnectionTests {
                 #expect(uses.map(\.line) == ["Read mail search (allowed)", "Read mail whoami (allowed)", "Write mail send_message (refused)",
                                              "Write mail send_draft (refused)", "Read people get (allowed)", "Read people get (allowed)",
                                              "Read people get (allowed)", "Write people send (refused)"])
-                #expect(uses.allSatisfy { $0.job == "mailjob1" } && uses[0].secret == "mail-token" && uses[0].host == "127.0.0.1")
+                #expect(uses.allSatisfy { $0.job == "mailjob1" } && uses[0].secret == "mail-token" && uses[0].host == "localhost")
                 let report = try await send(.get, "/v1/jobs/mailjob1", headers: owner)
                 #expect(report.text.contains(#""connectionUses":[{"#) && !(leaks(report.text)))
                 let log = try String(contentsOf: self.folder.appending(path: "vault/uses.jsonl"), encoding: .utf8)
