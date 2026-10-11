@@ -32,6 +32,13 @@ nonisolated struct AccountState: Equatable, Sendable {
     var running = 0
     /// A job of its hit the account's usage limit: it gets no job until then.
     var fullUntil: Date?
+    /// Whether the account's agents have Tetrix's MCP server connected, as its tool last said
+    /// (Engine/TetrixUse.swift), or nil before it said.
+    var tetrix: Bool?
+    /// Of its recent jobs that ended and whose tool said what it had, how many there are, and how
+    /// many used Tetrix.
+    var tetrixJobs = 0
+    var tetrixUsed = 0
 
     var signedIn: Bool { label != nil }
     func isFull(at now: Date = .now) -> Bool { (fullUntil ?? .distantPast) > now }
@@ -116,6 +123,12 @@ final class AccountStore {
         accounts[index].fullUntil = until
     }
 
+    /// Whether the account's agents have Tetrix connected, as its tool just said. Nil changes nothing.
+    func setTetrix(_ connected: Bool?, for accountID: String) {
+        guard let connected, let index = accounts.firstIndex(where: { $0.account.id == accountID }) else { return }
+        accounts[index].tetrix = connected
+    }
+
     /// What the tool says about the account's login, or nil when it's signed out.
     func setLabel(_ label: String?, for accountID: String) {
         guard let index = accounts.firstIndex(where: { $0.account.id == accountID }) else { return }
@@ -124,10 +137,12 @@ final class AccountStore {
 
     func state(_ id: String) -> AccountState? { accounts.first { $0.account.id == id } }
 
-    /// Counts each account's active jobs; `Job.account` holds the account's id.
+    /// Counts each account's active jobs, and its recent ones that used Tetrix; `Job.account`
+    /// holds the account's id.
     func countRunning(_ jobs: [Job]) {
         for index in accounts.indices {
             accounts[index].running = jobs.filter { $0.isActive && $0.account == accounts[index].account.id }.count
+            (accounts[index].tetrixJobs, accounts[index].tetrixUsed) = TetrixUse.share(jobs, account: accounts[index].account.id)
         }
     }
 
@@ -142,6 +157,14 @@ final class AccountStore {
                 let status = Agents.sandboxed(["claude", "auth", "status", "--json"], in: nil, own: account.home ?? "\(Agents.home)/.claude")
                 let result = try? await Shell.run(status, env: ["CLAUDE_CONFIG_DIR": account.home], timeout: 30)
                 label = result.flatMap { Self.claudeLabel(status: $0.out) }
+                // Its own MCP servers, as agents get them: claude.ai's connectors are off for agents (#84).
+                if label != nil {
+                    let list = Agents.sandboxed(["claude", "mcp", "list"], in: nil, own: account.home ?? "\(Agents.home)/.claude")
+                    let env = Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": account.home]) { $1 }
+                    if let listed = try? await Shell.run(list, env: env, timeout: 30), listed.status == 0, !listed.timedOut {
+                        setTetrix(TetrixUse.claudeList(listed.text), for: account.id)
+                    }
+                }
             case "codex":
                 // Codex's app-server knows both the login and the limits; Claude Code's limits
                 // arrive with its first job.
@@ -150,6 +173,7 @@ final class AccountStore {
                 if label != nil, let used = try? await CodexAgent.usage(home: home) {
                     record(used.event, for: account.id)
                 }
+                if label != nil { setTetrix((try? await CodexAgent.tetrix(home: home)) ?? nil, for: account.id) }
             default:
                 break
             }

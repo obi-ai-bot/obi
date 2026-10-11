@@ -198,6 +198,18 @@ nonisolated enum Usage {
     /// "1 agent running", "3 agents running".
     static func runningText(_ count: Int) -> String { "\(count) agent\(count == 1 ? "" : "s") running" }
 
+    /// What Settings says about an account's Tetrix (#130): "Tetrix: connected · used in 9 of 12
+    /// recent jobs (75%)", "Tetrix: not connected: sign in", or "Tetrix: not checked yet".
+    static func tetrix(_ connected: Bool?, jobs: Int, used: Int) -> String {
+        let state = switch connected {
+        case true?: "Tetrix: connected"
+        case false?: "Tetrix: not connected: sign in"
+        case nil: "Tetrix: not checked yet"
+        }
+        guard jobs > 0 else { return state }
+        return state + " · used in \(used) of \(jobs) recent job\(jobs == 1 ? "" : "s") (\(percent(Double(used) / Double(jobs))))"
+    }
+
     /// The line above the cards: "All limits under 50%", or the account with the most room left,
     /// like "Most room: Codex, Deskree · Plus (12% used)", until some signed-in account reports usage.
     static func summary(_ snapshots: [Snapshot]) -> String {

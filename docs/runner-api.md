@@ -65,6 +65,7 @@ This document is the contract between the runner and its clients. Change it in t
   "mergeError": null,
   "appleCheck": null,
   "appleRan": null,
+  "tetrix": null,
   "mergeNeedsYou": false,
   "title": "Review oby #33",
   "pipeline": {
@@ -122,6 +123,16 @@ This document is the contract between the runner and its clients. Change it in t
 - `title`: what to call the job in rows, the job screen, the notch and alerts. It's the brain's short title (3 to 6 words, like `"Mac runner notifications"`), which every planned dispatch gets and the job keeps. Jobs without one (the rules' plans when the brain is down, an epic's sub-issue jobs, jobs from before titles) get `"<Kind> <repo name> #<number>"` when `pr` or `issue` is set, otherwise the first line of `task` (falling back to `request`), capped at 60 characters. It's always a string; older runners don't send it, so clients fall back the same way. Show "Round 2 of 5" when `rounds` is above 1.
 - `files` and `lead` are set on jobs the Lead started (below), null otherwise. `files`: the files or folders (ending in `/`) the job is expected to touch, relative to the repository, from the Lead's brief. `lead`: the goal (one Lead turn) that started it. `claim` also reports issue-sync errors on any job; successful changes are listed in `outgoing`. Older runners don't send these keys.
 - `question`: what the job's agent asked the user, `{"text": "Should a job that commits nothing end as failed, or get a new status?", "options": ["Failed", "A new status"]}` (`options` may be empty), or null. Agents are told to end their summary with `QUESTION: …` and optionally `OPTIONS: a | b` rather than bury a decision in their report; the runner reads those last lines when a turn ends. Markdown around the label (`**QUESTION:**`) is ignored; the question and its options keep every character, like `*.swift`. The job then waits for the answer: it stays `running` with `step` `"Waiting for your answer"`, its agent idle, and its round doesn't move on (no check runs). Other jobs keep going. The question lands in the inbox (below) and alerts the phone. The answer reaches the agent as its next message, exactly as `POST /v1/jobs/{id}/messages` would send it, and `question` goes back to null. Telling the job anything else answers it too; stopping it drops it. A job whose agent ends while its question waits (it exited, or the runner restarted) is `interrupted` and keeps `question`: nothing is checked or published until it's answered, and answering picks its session up again. Older runners don't send the key.
+- `tetrix`: what the runner saw of the job's agent and Tetrix (#130), or null before its tool said (and on older jobs):
+
+  ```json
+  {"connected": true, "calls": {"search_entities": 2, "get_entity": 1, "save_session": 1}, "rounds": [4],
+   "reminded": null, "stamps": {"commits": 2, "stamped": 2, "sessions": ["ses_8f2a"]}, "author": null}
+  ```
+
+  `connected`: whether the agent had Tetrix's MCP server connected, from Claude Code's stream-json `init` (`mcp_servers`, a server named for Tetrix with `status` `connected`) or Codex's app-server (`mcpServerStatus/list`: one with tools that isn't `notLoggedIn`); a call to a Tetrix tool counts as connected too. Null when the tool didn't say. `calls`: the agent's calls to Tetrix's tools by name, over every round (Claude Code's `tool_use` named `mcp__<server>__<tool>`, Codex's `mcpToolCall` items, where the server's name holds `tetrix`). `rounds`: Tetrix calls in each round that ended, oldest first, or null. `reminded`: true once a round that had Tetrix connected and called none of it got a reminder in the next round's message (once a job). `stamps`: the job's commits since `startCommit` and how many carry a `Tetrix-Session: <id>` trailer, with the sessions they name, read when its last round ends done, or null. `author`: on Oby's review jobs, what the runner saw of the author's agent, as the reviewer is told; else null.
+  - Agents are told to start by asking Tetrix about the job's issue or pull request and the area it touches (`search_entities`, `get_entity`, `code_impact` where the repository's code is indexed) before reading many files, and to end with `save_session` and the `Tetrix-Session:` trailer on their commits. Among MCP tools, agents may call only Tetrix's graph reads and `save_session`.
+  - When the job ends, its `summary` ends with a line like `Tetrix: 4 calls (search_entities 2, get_entity 1, save_session 1). Session saved. 2 of 2 commits stamped Tetrix-Session (ses_8f2a).`, or `Tetrix: connected, but the agent didn't use it.`, or `Tetrix: not connected for this account's agent, so it wasn't asked. …`. Not on review jobs: their last line is the verdict. Older runners don't send the key.
 - A job whose `files` overlap an earlier queued or running job's in the same repository (the same path, or one inside a folder the other names) waits, queued, until that job ends: its `step` reads `Waiting for <title> (<id>): both touch <files>`. Then it starts by itself. Jobs without `files` (the brain's) never wait or block.
 
 ### Job pipeline and pull request following
@@ -229,7 +240,8 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
 ```json
 {"id": "default", "agent": "claude", "name": "Personal", "label": "Max · well0cp@gmail.com",
  "signedIn": true, "fiveHour": 0.12, "sevenDay": 0.4,
- "fiveHourResets": "2026-10-10T02:14:40Z", "sevenDayResets": "2026-10-14T19:27:22Z", "running": 1, "fullUntil": null}
+ "fiveHourResets": "2026-10-10T02:14:40Z", "sevenDayResets": "2026-10-14T19:27:22Z", "running": 1, "fullUntil": null,
+ "tetrix": true, "tetrixJobs": 12, "tetrixUsed": 9}
 ```
 
 - `label` is what the tool says about the login (null while signed out). Its first part is the plan (`Max`, `Team`, `Plus`), which Settings shows next to the account's name.
@@ -237,6 +249,7 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
 - `fiveHourResets` and `sevenDayResets`: when each window resets, or null when the tool didn't say. Claude Code sends them in its `rate_limit_event` (`resetsAt` per window), Codex in `account/rateLimits/read` and its `account/rateLimits/updated` notifications (`resetsAt`). A window keeps its last reset time until the tool sends a new one. Older runners don't send these keys.
 - `running`: jobs queued or running on the account.
 - `fullUntil` is set while a job of the account's hit its usage limit: no job goes to it before then. Accounts are signed in on the runner itself, through each tool's own login; the app only shows them.
+- `tetrix`: whether the account's agents have Tetrix's MCP server connected, or null before the runner knows. The runner asks on startup (Claude Code: `claude mcp list`, with claude.ai's connectors off as for agents; Codex: its app-server's `mcpServerStatus/list`), and every job's tool says it again as its session starts. `tetrixJobs`: of the account's recent jobs (the latest 50 the runner keeps in memory) that ended and whose tool said what it had, how many there are; `tetrixUsed`: how many of them called Tetrix. Settings shows `Tetrix: connected · used in 9 of 12 recent jobs (75%)`, or `Tetrix: not connected: sign in` (signing in is the tool's own login for its `tetrix` server, on the runner; never Oby holding the token). Older runners don't send these keys.
 
 Accounts are signed in on the runner itself, through each tool's own login; the app only shows them. Settings shows one card per account, grouped by tool, with a bar per window, its reset time, and the running count.
 
@@ -422,7 +435,7 @@ data: { …Mac check }
 ```
 
 - A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`, `dismissed`, `macCheck`, `mergeError`, a move to another account. The app replaces the job with that `id`.
-- `accounts` comes when sign-ins, usage, reset times, running counts or `fullUntil` change.
+- `accounts` comes when sign-ins, usage, reset times, running counts, `fullUntil` or Tetrix (`tetrix`, `tetrixJobs`, `tetrixUsed`) change.
 - `clear` comes when Clear done is pressed on any app (`POST /v1/clear`): hide the jobs that finished by `clearedAt`.
 - `inbox` comes with every inbox item that arrives or changes: answered, done or put off, on any app, or settled by itself. Replace the item with that `id`; one whose `state` is `done` leaves the inbox.
 - `check` comes when a Mac check or an Apple check (below) is queued, taken by a Mac or ends. A Mac that runs checks asks for one (`GET /v1/checks/next`) when one is `queued`; other apps can ignore it, since the job's own event carries `macCheck` and `appleCheck` too.

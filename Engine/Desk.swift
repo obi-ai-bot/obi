@@ -123,6 +123,10 @@ final class Desk {
     }
     /// What a job's work does to the tests since its branch started (case 3.2): what weakens them,
     /// and other changes to existing tests. Tests put in their own.
+    /// The job's commits since `since` and their Tetrix sessions (Engine/TetrixUse.swift). Tests put in their own.
+    @ObservationIgnored var readStamps: (_ id: String, _ since: String) async -> TetrixUse.Stamps? = { id, since in
+        await TetrixUse.stamps(worktree: Workspace.worktree(id), since: since)
+    }
     @ObservationIgnored var integrity: (Job) async -> Integrity.Report = { job in
         guard let ref = Integrity.ref(job) else { return Integrity.Report() }
         return await Integrity.check(worktree: Workspace.worktree(job.id), against: ref)
@@ -917,9 +921,14 @@ final class Desk {
             if count >= limits.denials { hold(id, "\(count) actions in a row were denied", "The last one: \(denied)") }
         case .maxTurns:
             hold(id, "\(job.agentName) used its \(limits.maxTurns) turns in one round")
+        case .tetrix(let seen):
+            job.tetrix = (job.tetrix ?? TetrixUse()).noting(seen)
+            if case .connected = seen { accounts.setTetrix(job.tetrix?.connected, for: job.account) }
+            replace(job, save: false)
         case .turnEnded(let summary, let failed):
             roundTimers.removeValue(forKey: id)?.cancel()
             job.summaries = (job.summaries ?? []) + [summary]
+            job.tetrix?.endRound()
             // A question for the user (case I.1): the job waits for the answer, its agent idle, and
             // the inbox has it. The answer comes as its next message (`message`); others keep going.
             if !failed, let question = Inbox.question(in: summary) {
@@ -1026,6 +1035,7 @@ final class Desk {
             agent.end()
             finish(id, status, text)
         case let .again(message):
+            let message = TetrixUse.remind(&job, message)
             let said: String
             do {
                 said = try vault.forAgent(message)
@@ -1097,6 +1107,7 @@ final class Desk {
             let commits = await countCommits(id, "refs/remotes/origin/\(base)")
             // A pull request's branch has its own commits beyond the base: only the ones after its head are the job's.
             let made = job.pr == nil ? commits : await countCommits(id, "refs/oby/pr-\(job.pr ?? 0)")
+            await noteTetrixStamps(id)
             guard var running = self.job(id), running.isActive else { return }
             // The job as it would end, which is what gets published.
             var ended = running
@@ -1144,6 +1155,8 @@ final class Desk {
         if job.status == .failed && status == .done { job.phase = .work }
         // How it moved between accounts, for the report.
         if let moves = handoffs[id], !moves.isEmpty { job.summary += "\n\n" + moves.joined(separator: "\n") }
+        // What it asked Tetrix and saved there. Not on a review, whose last line is its verdict.
+        if job.reviewOf == nil, let tetrix = TetrixUse.report(job) { job.summary += "\n\n" + tetrix }
         job.commits = commits
         // After commits, so it counts them as pushed.
         if let published {

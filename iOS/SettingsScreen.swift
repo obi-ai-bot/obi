@@ -50,6 +50,10 @@ struct SettingsScreen: View {
                     Section(Usage.tool(agent)) {
                         ForEach(phone.accounts.filter { $0.agent == agent }) { account in
                             UsageCard(snapshot: account.usage)
+                            if account.signedIn {
+                                Text(Usage.tetrix(account.tetrix, jobs: account.tetrixJobs ?? 0, used: account.tetrixUsed ?? 0))
+                                    .font(.footnote).foregroundStyle(account.tetrix == false ? Color.orange : Color.secondary)
+                            }
                         }
                     }
                 }

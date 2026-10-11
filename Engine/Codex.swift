@@ -55,6 +55,8 @@ final class CodexAgent: AgentRun {
                 }
                 self.thread = thread
                 onEvent(.session(thread))
+                // Whether Tetrix is connected (Engine/TetrixUse.swift), alongside the turn: an older Codex doesn't say.
+                Task { if let on = (try? await server.call("mcpServerStatus/list", [:])).flatMap(TetrixUse.codexStatus) { onEvent(.tetrix(.connected(on))) } }
                 let turn = try await server.call("turn/start", CodexRPC.turnStart(thread: thread, prompt: prompt,
                                                                                  model: model ?? AgentModels.value("codex", "model"),
                                                                                  effort: AgentModels.value("codex", "effort")))
@@ -164,6 +166,11 @@ final class CodexAgent: AgentRun {
     static func usage(home: URL?) async throws -> CodexRPC.Usage {
         let result = try await ask(home: home, "account/rateLimits/read")
         return (result["rateLimits"] as? [String: Any]).flatMap(CodexRPC.usage) ?? CodexRPC.Usage()
+    }
+
+    /// Whether the account's Codex has Tetrix's MCP server connected, or nil when it doesn't say.
+    static func tetrix(home: URL?) async throws -> Bool? {
+        TetrixUse.codexStatus(try await ask(home: home, "mcpServerStatus/list"))
     }
 
     /// The models the account offers, with the efforts each takes.
@@ -337,7 +344,10 @@ nonisolated enum CodexRPC {
         let params = message["params"] as? [String: Any] ?? [:]
         switch message["method"] as? String {
         case "item/started":
-            return (params["item"] as? [String: Any]).flatMap(step).map { [.step($0)] } ?? []
+            let item = params["item"] as? [String: Any] ?? [:]
+            let tetrix = item["type"] as? String == "mcpToolCall"
+                ? TetrixUse.tool(server: item["server"] as? String ?? "", tool: item["tool"] as? String ?? "").map { [AgentEvent.tetrix(.call($0))] } : nil
+            return (step(item).map { [.step($0)] } ?? []) + (tetrix ?? [])
         case "account/rateLimits/updated":
             return (params["rateLimits"] as? [String: Any]).flatMap(usage).map { [$0.event] } ?? []
         case "turn/completed":
