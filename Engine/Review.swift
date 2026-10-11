@@ -81,10 +81,10 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     }
 
     /// When the first account that could review `author`'s pull request has room again: the
-    /// soonest that everything filling one account resets (marked full, or a window at 95%). Nil
-    /// when none of them said when.
+    /// soonest that everything filling one account resets (marked full, or a window at 95%), as
+    /// `reviewer` counts it: a reset that has passed fills nothing. Nil when none of them said when.
     static func roomAt(_ accounts: [AccountState], for author: Job, now: Date = .now) -> Date? {
-        candidates(accounts, for: author).compactMap { state -> Date? in
+        candidates(accounts, for: author).map { reset($0, at: now) }.compactMap { state -> Date? in
             var at = now
             if state.isFull(at: now), let until = state.fullUntil { at = max(at, until) }
             for (used, resets) in [(state.fiveHour, state.fiveHourResets), (state.sevenDay, state.sevenDayResets)] where (used ?? 0) >= 0.95 {
@@ -333,10 +333,16 @@ extension Desk {
     // MARK: Reviews waiting for an account with room
 
     /// Starts every review that waits for an account with room, on an account that has room now.
-    /// Not while the author runs again (it publishes again, and is reviewed then), nor once its
-    /// pull request was merged or closed.
+    /// Not while the author runs again (it publishes again, and is reviewed then). One whose pull
+    /// request was merged or closed waits no more.
     func startWaitingReviews() {
-        for job in jobs where job.waitsForReviewer && !job.isActive && (job.pullRequest?.state ?? .open) == .open {
+        for job in jobs where job.waitsForReviewer && !job.isActive {
+            guard job.reviewsWhenRoom else {
+                var settled = job
+                settled.reviewError = nil
+                replace(settled)
+                continue
+            }
             reviewPublished(job)
         }
         watchForRoom()
@@ -354,6 +360,9 @@ extension Desk {
 
     private static var roomWatches: [RoomWatch] = []
 
+    /// The soonest reset a waiting review wakes at, or nil when none is set.
+    var roomWakeAt: Date? { roomWatch.at }
+
     private var roomWatch: RoomWatch {
         Self.roomWatches.removeAll { $0.desk == nil }
         if let watch = Self.roomWatches.first(where: { $0.desk === self }) { return watch }
@@ -366,6 +375,7 @@ extension Desk {
     /// job of theirs ends, a usage report, a sign-in) and the soonest reset wake the waiting reviews.
     func watchForRoom() {
         let watch = roomWatch
+        // Watching the accounts costs nothing until they change; an author running again still waits.
         let waiting = jobs.filter(\.waitsForReviewer)
         guard !waiting.isEmpty else {
             watch.wake?.cancel()
@@ -383,7 +393,11 @@ extension Desk {
                 }
             }
         }
-        let soonest = waiting.compactMap { Review.roomAt(accounts.accounts, for: $0) }.min()
+        // The wake-up only for reviews that can start, and only for a reset still to come: one
+        // that has passed already found its account with room, or never will by time alone.
+        let now = Date.now
+        let soonest = waiting.filter { !$0.isActive && $0.reviewsWhenRoom }
+            .compactMap { Review.roomAt(accounts.accounts, for: $0, now: now) }.filter { $0 > now }.min()
         guard soonest != watch.at else { return }
         watch.wake?.cancel()
         watch.at = soonest
@@ -401,4 +415,6 @@ extension Desk {
 extension Job {
     /// Its pull request's review waits for an account with room (`Desk.reviewPublished`).
     var waitsForReviewer: Bool { reviewing == nil && reviewError?.hasPrefix(Review.waiting) == true }
+    /// Its pull request is still open, so a review that waits starts when an account has room.
+    var reviewsWhenRoom: Bool { (pullRequest?.state ?? .open) == .open }
 }

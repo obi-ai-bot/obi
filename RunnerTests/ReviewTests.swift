@@ -225,19 +225,39 @@ struct ReviewTests {
 
     @Test func aReviewNoLongerWaitsOnceThePullRequestMerged() async throws {
         accounts.setLabel(nil, for: personal.id)
-        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
+        let resets = Date.now.addingTimeInterval(3600)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: resets), for: work.id)
         let published = try await publishAuthor()
-        #expect(published.waitsForReviewer)
+        #expect(published.waitsForReviewer && desk.roomWakeAt == resets)
         desk.followed("author", published: url.absoluteString, pushed: 2,
                       status: PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now), error: nil)
+        try await until("the author stops waiting") { desk.job("author")?.reviewError == nil }
         accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.2), for: work.id)
         try await Task.sleep(for: .milliseconds(100))
-        #expect(made.agents.count == 1 && desk.job("author")?.reviewing == nil)
+        #expect(made.agents.count == 1 && desk.job("author")?.reviewing == nil && desk.job("author")?.waitsForReviewer == false)
+        #expect(desk.roomWakeAt == nil)
+    }
+
+    /// A reset that has passed wakes nothing: while the author runs again, its waiting review sets
+    /// no wake-up, rather than one that fires every half second until the account reports again.
+    @Test func aPassedResetSetsNoWakeUp() async throws {
+        accounts.setLabel(nil, for: personal.id)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
+        let published = try await publishAuthor()
+        #expect(published.waitsForReviewer && desk.roomWakeAt == nil)
+        try desk.message("author", "One more thing.")
+        try await until("the author runs again") { desk.job("author")?.status == .running }
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: .now - 60), for: work.id)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(desk.job("author")?.waitsForReviewer == true && desk.roomWakeAt == nil && made.agents.count == 2)
+        // Past its reset, the account has room: Oby doesn't wait on it.
+        let now = Date.now
+        #expect(Review.roomAt(accounts.accounts, for: author, now: now) == now)
     }
 
     // MARK: Merged or closed pull requests
 
-    @Test func aMergedPullRequestIsNeverPublishedAgain() async throws {
+    @Test func aMergedPullRequestIsNeverPublishedAgainAndSaysSo() async throws {
         accounts.setLabel(nil, for: personal.id)
         accounts.setLabel(nil, for: work.id)
         _ = try await publishAuthor()
@@ -252,11 +272,17 @@ struct ReviewTests {
         round.agent.onEvent(.finished(summary: "fix: one more thing", failed: false))
         try await until("the author ends") { desk.job("author")?.isActive == false }
         let ended = try #require(desk.job("author"))
-        #expect(ended.status == .done && ended.unpublished == 1 && made.published.count == 1)
-        #expect(!ended.canPublish && !ended.needsYou && Push.notice(for: ended) == nil)
-        #expect(ended.pipeline.stages.last?.state == .done)
+        #expect(ended.status == .failed && ended.unpublished == 1 && made.published.count == 1)
+        #expect(ended.summary == "Not published: its pull request was merged, so 1 new commit has nowhere to go.\n\nfix: one more thing")
+        #expect(ended.doneLine == "Not published: Fix oby #75")
+        // It needs you, and alerts: nothing is offered to publish, and Dismiss lets it go.
+        #expect(!ended.canPublish && ended.needsYou && Push.notice(for: ended) == .failed)
+        let work = ended.pipeline.stages.first { $0.id == .work }
+        #expect(work?.state == .failed && work?.reason == ended.summary)
         await #expect(throws: Shell.Failure.self) { try await desk.publish("author") { _ in } }
         #expect(made.published.count == 1)
+        try desk.dismiss("author")
+        #expect(desk.job("author")?.needsYou == false)
     }
 
     @Test func aClosedPullRequestIsNotPublishable() {
@@ -270,9 +296,24 @@ struct ReviewTests {
         #expect(job.canPublish)
         for state in [PullRequestStatus.State.closed, .merged] {
             job.pullRequest = PullRequestStatus(state: state, base: "dev", checkedAt: .now)
-            #expect(!job.canPublish && !job.needsYou && Push.notice(for: job) == nil, Comment(rawValue: state.rawValue))
-            #expect(job.pipeline.stages.first { $0.id == .publish }?.state == .done)
+            #expect(!job.canPublish, Comment(rawValue: state.rawValue))
         }
+    }
+
+    @Test func aRoundWithCommitsForAClosedPullRequestFails() {
+        var job = author
+        job.status = .running
+        job.commits = 2
+        job.published = url.absoluteString
+        job.pullRequest = PullRequestStatus(state: .closed, base: "dev", checkedAt: .now)
+        let (status, summary) = Job.ending(job, .done, "fix: more", made: 4)
+        #expect(status == .failed && summary == "Not published: its pull request was closed, so 2 new commits have nowhere to go.\n\nfix: more")
+        // Nothing new beyond what went out, or no count: done as it was.
+        #expect(Job.ending(job, .done, "fix: nothing to add", made: 2, asked: true) == (.done, "fix: nothing to add"))
+        #expect(Job.ending(job, .done, "fix: more", made: nil) == (.done, "fix: more"))
+        #expect(Job.ending(job, .failed, "broke", made: 4) == (.failed, "broke"))
+        job.pullRequest?.state = .open
+        #expect(Job.ending(job, .done, "fix: more", made: 4) == (.done, "fix: more"))
     }
 
     // MARK: Approved

@@ -128,7 +128,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var doneLine: String {
         switch status {
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done: \(heading)"
-        case .failed: summary.hasPrefix("Nothing committed:") ? "Nothing committed: \(heading)" : "Couldn't finish: \(heading)"
+        case .failed:
+            summary.hasPrefix("Nothing committed:") ? "Nothing committed: \(heading)"
+                : summary.hasPrefix("Not published:") ? "Not published: \(heading)" : "Couldn't finish: \(heading)"
         case .stopped: "Stopped: \(heading)"
         case .interrupted: "Interrupted: \(heading)"
         case .queued, .running: step
@@ -142,7 +144,16 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// (nil when unknown): a committing job that's done with none ends as "nothing committed", with
     /// the agent's own words as the reason. Not a round the user `asked` for with a message: their
     /// words say what it should do (reset the branch, drop the work), so none committed is done.
+    /// A job whose pull request was merged or closed and that made commits beyond what it published
+    /// fails too, saying so: they have nowhere to go, and the failure alerts the user (Push).
     static func ending(_ job: Job, _ status: Status, _ summary: String, made: Int?, asked: Bool = false) -> (Status, String) {
+        // ponytail: only jobs Oby opened the pull request for; on someone else's pull request
+        // `made` counts from its head, which `pushed` doesn't.
+        if status == .done, job.pr == nil, job.published != nil, let state = job.pullRequest?.state, state != .open,
+           let pushed = job.pushed, let made, made > pushed {
+            let commits = made - pushed == 1 ? "1 new commit has" : "\(made - pushed) new commits have"
+            return (.failed, "Not published: its pull request was \(state == .merged ? "merged" : "closed"), so \(commits) nowhere to go.\n\n" + summary)
+        }
         guard status == .done, made == 0, committing.contains(job.kind), !asked else { return (status, summary) }
         let lines = summary.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
         let reason = lines.first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
