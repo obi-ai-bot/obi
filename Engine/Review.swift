@@ -136,10 +136,11 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             "What the user asked that agent for: \(job.task)",
             "Judge whether the changes do what the user asked, correctly and completely, and whether they're safe and follow the repository's own guidance (AGENTS.md, CLAUDE.md, README). Read the diff and the code around it; run the repository's tests or checks when that tells you more. Raise only what matters: bugs, missing pieces, risks, and what a person must know before merging.",
             blocking,
+            AppleCheck.reviewLine(job),
             "This is a review only: make no commits and change no files. Don't push, open pull requests or post anything to GitHub: Oby posts your review itself.",
             "If the tetrix MCP server is connected, use it for questions about code structure, ownership and impact before reading many files: it saves tokens.",
             finish,
-        ].joined(separator: "\n\n")
+        ].compactMap { $0 }.joined(separator: "\n\n")
     }
 
     /// What a follow-up reviewer is told: check the last review's blocking findings and the commits
@@ -157,6 +158,9 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             "This is a follow-up, not a fresh review. Check only " + (input == nil ? "" : "that each blocking finding in that file is fixed, and ")
                 + "that the new commits don't break anything. Don't review the rest of the pull request again, and don't raise what the last review didn't: it was judged then. Read the new changes and the code around them; run the repository's tests or checks when that tells you more.",
             "Blocking means a finding the last review blocked on that isn't fixed, or something the new commits broke: a bug, a security or data-loss problem, or a requirement or test they broke. Anything else you notice in the new commits is worth doing later.",
+        ]
+        if let apple = AppleCheck.reviewLine(job) { lines.append(apple) }
+        lines += [
             "This is a review only: make no commits and change no files. Don't push, open pull requests or post anything to GitHub: Oby posts your review itself.",
             finish,
         ]
@@ -481,6 +485,10 @@ extension Desk {
            let text = Review.previous(previous, summary: self.job(previous.job)?.summary, pr: pr) {
             // Not kept: the reviewer reviews it all, as the first time.
             review.attachments = (try? Review.keep(text, file: Review.previousFile(previous), for: review.id)).map { [$0] }
+        }
+        // The latest Apple build and test that ran, so the reviewer judges what was compiled (Engine/AppleChecks.swift).
+        if let text = AppleCheck.forReview(job, pr: pr, log: appleLogs[job.id]), let file = try? Review.keep(text, file: AppleCheck.reviewFile, for: review.id) {
+            review.attachments = (review.attachments ?? []) + [file]
         }
         author.reviewing = review.id
         author.reviewError = nil

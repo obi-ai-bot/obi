@@ -100,6 +100,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// and why Oby couldn't check or merge it, or nil.
     var macCheck: MacCheck?
     var mergeError: String?
+    /// The latest Apple build and test its agent asked for mid-round (`oby-check apple`,
+    /// Engine/AppleChecks.swift), or nil.
+    var appleCheck: MacCheck?
 
     var maxRounds: Int { rounds ?? 1 }
     /// Its agent asked the user something and waits for the answer: the inbox has it.
@@ -402,7 +405,8 @@ final class ClaudeAgent: AgentRun {
                             + (maxTurns.map { ["--max-turns", String($0)] } ?? [])
                             + (resume.map { ["--resume", $0] } ?? []),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude")
-        let environment = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 })
+        let environment = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 }
+            .merging(AppleCheck.environment(worktree: worktree)) { $1 })
         return (arguments, environment)
     }
 
@@ -887,11 +891,14 @@ nonisolated enum Agents {
     /// `own`, the job's account home (nil for none).
     /// `reading` are folders the process may read but not write, inside what's hidden otherwise
     /// (the Lead's own directory and the repositories' checkouts, under `OBY_HOME`).
+    /// `apple`: `oby-check apple`'s script and the runner it runs, shown read-only to a process in a
+    /// worktree (Engine/AppleChecks.swift).
     /// On the Mac, `argv` as it is: gh's login is in the keychain, and agents have no credential helper.
     // ponytail: one Unix user, hidden by path. Sockets that run commands for this user (docker is
     // hidden, nothing else is) and the runner's API on 127.0.0.1 stay reachable; a Unix user of its
     // own for agents is the upgrade.
-    static func sandboxed(_ argv: [String], in worktree: URL?, own: String?, reading: [String] = [], bubblewrap: Bool = Agents.bubblewrap) -> [String] {
+    static func sandboxed(_ argv: [String], in worktree: URL?, own: String?, reading: [String] = [], bubblewrap: Bool = Agents.bubblewrap,
+                          apple: AppleCheck.Tool? = AppleCheck.installed) -> [String] {
         guard bubblewrap else { return argv }
         let exists = { (path: String) in FileManager.default.fileExists(atPath: path) }
         // Never --die-with-parent: its death signal follows the thread that started bwrap, and Foundation
@@ -924,6 +931,7 @@ nonisolated enum Agents {
             }
         }
         for folder in reading where exists(folder) { args += ["--ro-bind", folder, folder] }
+        if worktree != nil, let apple { args += apple.binds }
         if let own { args += ["--bind", own, own] }
         // The default Claude account keeps ~/.claude.json with ~/.claude.
         if own == "\(home)/.claude" { args += ["--bind-try", "\(home)/.claude.json", "\(home)/.claude.json"] }
@@ -1088,7 +1096,8 @@ nonisolated enum Workspace {
 
 /// What Oby tells agents. Swift writes these; the model's text appears only as the task.
 nonisolated enum Prompts {
-    static func agent(_ job: Job) -> String {
+    /// `apple`: the runner offers `oby-check apple` (Engine/AppleChecks.swift).
+    static func agent(_ job: Job, apple: Bool = false) -> String {
         // Oby's own review of a pull request: a review only, no commits (Engine/Review.swift).
         if job.reviewOf != nil { return Review.prompt(job) }
         var lines: [String] = []
@@ -1118,6 +1127,7 @@ nonisolated enum Prompts {
         } else if job.maxRounds > 1 {
             lines.append("End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.")
         }
+        if apple, let line = AppleCheck.agentLine(job) { lines.append(line) }
         lines.append("Finish with a short summary. Its first line is one sentence the user will see in the notch.")
         lines.append(Inbox.howToAsk)
         return lines.joined(separator: "\n\n")
@@ -1127,9 +1137,9 @@ nonisolated enum Prompts {
     /// account hit its limit mid-round: the task as the first agent heard it, what earlier rounds
     /// reported, what the user said along the way, and the message that started the round to do over
     /// (nil for the task itself).
-    static func takeover(_ job: Job, from previous: String, round: String?) -> String {
+    static func takeover(_ job: Job, from previous: String, round: String?, apple: Bool = false) -> String {
         let quote = { (text: String) in text.split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n") }
-        var lines = [agent(job)]
+        var lines = [agent(job, apple: apple)]
         lines.append("\(previous) was working on this job and hit its account's usage limit mid-round. You're taking over in the same worktree and branch: its commits are on the branch, and it may have left uncommitted changes. Check `git status` and `git log` before you go on, and do this round over from its start.")
         if let summaries = job.summaries, !summaries.isEmpty {
             lines.append("What earlier rounds reported, oldest first:\n\n" + summaries.map(quote).joined(separator: "\n\n"))
