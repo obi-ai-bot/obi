@@ -24,8 +24,10 @@ final class SpeechTests {
         args = sys.argv[1:]
         def value(flag): return args[args.index(flag) + 1]
         root = pathlib.Path(__file__).parent
+        # The mode first, then started: the test removes the mode once it sees started.
+        try: mode = (root / 'mode').read_text()
+        except FileNotFoundError: mode = ''
         (root / 'started').touch()
-        mode = (root / 'mode').read_text() if (root / 'mode').exists() else ''
         if mode == 'hang':
             while True: time.sleep(.01)
         if mode == 'block':
