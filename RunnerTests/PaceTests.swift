@@ -114,6 +114,16 @@ struct PaceTests {
             return
         }
         #expect(drafts.map(\.job.account) == ["default"])
+
+        // The backup planner, when the brain fails, leaves the account to routing too.
+        let context = BrainContext(accounts: ["auto": ["auto", "Default"], "claude": ["auto", "Default"]], repos: ["deskree-inc/oby"])
+        let rules = Rules.plan("fix oby #12", context: context)
+        #expect(rules.dispatches.map { "\($0.agent)/\($0.account)" } == ["auto/auto"] && rules.problems(in: context, canary: "7f3a9c").isEmpty)
+        #expect(desk.card(for: Planner.Result(plan: rules, by: "rules"), said: "fix oby #12")
+                == .reply("No coding tool account is signed in with room to spare. Check Settings › Accounts."))
+        // Without "auto" on offer it names what the context has, and the plan still checks out.
+        let named = BrainContext(accounts: ["claude": ["default"]], repos: ["deskree-inc/oby"])
+        #expect(Rules.plan("fix oby", context: named).dispatches.map(\.account) == ["default"])
     }
 
     // MARK: Settings' cards
