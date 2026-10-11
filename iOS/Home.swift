@@ -148,7 +148,9 @@ struct HomeView: View {
                 case .thinking(let said):
                     Text("Thinking…").font(.title3.weight(.semibold))
                     Text("You said “\(said)”").font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
-                    Button("Cancel") { phone.cancel() }
+                    Button("Cancel waiting") { phone.cancel() }
+                    Text("Requests already sent may still start jobs.")
+                        .font(.caption).foregroundStyle(.secondary)
                 case .reply(let reply):
                     Text(reply).font(.headline)
                     Text("Type a task below.").font(.subheadline).foregroundStyle(.secondary)

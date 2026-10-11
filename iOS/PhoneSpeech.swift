@@ -18,6 +18,7 @@ final class PhoneSpeech {
     private var nextSequence = 0
     private var frames = 0
     private var ending = false
+    private var onCancel: (() -> Void)?
     private(set) var cancelled = false
 
     private init(request: String, sourceFormat: AVAudioFormat, analyzerFormat: AVAudioFormat,
@@ -99,7 +100,7 @@ final class PhoneSpeech {
         } catch { await analyzer.cancelAndFinishNow(); throw error }
     }
 
-    static func make(request: String, sampleRate: Double, sourceFormat: AVAudioFormat? = nil, context: [String] = [], partial: @escaping (String) -> Void) async throws -> PhoneSpeech {
+    static func make(request: String, sampleRate: Double, sourceFormat: AVAudioFormat? = nil, context: [String] = [], onCancel: (() -> Void)? = nil, partial: @escaping (String) -> Void) async throws -> PhoneSpeech {
         let transcriber = try await transcriber()
         guard let source = sourceFormat ?? AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate,
                                                           channels: 1, interleaved: false),
@@ -115,6 +116,7 @@ final class PhoneSpeech {
         try await analyzer.setContext(hints)
         let live = PhoneSpeech(request: request, sourceFormat: source, analyzerFormat: format,
                                converter: converter, analyzer: analyzer, input: input)
+        live.onCancel = onCancel
         live.results = Task {
             var finalized = AttributedString()
             var volatile = AttributedString()
@@ -128,18 +130,20 @@ final class PhoneSpeech {
         }
         do { try await analyzer.start(inputSequence: stream) }
         catch { live.cancel(); throw error }
-        // UIKit requires the expired task ended inside this callback, before async cleanup.
-        // Hand off ownership synchronously to avoid ending the id twice.
-        nonisolated(unsafe) var background = UIBackgroundTaskIdentifier.invalid
-        live.background = UIApplication.shared.beginBackgroundTask(withName: "watch live speech") { [weak live] in
-            UIApplication.shared.endBackgroundTask(background)
-            background = .invalid
-            Task { @MainActor in
-                live?.background = .invalid
-                live?.cancel()
+        if sourceFormat == nil {
+            // UIKit requires the expired task ended inside this callback, before async cleanup.
+            // Hand off ownership synchronously to avoid ending the id twice.
+            nonisolated(unsafe) var background = UIBackgroundTaskIdentifier.invalid
+            live.background = UIApplication.shared.beginBackgroundTask(withName: "watch live speech") { [weak live] in
+                UIApplication.shared.endBackgroundTask(background)
+                background = .invalid
+                Task { @MainActor in
+                    live?.background = .invalid
+                    live?.cancel()
+                }
             }
+            background = live.background
         }
-        background = live.background
         live.armExpiry()
         return live
     }
@@ -181,7 +185,16 @@ final class PhoneSpeech {
         armExpiry()
     }
 
-    func finish() async throws -> String { try await finish(sequence: nextSequence) }
+    /// Phone input has no Watch packet sequence, and reports interruptions as phone listening errors.
+    func finish() async throws -> String {
+        guard !cancelled, !ending else {
+            throw RunnerError(message: "Listening was interrupted. Hold the mic to try again.")
+        }
+        do { return try await finish(sequence: nextSequence) }
+        catch is CancellationError {
+            throw RunnerError(message: "Listening was interrupted. Hold the mic to try again.")
+        }
+    }
 
     /// A persistent converter preserves resampling across chunk boundaries; drain it at end.
     private func convert(_ buffer: AVAudioPCMBuffer?) throws {
@@ -235,6 +248,9 @@ final class PhoneSpeech {
         results?.cancel()
         Task { await analyzer.cancelAndFinishNow() }
         cleanup()
+        let notify = onCancel
+        onCancel = nil
+        notify?()
     }
 
     private func cleanup() {

@@ -1,4 +1,5 @@
 import AVFoundation
+import Foundation
 import Observation
 import Speech
 import UIKit
@@ -21,6 +22,44 @@ final class PhoneVoice {
     @ObservationIgnored private var feeding: Task<Void, Never>?
     @ObservationIgnored private var done: ((String) -> Void)?
     @ObservationIgnored private var timeout: Task<Void, Never>?
+    @ObservationIgnored private var audioObservers: [NSObjectProtocol] = []
+
+    init() {
+        let center = NotificationCenter.default
+        let session = AVAudioSession.sharedInstance()
+        audioObservers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] notification in
+            guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
+            MainActor.assumeIsolated { self?.interrupted() }
+        })
+        audioObservers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { [weak self] notification in
+            guard let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: raw),
+                  reason == .oldDeviceUnavailable || reason == .noSuitableRouteForCategory else { return }
+            MainActor.assumeIsolated { self?.interrupted() }
+        })
+        audioObservers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] notification in
+            guard let changed = notification.object as? AVAudioEngine else { return }
+            MainActor.assumeIsolated {
+                guard let self, self.listening, self.engine === changed else { return }
+                self.interrupted()
+            }
+        })
+        for name in [AVAudioSession.mediaServicesWereLostNotification, AVAudioSession.mediaServicesWereResetNotification] {
+            audioObservers.append(center.addObserver(forName: name, object: session, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.interrupted() }
+            })
+        }
+    }
+
+    deinit {
+        for observer in audioObservers { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    private func interrupted() {
+        guard held else { return }
+        fail(RunnerError(message: "Listening was interrupted. Hold the mic to try again."), token: generation)
+    }
 
     func start(context: [String], done: @escaping (String) -> Void) {
         guard !held, !finishing else { return }
@@ -48,11 +87,16 @@ final class PhoneVoice {
                 }
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.record, mode: .measurement)
+                // Lock feedback happens while capturing; iOS otherwise suppresses haptics.
+                try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
                 try session.setActive(true)
                 let engine = AVAudioEngine()
                 let source = engine.inputNode.outputFormat(forBus: 0)
                 let speech = try await PhoneSpeech.make(request: UUID().uuidString, sampleRate: source.sampleRate,
-                                                        sourceFormat: source, context: context) { [weak self] words in
+                                                        sourceFormat: source, context: context,
+                                                        onCancel: { [weak self] in
+                    self?.fail(RunnerError(message: "Listening was interrupted. Hold the mic to try again."), token: token)
+                }) { [weak self] words in
                     guard let self, self.generation == token else { return }
                     self.words = words
                 }
@@ -116,8 +160,8 @@ final class PhoneVoice {
         self.done = nil
         held = false
         locked = false
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         stopMicrophone()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         // Preparation still pending: cancel it, and discard this hold.
         guard let speech else { cancel(); return }
         finishing = true
@@ -137,13 +181,14 @@ final class PhoneVoice {
     }
 
     func cancel() {
-        if held { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+        let wasHeld = held
         generation += 1
         held = false
         locked = false
         done = nil
         finishing = false
         stopMicrophone()
+        if wasHeld { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
         work?.cancel()
         feeding?.cancel()
         speech?.cancel()
@@ -193,7 +238,10 @@ final class PhoneSpeaker: NSObject, AVSpeechSynthesizerDelegate {
         stop()
         let locale = PhoneSpeech.locale.identifier.replacingOccurrences(of: "_", with: "-")
         let language = locale.split(separator: "-").first.map(String.init) ?? "en"
-        let voices = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix(language) }
+        let voices = AVSpeechSynthesisVoice.speechVoices().filter {
+            $0.language.hasPrefix(language) && !$0.voiceTraits.contains(.isNoveltyVoice)
+                && ($0.quality == .enhanced || $0.quality == .premium)
+        }
         let exact = voices.filter { $0.language == locale }
         let preferred = (exact.isEmpty ? voices : exact).sorted { $0.quality.rawValue > $1.quality.rawValue }.first
         let utterance = AVSpeechUtterance(string: text)
