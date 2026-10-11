@@ -315,6 +315,9 @@ extension Job {
         JobList.lists(active: isActive, needsYou: needsYou, finished: finished, clearedAt: clearedAt)
     }
 
+    /// Clear done would take it from the list (Shared/JobList.swift).
+    nonisolated var clearable: Bool { JobList.clears(active: isActive, needsYou: needsYou) }
+
     /// The status pill, the same on the iPhone and the Mac: how it's going, how it ended, and
     /// where its pull request is. A job you let go says Dismissed, however it ended.
     nonisolated var badge: JobBadge {

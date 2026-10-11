@@ -58,6 +58,10 @@ nonisolated enum JobList {
         active || needsYou || shows(finished: finished, clearedAt: clearedAt)
     }
 
+    /// Whether Clear done would take the job from the list: it finished and needs the user no
+    /// more. While no listed job would go, the iPhone's Home offers no Clear done.
+    static func clears(active: Bool, needsYou: Bool) -> Bool { !active && !needsYou }
+
     /// Clear done by time alone: the job hasn't finished, nothing was ever cleared, or it finished
     /// after the last clear. A job that finished at the clear's second or before is hidden on
     /// every app, since the runner keeps the clear's time. `lists` is the whole rule.

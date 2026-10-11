@@ -52,7 +52,8 @@ struct HomeView: View {
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationDestination(for: String.self) { JobScreen(id: $0) }
             .toolbar {
-                if jobs.contains(where: { !$0.isActive }) {
+                // Only when it would take something: jobs that need you stay until you Dismiss them.
+                if jobs.contains(where: \.clearable) {
                     ToolbarItem(placement: .topBarLeading) {
                         // Through the runner, so the Mac's island clears too.
                         Button("Clear done") { Task { await clear() } }

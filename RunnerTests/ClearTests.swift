@@ -131,6 +131,10 @@ final class ClearTests {
         #expect(JobList.lists(active: false, needsYou: true, finished: now - 1, clearedAt: now))
         #expect(!JobList.lists(active: false, needsYou: false, finished: now - 1, clearedAt: now))
         #expect(JobList.lists(active: true, needsYou: false, finished: nil, clearedAt: now))
+        // Clear done is offered only for what it would take: finished jobs that need you no more.
+        #expect(JobList.clears(active: false, needsYou: false))
+        #expect(!JobList.clears(active: false, needsYou: true))
+        #expect(!JobList.clears(active: true, needsYou: false))
     }
 
     /// The one line the iPhone's Home, the closed notch and the island's header all say.
