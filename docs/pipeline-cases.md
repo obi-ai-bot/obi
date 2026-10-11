@@ -365,6 +365,7 @@ A job counts as done only when its check passes. Then the Lead reviews the diff 
   - METR has documented models editing tests and scorers to pass.
 - **Open for Oby:**
   - Decided 2026-10-10: 1 attempt and 3 fix rounds. About 15 minutes a round, 45 minutes a job, 10 minutes a test run.
+  - Changed 2026-10-11, after real rounds took 20 to 47 minutes and the 15-minute timer stopped jobs mid-work: **45 minutes a round, 3 hours a job, 20 minutes a test run.**
   - Stop early when the same failure repeats twice (failures compared with timestamps and durations stripped), the failure count doesn't drop in 2 rounds, a round changes nothing, or 3 actions in a row are denied.
   - At the limit: stop, keep the branch and push nothing. The inbox offers "one more round" or "one more round on the stronger model".
   - Limits live in Swift, never in prompts, and Oby tunes them per repo (X.4).
