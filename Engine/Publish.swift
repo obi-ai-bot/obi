@@ -45,12 +45,29 @@ nonisolated enum Publish {
             : "Push the new commits on \(job.branch) to \(job.repo), for its pull request into \(base)."
     }
 
+    /// The job was stopped while it published: nothing more goes out.
+    struct Stopped: LocalizedError {
+        var errorDescription: String? { "Not published: the job was stopped." }
+    }
+
+    /// What publishing tells the desk as it goes, and asks it before each thing it sends.
+    struct Hooks {
+        /// The step it's on, for the job's pipeline.
+        var progress: (PublishStep) -> Void = { _ in }
+        /// Throws (`Stopped`) when nothing more may go out: asked right before the push and the pull request.
+        var proceed: () throws -> Void = {}
+        /// Something just went out, for the job's report.
+        var sent: (Outgoing) -> Void = { _ in }
+    }
+
     /// Guards, the commits compared with the base by patch (`AlreadyOnBase` when they're all on it),
-    /// secret scan (`Blocked` when it finds something), `approve` with the action, push, pull
-    /// request. The first refusal stops it with one line the notch can show. Returns the pull
-    /// request's URL. `approve` is `{ _ in }` when a job publishes by itself.
-    static func publish(_ job: Job, base: String, progress: (PublishStep) -> Void = { _ in },
+    /// secret scan of the changes, the commit messages and the pull request's title and description
+    /// (`Blocked` when it finds something), `approve` with the action, push, pull request. The first
+    /// refusal stops it with one line the notch can show. Returns the pull request's URL. `approve`
+    /// is `{ _ in }` when a job publishes by itself.
+    static func publish(_ job: Job, base: String, hooks: Hooks = Hooks(),
                         approve: (String) async throws -> Void) async throws -> URL {
+        let progress = hooks.progress
         progress(.scan)
         let worktree = Workspace.worktree(job.id)
         let git = { (arguments: [String]) in try? await Shell.ok(["git", "-C", worktree.path] + arguments) }
@@ -71,12 +88,30 @@ nonisolated enum Publish {
         if left == 0 { throw AlreadyOnBase(base: base) }
         let findings = try await scan(worktree, base: base, head: head)
         if !findings.isEmpty { throw Blocked(findings: findings) }
+        // Everything else that goes out: every commit's message, merges too, and the pull request's title and description.
+        guard let messages = await git(["log", "--format=%B", "refs/remotes/origin/\(base)..\(head)"]),
+              let subjects = await git(["log", "--reverse", "--no-merges", "--format=%s", "refs/remotes/origin/\(base)..\(head)"]) else {
+            throw Shell.Failure(message: "Not published: the secret scan couldn't read the commit messages.")
+        }
+        let title = title(for: job, subjects: subjects.split(separator: "\n").map(String.init))
+        let texts = [("commit message", messages), ("pull request title", title), ("pull request description", body(for: job))]
+        let said: [Finding]
+        do {
+            said = try await scan(texts: texts)
+        } catch {
+            throw Shell.Failure(message: "Not published: the secret scan couldn't run (\(error.localizedDescription)).")
+        }
+        if !said.isEmpty { throw Blocked(findings: said) }
         try await approve(action(for: job, base: base))
-        let subjects = await git(["log", "--reverse", "--no-merges", "--format=%s", "refs/remotes/origin/\(base)..\(head)"]) ?? ""
+        try hooks.proceed()
         progress(.push)
         try await push(head, of: job, from: worktree)
+        hooks.sent(Outgoing(action: .push, repo: job.repo, id: head, branch: job.branch))
+        try hooks.proceed()
         progress(.pullRequest)
-        return try await pullRequest(job, base: base, subjects: subjects.split(separator: "\n").map(String.init))
+        let (url, sent) = try await pullRequest(job, base: base, title: title)
+        if let sent { hooks.sent(Outgoing(action: sent, repo: job.repo, id: url.absoluteString)) }
+        return url
     }
 
     /// Why Oby won't publish this job, or nil to go ahead.
@@ -139,11 +174,151 @@ nonisolated enum Publish {
     static func findings(inDiff diff: String) -> [Finding] {
         let (files, lines) = parse(diff)
         let named = files.compactMap { file in secretFile(file).map { Finding(file: file, line: nil, rule: $0) } }
-        let found = lines.flatMap { line in
-            rules.filter { line.text.contains($0.pattern) }.map { Finding(file: line.file, line: line.number, rule: $0.name) }
-        }
+        let found = lines.flatMap { line in matches(line.text).map { Finding(file: line.file, line: line.number, rule: $0) } }
         var seen = Set<Finding>()
-        return (named + found).filter { seen.insert($0).inserted }
+        return (named + found + wrapped(lines)).filter { seen.insert($0).inserted }
+    }
+
+    /// Base64 or hex wrapped over several lines (`base64` and `openssl` wrap at 76 or 64): runs of
+    /// adjacent lines in one file that hold nothing else, joined, with the end of the line before
+    /// (`token = QUtJ…`), and found at the run's first line.
+    static func wrapped(_ lines: [Line]) -> [Finding] {
+        let trim = CharacterSet.whitespaces.union(CharacterSet(charactersIn: "\"',\\"))
+        var found: [Finding] = []
+        var run: [Line] = [], lead = ""
+        func flush() {
+            if run.count + (lead.isEmpty ? 0 : 1) > 1, let first = run.first {
+                let joined = lead + run.map { $0.text.trimmingCharacters(in: trim) }.joined()
+                found += matches(joined).map { Finding(file: first.file, line: first.number, rule: $0) }
+            }
+            run = []
+            lead = ""
+        }
+        var previous: Line?
+        for line in lines {
+            let text = line.text.trimmingCharacters(in: trim)
+            let encoded = !text.isEmpty && text.wholeMatch(of: /[A-Za-z0-9+\/=_-]+/) != nil
+            let adjacent = previous.map { $0.file == line.file && $0.number + 1 == line.number } ?? false
+            if encoded, adjacent, !run.isEmpty {
+                run.append(line)
+            } else {
+                flush()
+                if encoded {
+                    run = [line]
+                    // The first part may end the line before, after `=` or `:`.
+                    if adjacent, let previous, let tail = previous.text.trimmingCharacters(in: trim).firstMatch(of: /[A-Za-z0-9+\/_-]{8,}$/) {
+                        lead = String(tail.output)
+                    }
+                }
+            }
+            previous = line
+        }
+        flush()
+        return found
+    }
+
+    /// The rules a line breaks, by name: in plain text, else in a base64, hex or URL-encoded copy
+    /// ("GitHub token, base64").
+    static func matches(_ text: String) -> [String] {
+        let plain = rules.filter { text.contains($0.pattern) }.map(\.name)
+        guard plain.isEmpty else { return plain }
+        var seen = Set<String>()
+        return decoded(text).flatMap { how, text in
+            rules.filter { text.contains($0.pattern) }.map { "\($0.name), \(how)" }
+        }.filter { seen.insert($0).inserted }
+    }
+
+    /// The text's encoded runs, decoded: URL-encoding, base64 (standard or URL-safe) and hex, and
+    /// what those hide in turn (`depth` levels), labelled like "base64" or "hex in base64".
+    static func decoded(_ text: String, depth: Int = 2) -> [(how: String, text: String)] {
+        guard depth > 0 else { return [] }
+        var found: [(how: String, text: String)] = []
+        // Each run of %XX on its own, so one stray % (`50%`) doesn't hide the rest of the line.
+        if text.contains("%") {
+            let plain = text.replacing(/(?:%[0-9A-Fa-f]{2})+/) { percent($0.output) }
+            if plain != text { found.append(("URL-encoded", plain)) }
+        }
+        for run in text.matches(of: /[A-Za-z0-9+\/_-]{16,}={0,2}/) {
+            if let plain = base64(run.output) { found.append(("base64", plain)) }
+        }
+        for run in text.matches(of: /[0-9A-Fa-f]{16,}/) {
+            // An odd run has a stray digit at one end or the other.
+            let tries = run.output.count.isMultiple(of: 2) ? [run.output] : [run.output.dropFirst(), run.output.dropLast()]
+            found += tries.compactMap { hex($0).map { ("hex", $0) } }
+        }
+        // Hex written as escapes: \x41\x4b… or 0x41, 0x4b, …
+        for run in text.matches(of: /(?:\\x[0-9A-Fa-f]{2}){8,}|(?:0x[0-9A-Fa-f]{2}[\s,]*){8,}/) {
+            let digits = run.output.matches(of: /(?:\\x|0x)([0-9A-Fa-f]{2})/).map(\.output.1).joined()
+            if let plain = hex(Substring(digits)) { found.append(("hex", plain)) }
+        }
+        // What a run of letters that isn't an encoding decodes to has no stretch a rule could match:
+        // skipping it keeps long lines (minified code, lockfiles) quick.
+        found = found.filter { readable($0.text) }
+        return found + found.flatMap { how, plain in decoded(plain, depth: depth - 1).map { ("\($0.how) in \(how)", $0.text) } }
+    }
+
+    /// Text with 15 printable ASCII characters in a row: the shortest any rule matches.
+    static func readable(_ text: String) -> Bool {
+        var row = 0
+        for byte in text.utf8 {
+            row = (0x20...0x7E).contains(byte) ? row + 1 : 0
+            if row >= 15 { return true }
+        }
+        return false
+    }
+
+    /// `%41%4B…` as text.
+    static func percent(_ run: Substring) -> String {
+        let bytes = run.split(separator: "%").compactMap { UInt8($0, radix: 16) }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// Base64, standard or URL-safe, padded or not, as text (bytes that aren't UTF-8 become �, so a
+    /// secret inside binary still reads). Nil when it isn't base64.
+    static func base64(_ run: Substring) -> String? {
+        var text = String(run.prefix { $0 != "=" }).replacing("-", with: "+").replacing("_", with: "/")
+        guard text.count % 4 != 1 else { return nil }
+        text += String(repeating: "=", count: (4 - text.count % 4) % 4)
+        return Data(base64Encoded: text).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    /// Hex pairs as text, or nil when the run isn't whole bytes.
+    static func hex(_ run: Substring) -> String? {
+        guard run.count.isMultiple(of: 2) else { return nil }
+        var bytes: [UInt8] = []
+        var index = run.startIndex
+        while index < run.endIndex {
+            let next = run.index(index, offsetBy: 2)
+            guard let byte = UInt8(run[index..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = next
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// What the built-in rules find in text Oby is about to post (a pull request's title or
+    /// description, a comment, commit messages), each line under `name`.
+    static func findings(inText text: String, named name: String) -> [Finding] {
+        let lines = lines(of: text, named: name)
+        var seen = Set<Finding>()
+        return (lines.flatMap { line in matches(line.text).map { Finding(file: name, line: line.number, rule: $0) } } + wrapped(lines))
+            .filter { seen.insert($0).inserted }
+    }
+
+    /// Text Oby is about to post, as numbered lines under `name`.
+    static func lines(of text: String, named name: String) -> [Line] {
+        text.split(separator: "\n", omittingEmptySubsequences: false).enumerated().map { index, line in
+            Line(file: name, number: index + 1, text: String(line))
+        }
+    }
+
+    /// Scans each text Oby is about to post, by name: the built-in rules, and gitleaks when it's
+    /// installed. Throws when the scan can't run: then nothing goes out.
+    static func scan(texts: [(name: String, text: String)]) async throws -> [Finding] {
+        let lines = texts.flatMap { lines(of: $0.text, named: $0.name) }
+        let found = texts.flatMap { findings(inText: $0.text, named: $0.name) }
+        var seen = Set<Finding>()
+        return (found + (try await gitleaks(lines))).filter { seen.insert($0).inserted }
     }
 
     /// Scans what publishing would send: each commit up to `head` that isn't on origin/<base>,
@@ -244,8 +419,9 @@ nonisolated enum Publish {
     }
 
     /// Opens the pull request, ready for review, or returns the one already open for the branch
-    /// with its description brought up to date (a later round's summary and check).
-    static func pullRequest(_ job: Job, base: String, subjects: [String]) async throws -> URL {
+    /// with its description brought up to date (a later round's summary and check). `sent` says
+    /// which went out: `pullRequestEdit` only when the description did update.
+    static func pullRequest(_ job: Job, base: String, title: String) async throws -> (url: URL, sent: Outgoing.Action?) {
         let file = FileManager.default.temporaryDirectory.appending(path: "oby-pr-\(UUID().uuidString).md")
         try body(for: job).write(to: file, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: file) }
@@ -253,15 +429,15 @@ nonisolated enum Publish {
                                        "--json", "url", "--jq", ".[0].url // empty"])
         if !open.isEmpty, let url = URL(string: open) {
             // The commits are on it already; a description that didn't update isn't worth failing for.
-            _ = try? await Shell.ok(["gh", "pr", "edit", open, "-R", job.repo, "--body-file", file.path])
-            return url
+            let edited = (try? await Shell.ok(["gh", "pr", "edit", open, "-R", job.repo, "--body-file", file.path])) != nil
+            return (url, edited ? .pullRequestEdit : nil)
         }
         let created = try await Shell.ok(["gh", "pr", "create", "-R", job.repo, "--base", base, "--head", job.branch,
-                                          "--title=\(title(for: job, subjects: subjects))", "--body-file", file.path])
+                                          "--title=\(title)", "--body-file", file.path])
         guard let url = created.split(separator: "\n").last.flatMap({ URL(string: String($0)) }) else {
             throw Shell.Failure(message: "gh opened no pull request: \(created)")
         }
-        return url
+        return (url, .pullRequest)
     }
 
     /// The pull request's title in Conventional Commits form, ending with `(#issue)` when there is

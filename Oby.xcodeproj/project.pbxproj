@@ -12,6 +12,7 @@
 		0B1E0C0A0000000000AC0002 /* ObyActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0B1E0C0A0000000000AC0001 /* ObyActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		0B1E0C0A0000000000AD0002 /* ObyWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 0B1E0C0A0000000000AD0001 /* ObyWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		0B1E0C0A0000000000AD0010 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 0B1E0C0A000000000000E1 /* AppIcon.icon */; };
+		0B1E0C0A0000000000AE0002 /* ObyWatchWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0B1E0C0A0000000000AE0001 /* ObyWatchWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -43,6 +44,13 @@
 			remoteGlobalIDString = 0B1E0C0A0000000000AD0007;
 			remoteInfo = ObyWatch;
 		};
+		0B1E0C0A0000000000AE000F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FB61F80330795FDE00A9523D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0B1E0C0A0000000000AE0007;
+			remoteInfo = ObyWatchWidget;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -68,6 +76,17 @@
 			name = "Embed Watch Content";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		0B1E0C0A0000000000AE0003 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				0B1E0C0A0000000000AE0002 /* ObyWatchWidget.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
@@ -78,6 +97,7 @@
 		0B1E0C0A000000000000E1 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; name = AppIcon.icon; path = Icon/AppIcon.icon; sourceTree = "<group>"; };
 		0B1E0C0A0000000000AC0001 /* ObyActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ObyActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		0B1E0C0A0000000000AD0001 /* ObyWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ObyWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0B1E0C0A0000000000AE0001 /* ObyWatchWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ObyWatchWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -107,10 +127,39 @@
 		0B1E0C0A0000000000AD0005 /* Exceptions for "Watch" folder in "ObyWatch" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Frames/compose.py,
+				Frames/render.mjs,
 				Info.plist,
+				Oby.entitlements,
 				README.md,
+				Widget/Assets.xcassets,
+				Widget/Info.plist,
+				Widget/ObyWidget.entitlements,
+				Widget/ObyWidget.swift,
 			);
 			target = 0B1E0C0A0000000000AD0007 /* ObyWatch */;
+		};
+		0B1E0C0A0000000000AE0005 /* Exceptions for "Watch" folder in "ObyWatchWidget" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Assets.xcassets,
+				Frames.xcassets,
+				Frames/compose.py,
+				Frames/render.mjs,
+				HomeView.swift,
+				Info.plist,
+				JobScreen.swift,
+				ObyAnimation.swift,
+				Oby.entitlements,
+				ObyWatchApp.swift,
+				README.md,
+				TalkView.swift,
+				Watch.swift,
+				WatchNotifications.swift,
+				Widget/Info.plist,
+				Widget/ObyWidget.entitlements,
+			);
+			target = 0B1E0C0A0000000000AE0007 /* ObyWatchWidget */;
 		};
 		0B1E0C0A0000000000AD0006 /* Exceptions for "Shared" folder in "ObyWatch" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
@@ -171,6 +220,7 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				0B1E0C0A0000000000AD0005 /* Exceptions for "Watch" folder in "ObyWatch" target */,
+				0B1E0C0A0000000000AE0005 /* Exceptions for "Watch" folder in "ObyWatchWidget" target */,
 			);
 			path = Watch;
 			sourceTree = "<group>";
@@ -208,6 +258,11 @@
 			files = (
 			);
 		};
+		0B1E0C0A0000000000AE0009 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -236,6 +291,7 @@
 				0B1E0C0A000000000000D5 /* iOSTests.xctest */,
 				0B1E0C0A0000000000AC0001 /* ObyActivity.appex */,
 				0B1E0C0A0000000000AD0001 /* ObyWatch.app */,
+				0B1E0C0A0000000000AE0001 /* ObyWatchWidget.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -360,10 +416,12 @@
 				0B1E0C0A0000000000AD0008 /* Sources */,
 				0B1E0C0A0000000000AD0009 /* Frameworks */,
 				0B1E0C0A0000000000AD000A /* Resources */,
+				0B1E0C0A0000000000AE0003 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				0B1E0C0A0000000000AE000E /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				0B1E0C0A0000000000AD0004 /* Watch */,
@@ -373,6 +431,26 @@
 			productName = ObyWatch;
 			productReference = 0B1E0C0A0000000000AD0001 /* ObyWatch.app */;
 			productType = "com.apple.product-type.application";
+		};
+		0B1E0C0A0000000000AE0007 /* ObyWatchWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0B1E0C0A0000000000AE000B /* Build configuration list for PBXNativeTarget "ObyWatchWidget" */;
+			buildPhases = (
+				0B1E0C0A0000000000AE0008 /* Sources */,
+				0B1E0C0A0000000000AE0009 /* Frameworks */,
+				0B1E0C0A0000000000AE000A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				0B1E0C0A0000000000AD0004 /* Watch */,
+			);
+			name = ObyWatchWidget;
+			productName = ObyWatchWidget;
+			productReference = 0B1E0C0A0000000000AE0001 /* ObyWatchWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -404,6 +482,9 @@
 					0B1E0C0A0000000000AD0007 = {
 						CreatedOnToolsVersion = 27.0;
 					};
+					0B1E0C0A0000000000AE0007 = {
+						CreatedOnToolsVersion = 27.0;
+					};
 				};
 			};
 			buildConfigurationList = FB61F80630795FDE00A9523D /* Build configuration list for PBXProject "Oby" */;
@@ -426,6 +507,7 @@
 				0B1E0C0A000000000000D1 /* iOSTests */,
 				0B1E0C0A0000000000AC0007 /* ObyActivity */,
 				0B1E0C0A0000000000AD0007 /* ObyWatch */,
+				0B1E0C0A0000000000AE0007 /* ObyWatchWidget */,
 			);
 		};
 /* End PBXProject section */
@@ -462,6 +544,11 @@
 			isa = PBXResourcesBuildPhase;
 			files = (
 				0B1E0C0A0000000000AD0010 /* AppIcon.icon in Resources */,
+			);
+		};
+		0B1E0C0A0000000000AE000A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
 			);
 		};
 /* End PBXResourcesBuildPhase section */
@@ -538,6 +625,11 @@
 			files = (
 			);
 		};
+		0B1E0C0A0000000000AE0008 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -560,6 +652,11 @@
 			isa = PBXTargetDependency;
 			target = 0B1E0C0A0000000000AD0007 /* ObyWatch */;
 			targetProxy = 0B1E0C0A0000000000AD000F /* PBXContainerItemProxy */;
+		};
+		0B1E0C0A0000000000AE000E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0B1E0C0A0000000000AE0007 /* ObyWatchWidget */;
+			targetProxy = 0B1E0C0A0000000000AE000F /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -693,10 +790,13 @@
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens only while you hold fn, and writes down what you say on this Mac.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Oby writes down what you say while you hold fn, on this Mac.";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 0.1.0;
@@ -725,10 +825,13 @@
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens only while you hold fn, and writes down what you say on this Mac.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Oby writes down what you say while you hold fn, on this Mac.";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 0.1.0;
@@ -986,6 +1089,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Watch/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = PQKAL8E36D;
@@ -1020,6 +1124,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Watch/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = PQKAL8E36D;
@@ -1042,6 +1147,68 @@
 				SUPPORTED_PLATFORMS = "watchos watchsimulator";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Release;
+		};
+		0B1E0C0A0000000000AE000C /* Debug configuration for PBXNativeTarget "ObyWatchWidget" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Watch/Widget/ObyWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PQKAL8E36D;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Watch/Widget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Oby;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(OBY_IPHONE_BUNDLE_ID).watchkitapp.widget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Debug;
+		};
+		0B1E0C0A0000000000AE000D /* Release configuration for PBXNativeTarget "ObyWatchWidget" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Watch/Widget/ObyWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PQKAL8E36D;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Watch/Widget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Oby;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(OBY_IPHONE_BUNDLE_ID).watchkitapp.widget";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
@@ -1106,6 +1273,14 @@
 			buildConfigurations = (
 				0B1E0C0A0000000000AD000C /* Debug configuration for PBXNativeTarget "ObyWatch" */,
 				0B1E0C0A0000000000AD000D /* Release configuration for PBXNativeTarget "ObyWatch" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		0B1E0C0A0000000000AE000B /* Build configuration list for PBXNativeTarget "ObyWatchWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0B1E0C0A0000000000AE000C /* Debug configuration for PBXNativeTarget "ObyWatchWidget" */,
+				0B1E0C0A0000000000AE000D /* Release configuration for PBXNativeTarget "ObyWatchWidget" */,
 			);
 			defaultConfigurationName = Release;
 		};

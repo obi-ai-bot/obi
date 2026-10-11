@@ -1,6 +1,6 @@
 # The Oby runner API
 
-The runner is Oby's engine without the notch: the brain, Oby's own clones and job worktrees, the Claude Code and Codex runners, accounts, routing and Publish. It runs on an always-on machine (first: `tetrix-lab`, Ubuntu, on Wellington's tailnet), so the iPhone app (and later the Watch) can plan, dispatch and follow jobs while the Mac is closed.
+The runner is Oby's engine without the notch: the brain and the Lead, Oby's own clones and job worktrees, the Claude Code and Codex runners, accounts, routing and Publish. It runs on an always-on machine (first: `tetrix-lab`, Ubuntu, on Wellington's tailnet), so the iPhone app (and later the Watch) can plan, dispatch and follow jobs while the Mac is closed.
 
 This document is the contract between the runner and its clients. Change it in the same pull request as the code on either side.
 
@@ -52,6 +52,10 @@ This document is the contract between the runner and its clients. Change it in t
   "review": null,
   "reviewError": null,
   "reviewOf": null,
+  "files": null,
+  "lead": null,
+  "claim": null,
+  "outgoing": [],
   "title": "Review oby #33",
   "pipeline": {
     "number": 2,
@@ -76,7 +80,8 @@ This document is the contract between the runner and its clients. Change it in t
 - `commits`: commits made beyond `base` (set when a job ends as done).
 - Publishing happens by itself. A job that ends `done` with commits not on its pull request (its check passed, or it has none) publishes before it ends, with no device signature: `step` is `"Publishing"` meanwhile, and `publishStep` follows the scan, push and PR creation.
   - It pushes the branch and opens a pull request into `base`, ready for review (never a draft), or pushes to the one already open.
-  - The secret scan still gates it. A possible secret makes the job `failed`, and its `summary` starts with `Not published: possible secret in <file>:<line> (<rule>).` Nothing goes out, and it never says the secret. If the scanner can't run, nothing goes out either.
+  - The secret scan still gates it. It reads every line the commits add, every commit's message (merges too), and the pull request's title and description, in plain text and in base64 (standard or URL-safe, also wrapped over several lines), hex (also `\x41…` and `0x41, …`) and URL-encoded copies (the rule then reads like `AWS access key, base64`). A possible secret makes the job `failed`, and its `summary` starts with `Not published: possible secret in <file>:<line> (<rule>).`, where `<file>` is the file, or `commit message`, `pull request title` or `pull request description`. Nothing goes out, and it never says the secret. If the scanner can't run, nothing goes out either.
+  - Stopped while publishing (`POST /v1/jobs/{id}/stop` or `POST /v1/stop-all`): nothing more goes out. The runner checks right before the push and right before the pull request; a push that already went out is listed in `outgoing`.
   - Only a job that ends while the runner is up, with commits made since its agent started, publishes by itself. A job that ended before the runner started never does, and one whose own publish failed isn't tried again by itself (a round with no new commits keeps its `publishError`).
   - Before publishing, the runner fetches `base` and compares the job's commits with it by patch (`git cherry`, then a trial merge for squash merges). When they're all on it already, nothing goes out: the job stays `done` with `commits` 0, and its `summary` starts with `Not published: its commits are already on <base>.`
   - Any other failure (push, `gh`) leaves the job `done` with `publishError` set. Then Publish by hand is offered (`POST /v1/jobs/{id}/publish`).
@@ -84,6 +89,7 @@ This document is the contract between the runner and its clients. Change it in t
 - `publishError`: why the runner couldn't publish the job by itself, or null. Show it instead of "Published".
 - `pushed`: how many of `commits` were on the pull request when it was last published, or null before then. A published job that ran again (`POST /v1/jobs/{id}/messages`) and ended `done` with new commits pushes them to the same branch by itself, so they land on the open pull request.
 - `summaries`: every round's summary from the agent, oldest first, or null. The pull request's description quotes them all.
+- `outgoing`: everything the runner sent out for the job, oldest first: the job's report lists it. Always a list, empty before anything went out. Each is `{"action": "push", "repo": "deskree-inc/oby", "id": "<commit>", "branch": "oby/fix-75", "date": "2026-10-09T22:01:40Z"}`; `action` is `push` (`id` the commit pushed, `branch` where), `pullRequest` (opened; `id` its URL), `pullRequestEdit` (its description brought up to date; `id` its URL) or `comment` (Oby's review posted on the job's pull request; `id` the comment's URL). `branch` is present on pushes only. More actions may come: show one you don't know as its `action` and `id`. Ids only, never what was sent; the runner's journal keeps one line per action, ids only too.
 - What needs you: a job that's `done` with commits the runner couldn't publish (`publishError`), `failed` or `interrupted`, or one Oby's review requested changes on for the fourth time (`review`, below), unless it's dismissed. Say so where the apps would otherwise say nothing needs you.
 - `dismissed`: when the user let the job go (`POST /v1/jobs/{id}/dismiss`), or null. A dismissed job needs nothing: it sends no alert, offers no Publish, and its `pipeline` shows Publish as `skipped` with the detail `Dismissed`. It stays in the list and in history. Telling it something (`POST /v1/jobs/{id}/messages`) clears `dismissed`.
 - `issue`: the GitHub issue the work is about. The runner fetches it for the agent, which has no GitHub login, and the pull request says `Closes #N`.
@@ -94,6 +100,8 @@ This document is the contract between the runner and its clients. Change it in t
 - `model`: a stronger model the user chose for this job, or null for the one in Settings › Models.
 - `notes`: what the user told the agent along the way (`POST /v1/jobs/{id}/messages`), oldest first, or null.
 - `title`: what to call the job in rows, the job screen, the notch and alerts. It's the brain's short title (3 to 6 words, like `"Mac runner notifications"`), which every planned dispatch gets and the job keeps. Jobs without one (the rules' plans when the brain is down, an epic's sub-issue jobs, jobs from before titles) get `"<Kind> <repo name> #<number>"` when `pr` or `issue` is set, otherwise the first line of `task` (falling back to `request`), capped at 60 characters. It's always a string; older runners don't send it, so clients fall back the same way. Show "Round 2 of 5" when `rounds` is above 1.
+- `files`, `lead` and `claim` are set on jobs the Lead started (below), null otherwise. `files`: the files or folders (ending in `/`) the job is expected to touch, relative to the repository, from the Lead's brief. `lead`: the goal (one Lead turn) that started it. `claim`: how the runner claimed the job's issue when the job started (`"Claimed: assigned to you, labeled status:in-progress, branch noted, moved to In progress."`), or what failed, null until then. Older runners don't send these keys.
+- A job whose `files` overlap an earlier queued or running job's in the same repository (the same path, or one inside a folder the other names) waits, queued, until that job ends: its `step` reads `Waiting for <title> (<id>): both touch <files>`. Then it starts by itself. Jobs without `files` (the brain's) never wait or block.
 
 ### Job pipeline and pull request following
 
@@ -111,7 +119,7 @@ Every job response (list, detail, dispatch, stop, message, wait, plan and `job` 
 
 ### Oby's review
 
-When a job publishes (or pushes new commits to its pull request), the runner has the pull request reviewed by one of its own jobs, on a different account than the author's: it prefers the other tool (Claude Code reviews Codex's work, Codex reviews Claude Code's), takes only an account that's signed in with room on its limits (under 95% of both windows), and runs it on that account's model from Settings › Models. With no such account, nothing reviews and `reviewError` says so.
+When a job publishes (or pushes new commits to its pull request), the runner has the pull request reviewed by one of its own jobs, on a different account than the author's: it prefers the other tool (Claude Code reviews Codex's work, Codex reviews Claude Code's), takes only an account that's signed in with room on its limits (under 95% of its 5-hour window and under 80% of its weekly one, which keeps the rest for jobs the user sends to it by name), and runs it on that account's model from Settings › Models. With no such account, nothing reviews and `reviewError` says so.
 
 - **The review job** is an ordinary `Job` in the list and the event stream: `kind` `review`, `pr` the published pull request's number, `branch` like `oby/review-80`, `task` the author's task, and `reviewOf` the author job's `id` (null on every other job). It reads the diff and the author's task, makes no commits and never publishes. Its `summary` is the review; its last line is the verdict (`VERDICT: APPROVED` or `VERDICT: CHANGES REQUESTED`).
 - **On the author job:** `reviewing` is the review job's `id` while it runs, else null. `review` is Oby's latest verdict, or null:
@@ -122,7 +130,7 @@ When a job publishes (or pushes new commits to its pull request), the runner has
   ```
 
   `verdict` is `approved` or `changesRequested`; `job` the review job; `agent` and `account` the reviewer's tool and account name; `round` which of Oby's reviews of this pull request it is (1 to 4); `comment` the pull request comment it was posted as, or null with `postError` saying why it wasn't (a possible secret in the review, or `gh` failing). `reviewError` says why no review ran or none gave a verdict (no account with room, the reviewer failed, was stopped or interrupted, or gave no verdict), else null.
-- **The comment.** GitHub doesn't let the user approve or request changes on their own pull request, so the runner posts the review as a regular comment, after the secret scan like everything outgoing, headed `### Oby review · Claude Code · Personal: Approved` (or `Changes requested`), the review itself in a code block, and a `by Oby` line. The secret scan gates it: a possible secret means no comment, and the verdict still counts.
+- **The comment.** GitHub doesn't let the user approve or request changes on their own pull request, so the runner posts the review as a regular comment, after the secret scan like everything outgoing, headed `### Oby review · Claude Code · Personal: Approved` (or `Changes requested`), the review itself in a code block, and a `by Oby` line. The secret scan gates it, with the same rules and encoded copies as publishing: a possible secret means no comment, and the verdict still counts. A posted comment is listed in the author job's `outgoing`.
 - **The Review stage** shows GitHub's decision when it has one, else Oby's: `Oby is reviewing` (current), `Approved by Oby` (done, with Merged `current` and `Ready to merge`), or `Changes requested` (failed, reason `Oby requested changes.`). A failed review leaves it current with `Waiting for review · <reviewError>`. A merged pull request with no GitHub decision reads `Approved by Oby` or `Oby requested changes` instead of `Merged without review`.
 - **Changes requested** go to the author's agent as its next round, in the same session and worktree: the review is quoted in a file (`.oby/inputs/review-<round>.md`), never pasted into the prompt. The job goes back to `running` with a new `round` (and one more on `rounds`, as a message does), `step` `Working on Oby's review`, and ends as usual: when its check passes and it publishes the new commits, the review runs again. At most 4 reviews per job; when the fourth requests changes, the job stays `done`, needs you (`reviewNeedsYou`, below), and the runner reviews it no more, even after you talk to it.
 - **Approved:** the job shows it's ready to merge. The runner doesn't merge: nothing checks the Mac and iPhone builds before a merge yet.
@@ -207,6 +215,22 @@ Words that ask to stop work ("stop everything") stop every queued and running jo
 
 One message can plan up to 10 jobs ("work on oby #12, #15 and #18", or "work on epic #30", which becomes one job per open sub-issue). Each draft is already routed to the least busy account; dispatch each with its own `POST /v1/jobs`. `draft` is kept for apps that know only one job.
 
+#### The Lead: vague goals
+
+A vague goal, like "work on the roadmap", "Obi, next issue", "pick the next open issues" or anything naming the roadmap, the board or the backlog, goes to the Lead instead of the brain (when a Claude account is signed in). Words that stop work ("stop working on the roadmap") stay with the brain, which stops the jobs. The Lead is a fresh Claude Code turn on Sonnet 5.5 (the model the spike proved), with only Read, Grep and Glob, boxed like a job. It takes 6 to 20 seconds. Before each turn the runner:
+
+- reads the GitHub project **Oby — Roadmap** with its own `gh` login: the open issues in board order, each with its status column, labels, milestone, assignees and the open pull requests that close it;
+- builds the **skipped list** itself, never trusting the Lead's: done, in review, `status:needs-test`, blocked, `oby:skip`, assigned to someone else, a queued or running Oby job on it, or an open pull request (the board's, or one Oby published for it);
+- writes `.oby/context/roadmap.md` (the board with the runner's verdict on every row, workable or why it's skipped) and `.oby/context/jobs.md` (the runner's running and recent jobs, with the files each expects to touch) where the Lead reads them.
+
+The Lead answers one typed plan, checked in Swift and retried once with the reasons: `start_jobs` (one brief per job: repository, issue, kind, title, goal, the files it will touch, a one-line check and what's out of scope), `reply`, or `ask_user`. No push, merge, approve or publish action exists. A brief is refused unless its issue is one the board lists as workable: a skipped issue is refused with its reason, and a closed, made-up or off-board issue is refused too (Oby would claim it on GitHub). So the same request twice starts nothing new.
+
+The jobs start right away, with no Dispatch tap, each routed to the signed-in account with the most room (the picks spread out, as a plan's drafts do), with 4 rounds (one attempt and three fix rounds) and the brief's check. Right before each job starts, the runner checks the live jobs again: an issue that got a queued or running job while the turn ran (the same request from the Mac and the iPhone at once, or repeated after the app gave up waiting) starts nothing new, and the reply says so. The answer is a `reply`: `"Started 2 jobs: Safe when nobody watches (#7), Watch first slice (#12). Skipped 8 on the board."`, and the jobs arrive as `job` events and in `GET /v1/jobs` with `files`, `lead` and, once each starts, `claim`. When nothing can start, the reply says why (every issue skipped or taken, the board unreadable, no account with room, or the Lead's plans refused twice). A `question` is answered as the brain's is. The runner keeps the last 20 goals' context folders.
+
+When a job of the Lead's starts, the runner **claims its issue** with its own `gh` login: assigns it to you, adds `status:in-progress`, comments the branch name (`Oby is working on this on the branch `oby/build-7` (job ab12cd34).`, written by the runner, never by an agent), and moves the item to **In progress** on the board. Each step that fails is said in `claim`; the rest still happen.
+
+Every Lead turn is logged on the runner (the words, the plan or why it was refused, the skipped list, the jobs started) and kept in `oby.sqlite` with the brain's turns.
+
 ### `POST /v1/jobs`
 
 Dispatches the draft's job. The user may have changed:
@@ -241,6 +265,16 @@ The iPhone app waits on this as a background download: iOS keeps it going while 
 ### `POST /v1/jobs/{id}/stop`
 
 Stops a queued or running job. Returns the job (`status: "stopped"`).
+
+### `POST /v1/stop-all`
+
+Stop all (⌃⌥⌘. or the menu on the Mac, Stop all on the iPhone): every queued and running job stops at once, as `POST /v1/jobs/{id}/stop` does for one. Each agent is asked to stop and ended within 2 seconds, with everything it started; a job that was publishing sends nothing more. No body. Answers with how many it stopped and those jobs, now `stopped`:
+
+```json
+{"stopped": 2, "jobs": [{"id": "9f08fd10", "status": "stopped", …}, …]}
+```
+
+With nothing running: `{"stopped": 0, "jobs": []}`.
 
 ### `POST /v1/jobs/{id}/dismiss`
 
@@ -387,6 +421,6 @@ Each tool's model and effort, as in `status.models`. `GET /v1/settings/models/op
 ## What the runner never does
 
 - **Merge, force-push or push to main:** not for anyone, not even with an approval.
-- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comment that goes out is Oby's own review of its own pull request, after the secret scan; no GitHub review, approval or comment on anyone else's work.
+- **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. The only comments that go out are Oby's own review of its own pull request, after the secret scan, and the Lead's claim on an issue a job starts on (the branch name, written by the runner); no GitHub review, approval or comment on anyone else's work.
 - **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
 - **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.

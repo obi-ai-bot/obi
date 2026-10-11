@@ -21,6 +21,18 @@ final class WatchNotifications: NSObject, WKApplicationDelegate, UNUserNotificat
         ])
     }
 
+    /// The phone's job list can wake the app in the background: it lands in `watch`, which updates
+    /// the complications.
+    func handle(_ backgroundTasks: Set<WKRefreshBackgroundTask>) {
+        for task in backgroundTasks {
+            if let delivery = task as? WKWatchConnectivityRefreshBackgroundTask {
+                watch.finishWhenDelivered(delivery)
+            } else {
+                task.setTaskCompletedWithSnapshot(false)
+            }
+        }
+    }
+
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         guard let id = response.notification.request.content.userInfo["job"] as? String else { return }
         watch.open(id, publish: response.actionIdentifier == Self.publish)

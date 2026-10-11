@@ -307,7 +307,7 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
 
 ### 2.4 Usage limit: the account runs out mid-job
 - **What happens:** the job pauses, then carries on with another account of the same tool (same worktree, a new session given the summary so far) or waits for the reset. Goes back to 2.
-- **Oby today:** Partial. Routing skips accounts at 95% when a job starts. A job already running on a full account just fails.
+- **Oby today:** Partial. Routing skips accounts at 95% of their 5-hour window or 80% of their week (kept for jobs sent to them by name, until the week resets) and ranks an account lower the further its week is ahead of pace. A job whose account hits its limit carries on with the next account with room, or fails when none has.
 - **Claude Code:** shows the reset time, and interactive sessions can continue at the reset. Headless auto-resume is undocumented. Project threads retry after the reset.
 - **Cursor:** not found.
 - **Codex:** 5-hour and weekly limits. What happens mid-task: not found.

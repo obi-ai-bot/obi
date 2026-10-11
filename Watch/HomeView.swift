@@ -48,14 +48,18 @@ struct HomeView: View {
         return false
     }
 
+    /// Waving while something needs you, busy while agents work, calm otherwise.
+    private var loop: ObyAnimation.Loop {
+        if !watch.needing.isEmpty { return .needs }
+        return watch.working.isEmpty ? .idle : .working
+    }
+
     private var header: some View {
         HStack(alignment: .center, spacing: 8) {
-            // Oby's still pose, from the same render as the icon (Icon/README.md).
-            Image("Oby")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 48, height: 48)
-                .accessibilityLabel("Oby")
+            // Oby animated, rendered from Character/ (Watch/README.md). The frames leave room for
+            // it to move, so the frame is a little larger than Oby itself.
+            ObyAnimation(loop: loop)
+                .frame(width: 60, height: 60)
             VStack(alignment: .leading, spacing: 2) {
                 Text(watch.line).font(.headline).lineLimit(2).minimumScaleFactor(0.8)
                 Text(watch.subline).font(.caption2).foregroundStyle(.secondary).lineLimit(2)

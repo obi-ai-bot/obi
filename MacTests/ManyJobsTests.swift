@@ -54,7 +54,7 @@ struct ManyJobsTests {
         let accounts = [state("busy", fiveHour: 0.6), state("calm", running: 1, fiveHour: 0.2), state("codex", agent: "codex", sevenDay: 0.4)]
         #expect(AccountStore.route(accounts, agent: nil)?.id == "calm")
         #expect(AccountStore.route(accounts, agent: "codex")?.id == "codex")
-        #expect(AccountStore.route([state("full", fiveHour: 0.96), state("ok", sevenDay: 0.9)], agent: nil)?.id == "ok")
+        #expect(AccountStore.route([state("full", fiveHour: 0.96), state("ok", sevenDay: 0.79)], agent: nil)?.id == "ok")
     }
 
     @Test func aPlansJobsSpreadOut() {

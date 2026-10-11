@@ -59,6 +59,12 @@ struct HomeView: View {
                         Button("Clear done") { Task { await clear() } }
                     }
                 }
+                if jobs.contains(where: \.isActive) {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        // Every job on the runner, as ⌃⌥⌘. does on the Mac.
+                        Button("Stop all", systemImage: "stop.circle", role: .destructive) { Task { await stopAll() } }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { settings = true } label: { Image(systemName: "gearshape") }
                         .accessibilityLabel("Settings")
@@ -200,6 +206,16 @@ struct HomeView: View {
     private func dismiss(_ id: String) async {
         do {
             try await phone.dismiss(id)
+            problem = nil
+        } catch {
+            problem = error.localizedDescription
+        }
+    }
+
+    /// Stop all: every queued and running job on the runner stops now.
+    private func stopAll() async {
+        do {
+            try await phone.stopAll()
             problem = nil
         } catch {
             problem = error.localizedDescription

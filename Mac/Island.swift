@@ -1,14 +1,19 @@
 import AppKit
+import ApplicationServices
 import SwiftUI
 import WebKit
 
-enum IslandState { case compact, peek, open }
+enum IslandState { case compact, peek, open, listening }
 
 /// The island's state and its geometry, measured from the screen Oby lives on.
 @Observable
 final class IslandModel {
     let desk: Desk
     let feed: RunnerFeed
+    /// What you say while you hold fn.
+    let voice = Voice()
+    /// What goes with the next request: screenshots, what you copied.
+    let tray = Tray()
     var state: IslandState = .compact
     /// The notch's size, or zero on a screen without one.
     var notch: CGSize = .zero
@@ -50,7 +55,7 @@ final class IslandModel {
         switch state {
         case .compact: return CGSize(width: base, height: top)
         case .peek: return CGSize(width: base + (peekLine == Summary.quiet ? 140 : 320), height: top + 6)
-        case .open: return CGSize(width: 600, height: openHeight)
+        case .open, .listening: return CGSize(width: 600, height: openHeight)
         }
     }
 
@@ -58,7 +63,7 @@ final class IslandModel {
         switch state {
         case .compact: 12
         case .peek: 18
-        case .open: 32
+        case .open, .listening: 32
         }
     }
 
@@ -67,7 +72,7 @@ final class IslandModel {
         switch state {
         case .compact, .peek: CGRect(x: 8, y: -3, width: top + 6, height: top + 6)
         // Oby's body sits low in its frame (room to jump), so the frame starts under the notch.
-        case .open: CGRect(x: 14, y: top - 14, width: 136, height: 136)
+        case .open, .listening: CGRect(x: 14, y: top - 14, width: 136, height: 136)
         }
     }
 
@@ -81,11 +86,16 @@ final class IslandController {
     let feed = RunnerFeed()
     let model: IslandModel
     let character = ObyCharacter()
+    let talkKey = TalkKey()
+    let stopAllKey = StopAllKey()
     private let panel = NotchPanel()
     private var timer: Timer?
     private var lastMouse: CGPoint?
     private var clickMonitor: Any?
     private var noticeTask: Task<Void, Never>?
+    /// Every repository the user pushed to lately: names the voice listens for. Fetched when you
+    /// first talk, and again each time until it works.
+    private var repos: [String] = []
 
     init() { model = IslandModel(desk: desk, feed: feed) }
 
@@ -101,6 +111,11 @@ final class IslandController {
         feed.onNotice = { [weak self] job, notice in self?.notify(RunnerFeed.title(notice, for: job), happy: notice == .ready && job.publishError == nil) }
         feed.start()
         Task { await desk.refresh() }
+        talkKey.on = { [weak self] in self?.talk($0) }
+        talkKey.start()
+        stopAllKey.on = { [weak self] in self?.stopAll() }
+        stopAllKey.start()
+        model.voice.prepare()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.place() }
         }
@@ -111,6 +126,24 @@ final class IslandController {
         // A click in another app closes the open island. Clicks on the island are ours and never arrive here.
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             MainActor.assumeIsolated { self?.close() }
+        }
+    }
+
+    /// Stop all (⌃⌥⌘. or the menu): every job on this Mac and on the runner stops now, and the
+    /// notch says how many.
+    func stopAll() {
+        let here = desk.stopAll()
+        Task {
+            var line: String
+            do {
+                let there = try await feed.runner?.stopAll()
+                for job in there?.jobs ?? [] { feed.apply(job) }
+                let stopped = here + (there?.stopped ?? 0)
+                line = stopped == 0 ? "Nothing is running." : "Stopped \(stopped) job\(stopped == 1 ? "" : "s")."
+            } catch {
+                line = "Stopped \(here) here. Couldn't reach the runner: \(error.localizedDescription)"
+            }
+            notify(line, happy: true)
         }
     }
 
@@ -141,9 +174,52 @@ final class IslandController {
         character.pause(state == .compact)
     }
 
+    /// The talk key: the island listens while it's held, and what you said goes to the planner as if typed.
+    private func talk(_ event: TalkKey.Event) {
+        let voice = model.voice
+        switch event {
+        case .start(let key):
+            noticeTask?.cancel()
+            model.notice = nil
+            // Your own jobs' repositories first: they're the ones you're likeliest to name.
+            voice.start(key: key, context: Voice.context(repos: desk.jobs.map(\.repo) + repos))
+            if repos.isEmpty { Task { repos = (try? await Workspace.knownRepos()) ?? [] } }
+            set(.listening)
+        case .handsFree:
+            voice.handsFree = true
+        case .send:
+            let key = voice.key
+            voice.finish { [weak self] said in self?.heard(said, key: key) }
+        case .cancel:
+            voice.cancel()
+            stopListening()
+        }
+    }
+
+    private func heard(_ said: String, key: TalkKey.Key) {
+        if !said.isEmpty { desk.ask(said) }
+        // Talking again already: that's what the island shows.
+        guard model.voice.phase == .idle, model.state == .listening else { return }
+        if said.isEmpty {
+            let problem = model.voice.problem
+            stopListening()
+            notify(problem ?? "Oby didn't catch that", happy: false)
+        } else {
+            open()
+            // Not in the voice's queue: the alert waits for you, and talking mustn't.
+            if key == .fn { Task { GlobeKey.guideOnce() } }
+        }
+    }
+
+    private func stopListening() {
+        guard model.state == .listening else { return }
+        set(.compact)
+        if panel.isKeyWindow { NSWorkspace.shared.frontmostApplication?.activate() }
+    }
+
     /// A job ended, or a runner's job needs you: say so in one line, with a face to match.
     private func notify(_ line: String, happy: Bool) {
-        guard model.state != .open else { return }
+        guard model.state != .open, model.state != .listening else { return }
         model.notice = line
         set(.peek)
         character.play(happy ? "Agree" : "Confused")
@@ -222,6 +298,7 @@ struct IslandView: View {
     let onClose: () -> Void
 
     private var mood: String {
+        if model.state == .listening { return "listening" }
         if case .thinking = model.desk.talk { return "thinking" }
         return model.working == 0 ? "idle" : "working"
     }
@@ -267,6 +344,14 @@ struct IslandView: View {
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { model.openHeight = $0 }
                     .transition(.opacity)
             }
+
+            if model.state == .listening {
+                ListeningIsland(voice: model.voice, characterWidth: frame.maxX, top: model.contentTop)
+                    .frame(width: size.width)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { model.openHeight = $0 }
+                    .transition(.opacity)
+            }
         }
         .foregroundStyle(.white)
         .frame(width: size.width, height: size.height, alignment: .topLeading)
@@ -281,6 +366,63 @@ struct IslandView: View {
         .animation(.spring(response: 0.42, dampingFraction: 0.8), value: model.openHeight)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onChange(of: mood, initial: true) { character.mood = mood }
+    }
+}
+
+/// While you hold fn: the waveform, your words as you say them, and how to send.
+private struct ListeningIsland: View {
+    let voice: Voice
+    let characterWidth: CGFloat
+    let top: CGFloat
+
+    private var keyName: String { voice.key == .fn ? "fn" : "Control-Option" }
+
+    private var hint: String {
+        switch voice.phase {
+        case .finishing: "Writing it down…"
+        case _ where voice.handsFree: "Press \(keyName) to send · Oby listens until you do"
+        default: "Let go of \(keyName) to send · Oby only listens while you hold it"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 14) {
+                Text("LISTENING").font(.system(size: 12, weight: .semibold)).kerning(1).foregroundStyle(.white.opacity(0.55))
+                Waveform(levels: voice.levels)
+            }
+            if let problem = voice.problem {
+                Text(problem).font(.system(size: 15, weight: .medium)).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(voice.words.isEmpty ? "Say what you need…" : voice.words)
+                    .font(.system(size: 19, weight: .medium))
+                    .foregroundStyle(.white.opacity(voice.words.isEmpty ? 0.45 : 1))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(hint).font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
+        }
+        .frame(maxWidth: .infinity, minHeight: 120, alignment: .leading)
+        .padding(.leading, characterWidth + 12)
+        .padding(.trailing, 28)
+        .padding(.top, top + 6)
+        .padding(.bottom, 24)
+    }
+}
+
+/// The microphone's loudness, one bar per moment, newest on the right.
+private struct Waveform: View {
+    let levels: [Float]
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(levels.indices, id: \.self) { index in
+                Capsule().frame(width: 3, height: 3 + 15 * CGFloat(levels[index]))
+            }
+        }
+        .frame(height: 18)
+        .animation(.linear(duration: 0.08), value: levels)
+        .accessibilityHidden(true)
     }
 }
 
@@ -305,6 +447,7 @@ private struct OpenIsland: View {
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
+    private var tray: Tray { model.tray }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -332,14 +475,16 @@ private struct OpenIsland: View {
 
             switch desk.talk {
             case .plan(let drafts) where drafts.count == 1:
+                TrayRow(tray: tray)
                 PlanCard(draft: drafts[0], accounts: desk.accounts.accounts.filter(\.signedIn),
-                         onDispatch: { desk.dispatch($0) },
-                         onEdit: { text = drafts[0].said; desk.cancel(); typing = true },
+                         onDispatch: { desk.dispatch(tray.attach($0)); tray.clear() },
+                         onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
                          onCancel: { desk.cancel() })
             case .plan(let drafts):
+                TrayRow(tray: tray)
                 PlansCard(drafts: drafts, accounts: desk.accounts.accounts.filter(\.signedIn),
-                          onDispatch: { for draft in $0 { desk.dispatch(draft) } },
-                          onEdit: { text = drafts[0].said; desk.cancel(); typing = true },
+                          onDispatch: { for draft in $0 { desk.dispatch(tray.attach(draft)) }; tray.clear() },
+                          onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
                           onCancel: { desk.cancel() })
             case .question(let said, let question):
                 ForEach(question.options, id: \.self) { option in
@@ -498,6 +643,14 @@ private struct OpenIsland: View {
                 // The same line as the iPhone's Home and the closed notch (Shared/JobList.swift).
                 Text(model.summary).font(.system(size: 19, weight: .semibold))
                 Text("Type a task below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+                // First launch was skipped or Accessibility refused: fn does nothing until it's allowed.
+                // macOS doesn't say when it is, so look again every couple of seconds while open.
+                TimelineView(.periodic(from: .now, by: 2)) { _ in
+                    if !AXIsProcessTrusted() {
+                        Button("To talk with fn, allow Accessibility") { Task { await Permissions().ask(.accessibility) } }
+                            .buttonStyle(.plain).font(.system(size: 13, weight: .medium)).foregroundStyle(.orange)
+                    }
+                }
             }
         }
         .padding(.top, 34)
@@ -511,12 +664,34 @@ private struct OpenIsland: View {
     }
 
     private var field: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TrayRow(tray: tray)
+            fieldCapsule
+        }
+    }
+
+    private var fieldCapsule: some View {
         HStack(spacing: 8) {
             TextField("Type a task, like “Review oby PR #12”", text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 15))
                 .focused($typing)
                 .onSubmit(send)
+            Button(action: tray.pasteClipboard) {
+                Image(systemName: "doc.on.clipboard").font(.system(size: 14, weight: .semibold))
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .help("Attach what you copied")
+            .accessibilityLabel("Attach the clipboard")
+            Button(action: screenshot) {
+                Image(systemName: "camera").font(.system(size: 14, weight: .semibold))
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .disabled(tray.capturing)
+            .help("Show Oby your screen: drag over part of it, or click for all of it")
+            .accessibilityLabel("Attach a screenshot")
             Button(action: send) {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 15, weight: .bold))
@@ -536,8 +711,23 @@ private struct OpenIsland: View {
 
     private func send() {
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        desk.ask(text)
+        // The chips stay until Dispatch, which hands them to the jobs.
+        desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text)
         text = ""
+    }
+
+    /// Your words without the line about the chips, to edit them: it's added again when you send.
+    private func typed(_ said: String) -> String {
+        said.range(of: "\n\n(The user attached ").map { String(said[..<$0.lowerBound]) } ?? said
+    }
+
+    /// The camera: the overlay takes the keyboard while you pick, so the field takes it back after.
+    private func screenshot() {
+        Task {
+            await tray.screenshot()
+            NSApp.windows.first { $0 is NotchPanel }?.makeKey()
+            typing = true
+        }
     }
 }
 
@@ -608,7 +798,7 @@ private struct PlanCard: View {
                 }
                 .frame(width: 170)
             }
-            if draft.suggestedModel != nil, let account {
+            if draft.suggestedModel != nil, let account, ModelPicks.complex(for: account.agent) != nil {
                 StrongerModel(agent: account.agent, plan: accounts.first { $0.account.id == account.id }?.label, on: $stronger)
             }
             Label("Works in Oby's own copy of the repository. Nothing is pushed or posted.", systemImage: "checkmark.shield")
@@ -628,7 +818,7 @@ private struct PlanCard: View {
                     draft.job.rounds = rounds > 1 ? rounds : nil
                     let command = check.trimmingCharacters(in: .whitespaces)
                     draft.job.check = command.isEmpty ? nil : command
-                    draft.job.model = stronger ? AgentModels.stronger[draft.job.agent] : nil
+                    draft.job.model = stronger ? ModelPicks.complex(for: draft.job.agent) : nil
                     onDispatch(draft)
                 } label: {
                     Text("Dispatch").font(.system(size: 15, weight: .semibold)).foregroundStyle(.black)
@@ -699,8 +889,8 @@ private struct PlansCard: View {
                         Text(details(draft)).font(.system(size: 12, design: .monospaced)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
                     }
                     Spacer(minLength: 8)
-                    if draft.suggestedModel != nil {
-                        Toggle(AgentModels.name(AgentModels.stronger[agent(of: draft)] ?? ""), isOn: Binding {
+                    if draft.suggestedModel != nil, let model = ModelPicks.complex(for: agent(of: draft)) {
+                        Toggle(AgentModels.name(model), isOn: Binding {
                             stronger.contains(draft.job.id)
                         } set: { on in
                             if on { stronger.insert(draft.job.id) } else { stronger.remove(draft.job.id) }
@@ -759,7 +949,7 @@ private struct PlansCard: View {
                 draft.job.account = account.id
                 draft.job.agent = account.agent
             }
-            draft.job.model = stronger.contains(draft.job.id) ? AgentModels.stronger[draft.job.agent] : nil
+            draft.job.model = stronger.contains(draft.job.id) ? ModelPicks.complex(for: draft.job.agent) : nil
             return draft
         })
     }
@@ -778,8 +968,9 @@ private struct PlansCard: View {
     }
 }
 
-/// The offer for complex work: the tool's stronger model, off until the user turns it on. Astra
-/// on a ChatGPT Plus plan gets a warning, because it uses that plan's limits fast.
+/// The offer for complex work: the model picked for complex jobs (Oby's stronger model if none was),
+/// off until the user turns it on. Astra on a ChatGPT Plus plan gets a warning, because it uses
+/// that plan's limits fast.
 private struct StrongerModel: View {
     let agent: String
     /// The account's label, like "Plus · name@example.com".
@@ -787,11 +978,11 @@ private struct StrongerModel: View {
     @Binding var on: Bool
 
     var body: some View {
-        let model = AgentModels.stronger[agent] ?? ""
+        let model = ModelPicks.complex(for: agent) ?? ""
         VStack(alignment: .leading, spacing: 4) {
             Toggle("This looks complex. Use \(AgentModels.name(model)) for this job?", isOn: $on)
                 .toggleStyle(.switch).font(.system(size: 13, weight: .medium))
-            if agent == "codex", plan?.hasPrefix("Plus") == true {
+            if model.contains("astra"), plan?.hasPrefix("Plus") == true {
                 Label("Astra uses a ChatGPT Plus plan's limits fast.", systemImage: "exclamationmark.triangle")
                     .font(.system(size: 12)).foregroundStyle(.orange)
             }

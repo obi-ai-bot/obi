@@ -56,7 +56,7 @@ struct ReviewTests {
             return agent
         }
         desk.countCommits = { _, _ in 2 }
-        desk.publishOnItsOwn = { [made, url] job, _ in
+        desk.publishOnItsOwn = { [made, url] job, _, _ in
             made.published.append(job)
             return url
         }
@@ -335,6 +335,9 @@ struct ReviewTests {
         let verdict = try #require(reviewed.review)
         #expect(verdict.verdict == .approved && verdict.round == 1 && verdict.agent == "codex" && verdict.account == "Work")
         #expect(verdict.comment == "https://github.com/deskree-inc/oby/pull/80#issuecomment-1" && verdict.postError == nil)
+        // The comment is in the author's report (#7).
+        #expect(reviewed.outgoing?.last == Outgoing(action: .comment, repo: "deskree-inc/oby", id: verdict.comment ?? "",
+                                                    date: try #require(reviewed.outgoing?.last?.date)))
         #expect(reviewed.reviewing == nil && reviewed.reviewError == nil && reviewed.status == .done)
         #expect(made.posted.count == 1 && made.posted.first?.author.id == "author")
         let body = try #require(made.posted.first?.body)
@@ -437,7 +440,7 @@ struct ReviewTests {
         _ = try await publishAuthor()
         made.postError = Shell.Failure(message: "Not posted: possible secret in the review at line 3 (AWS access key).")
         let reviewed = try await review("Hmm.\n\n- Remove the key\n\nVERDICT: CHANGES REQUESTED")
-        #expect(reviewed.review?.comment == nil)
+        #expect(reviewed.review?.comment == nil && reviewed.outgoing == nil)
         #expect(reviewed.review?.postError == "Not posted: possible secret in the review at line 3 (AWS access key).")
         try await until("the author runs again") { desk.job("author")?.status == .running }
         #expect(made.quoted.first?.text.contains("- Not posted on the pull request: Not posted: possible secret in the review at line 3 (AWS access key).") == true)

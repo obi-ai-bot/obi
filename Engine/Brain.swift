@@ -313,8 +313,11 @@ nonisolated enum Rules {
         let repos = context.repos.filter { repo in
             words.contains(repo.lowercased()) || words.contains(String(repo.lowercased().split(separator: "/").last ?? ""))
         }
-        guard repos.count == 1, let repo = repos.first,
-              let agent = context.accounts.keys.sorted().first, let account = context.accounts[agent]?.first else {
+        // "auto" whenever the context offers it, so Oby routes the job (`AccountStore.route`): an
+        // account named here would count as one the user sent the job to.
+        let agent = context.accounts["auto"] != nil ? "auto" : context.accounts.keys.sorted().first
+        let account = agent.flatMap { context.accounts[$0] }.flatMap { $0.contains("auto") ? "auto" : $0.first }
+        guard repos.count == 1, let repo = repos.first, let agent, let account else {
             let options = repos.count > 1 ? repos : Array(context.repos.prefix(3))
             return Plan(action: .askUser, reply: "",
                         dispatches: [], question: Plan.Question(text: "Which repository?", options: Array(options.prefix(4))))

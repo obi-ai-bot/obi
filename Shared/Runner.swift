@@ -55,8 +55,16 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var review: Review?
     var reviewError: String?
     var reviewOf: String?
+    /// Everything the runner sent out for the job, oldest first (newer runners only).
+    var outgoing: [Outgoing]?
 
     var isActive: Bool { status == .queued || status == .running }
+
+    /// The report's list of what Oby sent out for the job, or nil when nothing went out.
+    var sentLines: String? {
+        guard let outgoing, !outgoing.isEmpty else { return nil }
+        return "Sent by Oby:\n" + outgoing.map { "- \($0.line)" }.joined(separator: "\n")
+    }
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
     var agentName: String { agent == "codex" ? "Codex" : "Claude Code" }
 
@@ -149,6 +157,27 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     var postError: String?
 
     var label: String { verdict == "approved" ? "Approved" : "Changes requested" }
+}
+
+/// Something the runner sent out for a job (docs/runner-api.md): ids only, never what was sent.
+nonisolated struct Outgoing: Codable, Equatable, Sendable {
+    /// "push", "pullRequest", "pullRequestEdit" or "comment"; a newer runner may send others.
+    var action: String
+    var repo: String
+    var id: String
+    var branch: String?
+    var date: Date
+
+    /// As Engine/Outgoing.swift words it.
+    var line: String {
+        switch action {
+        case "push": "Pushed \(id.prefix(7)) to \(branch ?? "its branch") in \(repo)"
+        case "pullRequest": "Opened pull request \(id)"
+        case "pullRequestEdit": "Updated the description of \(id)"
+        case "comment": "Commented \(id)"
+        default: "\(action) \(id)"
+        }
+    }
 }
 
 nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
@@ -280,6 +309,12 @@ nonisolated struct ClearedAt: Codable, Equatable, Sendable {
     var clearedAt: Date
 }
 
+/// What `POST /v1/stop-all` answers: how many jobs stopped, and those jobs.
+nonisolated struct StoppedJobs: Decodable, Sendable {
+    var stopped: Int
+    var jobs: [Job]
+}
+
 /// One thing the runner reports while the app is open.
 nonisolated enum RunnerEvent: Equatable, Sendable {
     case job(Job)
@@ -397,6 +432,8 @@ nonisolated struct Runner: Sendable {
     func status() async throws -> RunnerStatus { try await call("GET", "v1/status") }
     func jobs() async throws -> [Job] { try await call("GET", "v1/jobs?limit=50") }
     func stop(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/stop") }
+    /// Stop all: every queued and running job on the runner stops now.
+    func stopAll() async throws -> StoppedJobs { try await call("POST", "v1/stop-all") }
     /// Lets go of a job that needs the user: it then needs nothing. No signature: nothing goes out.
     func dismiss(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/dismiss") }
     /// Clear done: the runner records now, and every app hides the jobs that finished by then.
