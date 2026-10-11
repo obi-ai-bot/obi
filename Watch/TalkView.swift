@@ -3,8 +3,8 @@ import SwiftUI
 
 /// Hold to talk, on Home: the microphone is open only while the button is held. The recording
 /// goes to the iPhone, which writes it down (SpeechAnalyzer) and asks the brain; the plan comes
-/// back in Home's sheet (TalkView) to dispatch with one tap. Without the phone in reach, the
-/// button dictates instead, and the request waits for it.
+/// back in Home's sheet (TalkView) to dispatch with one tap. Without the phone in reach, or
+/// without the microphone, the button dictates instead; the request waits for the phone if it must.
 struct TalkButton: View {
     @Environment(Watch.self) private var watch
     @Environment(\.scenePhase) private var scenePhase
@@ -23,7 +23,7 @@ struct TalkButton: View {
                 Button { talking = true } label: { circle("mic.fill") }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Show the request")
-            } else if watch.reachable || holding {
+            } else if holding || (watch.reachable && recorder.allowed != false) {
                 // Drawn while held too, so the gesture that opened the mic is still there to close it.
                 circle(holding ? "waveform" : "mic.fill")
                     .gesture(

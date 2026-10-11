@@ -19,18 +19,10 @@ struct HomeView: View {
         NavigationStack(path: $path) {
             ZStack(alignment: .bottom) {
                 Button { path.append(.jobs) } label: {
-                    ObyAnimation(loop: loop)
-                        .overlay(alignment: .topTrailing) {
-                            if !watch.needing.isEmpty {
-                                Text("\(watch.needing.count)")
-                                    .font(.caption2.weight(.bold).monospacedDigit())
-                                    .foregroundStyle(.white)
-                                    .frame(minWidth: 20, minHeight: 20)
-                                    .background(.orange, in: Capsule())
-                                    .padding(8)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // The whole screen, whatever its shape: Oby fills it and the overflow is cut.
+                    Color.clear
+                        .overlay { ObyAnimation(loop: loop, contentMode: .fill) }
+                        .clipped()
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -39,6 +31,18 @@ struct HomeView: View {
                 .accessibilityHint("Shows the jobs")
                 .ignoresSafeArea()
                 TalkButton(talking: $talking)
+            }
+            // Oby's top corner, below the clock: the count of what needs you. VoiceOver reads it on Oby.
+            .overlay(alignment: .topTrailing) {
+                if !watch.needing.isEmpty {
+                    Text("\(watch.needing.count)")
+                        .font(.caption2.weight(.bold).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 20, minHeight: 20)
+                        .background(.orange, in: Capsule())
+                        .padding(.trailing, 4)
+                        .accessibilityHidden(true)
+                }
             }
             .navigationDestination(for: Screen.self) { screen in
                 switch screen {
@@ -62,6 +66,9 @@ struct HomeView: View {
             .onChange(of: watch.opening, initial: true) {
                 guard let id = watch.opening else { return }
                 watch.opening = nil
+                // Dropped before the microphone leaves the screen, so a recording under way isn't
+                // sent on the release that follows. A request waiting for the phone stays.
+                if !isQueued { watch.cancel() }
                 talking = false
                 path = [.job(id)]
             }
