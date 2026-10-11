@@ -8,6 +8,8 @@ struct SettingsView: View {
     @State private var problem: String?
     /// The always-on runner whose jobs the island lists and RunnerFeed follows; empty turns that off.
     @AppStorage("runnerURL") private var runnerURL = ""
+    /// Merge checks on this Mac (Mac/MacChecks.swift).
+    @AppStorage(MacChecks.setting) private var runMergeChecks = true
 
     var body: some View {
         Form {
@@ -27,6 +29,9 @@ struct SettingsView: View {
             Section("Runner") {
                 TextField("URL", text: $runnerURL, prompt: Text(Runner.defaultURL.absoluteString))
                 Text("The island lists the jobs running there too, and Oby tells you when one needs you. Leave it empty to turn this off.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Run merge checks on this Mac", isOn: $runMergeChecks)
+                Text("When Oby's review approves a pull request, this Mac runs its tests and builds the Mac and iPhone apps, one at a time, before Oby merges it into dev.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

@@ -40,6 +40,8 @@ final class RunnerFeed {
     private(set) var clearedAt: Date?
     /// The runner didn't answer the last try; the feed keeps trying.
     private(set) var down = false
+    /// Merge checks this Mac runs for the runner (Settings › Runner, on by default).
+    let checks = MacChecks()
     /// A job's notice just changed to something that needs the user: the notch's heads-up.
     @ObservationIgnored var onNotice: (Job, Notice) -> Void = { _, _ in }
 
@@ -71,6 +73,14 @@ final class RunnerFeed {
         // After sleep the old connection is dead but may take a minute to say so: reconnect now.
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.follow(again: true) }
+        }
+        // A merge check a Mac took and went quiet on comes back after a while, with no event: look now and then.
+        Task { [weak self] in
+            while true {
+                try? await Task.sleep(for: .seconds(600))
+                guard let self else { return }
+                if let runner, !down { checks.look(runner) }
+            }
         }
     }
 
@@ -120,10 +130,12 @@ final class RunnerFeed {
                         down = false
                         wait = 1
                         Self.ask()
+                        checks.look(runner)
                     case .job(let job): apply(job)
                     case .cleared(let date): clearedAt = date
                     case .inbox(let item): apply(item)
                     case .accounts: break
+                    case .check(let check): if check.state == .queued { checks.look(runner) }
                     }
                 }
             } catch {

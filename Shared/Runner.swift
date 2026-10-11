@@ -165,7 +165,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
 
 /// Something the runner sent out for a job (docs/runner-api.md): ids only, never what was sent.
 nonisolated struct Outgoing: Codable, Equatable, Sendable {
-    /// "push", "pullRequest", "pullRequestEdit" or "comment"; a newer runner may send others.
+    /// "push", "pullRequest", "pullRequestEdit", "comment" or "merge"; a newer runner may send others.
     var action: String
     var repo: String
     var id: String
@@ -179,6 +179,7 @@ nonisolated struct Outgoing: Codable, Equatable, Sendable {
         case "pullRequest": "Opened pull request \(id)"
         case "pullRequestEdit": "Updated the description of \(id)"
         case "comment": "Commented \(id)"
+        case "merge": "Squash-merged \(id) into dev and deleted \(branch ?? "its branch")"
         default: "\(action) \(id)"
         }
     }
@@ -370,6 +371,10 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     case cleared(Date)
     /// An inbox item came, was answered, done or put off, here or on another app.
     case inbox(InboxItem)
+    #if os(macOS)
+    /// A merge check was queued, taken or ended (Engine/Checks.swift): a Mac that runs them asks for one.
+    case check(MacCheck)
+    #endif
 }
 
 extension Job {
@@ -559,6 +564,23 @@ nonisolated struct Runner: Sendable {
         return answer.id
     }
 
+    #if os(macOS)
+    /// The next merge check for this Mac to run, now this Mac's, or nil when none waits.
+    func nextCheck(mac: String) async throws -> MacCheck? {
+        struct Answer: Decodable { var check: MacCheck? }
+        let name = mac.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        let answer: Answer = try await call("GET", "v1/checks/next?mac=\(name)")
+        return answer.check
+    }
+
+    /// What this Mac found running a check it took.
+    func report(_ id: String, _ report: MacCheck.Report) async throws -> MacCheck {
+        struct Answer: Decodable { var check: MacCheck }
+        let answer: Answer = try await call("POST", "v1/checks/\(id)/result", body: report)
+        return answer.check
+    }
+    #endif
+
     /// Server-Sent Events until the connection drops; the caller reconnects.
     func events() -> AsyncThrowingStream<RunnerEvent, Error> {
         AsyncThrowingStream { stream in
@@ -673,6 +695,9 @@ nonisolated struct EventParser {
             case "accounts": return (try? Runner.decoder.decode([Account].self, from: json)).map(RunnerEvent.accounts)
             case "clear": return (try? Runner.decoder.decode(ClearedAt.self, from: json)).map { .cleared($0.clearedAt) }
             case "inbox": return (try? Runner.decoder.decode(InboxItem.self, from: json)).map(RunnerEvent.inbox)
+            #if os(macOS)
+            case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
+            #endif
             default: return nil
             }
         }
