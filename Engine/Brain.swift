@@ -258,13 +258,30 @@ nonisolated struct ClaudeBrain: BrainAdapter {
              "--no-session-persistence", "--output-format", "json", "--system-prompt", system,
              "--json-schema", String(decoding: schema, as: UTF8.self)],
             in: nil, own: home ?? "\(Agents.home)/.claude", reading: [directory.path])
-        let result = try await Shell.run(argv, in: directory, input: Data(user.utf8), env: environment, timeout: timeout)
-        // It can report success without structured_output, so the field is what counts.
-        guard let reply = try? JSONSerialization.jsonObject(with: result.out) as? [String: Any],
-              let plan = reply["structured_output"] as? [String: Any] else {
-            throw Shell.Failure(message: "claude returned no plan (exit \(result.status)): \(result.err.suffix(200))")
+        let deadline = Date.now.addingTimeInterval(timeout)
+        var failures: [String] = []
+        for attempt in 1...3 {
+            try Task.checkCancellation()
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            let result = try await Shell.run(argv, in: directory, input: Data(user.utf8), env: environment, timeout: remaining)
+            try Task.checkCancellation()
+            // It can report success without structured_output, so the field is what counts.
+            if let reply = try? JSONSerialization.jsonObject(with: result.out) as? [String: Any],
+               let plan = reply["structured_output"] as? [String: Any] {
+                return try JSONSerialization.data(withJSONObject: plan)
+            }
+            let reason = result.timedOut ? "timed out, exit \(result.status)" : "exit \(result.status)"
+            let stderr = result.err.isEmpty ? "<empty>" : String(result.err.suffix(1000))
+            failures.append("attempt \(attempt): \(reason), stderr: \(stderr)")
+            // An empty failed process can be transient. Keep retries within the original
+            // deadline; timeouts, authentication output and missing schema results don't retry.
+            let backoff = Double(attempt) * 0.25
+            guard attempt < 3, result.status != 0, result.text.isEmpty, !result.timedOut,
+                  deadline.timeIntervalSinceNow > backoff + 1 else { break }
+            try await Task.sleep(for: .seconds(backoff))
         }
-        return try JSONSerialization.data(withJSONObject: plan)
+        throw Shell.Failure(message: "claude returned no plan: " + failures.joined(separator: "; "))
     }
 }
 
@@ -297,7 +314,7 @@ nonisolated struct Planner: Sendable {
                 do {
                     data = try await adapter.complete(system: system, user: message, quoted: context.quoted, schema: schema, timeout: left)
                 } catch {
-                    // Not signed in, timed out, no output: a retry won't help, the next adapter might.
+                    // The adapter has exhausted any transient retries; try the next one.
                     refused.append("\(adapter.name) failed: \(error.localizedDescription)")
                     Logger.brain.error("\(refused.last ?? "", privacy: .public)")
                     break
