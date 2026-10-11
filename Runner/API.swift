@@ -277,7 +277,7 @@ final class API {
         let report: String?
         do {
             // What the build printed goes to the agent with the vault's secrets taken out.
-            report = try AppleCheck.report(check, log: desk.appleLogs[id]).map { try desk.vault.forAgent($0) }
+            report = try AppleCheck.report(check, log: desk.appleLogs[check.id]).map { try desk.vault.forAgent($0) }
         } catch {
             throw APIError(.serviceUnavailable, "The runner can't read its vault: \(error.localizedDescription)")
         }
@@ -583,7 +583,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan }
 
     private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou }
 
@@ -631,6 +631,7 @@ struct JobJSON: Encodable {
         if job.macCheck == nil { try nulls.encodeNil(forKey: .macCheck) }
         if job.mergeError == nil { try nulls.encodeNil(forKey: .mergeError) }
         if job.appleCheck == nil { try nulls.encodeNil(forKey: .appleCheck) }
+        if job.appleRan == nil { try nulls.encodeNil(forKey: .appleRan) }
         // What went out is always a list: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
     }

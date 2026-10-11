@@ -115,7 +115,8 @@ struct AppleCheckTests {
 
         // Only its two Apple steps count: no `swift test`, nothing posted, nothing merged.
         let ended = try desk.macCheckEnded(check.id, failing)
-        #expect(ended.state == .failed && ended.failures == ["MacTests.JobViewTests/showsActions()"] && desk.appleLogs["apple118"] == log)
+        #expect(ended.state == .failed && ended.failures == ["MacTests.JobViewTests/showsActions()"] && desk.appleLogs[check.id] == log)
+        #expect(desk.job("apple118")?.appleRan == ended)
         #expect(desk.job("apple118")?.appleCheck == ended && desk.job("apple118")?.macCheck == nil && made.events.last == ended)
         #expect(throws: (any Error).self) { try desk.macCheckEnded(check.id, failing) }
         let report = try #require(AppleCheck.report(ended, log: log))
@@ -131,7 +132,21 @@ struct AppleCheckTests {
         #expect(try await desk.askAppleCheck("apple118").id == check.id)
         made.head = Self.next
         let second = try await desk.askAppleCheck("apple118")
-        #expect(second.id != check.id && second.round == 2 && second.head == Self.next && desk.appleLogs["apple118"] == nil)
+        #expect(second.id != check.id && second.round == 2 && second.head == Self.next)
+        // The one that ran stays for the reviewer, with what it printed, even when the newer one can't run.
+        let waiting = try #require(desk.job("apple118"))
+        #expect(waiting.appleRan == ended && desk.appleLogs[check.id] == log && AppleCheck.latest(waiting) == ended)
+        let none = try #require(desk.appleCheck("apple118", now: second.created + AppleCheck.unclaimed + 1))
+        #expect(none.state == .error && desk.job("apple118")?.appleRan == ended)
+        let after = try #require(desk.job("apple118"))
+        let quoted = try #require(AppleCheck.forReview(after, pr: 81, logs: desk.appleLogs))
+        #expect(quoted.contains("- Result: Failed") && quoted.contains("> Mac/JobView.swift:12:5: error: cannot find 'OSLog' in scope"))
+        // A newer check that ran takes its place, and the older output goes.
+        made.head = "cccc" + String(Self.next.dropFirst(4))
+        let third = try await desk.askAppleCheck("apple118")
+        _ = desk.nextMacCheck(mac: "Studio", kinds: [.apple])
+        let passed3 = try desk.macCheckEnded(third.id, MacCheck.Report(passed: true, steps: steps.map { MacCheck.Step(name: $0.name, passed: true, seconds: 1) }, failures: []))
+        #expect(desk.job("apple118")?.appleRan == passed3 && desk.appleLogs[check.id] == nil)
         // The old check's result has no one waiting.
         #expect(throws: MacCheck.Unknown.self) { try desk.macCheckEnded(check.id, failing) }
 
@@ -142,6 +157,28 @@ struct AppleCheckTests {
         desk.queuesMacChecks = false
         made.head = Self.head
         await #expect(throws: (any Error).self) { try await desk.askAppleCheck("apple118") }
+    }
+
+    @Test func aStepTheMacCouldNotRunDoesNotHideWhatTheOtherFound() async throws {
+        try await running()
+        let check = try await desk.askAppleCheck("apple118")
+        _ = desk.nextMacCheck(mac: "Studio", kinds: [.apple])
+        let simulator = "iPhone app with Watch, and iOSTests couldn't run on this Mac (exit 70): xcodebuild: error: Unable to find a destination"
+        let partial = MacCheck.Report(passed: false, steps: [steps[0], MacCheck.Step(name: steps[1].name, passed: false, seconds: 3)],
+                                      failures: ["MacTests.JobViewTests/showsActions()"], log: log, problem: simulator)
+        let ended = try desk.macCheckEnded(check.id, partial)
+        #expect(ended.state == .error && ended.problem == simulator && desk.appleLogs[check.id] == log)
+        // It didn't run whole, so it isn't what the reviewer reads.
+        #expect(desk.job("apple118")?.appleRan == nil)
+        let report = try #require(AppleCheck.report(ended, log: desk.appleLogs[check.id]))
+        #expect(report.hasPrefix("The Apple check of commit 1a2b3c4d5e6f couldn't run: \(simulator)\nWhat it could run on Studio follows."))
+        #expect(report.contains("- Mac app and MacTests: failed (2m 05s)") && report.contains("- MacTests.JobViewTests/showsActions()"))
+        #expect(report.hasSuffix("Mac/JobView.swift:12:5: error: cannot find 'OSLog' in scope"))
+        // Nothing found at all (the checkout failed): the problem alone.
+        var nothing = ended
+        nothing.steps = [MacCheck.Step(name: "Check out the commit", passed: false, seconds: 0)]
+        nothing.failures = []
+        #expect(AppleCheck.report(nothing, log: nil) == "The Apple check of commit 1a2b3c4d5e6f couldn't run: \(simulator)")
     }
 
     @Test func noMacTakingItSaysSoButABusyMacKeepsItWaiting() async throws {
@@ -229,7 +266,9 @@ struct AppleCheckTests {
             // A new commit no Mac takes yet: it says how to keep waiting.
             await MainActor.run { made.head = AppleCheckTests.next }
             printed = []
-            #expect(await CheckCommand.run(["apple", "--wait", "12"], environment: environment, send: sender(token), sleep: { _ in }, uncommitted: { false },
+            var clock = Date(timeIntervalSince1970: 0)
+            #expect(await CheckCommand.run(["apple", "--wait", "12"], environment: environment, send: sender(token), now: { clock },
+                                           sleep: { clock += $0 }, uncommitted: { false },
                                            print: { printed.append($0) }) == 3)
             #expect(printed.last == "Still queued after 12 seconds. Run oby-check apple again to keep waiting: it picks up the same check.")
 
@@ -281,6 +320,20 @@ struct AppleCheckTests {
         #expect(await CheckCommand.run(["apple"], environment: [:], uncommitted: { false }, print: { printed.append($0) }) == 2)
         #expect(printed == [CheckCommand.usage, CheckCommand.usage, "oby-check works only inside an Oby job on the runner: there's no runner to ask here."])
         #expect(CheckCommand.wait(["apple"]) == 110 && CheckCommand.wait(["apple", "--wait", "540"]) == 540 && CheckCommand.wait(["apple", "540"]) == nil)
+        #expect(CheckCommand.wait(["apple", "--wait", "0"]) == nil)
+
+        // --wait is the whole wait, requests included: a runner slow to answer doesn't stretch it.
+        let queued = #"{"check":{"id":"ab12cd34","state":"queued"},"line":"Apple check ab12cd34 is queued, waiting for a Mac.","report":null}"#
+        let slow: CheckCommand.Send = { method, _ in
+            if method == "GET" { try await Task.sleep(for: .seconds(30)) }
+            return (200, Data(queued.utf8))
+        }
+        printed = []
+        let start = ContinuousClock.now
+        #expect(await CheckCommand.run(["apple", "--wait", "1"], environment: ["OBY_CHECK_URL": "http://x", "OBY_CHECK_TOKEN": "t"], send: slow,
+                                       uncommitted: { false }, print: { printed.append($0) }) == 3)
+        #expect(ContinuousClock.now - start < .seconds(10))
+        #expect(printed.last?.hasPrefix("Still queued after ") == true)
 
         // The runner installs a script that runs its own executable, `check` first.
         let root = try temporaryFolder()
@@ -407,13 +460,13 @@ struct AppleCheckTests {
         later.macCheck = merge
         later.outgoing = [Outgoing(action: .push, repo: later.repo, id: Self.next, branch: later.branch)]
         #expect(AppleCheck.latest(later)?.id == "ab12cd34")
-        let text = try #require(AppleCheck.forReview(later, pr: 81, log: "should not show for a merge check's id"))
+        let text = try #require(AppleCheck.forReview(later, pr: 81, logs: ["ab12cd34": "should not show for a merge check's id"]))
         #expect(text.contains("Oby's check before merging") && text.contains("> MacTests.A/b()") && text.contains("(the pull request's head)") && !text.contains("should not show"))
         later.macCheck?.state = .error
         #expect(AppleCheck.latest(later)?.isApple == true)
-        #expect(AppleCheck.forReview(later, pr: 81, log: nil)?.contains("an earlier commit than the pull request's head, aaaabbbbcccc") == true)
+        #expect(AppleCheck.forReview(later, pr: 81, logs: [:])?.contains("an earlier commit than the pull request's head, aaaabbbbcccc") == true)
         later.appleCheck = nil
-        #expect(AppleCheck.forReview(later, pr: 81, log: nil) == nil)
+        #expect(AppleCheck.forReview(later, pr: 81, logs: [:]) == nil)
         // Without the file, no line about it.
         var review = Review.make(for: later, pr: 81, account: Account(id: "w", agent: "codex", name: "Work", payer: "Deskree"))
         #expect(!Review.prompt(review).contains("apple-check.md"))

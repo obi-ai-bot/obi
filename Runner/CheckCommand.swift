@@ -6,13 +6,14 @@ import FoundationNetworking
 /// `oby-check apple` (the script runs `oby-runner check apple`): what an agent runs in its sandbox
 /// to have the user's Mac build and test the Apple apps at its worktree's commit
 /// (Engine/AppleChecks.swift). It asks the runner on `OBY_CHECK_URL` with its job's
-/// `OBY_CHECK_TOKEN`, then waits, saying where the check is, up to `--wait` seconds: 110 by
-/// default, under a 2-minute command timeout. Asking again picks up the same check.
+/// `OBY_CHECK_TOKEN`, then waits, saying where the check is, up to `--wait` seconds in all,
+/// requests to the runner included: 110 by default, under a 2-minute command timeout. Asking again
+/// picks up the same check.
 /// Exits 0 when everything passed, 1 when something failed, 2 when the check couldn't run (no Mac
 /// took it, the Mac couldn't, no runner), 3 when it's still running, 64 for a wrong command line.
 enum CheckCommand {
     /// One request to the runner: the method and path, and what it answered.
-    typealias Send = (_ method: String, _ path: String) async throws -> (status: Int, body: Data)
+    typealias Send = @Sendable (_ method: String, _ path: String) async throws -> (status: Int, body: Data)
 
     static let usage = "usage: oby-check apple [--wait SECONDS]"
     static let defaultWait = 110
@@ -36,8 +37,10 @@ enum CheckCommand {
         var message: String
     }
 
+    /// `now` and `sleep` are the clock it waits by. Tests put in their own.
     static func run(_ arguments: [String], environment: [String: String] = ProcessInfo.processInfo.environment, send: Send? = nil,
-                    sleep: (Int) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
+                    now: () -> Date = { Date.now },
+                    sleep: (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
                     uncommitted: () async -> Bool = { CheckCommand.uncommitted() },
                     print out: (String) -> Void = { Swift.print($0) }) async -> Int32 {
         guard let wait = Self.wait(arguments) else {
@@ -49,29 +52,36 @@ enum CheckCommand {
             return 2
         }
         let send = send ?? http(url, token: token)
+        let start = now()
+        let deadline = start.addingTimeInterval(TimeInterval(wait))
+        func left() -> TimeInterval { deadline.timeIntervalSince(now()) }
         if await uncommitted() {
             out("Your uncommitted changes aren't in the check: the Mac builds your last commit. Commit them and run oby-check apple again to check them.")
         }
         var answer: Answer
         do {
-            answer = try await call(send, "POST")
+            guard let first = try await call(send, "POST", within: left()) else {
+                out("The runner didn't answer within \(wait) seconds.")
+                return 2
+            }
+            answer = first
         } catch {
             out((error as? Failure)?.message ?? "The runner didn't answer: \(error.localizedDescription)")
             return 2
         }
         out(answer.line)
-        var waited = 0
+        /// Out of time with the check under way: how to keep waiting.
+        func still(_ answer: Answer) -> Int32 {
+            out("Still \(answer.check.state) after \(Int(now().timeIntervalSince(start).rounded())) seconds. Run oby-check apple again to keep waiting: it picks up the same check.")
+            return 3
+        }
         var said = answer.line
         while answer.report == nil {
-            guard waited < wait else {
-                out("Still \(answer.check.state) after \(waited) seconds. Run oby-check apple again to keep waiting: it picks up the same check.")
-                return 3
-            }
-            let pause = min(interval, wait - waited)
-            try? await sleep(pause)
-            waited += pause
+            guard left() > 0 else { return still(answer) }
+            try? await sleep(min(TimeInterval(interval), left()))
             do {
-                answer = try await call(send, "GET")
+                guard left() > 0, let next = try await call(send, "GET", within: left()) else { return still(answer) }
+                answer = next
             } catch {
                 out((error as? Failure)?.message ?? "The runner didn't answer: \(error.localizedDescription)")
                 return 2
@@ -94,13 +104,23 @@ enum CheckCommand {
         guard arguments.first == "apple" else { return nil }
         switch arguments.count {
         case 1: return defaultWait
-        case 3 where arguments[1] == "--wait": return Int(arguments[2]).flatMap { (0...maxWait).contains($0) ? $0 : nil }
+        case 3 where arguments[1] == "--wait": return Int(arguments[2]).flatMap { (1...maxWait).contains($0) ? $0 : nil }
         default: return nil
         }
     }
 
-    static func call(_ send: Send, _ method: String) async throws -> Answer {
-        let (status, body) = try await send(method, path)
+    /// One request, given at most `seconds`: nil when the runner didn't answer in time.
+    static func call(_ send: @escaping Send, _ method: String, within seconds: TimeInterval) async throws -> Answer? {
+        let answered = try await withThrowingTaskGroup(of: (status: Int, body: Data)?.self) { group in
+            group.addTask { try await send(method, path) }
+            group.addTask {
+                try await Task.sleep(for: .seconds(max(0, seconds)))
+                return nil
+            }
+            defer { group.cancelAll() }
+            return try await group.next() ?? nil
+        }
+        guard let (status, body) = answered else { return nil }
         guard (200..<300).contains(status) else {
             struct Problem: Decodable { var error: String }
             throw Failure(message: (try? JSONDecoder().decode(Problem.self, from: body))?.error ?? "The runner answered \(status).")

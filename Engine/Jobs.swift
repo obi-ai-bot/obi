@@ -103,6 +103,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The latest Apple build and test its agent asked for mid-round (`oby-check apple`,
     /// Engine/AppleChecks.swift), or nil.
     var appleCheck: MacCheck?
+    /// The latest of them that ran (passed or failed), kept when a newer one is asked for: what
+    /// its reviewer reads (`AppleCheck.latest`). Nil before one ran.
+    var appleRan: MacCheck?
 
     var maxRounds: Int { rounds ?? 1 }
     /// Its agent asked the user something and waits for the answer: the inbox has it.

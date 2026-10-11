@@ -63,6 +63,7 @@ This document is the contract between the runner and its clients. Change it in t
   "macCheck": null,
   "mergeError": null,
   "appleCheck": null,
+  "appleRan": null,
   "mergeNeedsYou": false,
   "title": "Review oby #33",
   "pipeline": {
@@ -186,12 +187,12 @@ GitHub Actions doesn't run for deskree-inc/oby, so the user's Mac checks a pull 
 
 Agents run on the runner, which has no Xcode, so an agent that changes the Apple apps asks the user's Mac to build and test them mid-round (#118): `oby-check apple` in its sandbox. The runner queues an Apple check of the job's worktree commit (`HEAD`), a Mac check (above) with `kind` `apple`; a Mac that follows the runner with Settings › Runner › "Build and test agents' work on this Mac" on (the default) takes it before any merge check, fetches its commits from the runner (`GET /v1/checks/{id}/bundle`: they aren't on GitHub yet), and runs the `Oby` scheme with `MacTests` and the `ObyPhone` scheme (with `ObyWatch`) with `iOSTests`, as a merge check does, without `swift test` (the agent runs that on the runner). Same clean worktree, timeouts, ad hoc signing, throwaway `OBY_HOME` and no GitHub login or vault secret. Paths in what the failing steps printed are relative to the repository.
 
-- **On the job:** `appleCheck` is the job's latest Apple check, or null. `pr` is the job's pull request, or 0 before it has one; `round` counts the job's Apple checks (at most 20 per job). Nothing is posted on GitHub, merged or handed to another round: the result is for the agent waiting on it, and for the reviewer (Oby's review, below). What the failing steps printed is kept in memory only, for the agent and the reviewer.
+- **On the job:** `appleCheck` is the job's latest Apple check, or null. `appleRan` is the latest one that ran (`passed` or `failed`), or null: it stays when the agent asks for a newer commit, so a newer check that can't run never hides one that did. `pr` is the job's pull request, or 0 before it has one; `round` counts the job's Apple checks (at most 20 per job). Nothing is posted on GitHub, merged or handed to another round: the result is for the agent waiting on it, and for the reviewer (Oby's review, below). What the failing steps printed is kept in memory only, for the agent and the reviewer, for the job's latest check and the latest that ran.
 - **Asking again** for the same commit picks up the same check (or its result), unless it couldn't run. A new commit is a new check; the old one's result, if a Mac still sends it, is answered `404`.
 - **Who takes it:** only a job that's running (`queued` or `running`) and only from a Mac that says it takes Apple checks (`kinds`, below). A Mac running another check finishes it first.
 - **No Mac:** a check no Mac took within a minute while no Mac was busy, or within an hour at all, is `error` with `problem` saying so, and the agent is told to carry on and say in its summary that the Apple apps weren't built.
 - **Security:** the Mac runs the agent's code (its build phases and tests) before Oby's review has read it, with the user's access to the Mac. The setting turns it off; a merge check still needs the review.
-- **Reviews:** when a job's pull request is reviewed, the reviewer gets the latest Apple build and test that ran (passed or failed), the job's Apple check or its merge check, whichever ended last, quoted in `.oby/inputs/apple-check.md` with its commit (and whether it's the pull request's head), its steps, failing tests and, for an Apple check, the end of what the failing steps printed. It's told not to request changes because the code wasn't compiled.
+- **Reviews:** when a job's pull request is reviewed, the reviewer gets the latest Apple build and test that ran (passed or failed), the job's Apple check (`appleCheck`, else `appleRan`) or its merge check, whichever ended last, quoted in `.oby/inputs/apple-check.md` with its commit (and whether it's the pull request's head), its steps, failing tests and, for an Apple check, the end of what the failing steps printed. It's told not to request changes because the code wasn't compiled.
 
 ### Inbox item
 
@@ -517,10 +518,10 @@ For `oby-check apple` in an agent's sandbox, with `Authorization: Bearer <its jo
 ```
 
 - `line`: where it is, in one line: queued (`waiting for a Mac`, or `Studio is running another check first`), building and testing, or how it ended.
-- `report`: once it ended, what the command prints: each step with its time, the failing tests and the end of what the failing steps printed (the compiler's errors when there are any), with the vault's secrets taken out; or why it couldn't run. Null before then.
+- `report`: once it ended, what the command prints: each step with its time, the failing tests and the end of what the failing steps printed (the compiler's errors when there are any), with the vault's secrets taken out. For a check that couldn't run, why, followed by whatever the steps that did run found (one app's compiler errors still show when the other's simulator is missing). Null before then.
 - `401` without a job's token, `409` when the job isn't running, its worktree commit can't be read, it asked for 20 already, or the runner doesn't queue checks; `404` (`GET`) before the job asked for one; `503` when the vault can't be read.
 
-`oby-check apple [--wait SECONDS]` asks, prints `line` when it changes, polls every 5 seconds up to `--wait` (110 by default, under a 2-minute command timeout; at most 3,000), and prints `report`. It notes uncommitted changes, which aren't in the check. Exit status: `0` passed, `1` failed, `2` couldn't run (no Mac, the Mac's problem, no runner), `3` still running (run it again: it picks up the same check), `64` a wrong command line. Jobs whose Lead brief names `iOS/`, `Watch/`, `Mac/` or `Shared/`, or, without a brief, in a repository that has them, are told about it in their prompt.
+`oby-check apple [--wait SECONDS]` asks, prints `line` when it changes, polls every 5 seconds, and prints `report`. `--wait` (1 to 3,000; 110 by default, under a 2-minute command timeout) bounds the whole wait, the requests to the runner included: a request still unanswered at the deadline is dropped. It notes uncommitted changes, which aren't in the check. Exit status: `0` passed, `1` failed, `2` couldn't run (no Mac, the Mac's problem, no runner), `3` still running (run it again: it picks up the same check), `64` a wrong command line. Jobs whose Lead brief names `iOS/`, `Watch/`, `Mac/` or `Shared/`, or, without a brief, in a repository that has them, are told about it in their prompt.
 
 ### `POST /v1/devices`
 

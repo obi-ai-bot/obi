@@ -487,7 +487,7 @@ extension Desk {
             review.attachments = (try? Review.keep(text, file: Review.previousFile(previous), for: review.id)).map { [$0] }
         }
         // The latest Apple build and test that ran, so the reviewer judges what was compiled (Engine/AppleChecks.swift).
-        if let text = AppleCheck.forReview(job, pr: pr, log: appleLogs[job.id]), let file = try? Review.keep(text, file: AppleCheck.reviewFile, for: review.id) {
+        if let text = AppleCheck.forReview(job, pr: pr, logs: appleLogs), let file = try? Review.keep(text, file: AppleCheck.reviewFile, for: review.id) {
             review.attachments = (review.attachments ?? []) + [file]
         }
         author.reviewing = review.id

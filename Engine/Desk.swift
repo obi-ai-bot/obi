@@ -155,8 +155,9 @@ final class Desk {
     /// own desk has no one to take them, so its approved jobs wait for a person to merge them.
     @ObservationIgnored var queuesMacChecks = false
     /// Apple checks agents ask for (Engine/AppleChecks.swift): the commit a job's worktree is on,
-    /// the git bundle a Mac fetches a check's commits from, and what each job's latest check
-    /// printed, for its agent and its reviewer, never stored. Tests put in their own.
+    /// the git bundle a Mac fetches a check's commits from, and what each check printed (by the
+    /// check's id: a job's latest and the latest that ran), for its agent and its reviewer, never
+    /// stored. Tests put in their own.
     @ObservationIgnored var worktreeHead: (_ id: String) async -> String? = { id in
         try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-parse", "--verify", "HEAD^{commit}"])
     }
