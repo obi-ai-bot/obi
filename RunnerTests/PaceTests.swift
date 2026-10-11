@@ -61,7 +61,9 @@ struct PaceTests {
 
     @Test func atEightyPercentOfTheWeekNoAutomaticWork() {
         let reserved = state("reserved", sevenDay: 0.8, gone: 0.9)
-        #expect(reserved.isReserved && !state("a", sevenDay: 0.79).isReserved && !state("b").isReserved)
+        #expect(reserved.isReserved(at: now) && !state("a", sevenDay: 0.79).isReserved(at: now) && !state("b").isReserved(at: now))
+        // The engine and the cards keep the same share.
+        #expect(AccountState.reserve == Usage.reserve)
         #expect(route([reserved]) == nil)
         #expect(route([state("a", sevenDay: 0.79, gone: 0.95)]) == "a")
         #expect(route([reserved, state("busy", fiveHour: 0.9, running: 3)]) == "busy")
@@ -70,6 +72,18 @@ struct PaceTests {
         full.fullUntil = now.addingTimeInterval(3600)
         #expect(AccountStore.next([full, reserved, state("codex", "codex")], agent: "claude", now: now)?.id == "codex")
         #expect(AccountStore.next([full, reserved], agent: "claude", now: now) == nil)
+    }
+
+    /// Claude Code reports usage only during a job, so a reserved account's 80% wouldn't update by
+    /// itself: the reserve ends when its week resets.
+    @Test func theReserveEndsWhenTheWeekResets() {
+        let reserved = state("reserved", sevenDay: 0.85, gone: 0.9)
+        let later = now.addingTimeInterval(0.1 * week)
+        #expect(!reserved.isReserved(at: later) && reserved.ahead(at: later) == 0)
+        #expect(AccountStore.route([reserved], agent: "claude", now: later)?.id == "reserved")
+        #expect(AccountStore.route([reserved], agent: "claude", now: later.addingTimeInterval(-1)) == nil)
+        // Without a reset time it stays reserved.
+        #expect(state("unknown", sevenDay: 0.85).isReserved(at: later))
     }
 
     @Test func reviewsDontUseAReservedAccount() {
@@ -128,8 +142,14 @@ struct PaceTests {
     @Test func aReservedCardSaysSo() {
         let card = Usage.Snapshot(agent: "claude", name: "Personal", label: "Max · w@example.com", fiveHour: 0.1, sevenDay: 0.8,
                                   sevenDayResets: resets(0.9))
-        #expect(card.reserved && Usage.reservedText == "Reserved: only jobs you send it")
-        #expect(!Usage.Snapshot(agent: "claude", name: "Work", label: "Max", sevenDay: 0.79).reserved)
+        #expect(card.reserved(at: now) && Usage.reservedText == "Reserved: only jobs you send it")
+        #expect(!Usage.Snapshot(agent: "claude", name: "Work", label: "Max", sevenDay: 0.79).reserved(at: now))
+        // Once its week resets the card stops saying so, though the 80% stays until a job reports again.
+        let later = now.addingTimeInterval(0.1 * week)
+        #expect(!card.reserved(at: later))
+        #expect(!Usage.spoken(card, now: later, locale: london, timeZone: utc).contains("Reserved"))
+        // An unknown reset time keeps it reserved.
+        #expect(Usage.Snapshot(agent: "claude", name: "Work", label: "Max", sevenDay: 0.8).reserved(at: later))
         #expect(Usage.spoken(card, now: now, locale: london, timeZone: utc) == "Claude Code, Personal: 10% of the 5-hour limit used, "
                 + "80% of the 7-day limit used, 90% of the week gone, resets in 16 hours 48 minutes, Reserved: only jobs you send it")
     }

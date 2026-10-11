@@ -38,8 +38,11 @@ nonisolated struct AccountState: Equatable, Sendable {
 
     /// The share of its weekly limit an account keeps for jobs the user sends to it by name.
     static let reserve = 0.8
-    /// At 80% of its weekly limit an account gets no automatic work, only jobs sent to it by name.
-    var isReserved: Bool { (sevenDay ?? 0) >= Self.reserve }
+    /// At 80% of its weekly limit an account gets no automatic work, only jobs sent to it by name,
+    /// until its week resets: Claude Code reports usage only during a job, so the 80% would stay.
+    func isReserved(at now: Date = .now) -> Bool {
+        (sevenDay ?? 0) >= Self.reserve && (sevenDayResets ?? .distantFuture) > now
+    }
 
     /// How much of the 7-day window has passed, 0...1, or nil when its reset time is unknown.
     func weekGone(at now: Date = .now) -> Double? {
@@ -173,7 +176,7 @@ final class AccountStore {
     nonisolated static func route(_ accounts: [AccountState], agent: String?, now: Date = .now) -> Account? {
         accounts.enumerated()
             .filter { $0.element.signedIn && (agent == nil || $0.element.account.agent == agent) && !$0.element.isFull(at: now)
-                && ($0.element.fiveHour ?? 0) < 0.95 && !$0.element.isReserved }
+                && ($0.element.fiveHour ?? 0) < 0.95 && !$0.element.isReserved(at: now) }
             .min { (score($0.element, now: now), $0.offset) < (score($1.element, now: now), $1.offset) }?
             .element.account
     }

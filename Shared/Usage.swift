@@ -45,9 +45,11 @@ nonisolated enum Usage {
         }
         /// The busier window, or nil without usage.
         var busiest: Double? { [fiveHour, sevenDay].compactMap { $0 }.max() }
-        /// At 80% of its weekly limit the account takes only jobs the user sends to it by name
-        /// (`AccountState.isReserved` in the engine).
-        var reserved: Bool { (sevenDay ?? 0) >= Usage.reserve }
+        /// At 80% of its weekly limit the account takes only jobs the user sends to it by name, until
+        /// its week resets (`AccountState.isReserved` in the engine).
+        func reserved(at now: Date = .now) -> Bool {
+            (sevenDay ?? 0) >= Usage.reserve && (sevenDayResets ?? .distantFuture) > now
+        }
     }
 
     /// How the weekly window is going against the clock.
@@ -61,7 +63,8 @@ nonisolated enum Usage {
         var ahead: Bool { runsOut != nil }
     }
 
-    /// The share of the weekly limit kept for jobs sent to the account by name, as routing keeps it.
+    /// The share of the weekly limit kept for jobs sent to the account by name, as routing keeps it
+    /// (`AccountState.reserve`; a test keeps the two equal).
     static let reserve = 0.8
     static let reservedText = "Reserved: only jobs you send it"
 
@@ -186,7 +189,7 @@ nonisolated enum Usage {
                     parts.append(resetText(resets, now: now, spoken: true, locale: locale, timeZone: timeZone))
                 }
             }
-            if snapshot.reserved { parts.append(reservedText) }
+            if snapshot.reserved(at: now) { parts.append(reservedText) }
         }
         if snapshot.running > 0 { parts.append(runningText(snapshot.running)) }
         return "\(snapshot.tool), \(snapshot.name): " + parts.joined(separator: ", ")
@@ -243,7 +246,7 @@ struct UsageCard: View {
                             ProgressView(value: min(max(window.used, 0), 1)).tint(Self.color(window.level))
                         }
                     }
-                    if snapshot.reserved {
+                    if snapshot.reserved(at: context.date) {
                         Label(Usage.reservedText, systemImage: "lock")
                             .font(.caption.weight(.medium)).foregroundStyle(.orange)
                     }
