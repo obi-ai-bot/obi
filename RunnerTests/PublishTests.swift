@@ -323,6 +323,9 @@ struct PullRequestTextTests {
         job.summaries = ["Fixed it."]
         let body = Publish.body(for: job, closes: false)
         #expect(body.contains("\n\nPart of #75\n\n") && !body.contains("Closes"))
+        // The secret scan checks that very description.
+        let scanned = Publish.outgoing(job, messages: "fix: it", title: "fix: it", closes: false).first { $0.name == "pull request description" }
+        #expect(scanned?.text == body)
     }
 
     @Test func aPlantedKeyIsFoundWithItsFileAndLine() {
