@@ -171,6 +171,8 @@ final class APITests {
                 #expect(account["label"] is NSNull && account["fullUntil"] is NSNull)
                 let claude = (status["models"] as? [String: Any])?["claude"] as? [String: Any]
                 #expect(claude?["model"] as? String == AgentModels.value("claude", "model"))
+                // No GitHub app here: the runner's own calls go with the owner's login.
+                #expect(status["github"] as? String == "owner")
             }
             try await client.execute(uri: "/v1/nowhere", method: .get, headers: owner) { response in
                 #expect(response.status == .notFound)

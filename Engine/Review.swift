@@ -410,7 +410,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         let file = FileManager.default.temporaryDirectory.appending(path: "oby-review-\(UUID().uuidString).md")
         try body.write(to: file, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: file) }
-        let said = try await Shell.ok(["gh", "pr", "comment", "\(pr)", "-R", author.repo, "--body-file", file.path])
+        let said = try await Shell.ok(["gh", "pr", "comment", "\(pr)", "-R", author.repo, "--body-file", file.path], as: .app)
         guard let url = said.split(separator: "\n").last.flatMap({ URL(string: String($0)) }) else {
             throw Shell.Failure(message: "gh posted no comment: \(said)")
         }

@@ -49,6 +49,7 @@ let package = Package(
                 "oby-runner", "ObyEngine", "ObyShared",
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
                 .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "_CryptoExtras", package: "swift-crypto"),
             ],
             path: "RunnerTests",
             swiftSettings: features

@@ -10,7 +10,7 @@ final class PullRequests {
     /// Includes failed attempts, so an unavailable GitHub isn't hammered on every wake-up.
     private var attempted: [String: (url: String, date: Date)] = [:]
     var read: ([String]) async throws -> Data = { arguments in
-        let result = try await Shell.run(arguments, env: ["GH_PROMPT_DISABLED": "1"], timeout: 30)
+        let result = try await Shell.run(arguments, env: ["GH_PROMPT_DISABLED": "1"], timeout: 30, as: .app)
         guard result.status == 0 else {
             // Don't store arbitrary tool output (it can contain credentials or GitHub text).
             throw Shell.Failure(message: "Couldn't refresh the pull request (gh exit \(result.status)).")

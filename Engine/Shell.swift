@@ -24,6 +24,8 @@ nonisolated enum Shell {
         for key in env.keys where key == "CLAUDECODE" || key.hasPrefix("CLAUDE_CODE_") || key.hasPrefix("ANTHROPIC_") {
             env[key] = nil
         }
+        // The GitHub app's settings stay with the runner: nothing it runs needs where the key is.
+        for key in GitHubApp.variables { env[key] = nil }
         if let user = getpwuid(getuid()), let shell = user.pointee.pw_shell {
             let process = Process()
             let out = Pipe()
@@ -43,9 +45,40 @@ nonisolated enum Shell {
 
     /// Runs a tool found on the user's PATH. `env` adds variables, and a nil value removes one.
     /// After `timeout` seconds it's ended, with all it started (`Halt`), and so it is when the task
-    /// is cancelled.
+    /// is cancelled. A gh call `as: .app` gets the GitHub app's installation token for the account
+    /// it names (`GitHubApp.account(in:)`) in `GH_TOKEN`, and once more a fresh one when GitHub
+    /// refuses it; with no app, no installation for that account, or a call about the owner
+    /// (`GitHubApp.ownersOwn`), it runs with the owner's gh login, as every other call does.
     static func run(_ arguments: [String], in directory: URL? = nil, input: Data? = nil,
-                    env: [String: String?] = [:], timeout: TimeInterval = 600) async throws -> Output {
+                    env: [String: String?] = [:], timeout: TimeInterval = 600, as actor: GitHubActor = .owner) async throws -> Output {
+        guard actor == .app, let app = stand?.app ?? GitHubApp.shared, !GitHubApp.ownersOwn(arguments),
+              let token = await app.token(for: GitHubApp.account(in: arguments)) else {
+            return try await launch(arguments, in: directory, input: input, env: env, timeout: timeout)
+        }
+        var appEnv = env
+        appEnv["GITHUB_TOKEN"] = .some(nil)
+        appEnv["GH_TOKEN"] = token
+        let result = try await launch(arguments, in: directory, input: input, env: appEnv, timeout: timeout)
+        guard GitHubApp.refused(result) else { return result }
+        await app.refused(token)
+        guard let fresh = await app.token(for: GitHubApp.account(in: arguments)) else {
+            return try await launch(arguments, in: directory, input: input, env: env, timeout: timeout)
+        }
+        appEnv["GH_TOKEN"] = fresh
+        return try await launch(arguments, in: directory, input: input, env: appEnv, timeout: timeout)
+    }
+
+    /// What a test stands in with, for its own task only: the GitHub app, and the tools, which get
+    /// the arguments and the variables `env` adds.
+    struct Stand: Sendable {
+        var app: GitHubApp?
+        var run: @Sendable (_ arguments: [String], _ env: [String: String?]) async throws -> Output
+    }
+    @TaskLocal static var stand: Stand?
+
+    private static func launch(_ arguments: [String], in directory: URL?, input: Data?,
+                               env: [String: String?], timeout: TimeInterval) async throws -> Output {
+        if let stand { return try await stand.run(arguments, env) }
         let running = Running()
         return try await withTaskCancellationHandler {
             try await run(arguments, in: directory, input: input, env: env, timeout: timeout, running: running)
@@ -95,8 +128,9 @@ nonisolated enum Shell {
 
     /// Runs a tool and returns its output, or throws with the last thing it said on stderr.
     @discardableResult
-    static func ok(_ arguments: [String], in directory: URL? = nil, env: [String: String?] = [:]) async throws -> String {
-        let result = try await run(arguments, in: directory, env: env)
+    static func ok(_ arguments: [String], in directory: URL? = nil, env: [String: String?] = [:],
+                   as actor: GitHubActor = .owner) async throws -> String {
+        let result = try await run(arguments, in: directory, env: env, as: actor)
         guard result.status == 0 else {
             // gh project puts the missing-scopes diagnostic before its final refresh hint.
             let project = Array(arguments.prefix(2)) == ["gh", "project"]

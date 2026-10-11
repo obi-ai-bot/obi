@@ -870,6 +870,8 @@ nonisolated enum Agents {
          "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
          // In bubblewrap, packed-refs can't be replaced, so git's automatic upkeep would only print errors.
          "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false"]
+        // Where the GitHub app's key is stays with the runner, as its tokens do.
+        for key in GitHubApp.variables { overrides[key] = .some(nil) }
         // Who commits, from the environment: no git config file is written for it.
         for (key, value) in identity?.environment ?? [:] { overrides[key] = value }
         return overrides
@@ -989,17 +991,17 @@ nonisolated enum Workspace {
     /// An epic's open sub-issues with their titles: GitHub's sub-issues, otherwise the open issues
     /// its task list names.
     static func openSubIssues(of epic: Int, in repo: String) async -> [(number: Int, title: String)] {
-        if let text = try? await Shell.ok(["gh", "api", "repos/\(repo)/issues/\(epic)/sub_issues?per_page=50"]),
+        if let text = try? await Shell.ok(["gh", "api", "repos/\(repo)/issues/\(epic)/sub_issues?per_page=50"], as: .app),
            let list = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [[String: Any]] {
             let open = list.filter { $0["state"] as? String == "open" }.compactMap { item -> (number: Int, title: String)? in
                 (item["number"] as? Int).map { ($0, item["title"] as? String ?? "") }
             }
             if !open.isEmpty { return open }
         }
-        guard let body = try? await Shell.ok(["gh", "issue", "view", "\(epic)", "-R", repo, "--json", "body", "-q", ".body"]) else { return [] }
+        guard let body = try? await Shell.ok(["gh", "issue", "view", "\(epic)", "-R", repo, "--json", "body", "-q", ".body"], as: .app) else { return [] }
         var open: [(number: Int, title: String)] = []
         for number in taskList(body) {
-            guard let text = try? await Shell.ok(["gh", "issue", "view", "\(number)", "-R", repo, "--json", "title,state"]),
+            guard let text = try? await Shell.ok(["gh", "issue", "view", "\(number)", "-R", repo, "--json", "title,state"], as: .app),
                   let info = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
                   info["state"] as? String == "OPEN" else { continue }
             open.append((number, info["title"] as? String ?? ""))
@@ -1051,12 +1053,12 @@ nonisolated enum Workspace {
         // The agent has no GitHub login, so Oby reads the issue for it.
         var issue: Data?
         if let number = job.issue {
-            issue = Data(try await Shell.ok(["gh", "issue", "view", "\(number)", "-R", job.repo, "--json", "title,body,author,url,labels,comments"]).utf8)
+            issue = Data(try await Shell.ok(["gh", "issue", "view", "\(number)", "-R", job.repo, "--json", "title,body,author,url,labels,comments"], as: .app).utf8)
         }
         if let pr = job.pr {
             try await git(["fetch", "--quiet", "origin", "+refs/pull/\(pr)/head:refs/oby/pr-\(pr)"])
             start = "refs/oby/pr-\(pr)"
-            pullRequest = Data(try await Shell.ok(["gh", "pr", "view", "\(pr)", "-R", job.repo, "--json", "title,body,author,baseRefName,url"]).utf8)
+            pullRequest = Data(try await Shell.ok(["gh", "pr", "view", "\(pr)", "-R", job.repo, "--json", "title,body,author,baseRefName,url"], as: .app).utf8)
         } else {
             if job.base == nil {
                 // ponytail: work starts from dev where a repository has one (Deskree's flow), else the

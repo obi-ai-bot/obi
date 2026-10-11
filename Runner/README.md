@@ -25,6 +25,17 @@ The runner works as the user it runs as, with that user's own logins, like Oby d
 
 Oby never reads these logins. More accounts go in `accounts.json` in `OBY_HOME`, each with its own home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`); sign in to each with that variable set.
 
+### The GitHub app
+
+The runner's own GitHub calls (reading pull requests, checks, issues and the board, posting Oby's reviews and Mac check results, merging into `dev`, the failure records) go as a GitHub App with an hourly budget of its own, so jobs that finish together don't run the owner's login out of it. Pushing, opening and editing pull requests, and who the owner is stay with the owner's `gh` login ([the runner API](../docs/runner-api.md#get-v1status) lists which is which). Deskree's app is **Oby by Deskree** (`oby-by-deskree`, App ID `5276623`). To set one up:
+
+1. Create a GitHub App (Settings › Developer settings › GitHub Apps) with no webhook and these permissions: Contents, Pull requests and Issues read and write; Checks and Commit statuses read; organization Projects read and write; no Workflows.
+2. Install it on the account that owns the repositories, for those repositories.
+3. Generate a private key and put it on the runner at `~/.config/oby/github-app.pem`, owned by the runner's user, mode 600. The runner refuses a key others may read.
+4. Set `OBY_GITHUB_APP_ID` in the service (the service file has Deskree's), and `OBY_GITHUB_APP_KEY` if the key is elsewhere, then restart it.
+
+The journal says at start whether calls go as the app (`GitHub: as the app 5276623, installed for deskree-inc`), and `GET /v1/status` says `"github": "app"` or `"owner"`. With no App ID, a key that's missing or that others may read, or no installation for a repository's owner, those calls go as the owner, as before. The key is read once and never leaves the runner: it isn't logged, and neither its path nor a token reaches an agent (`GH_TOKEN` is set only on the runner's own `gh` calls).
+
 ## Install
 
 ```sh
@@ -44,6 +55,8 @@ Put the owner's Tailscale login in place of `you@example.com` (`tailscale status
 | `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs, and the brain's latest 200 turns), `accounts.json`, `devices.json` (the phones that may approve publishing; to add one, `touch $OBY_HOME/pairing` and open the app within 10 minutes), `cleared.json` (when Clear done was last pressed, on any app), `apns/` (the APNs key and the phones' Live Activity tokens), `vault/` (the secrets Oby uses but never shows), `watch.json` and `watches.json` (the Watch API's Cloudflare Access settings and the paired Apple Watches), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
 | `OBY_PORT` | The port on `127.0.0.1`. 7777 by default. |
 | `OBY_WATCH_PORT` | The Watch API's port on `127.0.0.1`, for the Cloudflare Tunnel. 7778 by default. |
+| `OBY_GITHUB_APP_ID` | The GitHub app's App ID (or Client ID), for the runner's own GitHub calls ([The GitHub app](#the-github-app)). Unset: every call goes with the owner's `gh` login. |
+| `OBY_GITHUB_APP_KEY` | Where the app's private key is. `~/.config/oby/github-app.pem` by default. |
 
 The models and efforts the app picks in Settings › Models are kept in `~/.config/oby-runner.plist`.
 

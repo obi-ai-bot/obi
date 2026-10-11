@@ -33,6 +33,25 @@ do {
     Logger.runner.error("vault: \(error.localizedDescription, privacy: .public). Nothing is published until it's fixed.")
 }
 
+// The runner's own GitHub calls go as the Oby by Deskree app when it's set up; pushes and pull
+// requests stay with the owner's gh login (Engine/GitHubApp.swift).
+switch GitHubAppKey.load(environment) {
+case .success(let app):
+    GitHubApp.shared = app
+    Task {
+        let accounts = await app.check()
+        if app.works {
+            Logger.runner.notice("GitHub: as the app \(app.id, privacy: .public), installed for \(accounts.joined(separator: ", "), privacy: .public)")
+        } else {
+            Logger.runner.error("GitHub: the app \(app.id, privacy: .public) has no installation that works yet: calls go as the owner.")
+        }
+    }
+case .failure(let failure):
+    Logger.runner.error("GitHub app: \(failure.message, privacy: .public). Calls go as the owner.")
+case nil:
+    Logger.runner.notice("GitHub: no app set up (\(GitHubApp.idVariable, privacy: .public)): calls go as the owner.")
+}
+
 let speech = Speech()
 do { try await speech.discardAbandonedAudio() }
 catch {
