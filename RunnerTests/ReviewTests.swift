@@ -160,7 +160,7 @@ struct ReviewTests {
         let line = "Waiting for an account with room (resets \(Limits.clock(resets)))"
         #expect(published.reviewing == nil && published.reviewError == line && published.waitsForReviewer)
         let stage = published.pipeline.stages.first { $0.id == .review }
-        #expect(stage?.state == .current && stage?.detail == "Waiting for review · \(line)")
+        #expect(stage?.state == .current && stage?.detail == line)
         #expect(made.agents.count == 1 && !published.needsYou && Push.notice(for: published) == nil)
 
         // The Work account's window resets: Oby starts the review on it by itself.
@@ -169,6 +169,30 @@ struct ReviewTests {
         let author = try #require(desk.job("author"))
         #expect(author.reviewing == review.id && author.reviewError == nil && !author.waitsForReviewer)
         #expect(Date.now >= resets)
+    }
+
+    @Test func aReviewThatWaitedBeforeARestartStartsAfterIt() async throws {
+        accounts.setLabel(nil, for: personal.id)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
+        _ = try await publishAuthor()
+        #expect(desk.job("author")?.waitsForReviewer == true)
+
+        // Oby starts again over the same jobs, and the Work account has room by then.
+        let after = AccountStore(root: folder)
+        after.setLabel("Max · well@example.com", for: "default")
+        after.setLabel("Plus · work@example.com", for: work.id)
+        after.record(.usage(fiveHour: 0.1, sevenDay: 0.2), for: work.id)
+        let restarted = Desk(accounts: after, store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        restarted.prepare = { $0 }
+        restarted.makeAgent = { [made] job, _, resume in
+            let agent = Agent()
+            made.agents.append((job, agent, resume))
+            return agent
+        }
+        // What `refresh()` does once the sign-ins are known.
+        restarted.startWaitingReviews()
+        try await until("the review starts") { made.agents.last?.job.reviewOf == "author" }
+        #expect(made.agents.last?.job.account == work.id && restarted.job("author")?.reviewing != nil)
     }
 
     @Test func aWaitingReviewStartsWhenAJobOnAFullAccountEnds() async throws {
