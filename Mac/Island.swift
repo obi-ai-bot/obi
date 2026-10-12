@@ -63,7 +63,10 @@ final class IslandModel {
 
     /// Both chat surfaces read and send through this model.
     var thread: [Turn] { feed.conversation.thread(with: desk.turns) }
-    var recentTurns: [Turn] { Array(thread.suffix(3)) }
+    /// The accounts a plan's card offers: the runner's when the runner on this Mac plans (#283),
+    /// else this Mac's.
+    var planAccounts: [AccountState] { (feed.local ? feed.accounts : desk.accounts.accounts).filter(\.signedIn) }
+    var recentTurns: [Turn] { Array(thread.suffix(4)) }
     var chatWindowVisible = false
     var readReply: String?
     var unreadReply: Bool { thread.last(where: { $0.who == .oby }).map { $0.id != readReply } ?? false }
@@ -963,6 +966,14 @@ private struct OpenIsland: View {
                             onOpenJob: { onOpenWindow((id: $0, local: $1)) }, showTime: false)
                 }
                 switch desk.talk {
+                case .plan(let drafts) where drafts.count == 1:
+                    PlanCard(draft: drafts[0], accounts: model.planAccounts,
+                             onDispatch: { desk.dispatch(model.tray.attach($0)); model.tray.clear() },
+                             onEdit: { desk.cancel() }, onCancel: { desk.cancel() })
+                case .plan(let drafts):
+                    PlansCard(drafts: drafts, accounts: model.planAccounts,
+                              onDispatch: { for draft in $0 { desk.dispatch(model.tray.attach(draft)) }; model.tray.clear() },
+                              onEdit: { desk.cancel() }, onCancel: { desk.cancel() })
                 case .question(let said, let question):
                     DecisionCard(title: question.text, options: question.cardOptions,
                                  keyboardEnabled: true, onLater: { desk.cancel() },
@@ -1014,7 +1025,6 @@ private struct OpenIsland: View {
     }
 }
 
-/*
 /// The plan, before anything runs: agent, account, repository and branch. Dispatch, Edit, Cancel.
 /// The window shows it under the thread too (Mac/App/ChatWindow.swift).
 struct PlanCard: View {
@@ -1275,7 +1285,6 @@ private struct StrongerModel: View {
     }
 }
 
-*/
 
 /// One job in the list, as the iPhone's row: its tool's mark, its title, where it runs, the stage
 /// it's at, its line, the status pill and Oby's verdict. Click it for the job's screen. A job that

@@ -91,6 +91,10 @@ struct RunnerSettingsView: View {
     let feed: RunnerFeed
     /// The always-on runner whose jobs the island lists and RunnerFeed follows; empty turns that off.
     @AppStorage("runnerURL") private var runnerURL = ""
+    /// "This Mac" (#283): the runner is Oby's login item on this Mac, and Oby follows it on 127.0.0.1.
+    @AppStorage(RunnerFeed.thisMacKey) private var onThisMac = false
+    /// The login item, registered with "This Mac" and unregistered with a remote runner (Mac/LoginItem.swift).
+    @State private var loginItem = RunnerLoginItem()
     /// Merge checks on this Mac (Mac/MacChecks.swift).
     @AppStorage(MacChecks.setting) private var runMergeChecks = true
     /// Apple checks agents ask for (Engine/AppleChecks.swift).
@@ -102,8 +106,26 @@ struct RunnerSettingsView: View {
     var body: some View {
         Form {
             Section {
-                TextField("URL", text: $runnerURL, prompt: Text(Runner.defaultURL.absoluteString))
-                LabeledContent("Status", value: feed.runner == nil ? "Off" : feed.connection.status(host: feed.name))
+                Picker("Runner", selection: $onThisMac) {
+                    Text("This Mac").tag(true)
+                    Text("Remote").tag(false)
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: onThisMac) { _, on in
+                    if on { loginItem.register() } else { loginItem.unregister() }
+                }
+                if onThisMac {
+                    LabeledContent("Login item", value: loginItem.line)
+                    if loginItem.needsApproval {
+                        Button("Open Login Items Settings") { RunnerLoginItem.openSettings() }
+                    }
+                    if let problem = loginItem.problem {
+                        Text(problem).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                    }
+                } else {
+                    TextField("URL", text: $runnerURL, prompt: Text(Runner.defaultURL.absoluteString))
+                }
+                LabeledContent("Status", value: feed.runner == nil && !feed.local ? "Off" : feed.connection.status(host: feed.name))
                 if let cleanup = feed.cleanup {
                     LabeledContent("Job worktrees", value: ByteCountFormatter.string(fromByteCount: cleanup.bytes, countStyle: .file))
                     LabeledContent("Last cleanup", value: cleanup.lastRun.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never")
@@ -111,7 +133,9 @@ struct RunnerSettingsView: View {
             } header: {
                 Text("Runner")
             } footer: {
-                Text("The runner does the work while your Mac is closed. The island lists the jobs running there too, and Oby tells you when one needs you. It answers only your Tailscale login, so this Mac needs Tailscale on. Leave it empty to turn this off.")
+                Text(onThisMac
+                     ? "Oby's runner runs on this Mac as a login item: it starts when you log in and keeps working while Oby's window is closed. Oby plans and runs every job there, on 127.0.0.1, and lists them in the island and the window. Your iPhone and Apple Watch reach it through the gateway."
+                     : "The runner does the work while your Mac is closed. The island lists the jobs running there too, and Oby tells you when one needs you. It answers only your Tailscale login, so this Mac needs Tailscale on. Leave it empty to turn this off.")
             }
             // As on the iPhone (Shared/PermissionsSection.swift). This Mac's own jobs' default is in General.
             PermissionsSection(runner: feed.runner, defaultMode: feed.defaultMode, setDefault: feed.setDefaultMode)
@@ -152,6 +176,9 @@ struct RunnerSettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 460)
+        .onAppear { loginItem.refresh() }
+        // Back from approving the login item in System Settings.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in loginItem.refresh() }
         // Once the runner answers, and again after it comes back.
         .task(id: feed.connection) {
             guard feed.connection == .live, let runner = feed.runner else { return }

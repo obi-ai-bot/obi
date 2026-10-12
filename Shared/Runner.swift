@@ -738,11 +738,22 @@ nonisolated struct RunnerError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// The runner on the tailnet. `tailscale serve` vouches for who's asking, so there's no token.
+/// The runner on the tailnet: `tailscale serve` vouches for who's asking, so there's no token. Or
+/// the runner on this Mac (#283), on 127.0.0.1, with its own `token` (Engine/LocalRunner.swift)
+/// sent as `Authorization: Bearer` on every request.
 nonisolated struct Runner: Sendable {
     var base: URL
+    var token: String? = nil
 
     static let defaultURL = URL(string: "https://tetrix-lab.tail8de49b.ts.net:8443")!
+
+    /// `request` with the token, when there is one.
+    private func signed(_ request: URLRequest) -> URLRequest {
+        guard let token else { return request }
+        var request = request
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
 
     static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
@@ -919,7 +930,7 @@ nonisolated struct Runner: Sendable {
     func bundle(_ id: String) async throws -> Data {
         var request = URLRequest(url: base.appending(path: "v1/checks/\(id)/bundle"))
         request.timeoutInterval = 120
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: signed(request))
         try Self.check(response, data)
         return data
     }
@@ -940,7 +951,7 @@ nonisolated struct Runner: Sendable {
                     var request = URLRequest(url: base.appending(path: "v1/events"))
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     request.timeoutInterval = 60
-                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    let (bytes, response) = try await URLSession.shared.bytes(for: signed(request))
                     try Self.check(response, nil)
                     // The runner answers once it follows this connection: from here, every change arrives.
                     stream.yield(.connected)
@@ -1007,7 +1018,7 @@ nonisolated struct Runner: Sendable {
             request.httpBody = try Self.encoder.encode(body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: signed(request))
         try Self.check(response, data)
         return data
     }

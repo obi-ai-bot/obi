@@ -531,6 +531,19 @@ final class Desk {
         cancel()
         asking += 1
         let mine = asking
+        if plansElsewhere() {
+            talk = .thinking(said)
+            Task {
+                var result: Talk
+                do { result = try await planElsewhere(said, nil) }
+                catch { result = .reply(error.localizedDescription) }
+                guard asking == mine else { return }
+                if case .plan(let list) = result, list.isEmpty { result = .none }
+                talk = result
+                if let reply = Self.reply(in: result) { onReply(reply, spoken) }
+            }
+            return
+        }
         let turn = Turn(who: .user, text: shown ?? said, voice: spoken ? true : nil)
         pending = turn.id
         add(turn)
@@ -1144,6 +1157,22 @@ final class Desk {
     }
 
     // MARK: Jobs
+
+    @discardableResult
+    func dispatch(_ draft: Draft) -> Job {
+        talk = .none
+        drafts.removeAll { $0.job.id == draft.job.id }
+        if plansElsewhere() {
+            Task {
+                do { _ = try await dispatchElsewhere(draft) }
+                catch { talk = .reply("Oby couldn't start it on the runner: \(error.localizedDescription)") }
+            }
+            return draft.job
+        }
+        let job = enqueue(draft.job, why: draft.route.flatMap { $0.id == draft.job.account ? $0.why : nil })
+        link(job.id)
+        return job
+    }
 
     /// Queues a job that's ready to run, with why routing chose its account for its report (#269):
     /// a plan's jobs, a guessed plan's on Start, and the runner's `POST /v1/jobs`.

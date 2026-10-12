@@ -29,10 +29,12 @@ nonisolated final class Vault: Sendable {
         self.store = store
     }
 
-    /// The keychain on the Mac, the runner's file on Linux.
+    /// The keychain on the Mac, the runner's file on Linux. A runner on a Mac (#283, a bare
+    /// executable with no bundle id) keeps its own keychain items, under its own service name: an
+    /// item the app made would prompt the user when another program reads it.
     static let shared: Vault = {
         #if canImport(Security)
-        Vault(store: KeychainVault())
+        Vault(store: KeychainVault(service: Bundle.main.bundleIdentifier == nil ? KeychainVault.runnerService : KeychainVault.appService))
         #else
         Vault(store: FileVault(folder: folder))
         #endif
@@ -290,7 +292,11 @@ nonisolated final class FileVault: VaultStore {
 // ponytail: the data-protection keychain with a Secure Enclave key and biometryCurrentSet needs
 // Developer ID signing and a provisioning profile (F4).
 nonisolated struct KeychainVault: VaultStore {
-    var service = "com.deskree.oby.vault"
+    static let appService = "com.deskree.oby.vault"
+    /// The runner's on a Mac (`oby-runner vault …` from the app's Contents/Helpers adds to it).
+    static let runnerService = "com.deskree.oby.runner.vault"
+
+    var service = appService
 
     private var base: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service]
