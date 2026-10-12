@@ -433,6 +433,15 @@ Words about permissions act right away too, checked in Swift like a stop, and an
 
 Words that ask to move a job ("move the vault job to Claude", "use Fable for that one", "put the Watch job on Codex") move it right away too, as `POST /v1/jobs/{id}/move` would, and answer with a reply: `"Moved Vault secrets from Codex · Deskree to Claude Code · Personal. It goes on there now."`, or `"Couldn't move it: …"` with why. The brain names the job by its id from the briefing (its title, its issue or pull request, or "that one" in the conversation) and where it goes (a tool, an account by name, a model), and Swift checks both before anything moves: the job must be one the briefing listed, the account one it knows, and the model one of that tool's. (On the Mac, a runner's job moves through the runner's `POST /v1/jobs/{id}/move`.)
 
+**One request, several steps, like Claude Code.** A turn can take up to 6 actions. The brain picks one action. When it changes something (a stop, a move, a permission answer, a mode), Oby does it, then asks the brain again. The brain gets the user's words, what Oby did so far this turn, and a fresh briefing, and it plans the next action until the request is done. For example, "Deskree's limit is full, move its jobs to Personal and Codex" is a move of some of Deskree's jobs to Personal, then a move of the rest to Codex. The turn ends:
+
+- on an answer (a reply, a question, or jobs to dispatch);
+- on an action the brain already took this turn, or one that couldn't happen (with why);
+- on a later step only Oby's keyword rules could plan;
+- or after 36 seconds (`Desk.turnBudget`, under the apps' 45-second wait). Then the reply ends with "say “continue” for the rest".
+
+The reply lists everything that happened, in order: `"Moved Vault secrets from Claude Code · Deskree to Claude Code · Personal. It goes on there now. Moved Watch home from Claude Code · Deskree to Codex · Deskree. It starts again there."` One move may name up to 10 jobs going to the same place. A job that had failed or was interrupted (an account's limit, a restart) starts again where it went ("It starts again there"). The briefing names each job's account (`… · Claude Code · Deskree · running on tetrix-lab …`), so "its jobs" and "everything on Deskree" resolve.
+
 One message can plan up to 10 jobs ("work on oby #12, #15 and #18", or "work on epic #30", which becomes one job per open sub-issue). Each draft is already routed (Routing, under Account); dispatch each with its own `POST /v1/jobs`. `draft` is kept for apps that know only one job.
 
 #### The Lead: vague goals
