@@ -42,8 +42,10 @@ struct MoveChoiceTests {
         let accounts = [state("deskree", "codex"), state("work", "claude", fiveHour: 0.85), state("weekly", "claude", sevenDay: 0.81),
                         state("personal", "claude", fiveHour: 0.5, sevenDay: 0.6), state("spare", "claude", fiveHour: 0.2, sevenDay: 0.2)]
         #expect(try choose(MoveTarget(agent: "claude"), accounts).account == "spare")
-        // Past 80% of either window, only by name.
-        #expect(refusal(MoveTarget(agent: "claude"), Array(accounts.prefix(3)))?.contains("Name one to use it anyway") == true)
+        // Past 80% of either window: naming the tool takes its least busy account (2026-10-12),
+        // and no tool, account or model of its own named leaves Oby nothing to pick.
+        #expect(try choose(MoveTarget(agent: "claude"), Array(accounts.prefix(3))).account == "weekly")
+        #expect(refusal(MoveTarget(agent: "claude"), [state("full", "claude", fullUntil: now + 3600)])?.contains("Name one to use it anyway") == true)
         #expect(try choose(MoveTarget(account: "Work"), accounts).account == "work")
         #expect(try choose(MoveTarget(agent: "claude", account: "weekly"), accounts).account == "weekly")
         // Named, but signed out or stopped at its limit.
