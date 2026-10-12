@@ -14,6 +14,24 @@ struct ChatWindowTests {
         #expect(ConversationModel.decisionAnchor(job: "older", created: now - 60, turns: turns) == nil)
     }
 
+    @Test func confirmedAnswersLeaveTheInboxButStayInTheTranscript() {
+        let desk = Desk()
+        let feed = RunnerFeed()
+        var item = InboxItem(id: "decision", kind: .question, job: "j", title: "Job", text: "Which?",
+                             options: ["A", "B"], created: now)
+        feed.apply(item)
+        #expect(feed.inbox.count == 1 && feed.inboxHistory.isEmpty)
+        item.done = now + 10
+        item.answer = "B"
+        feed.apply(item)
+        #expect(feed.inbox.isEmpty && feed.inboxHistory.first?.answer == "B")
+        #expect(!IslandInbox.waits(desk: desk, feed: feed, now: now + 20))
+        feed.apply(item)
+        #expect(feed.inboxHistory.count == 1)
+        feed.forget()
+        #expect(feed.inboxHistory.isEmpty)
+    }
+
     @Test func returnNeverTakesADestructiveRecommendation() {
         for answer in ["Deny", "Dismiss", "Stop", "Stop job"] {
             #expect(CardOption.defaultOption([CardOption(label: answer, answer: answer, recommended: true)]) == nil)

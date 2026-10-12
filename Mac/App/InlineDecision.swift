@@ -20,6 +20,12 @@ struct InlineDecision: View {
     }
     private var extras: RunnerJobExtras? { entry.local ? nil : feed.extras[item.job] }
 
+    private var question: Question? {
+        extras?.question ?? desk.jobs.first { entry.local && $0.id == item.job }?.question.map {
+            Question(text: $0.text, options: $0.options, details: $0.details, recommended: $0.recommended)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
             if settled {
@@ -34,8 +40,8 @@ struct InlineDecision: View {
             if !settled || expanded {
                 Text(item.title).font(OBYStyle.caption).foregroundStyle(OBYStyle.tertiary)
                 DecisionCard(title: words.title(item.text), happened: words.body, behindDetails: words.details(item.text),
-                             detail: extras?.permission?.detail, plan: extras?.question?.plan,
-                             options: CardOption.inbox(item.options, kind: "\(item.kind)", question: extras?.question,
+                             detail: extras?.permission?.detail, plan: question?.plan,
+                             options: CardOption.inbox(item.options, kind: "\(item.kind)", question: question,
                                                        permission: extras?.permission, words: words, details: item.details),
                              busy: busy || settled, keyboardEnabled: keyboardEnabled && !settled,
                              onLater: settled ? nil : { answer(later: .now.addingTimeInterval(3600)) },

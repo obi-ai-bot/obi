@@ -24,6 +24,7 @@ struct DecisionCard: View {
     /// Sends the user's own words as the answer; nil where words can't answer it.
     var onWords: ((String) -> Void)? = nil
 
+    @State private var chosen: String?
     @State private var typing = false
     @State private var showsDetails = false
     @State private var words = ""
@@ -66,11 +67,17 @@ struct DecisionCard: View {
         .onExitCommand { if keyboardEnabled { onLater?() } }
         .background {
             if keyboardEnabled, let option = CardOption.defaultOption(options) {
-                Button("") { if !busy && typed.isEmpty { onChoose(option) } }
+                Button("") { if !busy && typed.isEmpty { choose(option) } }
                     .keyboardShortcut(.defaultAction).hidden().accessibilityHidden(true)
             }
         }
         #endif
+    }
+
+    private func choose(_ option: CardOption) {
+        guard !busy else { return }
+        chosen = option.answer
+        onChoose(option)
     }
 
     // MARK: Details
@@ -124,7 +131,7 @@ struct DecisionCard: View {
 
     @ViewBuilder private func button(_ option: CardOption, index: Int) -> some View {
         #if os(watchOS)
-        Button { onChoose(option) } label: {
+        Button { choose(option) } label: {
             VStack(alignment: .leading, spacing: 1) {
                 if option.recommended { Text("Recommended").font(.caption2.weight(.semibold)).foregroundStyle(.secondary) }
                 ReadingText(option.label)
@@ -135,11 +142,11 @@ struct DecisionCard: View {
         .tint(Self.tint(option))
         .accessibilityHint(Self.hint(option))
         #else
-        Button { onChoose(option) } label: {
+        Button { choose(option) } label: {
             HStack(alignment: .firstTextBaseline, spacing: OBYStyle.Space.sm) {
                 Text("\(index + 1)").font(Style.small.weight(.semibold))
                     .foregroundStyle(Style.secondary).frame(width: 20)
-                if busy { ProgressView().controlSize(.small) }
+                if busy && chosen == option.answer { ProgressView().controlSize(.small) }
                 VStack(alignment: .leading, spacing: 2) {
                     if option.role == .destructive {
                         Text(option.label).font(Reading.current.prose).fontWeight(.medium).foregroundStyle(Color.red)
@@ -175,7 +182,7 @@ struct DecisionCard: View {
         #if os(macOS)
         .background {
             if keyboardEnabled {
-                Button("") { if !busy { onChoose(option) } }
+                Button("") { if !busy { choose(option) } }
                     .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [])
                     .hidden().accessibilityHidden(true)
             }

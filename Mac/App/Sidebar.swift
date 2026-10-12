@@ -132,7 +132,7 @@ struct SidebarView: View {
                     if let last = model.thread.last {
                         Text(ConversationModel.clock(last.date)).font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
                     }
-                    let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count
+                    let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count + feed.permissionHistory.count { $0.waits(at: .now) }
                     if waiting > 0 {
                         Text("\(waiting)").font(OBYStyle.caption.weight(.semibold))
                             .padding(.horizontal, OBYStyle.Space.sm).padding(.vertical, OBYStyle.Space.xs)

@@ -149,7 +149,7 @@ private struct ConversationColumn: View {
                 ObyFace(size: 34)
                 VStack(alignment: .leading, spacing: OBYStyle.Space.xs) {
                     Text("Oby").font(OBYStyle.body.weight(.semibold))
-                    let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count
+                    let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count + feed.permissionHistory.count { $0.waits(at: .now) }
                     Text("\(model.working) working · \(waiting) waiting for you")
                         .font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
                 }
@@ -183,20 +183,25 @@ private struct ConversationColumn: View {
             let turns = conversation.thread(with: desk.turns)
             let days = ConversationModel.days(turns, now: context.date)
             let entries = (desk.inbox.map { IslandInbox.Entry(item: $0, local: true) }
-                + feed.inbox.map { IslandInbox.Entry(item: $0, local: false) })
+                + (feed.inbox + feed.inboxHistory).map { IslandInbox.Entry(item: $0, local: false) })
                 .filter { $0.item.isDecision && ($0.item.later == nil || $0.item.later! <= context.date) }
                 .sorted { $0.item.created < $1.item.created }
             let waiting = entries.filter { $0.item.isOpen }
+            let permissions = feed.permissionHistory.filter { $0.done != nil || $0.waits(at: context.date) }
+            let permissionWaits = permissions.filter { $0.waits(at: context.date) }
+            let oldest = (waiting.map { ($0.id, $0.item.created) } + permissionWaits.map { ($0.id, $0.created) })
+                .min { $0.1 < $1.1 }?.0
+            let waitingCount = waiting.count + permissionWaits.count
             let anchors = Dictionary(uniqueKeysWithValues: entries.map {
                 ($0.id, ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns))
             })
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
-                    if let oldest = waiting.first {
-                        Button { proxy.scrollTo(oldest.id, anchor: .center) } label: {
+                    if let oldest {
+                        Button { proxy.scrollTo(oldest, anchor: .center) } label: {
                             HStack {
                                 Image(systemName: "exclamationmark.bubble")
-                                Text("\(waiting.count) waiting for you")
+                                Text("\(waitingCount) waiting for you")
                                 Spacer()
                                 Text("⌘J")
                             }
@@ -222,7 +227,10 @@ private struct ConversationColumn: View {
                                 .font(.system(size: 14)).foregroundStyle(.white.opacity(0.45)).padding(.top, 20)
                         }
                         ForEach(entries.filter { anchors[$0.id] == .some(nil) }) { entry in
-                            decision(entry, active: waiting.first?.id == entry.id)
+                            decision(entry, active: oldest == entry.id)
+                        }
+                        ForEach(permissions.filter { ConversationModel.decisionAnchor(job: $0.job, created: $0.created, turns: turns) == nil }) { record in
+                            InlinePermission(record: record, feed: feed, keyboardEnabled: oldest == record.id).id(record.id)
                         }
                         ForEach(days) { day in
                             daySeparator(day.title)
@@ -238,7 +246,10 @@ private struct ConversationColumn: View {
                                         for id in ConversationModel.missing(of: turn, among: desk.jobs + feed.jobs) { try? await feed.fetch(id) }
                                     }
                                 ForEach(entries.filter { anchors[$0.id] == .some(turn.id) }) { entry in
-                                    decision(entry, active: waiting.first?.id == entry.id)
+                                    decision(entry, active: oldest == entry.id)
+                                }
+                                ForEach(permissions.filter { ConversationModel.decisionAnchor(job: $0.job, created: $0.created, turns: turns) == turn.id }) { record in
+                                    InlinePermission(record: record, feed: feed, keyboardEnabled: oldest == record.id).id(record.id)
                                 }
                             }
                         }

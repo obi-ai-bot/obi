@@ -944,9 +944,9 @@ nonisolated struct Runner: Sendable {
 
     #if os(macOS)
     /// What waits in the inbox, as `inbox()`, with Oby's plain words for each item, by item id.
-    func inboxWithWords() async throws -> ([InboxItem], [String: InboxWords]) {
+    func inboxWithWords(state: String = "open") async throws -> ([InboxItem], [String: InboxWords]) {
         do {
-            let data = try await send("GET", "v1/inbox")
+            let data = try await send("GET", state == "done" ? "v1/inbox?state=done&limit=1000" : "v1/inbox")
             return (try Self.decoder.decode([InboxItem].self, from: data), InboxWords.of(data))
         } catch let error as RunnerError where error.status == 404 {
             return ([], [:])

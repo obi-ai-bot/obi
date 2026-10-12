@@ -82,23 +82,23 @@ struct DecisionTests {
         #expect(CardOption.of([]).isEmpty)
     }
 
-    @Test func atMostThree() {
-        #expect(CardOption.of(["a", "b", "c", "d", "e"]).map(\.label) == ["a", "b", "c"])
+    @Test func atMostFour() {
+        #expect(CardOption.of(["a", "b", "c", "d", "e"]).map(\.label) == ["a", "b", "c", "d"])
         // A recommended one past the third still comes, first.
-        #expect(CardOption.of(["a", "b", "c", "d", "e"], recommended: 4).map(\.label) == ["e", "a", "b"])
+        #expect(CardOption.of(["a", "b", "c", "d", "e"], recommended: 4).map(\.label) == ["e", "a", "b", "c"])
     }
 
     @Test func permissionOptions() {
         let permission = RunnerPermission(id: "p1", tool: "Bash", title: "Run swift test", detail: "swift test", rule: "Bash(swift test:*)",
                                           always: "Yes, and don't ask again for swift test in deskree-inc/oby")
         let options = CardOption.permission(permission)
-        #expect(options.map(\.label) == ["Allow", "Always allow", "Deny"])
+        #expect(options.map(\.label) == ["Allow once", "Always allow", "Deny"])
         #expect(options.map(\.answer) == ["allow", "always", "deny"])
-        #expect(options[1].detail == "Yes, and don't ask again for swift test in deskree-inc/oby")
+        #expect(options[1].detail == "Yes, and don't ask again for swift test in deskree-inc/oby · Bash(swift test:*)")
         #expect(options[2].role == .destructive)
         // Without `always`, the rule is spelled out; with neither, there's nothing to save.
-        #expect(CardOption.permission(RunnerPermission(id: "p2", title: "Edit", rule: "Edit(README.md)"))[1].detail == "Don't ask again for Edit(README.md)")
-        #expect(CardOption.permission(RunnerPermission(id: "p3", title: "Edit")).map(\.label) == ["Allow", "Deny"])
+        #expect(CardOption.permission(RunnerPermission(id: "p2", title: "Edit", rule: "Edit(README.md)"))[1].detail == "Always allow Edit(README.md)")
+        #expect(CardOption.permission(RunnerPermission(id: "p3", title: "Edit")).map(\.label) == ["Allow once", "Deny"])
     }
 
     @Test func inboxItems() {

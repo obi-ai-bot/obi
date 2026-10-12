@@ -590,47 +590,10 @@ private struct OpenIsland: View {
             }
             .frame(minHeight: 92, alignment: .top)
 
-            switch desk.talk {
-            case .plan(let drafts) where drafts.count == 1:
-                scrolling {
-                    PlanCard(draft: drafts[0], accounts: desk.accounts.accounts.filter(\.signedIn),
-                             onDispatch: { desk.dispatch(tray.attach($0)); tray.clear() },
-                             onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
-                             onCancel: { desk.cancel() })
-                }
-            case .plan(let drafts):
-                scrolling {
-                    PlansCard(drafts: drafts, accounts: desk.accounts.accounts.filter(\.signedIn),
-                              onDispatch: { for draft in $0 { desk.dispatch(tray.attach(draft)) }; tray.clear() },
-                              onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
-                              onCancel: { desk.cancel() })
-                }
-            case .question(let said, let question):
-                scrolling {
-                    DecisionCard(title: question.text, options: CardOption.of(question.options),
-                                 onChoose: { desk.answer($0.answer, said: said, question: question.text) },
-                                 onWords: { desk.answer($0, said: said, question: question.text) })
-                }
-            default:
-                if let row = selectedRow {
-                    scrolling { screen(row).id(row.id) }
-                } else {
-                    // The inbox first: what only you can answer, then the jobs.
-                    if !groups.isEmpty || IslandInbox.waits(desk: desk, feed: feed) {
-                        scrolling {
-                            VStack(alignment: .leading, spacing: 14) {
-                                IslandInbox(desk: desk, feed: feed, onOpen: { selected = Row.id($0, local: $1) })
-                                list
-                            }
-                        }
-                    }
-                    if let problem {
-                        Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(2)
-                    }
-                    if feed.down {
-                        Text("\(feed.name) isn't reachable").font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
-                    }
-                }
+            if let row = selectedRow {
+                scrolling { screen(row).id(row.id) }
+            } else if !groups.isEmpty {
+                scrolling { list }
             }
             if selected == nil {
                 compactChat
@@ -834,12 +797,42 @@ private struct OpenIsland: View {
     }
 
     private var compactChat: some View {
-        ScrollView {
-            VStack(spacing: 6) {
+        let turns = model.recentTurns
+        let decisions = IslandInbox.entries(desk: desk, feed: feed, now: .now)
+        let permissions = feed.permissionHistory.filter { $0.waits(at: .now) }
+        return ScrollView {
+            VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
+                ForEach(decisions.filter { ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns) == nil }) { entry in
+                    InlineDecision(entry: entry, desk: desk, feed: feed, onOpen: { selected = Row.id($0, local: $1) })
+                }
                 ForEach(Array(model.recentTurns.enumerated()), id: \.element.id) { index, turn in
                     TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? model.recentTurns[index - 1] : nil),
                             jobs: [], account: { _, _ in "" }, isLocal: { _ in false },
                             onOpenJob: { onOpenWindow((id: $0, local: $1)) }, showTime: false)
+                    ForEach(decisions.filter { ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns) == turn.id }) { entry in
+                        InlineDecision(entry: entry, desk: desk, feed: feed, onOpen: { selected = Row.id($0, local: $1) })
+                    }
+                }
+                ForEach(permissions) { record in
+                    InlinePermission(record: record, feed: feed)
+                }
+                switch desk.talk {
+                case .plan(let drafts) where drafts.count == 1:
+                    PlanCard(draft: drafts[0], accounts: desk.accounts.accounts.filter(\.signedIn),
+                             onDispatch: { desk.dispatch(tray.attach($0)); tray.clear() },
+                             onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
+                             onCancel: { desk.cancel() })
+                case .plan(let drafts):
+                    PlansCard(drafts: drafts, accounts: desk.accounts.accounts.filter(\.signedIn),
+                              onDispatch: { for draft in $0 { desk.dispatch(tray.attach(draft)) }; tray.clear() },
+                              onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
+                              onCancel: { desk.cancel() })
+                case .question(let said, let question):
+                    DecisionCard(title: question.text, options: question.cardOptions,
+                                 keyboardEnabled: true, onLater: { desk.cancel() },
+                                 onChoose: { desk.answer($0.answer, said: said, question: question.text) },
+                                 onWords: { desk.answer($0, said: said, question: question.text) })
+                default: EmptyView()
                 }
                 if model.speaker.speaking {
                     Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
@@ -848,7 +841,7 @@ private struct OpenIsland: View {
             }
         }
         .defaultScrollAnchor(.bottom)
-        .frame(height: model.recentTurns.isEmpty && !thinking ? 0 : 150)
+        .frame(height: model.recentTurns.isEmpty && decisions.isEmpty && permissions.isEmpty && !thinking ? 0 : 190)
         .accessibilityLabel("Recent conversation with Oby")
     }
 

@@ -172,7 +172,7 @@ nonisolated struct CardOption: Equatable, Sendable {
         var list = [CardOption(label: "Allow once", answer: RunnerPermission.Decision.allow.rawValue, recommended: true)]
         if let rule = InboxWords.plain(permission.rule) {
             let always = permission.always ?? "Always allow \(rule)"
-            list.append(CardOption(label: "Always allow", answer: RunnerPermission.Decision.always.rawValue, detail: "\(always) · \(rule)"))
+            list.append(CardOption(label: "Always allow", answer: RunnerPermission.Decision.always.rawValue, detail: always.contains(rule) ? always : "\(always) · \(rule)"))
         }
         list.append(CardOption(label: "Deny", answer: RunnerPermission.Decision.deny.rawValue, role: .destructive))
         return list
@@ -281,6 +281,14 @@ extension Question {
         return list
     }
 }
+
+#if os(macOS)
+extension Plan.Question {
+    nonisolated var cardOptions: [CardOption] {
+        Question(text: text, options: options, details: details, recommended: recommended).cardOptions
+    }
+}
+#endif
 
 /// A plan in markdown, split into what the card draws: headings, list items, code and paragraphs
 /// (the card draws each one's inline markdown).
