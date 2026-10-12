@@ -119,7 +119,7 @@ extension Job {
                         set(.merged, merge.state, detail: merge.detail, reason: merge.reason)
                     } else if let review {
                         set(.review, .failed, detail: "Changes requested",
-                            reason: review.stopsHere ? Review.stopLine : "Oby requested changes.")
+                            reason: review.stopsHere ? review.stopReason : "Oby requested changes.")
                     } else if let reviewError {
                         set(.review, .current, detail: reviewError.hasPrefix(Review.waiting) ? reviewError : "Waiting for review · \(reviewError)")
                     } else {

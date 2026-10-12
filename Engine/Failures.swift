@@ -409,7 +409,7 @@ final class Failures {
             }
         }
         if job.status == .done, job.publishError != nil { add(.publishError, ended, "Its publish failed; Publish by hand is offered.", at: job.finished) }
-        if job.reviewNeedsYou, let review = job.review { add(.reviewCap, review.job, Review.stopLine, at: review.date) }
+        if job.reviewNeedsYou, let review = job.review { add(.reviewCap, review.job, review.stopReason, at: review.date) }
         if let error = job.reviewError, job.reviewing == nil {
             if error.hasPrefix("The reviewer gave no verdict") || error.hasPrefix("Oby's review failed") || error.hasPrefix("Oby's review was interrupted") {
                 add(.noVerdict, review?.id ?? Self.marker(error), "Oby's review of its pull request ended with no verdict.", at: review?.finished ?? job.finished)

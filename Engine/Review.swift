@@ -14,9 +14,10 @@ import OSLog
 /// request changes on their own pull request, and a comment would email them; Engine/CheckRuns.swift)
 /// and keeps it on the job. Changes requested go back to the author's agent as
 /// its next round, as a quoted file, never in the prompt; the round that publishes gets a
-/// follow-up review, which checks only the blocking findings and the new commits, `maxRounds`
-/// reviews at most, then the job stops and needs the user. Approved: the user's Mac checks the
-/// commit, and Oby merges it into dev when that passes (Engine/Checks.swift).
+/// follow-up review, which checks only the blocking findings and the new commits. Rounds go on
+/// while each one fixes what the last review blocked on, however many it takes (#224): the job
+/// stops and needs the user only when a blocker comes back (`repeated`). Approved: the user's Mac
+/// checks the commit, and Oby merges it into dev when that passes (Engine/Checks.swift).
 nonisolated struct Review: Codable, Equatable, Sendable {
     enum Verdict: String, Codable, Sendable { case approved, changesRequested }
 
@@ -39,6 +40,13 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// What it found blocking, one finding each, or nil when nothing was, or the review didn't
     /// sort its findings.
     var blocking: [String]?
+    /// What the earlier reviews found blocking, oldest first, or nil: its follow-up checks none of
+    /// them came back.
+    var blockedBefore: [String]?
+    /// Changes requested on a blocker an earlier review asked to fix: it wasn't fixed, or it came
+    /// back (the follow-up starts it with `Again:`, `repeats`). The job stops here and needs the user.
+    /// Nil on approvals, and on reviews from before #224, which stopped at their second.
+    var repeated: Bool?
     /// What this review and the earlier ones found worth doing later, oldest first, or nil: the
     /// job's report lists them as follow-ups.
     var followUps: [String]?
@@ -47,15 +55,23 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// them short leaves it set, and the runner does them when it starts again (`Desk.resumeReviews`).
     var applying: Bool?
 
-    /// How many times Oby reviews one job's pull request before a person has to. Each review costs
-    /// an account's weekly limit: the first, then one follow-up.
+    /// How many times Oby reviews one job's pull request when no review asked for the round it
+    /// reviews: the first, then one follow-up of a round the user or a Mac check started. A round
+    /// that answers changes requested is always reviewed (`wantsFollowUp`), however many came
+    /// before. Each review costs an account's weekly limit.
     static let maxRounds = 2
 
     var label: String { verdict == .approved ? "Approved" : "Changes requested" }
     var agentName: String { Job.agentNames[agent] ?? agent }
-    /// Changes requested for the last time Oby may ask: the job stops here and needs the user.
-    var stopsHere: Bool { verdict == .changesRequested && round >= Self.maxRounds }
-    static let stopLine = "Oby requested changes \(maxRounds) times. Take it from here."
+    /// Changes requested on a blocker that came back: the job stops here and needs the user. One
+    /// from before #224 stopped at its second.
+    var stopsHere: Bool { verdict == .changesRequested && (repeated ?? (round >= Self.maxRounds)) }
+    /// Changes requested, and the job goes on: the author's round answers them, and its commits get
+    /// the next review.
+    var wantsFollowUp: Bool { verdict == .changesRequested && !stopsHere }
+    static let stopLine = "Oby's review found a blocker it asked to fix before. Take it from here."
+    /// Why it stopped (`stopsHere`): the blocker that came back, or, before #224, how many times Oby asked.
+    var stopReason: String { repeated == true ? Self.stopLine : "Oby requested changes \(round) times. Take it from here." }
 
     /// "Oby review · Claude Code · Personal: Approved": the title of its check run on the pull request.
     var heading: String { "Oby review · \(agentName) · \(account): \(label)" }
@@ -169,10 +185,20 @@ nonisolated struct Review: Codable, Equatable, Sendable {
                 + "that the new commits don't break anything. Don't review the rest of the pull request again, and don't raise what the last review didn't: it was judged then. Read the new changes and the code around them; run the repository's tests or checks when that tells you more.",
             "Blocking means a finding the last review blocked on that isn't fixed, or something the new commits broke: a bug, a security or data-loss problem, or a requirement or test they broke. Anything else you notice in the new commits is worth doing later.",
         ]
+        if input != nil { lines.append(again) }
         if let apple = AppleCheck.reviewLine(job) { lines.append(apple) }
         lines += [ownText, "This is a review only: make no commits and change no files. Don't push, open pull requests or post anything to GitHub: Oby posts your review itself."]
             + TetrixUse.reviewLines(job) + [finish]
         return lines.joined(separator: "\n\n")
+    }
+
+    /// How a follow-up marks a blocker that wasn't fixed or came back (`repeats`).
+    static let again = "Start a blocking finding with `Again:` when it's one the file lists, the last review's or an earlier one's that came back, and the new commits didn't fix it. Oby keeps reviewing while each round fixes what the last review blocked on, and hands the pull request to a person when a blocker comes back, so use `Again:` only for those: a new problem is just blocking."
+
+    /// Whether a follow-up's blocking findings include one an earlier review blocked on: it starts
+    /// with `Again:` (`again`), bold or not.
+    static func repeats(_ blocking: [String]) -> Bool {
+        blocking.contains { $0.filter { !"`*_".contains($0) }.trimmingCharacters(in: .whitespaces).lowercased().prefixMatch(of: /again\s*[:\-–—]/) != nil }
     }
 
     /// What Oby writes on the pull request itself, so no reviewer blocks on what the agent can't
@@ -201,7 +227,8 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     static func previousFile(_ review: Review) -> String { "review-\(review.round).md" }
 
     /// The last review's blocking findings, quoted for its follow-up (its whole review when it
-    /// didn't sort them). Nil when there's nothing to quote.
+    /// didn't sort them), then what earlier reviews blocked on, fixed since. Nil when there's
+    /// nothing to quote.
     static func previous(_ review: Review, summary: String?, pr: Int) -> String? {
         let lines: [String]
         if let blocking = review.blocking, !blocking.isEmpty {
@@ -211,6 +238,13 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         } else {
             return nil
         }
+        let earlier = (review.blockedBefore ?? []).isEmpty ? "" : """
+
+
+            Earlier reviews blocked on these, and later rounds fixed them:
+
+            \((review.blockedBefore ?? []).map { "> - " + $0 }.joined(separator: "\n"))
+            """
         return """
             # What Oby's review \(review.round) of pull request #\(pr) found blocking, quoted
 
@@ -219,7 +253,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             ---
 
             \(lines.map { "> " + $0 }.joined(separator: "\n"))
-            """
+            """ + earlier
     }
 
     /// Keeps `text` as `file` until review job `id`'s worktree is ready: Workspace.prepare copies a
@@ -388,7 +422,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         return CheckRun(name: CheckRun.review, head: head, conclusion: review.verdict == .approved ? .success : .failure, title: review.heading, summary: """
             \(CheckRun.fenced(cut))
 
-            \(overruled(review, summary: summary).map { $0 + "\n\n" } ?? "")by Oby: \(review.agentName) reviewed this pull request on the \(review.account) account for Oby, review \(review.round) of at most \(maxRounds). GitHub doesn't let a pull request's own author approve it or request changes, so this check stands in. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
+            \(overruled(review, summary: summary).map { $0 + "\n\n" } ?? "")by Oby: \(review.agentName) reviewed this pull request on the \(review.account) account for Oby, review \(review.round). GitHub doesn't let a pull request's own author approve it or request changes, so this check stands in. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
             """)
     }
 
@@ -427,7 +461,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
 
             - Reviewer: \(review.agentName), on the \(review.account) account
             - Verdict: \(review.label)
-            - Review \(review.round) of at most \(maxRounds)
+            - Review \(review.round)
             \(posted)
 
             ---
@@ -472,15 +506,15 @@ nonisolated struct Review: Codable, Equatable, Sendable {
 }
 
 extension Desk {
-    /// A job just published: another account reviews its pull request until Oby has reviewed it
-    /// `Review.maxRounds` times. After changes requested, the reviewer gets the last review's
-    /// blocking findings to check, quoted in a file (`Review.followUp`). When the other accounts are signed in but full, the review waits
+    /// A job just published: another account reviews its pull request while its last review's
+    /// changes are what it answers (`Review.wantsFollowUp`), or until Oby has reviewed it `Job.reviewCap` times. After changes requested, the reviewer gets the last review's
+    /// blocking findings to check, and the earlier ones, quoted in a file (`Review.followUp`). When the other accounts are signed in but full, the review waits
     /// and starts as soon as one has room (`startWaitingReviews`).
     func reviewPublished(_ job: Job) {
         guard job.reviewOf == nil, job.reviewing == nil, let pr = Review.pullRequest(of: job) else { return }
         var author = job
-        guard (job.review?.round ?? 0) < job.reviewCap else {
-            author.reviewError = "Oby reviewed it \(job.reviewCap) times already: a person reviews it from here."
+        guard job.review?.wantsFollowUp == true || (job.review?.round ?? 0) < job.reviewCap else {
+            author.reviewError = "Oby reviewed it \(job.review?.round ?? 0) times already: a person reviews it from here."
             return replace(author)
         }
         guard let route = Review.reviewer(accounts.accounts, for: job) else {
@@ -535,6 +569,10 @@ extension Desk {
         let findings = Review.findings(review.summary)
         result.branch = review.branch
         result.blocking = findings.flatMap { $0.blocking.isEmpty ? nil : $0.blocking }
+        let before = (author.review?.blockedBefore ?? []) + (author.review?.blocking ?? [])
+        result.blockedBefore = before.isEmpty ? nil : before
+        // Only a follow-up is told about `Again:`.
+        if verdict == .changesRequested { result.repeated = author.review != nil && Review.repeats(result.blocking ?? []) }
         let followUps = (author.review?.followUps ?? []) + (findings?.later ?? [])
         result.followUps = followUps.isEmpty ? nil : followUps
         result.applying = true

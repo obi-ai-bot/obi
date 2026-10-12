@@ -358,7 +358,7 @@ struct GitHubAppTests {
         #expect(sent[0].body["output.summary"]?.hasPrefix("```\nBlocking:\n- It crashes\n\nVERDICT: CHANGES REQUESTED\n```") == true)
         // Approved on the second look: success.
         #expect(sent[1].body["conclusion"] == "success" && sent[1].body["output.title"] == "Oby review · Codex · Work: Approved" && sent[1].body["head_sha"] == nil)
-        #expect(sent[1].body["output.summary"]?.contains("review 2 of at most 2") == true)
+        #expect(sent[1].body["output.summary"]?.contains("review 2. ") == true)
         // The Mac check: failure, the steps and the failing tests.
         #expect(sent[2].body["name"] == "Oby Mac check" && sent[2].body["conclusion"] == "failure" && sent[2].body["output.title"] == "Oby Mac check · Studio: Failed")
         #expect(sent[2].body["output.summary"]?.contains("| Mac app and MacTests | Failed | 1m 01s |") == true)

@@ -168,8 +168,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
             && (pullRequest?.state ?? .open) == .open
     }
-    /// Oby's review requested changes for the last time it may (Review.maxRounds), and the pull
-    /// request is still open: a person takes it from here.
+    /// Oby's review requested changes for the last time it may (`Review.stopsHere`: a blocker came
+    /// back), and the pull request is still open: a person takes it from here.
     var reviewNeedsYou: Bool {
         status == .done && published != nil && (review?.stopsHere ?? false) && (pullRequest?.state ?? .open) == .open
     }

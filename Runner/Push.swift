@@ -394,7 +394,7 @@ final class Push {
         // Why its own publish failed, when that's what it needs; why Oby's review stopped.
         let body = switch notice {
         case .ready: job.publishError ?? state.line
-        case .review: Review.stopLine
+        case .review: job.review?.stopReason ?? Review.stopLine
         case .question: job.question?.text ?? state.line
         case .merge: job.mergeError ?? job.macCheck.map { $0.problem ?? $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? state.line
         case .failed, .interrupted: state.line

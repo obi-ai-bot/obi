@@ -62,6 +62,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Oby's merge stopped where a person takes over (the runner derives it, docs/runner-api.md "Mac
     /// check"), or nil from older runners.
     var stoppedMerge: Bool?
+    /// Oby's review stopped asking for changes, where a person takes over (the runner derives it,
+    /// docs/runner-api.md "Oby's review"), or nil from older runners.
+    var stoppedReview: Bool?
     /// How freely its agent works ("ask", "acceptEdits", "plan" or "bypass", `RunnerMode`); sent
     /// with a dispatch to pick one. Nil from older runners, and on a draft for the default.
     var mode: String?
@@ -83,6 +86,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves
         case stoppedMerge = "mergeNeedsYou"
+        case stoppedReview = "reviewNeedsYou"
     }
 
     /// "Moved from Codex · Deskree to Claude Code · Personal": its latest move, or nil (as Engine's).
@@ -131,11 +135,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
             && (pullRequest?.state ?? "OPEN") == "OPEN"
     }
 
-    /// Oby's review requested changes for the last time it may (4 rounds) and the pull request is still open.
-    var reviewNeedsYou: Bool {
-        status == .done && published != nil && review?.verdict == "changesRequested" && (review?.round ?? 0) >= 4
-            && (pullRequest?.state ?? "OPEN") == "OPEN"
-    }
+    /// Oby's review requested changes for the last time it may (a blocker came back) and the pull
+    /// request is still open, as the runner says.
+    var reviewNeedsYou: Bool { stoppedReview == true }
 
     /// Done with commits its pull request won't take: merged or closed before they went out (as Engine's `Job.stranded`).
     var stranded: Bool {

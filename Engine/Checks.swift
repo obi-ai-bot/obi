@@ -113,7 +113,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// A failed check whose round for the author ended without a new commit to check.
     static let nothingNewLine = "The agent's round for it pushed no new commit. Try again to check the same commit, or take it from here."
     /// A failed check whose fix Oby could never review: its reviews are used up.
-    static let reviewsUsedLine = "Oby reviewed it \(Review.maxRounds) times already, so a fix can't merge. Take it from here."
+    static let reviewsUsedLine = "Oby's reviews are used up, so a fix can't merge. Take it from here."
     /// How many times the runner tries a merge that failed on something that may pass later.
     static let maxTries = 3
 

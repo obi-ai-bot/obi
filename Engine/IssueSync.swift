@@ -59,7 +59,7 @@ final class IssueSync {
             return Event(status: "status:needs-test", key: "merged:\(job.published ?? "")")
         }
         if job.waitsForAnswer || job.reviewNeedsYou || job.needsYou {
-            let reason = job.question?.text ?? (job.reviewNeedsYou ? Review.stopLine : job.publishError ?? job.summary.split(separator: "\n").first.map(String.init) ?? "a user decision")
+            let reason = job.question?.text ?? (job.reviewNeedsYou ? job.review?.stopReason ?? Review.stopLine : job.publishError ?? job.summary.split(separator: "\n").first.map(String.init) ?? "a user decision")
             return Event(status: "status:blocked", key: "blocked:\(reason)")
         }
         if job.isActive {
