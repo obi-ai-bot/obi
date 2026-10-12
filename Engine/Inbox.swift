@@ -13,7 +13,7 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
     enum Kind: String, Codable, Sendable {
         /// The job's agent asked something (`Job.question`) and waits for the answer.
         case question
-        /// Oby's review requested changes for the last time it may (`Job.reviewNeedsYou`).
+        /// Oby's review stopped asking for changes: a blocker came back, or it was the last review (`Job.reviewNeedsYou`).
         case review
         /// The job failed or was interrupted.
         case failed
@@ -83,7 +83,7 @@ nonisolated enum Inbox {
         }
         guard !job.isActive else { return nil }
         if job.reviewNeedsYou, let review = job.review {
-            return item(.review, "review-\(review.job)", Review.stopLine, [oneMoreRound, dismiss])
+            return item(.review, "review-\(review.job)", review.stopReason, [oneMoreRound, dismiss])
         }
         if job.mergeNeedsYou, let check = job.macCheck {
             // A merge that failed can be tried again; each try that fails is its own item.

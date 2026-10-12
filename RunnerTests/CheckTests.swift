@@ -204,7 +204,7 @@ struct CheckTests {
         try await approve("The blocking finding is fixed.\n\nBlocking:\n(none)\n\nWorth doing later:\n- Add coverage\n\nVERDICT: APPROVED")
         try await until("the approval queues a Mac check") { desk.job("author")?.macCheck != nil }
         let reviewed = try #require(desk.job("author"))
-        #expect(reviewed.review?.round == Review.maxRounds && reviewed.review?.verdict == .approved)
+        #expect(reviewed.review?.round == 2 && reviewed.review?.verdict == .approved)
         #expect(reviewed.review?.blocking == nil && reviewed.review?.followUps == ["Add coverage"])
         #expect(reviewed.review?.stopsHere == false && !reviewed.reviewNeedsYou)
         #expect(!desk.inbox.contains { $0.job == "author" && $0.kind == .review && $0.isOpen })

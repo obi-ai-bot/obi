@@ -355,11 +355,11 @@ final class InboxTests {
         var interrupted = failed
         interrupted.status = .interrupted
         #expect(Inbox.need(of: interrupted)?.kind == .failed)
-        // Oby's fourth review asked for changes: one more round, or let it go.
+        // Oby's last review asked for changes: one more round, or let it go.
         var reviewed = fix
         reviewed.status = .done
         reviewed.published = "https://github.com/deskree-inc/oby/pull/80"
-        reviewed.review = Review(verdict: .changesRequested, job: "rev4", agent: "codex", account: "Work", round: 4)
+        reviewed.review = Review(verdict: .changesRequested, job: "rev4", agent: "codex", account: "Work", round: Review.maxRounds)
         let review = Inbox.need(of: reviewed)
         #expect(review?.kind == .review && review?.text == Review.stopLine && review?.options == ["One more round", "Dismiss"])
         // Nothing for what needs nothing.
