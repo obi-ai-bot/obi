@@ -57,6 +57,35 @@ describe("sign-in by email code", () => {
     expect(spent.body.error).toBe("Too many tries with that code. Ask for a new one.");
   });
 
+  it("counts concurrent wrong guesses atomically", async () => {
+    const app = testApp();
+    await app.call("POST", "/v1/auth/otp/request", { email: "well@example.com" });
+    const actual = app.mail.lastCode();
+    const wrong = actual === "000000" ? "000001" : "000000";
+    const answers = await Promise.all(
+      Array.from({ length: 20 }, () => app.call("POST", "/v1/auth/otp/verify", { email: "well@example.com", code: wrong })),
+    );
+    expect(answers.every((answer) => answer.status === 401)).toBe(true);
+    const row = await env.DB.prepare("SELECT attempts FROM otp_codes WHERE email = ?1").bind("well@example.com").first<{ attempts: number }>();
+    expect(row?.attempts).toBe(5);
+  });
+
+  it("limits verification attempts from one address", async () => {
+    const app = testApp();
+    const from = { "CF-Connecting-IP": "203.0.113.9" };
+    await app.call("POST", "/v1/auth/otp/request", { email: "well@example.com" }, undefined, from);
+    const actual = app.mail.lastCode();
+    const wrong = actual === "000000" ? "000001" : "000000";
+    for (let i = 0; i < 20; i++) {
+      const answer = await app.call("POST", "/v1/auth/otp/verify", { email: "well@example.com", code: wrong }, undefined, from);
+      expect(answer.status).toBe(401);
+    }
+    const blocked = await app.call("POST", "/v1/auth/otp/verify", { email: "well@example.com", code: wrong }, undefined, from);
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.error).toMatch(/^Too many sign-in attempts from this network\. Try again in \d+ minutes?\.$/);
+    expect(Number(blocked.headers.get("Retry-After"))).toBeGreaterThan(0);
+  });
+
   it("a code expires after ten minutes", async () => {
     const app = testApp();
     await app.call("POST", "/v1/auth/otp/request", { email: "well@example.com" });

@@ -27,6 +27,7 @@ export const CODE_TRIES = 5;
 export const LIMITS = {
   codesPerEmail: { max: 5, windowSeconds: 15 * 60 } satisfies Limit,
   codesPerAddress: { max: 20, windowSeconds: 60 * 60 } satisfies Limit,
+  verificationsPerAddress: { max: 20, windowSeconds: 15 * 60 } satisfies Limit,
   installationsPerUser: { max: 10, windowSeconds: 60 * 60 } satisfies Limit,
 };
 export const MAX_INSTALLATIONS = 20;
@@ -139,21 +140,30 @@ async function verifyCode(request: Request, env: Env, now: () => Date): Promise<
   const email = emailOf(body.email);
   const code = typeof body.code === "string" ? body.code.replace(/\s+/g, "") : "";
   if (!/^\d{6}$/.test(code)) throw new Reply(422, "The code is six digits.");
+  const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  await limit(env.DB, `verifications:address:${address}`, LIMITS.verificationsPerAddress, now(), "Too many sign-in attempts from this network.");
   const row = await env.DB.prepare("SELECT id, code_hash, attempts, expires_at FROM otp_codes WHERE email = ?1 AND used_at IS NULL ORDER BY created_at DESC LIMIT 1")
     .bind(email)
     .first<{ id: string; code_hash: string; attempts: number; expires_at: string }>();
   if (!row || row.expires_at <= iso(now())) throw new Reply(401, "That code has expired. Ask for a new one.");
-  if (row.attempts >= CODE_TRIES) throw new Reply(401, "Too many tries with that code. Ask for a new one.");
-  if (row.code_hash !== (await codeHash(email, code))) {
-    await env.DB.prepare("UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?1").bind(row.id).run();
+  const attempt = await env.DB.prepare(
+    "UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?1 AND used_at IS NULL AND attempts < ?2 RETURNING code_hash, expires_at",
+  )
+    .bind(row.id, CODE_TRIES)
+    .first<{ code_hash: string; expires_at: string }>();
+  if (!attempt) throw new Reply(401, "Too many tries with that code. Ask for a new one.");
+  if (attempt.code_hash !== (await codeHash(email, code))) {
     throw new Reply(401, "That code isn't right.");
   }
   const at = now();
+  const claimed = await env.DB.prepare("UPDATE otp_codes SET used_at = ?2 WHERE id = ?1 AND used_at IS NULL RETURNING id")
+    .bind(row.id, iso(at))
+    .first<{ id: string }>();
+  if (!claimed) throw new Reply(401, "That code has expired. Ask for a new one.");
   const user = await upsertUser(env.DB, email, at);
   const token = randomToken("oby_session_");
   const expires = new Date(at.getTime() + SESSION_DAYS * 86_400_000);
   await env.DB.batch([
-    env.DB.prepare("UPDATE otp_codes SET used_at = ?2 WHERE id = ?1").bind(row.id, iso(at)),
     env.DB.prepare("INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)").bind(
       newId(),
       user.id,

@@ -63,7 +63,7 @@ CREATE TABLE endpoints (
   created_at TEXT NOT NULL
 );
 
--- Fixed windows for the rate limits on sign-in codes and on creating installations.
+-- Fixed windows for the rate limits on sign-in codes, verification attempts and creating installations.
 CREATE TABLE rate_limits (
   key TEXT PRIMARY KEY,
   window_start INTEGER NOT NULL,
