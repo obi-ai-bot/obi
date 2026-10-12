@@ -380,7 +380,11 @@ nonisolated final class ProcessGroup: Sendable {
         defer { pthread_sigmask(SIG_SETMASK, &kept, nil) }
         try process.run()
         let pid = process.processIdentifier
-        group.state.withLock { $0.target = getpgid(pid) == pid ? -pid : pid }
+        // A process that ended before this line (the Mac's Foundation reaps it at once, on a busy
+        // machine) has no group to ask about: take it as its own, so what it left is still killed.
+        // Safe: a group's id isn't reused while any member lives, and kill(-pid) on none is ESRCH.
+        let pgid = getpgid(pid), gone = pgid == -1 && errno == ESRCH
+        group.state.withLock { $0.target = pgid == pid || gone ? -pid : pid }
         Thread.detachNewThread {
             var info = siginfo_t()
             // ECHILD: Foundation reaped it already (the Mac's does as soon as it ends).
