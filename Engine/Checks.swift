@@ -132,7 +132,9 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         case .error: "Couldn't run"
         }
     }
-    var macName: String { mac ?? "a Mac" }
+    /// What a Mac that gives no name is called. Every such Mac shares it, so none gets back a check it lost.
+    static let unnamedMac = "a Mac"
+    var macName: String { mac ?? Self.unnamedMac }
     /// `problem` where "couldn't run" is said already, capitalized.
     var problemLine: String? {
         guard let problem, problem.hasPrefix(Self.couldNotRun) else { return problem }
@@ -1194,8 +1196,10 @@ extension Desk {
     /// took and went quiet on (`MacCheck.lease`). It's the asking Mac's now. A Mac that takes Apple
     /// checks (`kinds`) gets those first: an agent waits for them mid-round. Then merge checks, then
     /// an Apple check no Mac took in time, late (`Desk.nextAppleCheck`). When two approved pull
-    /// requests touch the same files, the older job's merges first (`mergesAfter`, #237).
+    /// requests touch the same files, the older job's merges first (`mergesAfter`, #237). Before
+    /// all of them, the check this Mac lost (`Desk.lostCheck`).
     func nextMacCheck(mac: String, kinds: Set<MacCheck.Kind> = [.merge], now: Date = .now) -> MacCheck? {
+        if let check = lostCheck(mac: mac, kinds: kinds, now: now) { return check }
         if kinds.contains(.apple), let check = nextAppleCheck(mac: mac, now: now) { return check }
         guard kinds.contains(.merge) else { return kinds.contains(.apple) ? nextAppleCheck(mac: mac, late: true, now: now) : nil }
         let ready = jobs.filter { job in
@@ -1219,6 +1223,38 @@ extension Desk {
     /// check waits until it merged (or stopped on its way), then a rebase settles the conflict (#237).
     func mergesAfter(_ job: Job) -> Job? {
         jobs.first { $0.id != job.id && $0.created < job.created && $0.awaitsMerge && !Self.overlap(job, $0).isEmpty }
+    }
+
+    /// The check, Apple or merge, that Mac `mac` took and has had no result for within its lease,
+    /// handed back to it with `started` now (#227). A Mac runs one check at a time and asks only
+    /// when it's free (Mac/MacChecks.swift), so asking while it holds one means it lost it: Oby on
+    /// it quit or relaunched mid-check. Its job must still wait for it, as when it was taken. None
+    /// for Macs without a name: they can't be told apart.
+    func lostCheck(mac: String, kinds: Set<MacCheck.Kind>, now: Date = .now) -> MacCheck? {
+        guard mac != MacCheck.unnamedMac else { return nil }
+        func held(_ check: MacCheck?) -> Bool {
+            guard let check, check.state == .running, check.mac == mac else { return false }
+            return now.timeIntervalSince(check.started ?? now) <= MacCheck.lease
+        }
+        for var job in jobs {
+            if kinds.contains(.apple), job.isActive, held(job.appleCheck), var check = job.appleCheck {
+                check.started = now
+                job.appleCheck = check
+                replace(job)
+                onCheckChange(check)
+                Logger.jobs.notice("job \(job.id, privacy: .public): Apple check \(check.id, privacy: .public) back to \(mac, privacy: .public), which lost it")
+                return check
+            }
+            if kinds.contains(.merge), !job.isActive, held(job.macCheck), var check = job.macCheck, check.head == job.pushedHead {
+                check.started = now
+                job.macCheck = check
+                replace(job)
+                onCheckChange(check)
+                Logger.jobs.notice("job \(job.id, privacy: .public): Mac check \(check.id, privacy: .public) back to \(mac, privacy: .public), which lost it")
+                return check
+            }
+        }
+        return nil
     }
 
     /// A Mac reports check `id`. Its results go on the job and, while the job still waits for that

@@ -303,7 +303,7 @@ final class API {
     /// check, now that Mac's, or none. `kinds` (`merge,apple`) says which it takes: merge checks
     /// only when it says nothing, as Macs from before Apple checks do.
     func nextCheck(mac: String?, kinds: String? = nil) -> Response {
-        let name = mac.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)) }.flatMap { $0.isEmpty ? nil : $0 } ?? "a Mac"
+        let name = mac.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)) }.flatMap { $0.isEmpty ? nil : $0 } ?? MacCheck.unnamedMac
         let taken = kinds.map { Set($0.split(separator: ",").compactMap { MacCheck.Kind(rawValue: String($0)) }) } ?? [.merge]
         return Self.json(CheckAnswer(check: desk.nextMacCheck(mac: name, kinds: taken).map(MacCheckJSON.init)))
     }

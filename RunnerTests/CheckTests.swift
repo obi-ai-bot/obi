@@ -165,13 +165,20 @@ struct CheckTests {
         #expect(desk.job("author")?.macCheck == taken && made.events.last == taken)
         #expect(desk.job("author")?.pipeline.stages.last?.detail == "Checking on Studio")
         #expect(desk.nextMacCheck(mac: "Laptop", now: now + 60) == nil)
+        // Oby on Studio relaunched mid-check (#227): Studio asks again and gets the same check back, its lease from now.
+        let relaunched = now + 120
+        let back = try #require(desk.nextMacCheck(mac: "Studio", now: relaunched))
+        #expect(back.id == check.id && back.state == .running && back.mac == "Studio" && back.started == relaunched)
+        #expect(desk.job("author")?.macCheck == back && made.events.last == back)
         // The lease outlasts the longest check: every step to its timeout, each xcodebuild step twice.
         let longest = MacCheck.commands(cache: URL(filePath: "/")).reduce(0) { $0 + $1.timeout * ($1.xcodebuild ? 2 : 1) }
         #expect(MacCheck.lease > longest && longest == 170 * 60)
-        #expect(desk.nextMacCheck(mac: "Laptop", now: now + longest) == nil)
-        // A Mac that went quiet past the lease: the next one to ask gets it.
-        let again = try #require(desk.nextMacCheck(mac: "Laptop", now: now + MacCheck.lease + 1))
+        #expect(desk.nextMacCheck(mac: "Laptop", now: relaunched + longest) == nil)
+        #expect(desk.nextMacCheck(mac: MacCheck.unnamedMac, now: relaunched + longest) == nil)
+        // A Mac that went quiet past the lease: the next one to ask gets it, and it's no longer Studio's.
+        let again = try #require(desk.nextMacCheck(mac: "Laptop", now: relaunched + MacCheck.lease + 1))
         #expect(again.id == check.id && again.mac == "Laptop")
+        #expect(desk.nextMacCheck(mac: "Studio", now: relaunched + MacCheck.lease + 2) == nil)
     }
 
     @Test func noCheckForACommitTheReviewDidNotReadOrABranchOtherThanDev() async throws {
@@ -1150,6 +1157,11 @@ struct CheckTests {
             #expect(taken["id"] as? String == id && taken["state"] as? String == "running" && taken["mac"] as? String == "Studio Mac")
             #expect(taken["head"] as? String == Self.head && taken["pr"] as? Int == 80 && taken["base"] as? String == "dev" && taken["round"] as? Int == 1)
             for key in ["finished", "steps", "failures", "checkRun", "comment", "postError"] { #expect(taken[key] is NSNull, "\(key)") }
+            // The same Mac asking again lost it (#227): it gets it back. A Mac without a name doesn't.
+            try await client.execute(uri: "/v1/checks/next?mac=Studio%20Mac", method: .get, headers: owner) { response in
+                let back = object(Data(response.body.readableBytesView))["check"] as? [String: Any] ?? [:]
+                #expect(back["id"] as? String == id && back["mac"] as? String == "Studio Mac")
+            }
             try await client.execute(uri: "/v1/checks/next", method: .get, headers: owner) { response in
                 #expect(String(decoding: response.body.readableBytesView, as: UTF8.self) == #"{"check":null}"#)
             }
@@ -1174,12 +1186,12 @@ struct CheckTests {
                 #expect(detail == "Mac check failed" || detail == "Not merged")
             }
         }
-        // Every app heard the check taken and ended.
+        // Every app heard the check taken, taken again and ended.
         var heard: [String] = []
-        while heard.count < 2, let event = await events.next() {
+        while heard.count < 3, let event = await events.next() {
             if event.hasPrefix("event: check\n") { heard.append(event) }
         }
-        #expect(heard.first?.contains(#""state":"running""#) == true && heard.last?.contains(#""state":"failed""#) == true)
+        #expect(heard.prefix(2).allSatisfy { $0.contains(#""state":"running""#) } && heard.last?.contains(#""state":"failed""#) == true)
         // The job had no session to pick up: it says why, rather than starting a round.
         try await until("the check run is written") { desk.job("author")?.mergeError != nil }
         #expect(desk.job("author")?.mergeError == "The Mac check failed, but the job has no session to pick up." && made.runs.count == 1)
