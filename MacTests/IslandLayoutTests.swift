@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import Testing
 @testable import Oby
 
@@ -30,6 +31,27 @@ struct IslandLayoutTests {
 
     static func layout(_ state: IslandState, on screen: Screen, line: String = IslandLayoutTests.lines[0]) -> IslandLayout {
         IslandLayout.of(state, screenWidth: screen.width, notch: screen.notch, barHeight: 24, line: line, openHeight: 240)
+    }
+
+    @MainActor @Test func islandChatUsesTheWindowsSharedThread() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "oby-chat-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        desk.makeBrain = { _, _ in [] }
+        let feed = RunnerFeed()
+        let model = IslandModel(desk: desk, feed: feed)
+        let reply = Turn(id: "remote", who: .oby, text: "Hello from the runner")
+        feed.conversation.apply(reply)
+        #expect(model.recentTurns.last == reply && model.unreadReply)
+        model.markChatRead()
+        #expect(!model.unreadReply)
+        model.sendChat("   \n")
+        #expect(desk.turns.isEmpty)
+        model.sendChat("Hello from the notch")
+        #expect(feed.conversation.thread(with: desk.turns).last?.text == "Hello from the notch")
+        #expect(model.recentTurns == model.thread)
+        desk.cancel()
     }
 
     @Test(arguments: screens, states)

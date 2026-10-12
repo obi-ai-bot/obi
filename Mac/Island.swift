@@ -37,6 +37,20 @@ final class IslandModel {
         self.feed = feed
     }
 
+    /// Both chat surfaces read and send through this model.
+    var thread: [Turn] { feed.conversation.thread(with: desk.turns) }
+    var recentTurns: [Turn] { Array(thread.suffix(4)) }
+    var chatWindowVisible = false
+    var readReply: String?
+    var unreadReply: Bool { thread.last(where: { $0.who == .oby }).map { $0.id != readReply } ?? false }
+
+    func markChatRead() { readReply = thread.last(where: { $0.who == .oby })?.id }
+
+    func sendChat(_ text: String) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text, shown: text)
+    }
+
     /// Agents working now, on this Mac and on the runner.
     var working: Int { desk.active.count + feed.working }
 
@@ -81,7 +95,7 @@ final class IslandController {
     /// The last words sent were hands-free (fn + Space): once Oby has spoken its reply, it listens again.
     private var handsFreeAsk = false
     /// Opens the Oby window (Mac/App/ChatWindow.swift), on a job's screen when one is named: the
-    /// app sets it. The island's "Open Oby" and its "Last from Oby" line go there.
+    /// app sets it. The island's "Open Chat" button goes there.
     var openWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
 
     init() { desk.issueSync.enabled = true; model = IslandModel(desk: desk, feed: feed) }
@@ -485,10 +499,7 @@ private struct Waveform: View {
     }
 }
 
-/// The open island, the glance (#11): what Oby is up to, the last thing it said (the conversation
-/// itself lives in the Oby window), every job the iPhone lists (the runner's and this Mac's, in
-/// the same groups), one job's screen when you click it, and the field where you type: your words
-/// go to the same thread the window shows.
+/// The open island: needs-you cards and jobs above a compact view of the shared chat.
 private struct OpenIsland: View {
     let model: IslandModel
     let characterWidth: CGFloat
@@ -515,8 +526,6 @@ private struct OpenIsland: View {
 
     /// Oby is thinking about what you just said.
     private var thinking: Bool { if case .thinking = desk.talk { true } else { false } }
-    /// There's a conversation to ask about.
-    private var threaded: Bool { !desk.turns.isEmpty || thinking }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -531,7 +540,7 @@ private struct OpenIsland: View {
                     Button(action: clear) { topPill { Text("Clear done") } }
                         .buttonStyle(.plain)
                 }
-                Button { onOpenWindow(nil) } label: { topPill { Text("Open Oby") } }
+                Button { onOpenWindow(nil) } label: { topPill { Text("Open Chat") } }
                     .buttonStyle(.plain)
                     .help("The window: the whole conversation, every agent, and what's live")
                 Button(action: onClose) {
@@ -545,30 +554,27 @@ private struct OpenIsland: View {
             }
             .frame(minHeight: 92, alignment: .top)
 
-            // The last thing Oby said, in one line that opens the window; while it thinks, its
-            // bubble and × stay in sight, even over a job's screen.
-            if threaded, selected == nil || thinking {
-                LastFromOby(desk: desk, speaker: model.speaker, onCancel: { desk.cancel() }, onOpen: { onOpenWindow(nil) })
-            }
-
             switch desk.talk {
             case .plan(let drafts) where drafts.count == 1:
-                TrayRow(tray: tray)
-                PlanCard(draft: drafts[0], accounts: desk.accounts.accounts.filter(\.signedIn),
-                         onDispatch: { desk.dispatch(tray.attach($0)); tray.clear() },
-                         onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
-                         onCancel: { desk.cancel() })
+                scrolling {
+                    PlanCard(draft: drafts[0], accounts: desk.accounts.accounts.filter(\.signedIn),
+                             onDispatch: { desk.dispatch(tray.attach($0)); tray.clear() },
+                             onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
+                             onCancel: { desk.cancel() })
+                }
             case .plan(let drafts):
-                TrayRow(tray: tray)
-                PlansCard(drafts: drafts, accounts: desk.accounts.accounts.filter(\.signedIn),
-                          onDispatch: { for draft in $0 { desk.dispatch(tray.attach(draft)) }; tray.clear() },
-                          onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
-                          onCancel: { desk.cancel() })
+                scrolling {
+                    PlansCard(drafts: drafts, accounts: desk.accounts.accounts.filter(\.signedIn),
+                              onDispatch: { for draft in $0 { desk.dispatch(tray.attach(draft)) }; tray.clear() },
+                              onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
+                              onCancel: { desk.cancel() })
+                }
             case .question(let said, let question):
-                DecisionCard(title: question.text, options: CardOption.of(question.options),
-                             onChoose: { desk.answer($0.answer, said: said, question: question.text) },
-                             onWords: { desk.answer($0, said: said, question: question.text) })
-                field
+                scrolling {
+                    DecisionCard(title: question.text, options: CardOption.of(question.options),
+                                 onChoose: { desk.answer($0.answer, said: said, question: question.text) },
+                                 onWords: { desk.answer($0, said: said, question: question.text) })
+                }
             default:
                 if let row = selectedRow {
                     scrolling { screen(row).id(row.id) }
@@ -588,8 +594,11 @@ private struct OpenIsland: View {
                     if feed.down {
                         Text("\(feed.name) isn't reachable").font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
                     }
-                    field
                 }
+            }
+            if selected == nil {
+                compactChat
+                field
             }
         }
         .padding(insets)
@@ -597,7 +606,8 @@ private struct OpenIsland: View {
         .onExitCommand {
             if thinking { desk.cancel() } else if selected != nil { selected = nil } else { onClose() }
         }
-        .onAppear { typing = true }
+        .onAppear { typing = true; model.markChatRead() }
+        .onChange(of: model.thread.last?.id) { if selected == nil { model.markChatRead() } }
         // A notification opened the island on a runner's job: its screen opens.
         .onChange(of: model.focus, initial: true) { if let focus = model.focus { selected = Row.id(focus, local: false) } }
         // A runner's job open here stays across new lists; one older than the latest 50 (an inbox
@@ -659,7 +669,7 @@ private struct OpenIsland: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
         }
-        .frame(height: min(contentHeight, Self.maxHeight))
+        .frame(height: min(contentHeight, selected == nil ? 250 : Self.maxHeight))
     }
 
     /// The jobs under their groups' headings, as Home shows them on the iPhone.
@@ -780,6 +790,37 @@ private struct OpenIsland: View {
             .background(.white.opacity(0.12), in: Capsule())
     }
 
+    private var compactChat: some View {
+        ScrollView {
+            VStack(spacing: 6) {
+                ForEach(model.recentTurns) { turn in
+                    HStack {
+                        if turn.who == .user { Spacer(minLength: 50) }
+                        Text(turn.text).font(.system(size: 13)).lineLimit(3)
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .background(turn.who == .user ? Color.accentColor : .white.opacity(0.08),
+                                        in: RoundedRectangle(cornerRadius: 13))
+                        if turn.who == .oby { Spacer(minLength: 50) }
+                    }
+                }
+                if model.speaker.speaking {
+                    Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
+                }
+                if thinking {
+                    HStack {
+                        ProgressView().controlSize(.mini)
+                        Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
+                        Button("Cancel") { desk.cancel() }.buttonStyle(.plain)
+                        Spacer()
+                    }
+                }
+            }
+        }
+        .defaultScrollAnchor(.bottom)
+        .frame(height: model.recentTurns.isEmpty && !thinking ? 0 : 150)
+        .accessibilityLabel("Recent conversation with Oby")
+    }
+
     private var field: some View {
         VStack(alignment: .leading, spacing: 8) {
             TrayRow(tray: tray)
@@ -817,7 +858,7 @@ private struct OpenIsland: View {
                     .background(.white.opacity(text.isEmpty ? 0.4 : 1), in: Circle())
             }
             .buttonStyle(.plain)
-            .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty)
+            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .accessibilityLabel("Send")
         }
         .padding(.leading, 18)
@@ -827,9 +868,9 @@ private struct OpenIsland: View {
     }
 
     private func send() {
-        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         // The chips stay until Dispatch, which hands them to the jobs. The thread shows your words alone.
-        desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text, shown: text)
+        model.sendChat(text)
         text = ""
     }
 

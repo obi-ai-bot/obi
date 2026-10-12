@@ -92,6 +92,18 @@ struct ConversationModelTests {
         #expect(ConversationModel.days([], now: now, calendar: calendar).isEmpty)
     }
 
+    @Test func consecutiveBubblesGroupOnlyWithinTheSameDayAndSpeaker() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let midnight = calendar.startOfDay(for: now)
+        let first = turn(1, who: .oby, at: midnight + 60)
+        #expect(ConversationModel.grouped(turn(2, who: .oby, at: midnight + 120), after: first, calendar: calendar))
+        #expect(!ConversationModel.grouped(turn(2, at: midnight + 120), after: first, calendar: calendar))
+        #expect(!ConversationModel.grouped(turn(2, who: .oby, at: midnight + 360), after: first, calendar: calendar))
+        #expect(!ConversationModel.grouped(first, after: turn(0, who: .oby, at: midnight - 1), calendar: calendar))
+        #expect(!ConversationModel.grouped(first, after: nil, calendar: calendar))
+    }
+
     @Test func aTurnsJobsResolveToCards() throws {
         var running = Job(id: "9f08fd10", request: "Review oby PR #33", agent: "claude", account: "default", repo: "deskree-inc/oby",
                           branch: "oby/review-33", pr: 33, kind: .review, task: "Review PR #33")

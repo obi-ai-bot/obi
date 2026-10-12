@@ -34,6 +34,23 @@ struct SidebarTests {
         #expect(SidebarSections.agents(local: [done], runner: []).isEmpty)
     }
 
+    @Test func agentChatsOrderByLatestActivityWithStableTies() {
+        var old = job("old", status: .running, created: 600)
+        old.started = now
+        let recent = job("recent", status: .queued, created: 10)
+        #expect(SidebarSections.agents(local: [recent, old], runner: []).map(\.job.id) == ["old", "recent"])
+        #expect(SidebarSections.agents(local: [job("b", status: .running), job("a", status: .running)], runner: []).map(\.job.id) == ["a", "b"])
+    }
+
+    @MainActor @Test func openChatAlwaysReturnsToThePinnedObyThread() {
+        let state = ChatState()
+        #expect(state.selection == .oby)
+        state.open(job: ("job", true))
+        #expect(state.selection == .job(id: "job", local: true))
+        state.open()
+        #expect(state.selection == .oby)
+    }
+
     @Test func channelsAndObysSayTheyAreNotHereYet() {
         #expect(SidebarSections.channelsEmpty == "Team channels come with F11.")
         #expect(SidebarSections.obysEmpty == "Other people's Obys come with F12.")
