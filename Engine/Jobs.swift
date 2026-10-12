@@ -630,17 +630,46 @@ final class ClaudeAgent: AgentRun {
         self.resume = resume
     }
 
-    /// Where a job's Claude Code reads its MCP servers from (`mcpConfig`): in the worktree's
-    /// `.oby`, which no commit takes.
-    nonisolated static func mcpFile(worktree: URL) -> URL { worktree.appending(path: ".oby/mcp.json") }
+    /// Where a job's Claude Code reads its MCP servers from (`mcpConfig`): in Oby's own folder,
+    /// outside the worktree and hidden from the sandbox but for this one file, shown read-only.
+    /// Written as the agent starts (0600) and removed once its turn ends or it exits (`dropMCP`).
+    nonisolated static func mcpFile(worktree: URL) -> URL {
+        Workspace.root.appending(path: "mcp/\(worktree.lastPathComponent).json")
+    }
+
+    /// What a server may keep: what it needs to start. No `headers` (an Authorization token) and
+    /// no `env` (a token for a command), which would reach the agent.
+    nonisolated static let mcpKeys: Set<String> = ["type", "url", "command", "args"]
 
     /// The account's own MCP servers (Tetrix), from its `.claude.json`, as `--mcp-config` reads
-    /// them: a job reads none of the account's settings files, which would drop them too.
+    /// them: a job reads none of the account's settings files, which would drop them too. Only
+    /// `mcpKeys` of each: a server that needs a header or an environment variable is left out, and
+    /// one signed in with OAuth keeps its login in the account's own store.
     nonisolated static func mcpConfig(configDirectory: URL?) -> Data {
         let file = configDirectory?.appending(path: ".claude.json") ?? URL(filePath: "\(Agents.home)/.claude.json")
         let account = (try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-        let servers = account?["mcpServers"] as? [String: Any] ?? [:]
+        var servers: [String: Any] = [:]
+        for (name, value) in account?["mcpServers"] as? [String: Any] ?? [:] {
+            guard let server = value as? [String: Any], server["headers"] == nil, server["env"] == nil else { continue }
+            servers[name] = server.filter { mcpKeys.contains($0.key) }
+        }
         return (try? JSONSerialization.data(withJSONObject: ["mcpServers": servers], options: [.sortedKeys])) ?? Data(#"{"mcpServers":{}}"#.utf8)
+    }
+
+    /// Writes the job's MCP config where only Oby reads it, 0600.
+    nonisolated static func writeMCP(_ data: Data, to file: URL) throws {
+        let folder = file.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? FileManager.default.removeItem(at: file)
+        guard FileManager.default.createFile(atPath: file.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            throw Shell.Failure(message: "Oby couldn't write the agent's MCP config.")
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+
+    /// Claude Code has read its MCP config by the end of its first turn: it goes.
+    private func dropMCP() {
+        try? FileManager.default.removeItem(at: Self.mcpFile(worktree: worktree))
     }
 
     /// The command line and environment Claude Code starts with.
@@ -659,7 +688,9 @@ final class ClaudeAgent: AgentRun {
                              "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
                             + (maxTurns.map { ["--max-turns", String($0)] } ?? [])
                             + (resume.map { ["--resume", $0] } ?? []),
-                            in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude")
+                            in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude",
+                            // Oby's folder is hidden in the box: only the MCP config shows, read-only.
+                            reading: [mcpFile(worktree: worktree).path])
         let environment = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 }
             .merging(AppleCheck.environment(worktree: worktree)) { $1 })
         return (arguments, environment)
@@ -668,10 +699,15 @@ final class ClaudeAgent: AgentRun {
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
         self.onEvent = onEvent
         process.executableURL = URL(filePath: "/usr/bin/env")
-        let launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mode: mode)
-        let mcp = Self.mcpFile(worktree: worktree)
-        try FileManager.default.createDirectory(at: mcp.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Self.mcpConfig(configDirectory: configDirectory).write(to: mcp, options: .atomic)
+        // Before the command line: the box shows the file only when it exists.
+        try Self.writeMCP(Self.mcpConfig(configDirectory: configDirectory), to: Self.mcpFile(worktree: worktree))
+        let launch: (arguments: [String], environment: [String: String])
+        do {
+            launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mode: mode)
+        } catch {
+            dropMCP()
+            throw error
+        }
         process.arguments = launch.arguments
         process.environment = launch.environment
         process.currentDirectoryURL = worktree
@@ -680,7 +716,12 @@ final class ClaudeAgent: AgentRun {
         let log = worktree.appending(path: ".oby/agent.log")
         _ = FileManager.default.createFile(atPath: log.path, contents: nil)
         process.standardError = (try? FileHandle(forWritingTo: log)) ?? FileHandle.nullDevice
-        group = try ProcessGroup.run(process)
+        do {
+            group = try ProcessGroup.run(process)
+        } catch {
+            dropMCP()
+            throw error
+        }
 
         Task {
             do {
@@ -691,6 +732,7 @@ final class ClaudeAgent: AgentRun {
             // The output ends when the process does: how it ended is what's left to say, since a
             // process that's killed says nothing on stderr.
             let exit = await Self.exit(of: process)
+            self.dropMCP()
             let job = worktree.lastPathComponent
             guard let result, !waiting else {
                 Logger.jobs.error("job \(job, privacy: .public): Claude Code ended mid-turn, \(exit, privacy: .public)")
@@ -782,6 +824,7 @@ final class ClaudeAgent: AgentRun {
                 // The turn's result. Desk decides whether another round follows; the job ends when
                 // the process does.
                 result = (summary, failed)
+                dropMCP()
                 onEvent(.step(summary.split(separator: "\n").first.map(String.init) ?? "Finishing"))
                 // ponytail: nothing echoed at all means this Claude Code doesn't replay messages, so
                 // every result ends a turn, as before.

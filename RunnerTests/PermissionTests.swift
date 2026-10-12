@@ -161,6 +161,19 @@ final class PermissionTests {
                         "sudo ls", "xargs rm", "uv run anything", "npm exec foo", "bundle exec rake"] {
             #expect(PermissionPolicy.prefix(of: command) == nil, "\(command)")
         }
+        // Nor does a rule saved before cover them, a bare Bash rule included; a deny rule still refuses.
+        let old = ["Bash(python3:*)", "Bash(env:*)", "Bash(bash:*)", "Bash(uv run:*)", "Bash"].map {
+            PermissionRule(id: $0, rule: $0, repo: "deskree-inc/oby", decision: .allow, created: .now)
+        }
+        for command in ["python3 x.py", "/usr/bin/python3.12 x.py", "env FOO=1 make", "FOO=1 bash -c ls", "uv run x.py"] {
+            #expect(PermissionPolicy.decide(bash(command), mode: .ask, rules: old, worktree: worktree) == .ask, "\(command)")
+        }
+        #expect(PermissionPolicy.decide(bash("swift test"), mode: .ask, rules: old, worktree: worktree) == .allow)
+        let denied = PermissionRule(id: "d", rule: "Bash(python3:*)", repo: "deskree-inc/oby", decision: .deny, created: .now)
+        guard case .deny = PermissionPolicy.decide(bash("python3 x.py"), mode: .bypass, rules: [denied], worktree: worktree) else {
+            Issue.record("a deny rule for python3 didn't refuse it")
+            return
+        }
         let wrapped = PermissionPolicy.permission(for: bash("python3 -c 'import os'"), id: "p1", repo: "deskree-inc/oby", worktree: worktree)
         #expect(wrapped.rule == nil && wrapped.always == nil && wrapped.title == "Run python3 -c 'import os'")
         let card = PermissionPolicy.permission(for: bash("swift test --filter SpeechTests"), id: "p1", repo: "deskree-inc/oby", worktree: worktree)
@@ -420,17 +433,13 @@ final class PermissionTests {
 
     // MARK: Questions
 
-    @Test func theRecommendedOptionIsReadFromTheOptionsLine() throws {
-        let asked = Inbox.question(in: "Read it.\nQUESTION: Keep the old status?\nOPTIONS: Remove it | Keep it (recommended) | Ask later | Never")
-        #expect(asked == Plan.Question(text: "Keep the old status?", options: ["Remove it", "Keep it", "Ask later"], recommended: 1))
-        #expect(Inbox.question(in: "QUESTION: Which?\nOPTIONS: A (Recommended) | B")?.recommended == 0)
-        #expect(Inbox.question(in: "QUESTION: Which?\nOPTIONS: A | B")?.recommended == nil)
-        // A mark on an option that's cut off recommends nothing.
-        #expect(Inbox.question(in: "QUESTION: Which?\nOPTIONS: A | B | C | D (recommended)")?.recommended == nil)
-        #expect(Inbox.howToAsk.contains("(recommended)") && Inbox.howToAsk.contains("at most 3 options"))
-        // Every key goes out, null when there's nothing.
+    /// How the `OPTIONS:` line and its `(Recommended)` are read is #215's (InboxTests); a question
+    /// sends every key, the plan's too, null when there's nothing.
+    @Test func aQuestionSendsEveryKey() throws {
         let json = object(try API.encode(Plan.Question(text: "Which?", options: ["A"])))
-        #expect(json["recommended"] is NSNull && json["plan"] is NSNull)
+        #expect(json["details"] is NSNull && json["recommended"] is NSNull && json["plan"] is NSNull)
+        let plan = object(try API.encode(PermissionPolicy.planQuestion("1. Add modes")))
+        #expect(plan["plan"] as? String == "1. Add modes" && plan["recommended"] as? Int == 0)
     }
 
     @Test func theBrainsQuestionCarriesItsRecommendation() throws {

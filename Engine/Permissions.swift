@@ -151,6 +151,9 @@ nonisolated enum PermissionPolicy {
     static func matches(_ rule: String, _ call: ToolCall, worktree: URL, allowing: Bool) -> Bool {
         let (name, content) = parse(rule)
         guard family(name) == family(call.tool) else { return false }
+        // No allow rule covers what runs whatever follows it (`bash -c`, `python3`, `env`), even one
+        // saved before Oby stopped offering them: it would allow anything.
+        if allowing, family(call.tool) == "Bash", runsAnyProgram(call.command ?? "") { return false }
         guard let content else { return true }
         let (pattern, prefix) = content.hasSuffix(":*") ? (String(content.dropLast(2)), true)
             : content.hasSuffix("*") ? (String(content.dropLast()), true) : (content, false)
@@ -202,6 +205,20 @@ nonisolated enum PermissionPolicy {
                                                  "yarn exec", "bun x", "bun run", "deno run", "deno eval", "go run", "cargo run",
                                                  "docker run", "docker exec", "xcrun swift"]
 
+    /// Whether `command` runs whatever follows it: a shell, an interpreter or a wrapper
+    /// (`runsAnything`, by its name wherever it's run from and whichever version, so
+    /// /usr/bin/python3.12 is python3), or a tool's subcommand that does (`runsAnythingAfter`).
+    /// Variables set before it don't hide it.
+    static func runsAnyProgram(_ command: String) -> Bool {
+        let words = command.split(whereSeparator: \.isWhitespace).map(String.init)
+            .drop { $0.wholeMatch(of: /[A-Za-z_][A-Za-z0-9_]*=.*/) != nil }
+        guard let first = words.first else { return false }
+        let program = URL(filePath: first).lastPathComponent
+        if runsAnything.contains(program) || runsAnything.contains(program.replacing(/[0-9.]+$/, with: "")) { return true }
+        let rest = Array(words.dropFirst())
+        return !rest.isEmpty && runsAnythingAfter.contains("\(first) \(rest[0])")
+    }
+
     /// The words a command's rule keeps: "swift test" for `swift test --filter X`, "ls" for
     /// `ls -la`; nil for a chained command, one that starts by setting a variable, or one that
     /// runs whatever follows it (`runsAnything`).
@@ -210,12 +227,9 @@ nonisolated enum PermissionPolicy {
         guard !command.isEmpty, !command.contains(chained) else { return nil }
         let words = command.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         guard let first = words.first, !first.contains("="), !first.contains("\""), !first.contains("'") else { return nil }
-        // By its name, wherever it's run from, and whichever version: /usr/bin/python3.12 is python3.
-        let program = URL(filePath: first).lastPathComponent
-        guard !runsAnything.contains(program), !runsAnything.contains(program.replacing(/[0-9.]+$/, with: "")) else { return nil }
+        guard !runsAnyProgram(command) else { return nil }
         if subcommands.contains(first), words.count > 1, words[1].wholeMatch(of: /[a-z][a-z0-9:_-]*/) != nil {
-            let pair = "\(first) \(words[1])"
-            return runsAnythingAfter.contains(pair) ? nil : pair
+            return "\(first) \(words[1])"
         }
         return first
     }

@@ -673,18 +673,41 @@ struct ConnectorTests {
             let after = { (flag: String) in arguments.firstIndex(of: flag).map { arguments[arguments.index(after: $0)] } }
             #expect(after("--setting-sources") == "" && arguments.contains("--strict-mcp-config") && !arguments.contains("--bare"))
             #expect(after("--mcp-config") == ClaudeAgent.mcpFile(worktree: worktree).path)
+            // In Oby's own folder, not the worktree the agent works in.
+            #expect(!ClaudeAgent.mcpFile(worktree: worktree).path.hasPrefix(worktree.path + "/"))
+            #expect(ClaudeAgent.mcpFile(worktree: worktree).path.hasPrefix(Workspace.root.path + "/"))
         }
     }
 
-    /// The account's own servers, from its `.claude.json`, and nothing else from it.
+    /// The account's own servers, from its `.claude.json`, and nothing else from it: no header and
+    /// no environment variable (a token) ever reaches the file the agent's box shows.
     @Test func theJobGetsTheAccountsOwnMCPServers() throws {
         let account = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: account) }
-        let claude = #"{"mcpServers": {"tetrix": {"type": "http", "url": "https://tetrix.example/mcp"}}, "projects": {"/x": {"allowedTools": ["Bash"]}}}"#
+        let claude = #"""
+            {"mcpServers": {"tetrix": {"type": "http", "url": "https://tetrix.example/mcp", "oauth": {"callbackPort": 3118}},
+                            "github": {"type": "http", "url": "https://api.example/mcp", "headers": {"Authorization": "Bearer ghp_secret1"}},
+                            "local": {"command": "npx", "args": ["server"], "env": {"API_TOKEN": "tok_secret2"}},
+                            "files": {"command": "files-mcp", "args": ["--root", "."]}},
+             "projects": {"/x": {"allowedTools": ["Bash"]}}}
+            """#
         try Data(claude.utf8).write(to: account.appending(path: ".claude.json"))
-        let config = try #require(JSONSerialization.jsonObject(with: ClaudeAgent.mcpConfig(configDirectory: account)) as? [String: Any])
+        let data = ClaudeAgent.mcpConfig(configDirectory: account)
+        let written = String(decoding: data, as: UTF8.self)
+        for secret in ["ghp_secret1", "tok_secret2", "Authorization", "headers", "env", "oauth"] { #expect(!written.contains(secret), "\(secret)") }
+        let config = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(config.keys.sorted() == ["mcpServers"])
-        #expect(((config["mcpServers"] as? [String: Any])?["tetrix"] as? [String: Any])?["url"] as? String == "https://tetrix.example/mcp")
+        let servers = try #require(config["mcpServers"] as? [String: Any])
+        // A server that needs a header or a variable is left out; the others keep what starts them.
+        #expect(servers.keys.sorted() == ["files", "tetrix"])
+        #expect((servers["tetrix"] as? [String: Any])?.keys.sorted() == ["type", "url"])
+        #expect((servers["files"] as? [String: Any])?["args"] as? [String] == ["--root", "."])
+        // Written for Oby alone.
+        let file = account.appending(path: "mcp/job.json")
+        try ClaudeAgent.writeMCP(data, to: file)
+        let permissions = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber
+        let read = try Data(contentsOf: file)
+        #expect(permissions?.intValue == 0o600 && read == data)
         // An account without the file has none.
         let none = try #require(JSONSerialization.jsonObject(with: ClaudeAgent.mcpConfig(configDirectory: account.appending(path: "missing"))) as? [String: Any])
         #expect((none["mcpServers"] as? [String: Any])?.isEmpty == true)
