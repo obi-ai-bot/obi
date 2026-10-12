@@ -942,10 +942,11 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     }
 
     /// The Mac's trouble a "failure" in the result bundle is, when it's the test tooling's own
-    /// report rather than a test's: it names no test function (just the target, like `iOSTests`),
-    /// and isn't an assertion. A test's assertion that quotes "Failed to install" is still the code's.
+    /// report rather than a test's: it names no test function (just the target, like `iOSTests`, or
+    /// Xcode 27's `Oby (44171) encountered an error`: a process, not a signature), and isn't an
+    /// assertion. A test's assertion that quotes "Failed to install" is still the code's.
     static func diagnostic(_ failure: FailingTest) -> Trouble? {
-        guard !failure.test.contains("("), !failure.message.contains(assertion) else { return nil }
+        guard !failure.test.hasSuffix(")"), !failure.message.contains(assertion) else { return nil }
         return Trouble.in(failure.message)
     }
 

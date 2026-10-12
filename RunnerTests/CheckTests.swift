@@ -860,6 +860,8 @@ struct CheckTests {
         #expect(MacCheck.verdict(phone, attempt(65, hungOutput, summary: summary([]))) == .trouble(.hung))
         #expect(MacCheck.verdict(phone, attempt(65, "** TEST FAILED **", summary: summary([(nil, "iOSTests", "iOSTests",
                                                                                               "The test runner hung before establishing connection.")]))) == .trouble(.hung))
+        #expect(MacCheck.verdict(phone, attempt(65, "** TEST FAILED **", summary: summary([(nil, "iOSTests", "Oby (48709) encountered an error",
+                                                                                              "The test runner hung before establishing connection.")]))) == .trouble(.hung))
         #expect(MacCheck.verdict(mac, attempt(65, "Lost connection to the test manager service.\n** TEST FAILED **")) == .trouble(.lostConnection))
         #expect(MacCheck.Trouble.in("Unable to boot the Simulator.") == .boot)
         #expect(MacCheck.Trouble.in("Failed to install the requested application") == .install)
@@ -883,6 +885,10 @@ struct CheckTests {
         #expect(MacCheck.diagnostic(MacCheck.FailingTest(test: "iOSTests/testInstall()", message: "Failed to install the app")) == nil)
         #expect(MacCheck.diagnostic(MacCheck.FailingTest(test: "iOSTests", message: "Expectation failed: hung before establishing connection")) == nil)
         #expect(MacCheck.diagnostic(MacCheck.FailingTest(test: "iOSTests", message: "Failed to install or launch the test runner.")) == .install)
+        // Xcode 27 reports a hung runner as a "test" named after the host process (October 2026).
+        #expect(MacCheck.diagnostic(MacCheck.FailingTest(test: "Oby (44171) encountered an error",
+                                                         message: "The test runner hung before establishing connection.")) == .hung)
+        #expect(MacCheck.diagnostic(MacCheck.FailingTest(test: "iOSTests/JobRowTests/testTitle(_:)", message: "The test runner hung before establishing connection.")) == nil)
         // Without a bundle, the output names them, and Swift Testing's issues are their messages.
         let swiftTest = "✘ Test blocksASecret() recorded an issue at PublishTests.swift:12:9: Expectation failed: 1 == 2\n✘ Test blocksASecret() failed after 0.002 seconds with 1 issue."
         #expect(MacCheck.verdict(swift, attempt(1, swiftTest)) == .failed([MacCheck.FailingTest(test: "blocksASecret()", message: "PublishTests.swift:12:9: Expectation failed: 1 == 2")], log: nil))

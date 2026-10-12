@@ -176,8 +176,9 @@ struct PaceTests {
                          branch: "oby/fix-author", kind: .fix, task: "")
         let codex = state("codex", "codex", sevenDay: 0.85, gone: 0.9)
         let personal = state("personal", sevenDay: 0.3, gone: 0.5)
-        #expect(Review.reviewer([state("mine"), codex, personal], for: author)?.id == "personal")
-        #expect(Review.reviewer([state("mine"), codex], for: author) == nil)
+        // At the fixtures' time: codex's week resets at `now + 0.1 week`, and on the real clock it already has.
+        #expect(Review.reviewer([state("mine"), codex, personal], for: author, now: now)?.id == "personal")
+        #expect(Review.reviewer([state("mine"), codex], for: author, now: now) == nil)
     }
 
     @Test func onlyAJobSentByNameGoesToAReservedAccount() async throws {
