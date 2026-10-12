@@ -94,9 +94,8 @@ struct SidebarView: View {
                 .padding(.horizontal, 14).padding(.top, 46).padding(.bottom, 12)
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
-                    obyRow
-                    agentsSection
-                    section("Channels", trailing: nil) {
+                    if search.isEmpty || "Oby".localizedCaseInsensitiveContains(search) || (model.thread.last?.text.localizedCaseInsensitiveContains(search) ?? false) { obyRow }
+                    section("# channels", trailing: nil) {
                         emptyRow(SidebarSections.channelsEmpty, selected: selection == .channels) { selection = .channels }
                     }
                     section("Obys", trailing: nil) {
@@ -108,9 +107,8 @@ struct SidebarView: View {
                 .padding(.bottom, 16)
             }
             VStack(alignment: .leading, spacing: 2) {
-                link("Accounts and keys", symbol: "key") { onOpenSettings(.accounts) }
+                link("Accounts", symbol: "key") { onOpenSettings(.accounts) }
                 link("Integrations", symbol: "link") { onOpenSettings(.runner) }
-                link("Memory", symbol: "cylinder") { onOpenSettings(.vault) }
                 link("Settings", symbol: "gearshape") { onOpenSettings(.general) }
             }
             .padding(.horizontal, 14)
@@ -118,7 +116,7 @@ struct SidebarView: View {
             Divider().overlay(.white.opacity(0.08))
             you.padding(.horizontal, 14).padding(.vertical, 14)
         }
-        .background(Color(white: 0.11))
+        .background(OBYStyle.sidebar)
     }
 
     private var obyRow: some View {
@@ -134,7 +132,12 @@ struct SidebarView: View {
                     if let last = model.thread.last {
                         Text(ConversationModel.clock(last.date)).font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
                     }
-                    if model.unreadReply {
+                    let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count
+                    if waiting > 0 {
+                        Text("\(waiting)").font(OBYStyle.caption.weight(.semibold))
+                            .padding(.horizontal, OBYStyle.Space.sm).padding(.vertical, OBYStyle.Space.xs)
+                            .background(OBYStyle.accent, in: Capsule()).accessibilityLabel("\(waiting) waiting for you")
+                    } else if model.unreadReply {
                         Circle().fill(Color.accentColor).frame(width: 7, height: 7).accessibilityLabel("Unread reply")
                     }
                 }
@@ -145,35 +148,6 @@ struct SidebarView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(SidebarSections.obyLabel(last: model.thread.last?.text, unread: model.unreadReply))
-    }
-
-    private var agentsSection: some View {
-        section("Agents", trailing: SidebarSections.activeLine(agents)) {
-            if agents.isEmpty {
-                Text("No agent is working.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.4))
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-            }
-            ForEach(agents) { row in
-                let picked = selection == .job(id: row.job.id, local: row.local)
-                Button { selection = .job(id: row.job.id, local: row.local) } label: {
-                    HStack(spacing: 10) {
-                        AgentMark(agent: row.job.agent).font(.system(size: 14, weight: .semibold)).frame(width: 18)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(row.job.heading).font(.system(size: 14, weight: .medium)).lineLimit(1)
-                            Text(row.job.line).font(.system(size: 11)).foregroundStyle(.white.opacity(0.5)).lineLimit(1)
-                        }
-                        Spacer(minLength: 6)
-                        Circle().fill(row.dot == .working ? Color.blue : Color.orange).frame(width: 8, height: 8)
-                            .accessibilityLabel(row.dot == .working ? "Working" : "Needs you")
-                    }
-                    .padding(.horizontal, 10).padding(.vertical, 8)
-                    .background(.white.opacity(picked ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(row.local ? "On this Mac" : "On \(feed.name)")
-            }
-        }
     }
 
     private func section(_ title: String, trailing: String?, @ViewBuilder _ content: () -> some View) -> some View {

@@ -601,19 +601,19 @@ extension Job {
     /// where its pull request is. A job you let go says Dismissed, however it ended.
     nonisolated var badge: JobBadge {
         if dismissed != nil { return JobBadge(text: "Dismissed", tone: .gray) }
+        if waitsForAnswer { return JobBadge(text: "Needs input", tone: .orange) }
+        if step == "Waiting for your OK", isActive { return JobBadge(text: "Awaiting approval", tone: .orange) }
         switch status {
-        case .queued: return JobBadge(text: "Starting", tone: .blue)
-        case .running: return JobBadge(text: "Working", tone: .blue)
-        case .done where canPublish: return JobBadge(text: "Ready to publish", tone: .orange)
+        case .queued: return JobBadge(text: "Waiting", tone: .gray)
+        case .running: return JobBadge(text: "Running", tone: .blue)
+        case .done where reviewNeedsYou || mergeNeedsYou || cloudNeedsYou: return JobBadge(text: "Blocked", tone: .orange)
         case .done where pullRequestState == "MERGED": return JobBadge(text: "Merged", tone: .green)
         case .done where pullRequestState == "CLOSED": return JobBadge(text: "PR closed", tone: .gray)
-        case .done where reviewDecision == "CHANGES_REQUESTED": return JobBadge(text: "Changes requested", tone: .orange)
-        case .done where reviewDecision == "APPROVED": return JobBadge(text: "Approved", tone: .green)
-        case .done where published != nil: return JobBadge(text: "In review", tone: .blue)
-        case .done: return JobBadge(text: "Done", tone: .green)
-        case .failed: return JobBadge(text: "Failed", tone: .red)
+        case .done where published != nil && reviewDecision != "APPROVED": return JobBadge(text: "Awaiting approval", tone: .blue)
+        case .done: return JobBadge(text: "Ready", tone: .green)
+        case .failed: return JobBadge(text: "Blocked", tone: .red)
         case .stopped: return JobBadge(text: "Stopped", tone: .gray)
-        case .interrupted: return JobBadge(text: "Interrupted", tone: .gray)
+        case .interrupted: return JobBadge(text: "Blocked", tone: .gray)
         }
     }
 

@@ -120,7 +120,7 @@ struct JobView: View {
                     .accessibilityAddTraits(.isHeader)
             }
             HStack(spacing: 8) {
-                StatusBadge(job: job)
+                StatusPill(job: job)
                 if let verdict = job.verdictLine {
                     Text(verdict).font(.system(size: 12)).foregroundStyle(.white.opacity(0.6))
                 }
@@ -480,18 +480,6 @@ struct JobView: View {
         Text(title).font(.system(size: 12, weight: .semibold))
             .padding(.horizontal, 10).frame(height: 24)
             .background(.white.opacity(0.12), in: Capsule())
-    }
-}
-
-/// The status pill, with the words and colour both apps give the job (`Job.badge`, Shared/Runner.swift).
-struct StatusBadge: View {
-    let job: Job
-
-    var body: some View {
-        let badge = job.badge
-        Text(badge.text).font(.system(size: 12, weight: .semibold)).foregroundStyle(badge.tone.color)
-            .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(badge.tone.color.opacity(0.18), in: Capsule())
     }
 }
 

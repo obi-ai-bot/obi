@@ -368,18 +368,6 @@ struct JobRow: View {
     }
 }
 
-/// The status pill, with the words and colour both apps give the job (`Job.badge`, Shared/Runner.swift).
-struct StatusPill: View {
-    let job: Job
-
-    var body: some View {
-        let badge = job.badge
-        Text(badge.text).font(.caption.weight(.semibold)).foregroundStyle(badge.tone.color)
-            .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(badge.tone.color.opacity(0.18), in: Capsule())
-    }
-}
-
 /// The plan, before anything runs: agent, account, repository, branch, how it loops, and the
 /// stronger model when the work looks complex.
 struct PlanCard: View {

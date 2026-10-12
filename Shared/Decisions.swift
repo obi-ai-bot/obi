@@ -139,7 +139,7 @@ nonisolated struct CardOption: Equatable, Sendable {
     var role: Role = .plain
 
     /// A card offers at most this many; the user's own words take the rest.
-    static let most = 3
+    static let most = 4
     /// What the user's own words do on a permission card.
     static let denyWords = "Your words go with a Deny, for the agent."
 
@@ -151,6 +151,16 @@ nonisolated struct CardOption: Equatable, Sendable {
         return Array(list.prefix(most))
     }
 
+    /// Return must never deny, dismiss or stop work, even if an upstream recommendation says so.
+    var safeOnReturn: Bool {
+        let action = answer.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        return role != .destructive && !["deny", "dismiss", "stop"].contains(where: { action == $0 || action.hasPrefix($0 + " ") })
+    }
+
+    static func defaultOption(_ options: [CardOption]) -> CardOption? {
+        options.first { $0.recommended && $0.safeOnReturn }
+    }
+
     /// The same, with the recommended one named rather than numbered (an inbox item's options
     /// against its job's question).
     static func of(_ options: [String], recommending label: String?) -> [CardOption] {
@@ -159,9 +169,10 @@ nonisolated struct CardOption: Equatable, Sendable {
 
     /// Allow, Always allow with the rule spelled out (when the runner can save one), and Deny.
     static func permission(_ permission: RunnerPermission) -> [CardOption] {
-        var list = [CardOption(label: "Allow", answer: RunnerPermission.Decision.allow.rawValue)]
-        if let always = permission.always ?? permission.rule.map({ "Don't ask again for \($0)" }) {
-            list.append(CardOption(label: "Always allow", answer: RunnerPermission.Decision.always.rawValue, detail: always))
+        var list = [CardOption(label: "Allow once", answer: RunnerPermission.Decision.allow.rawValue, recommended: true)]
+        if let rule = InboxWords.plain(permission.rule) {
+            let always = permission.always ?? "Always allow \(rule)"
+            list.append(CardOption(label: "Always allow", answer: RunnerPermission.Decision.always.rawValue, detail: "\(always) · \(rule)"))
         }
         list.append(CardOption(label: "Deny", answer: RunnerPermission.Decision.deny.rawValue, role: .destructive))
         return list

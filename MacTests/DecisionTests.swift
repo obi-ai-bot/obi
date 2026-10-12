@@ -72,7 +72,7 @@ struct DecisionTests {
         #expect(CardOption.of(["A new status", "Failed"], recommended: 1).map(\.label) == ["Failed", "A new status"])
         #expect(CardOption.of(["A new status", "Failed"], recommended: 1).first?.recommended == true)
         #expect(CardOption.of(["A new status", "Failed"]).map(\.label) == ["A new status", "Failed"])
-        #expect(CardOption.of(["a", "b", "c", "d"]).count == 3)
+        #expect(CardOption.of(["a", "b", "c", "d"]).count == 4)
         // This Mac's own jobs' questions have no recommended option yet: their order stays.
         #expect(CardOption.inbox(["Yes", "No"], kind: "\(InboxItem.Kind.question)").map(\.label) == ["Yes", "No"])
     }

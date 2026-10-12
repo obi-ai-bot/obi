@@ -39,7 +39,7 @@ final class IslandModel {
 
     /// Both chat surfaces read and send through this model.
     var thread: [Turn] { feed.conversation.thread(with: desk.turns) }
-    var recentTurns: [Turn] { Array(thread.suffix(4)) }
+    var recentTurns: [Turn] { Array(thread.suffix(3)) }
     var chatWindowVisible = false
     var readReply: String?
     var unreadReply: Bool { thread.last(where: { $0.who == .oby }).map { $0.id != readReply } ?? false }
@@ -49,6 +49,11 @@ final class IslandModel {
     func sendChat(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text, shown: text)
+    }
+
+    func stopChatJob(_ id: String, local: Bool) {
+        if local { desk.stop(id) }
+        else { Task { if let job = try? await feed.about(id, { try await $0.stop(id) }) { feed.apply(job) } } }
     }
 
     /// Agents working now, on this Mac and on the runner.
@@ -572,6 +577,7 @@ private struct OpenIsland: View {
                 }
                 Button { onOpenWindow(nil) } label: { topPill { Text("Open Chat") } }
                     .buttonStyle(.plain)
+                    .keyboardShortcut("o", modifiers: .command)
                     .help("The window: the whole conversation, every agent, and what's live")
                 Button(action: onClose) {
                     Image(systemName: "chevron.up")
@@ -830,15 +836,10 @@ private struct OpenIsland: View {
     private var compactChat: some View {
         ScrollView {
             VStack(spacing: 6) {
-                ForEach(model.recentTurns) { turn in
-                    HStack {
-                        if turn.who == .user { Spacer(minLength: 50) }
-                        Text(turn.text).font(.system(size: 13)).lineLimit(3)
-                            .padding(.horizontal, 12).padding(.vertical, 8)
-                            .background(turn.who == .user ? Color.accentColor : .white.opacity(0.08),
-                                        in: RoundedRectangle(cornerRadius: 13))
-                        if turn.who == .oby { Spacer(minLength: 50) }
-                    }
+                ForEach(Array(model.recentTurns.enumerated()), id: \.element.id) { index, turn in
+                    TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? model.recentTurns[index - 1] : nil),
+                            jobs: [], account: { _, _ in "" }, isLocal: { _ in false },
+                            onOpenJob: { onOpenWindow((id: $0, local: $1)) }, showTime: false)
                 }
                 if model.speaker.speaking {
                     Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
@@ -855,8 +856,8 @@ private struct OpenIsland: View {
     private var thinkingRow: some View {
         HStack {
             ProgressView().controlSize(.mini)
-            Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
-            Button("Cancel") { desk.cancel() }.buttonStyle(.plain).help("Cancel (Esc)")
+            Text("Oby is thinking…").font(OBYStyle.caption).foregroundStyle(.secondary)
+            Button("Stop") { desk.cancel() }.buttonStyle(.plain).help("Cancel (Esc)")
             Spacer()
         }
     }
@@ -870,7 +871,7 @@ private struct OpenIsland: View {
 
     private var fieldCapsule: some View {
         HStack(spacing: 8) {
-            TextField("Type a task, like “Review oby PR #12”", text: $text)
+            TextField("Message Oby", text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 15))
                 .focused($typing)
@@ -1204,53 +1205,15 @@ private struct JobRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 12) {
-                AgentMark(agent: job.agent).font(.system(size: 17, weight: .semibold)).frame(width: 22)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(job.heading).font(.system(size: 15, weight: .semibold)).lineLimit(2)
-                        Text(place).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.7))
-                            .padding(.horizontal, 7).frame(height: 18)
-                            .background(.white.opacity(0.12), in: Capsule())
-                    }
-                    Text(job.pipeline.label).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.55))
-                    if !job.line.isEmpty {
-                        Text(job.line).font(.system(size: 13)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
-                    }
-                    HStack(spacing: 8) {
-                        StatusBadge(job: job)
-                        if let verdict = job.verdictLine {
-                            Text(verdict).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
-                        }
-                    }
-                }
-                Spacer(minLength: 8)
-                if job.needsYou {
-                    Button(action: dismiss) {
-                        Text("Dismiss").font(.system(size: 12, weight: .semibold))
-                            .padding(.horizontal, 10).frame(height: 24)
-                            .background(.white.opacity(0.12), in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Let this job go: it stays in the list, and stops needing you")
-                }
-                if job.isActive {
-                    Button(action: onStop) {
-                        Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
-                            .frame(width: 24, height: 24).background(.white.opacity(0.1), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Stop")
-                }
+            JobChip(job: job, account: place, onOpen: onOpen, onStop: onStop)
+            if job.needsYou {
+                Button("Dismiss", action: dismiss).buttonStyle(.plain).font(OBYStyle.caption)
             }
             if let problem {
                 Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(2)
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 11)
-        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .onTapGesture(perform: onOpen)
+        .contentShape(Rectangle())
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("Opens the job")
     }
