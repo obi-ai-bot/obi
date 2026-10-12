@@ -1160,7 +1160,8 @@ final class Desk {
             let resumed = waiting ? Self.heard(job, text) : Self.resumed(job, text)
             replace(resumed)
             if let author = resumed.reviewOf { reconnect(review: id, to: author) }
-            asked.insert(id)
+            // A round the user asked for. Not an answer: its round goes on, checked as it would be live.
+            if !waiting { asked.insert(id) }
             roundMessage[id] = nil
             // One the runner kept going down with still has the message it was about to get: it comes first.
             let prompt = [restarts?.message(id), text].compactMap { $0 }.joined(separator: "\n\n")

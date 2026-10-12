@@ -118,6 +118,29 @@ struct RestartTests {
         #expect(answered.status == .running && answered.question == nil && answered.currentRound == waiting.currentRound)
     }
 
+    @Test func anAnswerAfterARestartIsCheckedAsItWouldBeLive() async throws {
+        var fix = job
+        fix.id = "fixing"
+        fix.kind = .fix
+        fix.pr = nil
+        fix.base = "dev"
+        fix.branch = "oby/fix-206"
+        desk.dispatch(Desk.Draft(said: "fix oby #206", reply: "", job: fix, guessed: false))
+        for _ in 0..<500 where made.agents.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        let asking = try #require(made.agents.last?.agent)
+        asking.onEvent(.session("fixing-session"))
+        asking.onEvent(.turnEnded(summary: "QUESTION: Which option?\nOPTIONS: One | Two", failed: false))
+        let restarted = restart()
+        restarted.countCommits = { _, _ in 0 }
+        restarted.changedFiles = { _ in ["Engine/Desk.swift"] }
+        try restarted.message("fixing", "One")
+        // Its work left uncommitted is no answer's doing: it ends as it would have live.
+        try #require(made.agents.last?.agent).onEvent(.finished(summary: "Done.", failed: false))
+        for _ in 0..<500 where restarted.job("fixing")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
+        let ended = try #require(restarted.job("fixing"))
+        #expect(ended.status == .failed && ended.summary.hasPrefix("Nothing committed: `Engine/Desk.swift` is changed"))
+    }
+
     @Test func anInterruptedJobHoldingItsQuestionIsNoFailure() {
         var interrupted = job
         interrupted.status = .interrupted
