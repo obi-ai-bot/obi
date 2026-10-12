@@ -179,6 +179,24 @@ nonisolated struct CardOption: Equatable, Sendable {
     }
 }
 
+/// One keyboard path for a focused decision; input methods and ordinary text fields keep their keys.
+nonisolated enum DecisionKey {
+    enum Action: Equatable { case option(CardOption), words(String), later, none }
+    static func action(_ key: String, options: [CardOption], words: String = "", busy: Bool = false) -> Action {
+        guard !busy else { return .none }
+        if key == "escape" { return .later }
+        if key == "return" {
+            let typed = words.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !typed.isEmpty { return typed.count <= 2000 ? .words(typed) : .none }
+            return CardOption.defaultOption(options).map { .option($0) } ?? .none
+        }
+        if let number = Int(key), (1...4).contains(number), options.indices.contains(number - 1) {
+            return .option(options[number - 1])
+        }
+        return .none
+    }
+}
+
 extension CardOption {
     /// An inbox item's answers (`kind` as the runner names it): a question's with its job's
     /// recommended one first, a permission's with the rule Always allow saves and Deny in red.

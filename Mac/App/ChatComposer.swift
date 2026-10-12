@@ -85,7 +85,7 @@ struct ChatComposer: View {
     }
 }
 
-private struct ComposerEditor: NSViewRepresentable {
+struct ComposerEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var focused: Bool
     let onSend: () -> Void
@@ -123,7 +123,6 @@ private struct ComposerEditor: NSViewRepresentable {
         let editor = Editor(frame: .zero)
         editor.delegate = context.coordinator
         editor.isRichText = false
-        editor.isGraphicsImportAllowed = false
         editor.allowsUndo = true
         editor.font = .systemFont(ofSize: 15)
         editor.textColor = .white
@@ -135,9 +134,9 @@ private struct ComposerEditor: NSViewRepresentable {
         editor.isHorizontallyResizable = false
         editor.autoresizingMask = [.width]
         editor.minSize = .zero
-        editor.maxSize = NSSize(width: .greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
+        editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.textContainer?.widthTracksTextView = true
-        editor.textContainer?.containerSize = NSSize(width: 300, height: .greatestFiniteMagnitude)
+        editor.textContainer?.containerSize = NSSize(width: 300, height: CGFloat.greatestFiniteMagnitude)
         editor.setAccessibilityLabel("Message Oby")
         scroll.documentView = editor
         return scroll
@@ -154,7 +153,7 @@ private struct ComposerEditor: NSViewRepresentable {
             editor.scrollRangeToVisible(editor.selectedRange())
         }
         if focused && !context.coordinator.requestedFocus {
-            DispatchQueue.main.async { if let window = editor.window { window.makeFirstResponder(editor) } }
+            DispatchQueue.main.async { if context.coordinator.parent.focused, let window = editor.window { window.makeFirstResponder(editor) } }
         }
         context.coordinator.requestedFocus = focused
     }

@@ -5,6 +5,7 @@ struct InlinePermission: View {
     let record: RunnerFeed.PermissionRecord
     let feed: RunnerFeed
     var keyboardEnabled = false
+    var focusRequest = 0
     @State private var expanded = false
     @State private var busy = false
     @State private var problem: String?
@@ -21,7 +22,7 @@ struct InlinePermission: View {
             if record.done == nil || expanded {
                 DecisionCard(title: record.permission.title, detail: record.permission.detail,
                              options: CardOption.permission(record.permission), busy: busy || record.done != nil,
-                             keyboardEnabled: keyboardEnabled && record.done == nil,
+                             keyboardEnabled: keyboardEnabled && record.done == nil, focusRequest: focusRequest,
                              onLater: record.done == nil ? { feed.laterPermission(record.id) } : nil,
                              wordsNote: CardOption.denyWords,
                              onChoose: { option in

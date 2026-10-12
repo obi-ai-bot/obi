@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Testing
 @testable import Oby
 
@@ -14,6 +15,34 @@ struct ChatWindowTests {
         #expect(ComposerMetrics.lines("one\ntwo\nthree", width: 500) == 3)
         #expect(ComposerMetrics.lines("one\n", width: 500) == 2)
         #expect(ComposerMetrics.lines("", width: 500) == 1)
+    }
+
+    @Test func composerPreservesPastedLinesAndHandlesReturn() throws {
+        let editor = ComposerEditor.Editor(frame: NSRect(x: 0, y: 0, width: 500, height: 100))
+        editor.isRichText = false
+        editor.string = "first\nsecond"
+        var sends = 0
+        editor.send = { sends += 1; editor.string = "" }
+        let enter = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                windowNumber: 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r",
+                                                isARepeat: false, keyCode: 36))
+        #expect(editor.string == "first\nsecond")
+        editor.keyDown(with: enter)
+        #expect(sends == 1 && editor.string.isEmpty)
+        #expect(ComposerMetrics.lines(editor.string, width: 500) == 1)
+        #expect(ComposerMetrics.lines(String(repeating: "long text ", count: 50), width: 100) > 1)
+    }
+
+    @Test func numberReturnAndEscapeUseTheSameDecisionKeyboardPath() {
+        let options = CardOption.of(["A", "B", "C", "D"], recommended: 2)
+        for index in 0..<4 {
+            #expect(DecisionKey.action("\(index + 1)", options: options) == .option(options[index]))
+        }
+        #expect(DecisionKey.action("return", options: options) == .option(options[0]))
+        #expect(DecisionKey.action("return", options: options, words: "  My answer\n") == .words("My answer"))
+        #expect(DecisionKey.action("escape", options: options) == .later)
+        #expect(DecisionKey.action("1", options: options, busy: true) == .none)
+        #expect(DecisionKey.action("return", options: [CardOption(label: "Deny", answer: "deny", recommended: true)]) == .none)
     }
 
     @Test func decisionsAttachToTheirJobEvenAfterOtherTurns() {

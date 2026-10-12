@@ -135,6 +135,7 @@ private struct ConversationColumn: View {
     @Binding var liveExpanded: Bool
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
     @State private var text = ""
+    @State private var decisionFocus = 0
     @State private var columnHeight: CGFloat = 600
     @FocusState private var typing: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -199,7 +200,7 @@ private struct ConversationColumn: View {
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
                     if let oldest {
-                        Button { proxy.scrollTo(oldest, anchor: .center) } label: {
+                        Button { typing = false; decisionFocus += 1; proxy.scrollTo(oldest, anchor: .center) } label: {
                             HStack {
                                 Image(systemName: "exclamationmark.bubble")
                                 Text("\(waitingCount) waiting for you")
@@ -231,7 +232,7 @@ private struct ConversationColumn: View {
                             decision(entry, active: oldest == entry.id)
                         }
                         ForEach(permissions.filter { ConversationModel.decisionAnchor(job: $0.job, created: $0.created, turns: turns) == nil }) { record in
-                            InlinePermission(record: record, feed: feed, keyboardEnabled: oldest == record.id).id(record.id)
+                            InlinePermission(record: record, feed: feed, keyboardEnabled: oldest == record.id, focusRequest: decisionFocus).id(record.id)
                         }
                         ForEach(days) { day in
                             ForEach(Array(day.turns.enumerated()), id: \.element.id) { index, turn in
@@ -248,7 +249,7 @@ private struct ConversationColumn: View {
                                     decision(entry, active: oldest == entry.id)
                                 }
                                 ForEach(permissions.filter { ConversationModel.decisionAnchor(job: $0.job, created: $0.created, turns: turns) == turn.id }) { record in
-                                    InlinePermission(record: record, feed: feed, keyboardEnabled: oldest == record.id).id(record.id)
+                                    InlinePermission(record: record, feed: feed, keyboardEnabled: oldest == record.id, focusRequest: decisionFocus).id(record.id)
                                 }
                             }
                         }
@@ -266,6 +267,9 @@ private struct ConversationColumn: View {
                 .defaultScrollAnchor(.bottom)
                 .onChange(of: turns.count) { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("end", anchor: .bottom) } }
                 .onChange(of: desk.talk) { proxy.scrollTo("end", anchor: .bottom) }
+                .onChange(of: oldest, initial: true) {
+                    if oldest != nil { typing = false; decisionFocus += 1 }
+                }
                 }
             }
         }
@@ -273,7 +277,7 @@ private struct ConversationColumn: View {
     }
 
     private func decision(_ entry: IslandInbox.Entry, active: Bool) -> some View {
-        InlineDecision(entry: entry, desk: desk, feed: feed, keyboardEnabled: active, onOpen: onOpenJob)
+        InlineDecision(entry: entry, desk: desk, feed: feed, keyboardEnabled: active, focusRequest: decisionFocus, onOpen: onOpenJob)
             .id(entry.id)
     }
 

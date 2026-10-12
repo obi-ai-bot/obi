@@ -17,6 +17,7 @@ struct DecisionCard: View {
     let options: [CardOption]
     var busy = false
     var keyboardEnabled = false
+    var focusRequest = 0
     var onLater: (() -> Void)? = nil
     /// What sending your own words does, when it isn't plain (a permission's: they go with a deny).
     var wordsNote: String? = nil
@@ -29,6 +30,7 @@ struct DecisionCard: View {
     @State private var showsDetails = false
     @State private var words = ""
     @FocusState private var focused: Bool
+    @FocusState private var cardFocused: Bool
     /// Dynamic Type's scale, for the plan's inline code.
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
 
@@ -64,12 +66,20 @@ struct DecisionCard: View {
         }
         .disabled(busy)
         #if os(macOS)
-        .onExitCommand { if keyboardEnabled { onLater?() } }
-        .background {
-            if keyboardEnabled, let option = CardOption.defaultOption(options) {
-                Button("") { if !busy && typed.isEmpty { choose(option) } }
-                    .keyboardShortcut(.defaultAction).hidden().accessibilityHidden(true)
+        .focusable().focusEffectDisabled().focused($cardFocused)
+        .onAppear { if keyboardEnabled && focusRequest > 0 { cardFocused = true } }
+        .onExitCommand { if keyboardEnabled && !busy { onLater?() } }
+        .onChange(of: focusRequest) { if keyboardEnabled { cardFocused = true } }
+        .onKeyPress(phases: .down) { press in
+            guard keyboardEnabled, !focused, press.modifiers.isEmpty else { return .ignored }
+            let key = press.key == .return ? "return" : press.key == .escape ? "escape" : press.characters
+            switch DecisionKey.action(key, options: options, words: words, busy: busy) {
+            case .option(let option): choose(option)
+            case .words(let text): onWords?(text)
+            case .later: onLater?()
+            case .none: return .ignored
             }
+            return .handled
         }
         #endif
     }
@@ -180,13 +190,6 @@ struct DecisionCard: View {
         .buttonStyle(.plain)
         .accessibilityHint(Self.hint(option))
         #if os(macOS)
-        .background {
-            if keyboardEnabled {
-                Button("") { if !busy { choose(option) } }
-                    .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [])
-                    .hidden().accessibilityHidden(true)
-            }
-        }
         #endif
         #endif
     }
@@ -257,6 +260,13 @@ struct DecisionCard: View {
                 .focused($focused)
                 .submitLabel(.send)
                 .onSubmit(go)
+                #if os(macOS)
+                .onKeyPress(.return, phases: .down) { press in
+                    if press.modifiers.contains(.shift) { return .ignored }
+                    go()
+                    return .handled
+                }
+                #endif
             Button(action: go) {
                 Image(systemName: "arrow.up").font(Style.small.weight(.bold))
                     .foregroundStyle(Style.paper)

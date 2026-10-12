@@ -7,6 +7,7 @@ struct InlineDecision: View {
     let desk: Desk
     let feed: RunnerFeed
     var keyboardEnabled = false
+    var focusRequest = 0
     var onOpen: (_ job: String, _ local: Bool) -> Void = { _, _ in }
     @State private var expanded = false
     @State private var busy = false
@@ -43,7 +44,7 @@ struct InlineDecision: View {
                              detail: extras?.permission?.detail, plan: question?.plan,
                              options: CardOption.inbox(item.options, kind: "\(item.kind)", question: question,
                                                        permission: extras?.permission, words: words, details: item.details),
-                             busy: busy || settled, keyboardEnabled: keyboardEnabled && !settled,
+                             busy: busy || settled, keyboardEnabled: keyboardEnabled && !settled, focusRequest: focusRequest,
                              onLater: settled ? nil : { answer(later: .now.addingTimeInterval(3600)) },
                              onChoose: { answer($0.answer) },
                              onWords: item.kind.takesWords ? { answer($0) } : nil)
