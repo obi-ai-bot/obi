@@ -221,6 +221,17 @@ final class IslandController {
             }
         }
         desk.onReply = { [weak self] text, spoken in self?.replied(text, spoken: spoken) }
+        desk.plansElsewhere = { [weak self] in self?.feed.local ?? false }
+        desk.planElsewhere = { [weak self] said, answer in
+            guard let self else { throw RunnerError(message: "Oby is closing.") }
+            return try await feed.plan(said, answer: answer)
+        }
+        desk.cancelElsewhere = { [weak self] in await self?.feed.cancelPlan() }
+        desk.dispatchElsewhere = { [weak self] draft in
+            guard let self else { throw RunnerError(message: "Oby is closing.") }
+            return try await feed.dispatch(draft)
+        }
+        feed.onFollow = { [weak self] local in self?.desk.issueSync.enabled = !local }
         feed.start()
         Task { await desk.refresh() }
         talkKey.on = { [weak self] in self?.talk($0) }

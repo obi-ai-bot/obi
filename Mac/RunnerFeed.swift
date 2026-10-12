@@ -332,6 +332,11 @@ final class RunnerFeed {
         }
     }
 
+    /// Cancels a plan still running on the local runner.
+    func cancelPlan() async {
+        await runner?.cancelPlan()
+    }
+
     /// Dispatches a draft the runner planned (`Desk.dispatchElsewhere`): the job, queued there,
     /// listed here at once; its events bring the rest.
     func dispatch(_ draft: Desk.Draft) async throws -> Job {

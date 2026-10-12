@@ -74,6 +74,14 @@ final class Desk {
     @ObservationIgnored var moveElsewhere: (_ id: String, _ target: MoveTarget, _ why: String?) async throws -> Job = { _, _, _ in
         throw Shell.Failure(message: "That job isn't here.")
     }
+    @ObservationIgnored var plansElsewhere: () -> Bool = { false }
+    @ObservationIgnored var planElsewhere: (_ said: String, _ answer: (question: String, option: String)?) async throws -> Talk = { _, _ in
+        throw Shell.Failure(message: "The runner isn't set up.")
+    }
+    @ObservationIgnored var dispatchElsewhere: (Draft) async throws -> Job = { _ in
+        throw Shell.Failure(message: "The runner isn't set up.")
+    }
+    @ObservationIgnored var cancelElsewhere: () async -> Void = {}
     /// The brain's adapters, on the Claude account whose home is given. Tests put in their own.
     @ObservationIgnored var makeBrain: (_ home: String?, Vault) -> [any BrainAdapter] = { [ClaudeBrain(home: $0, vault: $1)] }
     /// How long `ask` waits for an answer before the turn ends with `Conversation.timedOut`, so
@@ -574,6 +582,7 @@ final class Desk {
     func cancel() {
         asking += 1
         stopRequested = false
+        if plansElsewhere() { Task { await cancelElsewhere() } }
         if let pending {
             remove(pending)
             self.pending = nil
@@ -1171,6 +1180,43 @@ final class Desk {
         }
         let job = enqueue(draft.job, why: draft.route.flatMap { $0.id == draft.job.account ? $0.why : nil })
         link(job.id)
+        return job
+    }
+
+    func dispatch(_ id: String, branch: String, account: String, rounds: Int? = nil, check: String?? = nil,
+                  model: String?? = nil, files: [String]? = nil, attachments: [String]? = nil,
+                  startWhen: [StartCondition]? = nil, mode: PermissionMode? = nil) throws -> Job {
+        guard var draft = drafts.first(where: { $0.job.id == id }) else {
+            throw Shell.Failure(message: "Oby doesn't have that plan any more. Ask again.")
+        }
+        if let startWhen {
+            draft.job.startWhen = startWhen.isEmpty ? nil : try StartWhen.checked(startWhen, job: id, jobs: startWhenLookup.job, accounts: accounts.accounts)
+        }
+        let selected = draft.job.startWhen?.compactMap(\.account).first ?? account
+        draft.job = try Self.edit(draft.job, branch: branch, account: accounts.state(selected), rounds: rounds, check: check)
+        if let files { draft.job.files = try Claims.validated(files) }
+        if let attachments { draft.job.attachments = attachments }
+        if let model { draft.job.model = model }
+        if let mode { draft.job.mode = mode }
+        return dispatch(draft)
+    }
+
+    nonisolated static func edit(_ job: Job, branch: String, account: AccountState?, rounds: Int? = nil, check: String?? = nil) throws -> Job {
+        guard Plan.isBranchName(branch) else { throw Shell.Failure(message: "That isn't a branch name Oby can create.") }
+        guard let account, account.signedIn else { throw Shell.Failure(message: "That account isn't signed in.") }
+        var job = job
+        job.branch = branch
+        job.account = account.account.id
+        job.agent = account.account.agent
+        if let rounds {
+            guard (1...10).contains(rounds) else { throw Shell.Failure(message: "Rounds go from 1 to 10.") }
+            job.rounds = rounds > 1 ? rounds : nil
+        }
+        if let check {
+            let value = check?.trimmingCharacters(in: .whitespaces) ?? ""
+            guard value.isEmpty || Plan.isCheck(value) else { throw Shell.Failure(message: "The check is one line of up to 200 characters.") }
+            job.check = value.isEmpty ? nil : value
+        }
         return job
     }
 

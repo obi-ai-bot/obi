@@ -843,6 +843,23 @@ nonisolated struct Runner: Sendable {
         try await send("POST", "v1/conversation/stop")
     }
 
+    func cancelPlan() async {
+        _ = try? await send("POST", "v1/plans/cancel")
+    }
+
+    func dispatch(_ job: Job) async throws -> Job {
+        struct Body: Encodable { var job: DispatchedJob; var mode: String? }
+        return try await call("POST", "v1/jobs", body: Body(job: DispatchedJob(job: job), mode: Self.mode(of: job)))
+    }
+
+    static func mode(of job: Job) -> String? {
+        #if os(macOS)
+        return nil
+        #else
+        return job.mode
+        #endif
+    }
+
     // MARK: Permissions (#134)
 
     /// Changes a job's mode; a permission it waits on that the new mode allows is answered.

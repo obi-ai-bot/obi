@@ -8,8 +8,9 @@ import Hummingbird
 // (Engine/LocalRunner.swift): then nothing publishes it, and remote devices come through the gateway.
 
 #if !os(Linux)
-// On a Mac, the runner's files live next to the app's, never in the same folder: the app runs its
-// own engine there (Workspace.root). Before anything reads OBY_HOME.
+// On a Mac, the runner's job files live next to the app's, never in the same folder: the app runs
+// its own engine there (Workspace.root). Accounts are shared because Settings signs them in there.
+// Before anything reads OBY_HOME.
 if ProcessInfo.processInfo.environment["OBY_HOME"]?.isEmpty ?? true {
     setenv("OBY_HOME", LocalRunner.home.path, 1)
 }
@@ -92,7 +93,12 @@ Task {
     }
 }
 // Jobs that were queued or running when the runner went down carry on (Engine/Restarts.swift).
-let desk = Desk(restarts: Restarts(file: Workspace.root.appending(path: "restarts.json")))
+#if os(macOS)
+let accountRoot = LocalRunner.appRoot
+#else
+let accountRoot = Workspace.root
+#endif
+let desk = Desk(accounts: AccountStore(root: accountRoot), restarts: Restarts(file: Workspace.root.appending(path: "restarts.json")))
 desk.issueSync.enabled = true
 // Every failure is recorded, studied and acted on (Engine/Failures.swift).
 desk.failureLog.enabled = true

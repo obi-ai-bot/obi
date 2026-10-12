@@ -60,6 +60,7 @@ final class API {
         }
         router.get("v1/status") { _, _ in await self.status() }
         router.post("v1/plans") { request, _ in try await self.plan(try await Self.decode(PlanRequest.self, from: request)) }
+        router.post("v1/plans/cancel") { _, _ in await self.cancelPlan() }
         router.post("v1/conversation/stop") { _, _ in await self.stopConversation() }
         router.get("v1/conversation") { request, _ in
             try await self.conversation(before: request.uri.queryParameters.get("before").map { String($0) },
@@ -192,6 +193,11 @@ final class API {
         return Self.json(["stopped": true])
     }
 
+    func cancelPlan() -> Response {
+        desk.cancel()
+        return Self.json(["cancelled": true])
+    }
+
     /// One page of the conversation, oldest first: the latest `limit` turns (50 unless asked,
     /// at most `Conversation.stored`), or the ones before the turn `before` names. Fewer than
     /// `limit` means there are no older ones.
@@ -219,16 +225,22 @@ final class API {
     /// `POST /v1/jobs`: a whole job to start (#269). A body with a draft's id and no work of its
     /// own is from before Oby started planned work by itself: `410`, with where it went.
     func dispatch(_ request: DispatchRequest) async throws -> Response {
-        guard var new = request.job.new else {
-            if request.job.id != nil {
-                throw APIError(.gone, "Oby starts planned work by itself now: POST /v1/plans starts it and answers the jobs. POST /v1/jobs takes a whole job (repo, kind, task).")
-            }
-            throw APIError(.unprocessableContent, "A job needs repo, kind and task.")
-        }
-        new.mode = try request.job.mode.map { try Self.mode($0) }
         do {
-            return Self.json(JobJSON(job: try await desk.dispatch(new)), status: .created)
+            if var new = request.job.new {
+                new.mode = try request.job.mode.map { try Self.mode($0) }
+                return Self.json(JobJSON(job: try await desk.dispatch(new)), status: .created)
+            }
+            guard let id = request.job.id, let branch = request.job.branch, let account = request.job.account else {
+                throw APIError(.unprocessableContent, "A job needs repo, kind and task.")
+            }
+            let mode = try request.job.mode.map { try Self.mode($0) }
+            let job = try desk.dispatch(id, branch: branch, account: account, rounds: request.job.rounds,
+                                        check: request.job.check.map { .some($0) }, model: request.job.model.map { .some($0) },
+                                        files: request.job.files, attachments: request.job.attachments,
+                                        startWhen: request.job.startWhen, mode: mode)
+            return Self.json(JobJSON(job: job), status: .created)
         } catch {
+            if let error = error as? APIError { throw error }
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
     }
@@ -1316,6 +1328,8 @@ struct DispatchRequest: Decodable {
         var model: String?
         /// The files the job claims (#209); an empty list claims none, left out its issue's.
         var files: [String]?
+        /// Files attached by the Mac user, copied into the runner's worktree.
+        var attachments: [String]?
         /// What the job waits for before it starts (#216); left out or empty, it starts at once.
         var startWhen: [StartCondition]?
         var request: String?
