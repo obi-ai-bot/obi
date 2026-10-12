@@ -10,6 +10,8 @@ nonisolated enum IslandState { case compact, peek, open, listening }
 final class IslandModel {
     let desk: Desk
     let feed: RunnerFeed
+    /// The update waiting to be installed, if any (Mac/Updater.swift): the open island's pill.
+    let updater: Updater
     /// What you say while you hold fn.
     let voice = Voice()
     /// Oby's reply, spoken, when you talked (Mac/Speech.swift).
@@ -32,9 +34,10 @@ final class IslandModel {
     /// The runner's job whose alert's Publish was clicked: its screen starts publishing, once.
     var publishing: String?
 
-    init(desk: Desk, feed: RunnerFeed) {
+    init(desk: Desk, feed: RunnerFeed, updater: Updater = Updater()) {
         self.desk = desk
         self.feed = feed
+        self.updater = updater
     }
 
     /// Both chat surfaces read and send through this model.
@@ -86,6 +89,8 @@ final class IslandModel {
 final class IslandController {
     let desk = Desk()
     let feed = RunnerFeed()
+    /// Sparkle, and the island's "Update ready · Restart" (Mac/Updater.swift).
+    let updater = Updater()
     let model: IslandModel
     let character = ObyCharacter()
     let talkKey = TalkKey()
@@ -104,7 +109,12 @@ final class IslandController {
     /// app sets it. The island's "Open Chat" button goes there.
     var openWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
 
-    init() { desk.issueSync.enabled = true; model = IslandModel(desk: desk, feed: feed) }
+    init() {
+        desk.issueSync.enabled = true
+        model = IslandModel(desk: desk, feed: feed, updater: updater)
+        // A restart never interrupts a check this Mac runs for the runner.
+        updater.busy = { [weak feed] in feed?.checks.current != nil }
+    }
 
     func start() {
         panel.contentView = NSHostingView(rootView: IslandView(
@@ -568,6 +578,19 @@ private struct OpenIsland: View {
             HStack(alignment: .top) {
                 header.padding(.leading, characterWidth - 20)
                 Spacer(minLength: 12)
+                // An update is downloaded (Mac/Updater.swift): Restart installs it and relaunches,
+                // after this Mac's check if one runs.
+                if let pill = model.updater.pill {
+                    Button { model.updater.install() } label: {
+                        Text(pill)
+                            .font(.system(size: 12, weight: .semibold))
+                            .padding(.horizontal, 12).frame(height: 28)
+                            .background(Color.accentColor.opacity(model.updater.waiting ? 0.5 : 1), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.updater.waiting)
+                    .help("Installs the update and relaunches Oby. While this Mac runs a check for the runner, it waits for the check to end.")
+                }
                 if selected != nil {
                     Button { selected = nil } label: { topPill { Label("Back", systemImage: "chevron.left") } }
                         .buttonStyle(.plain)

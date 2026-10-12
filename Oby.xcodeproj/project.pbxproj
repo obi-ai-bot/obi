@@ -13,6 +13,7 @@
 		0B1E0C0A0000000000AD0002 /* ObyWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 0B1E0C0A0000000000AD0001 /* ObyWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		0B1E0C0A0000000000AD0010 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 0B1E0C0A000000000000E1 /* AppIcon.icon */; };
 		0B1E0C0A0000000000AE0002 /* ObyWatchWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0B1E0C0A0000000000AE0001 /* ObyWatchWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		0B1E0C0A0000000000AF0004 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 0B1E0C0A0000000000AF0003 /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -98,9 +99,18 @@
 		0B1E0C0A0000000000AC0001 /* ObyActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ObyActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		0B1E0C0A0000000000AD0001 /* ObyWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ObyWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0B1E0C0A0000000000AE0001 /* ObyWatchWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ObyWatchWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		0B1E0C0A0000000000AF0001 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Signing.xcconfig; path = Config/Signing.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		0B1E0C0A0000000000AF0005 /* Exceptions for "Mac" folder in "Oby" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+				Oby.entitlements,
+			);
+			target = FB61F80A30795FDE00A9523D /* Oby */;
+		};
 		0B1E0C0A000000000000C4 /* Exceptions for "iOS" folder in "ObyPhone" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -182,6 +192,9 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		FB61F80D30795FDE00A9523D /* Mac */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				0B1E0C0A0000000000AF0005 /* Exceptions for "Mac" folder in "Oby" target */,
+			);
 			path = Mac;
 			sourceTree = "<group>";
 		};
@@ -241,6 +254,7 @@
 		FB61F80830795FDE00A9523D /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
+				0B1E0C0A0000000000AF0004 /* Sparkle in Frameworks */,
 			);
 		};
 		0B1E0C0A00000000000000A5 /* Frameworks */ = {
@@ -280,6 +294,7 @@
 			isa = PBXGroup;
 			children = (
 				0B1E0C0A000000000000E1 /* AppIcon.icon */,
+				0B1E0C0A0000000000AF0001 /* Signing.xcconfig */,
 				FB61F80D30795FDE00A9523D /* Mac */,
 				0B1E0C0A00000000000000B1 /* Engine */,
 				0B1E0C0A000000000000C1 /* Shared */,
@@ -326,6 +341,9 @@
 				0B1E0C0A000000000000C1 /* Shared */,
 			);
 			name = Oby;
+			packageProductDependencies = (
+				0B1E0C0A0000000000AF0003 /* Sparkle */,
+			);
 			productName = Oby;
 			productReference = FB61F80B30795FDE00A9523D /* Oby.app */;
 			productType = "com.apple.product-type.application";
@@ -507,6 +525,9 @@
 			);
 			mainGroup = FB61F80230795FDE00A9523D;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				0B1E0C0A0000000000AF0002 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = FB61F80C30795FDE00A9523D /* Products */;
 			projectDirPath = "";
@@ -674,6 +695,7 @@
 /* Begin XCBuildConfiguration section */
 		FB61F81430795FE000A9523D /* Debug configuration for PBXProject "Oby" */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0B1E0C0A0000000000AF0001 /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -707,7 +729,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = 3UV9W5SV7W;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -728,7 +750,6 @@
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
-				OBY_IPHONE_BUNDLE_ID = dev.wellprado.oby;
 				ONLY_ACTIVE_ARCH = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -737,6 +758,7 @@
 		};
 		FB61F81530795FE000A9523D /* Release configuration for PBXProject "Oby" */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0B1E0C0A0000000000AF0001 /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -770,7 +792,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = 3UV9W5SV7W;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -785,7 +807,6 @@
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
-				OBY_IPHONE_BUNDLE_ID = dev.wellprado.oby;
 				SWIFT_COMPILATION_MODE = wholemodule;
 			};
 			name = Release;
@@ -795,15 +816,17 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Mac/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 3UV9W5SV7W;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Mac/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens only while you hold fn, and writes down what you say on this Mac.";
@@ -811,7 +834,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.deskree.oby;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(OBY_MAC_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = macosx;
@@ -830,15 +853,17 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Mac/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 3UV9W5SV7W;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Mac/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens only while you hold fn, and writes down what you say on this Mac.";
@@ -846,7 +871,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.deskree.oby;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(OBY_MAC_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = macosx;
@@ -866,11 +891,11 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 3UV9W5SV7W;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.deskree.oby.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(OBY_MAC_BUNDLE_ID).tests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
@@ -888,11 +913,11 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 3UV9W5SV7W;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.deskree.oby.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(OBY_MAC_BUNDLE_ID).tests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
@@ -912,7 +937,7 @@
 				CODE_SIGN_ENTITLEMENTS = iOS/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PQKAL8E36D;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -955,7 +980,7 @@
 				CODE_SIGN_ENTITLEMENTS = iOS/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PQKAL8E36D;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -996,7 +1021,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PQKAL8E36D;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 0.1.0;
@@ -1019,7 +1044,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PQKAL8E36D;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 0.1.0;
@@ -1041,7 +1066,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PQKAL8E36D;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = LiveActivity/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
@@ -1072,7 +1097,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PQKAL8E36D;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = LiveActivity/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
@@ -1105,7 +1130,7 @@
 				CODE_SIGN_ENTITLEMENTS = Watch/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PQKAL8E36D;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Watch/Info.plist;
@@ -1141,7 +1166,7 @@
 				CODE_SIGN_ENTITLEMENTS = Watch/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PQKAL8E36D;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Watch/Info.plist;
@@ -1176,7 +1201,7 @@
 				CODE_SIGN_ENTITLEMENTS = Watch/Widget/ObyWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PQKAL8E36D;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Watch/Widget/Info.plist;
@@ -1207,7 +1232,7 @@
 				CODE_SIGN_ENTITLEMENTS = Watch/Widget/ObyWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = PQKAL8E36D;
+				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Watch/Widget/Info.plist;
@@ -1300,6 +1325,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		0B1E0C0A0000000000AF0002 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.9.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		0B1E0C0A0000000000AF0003 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0B1E0C0A0000000000AF0002 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = FB61F80330795FDE00A9523D /* Project object */;
 	validationLevel = 1;

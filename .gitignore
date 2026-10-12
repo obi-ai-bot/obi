@@ -7,3 +7,8 @@ dist/
 .build/
 .swiftpm/
 __pycache__/
+# One Mac's signing overrides and release credentials (docs/release.md): never in git.
+Config/Signing.local.xcconfig
+.env.local
+*.p12
+*.p8

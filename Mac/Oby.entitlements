@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The microphone, under the hardened runtime (#282). Nothing else Oby does needs an entitlement
+	     there: it runs the user's CLIs as child processes, the oby:// character loads in WebKit's
+	     own process, screenshots go through ScreenCaptureKit, and it sends no Apple Events.
+	     No sandbox: Oby runs the user's own tools (AGENTS.md). -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>
