@@ -80,6 +80,13 @@ nonisolated enum JobList {
         return (list, missing.sorted())
     }
 
+    /// The list after the runner answered `status` about the job `gone`: a 404 says it has no such
+    /// job (#223), so the job leaves the list instead of staying under Needs you with a Dismiss that
+    /// can't work. Any other answer leaves the list as it is.
+    static func answered<J>(_ status: Int?, about gone: String, in list: [J], id: (J) -> String) -> [J] {
+        status == 404 ? list.filter { id($0) != gone } : list
+    }
+
     /// `job` in the list: in place of the one with its id, else where its age puts it (newest first).
     static func placed<J>(_ job: J, in list: [J], id: (J) -> String, created: (J) -> Date) -> [J] {
         var list = list

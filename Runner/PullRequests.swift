@@ -34,8 +34,8 @@ final class PullRequests {
                 let data = try await read(arguments)
                 let status = try Self.decode(data, at: now)
                 desk.followed(job.id, published: url, pushed: job.pushed, status: status, error: nil)
-                // A job the list forgot changes without `Desk.replace`: a merge outside Oby is still an intervention.
-                if desk.job(job.id) == nil {
+                // A job the list doesn't hold changes without `Desk.replace`: a merge outside Oby is still an intervention.
+                if !desk.lists(job.id) {
                     var seen = job
                     seen.pullRequest = status
                     desk.failureLog.observe(seen)

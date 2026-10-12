@@ -297,6 +297,28 @@ final class RunnerFeed {
         noticeChanges()
     }
 
+    /// Asks the runner something about its job `id` (stop, dismiss, a message, a move): when it
+    /// answers 404, it has no such job, and the job leaves the lists here, its alert too (#223).
+    func about<T>(_ id: String, _ call: (Runner) async throws -> T) async throws -> T {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+        do {
+            return try await call(runner)
+        } catch let error as RunnerError {
+            gone(id, error.status)
+            throw error
+        }
+    }
+
+    /// The runner answered `status` about the job `id`: on a 404 the job goes from here.
+    private func gone(_ id: String, _ status: Int?) {
+        guard status == 404 else { return }
+        jobs = JobList.answered(status, about: id, in: jobs, id: \.id)
+        extras[id] = nil
+        onScreen.remove(id)
+        notified?[id] = nil
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
+    }
+
     /// A job's screen opened or closed on the island: while it's open, new lists keep its job.
     func showing(_ id: String, _ shown: Bool) {
         if shown { onScreen.insert(id) } else { onScreen.remove(id) }
@@ -308,7 +330,11 @@ final class RunnerFeed {
         guard !jobs.contains(where: { $0.id == id }) else { return }
         guard let runner = runner ?? self.runner else { throw RunnerError(message: "Set the runner's URL in Settings to open it.") }
         let asked = runnerChanges
-        let job = try await runner.job(id)
+        let job: Job
+        do { job = try await runner.job(id) } catch let error as RunnerError {
+            if runnerChanges == asked { gone(id, error.status) }
+            throw error
+        }
         // Settings › Runner changed while it was on its way: it's the other runner's job.
         guard runnerChanges == asked, !jobs.contains(where: { $0.id == id }) else { return }
         jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
@@ -322,10 +348,11 @@ final class RunnerFeed {
         jobs = list
         let asked = runnerChanges
         for id in refetch {
-            guard let job = try? await runner.job(id) else { continue }
+            let job: Job?
+            do { job = try await runner.job(id) } catch { job = nil; if runnerChanges == asked { gone(id, (error as? RunnerError)?.status) } }
             // Settings › Runner changed meanwhile: these are the other runner's.
             guard runnerChanges == asked, !Task.isCancelled else { return }
-            jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
+            if let job { jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created) }
         }
         noticeChanges()
         // Alerts left in Notification Center, from before a drop or a restart, whose job needs nothing now.

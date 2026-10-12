@@ -114,8 +114,8 @@ final class IslandController {
             var failed: [String: String] = [:]
             for id in ids {
                 do {
-                    guard let runner = feed.runner else { throw RunnerError(message: "\(feed.name) isn't set up.") }
-                    feed.apply(try await runner.stop(id))
+                    guard feed.runner != nil else { throw RunnerError(message: "\(feed.name) isn't set up.") }
+                    feed.apply(try await feed.about(id) { try await $0.stop(id) })
                 } catch {
                     failed[id] = error.localizedDescription
                 }
@@ -123,8 +123,8 @@ final class IslandController {
             return failed
         }
         desk.moveElsewhere = { [weak self] id, target, why in
-            guard let self, let runner = feed.runner else { throw RunnerError(message: "The runner isn't set up.") }
-            let job = try await runner.move(id, agent: target.agent, account: target.account, model: target.model, why: why)
+            guard let self, feed.runner != nil else { throw RunnerError(message: "The runner isn't set up.") }
+            let job = try await feed.about(id) { try await $0.move(id, agent: target.agent, account: target.account, model: target.model, why: why) }
             feed.apply(job)
             return job
         }
@@ -688,7 +688,7 @@ private struct OpenIsland: View {
                     publishing: feed.device.key.isAvailable
                         ? JobView.Publishing(action: { try await feed.publishAction(id) }, publish: { try await feed.publish(id, action: $0) })
                         : nil,
-                    onMessage: { text in if let runner = feed.runner { feed.apply(try await runner.tell(id, text)) } },
+                    onMessage: { text in if feed.runner != nil { feed.apply(try await feed.about(id) { try await $0.tell(id, text) }) } },
                     onDismiss: { try await dismiss(row) },
                     extras: feed.extras[id],
                     onMode: { try await feed.setMode(id, $0) },
@@ -711,7 +711,7 @@ private struct OpenIsland: View {
         if row.host == nil {
             desk.stop(row.job.id)
         } else {
-            Task { if let job = try? await feed.runner?.stop(row.job.id) { feed.apply(job) } }
+            Task { if let job = try? await feed.about(row.job.id, { try await $0.stop(row.job.id) }) { feed.apply(job) } }
         }
     }
 
@@ -723,16 +723,16 @@ private struct OpenIsland: View {
             return { target in _ = try desk.move(id, to: target) }
         }
         return { target in
-            guard let runner = feed.runner else { throw RunnerError(message: "The runner isn't set up.") }
-            feed.apply(try await runner.move(id, agent: target.agent, account: target.account, model: target.model))
+            guard feed.runner != nil else { throw RunnerError(message: "The runner isn't set up.") }
+            feed.apply(try await feed.about(id) { try await $0.move(id, agent: target.agent, account: target.account, model: target.model) })
         }
     }
 
     private func dismiss(_ row: Row) async throws {
         if row.host == nil {
             try desk.dismiss(row.job.id)
-        } else if let runner = feed.runner {
-            feed.apply(try await runner.dismiss(row.job.id))
+        } else if feed.runner != nil {
+            feed.apply(try await feed.about(row.job.id) { try await $0.dismiss(row.job.id) })
         }
     }
 

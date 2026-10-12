@@ -471,12 +471,12 @@ private struct JobPane: View {
                     onMessage: { try desk.message(job.id, $0) }, onDismiss: { try desk.dismiss(job.id) })
         } else {
             JobView(job: job, place: feed.name, account: nil,
-                    onStop: { Task { if let stopped = try? await feed.runner?.stop(job.id) { feed.apply(stopped) } } },
+                    onStop: { Task { if let stopped = try? await feed.about(job.id, { try await $0.stop(job.id) }) { feed.apply(stopped) } } },
                     publishing: feed.device.key.isAvailable
                         ? JobView.Publishing(action: { try await feed.publishAction(job.id) }, publish: { try await feed.publish(job.id, action: $0) })
                         : nil,
-                    onMessage: { text in if let runner = feed.runner { feed.apply(try await runner.tell(job.id, text)) } },
-                    onDismiss: { if let runner = feed.runner { feed.apply(try await runner.dismiss(job.id)) } },
+                    onMessage: { text in if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.tell(job.id, text) }) } },
+                    onDismiss: { if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.dismiss(job.id) }) } },
                     extras: feed.extras[job.id],
                     onMode: { try await feed.setMode(job.id, $0) },
                     onPermission: { try await feed.answer(job.id, $0, message: $1) })

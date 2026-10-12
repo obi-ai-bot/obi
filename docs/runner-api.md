@@ -425,7 +425,9 @@ The latest jobs, newest first.
 
 ### `GET /v1/jobs/{id}`
 
-One job, however old: fetch it when an inbox item or a notification names a job that isn't in `GET /v1/jobs`'s latest 50.
+One job, however old: fetch it when an inbox item or a notification names a job that isn't in `GET /v1/jobs`'s latest 50. Every job's routes (`/dismiss`, `/messages`, `/stop`, `/move`, `/publish`, `/wait`) work on any job the runner ever had, after any number of restarts; `404` means it never had it. An app that gets `404` for a job it holds drops the job from its lists (the Mac does) instead of keeping it under Needs you.
+
+On startup the runner keeps the latest 50 jobs in memory, plus every job that still needs something however old: queued, running or interrupted, needing you or waiting for your answer, or published with a pull request that isn't merged or closed, whose reviews, checks and merge it goes on following. Not once dismissed.
 
 ### `GET /v1/jobs/{id}/wait`
 
