@@ -85,6 +85,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         var kind: String
         var text: String
         var job: String?
+        /// Waiting for room while only these accounts' weekly reserves stand in the way (#278), by
+        /// id: "Use Personal anyway" shows on each. Newer runners only.
+        var reserved: [String]?
     }
 
     /// Queued until what its `startWhen` names happens (#216: `waiting`'s kind `schedule` or
@@ -118,6 +121,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var cloudNeedsYou: Bool { dismissed == nil && stoppedCloud == true }
 
     var isActive: Bool { status == .queued || status == .running }
+    /// Queued behind something (`waiting`): listed under Waiting, not counted as working (#238).
+    var isWaiting: Bool { status == .queued && waiting != nil }
+    /// Running, or getting ready to: what every app counts as an agent working (as Engine's).
+    var isWorking: Bool { isActive && !isWaiting }
     /// Its agent asked the user something and waits for the answer: its alert stays until then.
     var waitsForAnswer: Bool { question != nil && dismissed == nil && status != .stopped }
     /// Its agent waits for the user's OK (Allow, Always allow or Deny).
@@ -139,9 +146,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         return (task.isEmpty ? request : task).split(separator: "\n").first.map(String.init) ?? request
     }
 
-    /// The one line a finished job is known by.
+    /// The one line a finished job is known by; a waiting one says what for.
     var line: String {
-        switch status {
+        if let waiting, status == .queued { return Self.waitingLine(waiting.text) }
+        return switch status {
         case .queued, .running: step
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
         case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
@@ -268,6 +276,10 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     var tetrix: Bool?
     var tetrixJobs: Int?
     var tetrixUsed: Int?
+    /// Whether it gets only jobs sent to it by name, its week at 80%, and until when the user let
+    /// it past that (#278); newer runners only.
+    var reserved: Bool?
+    var reserveLiftedUntil: Date?
 
     /// "Personal · Claude Code"
     var title: String { "\(name) · \(Usage.tool(agent))" }
@@ -275,7 +287,8 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     /// What Settings' usage card shows.
     var usage: Usage.Snapshot {
         Usage.Snapshot(agent: agent, name: name, label: label, fiveHour: fiveHour, sevenDay: sevenDay,
-                       fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running)
+                       fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running,
+                       reserveLiftedUntil: reserveLiftedUntil)
     }
 }
 #endif
@@ -437,7 +450,9 @@ typealias RunnerAccount = Account
 typealias RunnerAccount = AccountState
 
 extension AccountState: Decodable {
-    private enum Keys: String, CodingKey { case id, agent, name, label, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed }
+    private enum Keys: String, CodingKey {
+        case id, agent, name, label, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed, reserveLiftedUntil
+    }
 
     init(from decoder: any Decoder) throws {
         let keys = try decoder.container(keyedBy: Keys.self)
@@ -452,7 +467,8 @@ extension AccountState: Decodable {
                   fullUntil: try keys.decodeIfPresent(Date.self, forKey: .fullUntil),
                   tetrix: try keys.decodeIfPresent(Bool.self, forKey: .tetrix),
                   tetrixJobs: try keys.decodeIfPresent(Int.self, forKey: .tetrixJobs) ?? 0,
-                  tetrixUsed: try keys.decodeIfPresent(Int.self, forKey: .tetrixUsed) ?? 0)
+                  tetrixUsed: try keys.decodeIfPresent(Int.self, forKey: .tetrixUsed) ?? 0,
+                  reserveLifted: try keys.decodeIfPresent(Date.self, forKey: .reserveLiftedUntil))
     }
 }
 #endif
@@ -568,7 +584,8 @@ extension Job {
     /// The one line a job's row says under its title, as the iPhone's `Job.line`: the step while it
     /// runs, else the summary's first line.
     nonisolated var line: String {
-        switch status {
+        if let waiting, status == .queued { return Self.waitingLine(waiting.text) }
+        return switch status {
         case .queued, .running: step
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
         case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
@@ -580,22 +597,37 @@ extension Job {
     /// moved since its last round and starts a new one where it went (docs/runner-api.md).
     nonisolated var resumable: Bool { session != nil || (started != nil && !(moves ?? []).isEmpty) }
 
-    /// Where the list puts the job (Shared/JobList.swift): what needs you first, then the ones
-    /// working, then published ones whose pull request is still open, then everything else.
+    /// "After #223 merges", "Runner update": a waiting job's row, under the Waiting heading (#238).
+    nonisolated static func waitingLine(_ text: String) -> String { text.prefix(1).uppercased() + text.dropFirst() }
+
+    /// Where the list puts the job (Shared/JobList.swift): what needs you, the ones working, the
+    /// ones waiting their turn (#238), published ones whose pull request is still open, then
+    /// everything else.
     nonisolated var group: JobGroup {
         if needsYou { return .needsYou }
+        if isWaiting { return .waiting }
         if isActive { return .working }
         if status == .done, published != nil, (pullRequestState ?? "OPEN") == "OPEN" { return .inReview }
         return .done
     }
 
+    /// Nothing more is to happen for it, so Clear done may take it (`JobList.settled`, #280): it
+    /// was dismissed or stopped, its pull request was merged or closed, or it ended with nothing
+    /// to publish. `jobs` is the list it's in, where a review job finds the job it reviews.
+    nonisolated func settled(among jobs: [Job]) -> Bool {
+        let author = reviewOf.flatMap { id in jobs.first { $0.id == id } }
+        return JobList.settled(active: isActive || waiting != nil, needsYou: needsYou, letGo: dismissed != nil || status == .stopped,
+                               openPullRequest: published != nil && (pullRequestState ?? "OPEN") == "OPEN",
+                               author: author.map { $0.settled(among: []) })
+    }
+
     /// Whether the list shows the job after the last Clear done, on any app (Shared/JobList.swift).
-    nonisolated func listed(after clearedAt: Date?) -> Bool {
-        JobList.lists(active: isActive, needsYou: needsYou, finished: finished, clearedAt: clearedAt)
+    nonisolated func listed(after clearedAt: Date?, among jobs: [Job]) -> Bool {
+        JobList.lists(settled: settled(among: jobs), finished: finished, clearedAt: clearedAt)
     }
 
     /// Clear done would take it from the list (Shared/JobList.swift).
-    nonisolated var clearable: Bool { JobList.clears(active: isActive, needsYou: needsYou) }
+    nonisolated func clearable(among jobs: [Job]) -> Bool { JobList.clears(settled: settled(among: jobs)) }
 
     /// The status pill, the same on the iPhone and the Mac: how it's going, how it ended, and
     /// where its pull request is. A job you let go says Dismissed, however it ended.
@@ -726,6 +758,13 @@ nonisolated struct Runner: Sendable {
     /// the runner answers with the job, or why it couldn't.
     func move(_ id: String, agent: String?, account: String?, model: String?, why: String? = nil) async throws -> Job {
         try await call("POST", "v1/jobs/\(id)/move", body: MoveBody(agent: agent, account: account, model: model, why: why))
+    }
+
+    /// "Use anyway" (#278): the account takes automatic work past its weekly reserve until its
+    /// week resets, or with `lift` false is reserved again. The runner answers with the account.
+    func liftReserve(_ id: String, _ lift: Bool) async throws -> RunnerAccount {
+        struct Body: Encodable { var lift: Bool }
+        return try await call("POST", "v1/accounts/\(id)/reserve", body: Body(lift: lift))
     }
 
     /// Starts a job that waits for its `startWhen` now (#216): the runner answers with the job.

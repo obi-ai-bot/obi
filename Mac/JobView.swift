@@ -32,6 +32,9 @@ struct JobView: View {
     var onMove: ((MoveTarget) async throws -> Void)? = nil
     /// Starts it now when it waits for its `startWhen` (#216, Engine/StartWhen.swift); nil where it can't.
     var onStartNow: (() async throws -> Void)? = nil
+    /// Lifts an account's weekly reserve, by id, when the job waits for room only reserves hold
+    /// back (#278); nil where it can't.
+    var onUseAnyway: ((String) async throws -> Void)? = nil
     @State private var busy = false
     @State private var moving = false
     @State private var moveAgent = ""
@@ -76,6 +79,18 @@ struct JobView: View {
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
                 }
                 .font(.system(size: 13, weight: .semibold))
+            }
+            // Waiting for room while only weekly reserves stand in the way (#278): one tap lifts
+            // one until its reset, and the job starts on it.
+            if job.waitsToStart, let onUseAnyway {
+                ForEach(Usage.liftable(job.waiting?.reserved, among: accounts, id: \.account.id, usage: \.usage), id: \.account.id) { state in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button { Task { await run { try await onUseAnyway(state.account.id) } } } label: { pill(Usage.useAnyway(state.usage)) }
+                            .buttonStyle(.plain)
+                            .disabled(busy)
+                        Text(Usage.liftNote(state.usage)).font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                }
             }
             if moving {
                 movePanel

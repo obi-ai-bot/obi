@@ -63,6 +63,9 @@ final class Desk {
     /// How long `ask` waits for an answer before the turn ends with `Conversation.timedOut`, so
     /// the island never stays on Thinking. A Lead goal gets twice this.
     @ObservationIgnored var patience: Duration = .seconds(45)
+    /// How long one turn may keep acting (`plan`): the apps give up on an answer after 45 seconds,
+    /// so the steps stop in time to say what they did.
+    @ObservationIgnored var turnBudget: Duration = .seconds(36)
     /// Counts asks: a result from a turn that was cancelled or replaced is ignored.
     private var asking = 0
     /// The user's turn waiting for its answer, in `turns`, or nil.
@@ -609,16 +612,81 @@ final class Desk {
     func plan(_ said: String, turns given: [Turn]? = nil, live: @escaping () -> Bool = { true }) async -> Talk {
         if repos.isEmpty { await refresh() }
         // The brain and the Lead think with the least busy Claude account too, so a busy one doesn't slow them.
-        let thinker = AccountStore.route(accounts.accounts, agent: "claude")
+        let thinker = AccountStore.thinker(accounts.accounts)
         if Lead.leads(said), let thinker { return await lead(said, account: thinker, live: live) }
-        let context = brainContext(turns: given ?? turns.filter { $0.id != pending })
-        var result = await Planner(adapters: makeBrain(thinker?.home, vault)).plan(said, context: context)
-        guard live() else {
-            result.refused.append("the turn was cancelled before the plan came: nothing done")
-            record(BrainTurn(said: said, by: result.by, plan: result.plan, refused: result.refused))
-            return .none
+        // Like Claude Code's loop: the brain picks one action, Oby does it and tells the brain what
+        // happened, and the brain picks the next, until the user's request is done ("Deskree is
+        // full, move its jobs to Personal and Codex" is several moves). It ends on an answer (a
+        // reply, a question, a plan to dispatch), an action it already took, or the turn's budget.
+        let deadline = ContinuousClock.now + turnBudget
+        var done: [String] = []
+        var taken: Set<String> = []
+        var request = said
+        for step in 0..<Self.mostSteps {
+            let context = brainContext(turns: given ?? turns.filter { $0.id != pending })
+            var result = await Planner(adapters: makeBrain(thinker?.home, vault)).plan(request, context: context)
+            guard live() else {
+                result.refused.append("the turn was cancelled before the plan came: nothing done")
+                record(BrainTurn(said: request, by: result.by, plan: result.plan, refused: result.refused))
+                return done.isEmpty ? .none : .reply(done.joined(separator: " "))
+            }
+            record(BrainTurn(said: request, by: result.by, plan: result.plan, refused: result.refused))
+            // Rules only stand in for the brain on the user's own words: a later step they planned is a guess.
+            if step > 0, result.by == "rules" { break }
+            let acting = Self.acting.contains(result.plan.action)
+            // The same action twice in one turn: it's done; the brain only repeated itself.
+            if acting, !taken.insert(Self.signature(result.plan)).inserted { break }
+            guard acting else { return Self.after(done, await answer(result, said: said)) }
+            let talk = await card(for: result, said: said)
+            guard case .reply(let text) = talk else { return Self.after(done, talk) }
+            if !text.isEmpty { done.append(text) }
+            // An action that couldn't happen ends the turn: the user hears why.
+            if text.hasPrefix("Couldn't") || text.hasPrefix("Say which") { break }
+            guard ContinuousClock.now < deadline else {
+                done.append("That's as far as Oby got in one go: say “continue” for the rest.")
+                break
+            }
+            request = Self.continued(said, done: done)
         }
-        record(BrainTurn(said: said, by: result.by, plan: result.plan, refused: result.refused))
+        return done.isEmpty ? .none : .reply(done.joined(separator: " "))
+    }
+
+    /// The actions that change something, after which the brain plans the next step.
+    nonisolated static let acting: Set<Plan.Action> = [.stopAgent, .moveJob, .answerPermission, .setMode]
+    /// The most actions one turn takes.
+    nonisolated static let mostSteps = 6
+
+    /// What makes two actions the same: what they do, to which jobs, how.
+    nonisolated static func signature(_ plan: Plan) -> String {
+        [plan.action.rawValue, (plan.jobs ?? []).sorted().joined(separator: ","), plan.all == true ? "all" : "",
+         plan.move.map { "\($0.agent)/\($0.account)/\($0.model)" } ?? "", plan.mode?.rawValue ?? "", plan.decision?.rawValue ?? ""]
+            .joined(separator: "|")
+    }
+
+    /// The user's words, with what Oby did so far this turn, for the brain's next step.
+    nonisolated static func continued(_ said: String, done: [String]) -> String {
+        "\(said)\n\n(Oby already did this for the request, step by step: \(done.joined(separator: " "))\nPlan the next action the request still needs, using the briefing as it is now. When everything the user asked for is done, answer reply_only with an empty reply: Oby tells the user what it did.)"
+    }
+
+    /// The turn's answer, after what it did: the brain's last words follow Oby's.
+    nonisolated static func after(_ done: [String], _ talk: Talk) -> Talk {
+        guard !done.isEmpty else { return talk }
+        let did = done.joined(separator: " ")
+        switch talk {
+        case .reply(let text): return .reply(text.isEmpty || done.contains(text) ? did : did + " " + text)
+        case .question(let said, var question):
+            question.text = did + " " + question.text
+            return .question(said: said, question)
+        case .plan(var list):
+            if !list.isEmpty { list[0].reply = did + " " + list[0].reply }
+            return .plan(list)
+        case .none, .thinking: return .reply(did)
+        }
+    }
+
+    /// A plan that answers rather than acts: a reply, a question, or jobs to dispatch.
+    private func answer(_ result: Planner.Result, said: String) async -> Talk {
+        var result = result
         var epics: [Int: Int] = [:]
         (result.plan.dispatches, epics) = await Self.expandEpics(result.plan.dispatches)
         if result.plan.action == .dispatch, result.plan.dispatches.isEmpty {
@@ -729,12 +797,16 @@ final class Desk {
             justStarted = started.map(\.id)
             guard !started.isEmpty else {
                 if !taken.isEmpty, unrouted == 0 { return .reply("Nothing new to start: " + taken.map { "#\($0)" }.joined(separator: ", ") + " already \(taken.count == 1 ? "has" : "have") a job.") }
+                if let held = AccountStore.reserveWait(states, agent: nil) { return .reply(held) }
                 return .reply("No account is signed in with room to spare. Check Settings › Accounts.")
             }
             var text = "Started \(started.count) job\(started.count == 1 ? "" : "s"): "
                 + started.map { "\($0.heading) (#\($0.issue ?? 0))" }.joined(separator: ", ") + "."
             if !taken.isEmpty { text += " " + taken.map { "#\($0)" }.joined(separator: ", ") + " already \(taken.count == 1 ? "has" : "have") a job." }
-            if unrouted > 0 { text += " \(unrouted) more had no account with room." }
+            if unrouted > 0 {
+                text += " \(unrouted) more had no account with room."
+                if let held = AccountStore.reserveWait(states, agent: nil) { text += " " + held }
+            }
             if !skipped.isEmpty { text += " Skipped \(skipped.count) on the board." }
             return .reply(text)
         }
@@ -800,7 +872,10 @@ final class Desk {
                     return .reply("\(wanted) isn't signed in. Sign in from Settings › Accounts.")
                 }
                 let route = named == nil ? AccountStore.choose(states, agent: agent) : nil
-                guard let account = named?.account ?? route?.account else {
+                // Only accounts in their weekly reserve could take it (#278): it waits for room, on
+                // the first of them until then, and the apps offer to use one anyway.
+                let held = named == nil && route == nil ? AccountStore.heldInReserve(states, agent: agent) : []
+                guard let account = named?.account ?? route?.account ?? held.first?.account else {
                     let tool = agent.map { Job.agentNames[$0] ?? $0 } ?? "coding tool"
                     return .reply("No \(tool) account is signed in with room to spare. Check Settings › Accounts.")
                 }
@@ -819,7 +894,8 @@ final class Desk {
                 job.rounds = dispatch.rounds > 1 ? dispatch.rounds : nil
                 job.check = dispatch.check
                 job.files = await claims[index].value
-                if let conditions = dispatch.startWhen, !conditions.isEmpty {
+                let conditions = (dispatch.startWhen ?? []) + (held.isEmpty ? [] : [StartCondition.room(agent: agent)])
+                if !conditions.isEmpty {
                     // Its account's name is the one it runs on, by id.
                     let named = conditions.map { condition -> StartCondition in
                         switch condition {
@@ -835,7 +911,8 @@ final class Desk {
                     }
                 }
                 job.mode = dispatch.mode ?? defaultMode
-                let reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
+                var reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
+                if !held.isEmpty { reply += " " + AccountStore.roomWait(held) }
                 drafts.append(Draft(said: said, reply: reply, job: job, guessed: result.by == "rules",
                                     suggestedModel: dispatch.complexity == .complex ? AgentModels.stronger[account.agent] : nil, route: route))
             }
@@ -875,16 +952,33 @@ final class Desk {
         case .moveJob:
             // The job the brain named, here or elsewhere, to where the user said: Swift picks the
             // account and checks the model (`Moves.choose`), and the reply says what happened.
-            guard let id = plan.jobs?.first, let move = plan.move else { return .reply("Say which job to move, and where.") }
+            // Several jobs go to the same place ("move Deskree's jobs to Personal"). One that had
+            // failed or was cut off (an account's limit, a restart) starts again where it went.
+            guard let ids = plan.jobs, !ids.isEmpty, let move = plan.move else { return .reply("Say which job to move, and where.") }
             let auto = { (value: String) in value == "auto" ? nil : value }
             let target = MoveTarget(agent: auto(move.agent), account: auto(move.account), model: auto(move.model))
-            do {
-                if job(id) != nil { return .reply(Moves.reply(try self.move(id, to: target, why: said))) }
-                guard elsewhere().flatMap(\.jobs).contains(where: { $0.id == id }) else { return .reply("That job isn't here any more.") }
-                return .reply(Moves.reply(try await moveElsewhere(id, target, said)))
-            } catch {
-                return .reply("Couldn't move it: \(error.localizedDescription)")
+            var lines: [String] = []
+            for id in ids {
+                do {
+                    if job(id) != nil {
+                        var moved = try self.move(id, to: target, why: said)
+                        if (moved.status == .failed || moved.status == .interrupted), moved.dismissed == nil, (try? message(id, Inbox.tryAgainMessage)) != nil {
+                            moved = job(id) ?? moved
+                            lines.append(moved.moves?.last.map { "Moved \(moved.heading) from \($0.from) to \($0.to). It starts again there." } ?? Moves.reply(moved))
+                        } else {
+                            lines.append(Moves.reply(moved))
+                        }
+                    } else if elsewhere().flatMap(\.jobs).contains(where: { $0.id == id }) {
+                        lines.append(Moves.reply(try await moveElsewhere(id, target, said)))
+                    } else {
+                        lines.append(ids.count == 1 ? "That job isn't here any more." : "Couldn't move \(id): it isn't here any more.")
+                    }
+                } catch {
+                    let name = (job(id) ?? elsewhere().flatMap(\.jobs).first { $0.id == id })?.heading
+                    lines.append(ids.count == 1 || name == nil ? "Couldn't move it: \(error.localizedDescription)" : "Couldn't move \(name ?? id): \(error.localizedDescription)")
+                }
             }
+            return .reply(lines.joined(separator: " "))
         case .replyOnly, .ignore:
             guard !plan.reply.isEmpty else { return .none }
             // The brain counted wrong: with agents working here or on the runner, Oby never says
@@ -966,6 +1060,7 @@ final class Desk {
         if runningCount < maxRunning && !older { return catchUp ? startCaughtUp(prepared) : start(prepared) }
         var job = prepared
         job.step = JobSlots.waitLine(running: runningCount, of: maxRunning)
+        job.waiting = .slot
         replace(job)
         if !waiting.contains(where: { $0.id == job.id }) { waiting.append(job) }
         // It waits behind an older job with a slot free (one it caught up for, given back): the
@@ -986,6 +1081,15 @@ final class Desk {
         }
     }
 
+    /// Queued while the runner drains for an update: it starts once the update is done or cancelled.
+    private func waitForUpdate(_ job: Job) {
+        var queued = job
+        queued.step = "Waiting for runner update"
+        queued.waiting = .update
+        if !waiting.contains(where: { $0.id == job.id }) { waiting.append(queued) }
+        replace(queued)
+    }
+
     /// A job whose worktree was set up a while ago (it waited for a slot, or for a restart): its
     /// branch moves to the base as GitHub has it now, then it starts (or waits again), so it works on
     /// top of what merged meanwhile rather than conflict with it (#209). It fails, saying why, when
@@ -993,6 +1097,8 @@ final class Desk {
     private func startCaughtUp(_ job: Job) {
         var job = job
         job.step = "Bringing \(job.branch) up to date with \(job.base ?? "its base")"
+        // Getting ready: nothing holds it now.
+        job.waiting = nil
         replace(job, save: false)
         updatePreparing.insert(job.id)
         startingUp.insert(job.id)
@@ -1048,6 +1154,11 @@ final class Desk {
             draft.job.startWhen = startWhen.isEmpty ? nil : try StartWhen.checked(startWhen, job: id, jobs: startWhenLookup.job, accounts: accounts.accounts)
         }
         if let waitsOn = draft.job.startWhen?.compactMap(\.account).first { account = waitsOn }
+        // Another account picked on the card: it runs there, not wherever room comes (#278).
+        if account != draft.job.account, let conditions = draft.job.startWhen, conditions.contains(where: \.isRoom) {
+            let left = conditions.filter { !$0.isRoom }
+            draft.job.startWhen = left.isEmpty ? nil : left
+        }
         draft.job = try Self.edit(draft.job, branch: branch, account: accounts.state(account), rounds: rounds, check: check)
         if let files { draft.job.files = try Claims.validated(files) }
         if let model {
@@ -1365,13 +1476,7 @@ final class Desk {
     func lists(_ id: String) -> Bool { jobs.contains { $0.id == id } }
 
     private func start(_ prepared: Job) {
-        if drainingForUpdate {
-            var queued = prepared
-            queued.step = "Waiting for runner update"
-            replace(queued)
-            if !waiting.contains(where: { $0.id == prepared.id }) { waiting.append(prepared) }
-            return
-        }
+        if drainingForUpdate { return waitForUpdate(prepared) }
         var job = prepared
         job.status = .running
         job.phase = .work
@@ -1537,9 +1642,11 @@ final class Desk {
         guard let route = AccountStore.next(accounts.accounts, agent: job.agent) else {
             let first = accounts.accounts.filter(\.signedIn).compactMap(\.fullUntil).min()
             let soonest = first.map { " The first resets at \(Limits.clock($0))." } ?? ""
+            // Only reserves in the way (#278): lifting one and trying again goes on there.
+            let held = AccountStore.reserveWait(accounts.accounts, agent: nil).map { " " + $0 } ?? ""
             Logger.jobs.error("job \(id, privacy: .public): \(from, privacy: .public) hit its limit, and no account has room")
             limited.insert(id)
-            return finish(id, .failed, "\(from) hit its usage limit\(when), and no other account has room.\(soonest)")
+            return finish(id, .failed, "\(from) hit its usage limit\(when), and no other account has room.\(soonest)\(held)")
         }
         let next = route.account
         Logger.jobs.notice("job \(id, privacy: .public): \(from, privacy: .public) hit its limit\(when, privacy: .public); continuing on \(next.heading, privacy: .public)")
@@ -2080,7 +2187,7 @@ final class Desk {
         guard !rewriting.contains(key) else { return }
         rewriting.insert(key)
         // The brain's model, on the least busy Claude account, as the brain thinks.
-        let thinker = AccountStore.route(accounts.accounts, agent: "claude")
+        let thinker = AccountStore.thinker(accounts.accounts)
         let rewriter = InboxRewriter(adapters: makeBrain(thinker?.home, vault), timeout: rewritePatience)
         Task {
             let rewrite = await rewriter.rewrite(item)

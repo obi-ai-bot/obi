@@ -114,7 +114,7 @@ struct HomeView: View {
     }
 }
 
-/// The jobs that need you, then the ones running.
+/// The jobs that need you, then the ones running, then the ones waiting their turn.
 struct JobListScreen: View {
     @Environment(Watch.self) private var watch
 
@@ -145,6 +145,8 @@ struct JobRow: View {
             }
             let (text, color) = JobStatus.of(job)
             Text(text).font(.caption2.weight(.semibold)).foregroundStyle(color)
+            // What it waits for: "After #223 merges".
+            if job.isWaiting && !job.waitsToStart { Text(job.line).font(.caption2).foregroundStyle(.secondary).lineLimit(2) }
         }
         .padding(.vertical, 2)
     }
@@ -156,6 +158,7 @@ enum JobStatus {
         switch job.status {
         // Waiting for its start condition (#216): what for, as the runner says it.
         case .queued where job.waitsToStart: ("Scheduled, waiting \(job.waiting?.text ?? "to start")", .secondary)
+        case .queued where job.waiting != nil: ("Waiting", .gray)
         case .queued: ("Starting", .blue)
         case .running: ("Working", .blue)
         case .done where job.canPublish: ("Ready to publish", .orange)

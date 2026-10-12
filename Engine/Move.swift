@@ -19,7 +19,8 @@ nonisolated struct MoveTarget: Codable, Equatable, Sendable {
 /// the brain and the apps only say what the user asked for.
 nonisolated enum Moves {
     /// Without an account named, a job moves only to one under this share of both its 5-hour and
-    /// its weekly window. One the user names takes it however busy it is.
+    /// its weekly window (past it, the week too while its reserve is lifted: #278). One the user
+    /// names takes it however busy it is.
     static let room = 0.8
     /// The model `MoveTarget.model` names to drop the job's own and run the tool's from Settings › Models.
     static let toolDefault = "default"
@@ -89,9 +90,16 @@ nonisolated enum Moves {
             account = own.account
         }
         if account == nil {
-            // Oby's own pick, as for any job (`AccountStore.choose`), among those with room in both windows.
-            let roomy = accounts.filter { ($0.fiveHour ?? 0) < room && ($0.sevenDay ?? 0) < room }
+            // Oby's own pick, as for any job (`AccountStore.choose`), among those with room in both
+            // windows; past 80% of its week too while the user lifted its reserve (#278).
+            let roomy = accounts.filter { ($0.fiveHour ?? 0) < room && (($0.sevenDay ?? 0) < room || $0.reserveLiftedUntil(at: now) != nil) }
             account = AccountStore.route(roomy, agent: tool, now: now)
+        }
+        if account == nil, wanted != nil {
+            // The user named the tool ("put them on Codex"): that names its accounts too, however
+            // busy, the least busy first, as long as one isn't stopped at its limit (2026-10-12).
+            account = accounts.filter { $0.signedIn && $0.account.agent == tool && !$0.isFull(at: now) }
+                .min { ($0.fiveHour ?? 0) < ($1.fiveHour ?? 0) }?.account
         }
         guard let account else {
             let name = Job.agentNames[tool] ?? tool

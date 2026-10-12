@@ -27,6 +27,20 @@ struct PaceTests {
         AccountStore.route(states, agent: agent, for: work, now: now)?.id
     }
 
+    /// Every account past 80% of its week, Deskree's Claude stopped at its limit (2026-10-12): new
+    /// work goes nowhere, but the brain still thinks, on the Claude account with room.
+    @Test func theBrainThinksWhenEveryAccountIsInItsReserve() {
+        var full = state("deskree", fiveHour: 1.02, sevenDay: 0.82, gone: 0.6)
+        full.fullUntil = now.addingTimeInterval(3600)
+        let accounts = [full, state("personal", fiveHour: 0.06, sevenDay: 0.83, gone: 0.6), state("codex", "codex", fiveHour: 0.27, sevenDay: 0.87, gone: 0.2)]
+        #expect(route(accounts) == nil)
+        #expect(AccountStore.thinker(accounts, now: now)?.id == "personal")
+        // Past even a review's 95%: any Claude account that isn't stopped still answers.
+        let spent = [full, state("personal", fiveHour: 0.5, sevenDay: 0.97, gone: 0.6)]
+        #expect(AccountStore.thinker(spent, now: now)?.id == "personal")
+        #expect(AccountStore.thinker([full], now: now) == nil)
+    }
+
     /// The accounts on 2026-10-11 at 19:29 UTC, when "Fix it" sent two failure fixes to Codex (#176).
     var october11: [AccountState] {
         [state("codex", "codex", name: "Deskree", sevenDay: 0.33, gone: 0.076),
@@ -171,14 +185,22 @@ struct PaceTests {
         #expect(state("unknown", sevenDay: 0.85).isReserved(at: later))
     }
 
-    @Test func reviewsDontUseAReservedAccount() {
+    @Test func reviewsUseAReservedAccountOnlyLastAndUnder95() {
         let author = Job(id: "author", request: "", agent: "claude", account: "mine", repo: "deskree-inc/oby",
                          branch: "oby/fix-author", kind: .fix, task: "")
         let codex = state("codex", "codex", sevenDay: 0.85, gone: 0.9)
         let personal = state("personal", sevenDay: 0.3, gone: 0.5)
-        // At the fixtures' time: codex's week resets at `now + 0.1 week`, and on the real clock it already has.
+        // At the fixtures' time: codex's week resets at `now + 0.1 week`.
+        // An account outside its reserve comes first.
         #expect(Review.reviewer([state("mine"), codex, personal], for: author, now: now)?.id == "personal")
-        #expect(Review.reviewer([state("mine"), codex], for: author, now: now) == nil)
+        // When every other account is in its reserve, a review still runs on one under 95% of its week.
+        #expect(Review.reviewer([state("mine"), codex], for: author, now: now)?.id == "codex")
+        // At 95% of its week it doesn't, and the wait says when that week resets.
+        let full = state("codex", "codex", sevenDay: 0.96, gone: 0.9)
+        #expect(Review.reviewer([state("mine"), full], for: author, now: now) == nil)
+        #expect(Review.roomAt([state("mine"), full], for: author, now: now).map { $0 > now } == true)
+        // New work still never goes to a reserved account.
+        #expect(AccountStore.choose([codex], agent: nil, for: .new, now: now) == nil)
     }
 
     @Test func onlyAJobSentByNameGoesToAReservedAccount() async throws {
@@ -193,8 +215,9 @@ struct PaceTests {
                                          epic: nil, kind: .fix, title: nil, task: "Fix it", inputs: [], rounds: 1, check: nil, complexity: .routine)
             return Planner.Result(plan: Plan(action: .dispatch, reply: "", dispatches: [dispatch], question: nil), by: "claude")
         }
-        #expect(await desk.card(for: plan(account: "auto"), said: "fix it")
-                == .reply("No Claude Code account is signed in with room to spare. Check Settings › Accounts."))
+        // Only its reserve keeps it from the job: it waits for room (#278, RunnerTests/ReserveTests.swift).
+        func waits(_ talk: Desk.Talk) -> [[StartCondition]?]? { if case .plan(let drafts) = talk { drafts.map(\.job.startWhen) } else { nil } }
+        #expect(waits(await desk.card(for: plan(account: "auto"), said: "fix it")) == [[.room(agent: "claude")]])
         guard case .plan(let drafts) = await desk.card(for: plan(account: "Default"), said: "fix it on Default") else {
             Issue.record("expected a plan")
             return
@@ -205,6 +228,11 @@ struct PaceTests {
         let context = BrainContext(accounts: ["auto": ["auto", "Default"], "claude": ["auto", "Default"]], repos: ["deskree-inc/oby"])
         let rules = Rules.plan("fix oby #12", context: context)
         #expect(rules.dispatches.map { "\($0.agent)/\($0.account)" } == ["auto/auto"] && rules.problems(in: context, canary: "7f3a9c").isEmpty)
+        #expect(waits(await desk.card(for: Planner.Result(plan: rules, by: "rules"), said: "fix oby #12")) == [[.room(agent: nil)]])
+        // At 95% of its week lifting its reserve wouldn't help: no account has room, and nothing waits.
+        accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.96), for: "default")
+        #expect(await desk.card(for: plan(account: "auto"), said: "fix it")
+                == .reply("No Claude Code account is signed in with room to spare. Check Settings › Accounts."))
         #expect(await desk.card(for: Planner.Result(plan: rules, by: "rules"), said: "fix oby #12")
                 == .reply("No coding tool account is signed in with room to spare. Check Settings › Accounts."))
         // Without "auto" on offer it names what the context has, and the plan still checks out.

@@ -144,8 +144,8 @@ struct ConversationTests {
         let headings = ["### Needs you", "### Working", "### In review", "### Done"].compactMap { text.range(of: $0)?.lowerBound }
         #expect(headings == headings.sorted() && headings.count == 4)
         for part in ["User: how is it going?", "Oby: Fine.",
-                     "ab12cd34 · Vault secrets · deskree-inc/oby, issue #60 · Claude Code · running on this Mac · Stage 2 of 5, Work: Round 1 of 1 · started 12 min ago · asked: work on oby #60",
-                     "fa11ed00 · Mac runner notifications · deskree-inc/oby, PR #33 · Claude Code · failed · Stage 2 of 5, Work: Round 1 of 1 · ended 1 min ago · asked: Review oby PR #33",
+                     "ab12cd34 · Vault secrets · deskree-inc/oby, issue #60 · Claude Code · Personal · running on this Mac · Stage 2 of 5, Work: Round 1 of 1 · started 12 min ago · asked: work on oby #60",
+                     "fa11ed00 · Mac runner notifications · deskree-inc/oby, PR #33 · Claude Code · Personal · failed · Stage 2 of 5, Work: Round 1 of 1 · ended 1 min ago · asked: Review oby PR #33",
                      "1e5e1e00 · Job progress screen", "Oby approved · PR https://github.com/deskree-inc/oby/pull/42 open · ended 1 h ago",
                      "3e26ed00 · Inbox first slice", "PR https://github.com/deskree-inc/oby/pull/42 merged · merged 1 min ago · ended 2 h ago",
                      "- Question for job ab12cd34 (Vault secrets, this Mac), waiting 3 min: the question and its options are quoted in work.md",
@@ -279,7 +279,7 @@ struct ConversationTests {
         brain.plans = [Self.stop(["fa5a5a5a"]), Self.stop(["fa5a5a5a"]), Self.stop(["fa5a5a5a"])]
         #expect(await desk.converse("stop the watch job") == .reply("Stopped Watch home."))
         #expect(stopped.ids == ["fa5a5a5a"])
-        #expect(brain.prompts.first?.contains("fa5a5a5a · Watch home · deskree-inc/oby, issue #60 · Claude Code · running on tetrix-lab") == true)
+        #expect(brain.prompts.first?.contains("fa5a5a5a · Watch home · deskree-inc/oby, issue #60 · Claude Code") == true && brain.prompts.first?.contains("running on tetrix-lab") == true)
         // The runner couldn't: Oby says so instead of "Stopped".
         stopped.failing = true
         #expect(await desk.converse("stop it") == .reply("Couldn't stop Watch home: the runner hung up."))

@@ -10,7 +10,7 @@ import OSLog
 ///
 /// As JSON (docs/runner-api.md): `{"job": "ab12cd34", "is": "merged"}`, `{"pr": 205, "is":
 /// "merged"}`, `{"account": "<id>", "window": "fiveHour", "under": 0.5}`, `{"account": "<id>",
-/// "onPace": true}`, `{"at": "2026-10-13T09:00:00Z"}`.
+/// "onPace": true}`, `{"room": true, "agent": "claude"}`, `{"at": "2026-10-13T09:00:00Z"}`.
 nonisolated enum StartCondition: Codable, Equatable, Sendable {
     /// What another job must have come to: `done` (it ended done), `merged` (its pull request was
     /// merged), `published` (its pull request is out) or `ended` (it ended in any way).
@@ -27,21 +27,30 @@ nonisolated enum StartCondition: Codable, Equatable, Sendable {
     case window(account: String, Window, under: Double?)
     /// The account's weekly use is back on pace (`AccountState.isAhead` false, #176).
     case onPace(account: String)
+    /// Routing has an account for it, of `agent`'s tool (any when nil): a job sent while only
+    /// accounts in their weekly reserve could take it waits for this (#278), and starts on the
+    /// account routing picks then (`AccountStore.choose`).
+    case room(agent: String?)
     case at(Date)
 
     /// The account it's about, if any: a job waiting on one runs on it.
     var account: String? {
         switch self {
         case .window(let account, _, _), .onPace(let account): account
-        case .job, .pullRequest, .at: nil
+        case .job, .pullRequest, .room, .at: nil
         }
     }
 
-    private enum Keys: String, CodingKey { case job, pr, `is`, account, window, under, onPace, at }
+    /// It waits for an account with room, whichever (`room`).
+    var isRoom: Bool { if case .room = self { true } else { false } }
+
+    private enum Keys: String, CodingKey { case job, pr, `is`, account, window, under, onPace, room, agent, at }
 
     init(from decoder: any Decoder) throws {
         let keys = try decoder.container(keyedBy: Keys.self)
-        if keys.contains(.job) {
+        if try keys.decodeIfPresent(Bool.self, forKey: .room) == true {
+            self = .room(agent: try keys.decodeIfPresent(String.self, forKey: .agent))
+        } else if keys.contains(.job) {
             self = .job(try keys.decode(String.self, forKey: .job), is: try keys.decodeIfPresent(JobState.self, forKey: .is) ?? .done)
         } else if keys.contains(.pr) {
             self = .pullRequest(try keys.decode(Int.self, forKey: .pr), is: try keys.decodeIfPresent(PullRequestState.self, forKey: .is) ?? .merged)
@@ -61,7 +70,7 @@ nonisolated enum StartCondition: Codable, Equatable, Sendable {
             }
             self = .at(date)
         } else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "A condition has job, pr, account or at."))
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "A condition has job, pr, account, room or at."))
         }
     }
 
@@ -81,6 +90,9 @@ nonisolated enum StartCondition: Codable, Equatable, Sendable {
         case .onPace(let account):
             try keys.encode(account, forKey: .account)
             try keys.encode(true, forKey: .onPace)
+        case .room(let agent):
+            try keys.encode(true, forKey: .room)
+            try keys.encodeIfPresent(agent, forKey: .agent)
         case .at(let date):
             // A string whatever the encoder does with dates: the store and the API read the same.
             try keys.encode(date.formatted(.iso8601), forKey: .at)
@@ -110,11 +122,13 @@ enum StartWhen {
     }
 
     /// What a condition is checked against: jobs by id, accounts by id, and pull requests' states
-    /// (in a repository, by number) as Oby last read them, nil when it doesn't know.
+    /// (in a repository, by number) as Oby last read them, nil when it doesn't know; and every
+    /// account, for `room`.
     struct Lookup {
         var job: (String) -> Job?
         var account: (String) -> AccountState?
         var pullRequest: (_ repo: String, _ number: Int) -> PullRequestStatus.State?
+        var accounts: () -> [AccountState] = { [] }
     }
 
     /// Where `condition` of `job` stands at `now`. A window whose reset time has passed counts as
@@ -169,6 +183,11 @@ enum StartWhen {
             if let waits = unavailable(account, now: now) { return .waits(waits) }
             guard account.isAhead(at: now), let pace = account.pace(at: now) else { return .holds }
             return .waits("for \(account.account.heading) to be back on its weekly pace (\(AccountStore.times(pace)) ahead)")
+        case .room(let agent):
+            let accounts = lookup.accounts()
+            if AccountStore.choose(accounts, agent: agent, now: now) != nil { return .holds }
+            let held = AccountStore.heldInReserve(accounts, agent: agent, now: now)
+            return .waits(held.isEmpty ? "for an account with room" : "for room: " + AccountStore.reserveLine(held))
         case .at(let date):
             return now >= date ? .holds : .waits("until \(when(date, now: now))")
         }
@@ -199,7 +218,7 @@ enum StartWhen {
             }
         }
         guard let first = open.first?.condition else { return nil }
-        let kind: Job.Waiting.Kind = first.account == nil ? .schedule : .limit
+        let kind: Job.Waiting.Kind = first.account == nil && !first.isRoom ? .schedule : .limit
         let job = open.lazy.compactMap { if case .job(let id, _) = $0.condition { id } else { nil } }.first
         if let why = never.first {
             let text = "for you: \(why)"
@@ -220,6 +239,7 @@ enum StartWhen {
             case .window(let id, let window, let under):
                 "\(accounts(id)?.account.heading ?? id) \(window == .fiveHour ? "5-hour" : "weekly") window under \(percent(under ?? AccountStore.busy))"
             case .onPace(let id): "\(accounts(id)?.account.heading ?? id) on its weekly pace"
+            case .room(let agent): "an account\(agent.map { " of \(Job.agentNames[$0] ?? $0)" } ?? "") with room"
             case .at(let date): "at \(date.formatted(.iso8601))"
             }
         }.joined(separator: ", ")
@@ -244,11 +264,17 @@ enum StartWhen {
                 return .window(account: try account(named, in: accounts).account.id, window, under: under)
             case .onPace(let named):
                 return .onPace(account: try account(named, in: accounts).account.id)
+            case .room(let agent):
+                if let agent, Job.agentNames[agent] == nil { throw Shell.Failure(message: "There's no tool \(agent) to wait for room on.") }
+                return condition
             case .at:
                 return condition
             }
         }
         guard Set(checked.compactMap(\.account)).count <= 1 else { throw Shell.Failure(message: "A job waits on one account at most: it runs on that account.") }
+        guard !checked.contains(where: \.isRoom) || !checked.contains(where: { $0.account != nil }) else {
+            throw Shell.Failure(message: "A job waiting on an account runs on it: it doesn't wait for room on another.")
+        }
         return checked
     }
 
@@ -302,7 +328,8 @@ extension Desk {
     var startWhenLookup: StartWhen.Lookup {
         StartWhen.Lookup(job: { [weak self] id in self?.job(id) ?? self?.elsewhere().flatMap(\.jobs).first { $0.id == id } },
                          account: { [weak self] id in self?.accounts.state(id) },
-                         pullRequest: { [weak self] repo, number in self?.pullRequestStates["\(repo)#\(number)"] })
+                         pullRequest: { [weak self] repo, number in self?.pullRequestStates["\(repo)#\(number)"] },
+                         accounts: { [weak self] in self?.accounts.accounts ?? [] })
     }
 
     /// Whether a job that's ready to start waits for its `startWhen` instead (`startOrWait`): it
@@ -360,6 +387,13 @@ extension Desk {
             scheduled.remove(id)
             keptWaiting.remove(id)
             Logger.jobs.notice("job \(id, privacy: .public): starts, what it waited for came")
+            // It waited for room (#278): it runs where routing finds it, as if just sent.
+            if let room = conditions.first(where: \.isRoom), case .room(let agent) = room,
+               let route = AccountStore.choose(accounts.accounts, agent: agent, now: now) {
+                if route.account.agent != job.agent { job.model = nil }
+                (job.account, job.agent) = (route.account.id, route.account.agent)
+                noteStart(route.why, for: id)
+            }
             job.startWhen = nil
             job.waiting = nil
             job.question = nil
@@ -368,8 +402,15 @@ extension Desk {
             replace(job)
             return true
         }
-        if job.step != wait.step || job.waiting != wait.waiting || job.question != wait.question {
-            (job.step, job.waiting, job.question) = (wait.step, wait.waiting, wait.question)
+        var waiting = wait.waiting
+        // Waiting for room while only reserves stand in the way (#278): the apps offer "Use
+        // Personal anyway" on these accounts.
+        if let room = conditions.first(where: \.isRoom), case .room(let agent) = room {
+            let held = AccountStore.heldInReserve(accounts.accounts, agent: agent, now: now).map(\.account.id)
+            waiting.reserved = held.isEmpty ? nil : held
+        }
+        if job.step != wait.step || job.waiting != waiting || job.question != wait.question {
+            (job.step, job.waiting, job.question) = (wait.step, waiting, wait.question)
             replace(job)
         }
         return false
@@ -448,8 +489,19 @@ extension Desk {
     /// to start, so no agent asked it.
     func asksAboutStart(_ id: String) -> Bool { job(id)?.waitsToStart == true }
 
-    /// The job's account conditions on the account it left go when it moves: it runs where it went.
+    /// The job's account conditions on the account it left go when it moves, and so does waiting
+    /// for room on any (#278): it runs where it went.
     nonisolated static func movedStartWhen(_ conditions: [StartCondition]?, leaving account: String) -> [StartCondition]? {
-        conditions.map { $0.filter { $0.account != account } }
+        conditions.map { $0.filter { $0.account != account && !$0.isRoom } }
+    }
+
+    /// "Use anyway" (#278): the account takes work past its weekly reserve until its week resets
+    /// (`AccountStore.liftReserve`), and jobs waiting for room look at once; without `lift` it's
+    /// reserved again. Nil for an unknown account.
+    @discardableResult
+    func liftReserve(_ accountID: String, _ lift: Bool) -> AccountState? {
+        guard let state = accounts.liftReserve(accountID, lift, now: clock()) else { return nil }
+        if lift, !scheduled.isEmpty { Task { await checkStartWhen() } }
+        return state
     }
 }

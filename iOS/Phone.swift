@@ -142,9 +142,9 @@ final class Phone {
     var active: [Job] { jobs.filter(\.isActive) }
     var signedIn: [Account] { accounts.filter(\.signedIn) }
 
-    /// The jobs Home lists: all but those that finished by the last Clear done, newest first. Home
-    /// puts them in their groups (JobList.groups), as the Mac's island does.
-    var visibleJobs: [Job] { jobs.filter { $0.isActive || JobList.shows(finished: $0.finished, clearedAt: clearedAt) } }
+    /// The jobs Home lists: all but the settled ones (`Job.settled`) that finished by the last Clear
+    /// done, newest first. Home puts them in their groups (JobList.groups), as the Mac's island does.
+    var visibleJobs: [Job] { jobs.filter { $0.listed(after: clearedAt, among: jobs) } }
 
     // MARK: Staying live
 

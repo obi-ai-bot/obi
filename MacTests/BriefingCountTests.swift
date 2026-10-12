@@ -60,4 +60,32 @@ struct BriefingCountTests {
         #expect(await desk.converse("anything running?") == .reply("No jobs are running right now."))
         #expect(desk.briefing(turns: []).working == 0)
     }
+
+    /// 1 job running on the runner and 14 queued behind another's files or the update: the notch,
+    /// the island's header and the brain say "1 agent is working, 14 waiting." (#238). The waiting
+    /// ones say Waiting, in gray, under their own group, and the sidebar gives them a gray dot.
+    @Test func theHeadlineCountsOnlyWorkingJobs() {
+        let feed = RunnerFeed()
+        var waiting: [Job] = []
+        for index in 0..<14 {
+            var queued = job("w\(index)", title: "Waiting \(index)", created: Double(index))
+            queued.status = .queued
+            queued.waiting = index == 0 ? Job.Waiting.update : Job.Waiting(kind: .files, text: "after #223 merges", job: "r1")
+            waiting.append(queued)
+            feed.apply(queued)
+        }
+        let running = job("r1", title: "Vault secrets", created: 300)
+        feed.apply(running)
+        let model = IslandModel(desk: desk, feed: feed)
+        #expect(model.working == 1 && model.waiting == 14)
+        #expect(model.summary == "1 agent is working, 14 waiting. Nothing needs you.")
+        #expect(waiting.allSatisfy { $0.badge == JobBadge(text: "Waiting", tone: .gray) && $0.group == .waiting })
+        #expect(waiting[1].line == "After #223 merges" && waiting[0].line == "Runner update")
+        #expect(running.badge == JobBadge(text: "Working", tone: .blue) && running.group == .working)
+        #expect(JobList.groups(feed.jobs, by: \.group).map(\.group) == [.working, .waiting])
+        #expect(SidebarSections.agents(local: [], runner: feed.jobs).filter { $0.dot == .waiting }.count == 14)
+        desk.elsewhere = { [Briefing.Place(name: "tetrix-lab", jobs: feed.jobs, inbox: [])] }
+        #expect(desk.briefing(turns: []).working == model.working)
+        #expect(desk.briefing(turns: []).text.contains("Working now: 1 agent is working: Vault secrets on tetrix-lab. 14 jobs are waiting."))
+    }
 }

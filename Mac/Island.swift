@@ -56,17 +56,23 @@ final class IslandModel {
         else { Task { if let job = try? await feed.about(id, { try await $0.stop(id) }) { feed.apply(job) } } }
     }
 
-    /// Agents working now, on this Mac and on the runner.
-    var working: Int { desk.active.count + feed.working }
+    /// Agents working now, on this Mac and on the runner: not the jobs waiting their turn (#238).
+    var working: Int { desk.jobs.count(where: \.isWorking) + feed.working }
+    /// Jobs queued behind something, on this Mac and on the runner (`Job.waiting`).
+    var waiting: Int { desk.jobs.count(where: \.isWaiting) + feed.waiting }
 
-    /// Whether the island lists a job: it hasn't finished, it still needs you, or it finished after
-    /// the last Clear done on any app. The runner keeps that time, and this Mac's own jobs go by it too.
-    func lists(_ job: Job) -> Bool { job.listed(after: feed.clearedAt) }
+    /// Whether the island lists a job: it isn't settled (`Job.settled`: still running, waiting,
+    /// needing you or with its pull request open), or it finished after the last Clear done on any
+    /// app. The runner keeps that time, and this Mac's own jobs go by it too.
+    func lists(_ job: Job) -> Bool { job.listed(after: feed.clearedAt, among: desk.jobs + feed.jobs) }
+
+    /// Clear done would take the job from the island (`Job.settled`).
+    func clears(_ job: Job) -> Bool { job.clearable(among: desk.jobs + feed.jobs) }
 
     /// The one line the iPhone's Home says too (Shared/JobList.swift): who's working, and what
     /// needs you among the jobs listed.
     var summary: String {
-        Summary.line(working: working, needs: NeedsYou.line((desk.jobs + feed.jobs).filter { lists($0) }))
+        Summary.line(working: working, waiting: waiting, needs: NeedsYou.line((desk.jobs + feed.jobs).filter { lists($0) }))
     }
 
     /// What peeking shows next to Oby's name: a job that just ended, else the summary.
@@ -666,17 +672,17 @@ private struct OpenIsland: View {
     /// The ones the island lists: all but those that finished by the last Clear done, on any app.
     private var rows: [Row] { allRows.filter { model.lists($0.job) } }
 
-    /// The list in the iPhone's groups: needs you, working, in review, done.
+    /// The list in the iPhone's groups: working, waiting, needs you, in review, done.
     private var groups: [JobList.Section<Row>] { JobList.groups(rows) { $0.job.group } }
 
     /// The job open now, even one that's cleared (a notification opened it).
     private var selectedRow: Row? { selected.flatMap { id in allRows.first { $0.id == id } } }
 
-    /// The job list is on screen, a runner is set (it keeps the clear's time), and something finished is listed.
+    /// The job list is on screen, a runner is set (it keeps the clear's time), and a settled job is listed.
     private var clearable: Bool {
         switch desk.talk {
         case .plan, .question: false
-        default: feed.runner != nil && rows.contains { !$0.job.isActive }
+        default: feed.runner != nil && rows.contains { model.clears($0.job) }
         }
     }
 
@@ -724,7 +730,8 @@ private struct OpenIsland: View {
                     publishNow: model.publishing == id,
                     onPublishNow: { model.publishing = nil },
                     accounts: feed.accounts, onMove: mover(row),
-                    onStartNow: { if feed.runner != nil { feed.apply(try await feed.about(id) { try await $0.startNow(id) }) } })
+                    onStartNow: { if feed.runner != nil { feed.apply(try await feed.about(id) { try await $0.startNow(id) }) } },
+                    onUseAnyway: { account in if let runner = feed.runner { _ = try await runner.liftReserve(account, true) } })
         } else {
             let job = row.job
             JobView(job: job, place: "This Mac", account: desk.accounts.accounts.first { $0.account.id == job.account }?.account.name,
@@ -735,7 +742,8 @@ private struct OpenIsland: View {
                     extras: RunnerJobExtras(local: job),
                     onMode: { try desk.changeMode(job.id, to: $0) },
                     onPermission: { try desk.answerPermission(job.id, $0, message: $1) },
-                    accounts: desk.accounts.accounts, onMove: mover(row), onStartNow: { try desk.startNow(job.id) })
+                    accounts: desk.accounts.accounts, onMove: mover(row), onStartNow: { try desk.startNow(job.id) },
+                    onUseAnyway: { _ = desk.liftReserve($0, true) })
         }
     }
 

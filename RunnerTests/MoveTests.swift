@@ -42,8 +42,10 @@ struct MoveChoiceTests {
         let accounts = [state("deskree", "codex"), state("work", "claude", fiveHour: 0.85), state("weekly", "claude", sevenDay: 0.81),
                         state("personal", "claude", fiveHour: 0.5, sevenDay: 0.6), state("spare", "claude", fiveHour: 0.2, sevenDay: 0.2)]
         #expect(try choose(MoveTarget(agent: "claude"), accounts).account == "spare")
-        // Past 80% of either window, only by name.
-        #expect(refusal(MoveTarget(agent: "claude"), Array(accounts.prefix(3)))?.contains("Name one to use it anyway") == true)
+        // Past 80% of either window: naming the tool takes its least busy account (2026-10-12),
+        // and no tool, account or model of its own named leaves Oby nothing to pick.
+        #expect(try choose(MoveTarget(agent: "claude"), Array(accounts.prefix(3))).account == "weekly")
+        #expect(refusal(MoveTarget(agent: "claude"), [state("full", "claude", fullUntil: now + 3600)])?.contains("Name one to use it anyway") == true)
         #expect(try choose(MoveTarget(account: "Work"), accounts).account == "work")
         #expect(try choose(MoveTarget(agent: "claude", account: "weekly"), accounts).account == "weekly")
         // Named, but signed out or stopped at its limit.
@@ -304,6 +306,64 @@ struct MoveJobTests {
 
     static func move(_ id: String, agent: String = "auto", account: String = "auto", model: String = "auto") -> String {
         #"{"action":"move_job","reply":"","question":null,"dispatches":[],"jobs":["\#(id)"],"all":false,"move":{"agent":"\#(agent)","account":"\#(account)","model":"\#(model)"}}"#
+    }
+
+    static func move(_ ids: [String], agent: String = "auto", account: String = "auto", model: String = "auto") -> String {
+        #"{"action":"move_job","reply":"","question":null,"dispatches":[],"jobs":[\#(ids.map { "\"\($0)\"" }.joined(separator: ","))],"all":false,"move":{"agent":"\#(agent)","account":"\#(account)","model":"\#(model)"}}"#
+    }
+
+    /// "Codex is full, move its jobs to Personal and Work": one request, two moves, then Oby says
+    /// what it did. The job its account's limit had failed starts again where it went (#118).
+    @Test func oneRequestMovesJobsToSeveralPlacesInSteps() async throws {
+        let work = try desk.accounts.add(agent: "claude", name: "Work", payer: "Deskree")
+        desk.accounts.setLabel("Max · work@example.com", for: work.id)
+        let first = try await running("aaaa1111")
+        first.onEvent(.session("thread-1"))
+        var other = job
+        other.id = "bbbb2222"
+        other.kind = .fix
+        other.pr = nil
+        other.issue = 76
+        other.base = "dev"
+        other.branch = "oby/fix-76"
+        other.title = "Watch home"
+        other.account = codex.id
+        other.agent = "codex"
+        desk.dispatch(Desk.Draft(said: "work on oby #76", reply: "", job: other, guessed: false))
+        try await until { desk.job("bbbb2222")?.status == .running }
+        let second = try #require(made.agents.last?.agent)
+        second.onEvent(.session("thread-2"))
+        second.onEvent(.finished(summary: "Codex hit its usage limit", failed: true))
+        try await until { desk.job("bbbb2222")?.status == .failed }
+
+        let brain = ConversationTests.FakeBrain([Self.move(["aaaa1111"], agent: "claude", account: "Personal"),
+                                                 Self.move(["bbbb2222"], agent: "claude", account: "Work"), ConversationTests.reply("")])
+        desk.makeBrain = { _, _ in [brain] }
+        desk.repos = ["deskree-inc/oby"]
+        let talk = await desk.converse("Codex is full: move its jobs to Personal and Work")
+        guard case .reply(let text) = talk else { Issue.record("no reply: \(talk)"); return }
+        #expect(text == "Moved Vault secrets from Codex · Deskree to Claude Code · Personal. It goes on there now. Moved Watch home from Codex · Deskree to Claude Code · Work. It starts again there.")
+        #expect(desk.job("aaaa1111")?.account == personal.id && desk.job("bbbb2222")?.account == work.id)
+        try await until { desk.job("bbbb2222")?.status == .running }
+        #expect(desk.job("bbbb2222")?.status == .running)
+        // Three steps: each after the first hears what Oby did, and the briefing names each job's account.
+        #expect(brain.prompts.count == 3)
+        #expect(brain.prompts.first?.contains("aaaa1111 · Vault secrets · deskree-inc/oby") == true && brain.prompts.first?.contains("Codex · Deskree · running") == true)
+        #expect(brain.prompts[1].contains("Oby already did this for the request, step by step: Moved Vault secrets"))
+        #expect(brain.systems.first?.contains("You work like Claude Code") == true)
+    }
+
+    @Test func aRepeatedOrFailedStepEndsTheTurn() async throws {
+        _ = try await running("aaaa1111")
+        // The brain asks for the same move again: Oby doesn't do it twice.
+        let brain = ConversationTests.FakeBrain([Self.move(["aaaa1111"], agent: "claude", account: "Personal")])
+        desk.makeBrain = { _, _ in [brain] }
+        desk.repos = ["deskree-inc/oby"]
+        #expect(await desk.converse("move it to Personal") == .reply("Moved Vault secrets from Codex · Deskree to Claude Code · Personal. It goes on there now."))
+        #expect(brain.prompts.count == 2)
+        // A move that can't happen ends the turn with why.
+        #expect(await desk.converse("move it to Personal") == .reply("Couldn't move it: It's on Claude Code · Personal already."))
+        #expect(brain.prompts.count == 3)
     }
 
     @Test func movePlansAreChecked() throws {

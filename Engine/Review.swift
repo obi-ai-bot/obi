@@ -98,7 +98,10 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     static func reviewer(_ accounts: [AccountState], for author: Job, now: Date = .now) -> AccountStore.Route? {
         let others = candidates(accounts, for: author).map { reset($0, at: now) }
         let otherTool = author.agent == "claude" ? "codex" : author.agent == "codex" ? "claude" : nil
-        if let otherTool, let route = AccountStore.choose(others, agent: otherTool, for: .review, now: now) { return route }
+        // The other tool first, while it's outside its weekly reserve; then any account, the
+        // reserved ones last (AccountStore.choose).
+        let unreserved = others.filter { !$0.isReserved(at: now) }
+        if let otherTool, let route = AccountStore.choose(unreserved, agent: otherTool, for: .review, now: now) { return route }
         return AccountStore.choose(others, agent: nil, for: .review, now: now)
     }
 

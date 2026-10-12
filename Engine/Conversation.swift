@@ -80,12 +80,14 @@ nonisolated struct Briefing: Equatable, Sendable {
     /// At most this many jobs, so the brain stays quick.
     static let mostJobs = 30
 
-    /// The list's groups, as the apps show them (Shared/JobList.swift, which the engine doesn't compile).
+    /// The list's groups, as the apps name them (Shared/JobList.swift, which the engine doesn't
+    /// compile), what needs the user first, so `mostJobs` never leaves it out.
     enum Group: String, CaseIterable, Sendable {
-        case needsYou = "Needs you", working = "Working", inReview = "In review", done = "Done"
+        case needsYou = "Needs you", working = "Working", waiting = "Waiting", inReview = "In review", done = "Done"
 
         init(_ job: Job) {
             if job.needsYou { self = .needsYou }
+            else if job.isWaiting { self = .waiting }
             else if job.isActive { self = .working }
             else if job.status == .done, job.published != nil, (job.pullRequest?.state ?? .open) == .open { self = .inReview }
             else { self = .done }
@@ -100,7 +102,7 @@ nonisolated struct Briefing: Equatable, Sendable {
         }
         let order = Group.allCases
         return listed.sorted { a, b in
-            let (i, j) = (order.firstIndex(of: Group(a.job)) ?? 4, order.firstIndex(of: Group(b.job)) ?? 4)
+            let (i, j) = (order.firstIndex(of: Group(a.job)) ?? order.count, order.firstIndex(of: Group(b.job)) ?? order.count)
             return i != j ? i < j : a.job.created > b.job.created
         }.prefix(Self.mostJobs).map { $0 }
     }
@@ -111,24 +113,31 @@ nonisolated struct Briefing: Equatable, Sendable {
     var permissions: [String] { jobs.filter { $0.job.waitsForPermission || ($0.job.waitsForAnswer && $0.job.question?.plan != nil) }.map(\.job.id) }
 
     /// Agents working now, everywhere: the same count the notch and the window's header show
-    /// (this Mac's active jobs plus the runner's), from the same jobs, not capped like `jobs`.
+    /// (this Mac's working jobs plus the runner's), from the same jobs, not capped like `jobs`.
+    /// Jobs waiting their turn don't count (#238).
     var working: Int { Self.working(places) }
 
-    /// The active jobs of these places, each with its place, newest first.
+    /// The working jobs of these places (`Job.isWorking`), each with its place, newest first.
     static func active(_ places: [Place]) -> [(place: String, job: Job)] {
-        places.flatMap { place in place.jobs.filter(\.isActive).map { (place.name, $0) } }.sorted { $0.job.created > $1.job.created }
+        places.flatMap { place in place.jobs.filter(\.isWorking).map { (place.name, $0) } }.sorted { $0.job.created > $1.job.created }
     }
 
     static func working(_ places: [Place]) -> Int { active(places).count }
 
+    /// Jobs queued behind something, everywhere (`Job.isWaiting`).
+    static func waiting(_ places: [Place]) -> Int { places.reduce(0) { $0 + $1.jobs.count(where: \.isWaiting) } }
+
     /// "2 agents are working: Vault secrets on this Mac, Watch home on tetrix-lab.", or "No agent is
-    /// working right now.": the facts the brain's reply must agree with (`contradicts`), in Oby's words.
+    /// working right now.", and how many jobs wait ("14 jobs are waiting."): the facts the brain's
+    /// reply must agree with (`contradicts`), in Oby's words.
     static func workingLine(_ places: [Place]) -> String {
         let active = active(places)
-        guard !active.isEmpty else { return "No agent is working right now." }
+        let waiting = waiting(places)
+        let wait = waiting == 0 ? "" : waiting == 1 ? " 1 job is waiting." : " \(waiting) jobs are waiting."
+        guard !active.isEmpty else { return "No agent is working right now." + wait }
         let named = active.prefix(5).map { "\(line($0.job.heading, cap: 60)) on \($0.place)" }
         let more = active.count > named.count ? ", and \(active.count - named.count) more" : ""
-        return "\(active.count == 1 ? "1 agent is" : "\(active.count) agents are") working: \(named.joined(separator: ", "))\(more)."
+        return "\(active.count == 1 ? "1 agent is" : "\(active.count) agents are") working: \(named.joined(separator: ", "))\(more)." + wait
     }
 
     /// Whether a reply says no job is running ("No jobs are running right now", "nothing is
@@ -183,7 +192,7 @@ nonisolated struct Briefing: Equatable, Sendable {
                 group = Group(job)
                 lines.append("### \(Group(job).rawValue)")
             }
-            lines.append("- " + Self.describe(job, place: place, now: now))
+            lines.append("- " + Self.describe(job, place: place, now: now, accounts: (places.first { $0.name == place }?.accounts ?? []) + accounts))
         }
         lines += ["", "## Inbox: what only the user can answer, longest-waiting first", ""]
         let waiting = self.waiting
@@ -279,11 +288,14 @@ nonisolated struct Briefing: Equatable, Sendable {
     /// "ab12cd34 · Vault secrets · deskree-inc/oby, issue #60 · Claude Code · running on this Mac ·
     /// Stage 2 of 5, Work: Round 1 of 1 · started 12 min ago · asked: work on oby #60". What Swift
     /// knows: a stage's detail from an agent (its step, its result as the reason) stays out.
-    static func describe(_ job: Job, place: String, now: Date) -> String {
+    /// `accounts` name the job's account ("Claude Code · Personal"), so the brain knows what's on
+    /// which: "move Deskree's jobs" needs it.
+    static func describe(_ job: Job, place: String, now: Date, accounts: [AccountState] = []) -> String {
         var parts = [job.id, line(job.heading, cap: 60)]
         let about = job.pr.map { ", PR #\($0)" } ?? job.issue.map { ", issue #\($0)" } ?? ""
         parts.append("\(job.repo)\(about)")
-        parts.append(job.agentName + (job.model.map { " (\(AgentModels.name($0)))" } ?? ""))
+        let heading = accounts.first { $0.account.id == job.account }?.account.heading ?? job.agentName
+        parts.append(heading + (job.model.map { " (\(AgentModels.name($0)))" } ?? ""))
         if let moved = job.movedLine { parts.append(moved.prefix(1).lowercased() + moved.dropFirst()) }
         let state = switch job.status {
         // Waiting for its `startWhen` (#216): its step says what for, in Oby's words.
@@ -291,7 +303,8 @@ nonisolated struct Briefing: Equatable, Sendable {
         case .queued, .running:
             job.waitsForPermission ? "waiting for the user's OK on a permission"
                 : job.question?.plan != nil ? "waiting for the user's OK on its plan"
-                : job.waitsForAnswer ? "waiting for the user's answer" : "\(job.status.rawValue) on \(place)"
+                : job.waitsForAnswer ? "waiting for the user's answer"
+                : job.waiting.map { "waiting on \(place): \($0.text)" } ?? "\(job.status.rawValue) on \(place)"
         default: job.status.rawValue + (job.dismissed == nil ? "" : ", dismissed")
             + (job.waitsForPermission ? ", its permission still waiting for the user's OK" : "")
         }

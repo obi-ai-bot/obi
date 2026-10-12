@@ -33,6 +33,8 @@ struct SettingsScreen: View {
 
                 AccountSections("Accounts on the runner", items: phone.accounts, id: \.id, usage: \.usage) { account in
                     UsageCard(snapshot: account.usage)
+                    // The runner's "accounts" event brings the change back.
+                    ReserveSwitch(snapshot: account.usage) { lift in _ = try await phone.runner.liftReserve(account.id, lift) }
                     if account.signedIn {
                         Text(Usage.tetrix(account.tetrix, jobs: account.tetrixJobs ?? 0, used: account.tetrixUsed ?? 0))
                             .font(.footnote).foregroundStyle(account.tetrix == false ? Color.orange : Color.secondary)

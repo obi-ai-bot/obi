@@ -36,6 +36,7 @@ struct StuckTests {
         // Its turn: it catches up, and its clock starts now.
         var catchingUp = waiting
         catchingUp.step = "Catching up with dev"
+        catchingUp.waiting = nil
         desk.replace(catchingUp)
         log.sweep()
         #expect(test.triggers(of: "second").isEmpty)
