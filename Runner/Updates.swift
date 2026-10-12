@@ -185,20 +185,25 @@ final class Updates {
         }
         // No build output is stored: it can contain credentials. A single durable item identifies
         // the step; polling/network failures are deduplicated too. Mark done after reading.
-        let id = head ?? "fetch-\(Int(now().timeIntervalSince1970))"
-        // Try again (#215) tries the same commit again now; otherwise the next one is.
-        desk.updateFailed(InboxItem(id: "runner-update-\(id)", kind: .failed, job: Desk.updateJob,
+        let id = "runner-update-" + (head ?? "fetch-\(Int(now().timeIntervalSince1970))")
+        // Try again (#215) tries the same commit again now; otherwise the next one is. Each try
+        // that fails is its own item, counted in its id, so a retry's failure offers Try again
+        // again; while one is open, the commit's next failure adds none.
+        let tries = desk.inbox.filter { $0.id == id || $0.id.hasPrefix(id + "-try-") }
+        guard !tries.contains(where: \.isOpen) else { return }
+        desk.updateFailed(InboxItem(id: tries.isEmpty ? id : "\(id)-try-\(tries.count + 1)", kind: .failed, job: Desk.updateJob,
                                     title: "Runner update failed", text: "Runner update failed at \(step)\(head.map { " (\($0))" } ?? ""). The old binary is kept. \(head == nil ? "The next poll tries again." : "The next dev commit tries again.")",
                                     options: [Inbox.tryAgain], details: ["Builds and tests this commit again now, and installs it if it passes."], created: now()))
     }
 
     /// Try again on a failed update's item: that commit is tried once more, now.
-    func retry() {
+    @discardableResult
+    func retry() -> Task<Void, Never> {
         if state.failed != nil {
             state.failed = nil
             try? save()
         }
-        Task { await poll() }
+        return Task { await poll() }
     }
 
     static func digest(_ file: URL) throws -> String {

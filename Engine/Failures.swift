@@ -460,6 +460,30 @@ final class Failures {
         if !job.isActive { checks[job.id] = nil }
         if added { study() }
         if let pr = Self.mergedFix(job, now: now()) { close(job, pr) }
+        // A job in Oby's repository that starts or opens its pull request may be a failure's fix.
+        if job.repo == Self.repo, job.reviewOf == nil {
+            let stage = job.isActive ? "active" : job.published != nil ? "published" : "idle"
+            if fixStages[job.id] != stage {
+                fixStages[job.id] = stage
+                if stage != "idle" { reconcile() }
+            }
+        }
+    }
+
+    /// Each Oby job's last stage `reconcile` looked at, so it runs when one changes, not every step.
+    private var fixStages: [String: String] = [:]
+    private var reconciledSinceStart = false
+
+    /// Failure items still open while their fix is under way (#215): a job on their cause queued or
+    /// running, or its pull request open. They're done by themselves, as Fix it would be refused.
+    /// When a fix job starts or opens its pull request, and once after a restart.
+    func reconcile() {
+        guard enabled, let desk, desk.inbox.contains(where: { $0.isOpen && $0.kind == .failure }) else { return }
+        for item in desk.inbox where item.isOpen && item.kind == .failure {
+            guard let record = store.failure(String(item.id.dropFirst("failure-".count))), let why = fixing(record) else { continue }
+            Logger.jobs.notice("failure item \(item.id, privacy: .public) is done: \(why, privacy: .public)")
+            _ = try? desk.settle(item.id, .done)
+        }
     }
 
     private func record(_ found: Found, job: Job) {
@@ -549,6 +573,10 @@ final class Failures {
     /// rules), and studies what's left to study.
     func sweep() {
         guard enabled, let desk else { return }
+        if !reconciledSinceStart {
+            reconciledSinceStart = true
+            reconcile()
+        }
         let now = now()
         for job in desk.jobs { observe(job) }
         for job in desk.jobs where job.isActive {

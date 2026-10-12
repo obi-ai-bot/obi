@@ -78,7 +78,10 @@ final class API {
             try await self.publish(context.parameters.require("id"), try await Self.decode(Approval.self, from: request))
         }
         router.post("v1/clear") { _, _ in try await self.clear() }
-        router.get("v1/inbox") { _, _ in await self.inbox() }
+        router.get("v1/inbox") { request, _ in
+            try await self.inbox(state: request.uri.queryParameters.get("state").map { String($0) },
+                                 limit: request.uri.queryParameters.get("limit", as: Int.self))
+        }
         router.post("v1/inbox/:id/answer") { request, context in
             try await self.answer(context.parameters.require("id"), try await Self.decode(InboxAnswer.self, from: request))
         }
@@ -276,8 +279,16 @@ final class API {
 
     /// What only the user can answer and hasn't settled, the longest-waiting first. Items put off
     /// until later are in it too, saying so.
-    func inbox() -> Response {
-        Self.json(desk.inbox.filter(\.isOpen).map { InboxJSON(item: $0) })
+    /// With `state` `done`, the history instead (#215): settled items and the reports that arrived
+    /// done (an audit's repairs, a failure whose fix was under way), the latest settled first, at most `limit`.
+    func inbox(state: String? = nil, limit: Int? = nil) throws -> Response {
+        switch state ?? "open" {
+        case "open": return Self.json(desk.inbox.filter(\.isOpen).map { InboxJSON(item: $0) })
+        case "done":
+            let done = desk.inbox.filter { !$0.isOpen }.sorted { ($0.done ?? $0.created) > ($1.done ?? $1.created) }
+            return Self.json(done.prefix(min(max(limit ?? 50, 0), 1000)).map { InboxJSON(item: $0) })
+        default: throw APIError(.unprocessableContent, "state is open or done.")
+        }
     }
 
     /// The user settles an inbox item: answers it (the answer goes to its job), marks it done, or

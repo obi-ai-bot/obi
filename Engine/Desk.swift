@@ -364,7 +364,14 @@ final class Desk {
         // ponytail: every job is read to find the outstanding ones; a column to query when there are many thousands.
         let all = store.recent(-1)
         jobs = Array(all.prefix(Self.listed))
-        inbox = store.inbox()
+        var saved = store.inbox()
+        // Items saved before #215 that offer nothing to decide (like the 2026-10-12 audit report)
+        // are done now, with the reports: once, since they're saved done.
+        for index in saved.indices where saved[index].isOpen && !saved[index].isDecision {
+            saved[index].done = .now
+            store.save(saved[index])
+        }
+        inbox = saved
         turns = store.conversation()
         let byID = Dictionary(all.map { ($0.id, $0) }) { first, _ in first }
         // Every job that still needs something, however old (#223): its pull request is followed,

@@ -469,10 +469,10 @@ final class IssueSync {
         }
     }
 
-    /// As verified on project 20 (2026-10-12, its 52 cards kept their status): every option goes
-    /// back with its id, in its order, and the new one, with none, after the column it stands in
-    /// for (Needs test after In review), else last. Read again after: any old id that changed or
-    /// moved is an error.
+    /// `updateProjectV2Field` keeps an option, and the cards on it, when the option goes back with
+    /// its id: every option goes back with its id, in its order, and the new one, with none, after
+    /// the column it stands in for (Needs test after In review), else last. Oby checks the ids
+    /// kept by reading them back after: any old id that changed or moved is an error.
     nonisolated static func adding(_ column: String, to options: [StatusOption]) -> [StatusOption] {
         var list = options
         let after = closest(to: column, in: options.map(\.name)).flatMap { name in options.firstIndex { $0.name == name } }

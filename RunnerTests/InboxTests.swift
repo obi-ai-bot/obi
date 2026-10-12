@@ -420,6 +420,23 @@ final class InboxTests {
         #expect(desk.inbox.filter(\.isOpen).isEmpty && makeDesk().inbox.count == 2)
     }
 
+    /// Items saved before #215 that offer nothing to decide (the 2026-10-12 audit report) are done
+    /// once the inbox loads, and stay done; a question with no options still waits.
+    @Test func savedItemsWithNothingToDecideAreDoneOnLoad() throws {
+        let store = JobStore(url: folder.appending(path: "oby.sqlite"))
+        let day = Date(timeIntervalSince1970: 1_791_763_200)
+        store.save(InboxItem(id: "issue-audit-20738", kind: .audit, job: "", title: "Daily issue audit",
+                             text: "Issue audit: fixed drift on 7 issue(s). Issue sync: roadmap has no Status option Needs test.", options: [], created: day))
+        var asked = fix
+        asked.question = Plan.Question(text: "Which?", options: [])
+        let desk = makeDesk([asked])
+        let report = try #require(desk.item("issue-audit-20738"))
+        #expect(report.done != nil && report.answer == nil)
+        #expect(desk.inbox.filter(\.isOpen).map(\.kind) == [.question])
+        // Saved done: the next load keeps it so, and it's in the history.
+        #expect(makeDesk().item("issue-audit-20738")?.done != nil)
+    }
+
     /// A failed runner update offers Try again, which tries that commit again.
     @Test func aFailedUpdateCanBeTriedAgain() throws {
         let desk = makeDesk()
@@ -490,6 +507,18 @@ final class InboxTests {
             #expect(try await answer(id, #"{"done": true}"#).0 == .conflict)
             try await client.execute(uri: "/v1/inbox", method: .get, headers: owner) { response in
                 #expect(String(decoding: response.body.readableBytesView, as: UTF8.self) == "[]")
+            }
+            // The history (#215): done items, the latest settled first, with what settled them.
+            let history: [[String: Any]] = try await client.execute(uri: "/v1/inbox?state=done", method: .get, headers: owner) { response in
+                #expect(response.status == .ok)
+                return (try? JSONSerialization.jsonObject(with: Data(response.body.readableBytesView)) as? [[String: Any]]) ?? []
+            }
+            #expect(history.first?["id"] as? String == id && history.first?["state"] as? String == "done" && history.first?["answer"] as? String == "Dismiss")
+            try await client.execute(uri: "/v1/inbox?state=done&limit=0", method: .get, headers: owner) { response in
+                #expect(String(decoding: response.body.readableBytesView, as: UTF8.self) == "[]")
+            }
+            try await client.execute(uri: "/v1/inbox?state=later", method: .get, headers: owner) { response in
+                #expect(response.status == .unprocessableContent)
             }
         }
         // Every app heard each change as an `inbox` event (and the job's, dismissed).

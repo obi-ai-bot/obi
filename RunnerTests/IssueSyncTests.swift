@@ -671,8 +671,8 @@ struct IssueSyncTests {
         #expect(desk.issueSync.choice(for: "Needs test") == nil)
     }
 
-    /// Add the column, as verified on project 20 (2026-10-12): every option goes back with its id
-    /// in its order, the new one with none after In review; the ids are read again, and the issue moves.
+    /// Add the column: every option goes back with its id in its order, the new one with none after
+    /// In review; the ids are read back to check they were kept, and the issue moves.
     @Test func addTheColumnKeepsEveryOptionAndMovesTheIssues() async throws {
         let (desk, fake, day) = try lackingNeedsTest()
         fake.ids = ["Todo": "OPT-1", "In progress": "OPT-2", "In review": "OPT-3", "Blocked": "OPT-4", "Done": "OPT-5"]

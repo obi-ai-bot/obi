@@ -600,6 +600,42 @@ struct FailureTests {
         #expect(desk.item("failure-\(second.id)")?.done != nil)
     }
 
+    /// A failure item already open when a fix job on its cause starts is done by itself (#215):
+    /// Fix it would be refused. After a restart, the open ones are checked once.
+    @Test func anOpenFailureItemIsDoneWhenItsFixStartsAndAfterARestart() async throws {
+        let test = try FailureTests(answers: [FailureTests.answer("oby-bug", "review-cap-hit-while-each-round-fixed-previous-blocker")])
+        let desk = test.desk
+        let log = desk.failureLog
+        log.observe(test.job("first") { $0.status = .failed })
+        await log.drain()
+        let item = try #require(desk.inbox.first { $0.kind == .failure && $0.isOpen })
+        desk.enqueue(FailureTests.job("fixer") { $0.issue = 200; $0.status = .queued; $0.finished = nil; $0.published = nil })
+        try await test.until("the item is done") { desk.item(item.id)?.done != nil }
+        #expect(desk.item(item.id)?.answer == nil)
+
+        // Another runner's inbox, saved with the item open, and the fix's pull request open: its
+        // first sweep after the restart settles it.
+        let other = try FailureTests(answers: [FailureTests.answer("oby-bug", "review-cap-hit-while-each-round-fixed-previous-blocker")])
+        other.desk.failureLog.observe(other.job("first") { $0.status = .failed })
+        await other.desk.failureLog.drain()
+        let waiting = try #require(other.desk.inbox.first { $0.kind == .failure && $0.isOpen })
+        let store = JobStore(url: other.folder.appending(path: "oby.sqlite"))
+        store.save(FailureTests.fixer("fixer", issue: 200, pr: 81, open: true))
+        let restarted = Desk(accounts: AccountStore(root: other.folder), store: store)
+        restarted.vault = other.desk.vault
+        let again = restarted.failureLog
+        again.makeAdapter = { [postMortems = other.postMortems] _, _, _ in postMortems }
+        again.gh = other.github.run
+        again.scan = { _ in }
+        again.root = other.folder.appending(path: "failures")
+        again.source = { nil }
+        again.worktree = { _ in nil }
+        #expect(restarted.item(waiting.id)?.isOpen == true)
+        again.enabled = true
+        again.sweep()
+        #expect(restarted.item(waiting.id)?.done != nil)
+    }
+
     @Test func mergingAFixIntoDevClosesItsFailureIssueAndNotAFeatureIssue() async throws {
         let test = try FailureTests(answers: [FailureTests.answer("oby-bug", "blocking-none-counted-as-finding")],
                                     jobs: [FailureTests.fixer("fixer", issue: 200, pr: 81), FailureTests.fixer("feature", issue: 75, pr: 82)])
