@@ -639,13 +639,73 @@ nonisolated enum Publish {
         }
     }
 
-    /// Brings origin/<base> up to date from GitHub, so what's merged since the job started counts.
-    static func fetch(_ base: String, of job: Job, into worktree: URL) async throws {
-        let result = try await Shell.run(
-            toGitHub + ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no",
-                        "https://github.com/\(job.repo).git", "+refs/heads/\(base):refs/remotes/origin/\(base)"],
-            in: worktree, env: ["GIT_TERMINAL_PROMPT": "0"], timeout: 120)
+    /// Brings origin/<base> up to date from GitHub (or `remote`), so what's merged since the job
+    /// started counts. One fetch at a time into the job's clone, and again when it loses a ref race (#235).
+    static func fetch(_ base: String, of job: Job, into worktree: URL, from remote: String? = nil) async throws {
+        let result = try await fetching(into: worktree) {
+            try await Shell.run(
+                toGitHub + ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no",
+                            remote ?? github(job), "+refs/heads/\(base):refs/remotes/origin/\(base)"],
+                in: worktree, env: ["GIT_TERMINAL_PROMPT": "0"], timeout: 120)
+        }
         guard result.status == 0 else { throw Shell.Failure(message: "Couldn't fetch \(base): \(said(result.err))") }
+    }
+
+    /// Runs `fetch` into the clone `directory` belongs to (the clone, or one of its worktrees, which
+    /// share its refs): one at a time per clone, since two fetches updating the same ref at once make
+    /// one fail. When it still loses a race for a ref (a fetch from outside Oby, say), it runs again,
+    /// up to three more times 1–2 seconds apart; then its last result stands.
+    static func fetching(into directory: URL, _ fetch: () async throws -> Shell.Output) async throws -> Shell.Output {
+        let clone = (try? await Shell.ok(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], in: directory))
+            ?? directory.standardizedFileURL.path
+        await Fetches.shared.take(clone)
+        do {
+            var result = try await fetch()
+            for _ in 0..<3 where result.status != 0 && lostRace(result.err) {
+                try await Task.sleep(for: .milliseconds(Int.random(in: 1000...2000)))
+                result = try await fetch()
+            }
+            await Fetches.shared.give(clone)
+            return result
+        } catch {
+            await Fetches.shared.give(clone)
+            throw error
+        }
+    }
+
+    /// `git fetch` with `arguments` into `clone` (or a worktree of it), through `fetching`. Throws
+    /// with the last thing git said when it fails.
+    static func gitFetch(_ arguments: [String], into clone: URL) async throws {
+        let result = try await fetching(into: clone) { try await Shell.run(["git", "-C", clone.path, "fetch"] + arguments) }
+        guard result.status == 0 else {
+            throw Shell.Failure(message: "git fetch: \(result.err.split(separator: "\n").last.map(String.init) ?? "exit \(result.status)")")
+        }
+    }
+
+    /// Git refused to move a ref because another fetch moved it first: worth trying again.
+    static func lostRace(_ err: String) -> Bool {
+        ["incorrect old value provided", "cannot lock ref", "unable to update local ref"].contains { err.contains($0) }
+    }
+
+    /// The fetches running into each clone, keyed by its git directory: the next waits for the one before.
+    actor Fetches {
+        static let shared = Fetches()
+        /// For each clone with a fetch running, the fetches waiting their turn, first come first.
+        private var waiting: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+        /// Returns once it's this fetch's turn in the clone.
+        func take(_ clone: String) async {
+            guard waiting[clone] != nil else { waiting[clone] = []; return }
+            await withCheckedContinuation { waiting[clone, default: []].append($0) }
+        }
+
+        /// Hands the clone to the next fetch waiting for it, or frees it.
+        func give(_ clone: String) {
+            guard var queue = waiting[clone], !queue.isEmpty else { waiting[clone] = nil; return }
+            let turn = queue.removeFirst()
+            waiting[clone] = queue
+            turn.resume()
+        }
     }
 
     /// How many commits up to `head` aren't on origin/<base>, compared by patch, so a cherry-pick,

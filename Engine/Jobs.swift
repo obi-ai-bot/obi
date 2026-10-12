@@ -1146,7 +1146,8 @@ nonisolated enum Workspace {
             let excluded = (try? String(contentsOf: exclude, encoding: .utf8)) ?? ""
             try (excluded + "\n.oby/\n").write(to: exclude, atomically: true, encoding: .utf8)
         }
-        try await git(["fetch", "--prune", "--quiet", "origin"])
+        // One at a time with the clone's other fetches (#235).
+        try await Publish.gitFetch(["--prune", "--quiet", "origin"], into: clone)
         // Agents commit unsigned: no signing key reaches them, and a gpgsign from the user's own
         // settings would fail every commit. Oby signs when it publishes (4.1). Every worktree reads it here.
         try await git(["config", "commit.gpgsign", "false"])
@@ -1159,7 +1160,7 @@ nonisolated enum Workspace {
             issue = Data(try await Shell.ok(["gh", "issue", "view", "\(number)", "-R", job.repo, "--json", "title,body,author,url,labels,comments"], as: .app).utf8)
         }
         if let pr = job.pr {
-            try await git(["fetch", "--quiet", "origin", "+refs/pull/\(pr)/head:refs/oby/pr-\(pr)"])
+            try await Publish.gitFetch(["--quiet", "origin", "+refs/pull/\(pr)/head:refs/oby/pr-\(pr)"], into: clone)
             start = "refs/oby/pr-\(pr)"
             pullRequest = Data(try await Shell.ok(["gh", "pr", "view", "\(pr)", "-R", job.repo, "--json", "title,body,author,baseRefName,url"], as: .app).utf8)
         } else {
