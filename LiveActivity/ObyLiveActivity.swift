@@ -150,6 +150,7 @@ private extension ObyActivity.ContentState {
     var label: String {
         switch status {
         case "queued": "Starting"
+        case "waiting": "Waiting"
         case "running": "Working"
         case "done": "Done"
         case "failed": "Failed"

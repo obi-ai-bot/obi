@@ -50,7 +50,9 @@ struct ChatScreen: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .navigationDestination(for: String.self) { JobScreen(id: $0) }
                 .safeAreaInset(edge: .top, spacing: 0) {
-                    if !phone.active.isEmpty { WorkingNow(jobs: phone.active, onOpen: { path.append($0) }) }
+                    if phone.active.contains(where: \.isWorking) {
+                        WorkingNow(jobs: phone.active.filter(\.isWorking), waiting: phone.active.count(where: \.isWaiting), onOpen: { path.append($0) })
+                    }
                 }
                 .safeAreaInset(edge: .bottom) {
                     Composer(text: $text, prompt: "Tell Oby what you need", typing: $typing, onSend: send)
@@ -316,10 +318,11 @@ private struct JobCard: View {
 }
 
 /// The Mac's Agents and Live, on the phone: a strip at the top of Chat with every agent working
-/// now, its tool, the job's title and its step. Tap one for its screen. At the accessibility text
-/// sizes the cards stack, so nothing is cut off.
+/// now, its tool, the job's title and its step, and how many wait their turn (#238). Tap one for
+/// its screen. At the accessibility text sizes the cards stack, so nothing is cut off.
 private struct WorkingNow: View {
     let jobs: [Job]
+    let waiting: Int
     let onOpen: (String) -> Void
     @Environment(\.dynamicTypeSize) private var typeSize
 
@@ -328,7 +331,7 @@ private struct WorkingNow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Working now · \(working.count)")
+            Text("Working now · \(working.count)" + (Summary.waitingLine(waiting).map { " · \($0)" } ?? ""))
                 .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 .padding(.horizontal, 16)
                 .accessibilityAddTraits(.isHeader)

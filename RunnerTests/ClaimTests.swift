@@ -152,6 +152,7 @@ struct ClaimTests {
         try await until("#198 waits") { desk.job(second.id)?.step.hasPrefix("Waiting for") == true }
         let waiting = try #require(desk.job(second.id))
         #expect(waiting.status == .queued && waiting.step == "Waiting for a free slot: 1 of 1 jobs running")
+        #expect(waiting.waiting == .slot)
         #expect(made.agents.count == 1 && made.fetched.isEmpty && made.moved.isEmpty)
 
         // #176 publishes and ends: its slot is free while its pull request is in review.
@@ -159,7 +160,7 @@ struct ClaimTests {
         try await endDone(176)
         #expect(desk.job(first.id)?.holdsClaim == true)
         try await until("#198 runs") { desk.job(second.id)?.status == .running }
-        #expect(made.agents.count == 2 && made.agents.last?.job.issue == 198)
+        #expect(made.agents.count == 2 && made.agents.last?.job.issue == 198 && desk.job(second.id)?.waiting == nil)
         #expect(made.fetched == [second.id] && made.moved.map { "\($0.id) \($0.from) \($0.to)" } == ["\(second.id) \(Self.devBefore) \(Self.devMerged)"])
         #expect(desk.job(second.id)?.startCommit == Self.devMerged && made.agents.last?.job.startCommit == Self.devMerged)
     }
