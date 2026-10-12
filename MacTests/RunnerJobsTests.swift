@@ -20,4 +20,30 @@ struct RunnerJobsTests {
         let status = #"{"accounts":[{"agent":"claude","fiveHour":0.53,"id":"default","label":"Team","name":"Deskree","running":0,"sevenDay":0.09,"signedIn":true}],"models":{"claude":{"effort":"xhigh","model":"claude-opus-5-5"},"codex":{"effort":"high","model":"gpt-6.1-sol"}},"runner":{"host":"tetrix-lab","version":"0.2.0"}}"#
         #expect(try Runner.decoder.decode(RunnerStatus.self, from: Data(status.utf8)).runner.host == "tetrix-lab")
     }
+
+    /// Clear done on the island takes only settled jobs (#280): a published job whose pull request
+    /// is open stays, with its review, until it merges; a dismissed one goes.
+    @Test func clearDoneKeepsAnOpenPullRequest() {
+        let cleared = Date.now
+        var job = Job(id: "a", request: "fix oby", agent: "claude", account: "default", repo: "deskree-inc/oby",
+                      branch: "oby/fix-a", base: "dev", kind: .fix, task: "fix oby")
+        job.status = .done
+        job.finished = cleared - 60
+        job.commits = 1
+        job.published = "https://github.com/deskree-inc/oby/pull/281"
+        var review = Job(id: "rev1", request: "review oby #281", agent: "codex", account: "default", repo: "deskree-inc/oby",
+                         branch: "oby/fix-a", base: "dev", kind: .review, task: "review")
+        review.status = .done
+        review.finished = cleared - 30
+        review.reviewOf = job.id
+        #expect(!job.settled(among: [job, review]) && job.listed(after: cleared, among: [job, review]))
+        #expect(review.listed(after: cleared, among: [job, review]) && !review.clearable(among: [job, review]))
+
+        var merged = job
+        merged.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: cleared - 10, checkedAt: cleared - 5)
+        #expect(!merged.listed(after: cleared, among: [merged, review]) && !review.listed(after: cleared, among: [merged, review]))
+        var dismissed = job
+        dismissed.dismissed = cleared - 5
+        #expect(dismissed.clearable(among: [dismissed]) && !dismissed.listed(after: cleared, among: [dismissed]))
+    }
 }

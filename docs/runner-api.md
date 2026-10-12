@@ -370,7 +370,7 @@ End-of-turn work a restart cut short carries on too (a crash or `systemctl resta
 
 `maxRunning` is how many jobs run at once (#237; Job, above), and `running` how many slots are taken now: jobs whose agent is running, reviews and rounds included, and waiting jobs on their way to a slot. Older runners don't send them.
 
-`clearedAt` is when Clear done was last pressed, on any app (`POST /v1/clear`), or null when it never was. Every app hides the jobs that finished at that second or before (`finished` not after `clearedAt`); running jobs, and finished ones that ran again since, stay. Older runners don't send the key.
+`clearedAt` is when Clear done was last pressed, on any app (`POST /v1/clear`), or null when it never was. Every app hides the settled jobs that finished at that second or before (`finished` not after `clearedAt`): dismissed or stopped, with their pull request merged or closed, or ended with nothing to publish (`JobList.settled`, Shared/JobList.swift). Jobs still queued, running or waiting, needing the user, with their pull request open, or reviewing one that isn't settled stay, and so do finished ones that ran again since. Older runners don't send the key.
 
 `github` is who the runner's own GitHub calls act as: `app` when the GitHub app is set up (`OBY_GITHUB_APP_ID` and its key, Runner/README.md) and its latest request for a token worked, `owner` otherwise (the owner's `gh` login, as before). Older runners don't send the key. Who does what:
 
@@ -629,7 +629,7 @@ data: { …Turn }
 
 - A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`, `dismissed`, `macCheck`, `mergeError`, a move to another account. The app replaces the job with that `id`.
 - `accounts` comes when sign-ins, usage, reset times, running counts, `fullUntil` or Tetrix (`tetrix`, `tetrixJobs`, `tetrixUsed`) change.
-- `clear` comes when Clear done is pressed on any app (`POST /v1/clear`): hide the jobs that finished by `clearedAt`.
+- `clear` comes when Clear done is pressed on any app (`POST /v1/clear`): hide the settled jobs that finished by `clearedAt`.
 - `inbox` comes with every inbox item that arrives or changes: answered, done or put off, on any app, or settled by itself. Replace the item with that `id`; one whose `state` is `done` leaves the inbox.
 - `check` comes when a Mac check or an Apple check (below) is queued, taken by a Mac or ends. A Mac that runs checks asks for one (`GET /v1/checks/next`) when one is `queued`; other apps can ignore it, since the job's own event carries `macCheck` and `appleCheck` too.
 - `turn` comes with every turn of the conversation that's added, from any app, and again when one changes (a job was dispatched from it): the turn as `GET /v1/conversation` lists it. Replace the turn with that `id`, or add it in `at` order. Older runners don't send it.

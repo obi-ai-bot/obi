@@ -56,9 +56,13 @@ final class IslandModel {
     /// Jobs queued behind something, on this Mac and on the runner (`Job.waiting`).
     var waiting: Int { desk.jobs.count(where: \.isWaiting) + feed.waiting }
 
-    /// Whether the island lists a job: it hasn't finished, it still needs you, or it finished after
-    /// the last Clear done on any app. The runner keeps that time, and this Mac's own jobs go by it too.
-    func lists(_ job: Job) -> Bool { job.listed(after: feed.clearedAt) }
+    /// Whether the island lists a job: it isn't settled (`Job.settled`: still running, waiting,
+    /// needing you or with its pull request open), or it finished after the last Clear done on any
+    /// app. The runner keeps that time, and this Mac's own jobs go by it too.
+    func lists(_ job: Job) -> Bool { job.listed(after: feed.clearedAt, among: desk.jobs + feed.jobs) }
+
+    /// Clear done would take the job from the island (`Job.settled`).
+    func clears(_ job: Job) -> Bool { job.clearable(among: desk.jobs + feed.jobs) }
 
     /// The one line the iPhone's Home says too (Shared/JobList.swift): who's working, and what
     /// needs you among the jobs listed.
@@ -689,11 +693,11 @@ private struct OpenIsland: View {
     /// The job open now, even one that's cleared (a notification opened it).
     private var selectedRow: Row? { selected.flatMap { id in allRows.first { $0.id == id } } }
 
-    /// The job list is on screen, a runner is set (it keeps the clear's time), and something finished is listed.
+    /// The job list is on screen, a runner is set (it keeps the clear's time), and a settled job is listed.
     private var clearable: Bool {
         switch desk.talk {
         case .plan, .question: false
-        default: feed.runner != nil && rows.contains { !$0.job.isActive }
+        default: feed.runner != nil && rows.contains { model.clears($0.job) }
         }
     }
 

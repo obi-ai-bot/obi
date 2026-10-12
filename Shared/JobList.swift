@@ -70,16 +70,27 @@ nonisolated enum JobList {
         return JobGroup.allCases.compactMap { group in grouped[group].map { Section(group: group, jobs: $0) } }
     }
 
-    /// Whether a job stays in the list after Clear done: it's queued or running, it still needs
-    /// the user (ready to publish, failed, interrupted, out of review rounds: only Dismiss lets
-    /// those go), or `shows` keeps it by its finish time.
-    static func lists(active: Bool, needsYou: Bool, finished: Date?, clearedAt: Date?) -> Bool {
-        active || needsYou || shows(finished: finished, clearedAt: clearedAt)
+    /// Whether a job is settled, so Clear done may take it (#280): nothing more is to happen for it.
+    /// Never while it's queued, running or waiting (`active`), or needs the user (ready to publish,
+    /// failed, interrupted, out of review rounds: only Dismiss lets those go). Then always once the
+    /// user dismissed or stopped it (`letGo`); else not while its pull request is open (in review,
+    /// waiting for its checks or an account, about to merge), and, for a review job, not while the
+    /// job it reviews isn't settled (`author`, nil when it's no review or its author isn't listed).
+    /// So it's settled once its pull request was merged or closed, or it ended with nothing to publish.
+    static func settled(active: Bool, needsYou: Bool, letGo: Bool, openPullRequest: Bool, author: Bool? = nil) -> Bool {
+        if active || needsYou { return false }
+        return letGo || !openPullRequest && (author ?? true)
     }
 
-    /// Whether Clear done would take the job from the list: it finished and needs the user no
-    /// more. While no listed job would go, the iPhone's Home offers no Clear done.
-    static func clears(active: Bool, needsYou: Bool) -> Bool { !active && !needsYou }
+    /// Whether a job stays in the list after Clear done: it isn't `settled`, or `shows` keeps it
+    /// by its finish time. The runner keeps only the clear's time; every app applies this rule.
+    static func lists(settled: Bool, finished: Date?, clearedAt: Date?) -> Bool {
+        !settled || shows(finished: finished, clearedAt: clearedAt)
+    }
+
+    /// Whether Clear done would take the job from the list: it's settled. While no listed job
+    /// would go, neither the iPhone's Home nor the Mac's island offers Clear done.
+    static func clears(settled: Bool) -> Bool { settled }
 
     /// Clear done by time alone: the job hasn't finished, nothing was ever cleared, or it finished
     /// after the last clear. A job that finished at the clear's second or before is hidden on

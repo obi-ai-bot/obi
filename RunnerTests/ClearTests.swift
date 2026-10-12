@@ -100,7 +100,7 @@ final class ClearTests {
                        branch: "oby/fix-a", base: "dev", kind: .fix, task: "fix oby")
         done.status = .done
         done.finished = now - 60
-        let lists = { (job: Job) in JobList.lists(active: job.isActive, needsYou: job.needsYou, finished: job.finished, clearedAt: cleared) }
+        let lists = { (job: Job) in JobList.lists(settled: Self.settled(job), finished: job.finished, clearedAt: cleared) }
 
         var ready = done
         ready.commits = 2
@@ -133,13 +133,88 @@ final class ClearTests {
         // Finished after the clear: listed, needing you or not.
         done.finished = now + 1
         #expect(lists(done))
-        #expect(JobList.lists(active: false, needsYou: true, finished: now - 1, clearedAt: now))
-        #expect(!JobList.lists(active: false, needsYou: false, finished: now - 1, clearedAt: now))
-        #expect(JobList.lists(active: true, needsYou: false, finished: nil, clearedAt: now))
-        // Clear done is offered only for what it would take: finished jobs that need you no more.
-        #expect(JobList.clears(active: false, needsYou: false))
-        #expect(!JobList.clears(active: false, needsYou: true))
-        #expect(!JobList.clears(active: true, needsYou: false))
+        #expect(JobList.lists(settled: false, finished: now - 1, clearedAt: now))
+        #expect(!JobList.lists(settled: true, finished: now - 1, clearedAt: now))
+        #expect(JobList.lists(settled: false, finished: nil, clearedAt: now))
+        // Clear done is offered only for what it would take: settled jobs.
+        #expect(JobList.clears(settled: true))
+        #expect(!JobList.clears(settled: false))
+    }
+
+    /// `Job.settled` (Shared/Runner.swift) over Engine's Job, as the Mac's island has it; the apps
+    /// build that one, so the rule is tested here through `JobList.settled`.
+    private static func settled(_ job: Job, among jobs: [Job] = []) -> Bool {
+        let author = job.reviewOf.flatMap { id in jobs.first { $0.id == id } }
+        return JobList.settled(active: job.isActive || job.waiting != nil, needsYou: job.needsYou,
+                               letGo: job.dismissed != nil || job.status == .stopped,
+                               openPullRequest: job.published != nil && (job.pullRequest?.state ?? .open) == .open,
+                               author: author.map { settled($0) })
+    }
+
+    /// Clear done takes only settled jobs (#280): a published job whose pull request is still open
+    /// (in review, checking, about to merge) stays, and goes once it merges; so does a review of
+    /// it. A dismissed or stopped job goes, and so does one that ended with nothing to publish.
+    @Test func clearDoneKeepsWhatIsStillInFlight() {
+        var done = Job(id: "a", request: "fix oby", agent: "claude", account: "default", repo: "deskree-inc/oby",
+                       branch: "oby/fix-a", base: "dev", kind: .fix, task: "fix oby")
+        done.status = .done
+        done.finished = now - 60
+        done.commits = 1
+        let cleared = now
+        let lists = { (job: Job, jobs: [Job]) in JobList.lists(settled: Self.settled(job, among: jobs), finished: job.finished, clearedAt: cleared) }
+
+        var inReview = done
+        inReview.published = "https://github.com/deskree-inc/oby/pull/281"
+        inReview.reviewing = "rev1"
+        var review = done
+        review.id = "rev1"
+        review.reviewOf = inReview.id
+        review.commits = 0
+        #expect(!inReview.needsYou && !Self.settled(inReview) && lists(inReview, []))
+        #expect(!Self.settled(review, among: [inReview]) && lists(review, [inReview]))
+        var checking = inReview
+        checking.pullRequest = PullRequestStatus(state: .open, reviewDecision: .approved, base: "dev", checkedAt: now - 30)
+        #expect(!checking.needsYou && lists(checking, []))
+        var waiting = done
+        waiting.status = .queued
+        waiting.finished = now - 60
+        waiting.waiting = Job.Waiting(kind: .cap, text: "a slot opens")
+        #expect(lists(waiting, []))
+
+        // Merged or closed, it's settled: it goes, and its review with it.
+        var merged = inReview
+        merged.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: now - 10, checkedAt: now - 5)
+        #expect(Self.settled(merged) && !lists(merged, []))
+        #expect(Self.settled(review, among: [merged]) && !lists(review, [merged]))
+        var closed = inReview
+        closed.pullRequest = PullRequestStatus(state: .closed, base: "dev", checkedAt: now - 5)
+        #expect(!lists(closed, []))
+        // A review whose author isn't listed goes by its own state.
+        #expect(!lists(review, []))
+
+        // Dismissed or stopped, it goes, open pull request or not.
+        var dismissed = inReview
+        dismissed.dismissed = now - 30
+        #expect(Self.settled(dismissed) && !lists(dismissed, []))
+        var failed = done
+        failed.status = .failed
+        #expect(lists(failed, []))
+        var letGo = failed
+        letGo.dismissed = now - 30
+        #expect(!lists(letGo, []))
+        var stopped = inReview
+        stopped.status = .stopped
+        #expect(!lists(stopped, []))
+
+        // Done with nothing to publish: no pull request and no commits left to push.
+        var nothing = done
+        nothing.commits = 0
+        #expect(Self.settled(nothing) && !lists(nothing, []))
+
+        // Clear done isn't offered while nothing listed is settled.
+        let listed = [inReview, review, checking, waiting, failed]
+        #expect(!listed.contains { JobList.clears(settled: Self.settled($0, among: listed)) })
+        #expect(([merged] + listed).contains { JobList.clears(settled: Self.settled($0, among: [merged] + listed)) })
     }
 
     /// The one line the iPhone's Home, the closed notch and the island's header all say.

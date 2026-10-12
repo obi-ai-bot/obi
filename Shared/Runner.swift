@@ -600,13 +600,23 @@ extension Job {
         return .done
     }
 
+    /// Nothing more is to happen for it, so Clear done may take it (`JobList.settled`, #280): it
+    /// was dismissed or stopped, its pull request was merged or closed, or it ended with nothing
+    /// to publish. `jobs` is the list it's in, where a review job finds the job it reviews.
+    nonisolated func settled(among jobs: [Job]) -> Bool {
+        let author = reviewOf.flatMap { id in jobs.first { $0.id == id } }
+        return JobList.settled(active: isActive || waiting != nil, needsYou: needsYou, letGo: dismissed != nil || status == .stopped,
+                               openPullRequest: published != nil && (pullRequestState ?? "OPEN") == "OPEN",
+                               author: author.map { $0.settled(among: []) })
+    }
+
     /// Whether the list shows the job after the last Clear done, on any app (Shared/JobList.swift).
-    nonisolated func listed(after clearedAt: Date?) -> Bool {
-        JobList.lists(active: isActive, needsYou: needsYou, finished: finished, clearedAt: clearedAt)
+    nonisolated func listed(after clearedAt: Date?, among jobs: [Job]) -> Bool {
+        JobList.lists(settled: settled(among: jobs), finished: finished, clearedAt: clearedAt)
     }
 
     /// Clear done would take it from the list (Shared/JobList.swift).
-    nonisolated var clearable: Bool { JobList.clears(active: isActive, needsYou: needsYou) }
+    nonisolated func clearable(among jobs: [Job]) -> Bool { JobList.clears(settled: settled(among: jobs)) }
 
     /// The status pill, the same on the iPhone and the Mac: how it's going, how it ended, and
     /// where its pull request is. A job you let go says Dismissed, however it ended.
