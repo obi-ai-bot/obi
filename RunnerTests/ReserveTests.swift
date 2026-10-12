@@ -8,8 +8,9 @@ import Testing
 @testable import oby_runner
 
 /// "Use anyway" (#278): the user lets an account past its weekly reserve until its week resets.
-/// It's then chosen for new work, the API lifts and restores it, and when only reserves keep work
-/// from starting Oby says whose, and the apps offer the button only where it would help.
+/// It's then chosen for new work, the API lifts and restores it, a job only reserves hold back
+/// waits for room saying whose and starts once one is lifted, and the apps offer the button only
+/// where it would help.
 @MainActor
 final class ReserveTests {
     let folder: URL
@@ -85,6 +86,118 @@ final class ReserveTests {
         #expect(AccountStore.route([week, hour, full], agent: nil, now: now) == nil)
         #expect(AccountStore.route([week, hour, full], agent: nil, for: .review, now: now) == nil)
         #expect(AccountStore.route([week, hour, full, state("fine", sevenDay: 0.85, lifted: resets)], agent: nil, now: now)?.id == "fine")
+    }
+
+    // MARK: Waiting for room
+
+    final class Made { var agents: [Job] = [] }
+
+    /// An agent that notes its job, and does nothing until it's stopped.
+    final class Agent: AgentRun {
+        let job: Job
+        let made: Made
+        init(_ job: Job, _ made: Made) { (self.job, self.made) = (job, made) }
+        func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws { made.agents.append(job) }
+        func send(_ text: String) {}
+        func end() {}
+        func stop() {}
+        func kill() {}
+    }
+
+    /// A desk on the clock, whose only Claude Code account (Default) is at 82% of a week that
+    /// resets in two days.
+    func desk(_ made: Made) -> (Desk, AccountStore) {
+        let accounts = AccountStore(root: folder)
+        accounts.setLabel("Max", for: "default")
+        accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.82, sevenDayResets: Date.now.addingTimeInterval(2 * 86_400)), for: "default")
+        let desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        desk.repos = ["deskree-inc/oby"]
+        desk.prepare = { job in
+            var job = job
+            job.startCommit = String(repeating: "a", count: 40)
+            return job
+        }
+        desk.fetchBase = { _, _ in String(repeating: "a", count: 40) }
+        desk.makeAgent = { job, _, _ in Agent(job, made) }
+        return (desk, accounts)
+    }
+
+    func plan(_ agent: String) -> Planner.Result {
+        let dispatch = Plan.Dispatch(agent: agent, account: "auto", repo: "deskree-inc/oby", baseBranch: nil, pr: nil, issue: nil,
+                                     epic: nil, kind: .fix, title: nil, task: "Fix it", inputs: [], rounds: 1, check: nil, complexity: .routine)
+        return Planner.Result(plan: Plan(action: .dispatch, reply: "", dispatches: [dispatch], question: nil), by: "claude")
+    }
+
+    func until(_ what: String, _ condition: () -> Bool) async throws {
+        for _ in 0..<500 where !condition() { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(condition(), Comment(rawValue: what))
+    }
+
+    @Test func aJobOnlyReservesHoldBackWaitsAndStartsWhenOneIsLifted() async throws {
+        let made = Made()
+        let (desk, _) = desk(made)
+        guard case .plan(let drafts) = await desk.card(for: plan("claude"), said: "fix it"), let draft = drafts.first else {
+            Issue.record("expected a plan")
+            return
+        }
+        #expect(draft.reply == "Claude Code will fix in oby. Waiting: Default is in its weekly reserve. "
+                + "Use it anyway to start it now; otherwise it starts when an account has room.")
+        #expect(draft.job.startWhen == [.room(agent: "claude")] && draft.job.account == "default")
+
+        let job = desk.dispatch(draft)
+        try await until("it waits") { desk.scheduled.contains(job.id) }
+        let waiting = try #require(desk.job(job.id))
+        #expect(waiting.status == .queued && waiting.step == "Waiting for room: Default is in its weekly reserve")
+        #expect(waiting.waiting == Job.Waiting(kind: .limit, text: "for room: Default is in its weekly reserve", job: nil, reserved: ["default"]))
+        #expect(made.agents.isEmpty)
+
+        // One tap: the reserve lifts and the job starts there.
+        #expect(desk.liftReserve("default", true)?.reserveLiftedUntil() != nil)
+        try await until("it starts") { desk.job(job.id)?.status == .running }
+        #expect(made.agents.map(\.account) == ["default"] && desk.job(job.id)?.startWhen == nil && desk.job(job.id)?.waiting == nil)
+    }
+
+    @Test func aJobWaitingForRoomStartsWhereRoutingFindsIt() async throws {
+        let made = Made()
+        let (desk, accounts) = desk(made)
+        guard case .plan(let drafts) = await desk.card(for: plan("auto"), said: "fix it"), let draft = drafts.first else {
+            Issue.record("expected a plan")
+            return
+        }
+        #expect(draft.job.startWhen == [.room(agent: nil)])
+        let job = desk.dispatch(draft)
+        try await until("it waits") { desk.scheduled.contains(job.id) }
+        // A Codex account signs in with room: the job goes there, as if just sent.
+        let codex = try accounts.add(agent: "codex", name: "Deskree", payer: "")
+        accounts.setLabel("Plus", for: codex.id)
+        accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.2), for: codex.id)
+        await desk.checkStartWhen()
+        try await until("it starts") { desk.job(job.id)?.status == .running }
+        #expect(made.agents.map(\.account) == [codex.id] && desk.job(job.id)?.agent == "codex")
+    }
+
+    @Test func waitingForRoomIsACondition() throws {
+        let decoded = try JSONDecoder().decode([StartCondition].self, from: Data(#"[{"room": true, "agent": "codex"}, {"room": true}]"#.utf8))
+        #expect(decoded == [.room(agent: "codex"), .room(agent: nil)])
+        #expect(try JSONDecoder().decode([StartCondition].self, from: JSONEncoder().encode(decoded)) == decoded)
+        let personal = state("personal", sevenDay: 0.82)
+        let lookup = StartWhen.Lookup(job: { _ in nil }, account: { _ in nil }, pullRequest: { _, _ in nil }, accounts: { [personal] })
+        let job = Job(id: "ab12cd34", request: "", agent: "claude", account: "personal", repo: "deskree-inc/oby", branch: "oby/fix-1", kind: .fix, task: "")
+        #expect(StartWhen.verdict(.room(agent: nil), of: job, now: now, lookup: lookup) == .waits("for room: Personal is in its weekly reserve"))
+        let lifted = StartWhen.Lookup(job: { _ in nil }, account: { _ in nil }, pullRequest: { _, _ in nil },
+                                      accounts: { [self.state("personal", sevenDay: 0.82, lifted: self.resets)] })
+        #expect(StartWhen.verdict(.room(agent: nil), of: job, now: now, lookup: lifted) == .holds)
+        let full = StartWhen.Lookup(job: { _ in nil }, account: { _ in nil }, pullRequest: { _, _ in nil }, accounts: { [self.state("personal", sevenDay: 0.97)] })
+        #expect(StartWhen.verdict(.room(agent: nil), of: job, now: now, lookup: full) == .waits("for an account with room"))
+        // It's what routing waits for: the kind is limit.
+        #expect(StartWhen.wait([(.room(agent: nil), .waits("for an account with room"))], kept: false)?.waiting.kind == .limit)
+        #expect(StartWhen.describe([.room(agent: "codex")], accounts: { _ in nil }) == "an account of Codex with room")
+        // An account named, or a move, settles where it runs: room on any other doesn't hold it.
+        #expect(throws: Shell.Failure.self) {
+            try StartWhen.checked([.room(agent: nil), .onPace(account: "personal")], job: "ab12cd34", jobs: { _ in nil }, accounts: [personal])
+        }
+        #expect(throws: Shell.Failure.self) { try StartWhen.checked([.room(agent: "cursor")], job: "ab12cd34", jobs: { _ in nil }, accounts: []) }
+        #expect(Desk.movedStartWhen([.room(agent: nil), .at(now)], leaving: "personal") == [.at(now)])
     }
 
     // MARK: The waiting line
@@ -170,6 +283,11 @@ final class ReserveTests {
         // The engine agrees with the apps.
         #expect(state("personal", sevenDay: 0.82).mayLiftReserve(at: now) && !state("full", sevenDay: 0.95).mayLiftReserve(at: now))
         #expect(AccountState.nearlyFull == Usage.nearlyFull)
+        // On a job waiting for room: the accounts its `waiting` names that the app knows and a lift would help, in order.
+        let cards = [card("Work", sevenDay: 0.85), personal, card("Full", sevenDay: 0.96)]
+        #expect(Usage.liftable(["personal", "full", "gone", "work"], among: cards, id: { $0.name.lowercased() }, usage: { $0 }, now: now).map(\.name)
+                == ["Personal", "Work"])
+        #expect(Usage.liftable(nil, among: cards, id: \.name, usage: { $0 }, now: now).isEmpty)
     }
 }
 

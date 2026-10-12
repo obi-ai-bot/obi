@@ -282,10 +282,10 @@ final class API {
     }
 
     /// "Use anyway" (#278): the account takes automatic work past its weekly reserve until its
-    /// week resets, or, with `lift` false, is reserved again now. Work waiting for an account
-    /// looks again as the accounts change.
+    /// week resets, or, with `lift` false, is reserved again now. Jobs and reviews waiting for
+    /// room look again at once.
     func reserve(_ id: String, _ request: ReserveRequest) throws -> Response {
-        guard let state = desk.accounts.liftReserve(id, request.lift) else { throw APIError(.notFound, "There's no account \(id).") }
+        guard let state = desk.liftReserve(id, request.lift) else { throw APIError(.notFound, "There's no account \(id).") }
         return Self.json(AccountJSON(state: state))
     }
 

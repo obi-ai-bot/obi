@@ -101,6 +101,14 @@ nonisolated enum Usage {
         "Past its reserve until " + day(until, locale: locale, timeZone: timeZone)
     }
 
+    /// The accounts a job waiting for room offers "Use … anyway" on (#278): the ones its `waiting`
+    /// names (`reserved`) that the app knows and whose lift would help (`Snapshot.mayLift`), in
+    /// that order.
+    static func liftable<Item>(_ reserved: [String]?, among items: [Item], id: (Item) -> String, usage: (Item) -> Snapshot,
+                               now: Date = .now) -> [Item] {
+        (reserved ?? []).compactMap { wanted in items.first { id($0) == wanted } }.filter { usage($0).mayLift(at: now) }
+    }
+
     /// "Thu 7:00 PM", as the locale writes times.
     static func day(_ date: Date, locale: Locale, timeZone: TimeZone) -> String {
         date.formatted(Date.FormatStyle(locale: locale, timeZone: timeZone).weekday(.abbreviated).hour().minute())

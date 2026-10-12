@@ -381,6 +381,13 @@ final class AccountStore {
         return listed + (names.count == 1 ? " is in its weekly reserve" : " are in their weekly reserve")
     }
 
+    /// What a plan card says of a job that waits for room because only `held` could take it:
+    /// "Waiting: Personal is in its weekly reserve. Use it anyway to start it now; otherwise it
+    /// starts when an account has room."
+    nonisolated static func roomWait(_ held: [AccountState]) -> String {
+        "Waiting: \(reserveLine(held)). Use \(held.count == 1 ? "it" : "one") anyway to start it now; otherwise it starts when an account has room."
+    }
+
     /// Why no account takes new work, when only reserves stand in the way: "Personal and Codex are
     /// in their weekly reserve: use one anyway from Settings › Accounts." Nil when an account would
     /// take it, or none would even with its reserve lifted.

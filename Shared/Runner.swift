@@ -85,6 +85,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         var kind: String
         var text: String
         var job: String?
+        /// Waiting for room while only these accounts' weekly reserves stand in the way (#278), by
+        /// id: "Use Personal anyway" shows on each. Newer runners only.
+        var reserved: [String]?
     }
 
     /// Queued until what its `startWhen` names happens (#216: `waiting`'s kind `schedule` or

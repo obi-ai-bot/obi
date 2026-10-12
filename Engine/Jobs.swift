@@ -158,6 +158,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         var kind: Kind
         var text: String
         var job: String?
+        /// Waiting for room while only these accounts' weekly reserves stand in the way (#278), by
+        /// id: the apps offer "Use Personal anyway" on each. Nil otherwise.
+        var reserved: [String]?
     }
     /// What it waits for before it starts (#216, Engine/StartWhen.swift): it stays queued until every
     /// condition holds. Nil for a job that starts at once, and once it started.

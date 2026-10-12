@@ -739,7 +739,8 @@ private struct OpenIsland: View {
                     publishNow: model.publishing == id,
                     onPublishNow: { model.publishing = nil },
                     accounts: feed.accounts, onMove: mover(row),
-                    onStartNow: { if feed.runner != nil { feed.apply(try await feed.about(id) { try await $0.startNow(id) }) } })
+                    onStartNow: { if feed.runner != nil { feed.apply(try await feed.about(id) { try await $0.startNow(id) }) } },
+                    onUseAnyway: { account in if let runner = feed.runner { _ = try await runner.liftReserve(account, true) } })
         } else {
             let job = row.job
             JobView(job: job, place: "This Mac", account: desk.accounts.accounts.first { $0.account.id == job.account }?.account.name,
@@ -750,7 +751,8 @@ private struct OpenIsland: View {
                     extras: RunnerJobExtras(local: job),
                     onMode: { try desk.changeMode(job.id, to: $0) },
                     onPermission: { try desk.answerPermission(job.id, $0, message: $1) },
-                    accounts: desk.accounts.accounts, onMove: mover(row), onStartNow: { try desk.startNow(job.id) })
+                    accounts: desk.accounts.accounts, onMove: mover(row), onStartNow: { try desk.startNow(job.id) },
+                    onUseAnyway: { _ = desk.liftReserve($0, true) })
         }
     }
 
