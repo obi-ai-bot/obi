@@ -30,6 +30,10 @@ final class Phone {
     private(set) var failures: [String: String] = [:]
     /// What each echo sent, by echo id, to send it again.
     @ObservationIgnored private var requests: [String: Request] = [:]
+    /// The echo of the request under way, or nil: the one Cancel or a new request lets go of.
+    /// Never another (an older failed one, say): the runner may settle this one before the
+    /// request answers, and then `echoes.last` is someone else.
+    @ObservationIgnored private var pending: String?
 
     private struct Request {
         var said: String
@@ -69,6 +73,7 @@ final class Phone {
             echoes = []
             failures = [:]
             requests = [:]
+            pending = nil
             start()
         }
     }
@@ -244,6 +249,7 @@ final class Phone {
         echoes.removeAll { $0.id == id }
         failures[id] = nil
         requests[id] = nil
+        if pending == id { pending = nil }
     }
 
     // MARK: Planning
@@ -267,8 +273,14 @@ final class Phone {
         speaker.stop()
         // The words the user gave up on leave the thread, as on the Mac; the runner still lists
         // them with its answer if it got them, and then they show.
-        if case .thinking = talk, let last = echoes.last { drop(echo: last.id) }
+        dropPending()
         talk = .none
+    }
+
+    /// Lets go of the request under way's echo, if it's still in the thread.
+    private func dropPending() {
+        if let pending { drop(echo: pending) }
+        pending = nil
     }
 
     /// Try again on words that didn't go through: the same request, sent anew.
@@ -286,12 +298,13 @@ final class Phone {
     private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false) {
         planning?.cancel()
         speaker.stop()
-        if case .thinking = talk, let last = echoes.last { drop(echo: last.id) }
+        dropPending()
         talk = .thinking(said)
         // The thread shows the words as the runner will list them: an answer is its option.
         let echo = Turn(who: .user, text: answer?.option ?? said, voice: voice ? true : nil)
         echoes.append(echo)
         requests[echo.id] = Request(said: said, answer: answer, voice: voice)
+        pending = echo.id
         planning = Task {
             let result: Talk
             do {
@@ -310,6 +323,8 @@ final class Phone {
             }
             // Cancelled or replaced while the brain was thinking.
             guard !Task.isCancelled else { return }
+            // The request is over: its words are the runner's now, or stay with their failure.
+            if pending == echo.id { pending = nil }
             talk = result
             if spoken, speakReplies {
                 switch result {
