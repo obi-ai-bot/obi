@@ -4,6 +4,7 @@ import SwiftUI
 import Testing
 @testable import Oby
 
+@Suite(.serialized)
 @MainActor
 struct ChatWindowTests {
     let now = Date(timeIntervalSince1970: 1_791_582_173)
@@ -103,7 +104,10 @@ struct ChatWindowTests {
         let escape = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                                                  windowNumber: window.windowNumber, context: nil,
                                                  characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
-        editor.keyDown(with: escape)
+        // Dispatch through AppKit with this window key, as a real Escape key arrives.
+        // The suite is serialized because key-window/input-context state is global.
+        window.makeKeyAndOrderFront(nil)
+        NSApp.sendEvent(escape)
         #expect(exits == 1)
     }
 
