@@ -88,8 +88,27 @@ final class Desk {
     private var updateWaiting: [String: (job: Job, prompt: String, resume: String?, notice: String?)] = [:]
     private var updatePreparing: Set<String> = []
     var updateIsIdle: Bool {
-        active.allSatisfy { $0.status == .queued || updateWaiting[$0.id] != nil || $0.question != nil }
-            && updatePreparing.isEmpty && finishing.isEmpty && finishingChecks.isEmpty
+        active.allSatisfy { $0.status == .queued || updateWaiting[$0.id] != nil || $0.question != nil } && updateIsBetweenSteps
+    }
+    /// No job is inside a step of its end of turn: counting its commits and publishing, a review's
+    /// verdict reaching its author (its check run, then the round or the Mac check), merging. A
+    /// runner update restarts only here, even past its drain limit (#212).
+    var updateIsBetweenSteps: Bool {
+        updatePreparing.isEmpty && finishing.isEmpty && finishingChecks.isEmpty && wrappingUp.isEmpty
+    }
+    /// End-of-turn work under way outside a job's own run, by kind and job, like `review:<author>` (`wrapUp`).
+    @ObservationIgnored var wrappingUp: Set<String> = []
+
+    /// Runs `work` as end-of-turn work a runner update waits for, once at a time per `key`: false
+    /// when it's under way already.
+    @discardableResult
+    func wrapUp(_ key: String, _ work: @escaping @MainActor () async -> Void) -> Bool {
+        guard wrappingUp.insert(key).inserted else { return false }
+        Task {
+            defer { wrappingUp.remove(key) }
+            await work()
+        }
+        return true
     }
 
     func cancelUpdateDrain() {
@@ -276,7 +295,10 @@ final class Desk {
             let reviews = asking.compactMap { all[$0]?.review?.job }
             // On the runner, every job that went down with it, however old, and the authors of the reviews among them.
             let down = restarts == nil ? [] : all.values.filter(\.isActive)
-            let wanted = asking.union(reviews).union(down.map(\.id)).union(down.compactMap(\.reviewOf)).subtracting(jobs.map(\.id))
+            // And the reviews whose verdict a restart kept from their authors, with them (`resumeReviews`).
+            let unapplied = restarts == nil ? [] : all.values.filter { $0.reviewOf == nil && ($0.review?.applying == true || $0.reviewing != nil) }
+            let applying = unapplied.map(\.id) + unapplied.compactMap(\.reviewing) + unapplied.compactMap { $0.review?.applying == true ? $0.review?.job : nil }
+            let wanted = asking.union(reviews).union(down.map(\.id)).union(down.compactMap(\.reviewOf)).union(applying).subtracting(jobs.map(\.id))
             jobs += all.values.filter { wanted.contains($0.id) }.sorted { $0.created > $1.created }
         }
         // Running when Oby last quit (or crashed): it didn't finish. On the runner it carries on

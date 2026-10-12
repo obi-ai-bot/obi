@@ -42,6 +42,10 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// What this review and the earlier ones found worth doing later, oldest first, or nil: the
     /// job's report lists them as follow-ups.
     var followUps: [String]?
+    /// Its verdict is on the author's job, but its check run and what follows (the changes' round
+    /// for the author's agent, or the approval's Mac check) are still to come: a restart that cut
+    /// them short leaves it set, and the runner does them when it starts again (`Desk.resumeReviews`).
+    var applying: Bool?
 
     /// How many times Oby reviews one job's pull request before a person has to. Each review costs
     /// an account's weekly limit: the first, then one follow-up.
@@ -533,12 +537,26 @@ extension Desk {
         result.blocking = findings.flatMap { $0.blocking.isEmpty ? nil : $0.blocking }
         let followUps = (author.review?.followUps ?? []) + (findings?.later ?? [])
         result.followUps = followUps.isEmpty ? nil : followUps
+        result.applying = true
         author.review = result
         author.summary = Review.report(author.summary, followUps: result.followUps)
         author.reviewError = nil
         replace(author)
-        if verdict == .approved { reviewApproved(id, review: review.id) }
-        Task {
+        applyReview(id, review: review)
+    }
+
+    /// The rest of a review's end, once its verdict is on the author (`Review.applying`): the approval
+    /// queues its Mac check, the check run goes on the pull request, then changes requested go to the
+    /// author's agent as its next round. A runner update waits for it (`wrapUp`); one a restart cut
+    /// short is done again when the runner starts (`resumeReviews`), so its check run may be written
+    /// twice, never lost. An approval whose Mac check was queued already isn't queued again.
+    func applyReview(_ id: String, review: Job) {
+        guard let author = job(id), let applying = author.review, applying.job == review.id, applying.applying == true else { return }
+        let verdict = applying.verdict
+        if verdict == .approved, (author.macCheck.map { $0.created < applying.date } ?? true) { reviewApproved(id, review: review.id) }
+        wrapUp("review:\(id)") { [self] in
+            var result = applying
+            result.applying = nil
             do {
                 // The commit the reviewer read; the pull request's head when its worktree can't say.
                 let head = await reviewedHead(review.id) ?? author.pushedHead ?? ""
@@ -574,6 +592,22 @@ extension Desk {
             let again = Review.round(latest)
             replace(again)
             run(again, prompt: Review.roundPrompt(again, file: file), resume: session)
+        }
+    }
+
+    /// After a restart: a review whose verdict didn't reach its author is applied now (#212). One
+    /// that ended while its author still waits for it ends for the author (`reviewEnded`); one whose
+    /// verdict is on the author but whose check run and round or Mac check a restart cut short
+    /// (`Review.applying`) gets them (`applyReview`).
+    func resumeReviews() {
+        for author in jobs where author.reviewOf == nil {
+            if let id = author.reviewing, let review = job(id), review.reviewOf == author.id, !review.isActive {
+                Logger.jobs.notice("job \(author.id, privacy: .public): applying review \(id, privacy: .public), which ended before the runner restarted")
+                reviewEnded(review)
+            } else if let result = author.review, result.applying == true, let review = job(result.job) {
+                Logger.jobs.notice("job \(author.id, privacy: .public): finishing review \(review.id, privacy: .public), which a restart cut short")
+                applyReview(author.id, review: review)
+            }
         }
     }
 

@@ -869,6 +869,20 @@ final class Failures {
         return nil
     }
 
+    /// Whether the fix of one of Oby's own failures (an `oby-bug` post-mortem in the last 7 days)
+    /// merged into dev after `since`: the runner installs that update without waiting (Runner/Updates.swift).
+    func fixMerged(since: Date) -> Bool {
+        let records = store.failures(since: now().addingTimeInterval(-Self.week)).filter { $0.postMortem?.cause == .obyBug }
+        guard !records.isEmpty else { return false }
+        if records.contains(where: { ($0.fixedAt ?? .distantPast) > since }) { return true }
+        let issues = Set(records.compactMap { Self.issueNumber($0.issue) })
+        let jobs = Set(records.compactMap(\.fix))
+        return (desk?.jobs ?? []).contains { job in
+            guard Self.fixes(job, issues: issues, jobs: jobs), let pull = job.pullRequest, pull.state == .merged, pull.base == MacCheck.into else { return false }
+            return (pull.mergedAt ?? pull.checkedAt) > since
+        }
+    }
+
     /// Why Fix it starts nothing for `record`: a job fixing its cause now, its pull request open, or
     /// a fix merged into dev in the last 7 days, on its issue or an alias's. Nil when there's none.
     func underway(_ record: FailureRecord) -> String? {

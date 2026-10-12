@@ -233,6 +233,76 @@ struct UpdateTests {
         restored.quit()
     }
 
+    @Test func twoDevCommitsInQuickSuccessionRestartOnce() async throws {
+        try await startJob()
+        await updates.poll()
+        #expect(updates.status.phase == "draining" && updates.status.waiting == fake.head)
+        // dev moves again while the first commit waits for the drain: the newer one replaces it.
+        fake.head = String(repeating: "b", count: 40)
+        await updates.poll()
+        #expect(updates.status.phase == "draining" && updates.status.waiting == fake.head && desk.drainingForUpdate)
+        #expect(fake.calls.filter { $0.args == ["swift", "test"] }.count == 2 && fake.restarts == 0)
+        fake.agents[0].onEvent(.finished(summary: "Done", failed: false))
+        for _ in 0..<500 where desk.job("updating")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
+        updates.deployIfReady()
+        #expect(fake.installs == 1 && fake.restarts == 1 && updates.state.installed == fake.head)
+        // The runner that starts has the newest commit: nothing more to install.
+        let restarted = Updates(desk: desk, root: updates.root, binary: updates.binary)
+        restarted.command = fakeCommand
+        restarted.install = updates.install
+        restarted.restart = updates.restart
+        await restarted.poll()
+        #expect(fake.installs == 1 && fake.restarts == 1 && restarted.status.commit == fake.head)
+    }
+
+    @Test func aNewerCommitThatFailsLeavesTheTestedOneToInstall() async throws {
+        try await startJob()
+        await updates.poll()
+        let tested = fake.head
+        fake.head = String(repeating: "b", count: 40)
+        fake.failed = ["swift", "test"]
+        await updates.poll()
+        #expect(updates.status.phase == "draining" && updates.status.waiting == tested && desk.drainingForUpdate)
+        #expect(updates.state.failed == fake.head && desk.inbox.count == 1)
+        fake.agents[0].onEvent(.finished(summary: "Done", failed: false))
+        for _ in 0..<500 where desk.job("updating")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
+        updates.deployIfReady()
+        #expect(fake.installs == 1 && fake.restarts == 1 && updates.state.installed == tested)
+    }
+
+    @Test(arguments: [false, true])
+    func updatesRestartAtMostOnceEveryFifteenMinutesUnlessTheyFixAFailure(fixes: Bool) async throws {
+        var date = Date(timeIntervalSince1970: 1_791_582_173)
+        updates.now = { date }
+        await updates.poll()
+        #expect(fake.restarts == 1)
+        // The runner is back, and dev moves a minute later.
+        let fresh = restarted()
+        let restarted = Updates(desk: fresh, root: updates.root, binary: updates.binary)
+        restarted.command = fakeCommand
+        restarted.install = updates.install
+        restarted.restart = updates.restart
+        restarted.now = { date }
+        restarted.fixesFailure = { _ in fixes }
+        fake.head = String(repeating: "b", count: 40)
+        date += 60
+        await restarted.poll()
+        guard !fixes else {
+            // It brings the fix of one of Oby's own failures: no waiting.
+            #expect(fake.restarts == 2 && restarted.state.installed == fake.head)
+            return
+        }
+        #expect(restarted.status.phase == "ready" && restarted.status.waiting == fake.head)
+        // Waiting its turn doesn't hold any agent back.
+        #expect(!fresh.drainingForUpdate && fake.restarts == 1)
+        date += Updates.spacing - 61
+        restarted.deployIfReady()
+        #expect(fake.restarts == 1)
+        date += 1
+        restarted.deployIfReady()
+        #expect(fake.restarts == 2 && restarted.state.installed == fake.head)
+    }
+
     @Test func drainCapRestartsAndRecoversTheSameSessionWithoutAnotherRound() async throws {
         try await startJob()
         let date = Date()

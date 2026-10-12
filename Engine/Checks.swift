@@ -1166,7 +1166,7 @@ extension Desk {
     func reviewApproved(_ id: String, review: String) {
         // Only where a Mac takes checks: the runner. The Mac's own jobs wait for a person to merge them.
         guard queuesMacChecks else { return }
-        Task {
+        wrapUp("approval:\(id)") { [self] in
             let read = await reviewedHead(review)
             guard var author = job(id), author.review?.job == review, author.review?.verdict == .approved, !author.isActive else { return }
             author.mergeError = nil

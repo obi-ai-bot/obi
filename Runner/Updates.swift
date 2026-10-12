@@ -4,11 +4,14 @@ import Crypto
 
 /// Owns a checkout outside every agent sandbox. A commit that failed is tried once, even across
 /// restarts; one a restart cut short is tried again. Jobs carry on after the restart like after any
-/// other (`Desk.resumeAfterRestart`, Engine/Restarts.swift).
+/// other (`Desk.resumeAfterRestart`, Engine/Restarts.swift). Updates are batched (#212): a newer
+/// `dev` commit replaces the one waiting to install, and the runner restarts for an update at most
+/// once every `spacing`, unless it brings the fix of one of Oby's own failures.
 @MainActor
 final class Updates {
     static let interval: TimeInterval = 180
     static let drainLimit: TimeInterval = 30 * 60
+    static let spacing: TimeInterval = 15 * 60
 
     struct State: Codable {
         /// The last commit that failed to build, test or install: not tried again.
@@ -17,6 +20,8 @@ final class Updates {
         var digest: String?
         /// Fetching `dev` fails since the inbox last heard: one item per outage.
         var outage: Bool?
+        /// When the runner last restarted to install an update: the next waits `spacing` from then.
+        var restarted: Date?
     }
     struct Status: Encodable {
         var commit: String?
@@ -39,8 +44,14 @@ final class Updates {
     private(set) var status: Status
     private var polling = false
     private var drainStarted: Date?
+    /// The tested executable, kept outside the checkout (a newer commit builds there), and its commit.
     private var candidate: URL?
+    private var ready: String?
+    /// The candidate brings the fix of one of Oby's own failures: it doesn't wait `spacing`.
+    private var urgent = false
     var now: () -> Date = Date.init
+    /// Whether a fix of one of Oby's own failures merged into dev since the date (Engine/Failures.swift). Tests put in their own.
+    var fixesFailure: (Date) -> Bool
     /// Fake commands and install/restart in tests. Production commands never enter Agents.sandboxed.
     var command: ([String], URL, [String: String?]) async throws -> String = { args, directory, env in
         let result = try await Shell.run(args, in: directory, env: env, timeout: 1800)
@@ -57,6 +68,7 @@ final class Updates {
         self.desk = desk
         self.root = root
         self.binary = binary
+        fixesFailure = { [weak desk] since in desk?.failureLog.fixMerged(since: since) ?? false }
         state = (try? JSONDecoder().decode(State.self, from: Data(contentsOf: root.appending(path: "state.json")))) ?? State()
         // A manual install must not report the previous executable's commit.
         let commit = state.digest == (try? Self.digest(binary)) ? state.installed : nil
@@ -72,7 +84,6 @@ final class Updates {
         guard !polling else { return }
         polling = true
         defer { polling = false }
-        if candidate != nil { return deployIfReady() }
         var step = "fetch dev"
         var head: String?
         do {
@@ -89,7 +100,10 @@ final class Updates {
                 state.outage = nil
                 try save()
             }
-            guard commit != status.commit, commit != state.failed else { return }
+            // Running already, waiting to install, or it failed: nothing new.
+            guard commit != status.commit, commit != state.failed, commit != ready else { return deployIfReady() }
+            // A newer commit replaces the one waiting to install, rather than restart twice: it waits
+            // for this one's build and tests, and a drain under way carries on meanwhile.
             head = commit
             status.waiting = commit
             status.phase = "building"
@@ -105,24 +119,39 @@ final class Updates {
             try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: home) }
             _ = try await command(["swift", "test"], source, MacCheck.home(home))
-            candidate = source.appending(path: ".build/release/oby-runner")
-            desk.drainingForUpdate = true
-            drainStarted = now()
-            status.phase = "draining"
+            step = "install"
+            let tested = root.appending(path: "candidate")
+            try? FileManager.default.removeItem(at: tested)
+            try FileManager.default.copyItem(at: source.appending(path: ".build/release/oby-runner"), to: tested)
+            candidate = tested
+            ready = commit
+            urgent = state.restarted.map(fixesFailure) ?? true
+            status.phase = drainStarted == nil ? "ready" : "draining"
             deployIfReady()
         } catch {
             fail(step, head: head)
         }
     }
 
-    /// Also ticked every second, so an idle runner doesn't wait another polling interval.
+    /// Also ticked every second, so an idle runner doesn't wait another polling interval. A tested
+    /// commit drains once `spacing` has passed since the last update's restart (or at once when it's
+    /// `urgent`), and installs when the agents are idle or the drain limit passed, but only between
+    /// the steps of a job's end of turn (`Desk.updateIsBetweenSteps`), never inside one.
     func deployIfReady() {
-        guard status.phase == "draining", let candidate, let commit = status.waiting, let drainStarted,
+        guard status.phase == "ready" || status.phase == "draining", let candidate, let commit = ready else { return }
+        if drainStarted == nil {
+            if !urgent, let restarted = state.restarted, now().timeIntervalSince(restarted) < Self.spacing { return }
+            desk.drainingForUpdate = true
+            drainStarted = now()
+            status.phase = "draining"
+        }
+        guard let drainStarted, desk.updateIsBetweenSteps,
               desk.updateIsIdle || now().timeIntervalSince(drainStarted) >= Self.drainLimit else { return }
         let previous = state
         do {
             state.installed = commit
             state.digest = try Self.digest(candidate)
+            state.restarted = now()
             try save()
             try install(candidate, binary)
         } catch {
@@ -141,11 +170,18 @@ final class Updates {
     private func fail(_ step: String, head: String?) {
         if let head { state.failed = head } else if state.outage == true { return } else { state.outage = true }
         try? save()
-        status.waiting = nil
-        status.phase = "failed"
-        candidate = nil
-        drainStarted = nil
-        desk.cancelUpdateDrain()
+        if let ready, ready != head {
+            // A newer commit failed: the tested one it was to replace still installs.
+            status.waiting = ready
+            status.phase = drainStarted == nil ? "ready" : "draining"
+        } else {
+            status.waiting = nil
+            status.phase = "failed"
+            candidate = nil
+            ready = nil
+            drainStarted = nil
+            desk.cancelUpdateDrain()
+        }
         // No build output is stored: it can contain credentials. A single durable item identifies
         // the step; polling/network failures are deduplicated too. Mark done after reading.
         let id = head ?? "fetch-\(Int(now().timeIntervalSince1970))"
