@@ -170,10 +170,12 @@ secret_scan() {
             *) tail -n 20 "$out/gitleaks.log"; die "gitleaks couldn't scan ${target#"$out/"}: nothing is published unscanned" ;;
         esac
     done
-    local -a log_opts=()
-    [[ -n "$since" ]] && log_opts=("--log-opts=$since..HEAD")
     status=0
-    gitleaks git "$root" "${log_opts[@]}" --no-banner --redact --exit-code=99 --report-format=json --report-path="$report" > "$out/gitleaks.log" 2>&1 || status=$?
+    if [[ -n "$since" ]]; then
+        gitleaks git "$root" "--log-opts=$since..HEAD" --no-banner --redact --exit-code=99 --report-format=json --report-path="$report" > "$out/gitleaks.log" 2>&1 || status=$?
+    else
+        gitleaks git "$root" --no-banner --redact --exit-code=99 --report-format=json --report-path="$report" > "$out/gitleaks.log" 2>&1 || status=$?
+    fi
     case "$status" in
         0) note "clean: the app, the appcast and the commits since ${since:-the beginning}" ;;
         99) die "possible secret in a commit since ${since:-the beginning}: build/release/gitleaks.json says where (redacted)" ;;
@@ -277,10 +279,20 @@ main() {
         # CI's ad hoc flags (docs/ci.md): no certificate needed, hardened runtime stays on.
         signing=(CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=)
     fi
-    xcodebuild -project Oby.xcodeproj -scheme Oby -configuration Release -destination 'generic/platform=macOS' \
-        -archivePath "$archive" -derivedDataPath "$out/DerivedData" \
-        MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="$build" "${signing[@]}" \
-        archive > "$out/archive.log" 2>&1 || { tail -n 40 "$out/archive.log"; die "the archive failed: build/release/archive.log"; }
+    local -a archive_args=(
+        -project Oby.xcodeproj
+        -scheme Oby
+        -configuration Release
+        -destination 'generic/platform=macOS'
+        -archivePath "$archive"
+        -derivedDataPath "$out/DerivedData"
+        MARKETING_VERSION="$version"
+        CURRENT_PROJECT_VERSION="$build"
+    )
+    if $dry_run; then
+        archive_args+=("${signing[@]}")
+    fi
+    xcodebuild "${archive_args[@]}" archive > "$out/archive.log" 2>&1 || { tail -n 40 "$out/archive.log"; die "the archive failed: build/release/archive.log"; }
     if $dry_run; then
         app="$out/Oby.app"
         cp -R "$archive/Products/Applications/Oby.app" "$app"
