@@ -84,6 +84,29 @@ struct ChatWindowTests {
         #expect(stopped && responder.escapes == 1)
     }
 
+    @Test func unhandledEscapeReachesTheSwiftUIExitCommand() async throws {
+        var exits = 0
+        let root = ChatComposer(text: .constant(""), focused: .constant(true), tray: Tray(),
+                                onSend: {}, onScreenshot: {}, onStop: { false })
+            .onExitCommand { exits += 1 }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 100),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: root)
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        for _ in 0..<40 {
+            if window.firstResponder is ComposerEditor.Editor { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let editor = try #require(window.firstResponder as? ComposerEditor.Editor)
+        let escape = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                 windowNumber: window.windowNumber, context: nil,
+                                                 characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        editor.keyDown(with: escape)
+        #expect(exits == 1)
+    }
+
     @Test func openingChatFocusesTheComposerAndNewDecisionsLeaveTypingAlone() async throws {
         let feed = RunnerFeed()
         let model = IslandModel(desk: Desk(), feed: feed)
