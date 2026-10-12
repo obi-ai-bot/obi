@@ -590,6 +590,8 @@ private struct OpenIsland: View {
             }
             .frame(minHeight: 92, alignment: .top)
 
+            if feed.down { RunnerOfflineNotice(name: feed.name) }
+            if let problem { Text(problem).font(OBYStyle.caption).foregroundStyle(.red).textSelection(.enabled) }
             if let row = selectedRow {
                 scrolling { screen(row).id(row.id) }
             } else if !groups.isEmpty {
@@ -853,7 +855,7 @@ private struct OpenIsland: View {
     private var field: some View {
         ChatComposer(text: $text, focused: Binding(get: { typing }, set: { typing = $0 }), tray: tray,
                      maximumHeight: 190, onSend: send, onScreenshot: screenshot,
-                     onStop: { if thinking { desk.cancel() } })
+                     onStop: { if thinking { desk.cancel(); return true }; return false })
     }
 
     private func send() {

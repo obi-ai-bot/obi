@@ -11,11 +11,21 @@ struct InlinePermission: View {
     @State private var busy = false
     @State private var problem: String?
 
-    var body: some View {
+    static func receipt(_ record: RunnerFeed.PermissionRecord) -> String? {
+        guard let done = record.done, let answer = InboxWords.plain(record.answer) else { return nil }
+        let subject = InboxWords.plain(record.permission.detail) ?? record.permission.title
+        return "\(answer): \(subject) · \(ConversationModel.clock(done))"
+    }
+
+    @ViewBuilder var body: some View {
+        if record.done == nil || Self.receipt(record) != nil { card }
+    }
+
+    private var card: some View {
         VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
-            if let done = record.done {
+            if let receipt = Self.receipt(record) {
                 Button { expanded.toggle() } label: {
-                    Label("\(record.answer ?? "Answered on another device") · \(ConversationModel.clock(done))", systemImage: "checkmark.circle.fill")
+                    Label(receipt, systemImage: "checkmark.circle.fill")
                         .font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
                 }
                 .buttonStyle(.plain)

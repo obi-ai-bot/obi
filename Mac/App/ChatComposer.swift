@@ -31,9 +31,10 @@ struct ChatComposer: View {
     @Binding var focused: Bool
     let tray: Tray
     var maximumHeight: CGFloat = 300
+    var focusRequest = 0
     let onSend: () -> Void
     let onScreenshot: () -> Void
-    let onStop: () -> Void
+    let onStop: () -> Bool
     @State private var width: CGFloat = 300
 
     private var lines: Int { ComposerMetrics.lines(text, width: width) }
@@ -51,9 +52,9 @@ struct ChatComposer: View {
                 } label: {
                     Image(systemName: "plus").font(OBYStyle.body.weight(.medium)).frame(width: 30, height: 34)
                 }
-                .menuStyle(.borderlessButton).fixedSize().padding(.bottom, 9)
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().padding(.bottom, 9)
                 .accessibilityLabel("Add attachment")
-                ComposerEditor(text: $text, focused: $focused, onSend: onSend, onStop: onStop)
+                ComposerEditor(text: $text, focused: $focused, focusRequest: focusRequest, onSend: onSend, onStop: onStop)
                     .frame(height: editorHeight)
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
                     .overlay(alignment: .topLeading) {
@@ -88,16 +89,40 @@ struct ChatComposer: View {
 struct ComposerEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var focused: Bool
+    var focusRequest = 0
     let onSend: () -> Void
-    let onStop: () -> Void
+    let onStop: () -> Bool
 
     final class Editor: NSTextView {
         var send: () -> Void = {}
-        var stop: () -> Void = {}
+        var stop: () -> Bool = { false }
+        var wantsFocus: () -> Bool = { false }
+        var focusWhenAttached = false
+
+        func requestComposerFocus() {
+            guard wantsFocus() else { focusWhenAttached = false; return }
+            guard let window else { focusWhenAttached = true; return }
+            focusWhenAttached = false
+            window.initialFirstResponder = self
+            window.makeFirstResponder(self)
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if focusWhenAttached {
+                DispatchQueue.main.async { [weak self] in self?.requestComposerFocus() }
+            }
+        }
+
+        override func cancelOperation(_ sender: Any?) {
+            // Forward unhandled Esc through the responder chain (notch back/close).
+            if hasMarkedText() { super.cancelOperation(sender) }
+            else if !stop() { nextResponder?.cancelOperation(sender) }
+        }
         override func keyDown(with event: NSEvent) {
             // Let the input method finish composing before interpreting Return as Send.
             if event.keyCode == 36, !hasMarkedText(), !event.modifierFlags.contains(.shift) { send(); return }
-            if event.keyCode == 53, !hasMarkedText() { stop(); return }
+            if event.keyCode == 53, !hasMarkedText(), stop() { return }
             super.keyDown(with: event)
         }
     }
@@ -105,6 +130,7 @@ struct ComposerEditor: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerEditor
         var requestedFocus = false
+        var focusRequest = 0
         init(_ parent: ComposerEditor) { self.parent = parent }
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }
@@ -147,14 +173,17 @@ struct ComposerEditor: NSViewRepresentable {
         context.coordinator.parent = self
         editor.send = onSend
         editor.stop = onStop
+        editor.wantsFocus = { context.coordinator.parent.focused }
         if editor.string != text {
             editor.string = text
             editor.setSelectedRange(NSRange(location: text.utf16.count, length: 0))
             editor.scrollRangeToVisible(editor.selectedRange())
         }
-        if focused && !context.coordinator.requestedFocus {
-            DispatchQueue.main.async { if context.coordinator.parent.focused, let window = editor.window { window.makeFirstResponder(editor) } }
+        if focused && (!context.coordinator.requestedFocus || focusRequest != context.coordinator.focusRequest) {
+            editor.focusWhenAttached = true
+            DispatchQueue.main.async { [weak editor] in editor?.requestComposerFocus() }
         }
         context.coordinator.requestedFocus = focused
+        context.coordinator.focusRequest = focusRequest
     }
 }

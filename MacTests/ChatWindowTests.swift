@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import SwiftUI
 import Testing
 @testable import Oby
 
@@ -45,6 +46,78 @@ struct ChatWindowTests {
         #expect(DecisionKey.action("return", options: [CardOption(label: "Deny", answer: "deny", recommended: true)]) == .none)
     }
 
+    @Test func timeLinesIgnoreSenderChangesUntilFifteenMinutesOrMidnight() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let first = Turn(id: "u", date: now, who: .user, text: "Hello")
+        let reply = Turn(id: "o", date: now + 5, who: .oby, text: "Hi")
+        #expect(ConversationModel.showsTime(first, after: nil, calendar: calendar))
+        #expect(!ConversationModel.showsTime(reply, after: first, calendar: calendar))
+        var later = reply
+        later.date = first.date + 900
+        #expect(!ConversationModel.showsTime(later, after: first, calendar: calendar))
+        later.date = first.date + 901
+        #expect(ConversationModel.showsTime(later, after: first, calendar: calendar))
+        var beforeMidnight = first
+        beforeMidnight.date = calendar.startOfDay(for: now) + 86_399
+        later.date = beforeMidnight.date + 2
+        #expect(ConversationModel.showsTime(later, after: beforeMidnight, calendar: calendar))
+    }
+
+    final class EscapeResponder: NSResponder {
+        var escapes = 0
+        override func cancelOperation(_ sender: Any?) { escapes += 1 }
+    }
+
+    @Test func escapeStopsThinkingOrReachesTheNotchResponder() throws {
+        let editor = ComposerEditor.Editor(frame: NSRect(x: 0, y: 0, width: 300, height: 52))
+        let responder = EscapeResponder()
+        editor.nextResponder = responder
+        editor.cancelOperation(nil)
+        #expect(responder.escapes == 1)
+        var stopped = false
+        editor.stop = { stopped = true; return true }
+        let escape = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                 windowNumber: 0, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                                                 isARepeat: false, keyCode: 53))
+        editor.keyDown(with: escape)
+        #expect(stopped && responder.escapes == 1)
+    }
+
+    @Test func openingChatFocusesTheComposerAndNewDecisionsLeaveTypingAlone() async throws {
+        let feed = RunnerFeed()
+        let model = IslandModel(desk: Desk(), feed: feed)
+        let state = ChatState()
+        state.open()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: ChatView(model: model, state: state, onOpenSettings: { _ in }))
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        for _ in 0..<40 {
+            if window.firstResponder is ComposerEditor.Editor { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let editor = try #require(window.firstResponder as? ComposerEditor.Editor)
+        editor.string = "fix 2 bugs"
+        feed.apply(InboxItem(id: "new", kind: .question, job: "j", title: "Job", text: "Which?", options: ["One", "Two"], created: now))
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(window.firstResponder === editor)
+        #expect(editor.string == "fix 2 bugs")
+        #expect(feed.inbox.first?.done == nil)
+        // Every open request includes returning from a search/other control in an existing window.
+        let other = NSTextView()
+        window.contentView?.addSubview(other)
+        window.makeFirstResponder(other)
+        state.open()
+        for _ in 0..<40 {
+            if window.firstResponder === editor { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(window.firstResponder === editor)
+    }
+
     @Test func decisionsAttachToTheirJobEvenAfterOtherTurns() {
         let turns = [Turn(id: "start", date: now, who: .oby, text: "Starting", jobs: ["job"]),
                      Turn(id: "later", date: now + 60, who: .user, text: "Another question")]
@@ -78,6 +151,19 @@ struct ChatWindowTests {
         #expect(InlineDecision.receipt(item) == nil)
         item.done = now + 10
         #expect(InlineDecision.receipt(item)?.hasPrefix("You chose: A · ") == true)
+    }
+
+    @Test func receiptsRequireAnAnswerAndNameThePermissionSubject() {
+        var item = InboxItem(id: "d", kind: .question, job: "j", title: "Job", text: "Which?", options: ["A"], created: now)
+        item.done = now
+        #expect(InlineDecision.receipt(item) == nil)
+        item.answer = "   "
+        #expect(InlineDecision.receipt(item) == nil)
+        var record = RunnerFeed.PermissionRecord(job: "j", permission: RunnerPermission(id: "p", title: "Run tests", detail: "swift test"), created: now)
+        record.done = now
+        #expect(InlinePermission.receipt(record) == nil)
+        record.answer = "Allowed once"
+        #expect(InlinePermission.receipt(record)?.hasPrefix("Allowed once: swift test · ") == true)
     }
 
     @Test func waitingDecisionsCountAndChooseTheOldestTarget() {
@@ -121,11 +207,30 @@ struct ChatWindowTests {
         #expect(CardOption.defaultOption(options)?.answer == "D")
     }
 
+    @Test func publishReviewAndFailedStatusesKeepTheirMeaning() {
+        var job = Job(id: "j", request: "Work", agent: "codex", account: "default", repo: "deskree-inc/oby",
+                      branch: "oby/fix-270", base: "dev", pr: nil, kind: .fix, task: "Work")
+        job.status = .done
+        job.commits = 1
+        #expect(job.badge == JobBadge(text: "Ready to publish", tone: .orange))
+        job.published = "https://github.com/deskree-inc/oby/pull/274"
+        job.pullRequest = PullRequestStatus(state: .open, reviewDecision: .waiting, base: "dev", checkedAt: now)
+        #expect(job.badge == JobBadge(text: "In review", tone: .blue))
+        job.pullRequest?.reviewDecision = .approved
+        #expect(job.badge.text == "In review")
+        job.pullRequest?.reviewDecision = .changesRequested
+        #expect(job.badge == JobBadge(text: "Needs input", tone: .orange))
+        job.pullRequest?.state = .merged
+        #expect(job.badge.text == "Merged")
+        job.status = .failed
+        #expect(job.badge == JobBadge(text: "Failed", tone: .red))
+    }
+
     @Test func statusVocabularyIsShared() {
         var job = Job(id: "j", request: "Work", agent: "codex", account: "default", repo: "deskree-inc/oby",
                       branch: "oby/fix-270", base: "dev", pr: nil, kind: .fix, task: "Work")
         let expected: [(Job.Status, String)] = [(.queued, "Waiting"), (.running, "Running"), (.done, "Ready"),
-                                              (.failed, "Blocked"), (.stopped, "Stopped"), (.interrupted, "Blocked")]
+                                              (.failed, "Failed"), (.stopped, "Stopped"), (.interrupted, "Blocked")]
         for (status, text) in expected { job.status = status; #expect(job.badge.text == text) }
         job.status = .running
         job.step = "Waiting for your OK"

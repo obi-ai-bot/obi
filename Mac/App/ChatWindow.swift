@@ -70,9 +70,11 @@ final class ChatWindow: NSObject, NSWindowDelegate {
 @Observable
 final class ChatState {
     var selection = ChatSelection.oby
+    var composerFocusRequest = 0
 
     func open(job: (id: String, local: Bool)? = nil) {
         selection = job.map { .job(id: $0.id, local: $0.local) } ?? .oby
+        if job == nil { composerFocusRequest += 1 }
     }
 }
 
@@ -105,7 +107,7 @@ struct ChatView: View {
     @ViewBuilder private var middle: some View {
         switch state.selection {
         case .oby:
-            ConversationColumn(model: model, liveExpanded: $liveExpanded, onOpenJob: { state.selection = .job(id: $0, local: $1) })
+            ConversationColumn(model: model, liveExpanded: $liveExpanded, composerFocusRequest: state.composerFocusRequest, onOpenJob: { state.selection = .job(id: $0, local: $1) })
         case .job(let id, let local):
             JobPane(model: model, id: id, local: local, onBack: { state.selection = .oby })
         case .channels:
@@ -131,6 +133,7 @@ struct ChatView: View {
 private struct ConversationColumn: View {
     let model: IslandModel
     @Binding var liveExpanded: Bool
+    let composerFocusRequest: Int
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
     @State private var text = ""
     struct ReplyTarget {
@@ -142,7 +145,7 @@ private struct ConversationColumn: View {
     @State private var sendProblem: String?
     @State private var decisionFocus = 0
     @State private var columnHeight: CGFloat = 600
-    @FocusState private var typing: Bool
+    @State private var typing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var desk: Desk { model.desk }
@@ -168,7 +171,7 @@ private struct ConversationColumn: View {
                     Button("Integrations") { SettingsSelection.open(.runner) }
                     Button("Settings") { SettingsSelection.open(.general) }
                 } label: { Image(systemName: "ellipsis").font(OBYStyle.title) }
-                    .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Chat menu")
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().accessibilityLabel("Chat menu")
             }
             .padding(.horizontal, OBYStyle.Space.xl).padding(.top, 46).padding(.bottom, OBYStyle.Space.lg)
             .accessibilityAddTraits(.isHeader)
@@ -179,6 +182,7 @@ private struct ConversationColumn: View {
         // Escape cancels the turn Oby is thinking about.
         .onExitCommand { if thinking { desk.cancel() } }
         .onAppear { typing = true; model.markChatRead() }
+        .onChange(of: composerFocusRequest) { typing = true }
         .onChange(of: model.thread.last?.id) { if model.chatWindowVisible { model.markChatRead() } }
     }
 
@@ -204,6 +208,9 @@ private struct ConversationColumn: View {
             })
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
+                    if feed.down {
+                        RunnerOfflineNotice(name: feed.name)
+                    }
                     if let oldest {
                         Button { typing = false; decisionFocus += 1; proxy.scrollTo(oldest, anchor: .center) } label: {
                             HStack {
@@ -245,7 +252,8 @@ private struct ConversationColumn: View {
                                         account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
                                         isLocal: { id in desk.jobs.contains { $0.id == id } },
                                         onOpenJob: onOpenJob,
-                                        onStopJob: { model.stopChatJob($0, local: $1) })
+                                        onStopJob: { model.stopChatJob($0, local: $1) },
+                                        showTime: ConversationModel.showsTime(turn, after: index > 0 ? day.turns[index - 1] : nil))
                                     .task(id: turn.jobs ?? []) {
                                         // A runner's job older than its list: fetched, so its card shows.
                                         for id in ConversationModel.missing(of: turn, among: desk.jobs + feed.jobs) { try? await feed.fetch(id) }
@@ -272,9 +280,6 @@ private struct ConversationColumn: View {
                 .defaultScrollAnchor(.bottom)
                 .onChange(of: turns.count) { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("end", anchor: .bottom) } }
                 .onChange(of: desk.talk) { proxy.scrollTo("end", anchor: .bottom) }
-                .onChange(of: oldest, initial: true) {
-                    if oldest != nil { typing = false; decisionFocus += 1 }
-                }
                 }
             }
         }
@@ -360,9 +365,10 @@ private struct ConversationColumn: View {
                 }
             }
             if sendingAnswer { ProgressView().controlSize(.small).accessibilityLabel("Sending answer") }
-            ChatComposer(text: $text, focused: Binding(get: { typing }, set: { typing = $0 }), tray: model.tray,
-                         maximumHeight: columnHeight * 0.5, onSend: send, onScreenshot: screenshot,
-                         onStop: { if thinking { desk.cancel() } })
+            ChatComposer(text: $text, focused: $typing, tray: model.tray,
+                         maximumHeight: columnHeight * 0.5, focusRequest: composerFocusRequest,
+                         onSend: send, onScreenshot: screenshot,
+                         onStop: { if thinking { desk.cancel(); return true }; return false })
                 .disabled(sendingAnswer)
         }
     }
@@ -414,7 +420,7 @@ struct TurnRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if !grouped && showTime {
+            if showTime {
                 Text(ConversationModel.dayTitle(turn.date, now: .now, calendar: .current) + " " + ConversationModel.clock(turn.date))
                     .font(OBYStyle.caption).foregroundStyle(OBYStyle.tertiary)
                     .frame(maxWidth: .infinity).padding(.top, OBYStyle.Space.lg).padding(.bottom, OBYStyle.Space.sm)

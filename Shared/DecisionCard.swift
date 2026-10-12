@@ -67,11 +67,12 @@ struct DecisionCard: View {
         .disabled(busy)
         #if os(macOS)
         .focusable().focusEffectDisabled().focused($cardFocused)
-        .onAppear { if keyboardEnabled { cardFocused = true } }
+        // Only an explicit jump/click gives a card the keyboard; arrival must never interrupt typing.
+        .onTapGesture { if keyboardEnabled && !focused { cardFocused = true } }
         .onExitCommand { if keyboardEnabled && !busy { onLater?() } }
         .onChange(of: focusRequest) { if keyboardEnabled { cardFocused = true } }
         .onKeyPress(phases: .down) { press in
-            guard keyboardEnabled, !focused, press.modifiers.isEmpty else { return .ignored }
+            guard keyboardEnabled, cardFocused, !focused, press.modifiers.isEmpty else { return .ignored }
             let key = press.key == .return ? "return" : press.key == .escape ? "escape" : press.characters
             switch DecisionKey.action(key, options: options, words: words, busy: busy) {
             case .option(let option): choose(option)

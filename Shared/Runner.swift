@@ -601,17 +601,22 @@ extension Job {
     /// where its pull request is. A job you let go says Dismissed, however it ended.
     nonisolated var badge: JobBadge {
         if dismissed != nil { return JobBadge(text: "Dismissed", tone: .gray) }
+        #if os(iOS) || os(watchOS)
+        if waitsForPermission { return JobBadge(text: "Awaiting approval", tone: .orange) }
+        #endif
         if waitsForAnswer { return JobBadge(text: "Needs input", tone: .orange) }
         if step == "Waiting for your OK", isActive { return JobBadge(text: "Awaiting approval", tone: .orange) }
         switch status {
         case .queued: return JobBadge(text: "Waiting", tone: .gray)
         case .running: return JobBadge(text: "Running", tone: .blue)
-        case .done where reviewNeedsYou || mergeNeedsYou || cloudNeedsYou: return JobBadge(text: "Blocked", tone: .orange)
+        case .done where canPublish: return JobBadge(text: "Ready to publish", tone: .orange)
+        case .done where reviewNeedsYou || mergeNeedsYou || cloudNeedsYou: return JobBadge(text: "Needs input", tone: .orange)
         case .done where pullRequestState == "MERGED": return JobBadge(text: "Merged", tone: .green)
         case .done where pullRequestState == "CLOSED": return JobBadge(text: "PR closed", tone: .gray)
-        case .done where published != nil && reviewDecision != "APPROVED": return JobBadge(text: "Awaiting approval", tone: .blue)
+        case .done where reviewDecision == "CHANGES_REQUESTED": return JobBadge(text: "Needs input", tone: .orange)
+        case .done where published != nil || pullRequestState == "OPEN": return JobBadge(text: "In review", tone: .blue)
         case .done: return JobBadge(text: "Ready", tone: .green)
-        case .failed: return JobBadge(text: "Blocked", tone: .red)
+        case .failed: return JobBadge(text: "Failed", tone: .red)
         case .stopped: return JobBadge(text: "Stopped", tone: .gray)
         case .interrupted: return JobBadge(text: "Blocked", tone: .gray)
         }

@@ -88,12 +88,6 @@ struct SidebarView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     if search.isEmpty || "Oby".localizedCaseInsensitiveContains(search) || (model.thread.last?.text.localizedCaseInsensitiveContains(search) ?? false) { obyRow }
-                    section("Channels", trailing: nil) {
-                        emptyRow(SidebarSections.channelsEmpty, selected: selection == .channels) { selection = .channels }
-                    }
-                    section("Obys", trailing: nil) {
-                        emptyRow(SidebarSections.obysEmpty, selected: selection == .obys) { selection = .obys }
-                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 4)

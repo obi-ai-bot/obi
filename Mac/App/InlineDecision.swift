@@ -31,16 +31,19 @@ struct InlineDecision: View {
 
     private var question: Question? { liveQuestion ?? questionSnapshot }
     static func receipt(_ item: InboxItem) -> String? {
-        guard let done = item.done else { return nil }
-        let choice = item.answer.map { "You chose: \($0)" } ?? "Settled"
-        return "\(choice) · \(ConversationModel.clock(done))"
+        guard let done = item.done, let answer = InboxWords.plain(item.answer) else { return nil }
+        return "You chose: \(answer) · \(ConversationModel.clock(done))"
     }
 
-    var body: some View {
+    @ViewBuilder var body: some View {
+        if !settled || Self.receipt(item) != nil { card }
+    }
+
+    private var card: some View {
         VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
-            if settled {
+            if let receipt = Self.receipt(item) {
                 Button { expanded.toggle() } label: {
-                    Label(Self.receipt(item) ?? "Settled",
+                    Label(receipt,
                           systemImage: "checkmark.circle.fill")
                         .font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
