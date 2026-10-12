@@ -89,6 +89,9 @@ final class Desk {
 
     /// Runner updates pause every entry to an agent, including review and follow-up rounds.
     @ObservationIgnored var drainingForUpdate = false
+    /// A moved job's handover, by job: its new agent starts once the agent it left and that one's
+    /// check have ended (`move`).
+    private var handovers: [String: Task<Void, Never>] = [:]
     /// The messages held for agents while draining, with what `run` was given (the prompt's on disk too).
     private var updateWaiting: [String: (job: Job, prompt: String, resume: String?, notice: String?)] = [:]
     private var updatePreparing: Set<String> = []
@@ -851,8 +854,10 @@ final class Desk {
             defer { updatePreparing.remove(job.id) }
             do {
                 let caught = try await caughtUp(job)
-                guard self.job(job.id)?.status == .queued else { return }
-                startOrWait(caught)
+                guard var latest = self.job(job.id), latest.status == .queued else { return }
+                // Moved meanwhile: it starts where it was moved to, on the commit it caught up to.
+                latest.startCommit = caught.startCommit
+                startOrWait(latest)
             } catch {
                 finish(job.id, .failed, "Couldn't bring \(job.branch) up to date with \(job.base ?? "its base"): \(error.localizedDescription)")
             }
@@ -992,8 +997,9 @@ final class Desk {
 
     /// The user moves a job to another tool, account or model (`Moves.choose` picks and checks
     /// where). It keeps its id, worktree, branch and history, and notes the move. A queued job
-    /// starts there; a running one's agent is stopped and the round starts over there with a new
-    /// session, hearing the work so far and why it moved; a finished one's next round runs there.
+    /// starts there; a running one's agent is stopped and, once it and any check of its have ended,
+    /// the round starts over there with a new session, hearing the work so far and why it moved; a
+    /// finished one's next round runs there.
     /// Not Oby's own reviews, and not a job that's wrapping up or publishing.
     @discardableResult
     func move(_ id: String, to target: MoveTarget, why: String? = nil) throws -> Job {
@@ -1019,16 +1025,33 @@ final class Desk {
             return moved
         }
         // Dropped before it's stopped, so nothing it says as it ends counts; a check under way ends too.
-        if let agent = agents.removeValue(forKey: id) { halt(agent) }
-        afterTurns.removeValue(forKey: id)?.cancel()
+        let leaving = agents.removeValue(forKey: id)
+        if let leaving { halt(leaving) }
+        let check = afterTurns.removeValue(forKey: id)
+        check?.cancel()
         handoffs[id, default: []].append("Moved from \(from) to \(to) by you.")
         moved.question = nil
         moved.phase = .work
-        moved.step = "Moved to \(to)"
+        moved.step = "Moving to \(to)"
         replace(moved)
         pickedUp.remove(id)
-        run(moved, prompt: Prompts.moved(moved, from: from, why: reason, round: roundMessage[id], apple: offersAppleChecks))
-        return self.job(id) ?? moved
+        let round = roundMessage[id], count = moved.moves?.count
+        let earlier = handovers[id]
+        handovers[id] = Task { [weak self] in
+            // The agent it left and its check work in the same worktree: the new agent starts only
+            // once they (and a move before this one) have ended, so their edits can't cross.
+            await earlier?.value
+            await leaving?.ended()
+            await check?.value
+            guard let self, self.job(id)?.moves?.count == count else { return }
+            self.handovers[id] = nil
+            // Stopped meanwhile, or another agent took it.
+            guard var latest = self.job(id), latest.status == .running, self.agents[id] == nil else { return }
+            latest.step = "Moved to \(to)"
+            self.replace(latest)
+            self.run(latest, prompt: Prompts.moved(latest, from: from, why: reason, round: round, apple: self.offersAppleChecks))
+        }
+        return moved
     }
 
     /// Stops every queued and running job, and says how many.
@@ -1056,6 +1079,7 @@ final class Desk {
                     updateWaiting[id]?.prompt = [held.prompt, text].filter { !$0.isEmpty }.joined(separator: "\n\n")
                     return
                 }
+                if handovers[id] != nil { throw Shell.Failure(message: "It's moving to \(job.agentName). Tell it again in a moment.") }
                 throw Shell.Failure(message: job.status == .queued ? "\(job.agentName) hasn't started yet. Tell it again in a moment."
                                     : "\(job.agentName) is wrapping up. Tell it again once it's done.")
             }

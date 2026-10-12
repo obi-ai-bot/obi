@@ -90,6 +90,8 @@ struct MoveJobTests {
         var prompt = ""
         var stopped = 0
         var sent: [String] = []
+        /// Its process ends once this opens; nil: it has ended already.
+        var exit: Gate?
         func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
             self.prompt = prompt
             self.onEvent = onEvent
@@ -98,6 +100,23 @@ struct MoveJobTests {
         func end() {}
         func stop() { stopped += 1 }
         func kill() {}
+        func ended() async { await exit?.wait() }
+    }
+
+    /// Opens once, for whoever waits, and doesn't open when their task is cancelled: as a process
+    /// that hasn't ended yet.
+    final class Gate {
+        private var open = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func wait() async {
+            guard !open else { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        func release() {
+            open = true
+            waiters.forEach { $0.resume() }
+            waiters = []
+        }
     }
 
     final class Made { var agents: [(agent: Agent, job: Job, home: URL?, resume: String?)] = [] }
@@ -153,8 +172,17 @@ struct MoveJobTests {
         first.onEvent(.session("thread-1"))
         first.onEvent(.turnEnded(summary: "Half the vault is done.\n\nGOAL NOT MET: the other half", failed: false))
         try await until { desk.job("moving")?.currentRound == 2 }
+        let exit = Gate()
+        first.exit = exit
         let moved = try desk.move("moving", to: MoveTarget(agent: "claude"), why: "Codex keeps looping")
-        #expect(first.stopped == 1 && made.agents.count == 2)
+        #expect(first.stopped == 1)
+        // The new agent waits for the one it replaces to end: both would work in the same worktree.
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(made.agents.count == 1 && desk.job("moving")?.step == "Moving to Claude Code · Personal")
+        #expect(throws: Shell.Failure.self) { try desk.message("moving", "and the tests") }
+        exit.release()
+        try await until { made.agents.count == 2 }
+        #expect(desk.job("moving")?.step == "Moved to Claude Code · Personal")
         let (second, started, home, resume) = try #require(made.agents.last)
         // The same job, worktree and branch, a new session on Claude Code's account.
         #expect(started.id == "moving" && started.branch == "oby/fix-75" && started.agent == "claude" && started.account == personal.id)
@@ -181,12 +209,12 @@ struct MoveJobTests {
     }
 
     /// Moved while its check runs: the check is over, its failure counts for nothing, and the job
-    /// goes on where it was moved, on its last round and on an earlier one alike.
+    /// goes on where it was moved once the check has ended, on its last round and on an earlier one alike.
     @Test(arguments: [nil, 3])
     func aMoveDuringTheCheckLeavesTheMovedJobRunning(rounds: Int?) async throws {
-        let gate = AsyncStream<Void>.makeStream()
+        let gate = Gate()
         desk.runCheck = { _, command, _, _ in
-            for await _ in gate.stream { break }
+            await gate.wait()
             return Rounds.Check(command: command, passed: false, output: "1 test failed")
         }
         desk.integrity = { _ in Integrity.Report() }
@@ -195,10 +223,13 @@ struct MoveJobTests {
         first.onEvent(.turnEnded(summary: "Fixed it.", failed: false))
         try await until { desk.job("checking")?.phase == .check }
         try desk.move("checking", to: MoveTarget(agent: "claude"))
+        // The check still runs in the worktree: nothing starts there until it has ended.
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(made.agents.count == 1)
+        // It ends after the move, failing as a cancelled check would.
+        gate.release()
+        try await until { made.agents.count == 2 }
         let second = try #require(made.agents.last?.agent)
-        // The check ends after the move, failing as a cancelled check would.
-        gate.continuation.yield()
-        gate.continuation.finish()
         try await Task.sleep(for: .milliseconds(100))
         let moved = try #require(desk.job("checking"))
         #expect(moved.status == .running && moved.agent == "claude" && moved.limit == nil)
@@ -295,7 +326,8 @@ struct MoveJobTests {
         desk.repos = ["deskree-inc/oby"]
         let talk = await desk.converse("move the vault job to Claude")
         #expect(talk == .reply("Moved Vault secrets from Codex · Deskree to Claude Code · Personal. It goes on there now."))
-        #expect(desk.job("ab12cd34")?.agent == "claude" && made.agents.count == 2)
+        try await until { made.agents.count == 2 }
+        #expect(desk.job("ab12cd34")?.agent == "claude")
         // The brain heard the jobs it may move and where they may go.
         #expect(brain.prompts.first?.contains("ab12cd34 · Vault secrets") == true)
         #expect(made.agents.last?.agent.prompt.contains("> move the vault job to Claude") == true)

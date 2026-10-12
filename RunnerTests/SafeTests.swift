@@ -380,6 +380,27 @@ struct HaltTests {
         #expect(getpgid(process.processIdentifier) != getpgrp())
     }
 
+    /// `ended` returns once the process has ended, and right away after that: a moved job's new agent
+    /// waits on it for the one it replaces (#118).
+    @Test(.timeLimit(.minutes(1)))
+    func endedWaitsForTheProcess() async throws {
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/sleep")
+        process.arguments = ["30"]
+        let group = try ProcessGroup.run(process)
+        let ended = Ended()
+        let waiting = Task {
+            await group.ended()
+            ended.mark()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(ended.at == nil)
+        group.end(after: Halt.stopping)
+        await waiting.value
+        #expect(ended.at != nil)
+        await group.ended()
+    }
+
     /// Started from a Dispatch worker, which blocks nearly every signal, a process still blocks none:
     /// SIGTERM reaches it.
     @Test(.timeLimit(.minutes(1)))

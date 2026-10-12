@@ -296,6 +296,13 @@ protocol AgentRun: AnyObject {
     func stop()
     /// Ends it now: Oby is quitting.
     func kill()
+    /// Returns once its process has ended, or right away when it never started.
+    func ended() async
+}
+
+extension AgentRun {
+    /// One without a process of its own (a test's) has nothing to wait for.
+    func ended() async {}
 }
 
 /// Ending an agent with everything it started: SIGTERM to its process group, then SIGKILL.
@@ -357,6 +364,8 @@ nonisolated final class ProcessGroup: Sendable {
         var exited = false
         /// `end` sent SIGTERM, and its SIGKILL is to come.
         var ending = false
+        /// Who waits for it to end (`ended`).
+        var waiters: [CheckedContinuation<Void, Never>] = []
     }
     private let state = Mutex(State())
 
@@ -384,11 +393,24 @@ nonisolated final class ProcessGroup: Sendable {
     /// The process ended: SIGKILL to what's left of its group, unless `end`'s own SIGKILL is to come,
     /// after the grace it gave.
     private func exited() {
-        let target = state.withLock { state -> pid_t? in
+        let (target, waiters) = state.withLock { state -> (pid_t?, [CheckedContinuation<Void, Never>]) in
             state.exited = true
-            return state.ending ? nil : state.target
+            defer { state.waiters = [] }
+            return (state.ending ? nil : state.target, state.waiters)
         }
         if let target, target < 0 { _ = kill(target, SIGKILL) }
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Returns once the process has ended (what's left of its group is sent SIGKILL as it does).
+    func ended() async {
+        await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+            let done = state.withLock { state -> Bool in
+                if !state.exited { state.waiters.append(waiter) }
+                return state.exited
+            }
+            if done { waiter.resume() }
+        }
     }
 
     /// SIGTERM to the whole group now, SIGKILL `after` seconds later (`Halt`). Once: a second call,
@@ -542,6 +564,10 @@ final class ClaudeAgent: AgentRun {
 
     func kill() {
         group?.end(after: Halt.dropping)
+    }
+
+    func ended() async {
+        await group?.ended()
     }
 
     private func handle(_ line: Data) {

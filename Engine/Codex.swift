@@ -99,6 +99,10 @@ final class CodexAgent: AgentRun {
         server?.kill()
     }
 
+    func ended() async {
+        await server?.ended()
+    }
+
     private func handle(_ message: [String: Any]) {
         if let id = message["id"] {
             answer(id, message)
@@ -249,6 +253,11 @@ final class CodexServer {
     /// Ends it now, with whatever it started: Stop's 2 seconds.
     func halt() {
         group?.end(after: Halt.stopping)
+    }
+
+    /// Returns once it has ended.
+    func ended() async {
+        await group?.ended()
     }
 
     private func read() async {

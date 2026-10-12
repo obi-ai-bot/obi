@@ -185,6 +185,33 @@ struct ClaimTests {
         #expect(made.agents.count == 1)
     }
 
+    /// A waiting job moved while it's brought up to date starts where it was moved, on the commit it
+    /// caught up to: the job catch-up started with doesn't undo the move (#118).
+    @Test func aJobMovedWhileItCatchesUpStartsWhereItWasMoved() async throws {
+        let gate = MoveJobTests.Gate()
+        desk.fetchBase = { [made] _, _ in
+            await gate.wait()
+            return made.dev
+        }
+        let drafts = try await drafts()
+        let first = desk.dispatch(drafts[0])
+        let second = desk.dispatch(drafts[1])
+        try await until("#198 waits") { desk.job(second.id)?.step.hasPrefix("Waiting for") == true }
+        // An account to move it to, signed in after both were routed.
+        let codex = try desk.accounts.add(agent: "codex", name: "Deskree", payer: "Deskree")
+        desk.accounts.setLabel("Plus · well@example.com", for: codex.id)
+        made.dev = Self.devMerged
+        desk.stop(first.id)
+        try await until("#198 catches up") { desk.job(second.id)?.step.hasPrefix("Bringing") == true }
+        let moved = try desk.move(second.id, to: MoveTarget(agent: "codex"))
+        #expect(moved.status == .queued && moved.account == codex.id)
+        gate.release()
+        try await until("#198 runs") { desk.job(second.id)?.status == .running }
+        let started = try #require(made.agents.last?.job)
+        #expect(made.agents.count == 2 && started.id == second.id)
+        #expect(started.agent == "codex" && started.account == codex.id && started.moves?.count == 1 && started.startCommit == Self.devMerged)
+    }
+
     /// Bringing a job up to date moves only a worktree with no work of its own, and never a pull request's.
     @Test func catchingUpLeavesWorkAndPullRequestsAlone() async throws {
         var job = Job(id: "j1", request: "fix", agent: "claude", account: "default", repo: "deskree-inc/oby",

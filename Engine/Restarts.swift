@@ -136,8 +136,10 @@ extension Desk {
                 let job = job
                 Task {
                     do {
-                        let prepared = try await prepare(job)
-                        guard self.job(job.id)?.status == .queued else { return }
+                        var prepared = try await prepare(job)
+                        guard let latest = self.job(job.id), latest.status == .queued else { return }
+                        // Moved meanwhile: it starts where it was moved to.
+                        (prepared.agent, prepared.account, prepared.model, prepared.moves) = (latest.agent, latest.account, latest.model, latest.moves)
                         startOrWait(prepared)
                     } catch { finish(job.id, .failed, "Couldn't get \(job.repoName) ready: \(error.localizedDescription)") }
                 }
