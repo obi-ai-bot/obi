@@ -468,8 +468,19 @@ nonisolated final class ProcessGroup: Sendable {
             defer { state.waiters = [] }
             return (state.ending ? nil : state.target, state.waiters)
         }
-        if let target, target < 0 { _ = kill(target, SIGKILL) }
+        if let target, target < 0 { Self.killAll(target) }
         for waiter in waiters { waiter.resume() }
+    }
+
+    /// SIGKILL to group `target` (-pgid) until nothing in it runs, for at most a second. Once isn't
+    /// enough on the Mac: a child a member is forking right then isn't in the group yet, escapes the
+    /// signal and holds the output for as long as it runs (a test's 31 s sleep, on a busy Mac).
+    private static func killAll(_ target: pid_t) {
+        for _ in 0..<100 {
+            _ = kill(target, SIGKILL)
+            guard running(group: -target) else { return }
+            usleep(10_000)
+        }
     }
 
     /// Returns once the process and everything left in its group have ended. What it started may
