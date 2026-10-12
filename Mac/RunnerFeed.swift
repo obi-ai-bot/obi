@@ -25,13 +25,17 @@ final class RunnerFeed {
 
     private(set) var jobs: [Job] = [] {
         didSet {
-            let count = jobs.count(where: \.isActive)
+            let count = jobs.count(where: \.isWorking)
             if count != working { working = count }
+            let queued = jobs.count(where: \.isWaiting)
+            if queued != waiting { waiting = queued }
         }
     }
-    /// Agents working on the runner now. The closed notch reads this, not `jobs`, so a new step
-    /// doesn't redraw it.
+    /// Agents working on the runner now (jobs waiting their turn aren't, #238). The closed notch
+    /// reads this, not `jobs`, so a new step doesn't redraw it.
     private(set) var working = 0
+    /// The runner's jobs queued behind something (`Job.waiting`).
+    private(set) var waiting = 0
     /// What waits in the runner's inbox, put-off items too, oldest first: answered on the iPhone,
     /// it goes from here too.
     private(set) var inbox: [InboxItem] = []

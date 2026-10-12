@@ -118,6 +118,8 @@ extension Desk {
                 continue
             }
             job.publishStep = nil
+            // What it waited for before the restart is found again (`startOrWait`), or holds it no more.
+            job.waiting = nil
             if let session = job.session {
                 job.status = .running
                 job.phase = .work
@@ -136,6 +138,7 @@ extension Desk {
                 startOrWait(job, catchUp: true)
             } else {
                 // A setup the restart cut short: its worktree gets ready again.
+                replace(job, save: false)
                 let job = job
                 Task {
                     do {

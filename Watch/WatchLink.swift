@@ -223,10 +223,11 @@ nonisolated struct WatchLink: Sendable {
 
 extension Glance {
     /// What the complications show for these jobs, as Home counts them: what needs you (that
-    /// finished in the last week, as the iPhone trims it) and what's working.
+    /// finished in the last week, as the iPhone trims it), what's working and what waits its turn (#238).
     nonisolated static func of(_ jobs: [Job], now: Date = .now) -> Glance {
         let needing = jobs.filter { $0.needsYou && ($0.finished ?? now) > now.addingTimeInterval(-7 * 86400) }
-        return Glance(needs: needing.count, working: jobs.count(where: \.isActive), top: needing.first?.heading)
+        return Glance(needs: needing.count, working: jobs.count(where: \.isWorking), waiting: jobs.count(where: \.isWaiting),
+                      top: needing.first?.heading)
     }
 
     /// The complications' WidgetKit push token, as issued and as the runner accepted it, in the

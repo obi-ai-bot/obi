@@ -96,12 +96,12 @@ struct HomeView: View {
     /// Every job but those that finished by the last Clear done, on any app, and need you no more.
     private var jobs: [Job] { phone.jobs.filter { $0.listed(after: phone.clearedAt) } }
 
-    /// The jobs in the groups both apps show: needs you, working, in review, done.
+    /// The jobs in the groups both apps show: working, waiting, needs you, in review, done.
     private var groups: [JobList.Section<Job>] { JobList.groups(jobs, by: \.group) }
 
     private var mood: String {
         if case .thinking = phone.talk { return "thinking" }
-        return phone.active.isEmpty ? "idle" : "working"
+        return phone.active.contains(where: \.isWorking) ? "working" : "idle"
     }
 
     private var header: some View {
@@ -150,7 +150,7 @@ struct HomeView: View {
                     Text("Type a task below.").font(.subheadline).foregroundStyle(.secondary)
                 default:
                     // The same line as the Mac's notch and island (Shared/JobList.swift).
-                    Text(Summary.line(working: phone.active.count, needs: needs))
+                    Text(Summary.line(working: phone.active.count(where: \.isWorking), waiting: phone.active.count(where: \.isWaiting), needs: needs))
                         .font(.title3.weight(.semibold))
                     Text(subline).font(.subheadline).foregroundStyle(.secondary)
                 }

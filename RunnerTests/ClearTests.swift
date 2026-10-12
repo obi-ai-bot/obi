@@ -158,12 +158,13 @@ final class ClearTests {
             var group: JobGroup
         }
         let rows = [Row(id: "a", group: .done), Row(id: "b", group: .working), Row(id: "c", group: .needsYou),
-                    Row(id: "d", group: .done), Row(id: "e", group: .inReview)]
+                    Row(id: "d", group: .done), Row(id: "e", group: .inReview), Row(id: "f", group: .waiting)]
         let groups = JobList.groups(rows, by: \.group)
-        #expect(groups.map(\.group) == [.needsYou, .working, .inReview, .done])
-        #expect(groups.map { $0.jobs.map(\.id) } == [["c"], ["b"], ["e"], ["a", "d"]])
+        // Working, then Waiting (#238), then Needs you.
+        #expect(groups.map(\.group) == [.working, .waiting, .needsYou, .inReview, .done])
+        #expect(groups.map { $0.jobs.map(\.id) } == [["b"], ["f"], ["c"], ["e"], ["a", "d"]])
         #expect(groups.map(\.id) == groups.map(\.group))
         #expect(JobList.groups([Row](), by: \.group).isEmpty)
-        #expect(JobGroup.allCases.map(\.rawValue) == ["Needs you", "Working", "In review", "Done"])
+        #expect(JobGroup.allCases.map(\.rawValue) == ["Working", "Waiting", "Needs you", "In review", "Done"])
     }
 }

@@ -2,21 +2,30 @@ import SwiftUI
 
 /// The window's right column, "Live": every agent working now, on this Mac and on the runner,
 /// with its tool and account, its current step, how far along it is where that's known, and how
-/// long it has run. Click one for its screen.
+/// long it has run. Click one for its screen. Jobs waiting their turn aren't cards: "14 waiting"
+/// under them opens the Waiting list, each saying what it waits for (#238).
 struct LiveView: View {
     let model: IslandModel
     let onOpen: (_ job: String, _ local: Bool) -> Void
+    @State private var showsWaiting = false
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
 
-    /// Running and queued jobs, newest first, with where each is.
-    private var live: [(job: Job, local: Bool)] {
+    /// Queued and running jobs, newest first, with where each is.
+    private var active: [(job: Job, local: Bool)] {
         (desk.active.map { ($0, true) } + feed.active.map { ($0, false) }).sorted { $0.0.created > $1.0.created }
     }
 
+    /// The ones working (running, or getting ready to).
+    private var live: [(job: Job, local: Bool)] { active.filter { $0.job.isWorking } }
+
+    /// The ones queued behind something.
+    private var waiting: [(job: Job, local: Bool)] { active.filter { $0.job.isWaiting } }
+
     var body: some View {
         let live = self.live
+        let waiting = self.waiting
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Live").font(.system(size: 15, weight: .semibold))
@@ -26,26 +35,66 @@ struct LiveView: View {
             .padding(.horizontal, 18).padding(.top, 46).padding(.bottom, 14)
             .accessibilityAddTraits(.isHeader)
             ScrollView {
-                if live.isEmpty {
-                    Text("Agents you dispatch show up here while they work.")
-                        .font(.system(size: 13)).foregroundStyle(.white.opacity(0.4))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 18)
-                } else {
-                    // Every second: the elapsed time moves on.
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        LazyVStack(spacing: 12) {
-                            ForEach(live, id: \.job.id) { entry in
-                                LiveCard(job: entry.job, account: Self.account(of: entry.job, local: entry.local, desk: desk, feed: feed),
-                                         now: context.date, onOpen: { onOpen(entry.job.id, entry.local) })
+                VStack(alignment: .leading, spacing: 12) {
+                    if live.isEmpty {
+                        Text(waiting.isEmpty ? "Agents you dispatch show up here while they work." : "No agent is working right now.")
+                            .font(.system(size: 13)).foregroundStyle(.white.opacity(0.4))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 18)
+                    } else {
+                        // Every second: the elapsed time moves on.
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            LazyVStack(spacing: 12) {
+                                ForEach(live, id: \.job.id) { entry in
+                                    LiveCard(job: entry.job, account: Self.account(of: entry.job, local: entry.local, desk: desk, feed: feed),
+                                             now: context.date, onOpen: { onOpen(entry.job.id, entry.local) })
+                                }
                             }
+                            .padding(.horizontal, 14)
                         }
-                        .padding(.horizontal, 14)
+                    }
+                    if let line = Summary.waitingLine(waiting.count) {
+                        waitingList(waiting, line: line)
                     }
                 }
             }
         }
         .background(Color(white: 0.09))
+    }
+
+    /// "14 waiting", which opens the Waiting list: each job's title and what it waits for.
+    private func waitingList(_ waiting: [(job: Job, local: Bool)], line: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button { showsWaiting.toggle() } label: {
+                HStack(spacing: 6) {
+                    Text(line).font(.system(size: 13, weight: .medium))
+                    Image(systemName: showsWaiting ? "chevron.down" : "chevron.right").font(.system(size: 10, weight: .semibold))
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.white.opacity(0.6))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(line)
+            .accessibilityHint(showsWaiting ? "Hides the waiting jobs" : "Shows the waiting jobs")
+            if showsWaiting {
+                ForEach(waiting, id: \.job.id) { entry in
+                    Button { onOpen(entry.job.id, entry.local) } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.job.heading).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                            Text(entry.job.line).font(.system(size: 12)).foregroundStyle(.white.opacity(0.5)).lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens the job")
+                }
+            }
+        }
+        .padding(.horizontal, 18)
     }
 
     /// The account's name as this Mac or the runner knows it, else its id.

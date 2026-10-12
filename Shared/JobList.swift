@@ -4,25 +4,41 @@ import SwiftUI
 #endif
 
 /// The one line Home's header on the iPhone and the closed notch and the island's header on the
-/// Mac all say about the jobs: who's working, and what needs you. Foundation only: the runner's
-/// tests build it too.
+/// Mac all say about the jobs: who's working, who waits, and what needs you. Foundation only: the
+/// runner's tests build it too.
 nonisolated enum Summary {
     static let quiet = "All quiet."
 
-    /// "2 agents are working. 1 job failed.", "1 job is ready to publish." or "All quiet."
-    /// `needs` is `NeedsYou.line` over the jobs shown, without its full stop.
-    static func line(working: Int, needs: String?) -> String {
+    /// "2 agents are working. 1 job failed.", "1 agent is working, 14 waiting. Nothing needs you.",
+    /// "3 jobs are waiting.", "1 job is ready to publish." or "All quiet." Only working jobs count
+    /// as agents working; jobs queued behind something are `waiting` (#238). `needs` is
+    /// `NeedsYou.line` over the jobs shown, without its full stop.
+    static func line(working: Int, waiting: Int = 0, needs: String?) -> String {
         let needs = needs.map { "\($0)." }
-        if working == 0 { return needs ?? quiet }
-        let agents = working == 1 ? "1 agent is working." : "\(working) agents are working."
+        if working == 0 && waiting == 0 { return needs ?? quiet }
+        let agents = switch (working, waiting) {
+        case (0, 1): "1 job is waiting."
+        case (0, _): "\(waiting) jobs are waiting."
+        case (1, 0): "1 agent is working."
+        case (_, 0): "\(working) agents are working."
+        case (1, _): "1 agent is working, \(waiting) waiting."
+        default: "\(working) agents are working, \(waiting) waiting."
+        }
         return "\(agents) \(needs ?? "Nothing needs you.")"
     }
+
+    /// "14 waiting", or nil when none: the line under Live's working jobs on the Mac, and the
+    /// Watch's, that opens the Waiting list.
+    static func waitingLine(_ waiting: Int) -> String? { waiting == 0 ? nil : "\(waiting) waiting" }
 }
 
-/// The groups the job list shows, in this order, on the iPhone and the Mac. The raw value is the heading.
+/// The groups the job list shows, in this order, on the iPhone and the Mac. The raw value is the
+/// heading. Working holds running jobs and ones getting ready; Waiting the ones queued behind
+/// something, each saying what for (#238).
 nonisolated enum JobGroup: String, CaseIterable, Hashable, Sendable {
-    case needsYou = "Needs you"
     case working = "Working"
+    case waiting = "Waiting"
+    case needsYou = "Needs you"
     case inReview = "In review"
     case done = "Done"
 }
@@ -32,6 +48,9 @@ nonisolated struct JobBadge: Equatable, Sendable {
     enum Tone: Sendable { case blue, green, orange, red, gray }
     var text: String
     var tone: Tone
+
+    /// A job queued behind something (#238), in gray: what it waits for goes on its row.
+    static let waiting = JobBadge(text: "Waiting", tone: .gray)
 }
 
 /// The job list as both apps show it: the same groups in the same order, and the same jobs hidden

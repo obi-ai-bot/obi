@@ -95,15 +95,18 @@ final class Watch: NSObject {
     var heard: String { Self.join(earlier, words) }
 
     var needing: [Job] { jobs.filter(\.needsYou) }
-    var working: [Job] { jobs.filter(\.isActive) }
-    /// What needs you first, then what's running.
-    var shown: [Job] { needing + working }
+    /// Running, or getting ready to: not the jobs waiting their turn (#238).
+    var working: [Job] { jobs.filter(\.isWorking) }
+    var waiting: [Job] { jobs.filter(\.isWaiting) }
+    /// What needs you first, then what's running, then what waits.
+    var shown: [Job] { needing + working + waiting }
 
-    /// "1 needs you · 2 working", or "All quiet": what Oby's pose says, for VoiceOver.
+    /// "1 needs you · 2 working · 14 waiting", or "All quiet": what Oby's pose says, for VoiceOver.
     var line: String {
         var parts: [String] = []
         if !needing.isEmpty { parts.append(needing.count == 1 ? "1 needs you" : "\(needing.count) need you") }
         if !working.isEmpty { parts.append("\(working.count) working") }
+        if let queued = Summary.waitingLine(waiting.count) { parts.append(queued) }
         return parts.isEmpty ? "All quiet" : parts.joined(separator: " · ")
     }
 

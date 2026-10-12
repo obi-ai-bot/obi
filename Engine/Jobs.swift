@@ -141,15 +141,13 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// (it's getting ready, or about to start) and once it isn't queued.
     var waiting: Waiting?
 
-    /// What a queued job waits for, in the words every app shows after "Waiting": "after #223
-    /// merges", "runner update". `job` is the job it waits behind, for `job` and `files`.
+    /// What a queued job waits for, in the words every app shows after "Waiting": "a slot opens",
+    /// "runner update". `job` is the job it waits behind, for `job` and `files`.
     struct Waiting: Codable, Equatable, Sendable {
         enum Kind: String, Codable, Sendable {
-            /// Another job on the same files that's still queued or running.
-            case job
-            /// Another job's files, held by its pull request until it's merged or closed, or by its
-            /// commits until they're published.
-            case files
+            /// Another job, or its files. Since #237 jobs on the same files run side by side, so this
+            /// runner doesn't set them.
+            case job, files
             /// The runner is updating: nothing starts until it restarts.
             case update
             /// The running-jobs cap (#237), a start time (#216), or its account's usage limit.
@@ -158,6 +156,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         var kind: Kind
         var text: String
         var job: String?
+
+        static let update = Waiting(kind: .update, text: "runner update")
+        /// Every slot is taken (`Desk.maxRunning`, #237): it starts in its turn, oldest first.
+        static let slot = Waiting(kind: .cap, text: "a slot opens")
     }
     /// What it waits for before it starts (#216, Engine/StartWhen.swift): it stays queued until every
     /// condition holds. Nil for a job that starts at once, and once it started.
@@ -200,6 +202,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// It takes one of the `Desk.maxRunning` slots (#237): its agent is running, not waiting for the
     /// user's answer. Reviews and rebase rounds count like any other.
     var takesSlot: Bool { status == .running && question == nil }
+    /// Queued behind something (`waiting`): every app lists it under Waiting, not Working (#238).
+    var isWaiting: Bool { status == .queued && waiting != nil }
+    /// Running, or getting ready to: what every app counts as an agent working (#238).
+    var isWorking: Bool { isActive && !isWaiting }
     /// Its `files` stay claimed (#209): while it's queued or running, and after, while its pull
     /// request is open or its commits wait to be published. A claim holds no other job back (#237):
     /// it tells the agents of overlapping jobs about this one, and orders their merges. Not once
