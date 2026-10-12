@@ -248,6 +248,13 @@ final class APITests {
         // An empty startWhen is none; files left out are nil, not none.
         #expect(new.startWhen == nil && new.files == nil && new.branch == nil)
         #expect(try decode(#"{"job": {"repo": "deskree-inc/oby", "kind": "fix"}}"#).new == nil)
+        #expect(old.rounds == nil && old.check == nil)
+        let cleared = try decode(#"{"job": {"id": "a", "branch": "oby/fix-42", "account": "default", "rounds": 3, "check": null}}"#)
+        #expect(cleared.rounds == 3 && cleared.check == .some(nil))
+        let set = try decode(#"{"job": {"id": "a", "branch": "oby/fix-42", "account": "default", "check": "swift test", "model": "claude-fable-5-1"}}"#)
+        #expect(set.check == .some("swift test") && set.model == .some("claude-fable-5-1") && old.model == nil)
+        let attached = try decode(#"{"job": {"id": "a", "branch": "oby/fix-42", "account": "default", "attachments": ["/tmp/screenshot.png"]}}"#)
+        #expect(attached.attachments == ["/tmp/screenshot.png"])
     }
 
     @Test func plansMapToTheirKinds() throws {

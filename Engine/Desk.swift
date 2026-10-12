@@ -1201,25 +1201,6 @@ final class Desk {
         return dispatch(draft)
     }
 
-    nonisolated static func edit(_ job: Job, branch: String, account: AccountState?, rounds: Int? = nil, check: String?? = nil) throws -> Job {
-        guard Plan.isBranchName(branch) else { throw Shell.Failure(message: "That isn't a branch name Oby can create.") }
-        guard let account, account.signedIn else { throw Shell.Failure(message: "That account isn't signed in.") }
-        var job = job
-        job.branch = branch
-        job.account = account.account.id
-        job.agent = account.account.agent
-        if let rounds {
-            guard (1...10).contains(rounds) else { throw Shell.Failure(message: "Rounds go from 1 to 10.") }
-            job.rounds = rounds > 1 ? rounds : nil
-        }
-        if let check {
-            let value = check?.trimmingCharacters(in: .whitespaces) ?? ""
-            guard value.isEmpty || Plan.isCheck(value) else { throw Shell.Failure(message: "The check is one line of up to 200 characters.") }
-            job.check = value.isEmpty ? nil : value
-        }
-        return job
-    }
-
     /// Queues a job that's ready to run, with why routing chose its account for its report (#269):
     /// a plan's jobs, a guessed plan's on Start, and the runner's `POST /v1/jobs`.
     @discardableResult
