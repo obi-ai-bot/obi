@@ -319,6 +319,9 @@ struct AppleCheckTests {
         // Free again, the Mac takes the Apple check first, though the merge check waited longer; then the merge check.
         let first = try #require(desk.nextMacCheck(mac: "Studio", kinds: [.merge, .apple]))
         #expect(first.id == check.id && first.isApple)
+        // Oby on the Mac relaunched mid-check (#227): it gets the Apple check back, not the merge check.
+        #expect(desk.nextMacCheck(mac: "Studio", kinds: [.merge, .apple])?.id == check.id)
+        try desk.macCheckEnded(check.id, MacCheck.Report(passed: true, steps: steps.map { MacCheck.Step(name: $0.name, passed: true, seconds: 1) }, failures: []))
         let second = try #require(desk.nextMacCheck(mac: "Studio", kinds: [.merge, .apple]))
         #expect(second.id == merge.id && !second.isApple)
     }
