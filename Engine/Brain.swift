@@ -468,8 +468,18 @@ nonisolated struct BrainTurn: Codable, Equatable, Sendable {
         var parts = ["\(said.debugDescription) → \(plan.action.rawValue) by \(by)"]
         if !plan.reply.isEmpty { parts.append("reply \(plan.reply.debugDescription)") }
         for job in plan.dispatches {
-            let number = job.issue.map { issue in " #\(issue)" + (job.pr.map { " from PR #\($0)" } ?? "") }
-                ?? job.pr.map { " PR #\($0)" } ?? job.epic.map { " epic #\($0)" } ?? ""
+            let number: String
+            if let issue = job.issue, let pr = job.pr {
+                number = " #\(issue) from PR #\(pr)"
+            } else if let issue = job.issue {
+                number = " #\(issue)"
+            } else if let pr = job.pr {
+                number = " PR #\(pr)"
+            } else if let epic = job.epic {
+                number = " epic #\(epic)"
+            } else {
+                number = ""
+            }
             parts.append("\(job.kind.rawValue) \(job.repo)\(number) with \(job.agent)/\(job.account), \(job.rounds) round\(job.rounds == 1 ? "" : "s")"
                          + (job.check.map { ", check `\($0)`" } ?? "")
                          + ((job.startWhen ?? []).isEmpty ? "" : ", starts when " + String(decoding: (try? JSONEncoder().encode(job.startWhen)) ?? Data(), as: UTF8.self)))
