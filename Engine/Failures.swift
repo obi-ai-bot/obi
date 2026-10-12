@@ -404,6 +404,8 @@ final class Failures {
             case .failed where job.limit != nil: add(.limit, ended, "Stopped at a limit: \(job.limit ?? "")", at: job.finished)
             case .failed where job.summary.hasPrefix("Not published:"): add(.publishError, ended, "It failed, not published.", at: job.finished)
             case .failed: add(.failed, ended, "It failed.", at: job.finished)
+            // Still holding its question: it waits for the user, nothing failed (#206).
+            case .interrupted where job.question != nil: break
             case .interrupted: add(.interrupted, ended, "It was interrupted.", at: job.finished)
             default: break
             }

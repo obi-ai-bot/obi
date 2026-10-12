@@ -93,19 +93,39 @@ struct RestartTests {
         #expect(made.agents.count == 1 && restarted.job("ending")?.status == .done)
     }
 
-    @Test func aStoppedJobAndAJobWithAQuestionStayInterrupted() async throws {
+    @Test func aStoppedJobStaysStoppedAndAJobWithAQuestionKeepsWaiting() async throws {
         try await start("stopped")
         desk.stop("stopped")
         let asking = try await start("asking")
         asking.onEvent(.turnEnded(summary: "QUESTION: Which option?\nOPTIONS: One | Two", failed: false))
         let restarted = restart()
+        restarted.failureLog.enabled = true
+        restarted.failureLog.sweep()
+        // Nothing runs until it's answered, and nothing failed (#206).
         #expect(made.agents.count == 2)
         #expect(restarted.job("stopped")?.status == .stopped)
-        #expect(restarted.job("asking")?.status == .interrupted && restarted.job("asking")?.question?.text == "Which option?")
+        let waiting = try #require(restarted.job("asking"))
+        #expect(waiting.status == .running && waiting.step == "Waiting for your answer" && waiting.question?.text == "Which option?")
         #expect(restarted.inbox.contains { $0.job == "asking" && $0.kind == .question && $0.isOpen })
-        // The answer picks its session up.
-        try restarted.message("asking", "One")
+        #expect(restarted.failureLog.store.failures().isEmpty)
+        // It keeps waiting across another restart.
+        let again = restart()
+        #expect(made.agents.count == 2 && again.job("asking")?.status == .running && again.job("asking")?.question != nil)
+        // The answer picks its session up, in the same round.
+        try again.message("asking", "One")
         #expect(made.agents.count == 3 && made.agents.last?.resume == "asking-session" && made.agents.last?.agent.prompt == "One")
+        let answered = try #require(again.job("asking"))
+        #expect(answered.status == .running && answered.question == nil && answered.currentRound == waiting.currentRound)
+    }
+
+    @Test func anInterruptedJobHoldingItsQuestionIsNoFailure() {
+        var interrupted = job
+        interrupted.status = .interrupted
+        interrupted.finished = .now
+        interrupted.question = Plan.Question(text: "Which option?", options: ["One", "Two"])
+        #expect(Failures.found(in: interrupted).isEmpty)
+        interrupted.question = nil
+        #expect(Failures.found(in: interrupted).map(\.trigger) == [.interrupted])
     }
 
     @Test func aCrashLoopStopsAfterTwoResumes() async throws {
