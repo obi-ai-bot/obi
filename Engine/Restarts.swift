@@ -104,7 +104,10 @@ extension Desk {
         for id in ids {
             guard var job = job(id), job.isActive else { continue }
             let message = restarts.message(id)
-            guard restarts.pickUp(id) else {
+            // Waiting for its `startWhen`, never started (#216): no agent of its crashed, so it
+            // waits again whatever the restarts.
+            let neverRan = job.waitsToStart && job.session == nil && message == nil
+            guard neverRan || restarts.pickUp(id) else {
                 Logger.jobs.notice("job \(id, privacy: .public): picked up \(Restarts.most) times in 30 minutes; left interrupted")
                 job.status = .interrupted
                 job.finished = .now
@@ -140,6 +143,7 @@ extension Desk {
                         guard let latest = self.job(job.id), latest.status == .queued else { return }
                         // Moved meanwhile: it starts where it was moved to.
                         (prepared.agent, prepared.account, prepared.model, prepared.moves) = (latest.agent, latest.account, latest.model, latest.moves)
+                        (prepared.startWhen, prepared.question) = (latest.startWhen, latest.question)
                         startOrWait(prepared)
                     } catch { finish(job.id, .failed, "Couldn't get \(job.repoName) ready: \(error.localizedDescription)") }
                 }

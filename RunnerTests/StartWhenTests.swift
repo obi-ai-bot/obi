@@ -370,6 +370,70 @@ struct StartWhenTests {
         try await until("it runs") { restarted.job("kept")?.status == .running }
     }
 
+    /// What it waits for keeps after a restart that forgot nothing of the account's usage: the
+    /// account store keeps it, as Claude Code reports usage only during a job (review of #262).
+    @Test func aRestartRemembersTheAccountsUsage() async throws {
+        try await dispatch(job("limited", [.window(account: codex.id, .fiveHour, under: nil)]))
+        desk.quit()
+        let fresh = AccountStore(root: folder)
+        #expect(fresh.state(codex.id)?.fiveHour == 0.97)
+        fresh.setLabel("Max · well@example.com", for: "default")
+        fresh.setLabel("Plus", for: codex.id)
+        let restarted = Desk(accounts: fresh, store: JobStore(url: folder.appending(path: "oby.sqlite")),
+                             restarts: Restarts(file: folder.appending(path: "restarts.json")))
+        set(restarted)
+        restarted.resumeAfterRestart()
+        try await until("it waits again") { restarted.scheduled.contains("limited") }
+        #expect(restarted.job("limited")?.step == "Waiting for Codex · Deskree: 5-hour window resets at \(Limits.clock(clock.now.addingTimeInterval(1800)))")
+    }
+
+    /// A job that never ran isn't counted as crashing: any number of restarts leaves it waiting.
+    @Test func restartsDontStrandAWaitingJob() async throws {
+        try await dispatch(job("patient", [.at(clock.now.addingTimeInterval(3600))]))
+        var current = desk
+        for _ in 0..<(Restarts.most + 2) {
+            current.quit()
+            current = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")),
+                           restarts: Restarts(file: folder.appending(path: "restarts.json")))
+            set(current)
+            current.resumeAfterRestart()
+            let desk = current
+            try await until("it waits again") { desk.scheduled.contains("patient") }
+        }
+        #expect(current.job("patient")?.status == .queued)
+    }
+
+    // MARK: Changes while it gets ready, and moves
+
+    /// Started now, or told to wait, while its worktree gets ready: that holds once it's ready.
+    @Test func changesWhileItGetsReadyHold() async throws {
+        let ready = MoveJobTests.Gate()
+        desk.prepare = { job in
+            await ready.wait()
+            var job = job
+            job.startCommit = StartWhenTests.dev
+            return job
+        }
+        let later = clock.now.addingTimeInterval(3600)
+        desk.dispatch(Desk.Draft(said: "early", reply: "", job: job("early", [.at(later)]), guessed: false))
+        desk.dispatch(Desk.Draft(said: "told", reply: "", job: job("told"), guessed: false))
+        try desk.startNow("early")
+        try desk.setStartWhen("told", [.at(later)])
+        ready.release()
+        try await until("the first runs, the second waits") { desk.job("early")?.status == .running && desk.scheduled.contains("told") }
+        #expect(desk.job("told")?.status == .queued && desk.job("told")?.step == "Waiting until \(Limits.clock(later))")
+    }
+
+    /// A new model on the same account keeps the wait for that account's room.
+    @Test func aModelChangeKeepsTheWait() async throws {
+        try await dispatch(job("model", [.window(account: codex.id, .fiveHour, under: nil)]))
+        let model = try #require(Moves.models["codex"]?.last)
+        let moved = try desk.move("model", to: MoveTarget(model: model))
+        #expect(moved.account == codex.id && moved.model == model)
+        #expect(moved.startWhen == [.window(account: codex.id, .fiveHour, under: nil)])
+        #expect(desk.job("model")?.status == .queued && desk.scheduled.contains("model") && made.agents.isEmpty)
+    }
+
     // MARK: File claims
 
     /// A waiting job keeps its claim from when it was queued: a later job on the same files hears of it.

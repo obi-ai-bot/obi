@@ -75,6 +75,18 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var permission: RunnerPermission?
     /// Every time the user moved it to another tool, account or model, oldest first (newer runners only).
     var moves: [Move]?
+    /// What it waits for before it starts (#216), as the runner words it, or nil (older runners too).
+    var waiting: Waiting?
+
+    /// `{"kind": "schedule", "text": "for #205 to merge", "job": null}`: `text` follows "Waiting".
+    struct Waiting: Codable, Equatable, Sendable {
+        var kind: String
+        var text: String
+        var job: String?
+    }
+
+    /// Queued until what it waits for happens (#216): it can start now (`Runner.startNow`).
+    var waitsToStart: Bool { status == .queued && waiting?.kind == "schedule" }
 
     /// One move, as the runner words it: "Codex · Deskree" to "Claude Code · Personal · Fable 5.1".
     struct Move: Codable, Equatable, Sendable {
@@ -87,7 +99,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
-             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves
+             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -582,6 +594,8 @@ extension Job {
     nonisolated var badge: JobBadge {
         if dismissed != nil { return JobBadge(text: "Dismissed", tone: .gray) }
         switch status {
+        // Waiting for what it waits for before it starts (#216), else about to start.
+        case .queued where waitsToStart: return JobBadge(text: "Waiting", tone: .gray)
         case .queued: return JobBadge(text: "Starting", tone: .blue)
         case .running: return JobBadge(text: "Working", tone: .blue)
         case .done where canPublish: return JobBadge(text: "Ready to publish", tone: .orange)

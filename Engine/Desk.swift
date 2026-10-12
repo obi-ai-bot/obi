@@ -898,8 +898,10 @@ final class Desk {
                 var prepared = try await ready.value
                 // Stopped while Oby was getting the repository ready.
                 guard let latest = self.job(prepared.id), latest.status == .queued else { return }
-                // Moved meanwhile: it starts where it was moved to.
+                // Moved meanwhile: it starts where it was moved to, and waits for what it waits for now
+                // (started now, or told to wait for something else, #216).
                 (prepared.agent, prepared.account, prepared.model, prepared.moves) = (latest.agent, latest.account, latest.model, latest.moves)
+                (prepared.startWhen, prepared.question) = (latest.startWhen, latest.question)
                 startOrWait(prepared)
             } catch {
                 updatePreparing.remove(job.id)
@@ -1132,8 +1134,8 @@ final class Desk {
         moved.model = model
         let to = Moves.place(moved, accounts: accounts.accounts)
         moved.moves = (job.moves ?? []) + [Job.Move(from: from, to: to, why: reason, date: .now)]
-        // Waiting on the account it left's room: it runs where it went (#216).
-        moved.startWhen = Self.movedStartWhen(moved.startWhen, leaving: job.account)
+        // Waiting on the room of an account it left: it runs where it went (#216). A new model alone keeps its wait.
+        if moved.account != job.account { moved.startWhen = Self.movedStartWhen(moved.startWhen, leaving: job.account) }
         // Sessions belong to a tool and an account: the next round starts a new one.
         moved.session = nil
         Logger.jobs.notice("job \(id, privacy: .public): moved from \(from, privacy: .public) to \(to, privacy: .public)")

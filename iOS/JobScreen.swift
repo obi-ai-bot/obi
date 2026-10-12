@@ -52,6 +52,12 @@ struct JobScreen: View {
                             }.padding(.top, 8)
                         }
                     }
+                    // Waiting for its start condition (#216): it can start now instead.
+                    if job.waitsToStart {
+                        Button("Start now", systemImage: "play.fill") {
+                            Task { await run { try await phone.startNow(job.id) } }
+                        }.disabled(busy)
+                    }
                     // Oby's own reviews pick their account themselves.
                     if job.reviewOf == nil {
                         Button("Move to…", systemImage: "arrow.left.arrow.right") { moving = true }.disabled(busy)
