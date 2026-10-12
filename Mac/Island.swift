@@ -599,6 +599,9 @@ private struct OpenIsland: View {
             if selected == nil {
                 compactChat
                 field
+            } else if thinking {
+                // Over a job's screen, Oby's thinking and its Cancel stay in sight.
+                thinkingRow
             }
         }
         .padding(insets)
@@ -806,19 +809,22 @@ private struct OpenIsland: View {
                 if model.speaker.speaking {
                     Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
                 }
-                if thinking {
-                    HStack {
-                        ProgressView().controlSize(.mini)
-                        Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
-                        Button("Cancel") { desk.cancel() }.buttonStyle(.plain)
-                        Spacer()
-                    }
-                }
+                if thinking { thinkingRow }
             }
         }
         .defaultScrollAnchor(.bottom)
         .frame(height: model.recentTurns.isEmpty && !thinking ? 0 : 150)
         .accessibilityLabel("Recent conversation with Oby")
+    }
+
+    /// Oby's bubble while it thinks: never left there, with a way out in sight.
+    private var thinkingRow: some View {
+        HStack {
+            ProgressView().controlSize(.mini)
+            Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
+            Button("Cancel") { desk.cancel() }.buttonStyle(.plain).help("Cancel (Esc)")
+            Spacer()
+        }
     }
 
     private var field: some View {
@@ -885,68 +891,6 @@ private struct OpenIsland: View {
             await tray.screenshot()
             NSApp.windows.first { $0 is NotchPanel }?.makeKey()
             typing = true
-        }
-    }
-}
-
-/// "Last from Oby": the last thing Oby said, in one line that opens the window, where the whole
-/// conversation is (#11). While Oby thinks, its bubble says so, with × (or Esc) to cancel; typing
-/// something else replaces the turn.
-private struct LastFromOby: View {
-    let desk: Desk
-    let speaker: Speaker
-    let onCancel: () -> Void
-    let onOpen: () -> Void
-
-    /// What Oby said last, or the user's words waiting for an answer.
-    private var last: Turn? { desk.turns.last { $0.who == .oby } ?? desk.turns.last }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if case .thinking = desk.talk {
-                pending
-            } else if let last {
-                Button(action: onOpen) {
-                    HStack(spacing: 8) {
-                        Text(last.who == .oby ? "Oby" : "You").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.55))
-                        Text(Briefing.line(last.text, cap: 200)).font(.system(size: 14, weight: .medium)).lineLimit(1)
-                        Spacer(minLength: 8)
-                        Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold)).foregroundStyle(.white.opacity(0.45))
-                    }
-                    .padding(.horizontal, 12).padding(.vertical, 9)
-                    .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .help("Open Oby: the whole conversation")
-                .accessibilityLabel("Last from Oby: \(last.text)")
-                .accessibilityHint("Opens the conversation")
-            }
-            if speaker.speaking {
-                Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
-                    .padding(.leading, 4)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// Oby's bubble while it thinks: never left there, with a way out in sight.
-    private var pending: some View {
-        HStack {
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small).tint(.white)
-                Text("Thinking…").font(.system(size: 14, weight: .medium)).foregroundStyle(.white.opacity(0.75))
-                Button(action: onCancel) {
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
-                        .frame(width: 20, height: 20).background(.white.opacity(0.14), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .help("Cancel (Esc)")
-                .accessibilityLabel("Cancel")
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            Spacer(minLength: 60)
         }
     }
 }

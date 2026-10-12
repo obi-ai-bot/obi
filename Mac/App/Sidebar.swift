@@ -27,9 +27,14 @@ nonisolated enum SidebarSections {
     static let channelsEmpty = "Team channels come with F11."
     static let obysEmpty = "Other people's Obys come with F12."
 
-    /// "2 working" under Oby's name, or "Quiet".
-    static func obyLine(working: Int) -> String {
-        working == 0 ? "Quiet" : "\(working) working"
+    /// What Oby's pinned row says under its name: the last message, or a hello.
+    static func obyPreview(_ last: String?) -> String {
+        last ?? "Say hello to Oby"
+    }
+
+    /// What VoiceOver reads for Oby's pinned row: what it shows, and an unread reply.
+    static func obyLabel(last: String?, unread: Bool) -> String {
+        "Oby, \(obyPreview(last))" + (unread ? ", unread reply" : "")
     }
 
     /// "2 active" beside Agents, or "None".
@@ -122,7 +127,7 @@ struct SidebarView: View {
                 ObyFace(size: 34)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Oby").font(.system(size: 15, weight: .semibold))
-                    Text(model.thread.last?.text ?? "Say hello to Oby").lineLimit(1).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
+                    Text(SidebarSections.obyPreview(model.thread.last?.text)).lineLimit(1).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
                 }
                 Spacer(minLength: 0)
                 VStack(alignment: .trailing, spacing: 8) {
@@ -139,7 +144,7 @@ struct SidebarView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Oby, \(SidebarSections.obyLine(working: model.working))")
+        .accessibilityLabel(SidebarSections.obyLabel(last: model.thread.last?.text, unread: model.unreadReply))
     }
 
     private var agentsSection: some View {
