@@ -382,7 +382,7 @@ private struct MoveSheet: View {
                     Button(busy ? "Moving…" : "Move") { move() }.disabled(busy)
                 }
             }
-            .task { options = try? await phone.modelOptions() }
+            .task { options = try? await phone.runner.modelOptions() }
         }
     }
 
