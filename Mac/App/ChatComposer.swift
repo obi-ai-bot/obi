@@ -114,11 +114,6 @@ struct ComposerEditor: NSViewRepresentable {
             }
         }
 
-        override func cancelOperation(_ sender: Any?) {
-            // Forward unhandled Esc through the responder chain (notch back/close).
-            if hasMarkedText() { super.cancelOperation(sender) }
-            else if !stop() { nextResponder?.cancelOperation(sender) }
-        }
         override func keyDown(with event: NSEvent) {
             // Let the input method finish composing before interpreting Return as Send.
             if event.keyCode == 36, !hasMarkedText(), !event.modifierFlags.contains(.shift) { send(); return }

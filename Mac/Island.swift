@@ -532,6 +532,14 @@ private struct Waveform: View {
     }
 }
 
+/// Both the island and its native composer use the same Escape routing.
+nonisolated enum IslandEscape {
+    enum Action: Equatable { case stop, back, close }
+    static func action(thinking: Bool, showingJob: Bool) -> Action {
+        thinking ? .stop : showingJob ? .back : .close
+    }
+}
+
 /// The open island: needs-you cards and jobs above a compact view of the shared chat.
 private struct OpenIsland: View {
     let model: IslandModel
@@ -607,9 +615,7 @@ private struct OpenIsland: View {
         }
         .padding(insets)
         // Escape cancels the turn Oby is thinking about first, then leaves a job's screen, then closes the island.
-        .onExitCommand {
-            if thinking { desk.cancel() } else if selected != nil { selected = nil } else { onClose() }
-        }
+        .onExitCommand { exit() }
         .onAppear { typing = true; model.markChatRead() }
         .onChange(of: model.thread.last?.id) { if selected == nil { model.markChatRead() } }
         // A notification opened the island on a runner's job: its screen opens.
@@ -628,6 +634,14 @@ private struct OpenIsland: View {
             }
         }
         .onDisappear { if let id = Row.runnerJob(selected) { feed.showing(id, false) } }
+    }
+
+    private func exit() {
+        switch IslandEscape.action(thinking: thinking, showingJob: selected != nil) {
+        case .stop: desk.cancel()
+        case .back: selected = nil
+        case .close: onClose()
+        }
     }
 
     /// A job in the list, and the runner it's on (nil: this Mac).
@@ -855,7 +869,7 @@ private struct OpenIsland: View {
     private var field: some View {
         ChatComposer(text: $text, focused: Binding(get: { typing }, set: { typing = $0 }), tray: tray,
                      maximumHeight: 190, onSend: send, onScreenshot: screenshot,
-                     onStop: { if thinking { desk.cancel(); return true }; return false })
+                     onStop: { exit(); return true })
     }
 
     private func send() {

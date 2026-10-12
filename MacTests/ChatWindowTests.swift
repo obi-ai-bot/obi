@@ -65,30 +65,24 @@ struct ChatWindowTests {
         #expect(ConversationModel.showsTime(later, after: beforeMidnight, calendar: calendar))
     }
 
-    final class EscapeResponder: NSResponder {
-        var escapes = 0
-        override func cancelOperation(_ sender: Any?) { escapes += 1 }
-    }
-
-    @Test func escapeStopsThinkingOrReachesTheNotchResponder() throws {
+    @Test func escapeStopsThinkingThenGoesBackThenCloses() throws {
+        #expect(IslandEscape.action(thinking: true, showingJob: true) == .stop)
+        #expect(IslandEscape.action(thinking: false, showingJob: true) == .back)
+        #expect(IslandEscape.action(thinking: false, showingJob: false) == .close)
         let editor = ComposerEditor.Editor(frame: NSRect(x: 0, y: 0, width: 300, height: 52))
-        let responder = EscapeResponder()
-        editor.nextResponder = responder
-        editor.cancelOperation(nil)
-        #expect(responder.escapes == 1)
-        var stopped = false
-        editor.stop = { stopped = true; return true }
+        var exits = 0
+        editor.stop = { exits += 1; return true }
         let escape = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                                                  windowNumber: 0, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
                                                  isARepeat: false, keyCode: 53))
         editor.keyDown(with: escape)
-        #expect(stopped && responder.escapes == 1)
+        #expect(exits == 1)
     }
 
-    @Test func unhandledEscapeReachesTheSwiftUIExitCommand() async throws {
+    @Test func composerEscapeUsesTheSameExitHandlerAsTheNotch() async throws {
         var exits = 0
         let root = ChatComposer(text: .constant(""), focused: .constant(true), tray: Tray(),
-                                onSend: {}, onScreenshot: {}, onStop: { false })
+                                onSend: {}, onScreenshot: {}, onStop: { exits += 1; return true })
             .onExitCommand { exits += 1 }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 100),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
