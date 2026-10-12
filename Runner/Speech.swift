@@ -287,15 +287,16 @@ private actor WhisperServer {
         if let process, process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
     }
 
-    func shutdown() {
+    func shutdown() async {
         closed = true
-        stop()
+        await stop()
     }
 
-    private func stop() {
+    private func stop() async {
         if let process, process.isRunning {
             _ = kill(process.processIdentifier, SIGKILL)
-            process.waitUntilExit()
+            // waitUntilExit() inside the actor can sleep forever on macOS after the child is gone.
+            while process.isRunning { try? await Task.sleep(for: .milliseconds(5)) }
         }
         process = nil
     }
@@ -342,7 +343,7 @@ private actor WhisperServer {
             }
             throw APIError(.serviceUnavailable, "Whisper server did not become ready.")
         } catch {
-            stop()
+            await stop()
             throw error
         }
     }
@@ -364,13 +365,13 @@ private actor WhisperServer {
             catch let error as URLError where [.cannotConnectToHost, .networkConnectionLost].contains(error.code) {
                 // Exit notifications can lag behind socket closure. Inference is stateless;
                 // retry once on a fresh owned server without appending PCM a second time.
-                stop()
+                await stop()
                 try await ensureStarted()
                 return try await infer(pcm: pcm, language: language, prompt: prompt)
             }
         } catch {
             // Timeout/cancellation must release the model and its audio, including hung inference.
-            stop()
+            await stop()
             throw APIError(.internalServerError, "Whisper failed or timed out.")
         }
     }

@@ -310,7 +310,7 @@ final class SpeechTests {
         squatter.standardError = FileHandle.nullDevice
         try squatter.run()
         defer {
-            if squatter.isRunning { _ = kill(squatter.processIdentifier, SIGKILL); squatter.waitUntilExit() }
+            if squatter.isRunning { _ = kill(squatter.processIdentifier, SIGKILL) }
         }
         for _ in 0..<3000 {
             if FileManager.default.fileExists(atPath: folder.appending(path: "squatter-ready").path) { break }
@@ -324,7 +324,7 @@ final class SpeechTests {
         await speech.maintainServers()
         #expect(!FileManager.default.fileExists(atPath: folder.appending(path: "leaked-post").path))
         _ = kill(squatter.processIdentifier, SIGKILL)
-        squatter.waitUntilExit()
+        while squatter.isRunning { try await Task.sleep(for: .milliseconds(5)) }
         try FileManager.default.removeItem(at: folder.appending(path: "mode"))
         try await speech.startServers()
         let recovered = try await speech.transcribe(device: device, utterance: UUID().uuidString, audio: chunk, final: true)
