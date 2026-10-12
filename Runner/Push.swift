@@ -354,6 +354,8 @@ final class Push {
         if job.canPublish { return .ready }
         if job.reviewNeedsYou { return .review }
         if job.mergeNeedsYou { return .merge }
+        // Xcode Cloud still fails after Oby handed it back (#122): its inbox item is a failure's.
+        if job.cloudNeedsYou { return .failed }
         switch job.status {
         case .failed: return .failed
         case .interrupted: return .interrupted

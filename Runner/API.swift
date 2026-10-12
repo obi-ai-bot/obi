@@ -699,9 +699,9 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError }
 
-    private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou }
+    private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou }
 
     func encode(to encoder: any Encoder) throws {
         // Oby's own review makes no commits; the ones in its worktree are the pull request's. Saying 0
@@ -714,6 +714,7 @@ struct JobJSON: Encodable {
         try derived.encode(job.shortTitle, forKey: .title)
         try derived.encode(job.mergeNeedsYou, forKey: .mergeNeedsYou)
         try derived.encode(job.reviewNeedsYou, forKey: .reviewNeedsYou)
+        try derived.encode(job.cloudNeedsYou, forKey: .cloudNeedsYou)
         var nulls = encoder.container(keyedBy: Nullable.self)
         if job.base == nil { try nulls.encodeNil(forKey: .base) }
         if job.pr == nil { try nulls.encodeNil(forKey: .pr) }
@@ -745,6 +746,8 @@ struct JobJSON: Encodable {
         if job.question == nil { try nulls.encodeNil(forKey: .question) }
         if job.limit == nil { try nulls.encodeNil(forKey: .limit) }
         if job.startCommit == nil { try nulls.encodeNil(forKey: .startCommit) }
+        if job.xcodeCloud == nil { try nulls.encodeNil(forKey: .xcodeCloud) }
+        if job.xcodeCloudError == nil { try nulls.encodeNil(forKey: .xcodeCloudError) }
         if job.macCheck == nil { try nulls.encodeNil(forKey: .macCheck) }
         if job.mergeError == nil { try nulls.encodeNil(forKey: .mergeError) }
         if job.appleCheck == nil { try nulls.encodeNil(forKey: .appleCheck) }

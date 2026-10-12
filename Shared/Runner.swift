@@ -65,6 +65,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Oby's review stopped asking for changes, where a person takes over (the runner derives it,
     /// docs/runner-api.md "Oby's review"), or nil from older runners.
     var stoppedReview: Bool?
+    /// Oby's Xcode Cloud recovery stopped, where a person takes over (the runner derives it,
+    /// docs/runner-api.md "Xcode Cloud"), or nil from older runners.
+    var stoppedCloud: Bool?
     /// How freely its agent works ("ask", "acceptEdits", "plan" or "bypass", `RunnerMode`); sent
     /// with a dispatch to pick one. Nil from older runners, and on a draft for the default.
     var mode: String?
@@ -87,6 +90,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
+        case stoppedCloud = "cloudNeedsYou"
     }
 
     /// "Moved from Codex · Deskree to Claude Code · Personal": its latest move, or nil (as Engine's).
@@ -94,6 +98,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
 
     /// Its merge stopped: it couldn't merge, or the Mac check failed with no round left.
     var mergeNeedsYou: Bool { dismissed == nil && stoppedMerge == true }
+
+    /// Its Xcode Cloud recovery stopped: Cloud still fails, or it couldn't hand the failure on.
+    var cloudNeedsYou: Bool { dismissed == nil && stoppedCloud == true }
 
     var isActive: Bool { status == .queued || status == .running }
     /// Its agent asked the user something and waits for the answer: its alert stays until then.
@@ -149,7 +156,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// rounds, stranded or its merge stopped, and not dismissed: what the runner sends an alert for,
     /// and what Dismiss takes.
     var needsYou: Bool {
-        dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou || mergeNeedsYou)
+        dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou || mergeNeedsYou || cloudNeedsYou)
     }
 
     /// "Round 2 of 5 · Fable 5.1", or empty for a one-round job on the usual model.
