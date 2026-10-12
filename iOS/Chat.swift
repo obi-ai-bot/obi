@@ -81,10 +81,17 @@ struct ChatScreen: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 16) {
                         if phone.conversation.hasOlder {
-                            Button(phone.conversation.loading ? "Loading…" : "Earlier") { Task { await phone.conversation.loadOlder() } }
-                                .font(.footnote.weight(.semibold))
-                                .disabled(phone.conversation.loading)
-                                .frame(maxWidth: .infinity)
+                            Button(phone.conversation.loading ? "Loading…" : "Earlier") {
+                                // The page goes in above: the turn that was at the top stays there.
+                                let top = turns.first?.id
+                                Task {
+                                    await phone.conversation.loadOlder()
+                                    if let top { proxy.scrollTo(top, anchor: .top) }
+                                }
+                            }
+                            .font(.footnote.weight(.semibold))
+                            .disabled(phone.conversation.loading)
+                            .frame(maxWidth: .infinity)
                         }
                         if let problem = phone.conversation.problem {
                             Text("The runner's thread couldn't be read: \(problem)").font(.footnote).foregroundStyle(.orange)
@@ -95,7 +102,11 @@ struct ChatScreen: View {
                         ForEach(days) { day in
                             DaySeparator(title: day.title)
                             ForEach(day.turns) { turn in
-                                TurnRow(turn: turn, jobs: ConversationModel.jobs(of: turn, among: phone.jobs), account: account)
+                                TurnRow(turn: turn, jobs: ConversationModel.jobs(of: turn, among: phone.jobs), account: account,
+                                        failure: phone.failures[turn.id],
+                                        onRetry: { phone.retry(echo: turn.id) },
+                                        onEdit: { text = turn.text; phone.discard(echo: turn.id); typing = true })
+                                    .id(turn.id)
                                     .task(id: turn.jobs ?? []) {
                                         // A job older than the runner's list: fetched, so its card shows.
                                         for id in ConversationModel.missing(of: turn, among: phone.jobs) { await phone.fetch(id) }
@@ -111,7 +122,9 @@ struct ChatScreen: View {
                     .padding(.vertical, 12)
                 }
                 .defaultScrollAnchor(.bottom)
-                .onChange(of: turns.count) { withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
+                // A new turn at the end, sent or received: follow it. A page of older ones above
+                // keeps the reading position (Earlier scrolls to the turn that was at the top).
+                .onChange(of: turns.last?.id) { withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
                 .onChange(of: phone.talk) { proxy.scrollTo("end", anchor: .bottom) }
                 .onChange(of: typing) { if typing { proxy.scrollTo("end", anchor: .bottom) } }
             }
@@ -211,12 +224,17 @@ private struct DaySeparator: View {
     }
 }
 
-/// One turn: yours on the right in a bubble, "You" or "You, by voice" with the time above it;
-/// Oby's on the left with its face, "Oby" and the time, its words, and a card for each job it started.
+/// One turn: yours on the right in a bubble, "You" or "You, by voice" with the time above it, and
+/// why it didn't go through with Try again and Edit when it didn't; Oby's on the left with its
+/// face, "Oby" and the time, its words, and a card for each job it started.
 private struct TurnRow: View {
     let turn: Turn
     let jobs: [Job]
     let account: (Job) -> String
+    /// Why the words didn't reach the runner, on an echo whose request failed (Phone.failures).
+    var failure: String? = nil
+    var onRetry: () -> Void = {}
+    var onEdit: () -> Void = {}
 
     var body: some View {
         if turn.who == .user { yours } else { obys }
@@ -232,10 +250,20 @@ private struct TurnRow: View {
                     .textSelection(.enabled)
                     .padding(.horizontal, 14).padding(.vertical, 10)
                     .background(Color.primary, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                if let failure {
+                    Text("Didn't reach Oby: \(failure)")
+                        .font(.footnote).foregroundStyle(.red).multilineTextAlignment(.trailing)
+                    HStack(spacing: 16) {
+                        Button("Try again", action: onRetry)
+                        Button("Edit", action: onEdit)
+                    }
+                    .font(.footnote.weight(.semibold))
+                }
             }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("You, \(ConversationModel.clock(turn.date)): \(turn.text)")
+        .accessibilityElement(children: failure == nil ? .combine : .contain)
+        .accessibilityLabel(failure.map { "You, \(ConversationModel.clock(turn.date)): \(turn.text). Didn't reach Oby: \($0)" }
+                            ?? "You, \(ConversationModel.clock(turn.date)): \(turn.text)")
     }
 
     private var obys: some View {

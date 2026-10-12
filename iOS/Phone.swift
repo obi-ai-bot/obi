@@ -25,6 +25,17 @@ final class Phone {
     /// What this iPhone said and the runner hasn't listed yet (ChatThread): the runner adds the
     /// user's turn with Oby's answer, so the words show here from the moment they're sent.
     private(set) var echoes: [Turn] = []
+    /// Why an echo's request didn't go through, by echo id: the words stay in the thread with the
+    /// reason, to try again or edit, until the runner lists them after all.
+    private(set) var failures: [String: String] = [:]
+    /// What each echo sent, by echo id, to send it again.
+    @ObservationIgnored private var requests: [String: Request] = [:]
+
+    private struct Request {
+        var said: String
+        var answer: (question: String, option: String)?
+        var voice: Bool
+    }
     @ObservationIgnored private let speaker = PhoneSpeaker()
     @ObservationIgnored private var planning: Task<Void, Never>?
     @ObservationIgnored private var spoken = false
@@ -56,6 +67,8 @@ final class Phone {
             // Another runner: nothing the last one said holds.
             conversation.forget()
             echoes = []
+            failures = [:]
+            requests = [:]
             start()
         }
     }
@@ -214,8 +227,23 @@ final class Phone {
         case .turn(let turn):
             conversation.apply(turn)
             // The runner listed what this iPhone said: its echo has done its job.
-            echoes = ChatThread.pending(echoes, runner: conversation.runnerTurns)
+            settleEchoes()
         }
+    }
+
+    /// Drops the echoes the runner has listed, with what went with them.
+    private func settleEchoes() {
+        echoes = ChatThread.pending(echoes, runner: conversation.runnerTurns)
+        let kept = Set(echoes.map(\.id))
+        failures = failures.filter { kept.contains($0.key) }
+        requests = requests.filter { kept.contains($0.key) }
+    }
+
+    /// Lets go of an echo: cancelled, edited, or sent again.
+    private func drop(echo id: String) {
+        echoes.removeAll { $0.id == id }
+        failures[id] = nil
+        requests[id] = nil
     }
 
     // MARK: Planning
@@ -239,18 +267,31 @@ final class Phone {
         speaker.stop()
         // The words the user gave up on leave the thread, as on the Mac; the runner still lists
         // them with its answer if it got them, and then they show.
-        if case .thinking = talk, !echoes.isEmpty { echoes.removeLast() }
+        if case .thinking = talk, let last = echoes.last { drop(echo: last.id) }
         talk = .none
+    }
+
+    /// Try again on words that didn't go through: the same request, sent anew.
+    func retry(echo id: String) {
+        guard let request = requests[id] else { return }
+        drop(echo: id)
+        plan(request.said, answer: request.answer, voice: request.voice)
+    }
+
+    /// Edit on words that didn't go through: they leave the thread for the field.
+    func discard(echo id: String) {
+        drop(echo: id)
     }
 
     private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false) {
         planning?.cancel()
         speaker.stop()
-        if case .thinking = talk, !echoes.isEmpty { echoes.removeLast() }
+        if case .thinking = talk, let last = echoes.last { drop(echo: last.id) }
         talk = .thinking(said)
         // The thread shows the words as the runner will list them: an answer is its option.
         let echo = Turn(who: .user, text: answer?.option ?? said, voice: voice ? true : nil)
         echoes.append(echo)
+        requests[echo.id] = Request(said: said, answer: answer, voice: voice)
         planning = Task {
             let result: Talk
             do {
@@ -262,8 +303,10 @@ final class Phone {
                 }
             } catch {
                 result = .reply(error.localizedDescription)
-                // Never reached the runner (or it answered with an error): nothing will list the words.
-                if !Task.isCancelled { echoes.removeAll { $0.id == echo.id } }
+                // The request didn't go through (or the runner answered with an error): the words
+                // stay in the thread with why, to try again or edit. If the runner got them after
+                // all (a timeout), its turn settles the echo as usual.
+                if !Task.isCancelled { failures[echo.id] = error.localizedDescription }
             }
             // Cancelled or replaced while the brain was thinking.
             guard !Task.isCancelled else { return }

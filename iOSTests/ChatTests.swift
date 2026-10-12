@@ -137,5 +137,32 @@ struct ChatTests {
         #expect(ChatThread.pending([obys], runner: model.runnerTurns) == [obys])
         model.apply(Turn(id: "r4", date: now.addingTimeInterval(20 - ChatThread.tolerance + 1), who: .user, text: "Fix the flake"))
         #expect(ChatThread.pending([obys], runner: model.runnerTurns).isEmpty)
+        // Words whose request failed stay pending, with their place in the thread, until the
+        // runner lists them after all (a timeout on words it did get).
+        let failed = Turn(date: now.addingTimeInterval(900), who: .user, text: "Merge it")
+        #expect(ChatThread.pending([failed], runner: model.runnerTurns) == [failed])
+        #expect(model.thread(with: [failed]).last?.id == failed.id)
+        model.apply(Turn(id: "r5", date: now.addingTimeInterval(930), who: .user, text: "Merge it"))
+        #expect(ChatThread.pending([failed], runner: model.runnerTurns).isEmpty)
+    }
+
+    /// The thread follows a new turn at its end, not a page of older ones above: what decides a
+    /// scroll to the bottom is the newest turn's id, which a prepended page leaves alone.
+    @Test func olderPagesDontMoveTheNewestTurn() async throws {
+        let runner = FakeRunner((0..<80).map { turn($0) })
+        let model = ConversationModel(page: runner.page)
+        await model.reload()
+        let newest = model.runnerTurns.last?.id
+        let top = model.runnerTurns.first?.id
+        await model.loadOlder()
+        #expect(model.runnerTurns.last?.id == newest && model.runnerTurns.count == 80)
+        // The turn that was at the top is still there to scroll back to.
+        #expect(model.runnerTurns.contains { $0.id == top } && model.runnerTurns.first?.id == "t0")
+        // A turn that changed (a job joined it) keeps its id too: no scroll either.
+        model.apply(turn(79, who: .oby, jobs: ["9f08fd10"]))
+        #expect(model.runnerTurns.last?.id == newest)
+        // A new one at the end changes it.
+        model.apply(turn(80, who: .oby))
+        #expect(model.runnerTurns.last?.id == "t80")
     }
 }
