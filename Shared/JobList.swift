@@ -113,17 +113,3 @@ extension JobBadge.Tone {
     }
 }
 #endif
-
-#if canImport(SwiftUI)
-/// A single pill for every app and every job surface.
-struct StatusPill: View {
-    let job: Job
-
-    var body: some View {
-        let badge = job.badge
-        Text(badge.text).font(OBYStyle.caption.weight(.semibold)).foregroundStyle(badge.tone.color)
-            .padding(.horizontal, OBYStyle.Space.md).padding(.vertical, OBYStyle.Space.xs)
-            .background(badge.tone.color.opacity(0.18), in: Capsule())
-    }
-}
-#endif

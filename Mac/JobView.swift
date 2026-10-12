@@ -120,7 +120,7 @@ struct JobView: View {
                     .accessibilityAddTraits(.isHeader)
             }
             HStack(spacing: 8) {
-                StatusPill(job: job)
+                StatusPill(badge: job.badge)
                 if let verdict = job.verdictLine {
                     Text(verdict).font(.system(size: 12)).foregroundStyle(.white.opacity(0.6))
                 }

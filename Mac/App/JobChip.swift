@@ -20,7 +20,7 @@ struct JobChip: View {
                             .font(OBYStyle.small).foregroundStyle(OBYStyle.secondary).lineLimit(1)
                     }
                     Spacer(minLength: OBYStyle.Space.xs)
-                    StatusPill(job: job)
+                    StatusPill(badge: job.badge)
                 }
                 .contentShape(Rectangle())
             }
