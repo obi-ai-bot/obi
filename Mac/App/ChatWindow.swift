@@ -295,7 +295,7 @@ private struct ConversationColumn: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 15))
                     .focused($typing)
-                    .onKeyPress(.return) { press in
+                    .onKeyPress(.return, phases: .down) { press in
                         if press.modifiers.contains(.shift) { return .ignored }
                         send()
                         return .handled

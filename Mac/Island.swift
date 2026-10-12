@@ -526,6 +526,8 @@ private struct OpenIsland: View {
 
     /// Oby is thinking about what you just said.
     private var thinking: Bool { if case .thinking = desk.talk { true } else { false } }
+    /// There's a conversation to ask about.
+    private var threaded: Bool { !desk.turns.isEmpty || thinking }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
