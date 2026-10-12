@@ -27,6 +27,20 @@ struct PaceTests {
         AccountStore.route(states, agent: agent, for: work, now: now)?.id
     }
 
+    /// Every account past 80% of its week, Deskree's Claude stopped at its limit (2026-10-12): new
+    /// work goes nowhere, but the brain still thinks, on the Claude account with room.
+    @Test func theBrainThinksWhenEveryAccountIsInItsReserve() {
+        var full = state("deskree", fiveHour: 1.02, sevenDay: 0.82, gone: 0.6)
+        full.fullUntil = now.addingTimeInterval(3600)
+        let accounts = [full, state("personal", fiveHour: 0.06, sevenDay: 0.83, gone: 0.6), state("codex", "codex", fiveHour: 0.27, sevenDay: 0.87, gone: 0.2)]
+        #expect(route(accounts) == nil)
+        #expect(AccountStore.thinker(accounts, now: now)?.id == "personal")
+        // Past even a review's 95%: any Claude account that isn't stopped still answers.
+        let spent = [full, state("personal", fiveHour: 0.5, sevenDay: 0.97, gone: 0.6)]
+        #expect(AccountStore.thinker(spent, now: now)?.id == "personal")
+        #expect(AccountStore.thinker([full], now: now) == nil)
+    }
+
     /// The accounts on 2026-10-11 at 19:29 UTC, when "Fix it" sent two failure fixes to Codex (#176).
     var october11: [AccountState] {
         [state("codex", "codex", name: "Deskree", sevenDay: 0.33, gone: 0.076),

@@ -327,6 +327,17 @@ final class AccountStore {
         choose(accounts, agent: agent, for: work, now: now)?.account
     }
 
+    /// The Claude account Oby's brain thinks with (the chat, the inbox's plain words, the Lead's
+    /// goals). A turn is small, so like a review it may use an account in its weekly reserve; past
+    /// that, any signed-in one that isn't stopped at its limit, the least busy first. Without this
+    /// the chat went silent when every account was past 80% of its week (2026-10-12), which is just
+    /// when the user needs it to re-route the jobs. Nil when no Claude account can answer.
+    nonisolated static func thinker(_ accounts: [AccountState], now: Date = .now) -> Account? {
+        route(accounts, agent: "claude", for: .review, now: now)
+            ?? accounts.filter { $0.signedIn && $0.account.agent == "claude" && !$0.isFull(at: now) }
+                .min { ($0.fiveHour ?? 0) < ($1.fiveHour ?? 0) }?.account
+    }
+
     /// The account for the next of several jobs started together (the Lead's): `choose`, with the
     /// pick counted as running in `states`, so the next pick spreads out.
     nonisolated static func pick(_ states: inout [AccountState], agent: String?, now: Date = .now) -> Route? {
