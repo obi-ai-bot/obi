@@ -15,10 +15,12 @@ struct FailureTests {
         var answers: [[String: Any]]
         var evidence: [String] = []
         var known: [String] = []
+        var users: [String] = []
         var name: String { "fake post-mortem" }
         init(_ answers: [[String: Any]]) { self.answers = answers }
 
         func turn(system: String, user: String, schema: Data, in directory: URL, timeout: TimeInterval) async throws -> Data {
+            users.append(user)
             evidence.append(try String(contentsOf: directory.appending(path: ".oby/evidence/failure.md"), encoding: .utf8))
             known.append(try String(contentsOf: directory.appending(path: ".oby/evidence/known.md"), encoding: .utf8))
             let answer = answers.count > 1 ? answers.removeFirst() : answers[0]
@@ -120,6 +122,7 @@ struct FailureTests {
         log.scan = { [made] texts in made.scanned += texts.map(\.text) }
         log.root = folder.appending(path: "failures")
         log.source = { nil }
+        log.worktree = { _ in nil }
         log.enabled = true
     }
 
@@ -410,6 +413,94 @@ struct FailureTests {
         // Fixing it twice while it runs is refused.
         try await test.until("the fix runs") { desk.job(fix.id)?.isActive == true }
         #expect(throws: (any Error).self) { try log.fix(record.id) }
+    }
+
+    // MARK: Oby's source and what the job left (#221)
+
+    /// The post-mortem reads a detached worktree at origin/dev, never the clone's own working tree,
+    /// whatever branch a job left it on; and it follows dev as dev moves.
+    @Test func sourceIsADetachedWorktreeAtOriginDev() async throws {
+        let folder = try temporaryFolder()
+        let upstream = folder.appending(path: "upstream")
+        let clone = folder.appending(path: "clone")
+        let path = folder.appending(path: "failures/source")
+        try await Shell.ok(["git", "init", "--quiet", "-b", "main", upstream.path])
+        let old = try await AlreadyOnBaseTests.commit("README.md", in: upstream)
+        try await AlreadyOnBaseTests.git(["switch", "--quiet", "-c", "dev"], in: upstream)
+        try FileManager.default.createDirectory(at: upstream.appending(path: "Engine"), withIntermediateDirectories: true)
+        try await AlreadyOnBaseTests.commit("Engine/Failures.swift", in: upstream)
+        try await AlreadyOnBaseTests.git(["switch", "--quiet", "main"], in: upstream)
+        try await Shell.ok(["git", "clone", "--quiet", "--branch", "main", upstream.path, clone.path])
+        // dev moves on after the clone last fetched.
+        try await AlreadyOnBaseTests.git(["switch", "--quiet", "dev"], in: upstream)
+        let dev = try await AlreadyOnBaseTests.commit("Engine/Desk.swift", in: upstream)
+
+        let source = try #require(await Failures.checkout(clone: clone, at: path))
+        #expect(source.path == path && source.commit == dev)
+        #expect(try await AlreadyOnBaseTests.git(["rev-parse", "HEAD"], in: path) == dev)
+        #expect(FileManager.default.fileExists(atPath: path.appending(path: "Engine/Desk.swift").path))
+        // The clone's own working tree is left where it was: main, with no Engine/.
+        #expect(try await AlreadyOnBaseTests.git(["rev-parse", "HEAD"], in: clone) == old)
+        #expect(try await AlreadyOnBaseTests.git(["branch", "--show-current"], in: clone) == "main")
+        #expect(!FileManager.default.fileExists(atPath: clone.appending(path: "Engine").path))
+
+        // The next study: dev moved again, and what was left in the checkout is gone.
+        try "stray\n".write(to: path.appending(path: "stray.txt"), atomically: true, encoding: .utf8)
+        try "changed\n".write(to: path.appending(path: "README.md"), atomically: true, encoding: .utf8)
+        let next = try await AlreadyOnBaseTests.commit("Engine/Guards.swift", in: upstream)
+        let again = try #require(await Failures.checkout(clone: clone, at: path))
+        #expect(again.commit == next)
+        #expect(try await AlreadyOnBaseTests.git(["rev-parse", "HEAD"], in: path) == next)
+        #expect(try await AlreadyOnBaseTests.git(["status", "--porcelain"], in: path).isEmpty)
+
+        // Its folder gone while git still lists it: made again.
+        try FileManager.default.removeItem(at: path)
+        #expect(await Failures.checkout(clone: clone, at: path)?.commit == next)
+        // No clone: nothing to read.
+        #expect(await Failures.checkout(clone: folder.appending(path: "none"), at: path) == nil)
+    }
+
+    @Test func leftBehindShowsTheWorktreesStatusAndDiff() async throws {
+        let folder = try temporaryFolder()
+        let work = folder.appending(path: "work")
+        try await Shell.ok(["git", "init", "--quiet", "-b", "dev", work.path])
+        try await AlreadyOnBaseTests.commit("README.md", in: work)
+        #expect(await Failures.leftBehind(in: work)?.contains("git status --porcelain:\n(nothing)") == true)
+        try "changed\nmore\n".write(to: work.appending(path: "README.md"), atomically: true, encoding: .utf8)
+        try "new\n".write(to: work.appending(path: "Left.swift"), atomically: true, encoding: .utf8)
+        let left = try #require(await Failures.leftBehind(in: work))
+        // The porcelain's leading space is kept.
+        #expect(left.contains("git status --porcelain:\n M README.md\n?? Left.swift"))
+        #expect(left.contains("git diff --stat HEAD:\n README.md | 3 ++-"))
+        #expect(await Failures.leftBehind(in: folder.appending(path: "gone")) == nil)
+    }
+
+    /// The evidence says which commit the post-mortem read and what the job left uncommitted, and
+    /// the record keeps both.
+    @Test func theEvidenceCarriesTheSourceCommitAndTheWorktree() async throws {
+        let test = try FailureTests()
+        let log = test.desk.failureLog
+        let commit = "b11afca0123456789abcdef0123456789abcdef0"
+        let path = test.folder.appending(path: "failures/source")
+        log.source = { Failures.Source(path: path, commit: commit) }
+        var asked: [String] = []
+        log.worktree = { job in asked.append(job); return "git status --porcelain:\n?? Engine/Left.swift" }
+        log.observe(test.job("left") { $0.status = .failed; $0.summary = "Nothing committed." })
+        await log.drain()
+
+        let evidence = try #require(test.postMortems.evidence.last)
+        #expect(evidence.contains("- Oby's source: origin/dev at \(commit)"))
+        #expect(evidence.contains("## What it left in its worktree, uncommitted\n\n> git status --porcelain:\n> ?? Engine/Left.swift"))
+        #expect(test.postMortems.users.last?.contains("checked out read-only at \(path.path), at origin/dev's commit \(commit)") == true)
+        #expect(asked == ["left"])
+        let record = try #require(log.store.failures().first { $0.job == "left" })
+        #expect(record.postMortem != nil)
+        #expect(record.evidence.source == commit && record.evidence.worktree?.contains("?? Engine/Left.swift") == true)
+        // Both are in the API's record, null when there's none.
+        let json = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(record.evidence)) as? [String: Any])
+        #expect(json["source"] as? String == commit)
+        let none = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(FailureRecord.Evidence(summary: "", step: ""))) as? [String: Any])
+        #expect(none["source"] is NSNull && none["worktree"] is NSNull)
     }
 
     // MARK: One cause, one issue (#197)
