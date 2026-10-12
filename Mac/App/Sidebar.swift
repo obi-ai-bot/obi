@@ -79,13 +79,6 @@ struct SidebarView: View {
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
-    private var agents: [SidebarSections.AgentRow] {
-        SidebarSections.agents(local: desk.jobs, runner: feed.jobs).filter {
-            search.isEmpty || $0.job.heading.localizedCaseInsensitiveContains(search)
-                || $0.job.agentName.localizedCaseInsensitiveContains(search)
-        }
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             TextField("Search chats", text: $search)
@@ -95,7 +88,7 @@ struct SidebarView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     if search.isEmpty || "Oby".localizedCaseInsensitiveContains(search) || (model.thread.last?.text.localizedCaseInsensitiveContains(search) ?? false) { obyRow }
-                    section("# channels", trailing: nil) {
+                    section("Channels", trailing: nil) {
                         emptyRow(SidebarSections.channelsEmpty, selected: selection == .channels) { selection = .channels }
                     }
                     section("Obys", trailing: nil) {
@@ -119,18 +112,25 @@ struct SidebarView: View {
         .background(OBYStyle.sidebar)
     }
 
+    private var preview: String {
+        let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count + feed.permissionHistory.count { $0.waits(at: .now) }
+        if waiting > 0 { return "Waiting on your yes" }
+        if model.working > 0 { return "\(model.working) working" }
+        return SidebarSections.obyPreview(model.thread.last?.text)
+    }
+
     private var obyRow: some View {
         Button { selection = .oby } label: {
             HStack(spacing: 12) {
-                ObyFace(size: 34)
+                ObyFace(size: 40)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Oby").font(.system(size: 15, weight: .semibold))
-                    Text(SidebarSections.obyPreview(model.thread.last?.text)).lineLimit(1).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
+                    Text("Oby").font(OBYStyle.body.weight(.bold))
+                    Text(preview).lineLimit(1).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
                 }
                 Spacer(minLength: 0)
                 VStack(alignment: .trailing, spacing: 8) {
                     if let last = model.thread.last {
-                        Text(ConversationModel.clock(last.date)).font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
+                        Text(Date.now.timeIntervalSince(last.date) < 60 ? "now" : ConversationModel.clock(last.date)).font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
                     }
                     let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count + feed.permissionHistory.count { $0.waits(at: .now) }
                     if waiting > 0 {
@@ -143,7 +143,7 @@ struct SidebarView: View {
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 10)
-            .background(.white.opacity(selection == .oby ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(selection == .oby ? OBYStyle.selection : .clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -153,7 +153,7 @@ struct SidebarView: View {
     private func section(_ title: String, trailing: String?, @ViewBuilder _ content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(title.uppercased()).font(.system(size: 11, weight: .semibold)).kerning(0.6).foregroundStyle(.white.opacity(0.45))
+                Text(title).font(.system(size: 11, weight: .semibold)).kerning(0.6).foregroundStyle(.white.opacity(0.45))
                 Spacer()
                 if let trailing { Text(trailing).font(.system(size: 12)).foregroundStyle(.white.opacity(0.45)) }
             }
@@ -191,7 +191,7 @@ struct SidebarView: View {
         let payer = desk.accounts.accounts.map(\.account.payer).first { !$0.isEmpty } ?? feed.host.map { "Runner: \($0)" } ?? "This Mac"
         return HStack(spacing: 12) {
             Text(SidebarSections.initials(name)).font(.system(size: 12, weight: .semibold))
-                .frame(width: 34, height: 34).background(.white.opacity(0.12), in: Circle())
+                .frame(width: 40, height: 40).background(.white.opacity(0.12), in: Circle())
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).font(.system(size: 14, weight: .semibold)).lineLimit(1)
                 Text(payer).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)

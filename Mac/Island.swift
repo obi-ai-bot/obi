@@ -847,58 +847,13 @@ private struct OpenIsland: View {
 
     /// Oby's bubble while it thinks: never left there, with a way out in sight.
     private var thinkingRow: some View {
-        HStack {
-            ProgressView().controlSize(.mini)
-            Text("Oby is thinking…").font(OBYStyle.caption).foregroundStyle(.secondary)
-            Button("Stop") { desk.cancel() }.buttonStyle(.plain).help("Cancel (Esc)")
-            Spacer()
-        }
+        ThinkingLine(onStop: { desk.cancel() })
     }
 
     private var field: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TrayRow(tray: tray)
-            fieldCapsule
-        }
-    }
-
-    private var fieldCapsule: some View {
-        HStack(spacing: 8) {
-            TextField("Message Oby", text: $text)
-                .textFieldStyle(.plain)
-                .font(.system(size: 15))
-                .focused($typing)
-                .onSubmit(send)
-            Button(action: tray.pasteClipboard) {
-                Image(systemName: "doc.on.clipboard").font(.system(size: 14, weight: .semibold))
-                    .frame(width: 30, height: 30)
-            }
-            .buttonStyle(.plain)
-            .help("Attach what you copied")
-            .accessibilityLabel("Attach the clipboard")
-            Button(action: screenshot) {
-                Image(systemName: "camera").font(.system(size: 14, weight: .semibold))
-                    .frame(width: 30, height: 30)
-            }
-            .buttonStyle(.plain)
-            .disabled(tray.capturing)
-            .help("Show Oby your screen: drag over part of it, or click for all of it")
-            .accessibilityLabel("Attach a screenshot")
-            Button(action: send) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(.black)
-                    .frame(width: 34, height: 34)
-                    .background(.white.opacity(text.isEmpty ? 0.4 : 1), in: Circle())
-            }
-            .buttonStyle(.plain)
-            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .accessibilityLabel("Send")
-        }
-        .padding(.leading, 18)
-        .padding(.trailing, 7)
-        .frame(height: 48)
-        .background(.white.opacity(0.08), in: Capsule())
+        ChatComposer(text: $text, focused: Binding(get: { typing }, set: { typing = $0 }), tray: tray,
+                     maximumHeight: 190, onSend: send, onScreenshot: screenshot,
+                     onStop: { if thinking { desk.cancel() } })
     }
 
     private func send() {

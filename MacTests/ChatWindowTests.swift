@@ -6,6 +6,16 @@ import Testing
 struct ChatWindowTests {
     let now = Date(timeIntervalSince1970: 1_791_582_173)
 
+    @Test func composerGrowsByLineAndCapsAtHalfTheWindow() {
+        #expect(ComposerMetrics.height(lines: 1, maximum: 300) == 22)
+        #expect(ComposerMetrics.height(lines: 2, maximum: 300) == 44)
+        #expect(ComposerMetrics.height(lines: 100, maximum: 300) == 300)
+        #expect(ComposerMetrics.height(lines: 1, maximum: 300) < ComposerMetrics.height(lines: 3, maximum: 300))
+        #expect(ComposerMetrics.lines("one\ntwo\nthree", width: 500) == 3)
+        #expect(ComposerMetrics.lines("one\n", width: 500) == 2)
+        #expect(ComposerMetrics.lines("", width: 500) == 1)
+    }
+
     @Test func decisionsAttachToTheirJobEvenAfterOtherTurns() {
         let turns = [Turn(id: "start", date: now, who: .oby, text: "Starting", jobs: ["job"]),
                      Turn(id: "later", date: now + 60, who: .user, text: "Another question")]
