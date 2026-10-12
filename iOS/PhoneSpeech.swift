@@ -196,11 +196,11 @@ final class PhoneSpeech {
     /// Phone input has no Watch packet sequence, and reports interruptions as phone listening errors.
     func finish() async throws -> String {
         guard !cancelled, !ending else {
-            throw RunnerError(message: "Listening was interrupted. Hold the mic to try again.")
+            throw RunnerError(message: "Listening was interrupted. Tap the mic to try again.")
         }
         do { return try await finish(sequence: nextSequence) }
         catch is CancellationError {
-            throw RunnerError(message: "Listening was interrupted. Hold the mic to try again.")
+            throw RunnerError(message: "Listening was interrupted. Tap the mic to try again.")
         }
     }
 

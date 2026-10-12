@@ -1109,11 +1109,12 @@ struct CheckTests {
         #expect(done.status == 3 && done.output == "hello\n" && !done.timedOut)
         // A child that ignores TERM and would hold a pipe open: the step still ends, soon after its timeout.
         let start = ContinuousClock.now
-        // Time enough for a loaded runner to start the shell; the bound is the timeout, the halt's
-        // grace and the last 5 seconds, well under the child's 30.
-        let hung = await MacCheck.execute(["sh", "-c", "trap '' TERM; echo started; sleep 30 & sleep 30"], in: folder, env: [:], timeout: 2)
+        // Time enough for a loaded runner to start the shell. The step ends after the timeout, the
+        // halt's grace and at most 5 seconds more (10 in all); the full suite alone stretches that
+        // to 11, so the bound leaves room for a busy machine, still well under the child's 120.
+        let hung = await MacCheck.execute(["sh", "-c", "trap '' TERM; echo started; sleep 120 & sleep 120"], in: folder, env: [:], timeout: 2)
         #expect(hung.timedOut && hung.output.hasPrefix("started"))
-        #expect(ContinuousClock.now - start < .seconds(15))
+        #expect(ContinuousClock.now - start < .seconds(40))
     }
 
     // MARK: The API
