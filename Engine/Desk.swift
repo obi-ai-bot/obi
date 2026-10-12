@@ -160,6 +160,32 @@ final class Desk {
     }
     /// Jobs on their way to the slot they took: brought up to date with their base before they start.
     private var startingUp: Set<String> = []
+    /// Jobs ready to run that wait for their `startWhen` (#216, Engine/StartWhen.swift), checked every
+    /// `startWhenEvery`; the ones the user chose to keep waiting though a condition can't hold; and
+    /// pull requests' states as last read for them, by `repo#number`.
+    @ObservationIgnored var scheduled: Set<String> = []
+    @ObservationIgnored var keptWaiting: Set<String> = []
+    @ObservationIgnored var pullRequestStates: [String: PullRequestStatus.State] = [:]
+    @ObservationIgnored var startWhenTimer: Task<Void, Never>?
+    @ObservationIgnored var startWhenEvery: Duration = .seconds(60)
+    /// The time conditions are checked at. Tests put in their own.
+    @ObservationIgnored var clock: () -> Date = { .now }
+    /// A pull request's state on GitHub, or nil when it can't be read. Tests put in their own.
+    @ObservationIgnored var pullRequestState: (_ repo: String, _ number: Int) async -> PullRequestStatus.State? = { repo, number in
+        guard let text = try? await Shell.ok(["gh", "pr", "view", "\(number)", "-R", repo, "--json", "state"], as: .app),
+              let info = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return nil }
+        return (info["state"] as? String).flatMap(PullRequestStatus.State.init(rawValue:))
+    }
+    /// Whether job `id` is on its way to its slot.
+    func isStartingUp(_ id: String) -> Bool { startingUp.contains(id) }
+    /// Takes job `id` out of the jobs waiting for a slot: whether it was there.
+    func dropFromSlotQueue(_ id: String) -> Bool {
+        guard waiting.contains(where: { $0.id == id }) else { return false }
+        waiting.removeAll { $0.id == id }
+        return true
+    }
+    /// A line for job `id`'s report, with how routing chose its account.
+    func noteStart(_ line: String, for id: String) { handoffs[id, default: []].append(line) }
     /// How many slots are taken: jobs running (`Job.takesSlot`), and those about to.
     var runningCount: Int { jobs.filter(\.takesSlot).count + startingUp.count }
     /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
@@ -353,7 +379,8 @@ final class Desk {
         // Running when Oby last quit (or crashed): it didn't finish. On the runner it carries on
         // (`resumeAfterRestart`), unless it waits for the user's answer.
         for index in jobs.indices.reversed() where jobs[index].isActive {
-            if restarts != nil && jobs[index].question == nil {
+            // One waiting for its `startWhen` asks only about that, and keeps waiting (#216).
+            if restarts != nil && (jobs[index].question == nil || jobs[index].waitsToStart) {
                 wentDown.append(jobs[index].id)
                 continue
             }
@@ -736,9 +763,13 @@ final class Desk {
             }
             for (index, dispatch) in plan.dispatches.enumerated() {
                 let agent = dispatch.agent == "auto" ? nil : dispatch.agent
-                let named = states.first { $0.signedIn && $0.account.name == dispatch.account && (agent == nil || $0.account.agent == agent) }
-                if dispatch.account != "auto", named == nil {
-                    return .reply("\(dispatch.account) isn't signed in. Sign in from Settings › Accounts.")
+                // A job waiting for an account's room runs on that account (#216).
+                let waitsOn = dispatch.startWhen?.compactMap(\.account).first
+                let wanted = waitsOn ?? dispatch.account
+                let named = states.first { $0.signedIn && $0.account.name == wanted && (agent == nil || $0.account.agent == agent) }
+                    ?? states.first { $0.signedIn && $0.account.name == waitsOn }
+                if wanted != "auto", named == nil {
+                    return .reply("\(wanted) isn't signed in. Sign in from Settings › Accounts.")
                 }
                 let route = named == nil ? AccountStore.choose(states, agent: agent) : nil
                 guard let account = named?.account ?? route?.account else {
@@ -755,6 +786,21 @@ final class Desk {
                 job.rounds = dispatch.rounds > 1 ? dispatch.rounds : nil
                 job.check = dispatch.check
                 job.files = await claims[index].value
+                if let conditions = dispatch.startWhen, !conditions.isEmpty {
+                    // Its account's name is the one it runs on, by id.
+                    let named = conditions.map { condition -> StartCondition in
+                        switch condition {
+                        case .window(_, let window, let under): .window(account: account.id, window, under: under)
+                        case .onPace: .onPace(account: account.id)
+                        default: condition
+                        }
+                    }
+                    do {
+                        job.startWhen = try StartWhen.checked(named, job: id, jobs: startWhenLookup.job, accounts: accounts.accounts)
+                    } catch {
+                        return .reply("Oby couldn't plan when that starts: \(error.localizedDescription)")
+                    }
+                }
                 let reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
                 drafts.append(Draft(said: said, reply: reply, job: job, guessed: result.by == "rules",
                                     suggestedModel: dispatch.complexity == .complex ? AgentModels.stronger[account.agent] : nil, route: route))
@@ -868,7 +914,13 @@ final class Desk {
     /// it back: jobs on the same files run side by side, each agent told about the others
     /// (`Prompts.agent`), and conflicts are settled when they merge (`nextMacCheck`, `rebaseConflicted`).
     /// `catchUp`: its worktree was set up a while ago (a restart), so it's brought up to date first.
+    /// A job with a `startWhen` waits for it first (#216, `holdsToStart`).
     func startOrWait(_ prepared: Job, catchUp: Bool = false) {
+        var prepared = prepared
+        if prepared.startWhen != nil {
+            if holdsToStart(prepared) { return }
+            prepared = job(prepared.id) ?? prepared
+        }
         if drainingForUpdate { return start(prepared) }
         let older = waiting.contains { $0.id != prepared.id && $0.created < prepared.created }
         if runningCount < maxRunning && !older { return catchUp ? startCaughtUp(prepared) : start(prepared) }
@@ -944,11 +996,18 @@ final class Desk {
     /// Dispatches one of the latest plans, by its job's id, with the user's changes (the runner's API).
     /// Rounds and check keep the plan's values unless the client sends them.
     /// `files`, when the client sends them, replace the plan's claim (an empty list claims none).
+    /// `startWhen`, when the client sends it, replaces what the plan's job waits for (#216; an empty
+    /// list starts it at once), and a condition on an account runs it on that account.
     func dispatch(_ id: String, branch: String, account: String, rounds: Int? = nil, check: String?? = nil, model: String?? = nil,
-                  files: [String]? = nil) throws -> Job {
+                  files: [String]? = nil, startWhen: [StartCondition]? = nil) throws -> Job {
         guard var draft = drafts.first(where: { $0.job.id == id }) else {
             throw Shell.Failure(message: "Oby doesn't have that plan any more. Ask again.")
         }
+        var account = account
+        if let startWhen {
+            draft.job.startWhen = startWhen.isEmpty ? nil : try StartWhen.checked(startWhen, job: id, jobs: startWhenLookup.job, accounts: accounts.accounts)
+        }
+        if let waitsOn = draft.job.startWhen?.compactMap(\.account).first { account = waitsOn }
         draft.job = try Self.edit(draft.job, branch: branch, account: accounts.state(account), rounds: rounds, check: check)
         if let files { draft.job.files = try Claims.validated(files) }
         if let model {
@@ -1073,12 +1132,16 @@ final class Desk {
         moved.model = model
         let to = Moves.place(moved, accounts: accounts.accounts)
         moved.moves = (job.moves ?? []) + [Job.Move(from: from, to: to, why: reason, date: .now)]
+        // Waiting on the account it left's room: it runs where it went (#216).
+        moved.startWhen = Self.movedStartWhen(moved.startWhen, leaving: job.account)
         // Sessions belong to a tool and an account: the next round starts a new one.
         moved.session = nil
         Logger.jobs.notice("job \(id, privacy: .public): moved from \(from, privacy: .public) to \(to, privacy: .public)")
         guard job.status == .running else {
             replace(moved)
-            return moved
+            // Waiting to start: nothing left to wait for starts it, else it waits for the rest there.
+            if moved.startWhen?.isEmpty == true { try startNow(id) } else if scheduled.contains(id) { startOrWait(moved, catchUp: true) }
+            return self.job(id) ?? moved
         }
         // Dropped before it's stopped, so nothing it says as it ends counts; a check under way ends too.
         let leaving = agents.removeValue(forKey: id)
@@ -1759,6 +1822,8 @@ final class Desk {
         onFinish(job)
         // A job waiting for a slot takes this one's (#237).
         releaseWaiting()
+        // Jobs waiting for this one to end look now, not at their next minute (#216).
+        if !scheduled.isEmpty { Task { await checkStartWhen() } }
     }
 
     /// What publishing `id` reports as it goes. A job publishing as it ends is `stoppable`: once
@@ -1911,6 +1976,7 @@ final class Desk {
             case (.merge, Inbox.oneMoreRound): try oneMoreMergeRound(item.job)
             case (.failed, Inbox.tryAgain), (.limit, Inbox.tryAgain), (.failed, Inbox.oneMoreRound): try message(item.job, Inbox.tryAgainMessage)
             case (.review, Inbox.oneMoreRound): try message(item.job, reviewAgain(item.job))
+            case (.question, _) where asksAboutStart(item.job): try decideStart(item.job, text)
             default: try message(item.job, text)
             }
             // The job moved on, which settled the item already; the answer is what settled it.

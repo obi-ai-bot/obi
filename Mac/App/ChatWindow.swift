@@ -468,7 +468,8 @@ private struct JobPane: View {
                     onStop: { desk.stop(job.id) },
                     publishing: JobView.Publishing(action: { Publish.action(for: job, base: job.base ?? "") },
                                                    publish: { _ in _ = try await desk.publish(job.id, approve: Publish.touchID) }),
-                    onMessage: { try desk.message(job.id, $0) }, onDismiss: { try desk.dismiss(job.id) })
+                    onMessage: { try desk.message(job.id, $0) }, onDismiss: { try desk.dismiss(job.id) },
+                    onStartNow: { try desk.startNow(job.id) })
         } else {
             JobView(job: job, place: feed.name, account: nil,
                     onStop: { Task { if let stopped = try? await feed.about(job.id, { try await $0.stop(job.id) }) { feed.apply(stopped) } } },
@@ -479,7 +480,8 @@ private struct JobPane: View {
                     onDismiss: { if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.dismiss(job.id) }) } },
                     extras: feed.extras[job.id],
                     onMode: { try await feed.setMode(job.id, $0) },
-                    onPermission: { try await feed.answer(job.id, $0, message: $1) })
+                    onPermission: { try await feed.answer(job.id, $0, message: $1) },
+                    onStartNow: { if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.startNow(job.id) }) } })
         }
     }
 }

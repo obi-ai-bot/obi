@@ -87,6 +87,22 @@ enum Render {
         return parts.joined(separator: " · ")
     }
 
+    /// What a job waits for before it starts (#216), one condition a line, as the runner keeps them.
+    static func startWhen(_ conditions: JSON?) -> String? {
+        guard let list = conditions?.array, !list.isEmpty else { return nil }
+        return list.map { condition in
+            if let job = condition["job"]?.string { return "job \(job) \(condition["is"]?.string ?? "done")" }
+            if let pr = condition["pr"]?.int { return "#\(pr) \(condition["is"]?.string ?? "merged")" }
+            if let account = condition["account"]?.string {
+                if condition["onPace"]?.bool == true { return "account \(account) back on its weekly pace" }
+                let window = condition["window"]?.string == "sevenDay" ? "weekly" : "5-hour"
+                return "account \(account) \(window) window " + (condition["under"]?.number.map { "under \(Int(($0 * 100).rounded()))%" } ?? "has room")
+            }
+            if let at = condition["at"]?.string { return "at \(at)" }
+            return condition.line
+        }.joined(separator: "\n")
+    }
+
     static func jobs(_ jobs: [JSON]) -> String {
         guard !jobs.isEmpty else { return "The runner has no jobs." }
         let waiting = jobs.filter(needsYou).count
@@ -102,6 +118,8 @@ enum Render {
         lines.add("status", job["status"])
         if needsYou(job) { lines.add("needs you", "yes") }
         lines.add("step", job["step"])
+        lines.add("waiting", job["waiting"]?["text"].flatMap(\.string).map { "Waiting " + $0 })
+        lines.add("starts when", startWhen(job["startWhen"]))
         lines.add("stage", stage(job))
         if let stages = job["pipeline"]?["stages"]?.array {
             lines.add("stages", stages.map { stage in

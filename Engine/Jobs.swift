@@ -133,6 +133,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Every time the user moved it to another tool, account or model (Engine/Move.swift), oldest
     /// first, or nil when it never moved.
     var moves: [Move]?
+    /// What it waits for before it starts (#216, Engine/StartWhen.swift): it stays queued until every
+    /// condition holds. Nil for a job that starts at once, and once it started.
+    var startWhen: [StartCondition]?
 
     /// One move: where the job was and where it went, as "Codex · Deskree" and "Claude Code ·
     /// Personal · Fable 5.1" (the model only when the job has its own), and the user's reason.

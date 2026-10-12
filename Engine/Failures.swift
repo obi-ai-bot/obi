@@ -527,9 +527,10 @@ final class Failures {
         if since[job.id]?.key != key { since[job.id] = (key, now()) }
     }
 
-    /// Queued on purpose: it waits for a free slot (`Desk.maxRunning`), or the runner is updating.
+    /// Queued on purpose: it waits for a free slot (`Desk.maxRunning`), the runner is updating, or
+    /// it waits for its `startWhen` (#216).
     nonisolated static func waitsItsTurn(_ job: Job) -> Bool {
-        job.status == .queued && job.step.hasPrefix("Waiting for ")
+        job.status == .queued && (job.step.hasPrefix("Waiting for ") || job.startWhen != nil)
     }
 
     /// How long a job may stay in one step: past its own timers, which should have ended it.

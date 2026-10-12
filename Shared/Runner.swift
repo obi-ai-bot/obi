@@ -705,6 +705,9 @@ nonisolated struct Runner: Sendable {
         try await call("POST", "v1/jobs/\(id)/move", body: MoveBody(agent: agent, account: account, model: model, why: why))
     }
 
+    /// Starts a job that waits for its `startWhen` now (#216): the runner answers with the job.
+    func startNow(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/start") }
+
     /// Tells the job's agent something. A finished job picks its session up again.
     func tell(_ id: String, _ text: String) async throws -> Job {
         struct Body: Encodable { var text: String }

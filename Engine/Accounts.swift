@@ -152,10 +152,10 @@ final class AccountStore {
     func state(_ id: String) -> AccountState? { accounts.first { $0.account.id == id } }
 
     /// Counts each account's active jobs, and its recent ones that used Tetrix; `Job.account`
-    /// holds the account's id.
+    /// holds the account's id. A job waiting for its `startWhen` (#216) isn't on it yet.
     func countRunning(_ jobs: [Job]) {
         for index in accounts.indices {
-            accounts[index].running = jobs.filter { $0.isActive && $0.account == accounts[index].account.id }.count
+            accounts[index].running = jobs.filter { $0.isActive && !$0.waitsToStart && $0.account == accounts[index].account.id }.count
             (accounts[index].tetrixJobs, accounts[index].tetrixUsed) = TetrixUse.share(jobs, account: accounts[index].account.id)
         }
     }
