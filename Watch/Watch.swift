@@ -182,7 +182,7 @@ final class Watch: NSObject {
                             apply(job)
                             saveGlance()
                         case .accounts(let accounts): self.accounts = accounts
-                        case .cleared, .inbox: break
+                        case .cleared, .inbox, .turn: break
                         }
                     }
                 } catch {

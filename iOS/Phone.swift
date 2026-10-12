@@ -1,6 +1,9 @@
 import Foundation
 import OSLog
 
+/// The app's tabs (#11): Home is the glance, Chat the thread with Oby, Settings the runner and its accounts.
+nonisolated enum PhoneTab: String, Hashable, Sendable { case home, chat, settings }
+
 /// The phone's view of the runner: its jobs and accounts, kept live while the app is open, and
 /// the conversation that turns words into a plan.
 @Observable
@@ -14,6 +17,29 @@ final class Phone {
     }
 
     let voice = PhoneVoice()
+    /// The tab in front; a notification's job opens on Home.
+    var tab = PhoneTab.home
+    /// The runner's conversation, read in pages and followed over `turn` events, for the Chat
+    /// tab's thread (Shared/ConversationModel.swift): one thread for every device (#11).
+    let conversation = ConversationModel()
+    /// What this iPhone said and the runner hasn't listed yet (ChatThread): the runner adds the
+    /// user's turn with Oby's answer, so the words show here from the moment they're sent.
+    private(set) var echoes: [Turn] = []
+    /// Why an echo's request didn't go through, by echo id: the words stay in the thread with the
+    /// reason, to try again or edit, until the runner lists them after all.
+    private(set) var failures: [String: String] = [:]
+    /// What each echo sent, by echo id, to send it again.
+    @ObservationIgnored private var requests: [String: Request] = [:]
+    /// The echo of the request under way, or nil: the one Cancel or a new request lets go of.
+    /// Never another (an older failed one, say): the runner may settle this one before the
+    /// request answers, and then `echoes.last` is someone else.
+    @ObservationIgnored private var pending: String?
+
+    private struct Request {
+        var said: String
+        var answer: (question: String, option: String)?
+        var voice: Bool
+    }
     @ObservationIgnored private let speaker = PhoneSpeaker()
     @ObservationIgnored private var planning: Task<Void, Never>?
     @ObservationIgnored private var spoken = false
@@ -42,6 +68,12 @@ final class Phone {
         didSet {
             UserDefaults.standard.set(runnerURL, forKey: "runner.url")
             stop()
+            // Another runner: nothing the last one said holds.
+            conversation.forget()
+            echoes = []
+            failures = [:]
+            requests = [:]
+            pending = nil
             start()
         }
     }
@@ -87,7 +119,14 @@ final class Phone {
     init() {
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
         JobsActivity.watchTokens { [weak self] in self?.runner }
+        conversation.page = { [weak self] before, limit in
+            guard let self else { return [] }
+            return try await runner.conversation(before: before, limit: limit)
+        }
     }
+
+    /// The thread Chat shows: the runner's turns and this iPhone's words still on their way, by time.
+    var thread: [Turn] { conversation.thread(with: ChatThread.pending(echoes, runner: conversation.runnerTurns)) }
 
     var runner: Runner { Runner(base: runnerURL) }
     var active: [Job] { jobs.filter(\.isActive) }
@@ -134,6 +173,9 @@ final class Phone {
         defaultMode = RunnerMode(status.permissions?.mode)
         await take(try await runner.jobs())
         inbox = try await runner.inbox()
+        // The thread's latest page every time: what was said on the Mac while the connection was
+        // down is in it.
+        await conversation.reload()
         loaded = true
         // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
         await Notifications.clear(Set(jobs.filter { !$0.needsYou && !$0.waitsForAnswer }.map(\.id)))
@@ -187,17 +229,36 @@ final class Phone {
             // One that's done leaves the list.
             inbox.removeAll { $0.id == item.id }
             if item.isOpen { inbox.append(item) }
+        case .turn(let turn):
+            conversation.apply(turn)
+            // The runner listed what this iPhone said: its echo has done its job.
+            settleEchoes()
         }
+    }
+
+    /// Drops the echoes the runner has listed, with what went with them.
+    private func settleEchoes() {
+        echoes = ChatThread.pending(echoes, runner: conversation.runnerTurns)
+        let kept = Set(echoes.map(\.id))
+        failures = failures.filter { kept.contains($0.key) }
+        requests = requests.filter { kept.contains($0.key) }
+    }
+
+    /// Lets go of an echo: cancelled, edited, or sent again.
+    private func drop(echo id: String) {
+        echoes.removeAll { $0.id == id }
+        failures[id] = nil
+        requests[id] = nil
+        if pending == id { pending = nil }
     }
 
     // MARK: Planning
 
     func ask(_ words: String, spoken: Bool = false) {
-        let said = words.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !said.isEmpty else { return }
+        guard let said = ChatThread.words(words) else { return }
         cancelVoice()
         self.spoken = spoken
-        plan(said, answer: nil)
+        plan(said, answer: nil, voice: spoken)
     }
 
     /// The user picked one of the brain's options.
@@ -210,13 +271,40 @@ final class Phone {
         planning = nil
         spoken = false
         speaker.stop()
+        // The words the user gave up on leave the thread, as on the Mac; the runner still lists
+        // them with its answer if it got them, and then they show.
+        dropPending()
         talk = .none
     }
 
-    private func plan(_ said: String, answer: (question: String, option: String)?) {
+    /// Lets go of the request under way's echo, if it's still in the thread.
+    private func dropPending() {
+        if let pending { drop(echo: pending) }
+        pending = nil
+    }
+
+    /// Try again on words that didn't go through: the same request, sent anew.
+    func retry(echo id: String) {
+        guard let request = requests[id] else { return }
+        drop(echo: id)
+        plan(request.said, answer: request.answer, voice: request.voice)
+    }
+
+    /// Edit on words that didn't go through: they leave the thread for the field.
+    func discard(echo id: String) {
+        drop(echo: id)
+    }
+
+    private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false) {
         planning?.cancel()
         speaker.stop()
+        dropPending()
         talk = .thinking(said)
+        // The thread shows the words as the runner will list them: an answer is its option.
+        let echo = Turn(who: .user, text: answer?.option ?? said, voice: voice ? true : nil)
+        echoes.append(echo)
+        requests[echo.id] = Request(said: said, answer: answer, voice: voice)
+        pending = echo.id
         planning = Task {
             let result: Talk
             do {
@@ -228,9 +316,15 @@ final class Phone {
                 }
             } catch {
                 result = .reply(error.localizedDescription)
+                // The request didn't go through (or the runner answered with an error): the words
+                // stay in the thread with why, to try again or edit. If the runner got them after
+                // all (a timeout), its turn settles the echo as usual.
+                if !Task.isCancelled { failures[echo.id] = error.localizedDescription }
             }
             // Cancelled or replaced while the brain was thinking.
             guard !Task.isCancelled else { return }
+            // The request is over: its words are the runner's now, or stay with their failure.
+            if pending == echo.id { pending = nil }
             talk = result
             if spoken, speakReplies {
                 switch result {
@@ -245,8 +339,9 @@ final class Phone {
 
     // MARK: Jobs
 
-    /// A notification was tapped: open its job, and publish it if that's what was tapped.
+    /// A notification was tapped: open its job on Home, and publish it if that's what was tapped.
     func open(_ id: String, publish: Bool) {
+        tab = .home
         opening = id
         publishing = publish ? id : nil
     }

@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Oby
 
-/// The window's thread (#11, Mac/App/ConversationModel.swift): the runner's conversation read in
+/// The window's thread (#11, Shared/ConversationModel.swift): the runner's conversation read in
 /// pages and followed over its `turn` events, this Mac's own turns in the same list, the days it's
 /// grouped by, and the jobs a turn's cards resolve to.
 @MainActor

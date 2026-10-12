@@ -1,13 +1,13 @@
 import SwiftUI
 import WebKit
 
-/// Oby, what's going on, the jobs, and the field where you type a task.
+/// Home, the glance (#11): Oby, what's going on, the Inbox, the jobs, and the field where you
+/// type a task. The thread itself is the Chat tab (iOS/Chat.swift).
 struct HomeView: View {
     @Environment(Phone.self) private var phone
     @Environment(\.scenePhase) private var scenePhase
     let character: ObyCharacter
     @State private var text = ""
-    @State private var settings = false
     @FocusState private var typing: Bool
     /// The scroll view's height, so an empty Home can put Oby in the middle of it.
     @State private var height: CGFloat = 0
@@ -68,22 +68,16 @@ struct HomeView: View {
                         Button("Stop all", systemImage: "stop.circle", role: .destructive) { Task { await stopAll() } }
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { settings = true } label: { Image(systemName: "gearshape") }
-                        .accessibilityLabel("Settings")
-                }
             }
-            .safeAreaInset(edge: .bottom) { field }
+            .safeAreaInset(edge: .bottom) { Composer(text: $text, typing: $typing, onSend: send) }
+            // The plan and the question are sheets here; Chat shows them in the thread.
             .sheet(isPresented: sheetShown) { sheet }
-            .sheet(isPresented: $settings) { SettingsScreen() }
             .onDisappear { phone.cancelVoice() }
             .onChange(of: scenePhase) { if scenePhase != .active { phone.cancelVoice() } }
-            .onChange(of: settings) { if settings { phone.cancelVoice() } }
             .onChange(of: path) { if !path.isEmpty { phone.cancelVoice() } }
             .onChange(of: phone.opening, initial: true) {
                 guard let id = phone.opening else { return }
                 phone.opening = nil
-                settings = false
                 phone.cancel()
                 path = [id]
             }
@@ -179,62 +173,7 @@ struct HomeView: View {
         }
     }
 
-    private var field: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if phone.voice.held || phone.voice.finishing {
-                if phone.voice.listening {
-                    Label(phone.voice.locked ? "Listening · Locked" : "Slide up to lock", systemImage: phone.voice.locked ? "lock.fill" : "arrow.up")
-                        .font(.caption).padding(.horizontal, 12)
-                    if phone.voice.locked {
-                        HStack {
-                            Button("Cancel") { phone.cancelVoice() }
-                            Spacer()
-                            Button("Stop and send") { phone.voice.finish() }
-                        }.padding(.horizontal, 12)
-                    } else {
-                        Text("Slide left to cancel").font(.caption).padding(.horizontal, 12)
-                    }
-                }
-                Text(phone.voice.words.isEmpty ? (phone.voice.finishing ? "Writing down…" : phone.voice.listening ? "Listening…" : "Getting ready…") : phone.voice.words)
-                    .font(.subheadline).padding(.horizontal, 12)
-                    .accessibilityAddTraits(.updatesFrequently)
-            }
-            if let problem = phone.voice.problem {
-                Text(problem).font(.footnote).foregroundStyle(.red).padding(.horizontal, 12)
-            }
-            HStack(spacing: 8) {
-                TextField("Type a task, like “Review oby PR #12”", text: $text, axis: .vertical)
-                    .lineLimit(1...4)
-                    .focused($typing)
-                    .submitLabel(.send)
-                    .onSubmit(send)
-                HoldMic(listening: phone.voice.listening, locked: phone.voice.locked, enabled: !phone.voice.finishing,
-                        start: { typing = false; phone.holdMic() }, lock: { phone.voice.lock(); return phone.voice.locked },
-                        release: { phone.releaseMic() }, cancel: { phone.cancelVoice() },
-                        stop: { phone.voice.finish() })
-                    .frame(width: 44, height: 44)
-                Button(action: send) {
-                    Image(systemName: "arrow.up")
-                        .font(.body.weight(.bold))
-                        .foregroundStyle(Color(uiColor: .systemBackground))
-                        .frame(width: 34, height: 34)
-                        .background(Color.primary.opacity(text.isEmpty ? 0.4 : 1), in: Circle())
-                }
-                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .accessibilityLabel("Send")
-            }
-            .padding(.leading, 18)
-            .padding(.trailing, 7)
-            .padding(.vertical, 7)
-            .background(Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 8)
-        .background(Color(uiColor: .systemGroupedBackground))
-    }
-
     private func send() {
-        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         phone.ask(text)
         text = ""
         typing = false
@@ -270,11 +209,13 @@ struct HomeView: View {
         }
     }
 
+    /// Only while Home is the tab in front: on Chat, the card is in the thread.
     private var sheetShown: Binding<Bool> {
         Binding {
+            guard phone.tab == .home else { return false }
             switch phone.talk {
-            case .plan, .question: true
-            default: false
+            case .plan, .question: return true
+            default: return false
             }
         } set: { shown in
             if !shown { phone.cancel() }

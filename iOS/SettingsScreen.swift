@@ -1,11 +1,10 @@
 import SwiftUI
 
-/// The runner Oby talks to, the accounts signed in there, each tool's model and effort, and the
-/// Apple Watches that reach it without this iPhone. The sections the Mac has too are shared
-/// (Shared/SettingsSections.swift).
+/// The Settings tab: the runner Oby talks to, the accounts signed in there, each tool's model and
+/// effort, and the Apple Watches that reach it without this iPhone. The sections the Mac has too
+/// are shared (Shared/SettingsSections.swift).
 struct SettingsScreen: View {
     @Environment(Phone.self) private var phone
-    @Environment(\.dismiss) private var dismiss
     @State private var address = ""
     @State private var options: ModelOptions?
     @State private var problem: String?
@@ -83,7 +82,6 @@ struct SettingsScreen: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("Done") { dismiss() } }
             .task {
                 address = phone.runnerURL.absoluteString
                 do { options = try await phone.runner.modelOptions() } catch { problem = error.localizedDescription }
