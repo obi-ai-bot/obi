@@ -264,7 +264,7 @@ struct ChatWindowTests {
     @Test func statusVocabularyIsShared() {
         var job = Job(id: "j", request: "Work", agent: "codex", account: "default", repo: "deskree-inc/oby",
                       branch: "oby/fix-270", base: "dev", pr: nil, kind: .fix, task: "Work")
-        let expected: [(Job.Status, String)] = [(.queued, "Waiting"), (.running, "Running"), (.done, "Ready"),
+        let expected: [(Job.Status, String)] = [(.queued, "Starting"), (.running, "Working"), (.done, "Ready"),
                                               (.failed, "Failed"), (.stopped, "Stopped"), (.interrupted, "Blocked")]
         for (status, text) in expected { job.status = status; #expect(job.badge.text == text) }
         job.status = .running

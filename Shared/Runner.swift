@@ -637,8 +637,9 @@ extension Job {
         if waitsForAnswer { return JobBadge(text: "Needs input", tone: .orange) }
         if step == "Waiting for your OK", isActive { return JobBadge(text: "Awaiting approval", tone: .orange) }
         switch status {
-        case .queued: return JobBadge(text: "Waiting", tone: .gray)
-        case .running: return JobBadge(text: "Running", tone: .blue)
+        case .queued where waiting != nil: return .waiting
+        case .queued: return JobBadge(text: "Starting", tone: .blue)
+        case .running: return JobBadge(text: "Working", tone: .blue)
         case .done where canPublish: return JobBadge(text: "Ready to publish", tone: .orange)
         case .done where reviewNeedsYou || mergeNeedsYou || cloudNeedsYou: return JobBadge(text: "Needs input", tone: .orange)
         case .done where pullRequestState == "MERGED": return JobBadge(text: "Merged", tone: .green)
