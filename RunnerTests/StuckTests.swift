@@ -3,8 +3,8 @@ import Testing
 @testable import ObyEngine
 @testable import oby_runner
 
-/// A job waiting its turn behind another job's claim (#209) isn't stuck (#231): the sweep
-/// (Engine/Failures.swift) starts its step clock when it really starts.
+/// A job waiting its turn for a slot (#237) isn't stuck (#231): the sweep (Engine/Failures.swift)
+/// starts its step clock when it really starts.
 @MainActor
 struct StuckTests {
     func queued(_ id: String, files: [String]) -> Job {
@@ -19,13 +19,14 @@ struct StuckTests {
         let test = try FailureTests(signedIn: false)
         let desk = test.desk
         let log = desk.failureLog
+        desk.maxRunning = 1
         desk.enqueue(queued("first", files: ["Engine/Desk.swift"]))
         try await test.until("the first runs") { desk.job("first")?.status == .running }
         desk.enqueue(queued("second", files: ["Engine/Desk.swift", "Engine/Failures.swift"]))
         try await test.until("the second waits") { desk.job("second")?.step.hasPrefix("Waiting for ") == true }
         let waiting = try #require(desk.job("second"))
         #expect(waiting.status == .queued)
-        #expect(waiting.step.hasSuffix("(first): both touch Engine/Desk.swift"))
+        #expect(waiting.step == "Waiting for a free slot: 1 of 1 jobs running")
         log.sweep()
         // Two hours in line.
         log.now = { .now.addingTimeInterval(7200) }

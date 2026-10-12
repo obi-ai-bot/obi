@@ -86,6 +86,8 @@ struct CheckTests {
             made.merged.append(check)
         }
         desk.onCheckChange = { [made] in made.events.append($0) }
+        // A rebase is reviewed again unless a test says its patch is the same (#237).
+        desk.samePatch = { _, _, _, _ in false }
         // As the runner's desk: Macs take its checks.
         desk.queuesMacChecks = true
     }

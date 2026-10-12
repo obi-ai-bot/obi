@@ -8,7 +8,8 @@ import Testing
 
 /// Every job claims its files (#209): a plan's job about an issue claims what the issue names, a
 /// client may claim them at dispatch, and the claim holds until the job's pull request is merged or
-/// closed, or the user lets it go, so jobs on the same code run one after another.
+/// closed, or the user lets it go. A claim holds no job back (#237, RunnerTests/ParallelTests.swift):
+/// a job that waited for a slot is brought up to date with dev before it starts.
 @MainActor
 struct ClaimTests {
     final class Made {
@@ -137,35 +138,26 @@ struct ClaimTests {
         #expect(try Workspace.inputs(job, pullRequest: nil, issue: issue, in: worktree, vault: vault).files == [])
     }
 
-    // MARK: Jobs on the same files run in turn
+    // MARK: A job that waited for a slot catches up
 
-    /// #176-like and #198-like jobs both touch Engine/Review.swift: the second waits for the first,
-    /// through its review, and starts once its pull request is merged.
-    @Test func plansForIssuesOnTheSameFileRunOneAfterTheOther() async throws {
+    /// With one slot, #198 waits for #176 to end, then starts on dev as GitHub has it now: its
+    /// worktree was set up on dev before #176 ended, so it moves first and doesn't edit stale code.
+    @Test func aJobThatWaitedForASlotStartsOnTheLatestDev() async throws {
+        desk.maxRunning = 1
         let drafts = try await drafts()
         #expect(drafts.map(\.job.files) == [["Engine/Accounts.swift", "Engine/Review.swift", "RunnerTests/"], ["Engine/Review.swift", "Engine/CheckRuns.swift"]])
         let first = desk.dispatch(drafts[0])
         let second = desk.dispatch(drafts[1])
         try await until("#176 runs") { desk.job(first.id)?.status == .running }
         try await until("#198 waits") { desk.job(second.id)?.step.hasPrefix("Waiting for") == true }
-        var waiting = try #require(desk.job(second.id))
-        #expect(waiting.status == .queued && waiting.step == "Waiting for Fix 176 (\(first.id)): both touch Engine/Review.swift")
-        #expect(made.agents.count == 1)
+        let waiting = try #require(desk.job(second.id))
+        #expect(waiting.status == .queued && waiting.step == "Waiting for a free slot: 1 of 1 jobs running")
+        #expect(made.agents.count == 1 && made.fetched.isEmpty && made.moved.isEmpty)
 
-        // #176 publishes: its pull request is in review, and still claims the file.
-        try await endDone(176)
-        let published = try #require(desk.job(first.id))
-        #expect(published.published == url.absoluteString && published.holdsClaim)
-        try await Task.sleep(for: .milliseconds(50))
-        waiting = try #require(desk.job(second.id))
-        #expect(waiting.status == .queued && made.agents.count == 1)
-
-        // Merged: #198 starts, on top of it. Its worktree was set up on dev before the merge: it
-        // moves to dev as GitHub has it now first, so it doesn't edit stale code.
-        #expect(made.fetched.isEmpty && made.moved.isEmpty)
+        // #176 publishes and ends: its slot is free while its pull request is in review.
         made.dev = Self.devMerged
-        desk.followed(first.id, published: url.absoluteString, pushed: published.pushed,
-                      status: PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now), error: nil)
+        try await endDone(176)
+        #expect(desk.job(first.id)?.holdsClaim == true)
         try await until("#198 runs") { desk.job(second.id)?.status == .running }
         #expect(made.agents.count == 2 && made.agents.last?.job.issue == 198)
         #expect(made.fetched == [second.id] && made.moved.map { "\($0.id) \($0.from) \($0.to)" } == ["\(second.id) \(Self.devBefore) \(Self.devMerged)"])
@@ -174,6 +166,7 @@ struct ClaimTests {
 
     /// A waiting job that can't be brought up to date fails, saying why, rather than start on stale code.
     @Test func aWaitingJobThatCantCatchUpFails() async throws {
+        desk.maxRunning = 1
         let drafts = try await drafts()
         let first = desk.dispatch(drafts[0])
         let second = desk.dispatch(drafts[1])
@@ -188,6 +181,7 @@ struct ClaimTests {
     /// A waiting job moved while it's brought up to date starts where it was moved, on the commit it
     /// caught up to: the job catch-up started with doesn't undo the move (#118).
     @Test func aJobMovedWhileItCatchesUpStartsWhereItWasMoved() async throws {
+        desk.maxRunning = 1
         let gate = MoveJobTests.Gate()
         desk.fetchBase = { [made] _, _ in
             await gate.wait()
@@ -265,22 +259,6 @@ struct ClaimTests {
         #expect(!nothing.holdsClaim)
     }
 
-    /// Dismissing the job whose pull request holds the claim lets the next one start.
-    @Test func dismissingTheClaimingJobLetsTheNextStart() async throws {
-        let drafts = try await drafts()
-        let first = desk.dispatch(drafts[0])
-        let second = desk.dispatch(drafts[1])
-        try await until("#176 runs") { desk.job(first.id)?.status == .running }
-        try await endDone(176)
-        // Its pull request needs a person (the review stopped): the user lets it go.
-        var stuck = try #require(desk.job(first.id))
-        stuck.status = .failed
-        desk.replace(stuck)
-        #expect(desk.job(second.id)?.status == .queued)
-        try desk.dismiss(first.id)
-        try await until("#198 runs") { desk.job(second.id)?.status == .running }
-    }
-
     // MARK: The runner's API and oby-mcp
 
     /// A client's list is checked whole: a 31st path is refused, never dropped and left unclaimed.
@@ -325,6 +303,6 @@ struct ClaimTests {
             let (_, kept) = try await dispatch(jobs[1], files: nil)
             #expect(kept["files"] as? [String] == ["Engine/Review.swift", "Engine/CheckRuns.swift"])
         }
-        try await until("#198 waits for #176") { desk.jobs.first { $0.issue == 198 }?.step.hasPrefix("Waiting for Fix 176") == true }
+        try await until("#176 and #198 run side by side") { desk.jobs.filter { $0.status == .running }.count == 2 }
     }
 }

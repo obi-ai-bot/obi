@@ -1193,13 +1193,15 @@ extension Desk {
     /// A Mac asks for work: the oldest queued check whose job still waits for it, or one a Mac
     /// took and went quiet on (`MacCheck.lease`). It's the asking Mac's now. A Mac that takes Apple
     /// checks (`kinds`) gets those first: an agent waits for them mid-round. Then merge checks, then
-    /// an Apple check no Mac took in time, late (`Desk.nextAppleCheck`).
+    /// an Apple check no Mac took in time, late (`Desk.nextAppleCheck`). When two approved pull
+    /// requests touch the same files, the older job's merges first (`mergesAfter`, #237).
     func nextMacCheck(mac: String, kinds: Set<MacCheck.Kind> = [.merge], now: Date = .now) -> MacCheck? {
         if kinds.contains(.apple), let check = nextAppleCheck(mac: mac, now: now) { return check }
         guard kinds.contains(.merge) else { return kinds.contains(.apple) ? nextAppleCheck(mac: mac, late: true, now: now) : nil }
         let ready = jobs.filter { job in
             guard let check = job.macCheck, !job.isActive, check.head == job.pushedHead else { return false }
-            return check.state == .queued || check.state == .running && now.timeIntervalSince(check.started ?? now) > MacCheck.lease
+            return check.state == .queued && mergesAfter(job) == nil
+                || check.state == .running && now.timeIntervalSince(check.started ?? now) > MacCheck.lease
         }
         guard var author = ready.min(by: { ($0.macCheck?.created ?? now) < ($1.macCheck?.created ?? now) }), var check = author.macCheck else {
             return kinds.contains(.apple) ? nextAppleCheck(mac: mac, late: true, now: now) : nil
@@ -1211,6 +1213,12 @@ extension Desk {
         replace(author)
         onCheckChange(check)
         return check
+    }
+
+    /// The older job, approved and on its way to merging, whose claim overlaps `job`'s: `job`'s Mac
+    /// check waits until it merged (or stopped on its way), then a rebase settles the conflict (#237).
+    func mergesAfter(_ job: Job) -> Job? {
+        jobs.first { $0.id != job.id && $0.created < job.created && $0.awaitsMerge && !Self.overlap(job, $0).isEmpty }
     }
 
     /// A Mac reports check `id`. Its results go on the job and, while the job still waits for that
@@ -1415,6 +1423,7 @@ extension Desk {
         // Rebased onto that commit already, and it still conflicts: a person takes it from here.
         guard latest.rebasedOnto != onto else { return stop("Oby rebased it onto \(onto.prefix(12)) already, and it still conflicts.") }
         latest.rebasedOnto = onto
+        latest.rebasedFrom = latest.pushedHead
         latest.rebases = today + [.now]
         latest.mergeError = nil
         latest.extraReviews = max(latest.extraReviews ?? 0, (latest.review?.round ?? 0) + 1 - Review.maxRounds)
@@ -1423,6 +1432,28 @@ extension Desk {
         replace(again)
         Logger.jobs.notice("job \(id, privacy: .public): pull request conflicts with \(base, privacy: .public), rebasing onto \(onto, privacy: .public)")
         run(again, prompt: MacCheck.rebasePrompt(again, base: base, onto: onto), resume: session)
+    }
+
+    /// A job just published: Oby reviews it (`reviewPublished`), unless the round was a rebase
+    /// (`rebasedFrom` is the head before it) of a pull request Oby approved, and `git range-diff`
+    /// shows the same patch on the new base, changed only in files it touched already (the
+    /// conflict's resolution, `Rebase.samePatch`): then the approval carries over and its Mac check
+    /// is queued at once (#237). A runner update waits for it (`wrapUp`).
+    func reviewOrCheck(_ job: Job, rebasedFrom: String?) {
+        guard queuesMacChecks, let from = rebasedFrom, let onto = job.rebasedOnto, let head = job.pushedHead,
+              job.review?.verdict == .approved else { return reviewPublished(job) }
+        let id = job.id
+        wrapUp("rebase:\(id)") { [self] in
+            let same = await samePatch(id, from, onto, head)
+            // It ran again meanwhile: it publishes again, and is reviewed then.
+            guard var latest = self.job(id), !latest.isActive, latest.pushedHead == head else { return }
+            guard same else { return reviewPublished(latest) }
+            Logger.jobs.notice("job \(id, privacy: .public): rebased onto \(onto, privacy: .public) with the same patch: Oby's approval carries over")
+            latest.summary += "\n\nRebased onto \(latest.base ?? "its base") with the same patch: Oby's approval carries over to \(head.prefix(12)), and its Mac check is next."
+            latest = approved(latest, read: head)
+            replace(latest)
+            if let check = latest.macCheck, check.head == head, check.state == .queued { onCheckChange(check) }
+        }
     }
 
     /// The Mac check failed: the failing tests go to the author's agent as its next round, in the
@@ -1453,5 +1484,55 @@ extension MacCheck {
     /// There's no check with that id.
     struct Unknown: LocalizedError {
         var errorDescription: String? { "There's no such check." }
+    }
+}
+
+extension Job {
+    /// Approved and on its way to merging: its Mac check is queued, running or passed on its pull
+    /// request's head, nothing stopped it, and the pull request is still open (`Desk.mergesAfter`).
+    nonisolated var awaitsMerge: Bool {
+        guard let check = macCheck, !isActive, dismissed == nil, mergeError == nil, check.head == pushedHead,
+              (pullRequest?.state ?? .open) == .open else { return false }
+        return [.queued, .running, .passed].contains(check.state)
+    }
+}
+
+/// Whether a rebase round changed a pull request's patch (#237).
+nonisolated enum Rebase {
+    /// Whether the commits from the pull request's old head `from` and its new head `to`, rebased
+    /// onto `onto`, are the same patch (`same`), read with git in the job's worktree. False when
+    /// git can't say: then Oby reviews it again.
+    static func samePatch(worktree: URL, from: String, onto: String, to: String) async -> Bool {
+        func git(_ arguments: [String]) async throws -> String { try await Shell.ok(["git", "-C", worktree.path] + arguments) }
+        do {
+            let base = try await git(["merge-base", from, onto])
+            let touched = try await git(["diff", "--name-only", "--no-renames", base, from]).split(separator: "\n").map(String.init)
+            return same(try await git(["range-diff", "--no-color", "\(base)..\(from)", "\(onto)..\(to)"]), touched: touched)
+        } catch {
+            return false
+        }
+    }
+
+    /// What `git range-diff old new` says is the same patch: every commit paired with one (`=`
+    /// unchanged, `!` changed), none dropped (`<`) or added (`>`), and the changed ones differing
+    /// only in files the pull request touched already (`touched`): each file in their diff of diffs
+    /// starts with a `## <path> ##` line.
+    static func same(_ rangeDiff: String, touched: [String]) -> Bool {
+        var pairs = 0
+        for line in rangeDiff.split(separator: "\n") {
+            if let pair = line.firstMatch(of: /^\s*(?:\d+|-+):\s+[0-9a-f-]+ ([=!<>]) (?:\d+|-+):\s+[0-9a-f-]+/) {
+                guard pair.1 == "=" || pair.1 == "!" else { return false }
+                pairs += 1
+                continue
+            }
+            // A changed pair's diff of diffs: four spaces, its own +, - or space, then the patch's line.
+            let text = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            guard text.hasPrefix("## "), text.hasSuffix(" ##"), text.count > 6 else { continue }
+            var path = String(text.dropFirst(3).dropLast(3))
+            // `## Engine/New.swift (new) ##`, `(deleted)`, `(mode change 100644 => 100755)`.
+            if path.hasSuffix(")"), let open = path.range(of: " (", options: .backwards) { path = String(path[..<open.lowerBound]) }
+            if path != "Metadata" && !touched.contains(path) { return false }
+        }
+        return pairs > 0
     }
 }

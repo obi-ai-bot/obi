@@ -149,8 +149,19 @@ final class Desk {
     @ObservationIgnored lazy var issueSync = IssueSync(desk: self, store: store)
     /// Failure records and their post-mortems (Engine/Failures.swift): on for the runner.
     @ObservationIgnored lazy var failureLog = Failures(desk: self, store: store)
-    /// Jobs ready to run that wait for an earlier job touching the same files to end (case 2.1), in order.
+    /// Jobs ready to run that wait for a free slot (`maxRunning`) or for a runner update to end.
     private var waiting: [Job] = []
+    /// At most this many jobs run at once (#237): a new job, or Oby's review, waits, queued, for a
+    /// slot, and they start oldest first as slots free up. A round of a job that started already
+    /// (a review's changes, a rebase, a failed Mac check, the user's words) takes a slot too, but
+    /// never waits for one. Raising it starts waiting jobs at once.
+    @ObservationIgnored var maxRunning = JobSlots.saved {
+        didSet { if maxRunning > oldValue { releaseWaiting() } }
+    }
+    /// Jobs on their way to the slot they took: brought up to date with their base before they start.
+    private var startingUp: Set<String> = []
+    /// How many slots are taken: jobs running (`Job.takesSlot`), and those about to.
+    var runningCount: Int { jobs.filter(\.takesSlot).count + startingUp.count }
     /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
     private var drafts: [Draft] = []
     private var agents: [String: any AgentRun] = [:]
@@ -232,6 +243,11 @@ final class Desk {
               try await Shell.ok(["git", "-C", path, "status", "--porcelain"]).isEmpty else { return false }
         try await Shell.ok(["git", "-C", path, "reset", "--quiet", "--hard", to])
         return true
+    }
+    /// Whether a rebase round published the same patch it had before (`Rebase.samePatch`), from the
+    /// job's worktree: its old head, the base it was rebased onto, its new head. Tests put in their own.
+    @ObservationIgnored var samePatch: (_ id: String, _ from: String, _ onto: String, _ to: String) async -> Bool = { id, from, onto, to in
+        await Rebase.samePatch(worktree: Workspace.worktree(id), from: from, onto: onto, to: to)
     }
     /// The limits every job is held to (case 3.1). Tests put in their own.
     @ObservationIgnored var limits = JobLimits()
@@ -838,50 +854,55 @@ final class Desk {
         return job
     }
 
-    /// A job that's ready runs now, unless an earlier job's claim covers the same files (case 2.1,
-    /// `Job.holdsClaim`): then it waits, queued, until that job is merged, closed or let go.
+    /// A job that's ready runs now when a slot is free (`maxRunning`) and no older job waits for
+    /// one; else it waits, queued, and starts in its turn, oldest first (#237). Its `files` never hold
+    /// it back: jobs on the same files run side by side, each agent told about the others
+    /// (`Prompts.agent`), and conflicts are settled when they merge (`nextMacCheck`, `rebaseConflicted`).
     /// `catchUp`: its worktree was set up a while ago (a restart), so it's brought up to date first.
     func startOrWait(_ prepared: Job, catchUp: Bool = false) {
-        guard let blocker = blocker(of: prepared) else { return catchUp ? startCaughtUp(prepared) : start(prepared) }
+        if drainingForUpdate { return start(prepared) }
+        let older = waiting.contains { $0.id != prepared.id && $0.created < prepared.created }
+        if runningCount < maxRunning && !older { return catchUp ? startCaughtUp(prepared) : start(prepared) }
         var job = prepared
-        job.step = "Waiting for \(blocker.heading) (\(blocker.id)): both touch \(Self.overlap(prepared, blocker).joined(separator: ", "))"
+        job.step = JobSlots.waitLine(running: runningCount, of: maxRunning)
         replace(job)
-        waiting.append(job)
+        if !waiting.contains(where: { $0.id == job.id }) { waiting.append(job) }
     }
 
-    /// The earlier job (older in the list, still holding its claim) this one would collide with, if any.
-    private func blocker(of job: Job) -> Job? {
-        guard let index = jobs.firstIndex(where: { $0.id == job.id }) else { return nil }
-        return jobs[(index + 1)...].first { $0.holdsClaim && !Self.overlap(job, $0).isEmpty }
-    }
-
-    /// A job let go of its claim: the waiting jobs it was blocking run now, in order, unless another blocks them.
-    private func releaseWaiting() {
+    /// A slot freed up (a job stopped running, the cap went up, a runner update was called off): the
+    /// waiting jobs start, oldest first, as many as there are free slots.
+    func releaseWaiting() {
         guard !drainingForUpdate else { return }
-        for waiter in waiting {
-            guard let latest = job(waiter.id), latest.status == .queued, blocker(of: latest) == nil else { continue }
+        waiting.removeAll { job($0.id)?.status != .queued }
+        for waiter in waiting.sorted(by: { $0.created < $1.created }) {
+            guard runningCount < maxRunning else { return }
+            guard let latest = job(waiter.id) else { continue }
             waiting.removeAll { $0.id == waiter.id }
             startCaughtUp(latest)
         }
     }
 
-    /// A job whose worktree was set up before what it waited for merged: its branch moves to the
-    /// base as GitHub has it now, then it starts (or waits again), so it works on top of what merged
-    /// meanwhile rather than conflict with it (#209). It fails, saying why, when that can't be done.
+    /// A job whose worktree was set up a while ago (it waited for a slot, or for a restart): its
+    /// branch moves to the base as GitHub has it now, then it starts (or waits again), so it works on
+    /// top of what merged meanwhile rather than conflict with it (#209). It fails, saying why, when
+    /// that can't be done. It holds its slot meanwhile (`startingUp`).
     private func startCaughtUp(_ job: Job) {
         var job = job
         job.step = "Bringing \(job.branch) up to date with \(job.base ?? "its base")"
         replace(job, save: false)
         updatePreparing.insert(job.id)
+        startingUp.insert(job.id)
         Task {
             defer { updatePreparing.remove(job.id) }
             do {
                 let caught = try await caughtUp(job)
-                guard var latest = self.job(job.id), latest.status == .queued else { return }
+                startingUp.remove(job.id)
+                guard var latest = self.job(job.id), latest.status == .queued else { return releaseWaiting() }
                 // Moved meanwhile: it starts where it was moved to, on the commit it caught up to.
                 latest.startCommit = caught.startCommit
                 startOrWait(latest)
             } catch {
+                startingUp.remove(job.id)
                 finish(job.id, .failed, "Couldn't bring \(job.branch) up to date with \(job.base ?? "its base"): \(error.localizedDescription)")
             }
         }
@@ -1212,7 +1233,9 @@ final class Desk {
         job.started = .now
         job.step = "Starting \(job.agentName)"
         replace(job)
-        run(job, prompt: Prompts.agent(job, apple: offersAppleChecks))
+        // The jobs in flight on the same files, for its agent to know about (#237).
+        let alongside = jobs.filter { $0.id != job.id && $0.holdsClaim && !Self.overlap(job, $0).isEmpty }
+        run(job, prompt: Prompts.agent(job, apple: offersAppleChecks, alongside: alongside))
     }
 
     /// Starts the job's agent in its worktree: a new session, or the job's own picked up again.
@@ -1689,6 +1712,9 @@ final class Desk {
             job.mergeError = nil
         }
         job.publishError = publishError
+        // A rebase round ends here: what it published is weighed once (`reviewOrCheck`).
+        let rebasedFrom = job.rebasedFrom
+        job.rebasedFrom = nil
         job.step = ""
         job.finished = .now
         replace(job)
@@ -1710,12 +1736,12 @@ final class Desk {
         denials[id] = nil
         limited.remove(id)
         waiting.removeAll { $0.id == id }
-        // Oby reviews what was just published, and a review that ended reaches its author (Engine/Review.swift).
-        if published != nil { reviewPublished(job) }
+        // Oby reviews what was just published (or, after a rebase that changed nothing else, checks
+        // it on a Mac), and a review that ended reaches its author (Engine/Review.swift).
+        if published != nil { reviewOrCheck(job, rebasedFrom: rebasedFrom) }
         if job.reviewOf != nil { reviewEnded(job) }
         onFinish(job)
-        // A job that waited on this one for the same files runs now (case 2.1), unless its claim
-        // holds on while its pull request is open (`Job.holdsClaim`).
+        // A job waiting for a slot takes this one's (#237).
         releaseWaiting()
     }
 
@@ -1758,7 +1784,7 @@ final class Desk {
         // ones when something changes it (dismissed, told something, moved), and is kept as any other.
         if !lists(job.id), let stored = store.job(job.id) { jobs.append(stored) }
         guard let index = jobs.firstIndex(where: { $0.id == job.id }) else { return }
-        let claimed = jobs[index].holdsClaim
+        let tookSlot = jobs[index].takesSlot
         jobs[index] = job
         if save { store.save(job) }
         onJobChange(job)
@@ -1767,8 +1793,8 @@ final class Desk {
         failureLog.observe(job)
         // A step changes nothing the user must answer.
         if save { syncInbox(job) }
-        // Merged, closed, dismissed or ended with nothing to publish: jobs waiting on its files run now.
-        if claimed && !job.holdsClaim { releaseWaiting() }
+        // It ended, or waits for the user's answer: a waiting job takes its slot (#237).
+        if tookSlot && !job.takesSlot { releaseWaiting() }
     }
 
     // MARK: The inbox
@@ -2031,8 +2057,8 @@ nonisolated enum Rounds {
     }
 }
 
-/// What a job claims (case 2.1, #209): the files its issue says it will touch, so jobs on the same
-/// code run one after another rather than all at once, each putting the next in conflict.
+/// What a job claims (case 2.1, #209): the files its issue says it will touch, so each agent hears
+/// which in-flight jobs touch the same code, and overlapping pull requests merge oldest first (#237).
 nonisolated enum Claims {
     /// At most as many paths as a Lead's brief holds, from a client. An issue's are all kept.
     static let most = 30

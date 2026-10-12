@@ -111,8 +111,8 @@ extension CheckTests {
         #expect(desk.job("author")?.rebasedOnto == fetched.onto)
     }
 
-    /// Oby rebases a pull request 3 times a day at most: a 4th conflict needs you, and is a failure.
-    @Test func aFourthConflictInADayIsntRebased() async throws {
+    /// Oby rebases a pull request 6 times a day at most (#237): a 7th conflict needs you, and is a failure.
+    @Test func aSeventhConflictInADayIsntRebased() async throws {
         final class Fetched { var count = 0 }
         let fetched = Fetched()
         desk.fetchBase = { _, _ in
@@ -121,15 +121,15 @@ extension CheckTests {
         }
         let check = try await approved()
         var author = try #require(desk.job("author"))
-        // Rebased 3 times today (and once yesterday, which no longer counts).
-        author.rebases = [Date.now.addingTimeInterval(-90_000)] + (1...3).map { Date.now.addingTimeInterval(TimeInterval(-3600 * $0)) }
+        // Rebased 6 times today (and once yesterday, which no longer counts).
+        author.rebases = [Date.now.addingTimeInterval(-90_000)] + (1...6).map { Date.now.addingTimeInterval(TimeInterval(-3600 * $0)) }
         desk.replace(author)
         _ = desk.nextMacCheck(mac: "Studio")
         made.mergeError = MacCheck.Conflict(base: "dev")
         try desk.macCheckEnded(check.id, MacCheck.Report(passed: true, steps: steps, failures: []))
         try await until("the merge stops") { desk.job("author")?.mergeError != nil }
         author = try #require(desk.job("author"))
-        #expect(author.mergeError == "Not merged: it conflicts with dev. Oby rebased it 3 times today already: a person takes it from here.")
+        #expect(author.mergeError == "Not merged: it conflicts with dev. Oby rebased it 6 times today already: a person takes it from here.")
         #expect(fetched.count == 0 && !author.isActive && author.mergeNeedsYou && made.agents.count == 2)
         #expect(Failures.found(in: author).map(\.trigger) == [.mergeError])
     }
