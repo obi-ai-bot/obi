@@ -135,8 +135,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
             && (pullRequest?.state ?? "OPEN") == "OPEN"
     }
 
-    /// Oby's review requested changes for the last time it may (a blocker came back, or it was the
-    /// last review) and the pull request is still open, as the runner says.
+    /// Oby's review requested changes for the last time it may (a blocker came back) and the pull
+    /// request is still open, as the runner says.
     var reviewNeedsYou: Bool { stoppedReview == true }
 
     /// Done with commits its pull request won't take: merged or closed before they went out (as Engine's `Job.stranded`).

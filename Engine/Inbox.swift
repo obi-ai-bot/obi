@@ -13,7 +13,7 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
     enum Kind: String, Codable, Sendable {
         /// The job's agent asked something (`Job.question`) and waits for the answer.
         case question
-        /// Oby's review stopped asking for changes: a blocker came back, or it was the last review (`Job.reviewNeedsYou`).
+        /// Oby's review stopped asking for changes: a blocker came back (`Job.reviewNeedsYou`).
         case review
         /// The job failed or was interrupted.
         case failed

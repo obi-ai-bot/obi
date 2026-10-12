@@ -414,7 +414,7 @@ struct ReviewTests {
         let quoted = try #require(made.quoted.first)
         #expect(quoted.author.id == "author" && quoted.file == "review-1.md")
         #expect(quoted.text.hasPrefix("# Oby's review of pull request #80, quoted"))
-        #expect(quoted.text.contains("- Reviewer: Codex, on the Work account\n- Verdict: Changes requested\n- Review 1 of at most 5\n- Posted on the pull request: https://github.com/deskree-inc/oby/runs/1"))
+        #expect(quoted.text.contains("- Reviewer: Codex, on the Work account\n- Verdict: Changes requested\n- Review 1\n- Posted on the pull request: https://github.com/deskree-inc/oby/runs/1"))
         #expect(quoted.text.contains("> - Fix the off-by-one in Rounds.next\n> - Add a test for the empty case\n> \n> VERDICT: CHANGES REQUESTED"))
         #expect(again.pipeline.number == 2)
 
@@ -425,7 +425,7 @@ struct ReviewTests {
         try await until("the author publishes again") { made.published.count == 2 }
         let approved = try await review("All good now.\n\nVERDICT: APPROVED")
         #expect(approved.review?.verdict == .approved && approved.review?.round == 2 && approved.pushed == 3)
-        #expect(made.posted.count == 2 && made.posted.last?.run.summary.contains("review 2 of at most 5") == true)
+        #expect(made.posted.count == 2 && made.posted.last?.run.summary.contains("review 2. ") == true)
         #expect(approved.pipeline.stages.last?.detail == "Ready to merge")
         #expect(desk.jobs.filter { $0.reviewOf == "author" }.count == 2)
     }
@@ -525,7 +525,7 @@ struct ReviewTests {
         let stopped = try await review("Not fixed.\n\nBlocking:\n- **Again:** SIGKILL still never reaches the process group\n\nVERDICT: CHANGES REQUESTED")
         try await Task.sleep(for: .milliseconds(50))
         let verdict = try #require(stopped.review)
-        #expect(verdict.round == 3 && verdict.repeated == true && verdict.stopsHere && verdict.stopReason == Review.repeatLine)
+        #expect(verdict.round == 3 && verdict.repeated == true && verdict.stopsHere && verdict.stopReason == Review.stopLine)
         #expect(stopped.status == .done && stopped.reviewing == nil && stopped.needsYou && stopped.reviewNeedsYou && Push.notice(for: stopped) == .review)
         #expect(object(try API.encode(JobJSON(job: stopped)))["reviewNeedsYou"] as? Bool == true)
         // The author, three reviews, and a round after each of the first two.
@@ -534,12 +534,12 @@ struct ReviewTests {
         #expect(stage?.state == .failed && stage?.reason == "Oby's review found a blocker it asked to fix before. Take it from here.")
         let alert = object(try Push.notification(.review, for: stopped))
         #expect((alert["aps"] as? [String: Any])?["alert"] as? [String: String]
-                == ["title": "Changes requested: Fix oby #75", "body": Review.repeatLine])
+                == ["title": "Changes requested: Fix oby #75", "body": Review.stopLine])
         try await until("the inbox asks the user") { desk.inbox.contains { $0.job == "author" && $0.kind == .review && $0.isOpen } }
         let asked = try #require(desk.inbox.first { $0.job == "author" && $0.kind == .review && $0.isOpen })
-        #expect(asked.text == Review.repeatLine && asked.options == [Inbox.oneMoreRound, Inbox.dismiss])
+        #expect(asked.text == Review.stopLine && asked.options == [Inbox.oneMoreRound, Inbox.dismiss])
 
-        // The user takes it from here, with reviews left: Oby reviews what that round publishes.
+        // The user takes it from here: another round publishes, and Oby reviews no more.
         try desk.message("author", "Signal the whole group.")
         try await until("the author runs for the user") { desk.job("author")?.status == .running }
         let last = try #require(made.agents.last)
@@ -547,8 +547,14 @@ struct ReviewTests {
         last.agent.onEvent(.turnEnded(summary: "fix: signal the group", failed: false))
         last.agent.onEvent(.finished(summary: "fix: signal the group", failed: false))
         try await until("the author publishes") { made.published.count == 4 }
-        let fourth = try await review("Fixed.\n\nVERDICT: APPROVED")
-        #expect(fourth.review?.round == 4 && fourth.review?.verdict == .approved && fourth.review?.repeated == nil && !fourth.needsYou)
+        try await Task.sleep(for: .milliseconds(50))
+        let final = try #require(desk.job("author"))
+        #expect(final.reviewing == nil && final.reviewError == "Oby reviewed it 3 times already: a person reviews it from here.")
+        #expect(desk.jobs.filter { $0.reviewOf == "author" }.count == 3)
+        // Merged by a person: nothing needs you any more.
+        var merged = final
+        merged.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now)
+        #expect(!merged.needsYou && Push.notice(for: merged) == nil)
     }
 
     @Test func aBlockerIsOnlyRepeatedWhenTheFollowUpSaysAgain() {
@@ -558,47 +564,30 @@ struct ReviewTests {
         // Reviews from before #224 say nothing: they stopped at their second, as they did then.
         let old = Review(verdict: .changesRequested, job: "r2", agent: "codex", account: "Work", round: 2)
         #expect(old.repeated == nil && old.stopsHere && old.stopReason == "Oby requested changes 2 times. Take it from here.")
+        // Progress never stops, however many reviews came before.
         var progress = old
         progress.repeated = false
-        #expect(!progress.stopsHere)
-        progress.round = Review.maxRounds
-        #expect(progress.stopsHere)
+        progress.round = 12
+        #expect(!progress.stopsHere && progress.wantsFollowUp)
+        progress.repeated = true
+        #expect(progress.stopsHere && !progress.wantsFollowUp && progress.stopReason == Review.stopLine)
     }
 
-    @Test func afterFiveReviewsTheJobStopsEvenWhileEachMadeProgress() async throws {
-        #expect(Review.maxRounds == 5)
+    @Test func roundsThatEachFixTheLastBlockerAreReviewedPastTheCap() async throws {
+        #expect(Review.maxRounds == 2)
         _ = try await publishAuthor()
-        var stopped = author
-        for round in 1...Review.maxRounds {
-            stopped = try await review("Something else.\n\nBlocking:\n- Problem \(round)\n\nVERDICT: CHANGES REQUESTED")
-            #expect(stopped.review?.round == round && stopped.review?.repeated == false)
-            guard round < Review.maxRounds else { break }
+        // Six reviews, each finding the last blocker fixed and a new one: no stop, and no person needed.
+        for round in 1...6 {
+            let reviewed = try await review("Something else.\n\nBlocking:\n- Problem \(round)\n\nVERDICT: CHANGES REQUESTED")
+            #expect(reviewed.review?.round == round && reviewed.review?.repeated == false && reviewed.review?.wantsFollowUp == true)
+            #expect(!reviewed.reviewNeedsYou && reviewed.reviewError == nil)
             try await roundPublishes(after: round)
         }
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(stopped.status == .done && stopped.reviewing == nil && stopped.review?.stopsHere == true && stopped.reviewNeedsYou)
-        #expect(stopped.review?.blockedBefore == ["Problem 1", "Problem 2", "Problem 3", "Problem 4"])
-        #expect(made.quoted.count == 4 && made.agents.count == 1 + 5 + 4 && made.published.count == 5)
-        #expect(stopped.pipeline.stages.first { $0.id == .review }?.reason == "Oby requested changes 5 times. Take it from here.")
-        try await until("the inbox asks the user") { desk.inbox.contains { $0.job == "author" && $0.kind == .review && $0.isOpen } }
-        #expect(desk.inbox.first { $0.job == "author" && $0.kind == .review && $0.isOpen }?.text == Review.stopLine)
-
-        // The user takes it from here: another round publishes, and Oby reviews no more.
-        try desk.message("author", "Do what the review asks.")
-        try await until("the author runs for the user") { desk.job("author")?.status == .running }
-        let last = try #require(made.agents.last)
-        desk.countCommits = { _, _ in 9 }
-        last.agent.onEvent(.turnEnded(summary: "fix: done", failed: false))
-        last.agent.onEvent(.finished(summary: "fix: done", failed: false))
-        try await until("the author publishes") { made.published.count == 6 }
-        try await Task.sleep(for: .milliseconds(50))
-        let final = try #require(desk.job("author"))
-        #expect(final.reviewing == nil && final.reviewError == "Oby reviewed it 5 times already: a person reviews it from here.")
-        #expect(desk.jobs.filter { $0.reviewOf == "author" }.count == 5)
-        // Merged by a person: nothing needs you any more.
-        var merged = final
-        merged.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now)
-        #expect(!merged.needsYou && Push.notice(for: merged) == nil)
+        let approved = try await review("All fixed.\n\nVERDICT: APPROVED")
+        #expect(approved.review?.round == 7 && approved.review?.verdict == .approved && approved.reviewError == nil && !approved.needsYou)
+        #expect(approved.review?.blockedBefore == ["Problem 1", "Problem 2", "Problem 3", "Problem 4", "Problem 5", "Problem 6"])
+        #expect(made.quoted.count == 6 && made.agents.count == 1 + 7 + 6 && made.published.count == 7)
+        #expect(!desk.inbox.contains { $0.job == "author" && $0.kind == .review && $0.isOpen })
     }
 
     @Test func aReviewThatCantBePostedStillReachesTheAuthor() async throws {
@@ -725,7 +714,7 @@ struct ReviewTests {
         let run = Review.checkRun(review, summary: "Use ```swift``` fences.\n\nVERDICT: CHANGES REQUESTED", head: CheckTests.head)
         #expect(run.name == "Oby review" && run.head == CheckTests.head && run.conclusion == .failure)
         #expect(run.title == "Oby review · Claude Code · Personal: Changes requested")
-        #expect(run.summary.hasPrefix("````\nUse ```swift``` fences.\n\nVERDICT: CHANGES REQUESTED\n````\n\nby Oby: Claude Code reviewed this pull request on the Personal account for Oby, review 2 of at most 5."))
+        #expect(run.summary.hasPrefix("````\nUse ```swift``` fences.\n\nVERDICT: CHANGES REQUESTED\n````\n\nby Oby: Claude Code reviewed this pull request on the Personal account for Oby, review 2."))
         // Built at runtime so this file holds no line the scan would flag.
         let key = "AKIA" + "ABCDEFGHIJKLMNOP"
         let findings = try await Review.scan("### Oby review\n\nThe key \(key) is in the diff.\n")
