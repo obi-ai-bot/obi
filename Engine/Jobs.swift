@@ -234,7 +234,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// words say what it should do (reset the branch, drop the work), so none committed is done.
     /// A job whose pull request was merged or closed and that made commits beyond what it published
     /// fails too, saying so: they have nowhere to go, and the failure alerts the user (Push).
-    static func ending(_ job: Job, _ status: Status, _ summary: String, made: Int?, asked: Bool = false) -> (Status, String) {
+    /// `dirty`: the files its worktree has changed but not committed (#220); then they're the reason.
+    static func ending(_ job: Job, _ status: Status, _ summary: String, made: Int?, asked: Bool = false, dirty: [String] = []) -> (Status, String) {
         // ponytail: only jobs Oby opened the pull request for; on someone else's pull request
         // `made` counts from its head, which `pushed` doesn't.
         if status == .done, job.pr == nil, job.published != nil, let state = job.pullRequest?.state, state != .open,
@@ -243,9 +244,30 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
             return (.failed, "Not published: its pull request was \(state == .merged ? "merged" : "closed"), so \(commits) nowhere to go.\n\n" + summary)
         }
         guard status == .done, made == 0, committing.contains(job.kind), !asked else { return (status, summary) }
+        if !dirty.isEmpty {
+            let said = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (.failed, "Nothing committed: \(Job.listed(dirty)) \(dirty.count == 1 ? "is" : "are") changed in the worktree but not committed."
+                + (said.isEmpty ? "" : "\n\n" + summary))
+        }
         let lines = summary.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
         let reason = lines.first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
         return (.failed, "Nothing committed: \(reason.isEmpty ? "the agent gave no reason." : reason)" + (lines.count > 1 ? "\n" + lines[1] : ""))
+    }
+
+    /// Paths as a sentence names them: "A", "A and B", "A, B and C", at most 10 and how many more.
+    static func listed(_ paths: [String]) -> String {
+        let shown = paths.prefix(10).map { "`\($0)`" } + (paths.count > 10 ? ["\(paths.count - 10) more"] : [])
+        guard let last = shown.last, shown.count > 1 else { return shown.first ?? "" }
+        return shown.dropLast().joined(separator: ", ") + " and " + last
+    }
+
+    /// The files `git status --porcelain` names: a renamed file by its new path.
+    static func changedFiles(porcelain: String) -> [String] {
+        porcelain.split(separator: "\n").compactMap { line in
+            guard line.count > 3 else { return nil }
+            let path = String(line.dropFirst(3))
+            return path.components(separatedBy: " -> ").last
+        }
     }
 
     /// Branch names come from Swift, never from the model.
@@ -1241,11 +1263,22 @@ nonisolated enum Prompts {
         } else if job.maxRounds > 1 {
             lines.append("End your summary with a last line that is exactly `GOAL MET` when the user's goal is fully met, or `GOAL NOT MET: <what's left>` when it isn't.")
         }
+        lines.append(foreground)
         if apple, let line = AppleCheck.agentLine(job) { lines.append(line) }
         lines.append("Finish with a short summary. Its first line is one sentence the user will see in the notch.")
         if job.issue != nil { lines.append(IssueSync.coverageInstruction) }
         lines.append(Inbox.howToAsk)
         return lines.joined(separator: "\n\n")
+    }
+
+    /// Ending a turn is ending the round (#220): work waiting on a background command is never committed.
+    static let foreground = "Run checks in the foreground, and never end a turn waiting on a background command: Oby takes the end of your turn as the end of your work."
+
+    /// What a job hears when its round ended done with nothing committed and `files` changed in its
+    /// worktree (#220): one more round to commit them.
+    static func commitRound(_ job: Job, files: [String]) -> String {
+        let check = job.check.map { "Run `\($0)` in the foreground" } ?? "Run the checks in the foreground"
+        return "Your changes to \(Job.listed(files)) are uncommitted, so this job has nothing committed yet. \(check), commit when they pass, and don't end your turn before the commit exists. Then finish with a short summary."
     }
 
     /// What an agent hears when it takes a job over from `previous` (like "Codex · Deskree"), whose
