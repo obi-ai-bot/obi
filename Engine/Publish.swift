@@ -673,6 +673,15 @@ nonisolated enum Publish {
         }
     }
 
+    /// `git fetch` with `arguments` into `clone` (or a worktree of it), through `fetching`. Throws
+    /// with the last thing git said when it fails.
+    static func gitFetch(_ arguments: [String], into clone: URL) async throws {
+        let result = try await fetching(into: clone) { try await Shell.run(["git", "-C", clone.path, "fetch"] + arguments) }
+        guard result.status == 0 else {
+            throw Shell.Failure(message: "git fetch: \(result.err.split(separator: "\n").last.map(String.init) ?? "exit \(result.status)")")
+        }
+    }
+
     /// Git refused to move a ref because another fetch moved it first: worth trying again.
     static func lostRace(_ err: String) -> Bool {
         ["incorrect old value provided", "cannot lock ref", "unable to update local ref"].contains { err.contains($0) }

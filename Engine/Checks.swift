@@ -732,7 +732,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         if check.isApple {
             try await AppleCheck.fetch(check, bundle: bundle, into: clone)
         } else {
-            try await git(["fetch", "--quiet", "origin", "+refs/pull/\(check.pr)/head:refs/oby/check-\(check.pr)"])
+            try await Publish.gitFetch(["--quiet", "origin", "+refs/pull/\(check.pr)/head:refs/oby/check-\(check.pr)"], into: clone)
         }
         guard (try? await git(["cat-file", "-e", "\(check.head)^{commit}"])) != nil else {
             throw Shell.Failure(message: check.isApple ? "Commit \(check.head.prefix(12)) didn't come from the runner."

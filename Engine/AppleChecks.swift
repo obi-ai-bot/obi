@@ -158,13 +158,13 @@ nonisolated enum AppleCheck {
     /// `bundle` (nothing when it's empty: the commit is on the base).
     static func fetch(_ check: MacCheck, bundle: Data?, into clone: URL) async throws {
         guard let bundle else { throw Shell.Failure(message: "the runner sent no commits.") }
-        @discardableResult func git(_ arguments: [String]) async throws -> String { try await Shell.ok(["git", "-C", clone.path] + arguments) }
-        try await git(["fetch", "--quiet", "origin", "+refs/heads/\(check.base):refs/remotes/origin/\(check.base)"])
+        // One at a time with the clone's other fetches, as a job's are (#235).
+        try await Publish.gitFetch(["--quiet", "origin", "+refs/heads/\(check.base):refs/remotes/origin/\(check.base)"], into: clone)
         guard !bundle.isEmpty else { return }
         let file = FileManager.default.temporaryDirectory.appending(path: "oby-apple-\(check.id)-\(UUID().uuidString).bundle")
         try bundle.write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
-        try await git(["fetch", "--quiet", file.path, "+\(ref(check)):\(ref(check))"])
+        try await Publish.gitFetch(["--quiet", file.path, "+\(ref(check)):\(ref(check))"], into: clone)
     }
 
     // MARK: What the agent reads

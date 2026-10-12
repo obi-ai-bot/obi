@@ -91,6 +91,32 @@ struct FetchTests {
         #expect(git.fetches == 2)
     }
 
+    /// An Apple check fetching the base on the Mac takes its turn with the jobs' fetches into that
+    /// clone, and runs again when it lost a ref race.
+    @Test func anAppleChecksFetchTakesItsTurnAndRetriesARefRace() async throws {
+        var check = MacCheck(id: "ab12cd34", job: "j", repo: "deskree-inc/oby", pr: 0, branch: "oby/build-118", base: "dev",
+                             head: String(repeating: "a", count: 40), round: 1)
+        check.kind = .apple
+        let raced = Git()
+        raced.failures = ["error: cannot lock ref 'refs/remotes/origin/dev': is at 1a2b but expected 3c4d"]
+        try await Shell.$stand.withValue(raced.stand) {
+            try await AppleCheck.fetch(check, bundle: Data(), into: URL(filePath: "/tmp/oby-clone"))
+        }
+        #expect(raced.fetches == 2)
+
+        let git = Git()
+        try await Shell.$stand.withValue(git.stand) {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { try await AppleCheck.fetch(check, bundle: Data(), into: URL(filePath: "/tmp/oby-clone")) }
+                for n in 0..<3 {
+                    group.addTask { try await Publish.fetch("dev", of: Self.job, into: URL(filePath: "/tmp/oby-jobs/\(n)")) }
+                }
+                try await group.waitForAll()
+            }
+        }
+        #expect(git.fetches == 4 && git.most == 1)
+    }
+
     /// Any other failure isn't a race: it fails at once, saying why.
     @Test func anotherFailureIsNotRetried() async throws {
         let git = Git()
