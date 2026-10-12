@@ -164,6 +164,51 @@ struct ClaimTests {
         #expect(desk.job(second.id)?.startCommit == Self.devMerged && made.agents.last?.job.startCommit == Self.devMerged)
     }
 
+    /// #176-like and #198-like jobs both touch Engine/Review.swift: they run side by side (#237).
+    /// #198's agent is told about #176's branch, and #176's claim holds through its review until
+    /// its pull request is merged.
+    @Test func plansForIssuesOnTheSameFileRunSideBySide() async throws {
+        let drafts = try await drafts()
+        let first = desk.dispatch(drafts[0])
+        let second = desk.dispatch(drafts[1])
+        try await until("#176 and #198 run") { desk.job(first.id)?.status == .running && desk.job(second.id)?.status == .running }
+        let running = try #require(desk.job(second.id))
+        #expect(running.status == .running && running.step == "Starting Claude Code")
+        #expect(made.agents.count == 2)
+        let prompt = try #require(made.agents.first { $0.job.issue == 198 }?.agent.prompt)
+        #expect(prompt.contains("Fix 176 (job \(first.id)) on the branch oby/fix-176: both touch Engine/Review.swift"))
+
+        // #176 publishes: its pull request is in review, and still claims the file.
+        try await endDone(176)
+        let published = try #require(desk.job(first.id))
+        #expect(published.published == url.absoluteString && published.holdsClaim)
+        #expect(desk.job(second.id)?.status == .running && made.agents.count == 2)
+
+        // Merged: its claim ends.
+        desk.followed(first.id, published: url.absoluteString, pushed: published.pushed,
+                      status: PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now), error: nil)
+        #expect(desk.job(first.id)?.holdsClaim == false)
+    }
+
+    /// Dismissing the job whose pull request holds the claim lets go of it: a job that starts after
+    /// isn't told about it any more.
+    @Test func dismissingTheClaimingJobLetsGoOfItsClaim() async throws {
+        let drafts = try await drafts()
+        let first = desk.dispatch(drafts[0])
+        try await until("#176 runs") { desk.job(first.id)?.status == .running }
+        try await endDone(176)
+        // Its pull request needs a person (the review stopped): the user lets it go.
+        var stuck = try #require(desk.job(first.id))
+        stuck.status = .failed
+        desk.replace(stuck)
+        #expect(desk.job(first.id)?.holdsClaim == true)
+        try desk.dismiss(first.id)
+        #expect(desk.job(first.id)?.holdsClaim == false)
+        let second = desk.dispatch(drafts[1])
+        try await until("#198 runs") { desk.job(second.id)?.status == .running }
+        #expect(made.agents.last?.agent.prompt.contains("Other jobs are changing the same files") == false)
+    }
+
     /// A waiting job that can't be brought up to date fails, saying why, rather than start on stale code.
     @Test func aWaitingJobThatCantCatchUpFails() async throws {
         desk.maxRunning = 1

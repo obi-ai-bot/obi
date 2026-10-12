@@ -359,12 +359,21 @@ struct LeadTests {
         try await until("all three run") { desk.jobs.filter { $0.status == .running }.count == 3 }
         let seven = try #require(desk.jobs.first { $0.issue == 7 })
         let twelve = try #require(desk.jobs.first { $0.issue == 12 })
+        #expect(seven.status == .running && desk.job(13)?.status == .running)
+        // #12 names Engine/, which holds #7's file: it runs all the same, with nothing waiting.
+        #expect(twelve.status == .running && !twelve.step.hasPrefix("Waiting for"))
+        #expect(made.agents.count == 3 && made.agents.contains { $0.job.issue == 12 })
         #expect(Desk.overlap(twelve, seven) == ["Engine/"] && Desk.overlap(seven, twelve) == ["Engine/Desk.swift"])
         // #12 names Engine/, which holds #7's file: its agent is told about #7, and #13's about nothing.
         let prompt = { (issue: Int) in made.agents.first { $0.job.issue == issue }?.agent.prompt ?? "" }
         #expect(prompt(12).contains("Safe when nobody watches (job \(seven.id)) on the branch \(seven.branch): both touch Engine/"))
         #expect(!prompt(13).contains("Other jobs are changing the same files"))
         try await until("all three are claimed") { made.claims.count == 3 }
+        #expect(made.claims.contains { $0.issue == 12 })
+        // #7 ends: #12 carries on.
+        desk.stop(seven.id)
+        try await until("#7 stops") { desk.jobs.first { $0.issue == 7 }?.status == .stopped }
+        #expect(desk.jobs.first { $0.issue == 12 }?.status == .running && made.agents.count == 3)
         #expect(desk.jobs.first { $0.issue == 12 }?.pipeline.stages.first { $0.id == .work }?.state == .current)
     }
 
