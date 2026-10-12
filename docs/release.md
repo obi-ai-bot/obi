@@ -89,7 +89,7 @@ Then push the commit and the tag: `git push origin HEAD v0.2.0`. Shipped Obys pi
 scripts/release.sh 0.2.0 --dry-run
 ```
 
-A dry run needs no certificate, key or bucket: it archives with ad hoc signing (CI's flags, hardened runtime on), skips the notarizations and the upload, signs the DMG ad hoc, uses a placeholder Sparkle signature when the keychain has no key, writes the appcast to `build/release/appcast.xml`, checks it with `xmllint` and prints the entry. It commits and tags nothing, and leaves the project untouched. Put its output in the pull request.
+A dry run needs no certificate, key or bucket: it archives with ad hoc signing (CI's flags, hardened runtime on), notarizes and uploads nothing, signs the DMG ad hoc, uses a placeholder Sparkle signature when the keychain has no key, writes the appcast to `build/release/appcast.xml`, checks it with `xmllint` and prints the entry. It commits and tags nothing, and leaves the project untouched. Put its output in the pull request.
 
 ## Moving the iPhone and Watch apps to the Deskree team
 

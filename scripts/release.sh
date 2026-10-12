@@ -16,8 +16,8 @@
 #   7. uploads the DMG and appcast.xml to R2 (wrangler, or aws against the R2 endpoint);
 #   8. tags v<version>.
 #
-# --dry-run does everything up to the signatures with ad hoc identities and skips notarization,
-# the upload, the commit and the tag, so it runs on any Mac today. Everything lands in
+# --dry-run does everything up to the signatures with ad hoc identities, and leaves out the
+# notarization, the upload, the commit and the tag, so it runs on any Mac today. Everything lands in
 # build/release/ (gitignored).
 #
 # Credentials come from the keychain (notarytool's profile, Sparkle's key, wrangler's own login,
@@ -256,7 +256,7 @@ main() {
 
     # 3. Notarize and staple the app.
     if $dry_run; then
-        say "Skipping the app's notarization (dry run)"
+        say "Dry run: the app stays ad hoc signed, not notarized"
     else
         say "Notarizing the app (keychain profile $notary_profile)"
         ditto -c -k --keepParent "$app" "$out/Oby.zip"
@@ -283,7 +283,7 @@ main() {
     fi
     if $dry_run; then
         codesign --force --sign - "$dmg"
-        note "signed ad hoc; notarization skipped"
+        note "signed ad hoc, not notarized (dry run)"
     else
         local identity
         identity="$(developer_id_identity "$team")"
