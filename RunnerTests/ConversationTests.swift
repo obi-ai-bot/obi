@@ -144,8 +144,8 @@ struct ConversationTests {
         let headings = ["### Needs you", "### Working", "### In review", "### Done"].compactMap { text.range(of: $0)?.lowerBound }
         #expect(headings == headings.sorted() && headings.count == 4)
         for part in ["User: how is it going?", "Oby: Fine.",
-                     "ab12cd34 · Vault secrets · deskree-inc/oby, issue #60 · Claude Code · running on this Mac · Stage 2 of 5, Work: Round 1 of 1 · started 12 min ago · asked: work on oby #60",
-                     "fa11ed00 · Mac runner notifications · deskree-inc/oby, PR #33 · Claude Code · failed · Stage 2 of 5, Work: Round 1 of 1 · ended 1 min ago · asked: Review oby PR #33",
+                     "ab12cd34 · Vault secrets · deskree-inc/oby, issue #60 · Claude Code · Personal · running on this Mac · Stage 2 of 5, Work: Round 1 of 1 · started 12 min ago · asked: work on oby #60",
+                     "fa11ed00 · Mac runner notifications · deskree-inc/oby, PR #33 · Claude Code · Personal · failed · Stage 2 of 5, Work: Round 1 of 1 · ended 1 min ago · asked: Review oby PR #33",
                      "1e5e1e00 · Job progress screen", "Oby approved · PR https://github.com/deskree-inc/oby/pull/42 open · ended 1 h ago",
                      "3e26ed00 · Inbox first slice", "PR https://github.com/deskree-inc/oby/pull/42 merged · merged 1 min ago · ended 2 h ago",
                      "- Question for job ab12cd34 (Vault secrets, this Mac), waiting 3 min: the question and its options are quoted in work.md",
@@ -200,7 +200,7 @@ struct ConversationTests {
         #expect(try Plan.decode(Data(Self.stop(["zz"]).utf8)).problems(in: context, canary: "zq9") == ["zz isn't a job Oby can stop"])
         var dispatch = try Plan.decode(Data(Self.reply("ok").utf8))
         dispatch.jobs = ["ab12cd34"]
-        #expect(dispatch.problems(in: context, canary: "zq9") == ["only stop_agent names jobs"])
+        #expect(dispatch.problems(in: context, canary: "zq9") == ["only stop_agent, move_job, answer_permission and set_mode name jobs"])
         // Stopping everything is said in so many words, never by naming no job.
         #expect(try Plan.decode(Data(Self.stop([]).utf8)).problems(in: context, canary: "zq9").isEmpty)
         var bare = try Plan.decode(Data(Self.stop([]).utf8))
@@ -279,7 +279,7 @@ struct ConversationTests {
         brain.plans = [Self.stop(["fa5a5a5a"]), Self.stop(["fa5a5a5a"]), Self.stop(["fa5a5a5a"])]
         #expect(await desk.converse("stop the watch job") == .reply("Stopped Watch home."))
         #expect(stopped.ids == ["fa5a5a5a"])
-        #expect(brain.prompts.first?.contains("fa5a5a5a · Watch home · deskree-inc/oby, issue #60 · Claude Code · running on tetrix-lab") == true)
+        #expect(brain.prompts.first?.contains("fa5a5a5a · Watch home · deskree-inc/oby, issue #60 · Claude Code") == true && brain.prompts.first?.contains("running on tetrix-lab") == true)
         // The runner couldn't: Oby says so instead of "Stopped".
         stopped.failing = true
         #expect(await desk.converse("stop it") == .reply("Couldn't stop Watch home: the runner hung up."))
@@ -479,17 +479,153 @@ struct ConversationTests {
         let url = folder.appending(path: "thread.sqlite")
         do {
             let store = JobStore(url: url)
-            for n in 0..<(Conversation.kept + 5) {
-                store.save(Turn(id: "t\(n)", date: Date(timeIntervalSince1970: 1_791_582_173 + Double(n)), who: n % 2 == 0 ? .user : .oby, text: "turn \(n)"))
+            for n in 0..<(Conversation.stored + 5) {
+                store.save(Turn(id: "t\(n)", date: Date(timeIntervalSince1970: 1_791_582_173 + Double(n)), who: n % 2 == 0 ? .user : .oby, text: "turn \(n)",
+                                jobs: n == 7 ? ["ab12cd34"] : nil))
             }
         }
         let store = JobStore(url: url)
         let turns = store.conversation()
-        #expect(turns.count == Conversation.kept)
-        #expect(turns.first?.text == "turn 5" && turns.last?.text == "turn \(Conversation.kept + 4)")
+        // The last 500, the oldest pruned (#11); the brain still reads only the last 50.
+        #expect(Conversation.stored == 500 && Conversation.kept == 50)
+        #expect(turns.count == Conversation.stored)
+        #expect(turns.first?.text == "turn 5" && turns.last?.text == "turn \(Conversation.stored + 4)")
         #expect(turns.first?.who == .oby && turns.last?.who == .user)
+        #expect(turns.first { $0.id == "t7" }?.jobs == ["ab12cd34"] && turns.first?.jobs == nil)
         store.delete(turn: "t5")
         #expect(JobStore(url: url).conversation().first?.text == "turn 6")
+    }
+
+    // MARK: One thread for every device (#11)
+
+    /// `GET /v1/conversation` pages the runner's thread, oldest first, by a turn's id; a dispatch
+    /// links its job to the turn that proposed it; and a `turn` event follows every turn added or changed.
+    @Test func theConversationEndpointPagesTheThreadAndItsEventFollowsIt() async throws {
+        let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
+        final class Heard: @unchecked Sendable { var events: [String] = [] }
+        let heard = Heard()
+        let stream = api.follow()
+        let listening = Task { for await event in stream { heard.events.append(event) } }
+        defer { listening.cancel() }
+        brain.plans = [Self.reply("One."), Self.reply("Two."), Self.reply("Three."),
+                       #"{"action":"dispatch","reply":"Oby will review PR #12 in oby.","question":null,"jobs":[],"dispatches":[{"agent":"auto","account":"auto","repo":"deskree-inc/oby","base_branch":null,"pr":12,"issue":null,"epic":null,"kind":"review","task":"Review PR #12","inputs":[],"rounds":1,"check":null,"complexity":"routine"}]}"#]
+        for words in ["first?", "second?", "third?"] { _ = await desk.converse(words) }
+        let talk = await desk.converse("review PR 12")
+        guard case .plan(let drafts) = talk, let draft = drafts.first else { return #expect(Bool(false), "no plan: \(talk)") }
+        // Dispatched: the job joins Oby's turn, which is saved again and sent again.
+        let job = try desk.dispatch(draft.job.id, branch: draft.job.branch, account: draft.job.account)
+        #expect(desk.turns.last?.who == .oby && desk.turns.last?.jobs == [job.id])
+        #expect(desk.turns.count == 8 && desk.turns.dropLast().allSatisfy { $0.jobs == nil })
+        #expect(store().conversation().last?.jobs == [job.id])
+        try await until("the turn events come") { heard.events.filter { $0.hasPrefix("event: turn\n") }.count == 9 }
+        let turnEvents = heard.events.filter { $0.hasPrefix("event: turn\n") }
+        let first = object(Data(String(turnEvents[0].dropFirst("event: turn\ndata: ".count)).utf8))
+        #expect(first["who"] as? String == "user" && first["text"] as? String == "first?" && first["jobs"] as? [String] == [] && first["at"] is String)
+        let linked = object(Data(String(turnEvents[8].dropFirst("event: turn\ndata: ".count)).utf8))
+        #expect(linked["id"] as? String == desk.turns.last?.id && linked["jobs"] as? [String] == [job.id] && linked["text"] as? String == "Oby will review PR #12 in oby.")
+
+        let app = Application(router: api.router(owner: "well@example.com"))
+        try await app.test(.router) { [owner, desk] client in
+            func get(_ uri: String) async throws -> (HTTPResponse.Status, [[String: Any]]) {
+                try await client.execute(uri: uri, method: .get, headers: owner) { response in
+                    (response.status, (try? JSONSerialization.jsonObject(with: Data(response.body.readableBytesView)) as? [[String: Any]]) ?? [])
+                }
+            }
+            @MainActor func ids() -> [String] { desk.turns.map(\.id) }
+            let all = await ids()
+            // The whole thread, oldest first, each turn as the API promises it.
+            let (status, turns) = try await get("/v1/conversation")
+            #expect(status == .ok && turns.count == 8)
+            #expect(turns.map { $0["id"] as? String } == all)
+            #expect(turns.map { $0["text"] as? String } == ["first?", "One.", "second?", "Two.", "third?", "Three.", "review PR 12", "Oby will review PR #12 in oby."])
+            #expect(turns.map { $0["who"] as? String } == ["user", "oby", "user", "oby", "user", "oby", "user", "oby"])
+            #expect(turns.allSatisfy { Set($0.keys) == ["id", "who", "text", "at", "jobs"] && ($0["jobs"] as? [String]) != nil })
+            #expect(turns.last?["jobs"] as? [String] == [job.id])
+            #expect(try #require(turns.first?["at"] as? String).hasSuffix("Z"))
+            // The latest 3, then the 3 before the oldest shown, then what's left.
+            let (_, latest) = try await get("/v1/conversation?limit=3")
+            #expect(latest.map { $0["id"] as? String } == Array(all.suffix(3)))
+            let (_, older) = try await get("/v1/conversation?limit=3&before=\(all[5])")
+            #expect(older.map { $0["id"] as? String } == Array(all[2..<5]))
+            let (_, rest) = try await get("/v1/conversation?limit=3&before=\(all[2])")
+            #expect(rest.map { $0["id"] as? String } == Array(all[0..<2]))
+            #expect(try await get("/v1/conversation?before=\(all[0])").1.isEmpty)
+            // A limit is 1 to 500; an id that isn't in the thread is 404.
+            #expect(try await get("/v1/conversation?limit=0").1.count == 1)
+            #expect(try await get("/v1/conversation?limit=9999").1.count == 8)
+            let (missing, _) = try await get("/v1/conversation?before=nope")
+            #expect(missing == .notFound)
+        }
+    }
+
+    /// The Lead's reply carries the jobs it started, so the window shows them under it.
+    @Test func theLeadsReplyLinksTheJobsItStarted() async throws {
+        final class QuickLead: LeadAdapter, @unchecked Sendable {
+            let name = "quick"
+            func turn(system: String, user: String, schema: Data, in directory: URL, timeout: TimeInterval) async throws -> Data {
+                Data(#"{"action":"start_jobs","reply":"","question":null,"jobs":[{"repo":"deskree-inc/oby","issue":7,"kind":"build","title":"Safe when nobody watches","goal":"Implement F3.","files":["Engine/Desk.swift"],"check":"swift test","out_of_scope":""}]}"#.utf8)
+            }
+        }
+        desk.makeLead = { _ in [QuickLead()] }
+        desk.leadRoot = folder.appending(path: "leads")
+        desk.readBoard = { _ in
+            Board(title: "Oby — Roadmap", number: 1, owner: "well-prado", items: [
+                BoardItem(repo: "deskree-inc/oby", number: 7, title: "F3 Safe when nobody is watching", url: "https://github.com/deskree-inc/oby/issues/7", status: "Todo", labels: ["feature"]),
+            ], user: "well-prado")
+        }
+        let talk = await desk.converse("work on the roadmap")
+        guard case .reply(let text) = talk else { return #expect(Bool(false), "\(talk)") }
+        #expect(text.hasPrefix("Started 1 job: Safe when nobody watches (#7)."))
+        let started = try #require(desk.jobs.first?.id)
+        #expect(desk.turns.last?.jobs == [started] && desk.turns.first?.jobs == nil)
+        // The next reply doesn't carry them again.
+        _ = await desk.converse("thanks")
+        #expect(desk.turns.last?.jobs == nil)
+    }
+
+    /// The brain's reply never says nothing is running while the header counts agents working,
+    /// here or on the runner: Oby answers with the count the header shows instead (#11).
+    @Test func theReplyNeverContradictsTheHeaderAboutRunningJobs() async throws {
+        var away = vaultJob()
+        away.id = "fa5a5a5a"
+        away.title = "Watch home"
+        away.status = .running
+        desk.elsewhere = { [Briefing.Place(name: "tetrix-lab", jobs: [away], inbox: [])] }
+        desk.enqueue(vaultJob())
+        try await until("the job runs") { desk.jobs.first?.status == .running }
+        brain.plans = [Self.reply("No jobs are running right now.")]
+        #expect(await desk.converse("anything running?") == .reply("2 agents are working: Vault secrets on this Mac, Watch home on tetrix-lab."))
+        // The briefing said so first, in the same count as the header.
+        let briefing = desk.briefing(turns: [])
+        #expect(briefing.working == 2 && briefing.text.contains("Working now: 2 agents are working: Vault secrets on this Mac, Watch home on tetrix-lab."))
+        #expect(brain.systems.last?.contains("never say that nothing is running") == true)
+        // Other replies pass as they are, and so does this one once nothing runs.
+        brain.plans = [Self.reply("Vault secrets is running its tests.")]
+        #expect(await desk.converse("how is it going?") == .reply("Vault secrets is running its tests."))
+        _ = desk.stopAll()
+        desk.elsewhere = { [] }
+        brain.plans = [Self.reply("No jobs are running right now.")]
+        #expect(await desk.converse("anything running?") == .reply("No jobs are running right now."))
+        #expect(desk.briefing(turns: []).text.contains("Working now: No agent is working right now."))
+        for said in ["No jobs are running right now.", "Nothing is running.", "There are no agents working.", "Oby isn't running anything at the moment.",
+                     "No running jobs.", "There's nothing in progress.", "Oby is not running any jobs."] {
+            #expect(Briefing.contradicts(said), "\(said)")
+        }
+        // A reply about something else is Oby's own to give, whatever runs: only "no job is
+        // running" is a contradiction, never "no jobs failed" or "no jobs waiting for review".
+        for said in ["Vault secrets is running its tests.", "2 agents are working.", "No jobs failed this week.", "Nothing needs you.",
+                     "There are no jobs that failed today.", "There are no jobs waiting for review.",
+                     "No jobs failed; Vault secrets is still running.", "There isn't any work that needs you.",
+                     "No jobs are waiting for your review, and nothing failed.", "There are no jobs in review."] {
+            #expect(!Briefing.contradicts(said), "\(said)")
+        }
+        // And such a reply reaches the user as it is while agents work.
+        var again = vaultJob()
+        again.id = "a6a1a6a1"
+        desk.enqueue(again)
+        try await until("the job runs") { desk.jobs.first?.status == .running }
+        brain.plans = [Self.reply("No jobs failed; Vault secrets is still running.")]
+        #expect(await desk.converse("did anything fail?") == .reply("No jobs failed; Vault secrets is still running."))
     }
 
     // MARK: The runner's API

@@ -25,27 +25,47 @@ final class RunnerFeed {
 
     private(set) var jobs: [Job] = [] {
         didSet {
-            let count = jobs.count(where: \.isActive)
+            let count = jobs.count(where: \.isWorking)
             if count != working { working = count }
+            let queued = jobs.count(where: \.isWaiting)
+            if queued != waiting { waiting = queued }
         }
     }
-    /// Agents working on the runner now. The closed notch reads this, not `jobs`, so a new step
-    /// doesn't redraw it.
+    /// Agents working on the runner now (jobs waiting their turn aren't, #238). The closed notch
+    /// reads this, not `jobs`, so a new step doesn't redraw it.
     private(set) var working = 0
+    /// The runner's jobs queued behind something (`Job.waiting`).
+    private(set) var waiting = 0
     /// What waits in the runner's inbox, put-off items too, oldest first: answered on the iPhone,
     /// it goes from here too.
     private(set) var inbox: [InboxItem] = []
+    /// Oby's plain words for each of those items (#65), which Engine's InboxItem doesn't read, by item id.
+    private(set) var inboxWords: [String: InboxWords] = [:]
     /// The runner's accounts and their usage, as it last said: the brain tells them too.
     private(set) var accounts: [AccountState] = []
+    /// What each job carries that Engine's Job doesn't read yet (its mode, the permission it waits
+    /// on, its question's recommended option and plan), by job id.
+    private(set) var extras: [String: RunnerJobExtras] = [:]
+    /// The mode the runner's new jobs get by default, or nil from a runner without modes.
+    private(set) var defaultMode: RunnerMode?
     /// The name the runner reports in /v1/status, like "tetrix-lab".
     private(set) var host: String?
     /// When Clear done was last pressed, here or on the iPhone (the runner's clock), or nil: the
     /// island hides the jobs that finished by then, the runner's and this Mac's alike.
     private(set) var clearedAt: Date?
+    /// How the line to the runner is: Settings › Runner says it.
+    private(set) var connection = RunnerConnection.connecting
     /// The runner didn't answer the last try; the feed keeps trying.
-    private(set) var down = false
+    var down: Bool { if case .offline = connection { true } else { false } }
+    /// The model and effort the runner's jobs use, as it last said (Settings › Models).
+    private(set) var models: ModelSettings?
     /// Merge checks this Mac runs for the runner (Settings › Runner, on by default).
     let checks = MacChecks()
+    /// This Mac's Touch ID key, registered on every connection: with it, the runner's jobs publish from here.
+    let device = MacDevice()
+    /// The runner's conversation, read in pages and followed over `turn` events, for the window's
+    /// thread (Shared/ConversationModel.swift): one thread for every device (#11).
+    let conversation = ConversationModel()
     /// A job's notice just changed to something that needs the user: the notch's heads-up.
     @ObservationIgnored var onNotice: (Job, Notice) -> Void = { _, _ in }
 
@@ -55,6 +75,12 @@ final class RunnerFeed {
     /// What each job's alert last said, or nil until the first list arrives: what the jobs already
     /// need when Oby starts isn't news.
     @ObservationIgnored private var notified: [String: Notice]?
+    /// The runner's jobs whose screen the island shows: new lists keep them even when they're
+    /// older than the latest 50, as on the iPhone.
+    @ObservationIgnored private var onScreen: Set<String> = []
+    /// How many times Settings › Runner changed: an answer from before the last change is the
+    /// other runner's, and is dropped.
+    @ObservationIgnored private var runnerChanges = 0
 
     var runner: Runner? { Self.runner(url ?? "") }
     var active: [Job] { jobs.filter(\.isActive) }
@@ -66,6 +92,13 @@ final class RunnerFeed {
 
     static func runner(_ url: String) -> Runner? {
         URL(string: url.trimmingCharacters(in: .whitespaces)).flatMap { $0.host() == nil ? nil : Runner(base: $0) }
+    }
+
+    init() {
+        conversation.page = { [weak self] before, limit in
+            guard let runner = self?.runner else { return [] }
+            return try await runner.conversation(before: before, limit: limit)
+        }
     }
 
     func start() {
@@ -92,16 +125,9 @@ final class RunnerFeed {
         let url = UserDefaults.standard.string(forKey: "runnerURL") ?? ""
         guard again || url != self.url else { return }
         let first = self.url == nil
-        if url != self.url {
-            jobs = []
-            inbox = []
-            accounts = []
-            host = nil
-            clearedAt = nil
-            notified = nil
-        }
+        if url != self.url { forget() }
         self.url = url
-        down = false
+        connection = .connecting
         loop?.cancel()
         loop = nil
         guard let runner = Self.runner(url) else { return }
@@ -109,6 +135,23 @@ final class RunnerFeed {
             if !first { try? await Task.sleep(for: .seconds(1)) }
             await run(runner)
         }
+    }
+
+    /// Another runner: nothing the last one said holds, and what's still on its way from it is dropped.
+    func forget() {
+        runnerChanges += 1
+        jobs = []
+        inbox = []
+        inboxWords = [:]
+        accounts = []
+        models = nil
+        extras = [:]
+        defaultMode = nil
+        host = nil
+        clearedAt = nil
+        notified = nil
+        conversation.forget()
+        device.reset()
     }
 
     /// Follows the runner's events and, once it's following, fetches the jobs and the inbox; after
@@ -124,34 +167,81 @@ final class RunnerFeed {
                     case .connected:
                         // Status every time: a Clear done while the connection was down is in it.
                         let status = try await runner.status()
-                        let list = try await runner.jobs()
-                        let items = try await runner.inbox()
+                        let (list, extras) = try await runner.jobsWithExtras()
+                        let (items, words) = try await runner.inboxWithWords()
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
                         host = status.runner.host
                         clearedAt = status.clearedAt
                         accounts = status.accounts
-                        take(list)
+                        models = status.models
+                        defaultMode = RunnerMode(status.permissions?.mode)
+                        self.extras = extras
+                        await take(list, from: runner)
+                        // Settings › Runner changed while the open jobs were fetched again.
+                        try Task.checkCancellation()
                         inbox = items
-                        down = false
+                        inboxWords = words
+                        // The thread's latest page every time too: what was said from the iPhone
+                        // while the connection was down is in it.
+                        await conversation.reload()
+                        try Task.checkCancellation()
+                        connection = .live
                         wait = 1
                         Self.ask()
                         checks.look(runner)
-                    case .job(let job): apply(job)
+                        register(runner)
+                    case .job(let job, let extras):
+                        if let extras { self.extras[job.id] = extras }
+                        apply(job)
                     case .cleared(let date): clearedAt = date
-                    case .inbox(let item): apply(item)
+                    case .inbox(let item, let words):
+                        if let words { inboxWords[item.id] = words }
+                        apply(item)
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
+                    case .turn(let turn): conversation.apply(turn)
                     }
                 }
             } catch {
                 if Task.isCancelled { return }
                 if !down { Logger.feed.error("following the runner failed: \(error.localizedDescription, privacy: .public)") }
-                down = true
+                connection = .offline(error.localizedDescription)
             }
             try? await Task.sleep(for: .seconds(wait))
             wait = min(wait * 2, 30)
         }
+    }
+
+    /// Registers this Mac's publishing key, as the iPhone does on each connection. A runner whose
+    /// pairing is closed answers 403: Settings › Runner shows its line, with Try again.
+    func register(_ runner: Runner? = nil) {
+        guard let runner = runner ?? self.runner else { return }
+        Task {
+            do { try await device.register(with: runner) } catch {
+                Logger.feed.error("registering this Mac failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// The runner's exact sentence for publishing a job: Publish shows it, and Touch ID approves it.
+    func publishAction(_ id: String) async throws -> String {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to publish it.") }
+        return try await runner.publishAction(id)
+    }
+
+    /// Publishes a runner's job with that sentence, after Touch ID; the runner pushes and opens the pull request.
+    @discardableResult
+    func publish(_ id: String, action: String) async throws -> URL {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to publish it.") }
+        let url = try await device.publish(id, action: action, with: runner)
+        // Its event brings the rest; until then it's published here too.
+        if var job = jobs.first(where: { $0.id == id }) {
+            job.published = url.absoluteString
+            job.publishError = nil
+            apply(job)
+        }
+        return url
     }
 
     /// Clear done: the runner records the time, and the island here and Home on the iPhone hide
@@ -161,16 +251,48 @@ final class RunnerFeed {
         clearedAt = try await runner.clear()
     }
 
+    /// Saves the model and effort the runner's jobs use (Settings › Models).
+    func setModels(_ models: ModelSettings) async throws {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+        self.models = try await runner.setModels(models)
+    }
+
     /// Settles one of the runner's inbox items: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
         guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to answer it.") }
         apply(try await runner.settle(id, answer: answer, done: done, later: later))
     }
 
+    /// Changes a runner job's mode (its screen's Mode menu): a permission it waits on that the new
+    /// mode allows is answered.
+    func setMode(_ id: String, _ mode: RunnerMode) async throws {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to change it.") }
+        let job = try await runner.setMode(id, mode)
+        extras[id, default: RunnerJobExtras(id: id)].mode = mode.rawValue
+        apply(job)
+    }
+
+    /// Allow, Always allow or Deny on what a runner job's agent waits for; words go with a deny.
+    func answer(_ id: String, _ decision: RunnerPermission.Decision, message: String? = nil) async throws {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to answer it.") }
+        guard let permission = extras[id]?.permission else { return }
+        let job = try await runner.answer(id, permission: permission.id, decision, message: message)
+        // The job's own event brings the next one, if any.
+        if extras[id]?.permission?.id == permission.id { extras[id]?.permission = nil }
+        apply(job)
+    }
+
+    /// Settings › Permissions: the mode the runner's new jobs get.
+    func setDefaultMode(_ mode: RunnerMode) async throws {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+        try await runner.setDefaultMode(mode)
+        defaultMode = mode
+    }
+
     /// An inbox item as the runner last said it: one that's done leaves the list.
     func apply(_ item: InboxItem) {
         inbox.removeAll { $0.id == item.id }
-        if item.isOpen { inbox.append(item) }
+        if item.isOpen { inbox.append(item) } else { inboxWords[item.id] = nil }
     }
 
     /// The runner's answer to Stop or a message, or one of its events: the job with that id.
@@ -179,12 +301,66 @@ final class RunnerFeed {
         noticeChanges()
     }
 
-    /// The whole list, on every (re)connection: what changed while the connection was down alerts now.
-    private func take(_ list: [Job]) {
+    /// Asks the runner something about its job `id` (stop, dismiss, a message, a move): when it
+    /// answers 404, it has no such job, and the job leaves the lists here, its alert too (#223).
+    func about<T>(_ id: String, _ call: (Runner) async throws -> T) async throws -> T {
+        guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+        do {
+            return try await call(runner)
+        } catch let error as RunnerError {
+            gone(id, error.status)
+            throw error
+        }
+    }
+
+    /// The runner answered `status` about the job `id`: on a 404 the job goes from here.
+    private func gone(_ id: String, _ status: Int?) {
+        guard status == 404 else { return }
+        jobs = JobList.answered(status, about: id, in: jobs, id: \.id)
+        extras[id] = nil
+        onScreen.remove(id)
+        notified?[id] = nil
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
+    }
+
+    /// A job's screen opened or closed on the island: while it's open, new lists keep its job.
+    func showing(_ id: String, _ shown: Bool) {
+        if shown { onScreen.insert(id) } else { onScreen.remove(id) }
+    }
+
+    /// A job older than the list's 50 (an inbox item or an alert opened it): fetched, and kept
+    /// among the others in age order.
+    func fetch(_ id: String, from runner: Runner? = nil) async throws {
+        guard !jobs.contains(where: { $0.id == id }) else { return }
+        guard let runner = runner ?? self.runner else { throw RunnerError(message: "Set the runner's URL in Settings to open it.") }
+        let asked = runnerChanges
+        let job: Job
+        do { job = try await runner.job(id) } catch let error as RunnerError {
+            if runnerChanges == asked { gone(id, error.status) }
+            throw error
+        }
+        // Settings › Runner changed while it was on its way: it's the other runner's job.
+        guard runnerChanges == asked, !jobs.contains(where: { $0.id == id }) else { return }
+        jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created)
+        noticeChanges()
+    }
+
+    /// The whole list, the latest 50, on every (re)connection: what changed while the connection
+    /// was down alerts now. A job whose screen is open stays, fetched again so it's current.
+    private func take(_ fresh: [Job], from runner: Runner) async {
+        let (list, refetch) = JobList.keeping(fresh, old: jobs, onScreen: onScreen, id: \.id, created: \.created)
         jobs = list
+        let asked = runnerChanges
+        for id in refetch {
+            let job: Job?
+            do { job = try await runner.job(id) } catch { job = nil; if runnerChanges == asked { gone(id, (error as? RunnerError)?.status) } }
+            // Settings › Runner changed meanwhile: these are the other runner's.
+            guard runnerChanges == asked, !Task.isCancelled else { return }
+            if let job { jobs = JobList.placed(job, in: jobs, id: \.id, created: \.created) }
+        }
         noticeChanges()
         // Alerts left in Notification Center, from before a drop or a restart, whose job needs nothing now.
-        let gone = list.filter { Self.notice(for: $0) == nil }.map(\.id)
+        let gone = jobs.filter { Self.notice(for: $0) == nil }.map(\.id)
         if !gone.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: gone) }
     }
 
@@ -249,7 +425,7 @@ final class RunnerFeed {
     static func body(_ notice: Notice, for job: Job) -> String {
         let line = job.summary.split(separator: "\n").first.map(String.init)
         if notice == .ready { return job.publishError ?? line ?? "Done" }
-        if notice == .review { return Review.stopLine }
+        if notice == .review { return job.review?.stopReason ?? Review.stopLine }
         if notice == .question, let question = job.question { return question.text }
         if notice == .merge { return job.mergeError ?? job.macCheck.map { $0.problem ?? $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? "Not merged" }
         return line ?? job.status.rawValue.capitalized
@@ -261,12 +437,16 @@ final class RunnerFeed {
     /// so a newer notice replaces the older one.
     static let jobKey = "job"
 
-    /// The runner's categories: "ready" for a job waiting for Publish, "job" for the rest. The Mac
-    /// can't publish a runner's job (that's the iPhone's Face ID), so both only open it.
+    /// The "ready" alert's Publish: the island opens on the job, shows the runner's sentence, and asks for Touch ID.
+    static let publishButton = "publish"
+
+    /// The runner's categories: "ready" for a job waiting for Publish, with Publish and Open, as the
+    /// iPhone's; "job" for the rest, which only opens it.
     static func registerCategories() {
         let open = UNNotificationAction(identifier: "open", title: "Open", options: [.foreground])
+        let publish = UNNotificationAction(identifier: publishButton, title: "Publish with Touch ID", options: [.foreground])
         UNUserNotificationCenter.current().setNotificationCategories([
-            UNNotificationCategory(identifier: "ready", actions: [open], intentIdentifiers: []),
+            UNNotificationCategory(identifier: "ready", actions: [publish, open], intentIdentifiers: []),
             UNNotificationCategory(identifier: "job", actions: [open], intentIdentifiers: []),
         ])
     }

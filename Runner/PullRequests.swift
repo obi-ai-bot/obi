@@ -10,7 +10,7 @@ final class PullRequests {
     /// Includes failed attempts, so an unavailable GitHub isn't hammered on every wake-up.
     private var attempted: [String: (url: String, date: Date)] = [:]
     var read: ([String]) async throws -> Data = { arguments in
-        let result = try await Shell.run(arguments, env: ["GH_PROMPT_DISABLED": "1"], timeout: 30)
+        let result = try await Shell.run(arguments, env: ["GH_PROMPT_DISABLED": "1"], timeout: 30, as: .app)
         guard result.status == 0 else {
             // Don't store arbitrary tool output (it can contain credentials or GitHub text).
             throw Shell.Failure(message: "Couldn't refresh the pull request (gh exit \(result.status)).")
@@ -34,6 +34,21 @@ final class PullRequests {
                 let data = try await read(arguments)
                 let status = try Self.decode(data, at: now)
                 desk.followed(job.id, published: url, pushed: job.pushed, status: status, error: nil)
+                // A job the list doesn't hold changes without `Desk.replace`: a merge outside Oby is still an intervention.
+                if !desk.lists(job.id) {
+                    var seen = job
+                    seen.pullRequest = status
+                    desk.failureLog.observe(seen)
+                }
+                // Xcode Cloud's results on that head (#122), read with the same login.
+                if status.state == .open, let head = status.head {
+                    do {
+                        let cloud = try await XcodeCloud.fetch(repo: job.repo, head: head, at: now, read: read)
+                        await desk.cloudObserved(job.id, published: url, pushed: job.pushed, head: head, result: cloud)
+                    } catch {
+                        await desk.cloudObserved(job.id, published: url, pushed: job.pushed, head: head, result: nil, error: true)
+                    }
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 desk.followed(job.id, published: url, pushed: job.pushed, status: nil,
@@ -53,7 +68,7 @@ final class PullRequests {
         guard parts.count == 4, "\(parts[0])/\(parts[1])" == job.repo, parts[2] == "pull",
               let number = Int(parts[3]), number > 0 else { throw Shell.Failure(message: "Invalid published pull request.") }
         return ["gh", "pr", "view", String(number), "--repo", job.repo,
-                "--json", "state,reviewDecision,mergedAt,baseRefName"]
+                "--json", "state,reviewDecision,mergedAt,baseRefName,headRefOid"]
     }
 
     nonisolated static func decode(_ data: Data, at now: Date) throws -> PullRequestStatus {
@@ -62,6 +77,7 @@ final class PullRequests {
             var reviewDecision: String?
             var mergedAt: Date?
             var baseRefName: String
+            var headRefOid: String?
         }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -73,6 +89,7 @@ final class PullRequests {
         }
         return PullRequestStatus(state: value.state,
                                  reviewDecision: value.reviewDecision.flatMap(PullRequestStatus.Review.init(rawValue:)),
-                                 base: value.baseRefName, mergedAt: value.mergedAt, checkedAt: now)
+                                 base: value.baseRefName, mergedAt: value.mergedAt, checkedAt: now,
+                                 head: value.headRefOid.flatMap { $0.isEmpty ? nil : $0 })
     }
 }

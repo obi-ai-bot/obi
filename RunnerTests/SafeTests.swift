@@ -380,6 +380,57 @@ struct HaltTests {
         #expect(getpgid(process.processIdentifier) != getpgrp())
     }
 
+    /// `ended` returns once the process has ended, and right away after that: a moved job's new agent
+    /// waits on it for the one it replaces (#118).
+    @Test(.timeLimit(.minutes(1)))
+    func endedWaitsForTheProcess() async throws {
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/sleep")
+        process.arguments = ["30"]
+        let group = try ProcessGroup.run(process)
+        let ended = Ended()
+        let waiting = Task {
+            await group.ended()
+            ended.mark()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(ended.at == nil)
+        group.end(after: Halt.stopping)
+        await waiting.value
+        #expect(ended.at != nil)
+        await group.ended()
+    }
+
+    /// The process dies on SIGTERM, but a child that ignores it lives until `end`'s SIGKILL: `ended`
+    /// waits for that child too, or a moved job's new agent would work beside it.
+    @Test(.timeLimit(.minutes(1)))
+    func endedWaitsForWhatTheProcessLeftInItsGroup() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let child = folder.appending(path: "child.pid")
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/sh")
+        // The child writes its pid once it ignores SIGTERM (and `sleep` keeps ignoring it): written by
+        // the shell, the pid could come before the trap, and SIGTERM would end the child at once.
+        process.arguments = ["-c", "sh -c 'trap \"\" TERM; echo $$ > \"\(child.path)\"; exec sleep 30' & wait"]
+        let group = try ProcessGroup.run(process)
+        for _ in 0..<200 where (try? String(contentsOf: child, encoding: .utf8))?.isEmpty ?? true { try await Task.sleep(for: .milliseconds(10)) }
+        let sleeper = try #require(Int32((try String(contentsOf: child, encoding: .utf8)).trimmingCharacters(in: .whitespacesAndNewlines)))
+        defer { _ = kill(sleeper, SIGKILL) }
+
+        let start = ContinuousClock.now
+        group.end(after: 0.5)
+        await group.ended()
+        // The shell went at once; its child only with the SIGKILL, half a second later.
+        #expect(ContinuousClock.now - start >= .milliseconds(450))
+        #expect(!ProcessGroup.running(group: process.processIdentifier))
+        #if os(Linux)
+        let state = (try? String(contentsOfFile: "/proc/\(sleeper)/stat", encoding: .utf8))
+            .flatMap { $0.split(separator: ")").last?.split(separator: " ").first }
+        #expect(state == nil || state == "Z", "the child is still running: \(state ?? "")")
+        #endif
+    }
+
     /// Started from a Dispatch worker, which blocks nearly every signal, a process still blocks none:
     /// SIGTERM reaches it.
     @Test(.timeLimit(.minutes(1)))
@@ -421,6 +472,10 @@ struct HaltTests {
         #expect(try String(contentsOf: said, encoding: .utf8) == "term\n")
     }
 
+    /// A leftover that says `leftover` on the output if it ends by itself, after its sleep: output
+    /// without it was cut by the kill, however slow the machine (#193).
+    func leftover(_ mark: String) -> String { "\(mark) && echo leftover & echo started" }
+
     /// The agent ended by itself, but a tool it started still runs and holds its output: that's
     /// killed, so reading the output ends (a review sat running for 2.5 hours on a test's leftover).
     @Test(.timeLimit(.minutes(1)))
@@ -428,13 +483,14 @@ struct HaltTests {
         let mark = mark()
         let process = Process(), out = Pipe()
         process.executableURL = URL(filePath: "/bin/sh")
-        process.arguments = ["-c", "\(mark) & echo started"]
+        process.arguments = ["-c", leftover(mark)]
         process.standardOutput = out
         _ = try ProcessGroup.run(process)
         let start = ContinuousClock.now
         let read = try await Task.detached { try out.fileHandleForReading.readToEnd() }.value
         #expect(read.map { String(decoding: $0, as: UTF8.self) } == "started\n")
-        #expect(ContinuousClock.now - start < .seconds(10))
+        // Under the leftover's 31 s: killed, not waited out, however busy the machine (13 s, #193).
+        #expect(ContinuousClock.now - start < .seconds(30))
         #expect(try await gone(mark))
     }
 
@@ -443,9 +499,9 @@ struct HaltTests {
     func aChecksLeftoversDontHoldItsOutput() async throws {
         let mark = mark()
         let start = ContinuousClock.now
-        let result = try await Shell.run(["sh", "-c", "\(mark) & echo started"])
+        let result = try await Shell.run(["sh", "-c", leftover(mark)])
         #expect(result.text == "started" && result.status == 0)
-        #expect(ContinuousClock.now - start < .seconds(10))
+        #expect(ContinuousClock.now - start < .seconds(30))
         #expect(try await gone(mark))
     }
 

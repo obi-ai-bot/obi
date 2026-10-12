@@ -50,8 +50,9 @@ struct ManyJobsTests {
     }
 
     @Test func routingKeepsAccountsInBalance() {
-        // The busier window counts, plus 0.15 per running job; the lowest score wins.
-        let accounts = [state("busy", fiveHour: 0.6), state("calm", running: 1, fiveHour: 0.2), state("codex", agent: "codex", sevenDay: 0.4)]
+        // The most weekly room left wins; a running job only breaks ties.
+        let accounts = [state("busy", fiveHour: 0.6, sevenDay: 0.5), state("calm", running: 1, fiveHour: 0.2, sevenDay: 0.2),
+                        state("codex", agent: "codex", sevenDay: 0.4)]
         #expect(AccountStore.route(accounts, agent: nil)?.id == "calm")
         #expect(AccountStore.route(accounts, agent: "codex")?.id == "codex")
         #expect(AccountStore.route([state("full", fiveHour: 0.96), state("ok", sevenDay: 0.79)], agent: nil)?.id == "ok")

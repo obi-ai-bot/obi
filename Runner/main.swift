@@ -33,17 +33,56 @@ do {
     Logger.runner.error("vault: \(error.localizedDescription, privacy: .public). Nothing is published until it's fixed.")
 }
 
+// The runner's own GitHub calls go as the Oby by Deskree app when it's set up; pushes and pull
+// requests stay with the owner's gh login (Engine/GitHubApp.swift).
+switch GitHubAppKey.load(environment) {
+case .success(let app):
+    GitHubApp.shared = app
+    Task {
+        let accounts = await app.check()
+        if app.works {
+            Logger.runner.notice("GitHub: as the app \(app.id, privacy: .public), installed for \(accounts.joined(separator: ", "), privacy: .public)")
+        } else {
+            Logger.runner.error("GitHub: the app \(app.id, privacy: .public) has no installation that works yet: calls go as the owner.")
+        }
+    }
+case .failure(let failure):
+    Logger.runner.error("GitHub app: \(failure.message, privacy: .public). Calls go as the owner.")
+case nil:
+    Logger.runner.notice("GitHub: no app set up (\(GitHubApp.idVariable, privacy: .public)): calls go as the owner.")
+}
+
 let speech = Speech()
 do { try await speech.discardAbandonedAudio() }
 catch {
     Logger.runner.error("Couldn't delete abandoned speech audio; refusing to start.")
     exit(1)
 }
-let desk = Desk()
+do { try await speech.startServers() }
+catch { Logger.runner.error("Speech servers unavailable; run setup-whisper.sh and check the models and loopback ports.") }
+Task {
+    while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(5))
+        await speech.maintainServers()
+    }
+}
+// Jobs that were queued or running when the runner went down carry on (Engine/Restarts.swift).
+let desk = Desk(restarts: Restarts(file: Workspace.root.appending(path: "restarts.json")))
 desk.issueSync.enabled = true
+// Every failure is recorded, studied and acted on (Engine/Failures.swift).
+desk.failureLog.enabled = true
 // Macs that follow the runner take its merge checks (Engine/Checks.swift), and the Apple checks
 // agents ask for with `oby-check apple` (Engine/AppleChecks.swift), which runs this executable.
 desk.queuesMacChecks = true
+// A plan's job about an issue claims the files the issue names (case 2.1, #209), so jobs on the
+// same code know about each other and merge oldest first (#237).
+desk.issueFiles = { repo, issue in
+    guard let text = try? await Shell.ok(["gh", "issue", "view", "\(issue)", "-R", repo, "--json", "title,body"], as: .app),
+          let info = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return nil }
+    return Claims.files(issue: info)
+}
+// Inbox items get a headline in plain words from the brain's cheap model (Engine/Inbox.swift).
+desk.rewritesInbox = true
 do {
     let executable = URL(filePath: (try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/self/exe"))
                          ?? Bundle.main.executablePath ?? CommandLine.arguments[0])
@@ -58,14 +97,35 @@ let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: 
               push: Push(desk: desk, folder: Workspace.root.appending(path: "apns")),
               cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")), speech: speech, broker: broker)
 
-// systemd stops the runner with SIGTERM: agents end now, and their jobs show as interrupted.
+// The runner deploys itself after merges into dev (Runner/Updates.swift).
+let updates = Updates(desk: desk)
+api.updates = updates
+Task {
+    while !Task.isCancelled {
+        await updates.poll()
+        do { try await Task.sleep(for: .seconds(Updates.interval)) }
+        catch { return }
+    }
+}
+Task {
+    while !Task.isCancelled {
+        do { try await Task.sleep(for: .seconds(1)) }
+        catch { return }
+        updates.deployIfReady()
+    }
+}
+
+// systemd stops the runner with SIGTERM: agents end now, and their jobs carry on when it starts again.
 // The sources live as long as the runner.
 let stops = [SIGTERM, SIGINT].map { number in
     signal(number, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
     source.setEventHandler {
         MainActor.assumeIsolated { desk.quit() }
-        exit(0)
+        Task {
+            await speech.stopServers()
+            exit(0)
+        }
     }
     source.resume()
     return source
@@ -89,11 +149,23 @@ Task {
     }
 }
 
-// Who is signed in, and the repositories the brain may pick: now, then every five minutes.
+// What a restart left interrupted, steps past their limit, the brain falling back to rules, and
+// the post-mortems still to do: every minute.
 Task {
+    while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(60))
+        desk.failureLog.sweep()
+    }
+}
+
+// Who is signed in, and the repositories the brain may pick: now, then every five minutes. After the
+// first, jobs the runner went down with carry on: their agents commit as the owner, on known accounts.
+Task {
+    await desk.refresh()
+    desk.resumeAfterRestart()
     while true {
-        await desk.refresh()
         try? await Task.sleep(for: .seconds(300))
+        await desk.refresh()
     }
 }
 Task {

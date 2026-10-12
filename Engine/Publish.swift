@@ -7,7 +7,8 @@ import LocalAuthentication
 /// review. Guards, then a secret scan, then the approval; nothing is sent before it (only the base is fetched).
 /// A job that ends done with commits publishes by itself (the approval lets everything through);
 /// a job whose publish failed is published by hand, with Touch ID on the Mac or a phone's
-/// signature on the runner. Oby never force-pushes or pushes to main for anyone; it merges only
+/// signature on the runner. Oby never pushes to main for anyone, and force-pushes only a rebase of
+/// its own oby/ branch, over the commit it pushed there last (`--force-with-lease`); it merges only
 /// into dev, after its review and the Mac check (Engine/Checks.swift).
 nonisolated enum Publish {
     /// The secret scan found something: nothing goes out, and the job fails naming where.
@@ -100,7 +101,9 @@ nonisolated enum Publish {
             throw Shell.Failure(message: "Not published: the secret scan couldn't read the commit messages.")
         }
         let title = title(for: job, subjects: subjects.split(separator: "\n").map(String.init))
-        let texts = outgoing(job, messages: messages, title: title)
+        // Read once: the scan checks the very description the pull request gets.
+        let closes = await closesIssue(job)
+        let texts = outgoing(job, messages: messages, title: title, closes: closes)
         let said: [Finding]
         do {
             said = try await scan(texts: texts)
@@ -111,19 +114,22 @@ nonisolated enum Publish {
         try await approve(action(for: job, base: base))
         try hooks.proceed()
         progress(.push)
-        try await push(head, of: job, from: worktree)
+        // A rebased branch replaces what's on GitHub, and only what Oby pushed there itself.
+        let lease = try await lease(for: head, of: job, from: worktree)
+        try hooks.proceed()
+        try await push(head, of: job, from: worktree, over: lease)
         hooks.sent(Outgoing(action: .push, repo: job.repo, id: head, branch: job.branch))
         try hooks.proceed()
         progress(.pullRequest)
-        let (url, sent) = try await pullRequest(job, base: base, title: title)
+        let (url, sent) = try await pullRequest(job, base: base, title: title, closes: closes)
         if let sent { hooks.sent(Outgoing(action: sent, repo: job.repo, id: url.absoluteString)) }
         return url
     }
 
     /// Everything a publish sends besides the files: the branch's name, every commit's message, and
     /// the pull request's title and description.
-    static func outgoing(_ job: Job, messages: String, title: String) -> [(name: String, text: String)] {
-        [("branch name", job.branch), ("commit message", messages), ("pull request title", title), ("pull request description", body(for: job))]
+    static func outgoing(_ job: Job, messages: String, title: String, closes: Bool = true) -> [(name: String, text: String)] {
+        [("branch name", job.branch), ("commit message", messages), ("pull request title", title), ("pull request description", body(for: job, closes: closes))]
     }
 
     /// Why Oby won't publish this job, or nil to go ahead.
@@ -580,22 +586,126 @@ nonisolated enum Publish {
     private static let toGitHub = ["git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
                                    "-c", "credential.helper=!gh auth git-credential"]
 
-    /// Pushes one commit to the job's own branch, never with --force: no tags, submodules or signing programs either.
-    static func push(_ commit: String, of job: Job, from worktree: URL) async throws {
-        let result = try await Shell.run(
-            toGitHub + ["push", "--no-follow-tags", "--no-signed", "--recurse-submodules=no",
-                        "https://github.com/\(job.repo).git", "\(commit):refs/heads/\(job.branch)"],
-            in: worktree, env: ["GIT_TERMINAL_PROMPT": "0"])
-        guard result.status == 0 else { throw Shell.Failure(message: "Couldn't push \(job.branch): \(said(result.err))") }
+    /// The job's repository on GitHub, as git talks to it.
+    static func github(_ job: Job) -> String { "https://github.com/\(job.repo).git" }
+
+    /// The commit the job's branch has on `remote` (GitHub), or nil when it has no such branch yet.
+    static func remoteHead(of job: Job, from worktree: URL, remote: String? = nil) async throws -> String? {
+        let result = try await Shell.run(toGitHub + ["ls-remote", "--heads", remote ?? github(job), "refs/heads/\(job.branch)"],
+                                         in: worktree, env: ["GIT_TERMINAL_PROMPT": "0"], timeout: 120)
+        guard result.status == 0 else { throw Shell.Failure(message: "Couldn't read \(job.branch) on GitHub: \(said(result.err))") }
+        return String(decoding: result.out, as: UTF8.self).split(separator: "\n").lazy.compactMap { line -> String? in
+            let parts = line.split(separator: "\t")
+            return parts.count == 2 && parts[1] == "refs/heads/\(job.branch)" ? String(parts[0]) : nil
+        }.first
     }
 
-    /// Brings origin/<base> up to date from GitHub, so what's merged since the job started counts.
-    static func fetch(_ base: String, of job: Job, into worktree: URL) async throws {
+    /// What pushing `head` replaces on the job's branch: nil when it only adds to what's there
+    /// (no branch yet, the same commit, or one `head` builds on), else the commit there, which a
+    /// rebase leaves behind. Only the commit Oby pushed there last may be replaced: anything else
+    /// someone else pushed, and Oby refuses rather than overwrite it.
+    static func lease(for head: String, of job: Job, from worktree: URL, remote: String? = nil) async throws -> String? {
+        guard let there = try await remoteHead(of: job, from: worktree, remote: remote), there != head else { return nil }
+        // Fails too when the clone doesn't have that commit: then it isn't one Oby pushed from here.
+        let builds = try await Shell.run(["git", "-C", worktree.path, "merge-base", "--is-ancestor", there, head])
+        if builds.status == 0 { return nil }
+        guard there == job.pushedHead else { throw Shell.Failure(message: overwritten(job, there)) }
+        return there
+    }
+
+    /// Why a rebased branch isn't pushed: someone else's commit is on it.
+    static func overwritten(_ job: Job, _ there: String) -> String {
+        "Not published: \(job.branch) on GitHub is at \(there.prefix(12)), not the commit Oby pushed, so the rebase would overwrite someone else's work."
+    }
+
+    /// Pushes one commit to the job's own branch: no tags, submodules or signing programs. With
+    /// `lease`, the commit a rebase replaces, it pushes with `--force-with-lease` on that commit, so
+    /// it fails when the branch moved since; never to a branch Oby didn't make.
+    static func push(_ commit: String, of job: Job, from worktree: URL, over lease: String? = nil, to remote: String? = nil) async throws {
+        if lease != nil, !job.branch.hasPrefix("oby/") || !Plan.isBranchName(job.branch) {
+            throw Shell.Failure(message: "Oby never force-pushes \(job.branch): only the oby/ branches it made.")
+        }
+        let force = lease.map { ["--force-with-lease=refs/heads/\(job.branch):\($0)"] } ?? []
         let result = try await Shell.run(
-            toGitHub + ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no",
-                        "https://github.com/\(job.repo).git", "+refs/heads/\(base):refs/remotes/origin/\(base)"],
-            in: worktree, env: ["GIT_TERMINAL_PROMPT": "0"], timeout: 120)
+            toGitHub + ["push", "--no-follow-tags", "--no-signed", "--recurse-submodules=no"] + force
+                + [remote ?? github(job), "\(commit):refs/heads/\(job.branch)"],
+            in: worktree, env: ["GIT_TERMINAL_PROMPT": "0"])
+        guard result.status == 0 else {
+            // The lease didn't hold: the branch moved after Oby read it.
+            if lease != nil, result.err.contains("stale info") {
+                throw Shell.Failure(message: "Not published: \(job.branch) moved on GitHub while Oby pushed the rebase, so it would overwrite someone else's work.")
+            }
+            throw Shell.Failure(message: "Couldn't push \(job.branch): \(said(result.err))")
+        }
+    }
+
+    /// Brings origin/<base> up to date from GitHub (or `remote`), so what's merged since the job
+    /// started counts. One fetch at a time into the job's clone, and again when it loses a ref race (#235).
+    static func fetch(_ base: String, of job: Job, into worktree: URL, from remote: String? = nil) async throws {
+        let result = try await fetching(into: worktree) {
+            try await Shell.run(
+                toGitHub + ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no",
+                            remote ?? github(job), "+refs/heads/\(base):refs/remotes/origin/\(base)"],
+                in: worktree, env: ["GIT_TERMINAL_PROMPT": "0"], timeout: 120)
+        }
         guard result.status == 0 else { throw Shell.Failure(message: "Couldn't fetch \(base): \(said(result.err))") }
+    }
+
+    /// Runs `fetch` into the clone `directory` belongs to (the clone, or one of its worktrees, which
+    /// share its refs): one at a time per clone, since two fetches updating the same ref at once make
+    /// one fail. When it still loses a race for a ref (a fetch from outside Oby, say), it runs again,
+    /// up to three more times 1–2 seconds apart; then its last result stands.
+    static func fetching(into directory: URL, _ fetch: () async throws -> Shell.Output) async throws -> Shell.Output {
+        let clone = (try? await Shell.ok(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], in: directory))
+            ?? directory.standardizedFileURL.path
+        await Fetches.shared.take(clone)
+        do {
+            var result = try await fetch()
+            for _ in 0..<3 where result.status != 0 && lostRace(result.err) {
+                try await Task.sleep(for: .milliseconds(Int.random(in: 1000...2000)))
+                result = try await fetch()
+            }
+            await Fetches.shared.give(clone)
+            return result
+        } catch {
+            await Fetches.shared.give(clone)
+            throw error
+        }
+    }
+
+    /// `git fetch` with `arguments` into `clone` (or a worktree of it), through `fetching`. Throws
+    /// with the last thing git said when it fails.
+    static func gitFetch(_ arguments: [String], into clone: URL) async throws {
+        let result = try await fetching(into: clone) { try await Shell.run(["git", "-C", clone.path, "fetch"] + arguments) }
+        guard result.status == 0 else {
+            throw Shell.Failure(message: "git fetch: \(result.err.split(separator: "\n").last.map(String.init) ?? "exit \(result.status)")")
+        }
+    }
+
+    /// Git refused to move a ref because another fetch moved it first: worth trying again.
+    static func lostRace(_ err: String) -> Bool {
+        ["incorrect old value provided", "cannot lock ref", "unable to update local ref"].contains { err.contains($0) }
+    }
+
+    /// The fetches running into each clone, keyed by its git directory: the next waits for the one before.
+    actor Fetches {
+        static let shared = Fetches()
+        /// For each clone with a fetch running, the fetches waiting their turn, first come first.
+        private var waiting: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+        /// Returns once it's this fetch's turn in the clone.
+        func take(_ clone: String) async {
+            guard waiting[clone] != nil else { waiting[clone] = []; return }
+            await withCheckedContinuation { waiting[clone, default: []].append($0) }
+        }
+
+        /// Hands the clone to the next fetch waiting for it, or frees it.
+        func give(_ clone: String) {
+            guard var queue = waiting[clone], !queue.isEmpty else { waiting[clone] = nil; return }
+            let turn = queue.removeFirst()
+            waiting[clone] = queue
+            turn.resume()
+        }
     }
 
     /// How many commits up to `head` aren't on origin/<base>, compared by patch, so a cherry-pick,
@@ -617,12 +727,12 @@ nonisolated enum Publish {
     /// Opens the pull request, ready for review, or returns the one already open for the branch
     /// with its description brought up to date (a later round's summary and check). `sent` says
     /// which went out: `pullRequestEdit` only when the description did update.
-    static func pullRequest(_ job: Job, base: String, title: String) async throws -> (url: URL, sent: Outgoing.Action?) {
+    static func pullRequest(_ job: Job, base: String, title: String, closes: Bool) async throws -> (url: URL, sent: Outgoing.Action?) {
         let file = FileManager.default.temporaryDirectory.appending(path: "oby-pr-\(UUID().uuidString).md")
-        try body(for: job).write(to: file, atomically: true, encoding: .utf8)
+        try body(for: job, closes: closes).write(to: file, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: file) }
         let open = try await Shell.ok(["gh", "pr", "list", "-R", job.repo, "--head", job.branch, "--state", "open",
-                                       "--json", "url", "--jq", ".[0].url // empty"])
+                                       "--json", "url", "--jq", ".[0].url // empty"], as: .app)
         if !open.isEmpty, let url = URL(string: open) {
             // The commits are on it already; a description that didn't update isn't worth failing for.
             let edited = (try? await Shell.ok(["gh", "pr", "edit", open, "-R", job.repo, "--body-file", file.path])) != nil
@@ -660,11 +770,29 @@ nonisolated enum Publish {
         return text + issue
     }
 
+    /// Whether the job's pull request closes its issue (`closes(issue:)`). Only the issue's shape is
+    /// read, never sent: one gh can't read isn't closed.
+    static func closesIssue(_ job: Job) async -> Bool {
+        guard let number = job.issue,
+              let issue = try? await Shell.ok(["gh", "issue", "view", "\(number)", "-R", job.repo, "--json", "body", "-q", ".body"]) else { return false }
+        return closes(issue: issue)
+    }
+
+    /// Whether a pull request closes its issue: not one whose body has a checklist (a feature or an
+    /// epic). Its items are ticked as slices merge (Engine/IssueSync.swift), and it closes once
+    /// its "Test it when it's done" list passes, never because one slice merged.
+    static func closes(issue body: String) -> Bool {
+        !body.split(separator: "\n").contains { line in
+            let text = line.trimmingCharacters(in: .whitespaces)
+            return text.hasPrefix("- [ ] ") || text.hasPrefix("- [x] ") || text.hasPrefix("- [X] ")
+        }
+    }
+
     /// The pull request's description: every round's summary, what the user asked for, the check
-    /// and the scan, `Closes #N`, and that Oby opened it. The agent's summaries are untrusted (it
-    /// may have read someone else's pull request), so they go in as code blocks: no mentions,
-    /// links or closing keywords.
-    static func body(for job: Job) -> String {
+    /// and the scan, `Closes #N` (`Part of #N` when it doesn't close it), and that Oby opened it.
+    /// The agent's summaries are untrusted (it may have read someone else's pull request), so they
+    /// go in as code blocks: no mentions, links or closing keywords.
+    static func body(for job: Job, closes: Bool = true) -> String {
         let summaries = job.summaries.flatMap { $0.isEmpty ? nil : $0 } ?? [job.summary]
         let rounds = summaries.enumerated().map { index, summary in
             let fence = String(repeating: "`", count: max(3, (summary.matches(of: /`+/).map(\.output.count).max() ?? 0) + 1))
@@ -672,7 +800,10 @@ nonisolated enum Publish {
             return "\(label)\n\n\(fence)\n\(summary)\n\(fence)"
         }
         let request = job.request.split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n")
-        let check = job.check.map { "- Check: \(code($0)) passed." } ?? "- Check: none, the job had no check."
+        // No Mac took its Apple check (#68): the Mac check before merging is the first to build the apps.
+        let check = job.check.map { "- Check: \(code($0)) passed" + (job.appleUnbuilt ? " without its Apple build. " + AppleCheck.unbuiltLine : ".") }
+            ?? "- Check: none, the job had no check."
+        let passed = job.appleUnbuilt ? "the check passed without its Apple build" : "the check passed"
         return """
             \(rounds.joined(separator: "\n\n"))
 
@@ -681,9 +812,9 @@ nonisolated enum Publish {
             \(request)
 
             \(check)
-            - Secret scan: clean.\(job.issue.map { "\n\nCloses #\($0)" } ?? "")
+            - Secret scan: clean.\(job.issue.map { "\n\n\(closes ? "Closes" : "Part of") #\($0)" } ?? "")
 
-            by Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
+            by Oby: Oby opened this pull request after \(passed) and the secret scan was clean. Oby merges it into dev once its review approves and the checks on the user's Mac pass on the same commit.
             """
     }
 

@@ -7,7 +7,9 @@ struct ObyApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            Button("Open Oby") { app.island.open() }
+            // The window with the conversation, Agents and Live (Mac/App/ChatWindow.swift); the island opens on hover or click.
+            Button("Open Oby") { app.chat.show() }
+                .keyboardShortcut("o")
             // The same keys work from any app (Mac/StopAllKey.swift).
             Button("Stop All Jobs") { app.island.stopAll() }
                 .keyboardShortcut(".", modifiers: [.control, .option, .command])
@@ -23,12 +25,23 @@ struct ObyApp: App {
         }
 
         Settings {
-            TabView {
-                SettingsView().tabItem { Label("General", systemImage: "gearshape") }
-                AccountsSettingsView(store: app.island.desk.accounts).tabItem { Label("Accounts", systemImage: "person.2") }
-                ModelsSettingsView().tabItem { Label("Models", systemImage: "cpu") }
-                VaultSettingsView(vault: .shared).tabItem { Label("Vault", systemImage: "lock") }
-            }
+            SettingsTabs(app: app)
+        }
+    }
+}
+
+/// The Settings tabs, on the one the window's sidebar asked for (SettingsSelection).
+private struct SettingsTabs: View {
+    let app: AppDelegate
+    private let selection = SettingsSelection.shared
+
+    var body: some View {
+        TabView(selection: Binding { selection.tab } set: { selection.tab = $0 }) {
+            SettingsView(desk: app.island.desk).tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general)
+            RunnerSettingsView(feed: app.island.feed).tabItem { Label("Runner", systemImage: "server.rack") }.tag(SettingsTab.runner)
+            AccountsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Accounts", systemImage: "person.2") }.tag(SettingsTab.accounts)
+            ModelsSettingsView(feed: app.island.feed).tabItem { Label("Models", systemImage: "cpu") }.tag(SettingsTab.models)
+            VaultSettingsView(vault: .shared).tabItem { Label("Vault", systemImage: "lock") }.tag(SettingsTab.vault)
         }
     }
 }
@@ -36,6 +49,8 @@ struct ObyApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     let island = IslandController()
     lazy var firstLaunch = FirstLaunch(island: island)
+    /// The Oby window: the conversation, Agents and Live (#11).
+    lazy var chat = ChatWindow(island: island)
 
     override init() {
         UserDefaults.standard.register(defaults: AgentModels.defaults)
@@ -55,14 +70,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // Before the island starts, so a click on an alert that launched Oby still arrives.
         UNUserNotificationCenter.current().delegate = self
         RunnerFeed.registerCategories()
+        island.openWindow = { [weak self] job in self?.chat.show(job: job) }
         island.start()
         if !FirstLaunch.done { firstLaunch.show() }
     }
 
-    /// A click on a runner's alert opens the island on its job.
+    /// A click on a runner's alert opens the island on its job; its Publish starts publishing there.
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         guard let id = response.notification.request.content.userInfo[RunnerFeed.jobKey] as? String else { return }
-        island.open(job: id)
+        island.open(job: id, publish: response.actionIdentifier == RunnerFeed.publishButton)
     }
 
     /// While Oby runs (always, in the menu bar), the alert still shows, so it isn't missed.

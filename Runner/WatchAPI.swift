@@ -6,7 +6,7 @@ import Hummingbird
 /// The Watch API: what the Apple Watch uses when its iPhone is out of reach (docs/runner-api.md,
 /// "The Watch API"). It's a second listener on 127.0.0.1, which a Cloudflare Tunnel publishes
 /// behind Cloudflare Access, and it serves only what the Watch does: the jobs, one job, the event
-/// stream, planning, dispatch, a word to a job, Publish, Dismiss, its push tokens and speech. It
+/// stream, planning, dispatch, a word to a job, Move, Publish, Dismiss, its push tokens and speech. It
 /// never trusts `Tailscale-User-Login`: every request needs the Access JWT and a fresh signature
 /// from a paired Watch's key (WatchGate). Pairing and unpairing are on the tailnet API, for the
 /// iPhone (`pairing(on:)`).
@@ -41,6 +41,16 @@ final class WatchAPI {
             try await self.api.message(context.parameters.require("id"), try await API.decode(NewMessage.self, from: request))
         }
         router.post("v1/jobs/:id/dismiss") { _, context in try await self.api.dismiss(context.parameters.require("id")) }
+        router.post("v1/jobs/:id/start") { _, context in try await self.api.startNow(context.parameters.require("id")) }
+        router.post("v1/jobs/:id/move") { request, context in
+            try await self.api.move(context.parameters.require("id"), try await API.decode(MoveRequest.self, from: request))
+        }
+        router.post("v1/jobs/:id/mode") { request, context in
+            try await self.api.mode(context.parameters.require("id"), try await API.decode(ModeJSON.self, from: request))
+        }
+        router.post("v1/jobs/:id/permission") { request, context in
+            try await self.api.permission(context.parameters.require("id"), try await API.decode(PermissionAnswer.self, from: request))
+        }
         router.get("v1/jobs/:id/publish") { _, context in try await self.api.publishAction(context.parameters.require("id")) }
         router.post("v1/jobs/:id/publish") { request, context in
             try await self.publish(context.parameters.require("id"), try await API.decode(WatchPublish.self, from: request))

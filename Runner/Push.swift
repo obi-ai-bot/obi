@@ -59,13 +59,16 @@ final class Push {
                 title = job.request.split(separator: "\n").first.map(String.init) ?? job.request
             }
             switch job.status {
+            // What it waits for, as the apps' rows say it: "After #223 merges" (#238).
+            case .queued where job.waiting != nil: line = job.waiting.map { $0.text.prefix(1).uppercased() + $0.text.dropFirst() } ?? ""
             case .queued, .running: line = job.step.isEmpty ? "Starting…" : job.step
             case .done: line = job.summary.split(separator: "\n").first.map(String.init) ?? "Done"
             case .failed, .stopped, .interrupted:
                 line = job.summary.split(separator: "\n").first.map(String.init) ?? job.status.rawValue.capitalized
             }
             started = (job.started ?? job.created).timeIntervalSinceReferenceDate
-            status = job.status.rawValue
+            // "waiting" for a job queued behind something: the Live Activity says Waiting, in gray.
+            status = job.isWaiting ? "waiting" : job.status.rawValue
             agent = job.agent
         }
     }
@@ -82,6 +85,8 @@ final class Push {
         case question
         /// Oby's merge stopped: it couldn't merge, or the Mac check failed with no round left.
         case merge
+        /// Its agent waits for the user's OK on a command or an edit (the inbox has it).
+        case permission
     }
 
     private struct Signer {
@@ -191,8 +196,9 @@ final class Push {
         let active = desk.jobs.filter(\.isActive)
         let updates = tokens.filter { $0.kind == "update" }
         let now = Date.now
-        if let job = active.first {
-            let state = State(job, working: active.count)
+        // A job working first, and only those count as working: not the ones waiting their turn (#238).
+        if let job = active.first(where: \.isWorking) ?? active.first {
+            let state = State(job, working: active.count(where: \.isWorking))
             if !updates.isEmpty {
                 guard state != lastSent else { return }
                 lastSent = state
@@ -248,8 +254,8 @@ final class Push {
         }
     }
 
-    /// The Watch's complications count what needs the user and what's working: when either
-    /// changes, a WidgetKit push has them reload (they fetch the jobs themselves).
+    /// The Watch's complications count what needs the user, what's working and what waits: when
+    /// any changes, a WidgetKit push has them reload (they fetch the jobs themselves).
     private func refreshComplications(now: Date) async {
         let glance = Self.glance(desk.jobs)
         guard glance != lastGlance else { return }
@@ -263,10 +269,11 @@ final class Push {
     struct Glance: Equatable {
         var needs: Int
         var working: Int
+        var waiting = 0
     }
 
     static func glance(_ jobs: [Job]) -> Glance {
-        Glance(needs: jobs.count(where: \.needsYou), working: jobs.count(where: \.isActive))
+        Glance(needs: jobs.count(where: \.needsYou), working: jobs.count(where: \.isWorking), waiting: jobs.count(where: \.isWaiting))
     }
 
     /// A WidgetKit push to every Watch's widget token: `{"aps": {"content-changed": true}}`.
@@ -349,11 +356,14 @@ final class Push {
 
     /// Nothing for a job the user dismissed: its alert clears.
     static func notice(for job: Job) -> Notice? {
+        if job.waitsForPermission { return .permission }
         if job.waitsForAnswer { return .question }
         guard job.needsYou else { return nil }
         if job.canPublish { return .ready }
         if job.reviewNeedsYou { return .review }
         if job.mergeNeedsYou { return .merge }
+        // Xcode Cloud still fails after Oby handed it back (#122): its inbox item is a failure's.
+        if job.cloudNeedsYou { return .failed }
         switch job.status {
         case .failed: return .failed
         case .interrupted: return .interrupted
@@ -390,17 +400,19 @@ final class Push {
         case .review: "Changes requested: \(state.title)"
         case .question: "Question: \(state.title)"
         case .merge: "Not merged: \(state.title)"
+        case .permission: "\(job.permission?.title ?? "Allow it")?"
         }
         // Why its own publish failed, when that's what it needs; why Oby's review stopped.
         let body = switch notice {
         case .ready: job.publishError ?? state.line
-        case .review: Review.stopLine
+        case .review: job.review?.stopReason ?? Review.stopLine
         case .question: job.question?.text ?? state.line
         case .merge: job.mergeError ?? job.macCheck.map { $0.problem ?? $0.failureLine + (job.checkStop.map { " " + $0 } ?? "") } ?? state.line
         case .failed, .interrupted: state.line
+        case .permission: "\(state.title): \(job.permission.map { String(($0.detail.isEmpty ? $0.title : $0.detail).prefix(200)) } ?? state.line)"
         }
         let aps: [String: any Encodable] = ["alert": ["title": title, "body": body], "sound": "default",
-                                            "category": notice == .ready ? "ready" : "job", "thread-id": "jobs"]
+                                            "category": notice == .ready ? "ready" : notice == .permission ? "permission" : "job", "thread-id": "jobs"]
         return try encoder.encode(Fields(["aps": Fields(aps), "job": job.id]))
     }
 

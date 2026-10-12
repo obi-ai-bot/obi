@@ -2,8 +2,9 @@ import AVFoundation
 import Foundation
 import Observation
 
-/// Oby's voice: when you talked (fn), it reads its reply out loud with the most natural English
-/// voice this Mac has (Settings › General › Oby speaks its replies). Pressing fn stops it at once.
+/// Oby's voice: when you talked (fn), it reads its reply out loud with the most natural voice this
+/// Mac has for the reply's language (`VoiceSettings.voice`, as on the iPhone; Settings › General ›
+/// Voice). Pressing fn stops it at once.
 @Observable
 final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     private(set) var speaking = false
@@ -30,7 +31,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     func speak(_ text: String, done: @escaping (Bool) -> Void) {
         stop()
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = Self.voice
+        utterance.voice = VoiceSettings.voice(for: text)
         current = utterance
         self.done = done
         speaking = true
@@ -53,16 +54,6 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         self.done = nil
         done?(heard)
     }
-
-    /// The most natural English voice installed: a premium one (the Siri-quality downloads), then
-    /// an enhanced one, then whatever the system has, US English first.
-    static let voice: AVSpeechSynthesisVoice? = {
-        let voices = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix("en") }
-        func rank(_ voice: AVSpeechSynthesisVoice) -> (Int, Int) {
-            (voice.quality == .premium ? 0 : voice.quality == .enhanced ? 1 : 2, voice.language == "en-US" ? 0 : 1)
-        }
-        return voices.min { rank($0) < rank($1) } ?? AVSpeechSynthesisVoice(language: "en-US")
-    }()
 
     // The utterance isn't Sendable, so only its identity crosses to the main actor.
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {

@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// One job: its stages, how it ended, Publish with the crown, a word to the agent.
+/// One job: what its agent waits for (a decision card), its stages, how it ended, Publish with
+/// the crown, a word to the agent.
 struct JobScreen: View {
     @Environment(Watch.self) private var watch
     let id: String
@@ -18,10 +19,12 @@ struct JobScreen: View {
                     Text(job.heading).font(.headline).accessibilityAddTraits(.isHeader)
                     let (status, color) = JobStatus.of(job)
                     Text(status).font(.caption.weight(.semibold)).foregroundStyle(color)
+                    if let moved = job.movedLine { Text(moved).font(.caption2).foregroundStyle(.secondary) }
+                    decision(job)
                     stages(job)
                     result(job)
                     if let outcome = watch.outcomes[job.id] {
-                        Text(outcome).font(.footnote).foregroundStyle(.secondary)
+                        ReadingText(outcome, secondary: true)
                     }
                     if job.canPublish {
                         Button(job.published == nil ? "Publish…" : "Publish new commits…") {
@@ -29,7 +32,7 @@ struct JobScreen: View {
                         }
                         .tint(.orange).disabled(busy)
                     }
-                    if job.status == .running || (!job.isActive && job.session != nil) {
+                    if job.status == .running || (!job.isActive && job.resumable) {
                         TextFieldLink(prompt: Text("Tell the agent…")) {
                             Label("Tell the agent", systemImage: "text.bubble")
                         } onSubmit: { text in
@@ -38,6 +41,16 @@ struct JobScreen: View {
                             Task { await run { try await watch.tell(job.id, text) } }
                         }
                         .disabled(busy)
+                    }
+                    // Waiting for its start condition (#216): it can start now instead.
+                    if job.waitsToStart {
+                        Button("Start now") {
+                            Task { await run { try await watch.startNow(job.id) } }
+                        }.disabled(busy)
+                    }
+                    // Oby's own reviews pick their account themselves.
+                    if job.reviewOf == nil {
+                        NavigationLink("Move to…") { MoveList(job: job) }.disabled(busy)
                     }
                     if job.needsYou {
                         Button("Dismiss") {
@@ -68,6 +81,26 @@ struct JobScreen: View {
         .onChange(of: publishAsked, initial: true) { publishFromNotification() }
     }
 
+    /// Its OK on a command or a file, else the answer to its question or its plan: options as
+    /// buttons, the recommended one first, and dictation for your own answer.
+    @ViewBuilder private func decision(_ job: Job) -> some View {
+        if let permission = job.permission, job.isActive {
+            DecisionCard(title: permission.title, detail: permission.detail, options: CardOption.permission(permission),
+                         busy: busy, wordsNote: CardOption.denyWords,
+                         onChoose: { option in
+                             guard let decision = RunnerPermission.Decision(rawValue: option.answer) else { return }
+                             Task { await run { try await watch.answer(job, decision) } }
+                         },
+                         onWords: { words in Task { await run { try await watch.answer(job, .deny, message: words) } } })
+                .id(permission.id)
+        } else if let question = job.question, job.waitsForAnswer {
+            DecisionCard(title: question.text, plan: question.plan, options: question.cardOptions, busy: busy,
+                         onChoose: { option in Task { await run { try await watch.tell(job.id, option.answer) } } },
+                         onWords: { words in Task { await run { try await watch.tell(job.id, words) } } })
+                .id(question.text)
+        }
+    }
+
     @ViewBuilder private func stages(_ job: Job) -> some View {
         if let pipeline = job.pipeline {
             Text(pipeline.label).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -81,7 +114,7 @@ struct JobScreen: View {
         if !job.summary.isEmpty || job.commits != nil || job.published != nil {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Result").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                if !job.summary.isEmpty { Text(job.summary).font(.footnote) }
+                if !job.summary.isEmpty { ReadingText(job.summary) }
                 if let commits = job.commits {
                     Text("\(commits) \(commits == 1 ? "commit" : "commits")").font(.caption2).foregroundStyle(.secondary)
                 }
@@ -111,6 +144,62 @@ struct JobScreen: View {
         defer { busy = false }
         do { try await work(); problem = nil }
         catch { problem = error.localizedDescription }
+    }
+}
+
+/// "Move to…" on the Watch: a tool (Oby picks its least busy account with room), an account with
+/// its usage, or a model. What the move does is said first; a tap moves it.
+private struct MoveList: View {
+    @Environment(Watch.self) private var watch
+    @Environment(\.dismiss) private var dismiss
+    let job: Job
+    @State private var busy = false
+    @State private var problem: String?
+
+    var body: some View {
+        List {
+            Section {
+                Text(MoveChoice.effect(active: job.isActive, running: job.status == .running)).font(.caption2).foregroundStyle(.secondary)
+                if let problem { Text(problem).font(.caption2).foregroundStyle(.red) }
+            }
+            Section("Tools") {
+                ForEach(MoveChoice.tools, id: \.0) { tool in
+                    Button(tool.1) { move(agent: tool.0) }.disabled(busy || tool.0 == job.agent)
+                }
+            }
+            Section("Accounts") {
+                ForEach(watch.accounts) { account in
+                    Button { move(account: account.id) } label: {
+                        VStack(alignment: .leading) {
+                            Text(account.title)
+                            Text(MoveChoice.usage(signedIn: account.signedIn, fiveHour: account.fiveHour, sevenDay: account.sevenDay))
+                                .font(.caption2)
+                                .foregroundStyle(MoveChoice.busy(fiveHour: account.fiveHour, sevenDay: account.sevenDay) ? Color.orange : Color.secondary)
+                        }
+                    }
+                    .disabled(busy || !account.signedIn || account.id == job.account)
+                }
+            }
+            Section("Models") {
+                ForEach(MoveChoice.claudeModels + [MoveChoice.codexStrongest], id: \.self) { model in
+                    Button(ModelChoice.name(model)) { move(model: model) }.disabled(busy || model == job.model)
+                }
+            }
+        }
+        .navigationTitle("Move to")
+    }
+
+    private func move(agent: String? = nil, account: String? = nil, model: String? = nil) {
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                try await watch.move(job.id, agent: agent, account: account, model: model)
+                dismiss()
+            } catch {
+                problem = error.localizedDescription
+            }
+        }
     }
 }
 

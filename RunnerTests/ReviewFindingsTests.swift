@@ -5,6 +5,16 @@ import Testing
 /// The reviewer sorts its findings: blocking ones request changes, the rest are follow-ups for
 /// later; and a review after changes requested is a follow-up, not a fresh review (Engine/Review.swift).
 struct ReviewFindingsTests {
+    @Test(arguments: ["(none)", "(**None.**)", "(no blocking findings)"])
+    func parenthesizedNoneIsNotABlockingFinding(_ none: String) throws {
+        let summary = "Fixed.\n\nBlocking:\n\(none)\n\nWorth doing later:\n- Add coverage\n\nVERDICT: APPROVED"
+        let findings = try #require(Review.findings(summary))
+        #expect(findings.blocking.isEmpty && findings.later == ["Add coverage"])
+        #expect(Review.decide(summary) == .approved)
+        // Parentheses around a real finding must still block, even after a none item.
+        #expect(Review.decide("Blocking:\n- \(none)\n- (None of the new paths are tested)\n\nVERDICT: APPROVED") == .changesRequested)
+    }
+
     // MARK: Blocking or not
 
     @Test func onlyBlockingFindingsRequestChanges() {
@@ -23,6 +33,32 @@ struct ReviewFindingsTests {
         #expect(Review.decide("Fine.\n\nBlocking: none\n\nWorth doing later:\n- Add a test\n\nVERDICT: CHANGES REQUESTED") == .approved)
         #expect(Review.decide("Fine.\n\n**Blocking:**\n- None — it all holds up.\n\nVERDICT: CHANGES REQUESTED") == .approved)
         #expect(Review.findings("Blocking:\n- None of the new paths are tested, and the old test breaks\n\nVERDICT: CHANGES REQUESTED")?.blocking.count == 1)
+
+        // "Blocking: none." then what the reviewer checked and found covered (PR #124): no findings, approved.
+        let covered = """
+            It does what was asked.
+
+            Blocking: none.
+            - Rounds stop at 2: covered by `Review.maxRounds` and its test
+            - Follow-ups go in the report: `Review.report`
+              keeps them last
+
+            VERDICT: APPROVED
+            """
+        #expect(Review.findings(covered)?.blocking == [] && Review.decide(covered) == .approved)
+        #expect(Review.decide("Fine.\n\n**Blocking:** None\n\nVERDICT: APPROVED") == .approved)
+        #expect(Review.decide("Fine.\n\n**Blocking:**\nNone.\n- Checked the round cap: covered\n\nVERDICT: APPROVED") == .approved)
+        #expect(Review.decide("Fine.\n\nBlocking:\n- **None.**\n\nVERDICT: APPROVED") == .approved)
+        #expect(Review.decide("Fine.\n\nBlocking: - none\n\nWorth doing later:\n- Add a test\n\nVERDICT: APPROVED") == .approved)
+        // What follows "none" isn't sorted, so the last line decides it: changes requested stays changes requested.
+        let unsure = "Hmm.\n\nBlocking: none.\n- The crash on empty input must be fixed\n\nVERDICT: CHANGES REQUESTED"
+        #expect(Review.findings(unsure)?.unsorted == ["The crash on empty input must be fixed"] && Review.decide(unsure) == .changesRequested)
+        // A "- None" item is just an item: a real one after it still blocks.
+        let item = "Bug.\n\nBlocking:\n- None\n- It crashes on an empty list\n\nVERDICT: APPROVED"
+        #expect(Review.findings(item)?.blocking == ["It crashes on an empty list"] && Review.decide(item) == .changesRequested)
+        // A heading after it is read again: a real blocking finding still requests changes, whatever the last line says.
+        let after = "Bug.\n\nBlocking: none.\n- Checked the cap\n\nBlocking issues:\n- It crashes on an empty list\n\nVERDICT: APPROVED"
+        #expect(Review.findings(after)?.blocking == ["It crashes on an empty list"] && Review.decide(after) == .changesRequested)
 
         // A review that doesn't sort its findings keeps its last line's verdict; none still means none.
         #expect(Review.findings("Two things.\n\n- Fix the off-by-one\n\nVERDICT: CHANGES REQUESTED") == nil)
@@ -89,19 +125,19 @@ struct ReviewFindingsTests {
         #expect(Review.decide(before.replacing("VERDICT: CHANGES REQUESTED", with: "VERDICT: APPROVED")) == .approved)
     }
 
-    @Test func theCommentSaysWhenObyOverrulesTheLastLine() {
+    @Test func theCheckRunSaysWhenObyOverrulesTheLastLine() {
         let summary = "Fine.\n\nWorth doing later:\n- Rename it\n\nVERDICT: CHANGES REQUESTED"
         let approved = Review(verdict: .approved, job: "rev1", agent: "codex", account: "Work", round: 1)
-        let comment = Review.comment(approved, summary: summary)
-        #expect(comment.hasPrefix("### Oby review · Codex · Work: Approved"))
-        #expect(comment.contains("```\n\nOby counts this review as approved: the reviewer asked for changes, but nothing it found is blocking. The rest are follow-ups.\n\nby Oby:"))
+        let run = Review.checkRun(approved, summary: summary, head: CheckTests.head)
+        #expect(run.title == "Oby review · Codex · Work: Approved" && run.conclusion == .success)
+        #expect(run.summary.contains("```\n\nOby counts this review as approved: the reviewer asked for changes, but nothing it found is blocking. The rest are follow-ups.\n\nby Oby:"))
         var requested = approved
         requested.verdict = .changesRequested
-        #expect(Review.comment(requested, summary: "Bug.\n\nBlocking:\n- It crashes\n\nVERDICT: APPROVED")
+        #expect(Review.checkRun(requested, summary: "Bug.\n\nBlocking:\n- It crashes\n\nVERDICT: APPROVED", head: CheckTests.head).summary
             .contains("Oby counts this review as changes requested: the reviewer approved, but it listed blocking findings."))
         // They agree: nothing more.
         #expect(Review.overruled(approved, summary: "Fine.\n\nVERDICT: APPROVED") == nil)
-        #expect(Review.comment(approved, summary: "Fine.\n\nVERDICT: APPROVED").contains("```\n\nby Oby:"))
+        #expect(Review.checkRun(approved, summary: "Fine.\n\nVERDICT: APPROVED", head: CheckTests.head).summary.contains("```\n\nby Oby:"))
     }
 
     // MARK: Follow-ups in the report
@@ -144,6 +180,7 @@ struct ReviewFindingsTests {
         #expect(prompt.contains("Don't review the rest of the pull request again, and don't raise what the last review didn't"))
         #expect(prompt.contains("What the user asked that agent for: Keep the last round.") && prompt.contains("make no commits"))
         #expect(prompt.contains("`Blocking:` and `Worth doing later:`") && prompt.contains("`VERDICT: APPROVED` or `VERDICT: CHANGES REQUESTED`"))
+        #expect(prompt.contains("never write `Blocking: none`"))
         // Not a fresh review, and the findings stay in their file.
         #expect(!prompt.contains("Judge whether the changes do what the user asked") && !prompt.contains("pr-80.md"))
         #expect(!prompt.contains("git diff origin/dev...HEAD") && !prompt.contains("drops the last round"))
@@ -165,6 +202,19 @@ struct ReviewFindingsTests {
         for review in cases + [Review.make(for: first, pr: 80, account: account)] {
             #expect(Review.followUp(review) == nil)
             #expect(Review.prompt(review).contains("Judge whether the changes do what the user asked"))
+        }
+    }
+
+    @Test func noReviewBlocksOnTheDescriptionObyWrites() {
+        // #167: two reviews blocked on the "Closes #116" Oby's template wrote, which no agent could change.
+        var followUp = Review.make(for: author(.changesRequested), pr: 80, account: account)
+        followUp.attachments = ["/tmp/oby-review-\(followUp.id)/review-1.md"]
+        var first = author(.approved)
+        first.review = nil
+        for review in [followUp, Review.make(for: first, pr: 80, account: account)] {
+            let prompt = Review.prompt(review)
+            #expect(prompt.contains("`Closes #N`") && prompt.contains("the agent can't change them from its branch"))
+            #expect(prompt.contains("nothing in the description lands in dev or closes an issue. Never block on the description."))
         }
     }
 

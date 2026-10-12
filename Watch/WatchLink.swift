@@ -91,6 +91,24 @@ nonisolated struct WatchLink: Sendable {
 
     func dismiss(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/dismiss") }
 
+    /// Starts a job waiting for its `startWhen` now (#216).
+    func startNow(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/start") }
+
+    /// Allow, Always allow or Deny (with words for the agent). A Watch API without it answers 404:
+    /// that waits for the iPhone.
+    func answer(_ id: String, permission: String, _ decision: RunnerPermission.Decision, message: String?) async throws -> Job {
+        struct Body: Encodable { var id: String; var decision: RunnerPermission.Decision; var message: String? }
+        do {
+            return try await call("POST", "v1/jobs/\(id)/permission", body: Body(id: permission, decision: decision, message: message))
+        } catch let error as RunnerError where error.status == 404 {
+            throw RunnerError(message: "Answering this needs your iPhone in reach.", status: 404)
+        }
+    }
+
+    func move(_ id: String, agent: String?, account: String?, model: String?) async throws -> Job {
+        try await call("POST", "v1/jobs/\(id)/move", body: MoveBody(agent: agent, account: account, model: model))
+    }
+
     func publishAction(_ id: String) async throws -> String {
         struct Answer: Decodable { var action: String }
         let answer: Answer = try await call("GET", "v1/jobs/\(id)/publish")
@@ -119,18 +137,23 @@ nonisolated struct WatchLink: Sendable {
         return answer.push
     }
 
-    /// One piece of a held recording. The runner answers `501` while it can't write speech down:
-    /// that's SpeechUnavailable.
-    func speech(request: String, sequence: Int, audio: Data) async throws {
-        let target = "v1/speech?request=\(request)&sequence=\(sequence)"
+    /// One piece of what the mic hears, answered with the whole transcript so far (it can change),
+    /// or nil when the runner sent none. `final` (its body may be empty) ends it with the final
+    /// words. The runner answers `501` while it can't write speech down: that's SpeechUnavailable.
+    func speech(request: String, sequence: Int, audio: Data, final: Bool = false) async throws -> String? {
+        let target = "v1/speech?request=\(request)&sequence=\(sequence)" + (final ? "&final=true" : "")
         var urlRequest = try signed("POST", target, body: audio)
         urlRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        // Whisper writes all of it down again for the final words.
+        if final { urlRequest.timeoutInterval = 60 }
         let (data, response) = try await URLSession.shared.data(for: urlRequest)
         if (response as? HTTPURLResponse)?.statusCode == 501 {
             struct Problem: Decodable { var error: String }
             throw SpeechUnavailable(message: (try? JSONDecoder().decode(Problem.self, from: data))?.error ?? "Speech-to-text isn't set up on the runner yet.")
         }
         try Runner.check(response, data)
+        struct Answer: Decodable { var text: String? }
+        return (try? JSONDecoder().decode(Answer.self, from: data))?.text
     }
 
     /// The runner's events while Oby is on screen; the caller ends it when Oby leaves the screen.
@@ -200,10 +223,11 @@ nonisolated struct WatchLink: Sendable {
 
 extension Glance {
     /// What the complications show for these jobs, as Home counts them: what needs you (that
-    /// finished in the last week, as the iPhone trims it) and what's working.
+    /// finished in the last week, as the iPhone trims it), what's working and what waits its turn (#238).
     nonisolated static func of(_ jobs: [Job], now: Date = .now) -> Glance {
         let needing = jobs.filter { $0.needsYou && ($0.finished ?? now) > now.addingTimeInterval(-7 * 86400) }
-        return Glance(needs: needing.count, working: jobs.count(where: \.isActive), top: needing.first?.heading)
+        return Glance(needs: needing.count, working: jobs.count(where: \.isWorking), waiting: jobs.count(where: \.isWaiting),
+                      top: needing.first?.heading)
     }
 
     /// The complications' WidgetKit push token, as issued and as the runner accepted it, in the

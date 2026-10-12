@@ -88,6 +88,25 @@ final class InboxTests {
         #expect(Prompts.agent(fix).contains("QUESTION: <one question>"))
     }
 
+    /// Options as Claude Code asks them (#215): a short label, then what choosing it does after
+    /// ` — `, and `(Recommended)` after the one the agent recommends.
+    @Test func questionsSayWhatEachOptionDoes() throws {
+        let asked = "Done.\nQUESTION: Should Oby offer Add the column?\nOPTIONS: Offer it now (Recommended) — Oby adds the missing column itself | Keep two buttons — only Use … instead and Ignore"
+        let question = try #require(Inbox.question(in: asked))
+        #expect(question.options == ["Offer it now", "Keep two buttons"] && question.recommended == 0)
+        #expect(question.details == ["Oby adds the missing column itself", "only Use … instead and Ignore"])
+        // Without a description for every option, none are kept; a dash in a label stays.
+        let some = try #require(Inbox.question(in: "QUESTION: Which?\nOPTIONS: A — does a | B-side | C (recommended)"))
+        #expect(some.options == ["A", "B-side", "C"] && some.details == nil && some.recommended == 2)
+        // The inbox item carries them, and asks the rewriter to keep the recommendation.
+        var job = fix
+        job.question = question
+        let item = try #require(Inbox.need(of: job))
+        #expect(item.details == question.details && item.recommended == 0 && item.isDecision)
+        #expect(InboxRewriter.quoted(item).contains("0. Offer it now — Oby adds the missing column itself"))
+        #expect(Prompts.agent(fix).contains("(Recommended)") && Prompts.agent(fix).contains("what choosing it does"))
+    }
+
     @Test func aQuestionWaitsInTheInboxAndTheAnswerGoesBackToTheJob() async throws {
         let agent = Agent()
         let desk = try await running(agent)
@@ -256,7 +275,7 @@ final class InboxTests {
         let agent = Agent()
         desk.makeAgent = { _, _, _ in agent }
         desk.countCommits = { _, _ in 0 }
-        desk.postReview = { _, _ in URL(string: "https://github.com/deskree-inc/oby/pull/80#issuecomment-1")! }
+        desk.postReview = { _, _ in URL(string: "https://github.com/deskree-inc/oby/runs/1")! }
         let item = try #require(desk.inbox.first { $0.job == "rev1" })
         try desk.settle(item.id, .answer("Try again"))
         #expect(desk.job("author")?.reviewing == "rev1" && desk.job("author")?.reviewError == nil)
@@ -355,11 +374,12 @@ final class InboxTests {
         var interrupted = failed
         interrupted.status = .interrupted
         #expect(Inbox.need(of: interrupted)?.kind == .failed)
-        // Oby's fourth review asked for changes: one more round, or let it go.
+        // Oby's review found a blocker it asked to fix before: one more round, or let it go.
         var reviewed = fix
         reviewed.status = .done
         reviewed.published = "https://github.com/deskree-inc/oby/pull/80"
         reviewed.review = Review(verdict: .changesRequested, job: "rev4", agent: "codex", account: "Work", round: 4)
+        reviewed.review?.repeated = true
         let review = Inbox.need(of: reviewed)
         #expect(review?.kind == .review && review?.text == Review.stopLine && review?.options == ["One more round", "Dismiss"])
         // Nothing for what needs nothing.
@@ -370,6 +390,64 @@ final class InboxTests {
         #expect(Inbox.need(of: stopped) == nil && Inbox.need(of: running) == nil)
         stopped.question = Plan.Question(text: "Which?", options: [])
         #expect(Inbox.need(of: stopped) == nil)
+    }
+
+    /// The inbox is for decisions (#215): every kind declares the answers that change something,
+    /// every item Oby makes offers one, and one that offers none arrives done, with the reports.
+    @Test func everyKindHasAnActionAndOnlyDecisionsWait() throws {
+        for kind in InboxItem.Kind.allCases {
+            #expect(kind.takesWords || !kind.actions.isEmpty, "\(kind) declares no action")
+        }
+        var reviewed = fix
+        reviewed.status = .done
+        reviewed.published = "https://github.com/deskree-inc/oby/pull/80"
+        reviewed.review = Review(verdict: .changesRequested, job: "rev4", agent: "codex", account: "Work", round: 4)
+        var never = failed
+        never.session = nil
+        var asked = fix
+        asked.question = Plan.Question(text: "Which?", options: [])
+        let made = [Inbox.need(of: failed), Inbox.need(of: failed, limited: true), Inbox.need(of: reviewed), Inbox.need(of: never), Inbox.need(of: asked)].compactMap { $0 }
+        #expect(made.count == 5)
+        for item in made { #expect(item.isDecision && item.options.allSatisfy(item.kind.acts), "\(item.id)") }
+        #expect(InboxItem.Kind.audit.acts(on: "Use In review instead") && !InboxItem.Kind.failed.acts(on: "Use In review instead"))
+        #expect(Inbox.instead("Use In review instead") == "In review" && Inbox.instead("In review") == nil)
+
+        let desk = makeDesk()
+        let day = Date(timeIntervalSince1970: 1_800_000_000)
+        desk.addIssueAudit(InboxItem(id: "report", kind: .audit, job: "", title: "Daily issue audit", text: "Fixed 7.", options: [], created: day))
+        desk.addIssueAudit(InboxItem(id: "nothing", kind: .failure, job: "", title: "Oby failure: x", text: "Bug.", options: ["Later"], created: day))
+        #expect(desk.item("report")?.done == day && desk.item("nothing")?.done == day)
+        #expect(desk.inbox.filter(\.isOpen).isEmpty && makeDesk().inbox.count == 2)
+    }
+
+    /// Items saved before #215 that offer nothing to decide (the 2026-10-12 audit report) are done
+    /// once the inbox loads, and stay done; a question with no options still waits.
+    @Test func savedItemsWithNothingToDecideAreDoneOnLoad() throws {
+        let store = JobStore(url: folder.appending(path: "oby.sqlite"))
+        let day = Date(timeIntervalSince1970: 1_791_763_200)
+        store.save(InboxItem(id: "issue-audit-20738", kind: .audit, job: "", title: "Daily issue audit",
+                             text: "Issue audit: fixed drift on 7 issue(s). Issue sync: roadmap has no Status option Needs test.", options: [], created: day))
+        var asked = fix
+        asked.question = Plan.Question(text: "Which?", options: [])
+        let desk = makeDesk([asked])
+        let report = try #require(desk.item("issue-audit-20738"))
+        #expect(report.done != nil && report.answer == nil)
+        #expect(desk.inbox.filter(\.isOpen).map(\.kind) == [.question])
+        // Saved done: the next load keeps it so, and it's in the history.
+        #expect(makeDesk().item("issue-audit-20738")?.done != nil)
+    }
+
+    /// A failed runner update offers Try again, which tries that commit again.
+    @Test func aFailedUpdateCanBeTriedAgain() throws {
+        let desk = makeDesk()
+        var retried = 0
+        desk.retryUpdate = { retried += 1 }
+        desk.updateFailed(InboxItem(id: "runner-update-abc", kind: .failed, job: Desk.updateJob, title: "Runner update failed",
+                                    text: "Runner update failed at swift test (abc).", options: [Inbox.tryAgain], created: .now))
+        #expect(desk.item("runner-update-abc")?.isOpen == true)
+        #expect(throws: (any Error).self) { try desk.settle("runner-update-abc", .answer(Inbox.dismiss)) }
+        let item = try desk.settle("runner-update-abc", .answer(Inbox.tryAgain))
+        #expect(retried == 1 && item.done != nil && item.answer == Inbox.tryAgain)
     }
 
     /// How long an item has waited, as both apps say it next to it.
@@ -409,8 +487,12 @@ final class InboxTests {
             let item = try #require(listed.first)
             #expect(item["id"] as? String == id && item["kind"] as? String == "failed" && item["job"] as? String == "failed")
             #expect(item["state"] as? String == "open" && item["options"] as? [String] == ["Try again", "Dismiss"])
-            for key in ["done", "later", "answer"] { #expect(item[key] is NSNull, "\(key)") }
-            #expect(Set(item.keys) == ["id", "kind", "job", "title", "text", "options", "created", "done", "later", "answer", "state"])
+            for key in ["done", "later", "answer", "headline", "happened", "recommended", "why"] { #expect(item[key] is NSNull, "\(key)") }
+            #expect(Set(item.keys) == ["id", "kind", "job", "title", "text", "options", "details", "created", "done", "later", "answer", "state",
+                                       "headline", "happened", "recommended", "why"])
+            // What each answer does, under its button (#215).
+            #expect(item["details"] as? [String] == ["Runs it again: the job picks up in its session, or the merge or the Mac check goes again.",
+                                                     "Lets the job go. Its branch stays; nothing more happens."])
 
             #expect(try await answer("nowhere", #"{"done": true}"#).0 == .notFound)
             #expect(try await answer(id, #"{"answer": "x", "done": true}"#).0 == .unprocessableContent)
@@ -425,6 +507,18 @@ final class InboxTests {
             #expect(try await answer(id, #"{"done": true}"#).0 == .conflict)
             try await client.execute(uri: "/v1/inbox", method: .get, headers: owner) { response in
                 #expect(String(decoding: response.body.readableBytesView, as: UTF8.self) == "[]")
+            }
+            // The history (#215): done items, the latest settled first, with what settled them.
+            let history: [[String: Any]] = try await client.execute(uri: "/v1/inbox?state=done", method: .get, headers: owner) { response in
+                #expect(response.status == .ok)
+                return (try? JSONSerialization.jsonObject(with: Data(response.body.readableBytesView)) as? [[String: Any]]) ?? []
+            }
+            #expect(history.first?["id"] as? String == id && history.first?["state"] as? String == "done" && history.first?["answer"] as? String == "Dismiss")
+            try await client.execute(uri: "/v1/inbox?state=done&limit=0", method: .get, headers: owner) { response in
+                #expect(String(decoding: response.body.readableBytesView, as: UTF8.self) == "[]")
+            }
+            try await client.execute(uri: "/v1/inbox?state=later", method: .get, headers: owner) { response in
+                #expect(response.status == .unprocessableContent)
             }
         }
         // Every app heard each change as an `inbox` event (and the job's, dismissed).

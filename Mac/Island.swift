@@ -3,7 +3,7 @@ import ApplicationServices
 import SwiftUI
 import WebKit
 
-enum IslandState { case compact, peek, open, listening }
+nonisolated enum IslandState { case compact, peek, open, listening }
 
 /// The island's state and its geometry, measured from the screen Oby lives on.
 @Observable
@@ -17,8 +17,10 @@ final class IslandModel {
     /// What goes with the next request: screenshots, what you copied.
     let tray = Tray()
     var state: IslandState = .compact
-    /// The notch's size, or zero on a screen without one.
-    var notch: CGSize = .zero
+    /// The camera's cutout, from the screen's top-left corner, or nil on a screen without one.
+    var notch: CGRect?
+    /// The width of the screen Oby lives on: the island is centered on it.
+    var screenWidth: CGFloat = 0
     /// The menu bar's height, used for the pill on screens without a notch.
     var barHeight: CGFloat = 24
     /// The open island's height, measured from its content.
@@ -27,58 +29,56 @@ final class IslandModel {
     var notice: String?
     /// The runner's job a notification opened the island on, until the island closes.
     var focus: String?
+    /// The runner's job whose alert's Publish was clicked: its screen starts publishing, once.
+    var publishing: String?
 
     init(desk: Desk, feed: RunnerFeed) {
         self.desk = desk
         self.feed = feed
     }
 
-    /// Agents working now, on this Mac and on the runner.
-    var working: Int { desk.active.count + feed.working }
+    /// Both chat surfaces read and send through this model.
+    var thread: [Turn] { feed.conversation.thread(with: desk.turns) }
+    var recentTurns: [Turn] { Array(thread.suffix(4)) }
+    var chatWindowVisible = false
+    var readReply: String?
+    var unreadReply: Bool { thread.last(where: { $0.who == .oby }).map { $0.id != readReply } ?? false }
 
-    /// Whether the island lists a job: it hasn't finished, it still needs you, or it finished after
-    /// the last Clear done on any app. The runner keeps that time, and this Mac's own jobs go by it too.
-    func lists(_ job: Job) -> Bool { job.listed(after: feed.clearedAt) }
+    func markChatRead() { readReply = thread.last(where: { $0.who == .oby })?.id }
+
+    func sendChat(_ text: String) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text, shown: text)
+    }
+
+    /// Agents working now, on this Mac and on the runner: not the jobs waiting their turn (#238).
+    var working: Int { desk.jobs.count(where: \.isWorking) + feed.working }
+    /// Jobs queued behind something, on this Mac and on the runner (`Job.waiting`).
+    var waiting: Int { desk.jobs.count(where: \.isWaiting) + feed.waiting }
+
+    /// Whether the island lists a job: it isn't settled (`Job.settled`: still running, waiting,
+    /// needing you or with its pull request open), or it finished after the last Clear done on any
+    /// app. The runner keeps that time, and this Mac's own jobs go by it too.
+    func lists(_ job: Job) -> Bool { job.listed(after: feed.clearedAt, among: desk.jobs + feed.jobs) }
+
+    /// Clear done would take the job from the island (`Job.settled`).
+    func clears(_ job: Job) -> Bool { job.clearable(among: desk.jobs + feed.jobs) }
 
     /// The one line the iPhone's Home says too (Shared/JobList.swift): who's working, and what
     /// needs you among the jobs listed.
     var summary: String {
-        Summary.line(working: working, needs: NeedsYou.line((desk.jobs + feed.jobs).filter { lists($0) }))
+        Summary.line(working: working, waiting: waiting, needs: NeedsYou.line((desk.jobs + feed.jobs).filter { lists($0) }))
     }
-
-    private let wing: CGFloat = 52
-    private var top: CGFloat { notch == .zero ? barHeight : notch.height }
 
     /// What peeking shows next to Oby's name: a job that just ended, else the summary.
     var peekLine: String { notice ?? summary }
 
-    var size: CGSize {
-        let base = notch == .zero ? 180 : notch.width + 2 * wing
-        switch state {
-        case .compact: return CGSize(width: base, height: top)
-        case .peek: return CGSize(width: base + (peekLine == Summary.quiet ? 140 : 320), height: top + 6)
-        case .open, .listening: return CGSize(width: 600, height: openHeight)
-        }
+    /// Where everything sits inside the island now (Mac/IslandLayout.swift).
+    var layout: IslandLayout {
+        IslandLayout.of(state, screenWidth: screenWidth, notch: notch, barHeight: barHeight, line: peekLine, openHeight: openHeight)
     }
 
-    var radius: CGFloat {
-        switch state {
-        case .compact: 12
-        case .peek: 18
-        case .open, .listening: 32
-        }
-    }
-
-    /// Where Oby sits inside the island, from its top-left corner.
-    var characterFrame: CGRect {
-        switch state {
-        case .compact, .peek: CGRect(x: 8, y: -3, width: top + 6, height: top + 6)
-        // Oby's body sits low in its frame (room to jump), so the frame starts under the notch.
-        case .open, .listening: CGRect(x: 14, y: top - 14, width: 136, height: 136)
-        }
-    }
-
-    var contentTop: CGFloat { top }
+    var size: CGSize { layout.size }
 }
 
 /// Pins the island to the top center of the screen with the notch (or the main screen),
@@ -100,6 +100,9 @@ final class IslandController {
     private var repos: [String] = []
     /// The last words sent were hands-free (fn + Space): once Oby has spoken its reply, it listens again.
     private var handsFreeAsk = false
+    /// Opens the Oby window (Mac/App/ChatWindow.swift), on a job's screen when one is named: the
+    /// app sets it. The island's "Open Chat" button goes there.
+    var openWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
 
     init() { desk.issueSync.enabled = true; model = IslandModel(desk: desk, feed: feed) }
 
@@ -107,7 +110,11 @@ final class IslandController {
         panel.contentView = NSHostingView(rootView: IslandView(
             model: model, character: character,
             onOpen: { [weak self] in self?.open() },
-            onClose: { [weak self] in self?.close() }))
+            onClose: { [weak self] in self?.close() },
+            onOpenWindow: { [weak self] job in
+                self?.close()
+                self?.openWindow(job)
+            }))
         place()
         panel.orderFrontRegardless()
         character.pause(true)
@@ -127,13 +134,47 @@ final class IslandController {
             var failed: [String: String] = [:]
             for id in ids {
                 do {
-                    guard let runner = feed.runner else { throw RunnerError(message: "\(feed.name) isn't set up.") }
-                    feed.apply(try await runner.stop(id))
+                    guard feed.runner != nil else { throw RunnerError(message: "\(feed.name) isn't set up.") }
+                    feed.apply(try await feed.about(id) { try await $0.stop(id) })
                 } catch {
                     failed[id] = error.localizedDescription
                 }
             }
             return failed
+        }
+        desk.moveElsewhere = { [weak self] id, target, why in
+            guard let self, feed.runner != nil else { throw RunnerError(message: "The runner isn't set up.") }
+            let job = try await feed.about(id) { try await $0.move(id, agent: target.agent, account: target.account, model: target.model, why: why) }
+            feed.apply(job)
+            return job
+        }
+        // "Allow it", "no, run only the runner tests" and "stop asking on the Watch job" reach the
+        // runner's jobs too (#134): a permission through its answer, a plan through the job's words,
+        // as its card would send them.
+        desk.answerElsewhere = { [weak self] job, decision, message in
+            guard let self, let runner = feed.runner else { return "The runner isn't set up." }
+            do {
+                if job.question?.plan != nil {
+                    let words = decision == .deny ? (message ?? PermissionPolicy.changeIt) : "Approve: \(PermissionMode.acceptEdits.title)"
+                    feed.apply(try await runner.tell(job.id, words))
+                    return nil
+                }
+                guard let permission = job.permission?.id ?? feed.extras[job.id]?.permission?.id,
+                      let answer = RunnerPermission.Decision(rawValue: decision.rawValue) else { return "It isn't waiting for your OK any more." }
+                feed.apply(try await runner.answer(job.id, permission: permission, answer, message: message))
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }
+        desk.modeElsewhere = { [weak self] job, mode in
+            guard let self, let choice = RunnerMode(rawValue: mode.rawValue) else { return "The runner isn't set up." }
+            do {
+                try await feed.setMode(job.id, choice)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
         }
         desk.onReply = { [weak self] text, spoken in self?.replied(text, spoken: spoken) }
         feed.start()
@@ -174,9 +215,10 @@ final class IslandController {
         }
     }
 
-    /// A notification was clicked: the island opens on its job.
-    func open(job id: String) {
+    /// A notification was clicked: the island opens on its job, and its Publish publishes it.
+    func open(job id: String, publish: Bool = false) {
         model.focus = id
+        model.publishing = publish ? id : nil
         open()
     }
 
@@ -190,6 +232,7 @@ final class IslandController {
     func close() {
         guard model.state == .open else { return }
         model.focus = nil
+        model.publishing = nil
         set(.compact)
         // Hand the keyboard back to the app you were in.
         if panel.isKeyWindow { NSWorkspace.shared.frontmostApplication?.activate() }
@@ -291,10 +334,11 @@ final class IslandController {
     private func place() {
         guard let screen else { return }
         if screen.safeAreaInsets.top > 0, let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
-            model.notch = CGSize(width: screen.frame.width - left.width - right.width, height: screen.safeAreaInsets.top)
+            model.notch = CGRect(x: left.width, y: 0, width: screen.frame.width - left.width - right.width, height: screen.safeAreaInsets.top)
         } else {
-            model.notch = .zero
+            model.notch = nil
         }
+        model.screenWidth = screen.frame.width
         let bar = screen.frame.maxY - screen.visibleFrame.maxY
         model.barHeight = bar > 0 ? bar : NSStatusBar.system.thickness
         let size = CGSize(width: 720, height: 760)
@@ -321,7 +365,7 @@ final class IslandController {
         lastMouse = mouse
         // oby.html reads the pointer relative to its own frame, which is tiny here: scale the
         // distance from Oby so far-away pointers turn the head a little, not all the way round.
-        let frame = model.characterFrame
+        let frame = model.layout.character
         let x = max(-1, min(1, (mouse.x - (island.minX + frame.midX)) / 420))
         let y = max(-1, min(1, ((island.maxY - frame.midY) - mouse.y) / 260))
         character.point(at: CGPoint(x: (x + 1) / 2 * frame.width, y: (y + 1) / 2 * frame.height))
@@ -350,6 +394,8 @@ struct IslandView: View {
     let character: ObyCharacter
     let onOpen: () -> Void
     let onClose: () -> Void
+    /// Opens the Oby window, on a job when one is named (Mac/App/ChatWindow.swift).
+    var onOpenWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
 
     private var mood: String {
         if model.state == .listening { return "listening" }
@@ -358,9 +404,10 @@ struct IslandView: View {
     }
 
     var body: some View {
-        let size = model.size
-        let frame = model.characterFrame
-        let shape = UnevenRoundedRectangle(bottomLeadingRadius: model.radius, bottomTrailingRadius: model.radius, style: .continuous)
+        let layout = model.layout
+        let size = layout.size
+        let frame = layout.character
+        let shape = UnevenRoundedRectangle(bottomLeadingRadius: layout.radius, bottomTrailingRadius: layout.radius, style: .continuous)
 
         ZStack(alignment: .topLeading) {
             WebView(character.page)
@@ -370,29 +417,24 @@ struct IslandView: View {
                 .offset(x: frame.minX, y: frame.minY)
                 .accessibilityLabel("Oby")
 
-            // Agents working on this Mac and on the runner.
-            if model.state == .compact, model.working > 0 {
+            // Agents working on this Mac and on the runner, in the right wing.
+            if let count = layout.count, model.working > 0 {
                 Text("\(model.working)")
                     .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                    .frame(width: size.width - 16, height: size.height, alignment: .trailing)
+                    .frame(width: count.width, height: count.height, alignment: .trailing)
+                    .offset(x: count.minX, y: count.minY)
                     .accessibilityLabel(model.working == 1 ? "1 agent running" : "\(model.working) agents running")
             }
 
-            if model.state == .peek {
-                HStack(spacing: 12) {
-                    Text("Oby").font(.system(size: 12, weight: .semibold))
-                        .padding(.leading, frame.maxX + 4)
-                    Spacer(minLength: 0)
-                    Text(model.peekLine).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.6))
-                        .lineLimit(1)
-                        .padding(.trailing, 14)
-                }
-                .frame(width: size.width, height: size.height)
-                .transition(.opacity)
+            if let line = layout.line {
+                peek(below: layout.lineBelow)
+                    .frame(width: line.width, height: line.height)
+                    .offset(x: line.minX, y: line.minY)
+                    .transition(.opacity)
             }
 
             if model.state == .open {
-                OpenIsland(model: model, characterWidth: frame.maxX, top: model.contentTop, onClose: onClose)
+                OpenIsland(model: model, characterWidth: frame.maxX, insets: layout.insets ?? EdgeInsets(), onClose: onClose, onOpenWindow: onOpenWindow)
                     .frame(width: size.width)
                     .fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { model.openHeight = $0 }
@@ -400,7 +442,7 @@ struct IslandView: View {
             }
 
             if model.state == .listening {
-                ListeningIsland(voice: model.voice, characterWidth: frame.maxX, top: model.contentTop)
+                ListeningIsland(voice: model.voice, insets: layout.insets ?? EdgeInsets())
                     .frame(width: size.width)
                     .fixedSize(horizontal: false, vertical: true)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { model.openHeight = $0 }
@@ -421,13 +463,27 @@ struct IslandView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onChange(of: mood, initial: true) { character.mood = mood }
     }
+
+    /// "Oby" and the hover line: under the camera, centered, on a screen with a notch; else Oby's
+    /// name beside it and the line trailing. The line wraps to two lines, cut only past the second;
+    /// IslandLayout measures it in these fonts and gives the row the height it needs.
+    @ViewBuilder private func peek(below: Bool) -> some View {
+        let name = Text("Oby").font(.system(size: 12, weight: .semibold)).layoutPriority(1)
+        let line = Text(model.peekLine).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.6))
+            .lineLimit(IslandLayout.maxLines).truncationMode(.tail)
+        if below {
+            HStack(alignment: .firstTextBaseline, spacing: IslandLayout.gap(below: true)) { name; line }
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: IslandLayout.gap(below: false)) { name; Spacer(minLength: 0); line }
+        }
+    }
 }
 
 /// While you hold fn: the waveform, your words as you say them, and how to send.
 private struct ListeningIsland: View {
     let voice: Voice
-    let characterWidth: CGFloat
-    let top: CGFloat
+    /// From the island's edges (IslandLayout): the words start below the camera.
+    let insets: EdgeInsets
 
     private var keyName: String { voice.key == .fn ? "fn" : "Control-Option" }
 
@@ -457,10 +513,7 @@ private struct ListeningIsland: View {
             Text(hint).font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
         }
         .frame(maxWidth: .infinity, minHeight: 120, alignment: .leading)
-        .padding(.leading, characterWidth + 12)
-        .padding(.trailing, 28)
-        .padding(.top, top + 6)
-        .padding(.bottom, 24)
+        .padding(insets)
     }
 }
 
@@ -480,14 +533,15 @@ private struct Waveform: View {
     }
 }
 
-/// The open island: what Oby is up to, the conversation (your words and Oby's replies, newest at
-/// the bottom), every job the iPhone lists (the runner's and this Mac's, in the same groups), one
-/// job's screen when you click it, and the field where you type.
+/// The open island: needs-you cards and jobs above a compact view of the shared chat.
 private struct OpenIsland: View {
     let model: IslandModel
     let characterWidth: CGFloat
-    let top: CGFloat
+    /// From the island's edges (IslandLayout): the words start below the camera.
+    let insets: EdgeInsets
     let onClose: () -> Void
+    /// Opens the Oby window (Mac/App/ChatWindow.swift), on a job when one is named.
+    var onOpenWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
     @State private var text = ""
     @FocusState private var typing: Bool
     /// The job open in place of the list (a Row's id), or nil for the list.
@@ -498,9 +552,7 @@ private struct OpenIsland: View {
     @State private var contentHeight: CGFloat = 0
 
     /// The list or a job grows the island up to here, then scrolls: the panel is 760 points tall.
-    /// With the conversation above it, the list gets less.
     private static let maxHeight: CGFloat = 420
-    private static let maxHeightWithThread: CGFloat = 260
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
@@ -508,7 +560,7 @@ private struct OpenIsland: View {
 
     /// Oby is thinking about what you just said.
     private var thinking: Bool { if case .thinking = desk.talk { true } else { false } }
-    /// The conversation shows once there's one.
+    /// There's a conversation to ask about.
     private var threaded: Bool { !desk.turns.isEmpty || thinking }
 
     var body: some View {
@@ -524,6 +576,9 @@ private struct OpenIsland: View {
                     Button(action: clear) { topPill { Text("Clear done") } }
                         .buttonStyle(.plain)
                 }
+                Button { onOpenWindow(nil) } label: { topPill { Text("Open Chat") } }
+                    .buttonStyle(.plain)
+                    .help("The window: the whole conversation, every agent, and what's live")
                 Button(action: onClose) {
                     Image(systemName: "chevron.up")
                         .font(.system(size: 12, weight: .bold))
@@ -535,36 +590,27 @@ private struct OpenIsland: View {
             }
             .frame(minHeight: 92, alignment: .top)
 
-            // With a job's screen open the thread steps aside, unless Oby is thinking: then its
-            // bubble and × stay in sight.
-            if threaded, selected == nil || thinking {
-                ConversationThread(desk: desk, speaker: model.speaker, onCancel: { desk.cancel() })
-            }
-
             switch desk.talk {
             case .plan(let drafts) where drafts.count == 1:
-                TrayRow(tray: tray)
-                PlanCard(draft: drafts[0], accounts: desk.accounts.accounts.filter(\.signedIn),
-                         onDispatch: { desk.dispatch(tray.attach($0)); tray.clear() },
-                         onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
-                         onCancel: { desk.cancel() })
-            case .plan(let drafts):
-                TrayRow(tray: tray)
-                PlansCard(drafts: drafts, accounts: desk.accounts.accounts.filter(\.signedIn),
-                          onDispatch: { for draft in $0 { desk.dispatch(tray.attach(draft)) }; tray.clear() },
-                          onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
-                          onCancel: { desk.cancel() })
-            case .question(let said, let question):
-                ForEach(question.options, id: \.self) { option in
-                    Button { desk.answer(option, said: said, question: question.text) } label: {
-                        Text(option).font(.system(size: 14, weight: .medium))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 16).padding(.vertical, 11)
-                            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
+                scrolling {
+                    PlanCard(draft: drafts[0], accounts: desk.accounts.accounts.filter(\.signedIn),
+                             onDispatch: { desk.dispatch(tray.attach($0)); tray.clear() },
+                             onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
+                             onCancel: { desk.cancel() })
                 }
-                field
+            case .plan(let drafts):
+                scrolling {
+                    PlansCard(drafts: drafts, accounts: desk.accounts.accounts.filter(\.signedIn),
+                              onDispatch: { for draft in $0 { desk.dispatch(tray.attach(draft)) }; tray.clear() },
+                              onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
+                              onCancel: { desk.cancel() })
+                }
+            case .question(let said, let question):
+                scrolling {
+                    DecisionCard(title: question.text, options: CardOption.of(question.options),
+                                 onChoose: { desk.answer($0.answer, said: said, question: question.text) },
+                                 onWords: { desk.answer($0, said: said, question: question.text) })
+                }
             default:
                 if let row = selectedRow {
                     scrolling { screen(row).id(row.id) }
@@ -573,7 +619,7 @@ private struct OpenIsland: View {
                     if !groups.isEmpty || IslandInbox.waits(desk: desk, feed: feed) {
                         scrolling {
                             VStack(alignment: .leading, spacing: 14) {
-                                IslandInbox(desk: desk, feed: feed)
+                                IslandInbox(desk: desk, feed: feed, onOpen: { selected = Row.id($0, local: $1) })
                                 list
                             }
                         }
@@ -584,20 +630,39 @@ private struct OpenIsland: View {
                     if feed.down {
                         Text("\(feed.name) isn't reachable").font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
                     }
-                    field
                 }
             }
+            if selected == nil {
+                compactChat
+                field
+            } else if thinking {
+                // Over a job's screen, Oby's thinking and its Cancel stay in sight.
+                thinkingRow
+            }
         }
-        .padding(.top, top + 10)
-        .padding(.horizontal, 22)
-        .padding(.bottom, 22)
+        .padding(insets)
         // Escape cancels the turn Oby is thinking about first, then leaves a job's screen, then closes the island.
         .onExitCommand {
             if thinking { desk.cancel() } else if selected != nil { selected = nil } else { onClose() }
         }
-        .onAppear { typing = true }
+        .onAppear { typing = true; model.markChatRead() }
+        .onChange(of: model.thread.last?.id) { if selected == nil { model.markChatRead() } }
         // A notification opened the island on a runner's job: its screen opens.
         .onChange(of: model.focus, initial: true) { if let focus = model.focus { selected = Row.id(focus, local: false) } }
+        // A runner's job open here stays across new lists; one older than the latest 50 (an inbox
+        // item's or an alert's) is fetched, and its screen opens once it's here.
+        .onChange(of: selected, initial: true) { old, new in
+            if let id = Row.runnerJob(old) { feed.showing(id, false) }
+            guard let id = Row.runnerJob(new) else { return }
+            feed.showing(id, true)
+            Task {
+                do { try await feed.fetch(id) } catch {
+                    if selected == new { selected = nil }
+                    problem = error.localizedDescription
+                }
+            }
+        }
+        .onDisappear { if let id = Row.runnerJob(selected) { feed.showing(id, false) } }
     }
 
     /// A job in the list, and the runner it's on (nil: this Mac).
@@ -606,6 +671,11 @@ private struct OpenIsland: View {
         var host: String?
         var id: String { Self.id(job.id, local: host == nil) }
         static func id(_ job: String, local: Bool) -> String { "\(local ? "mac" : "runner")/\(job)" }
+        /// The runner's job a Row's id names, or nil for this Mac's own or none.
+        static func runnerJob(_ id: String?) -> String? {
+            guard let id, id.hasPrefix("runner/") else { return nil }
+            return String(id.dropFirst("runner/".count))
+        }
     }
 
     /// Every job, this Mac's and the runner's, newest first.
@@ -617,17 +687,17 @@ private struct OpenIsland: View {
     /// The ones the island lists: all but those that finished by the last Clear done, on any app.
     private var rows: [Row] { allRows.filter { model.lists($0.job) } }
 
-    /// The list in the iPhone's groups: needs you, working, in review, done.
+    /// The list in the iPhone's groups: working, waiting, needs you, in review, done.
     private var groups: [JobList.Section<Row>] { JobList.groups(rows) { $0.job.group } }
 
     /// The job open now, even one that's cleared (a notification opened it).
     private var selectedRow: Row? { selected.flatMap { id in allRows.first { $0.id == id } } }
 
-    /// The job list is on screen, a runner is set (it keeps the clear's time), and something finished is listed.
+    /// The job list is on screen, a runner is set (it keeps the clear's time), and a settled job is listed.
     private var clearable: Bool {
         switch desk.talk {
         case .plan, .question: false
-        default: feed.runner != nil && rows.contains { !$0.job.isActive }
+        default: feed.runner != nil && rows.contains { model.clears($0.job) }
         }
     }
 
@@ -638,7 +708,7 @@ private struct OpenIsland: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
         }
-        .frame(height: min(contentHeight, threaded && (selected == nil || thinking) ? Self.maxHeightWithThread : Self.maxHeight))
+        .frame(height: min(contentHeight, selected == nil ? 250 : Self.maxHeight))
     }
 
     /// The jobs under their groups' headings, as Home shows them on the iPhone.
@@ -657,18 +727,38 @@ private struct OpenIsland: View {
         }
     }
 
-    /// The job's screen, with the same stages as the iPhone's. Publishing a runner's job needs the
-    /// iPhone's device key, so only this Mac's own jobs offer Publish here.
+    /// The job's screen, with the same stages as the iPhone's. Both kinds publish here after Touch
+    /// ID: this Mac's own jobs with Oby's sentence, the runner's with the runner's, signed by this
+    /// Mac's key (Mac/MacDevice.swift). A Mac without Touch ID leaves the runner's to the iPhone.
     @ViewBuilder private func screen(_ row: Row) -> some View {
         if let host = row.host {
-            JobView(job: row.job, place: host, account: nil, onStop: { stop(row) }, onPublish: nil,
-                    onMessage: { text in if let runner = feed.runner { feed.apply(try await runner.tell(row.job.id, text)) } },
-                    onDismiss: { try await dismiss(row) })
+            let id = row.job.id
+            JobView(job: row.job, place: host, account: feed.accounts.first { $0.account.id == row.job.account }?.account.name, onStop: { stop(row) },
+                    publishing: feed.device.key.isAvailable
+                        ? JobView.Publishing(action: { try await feed.publishAction(id) }, publish: { try await feed.publish(id, action: $0) })
+                        : nil,
+                    onMessage: { text in if feed.runner != nil { feed.apply(try await feed.about(id) { try await $0.tell(id, text) }) } },
+                    onDismiss: { try await dismiss(row) },
+                    extras: feed.extras[id],
+                    onMode: { try await feed.setMode(id, $0) },
+                    onPermission: { try await feed.answer(id, $0, message: $1) },
+                    publishNow: model.publishing == id,
+                    onPublishNow: { model.publishing = nil },
+                    accounts: feed.accounts, onMove: mover(row),
+                    onStartNow: { if feed.runner != nil { feed.apply(try await feed.about(id) { try await $0.startNow(id) }) } },
+                    onUseAnyway: { account in if let runner = feed.runner { _ = try await runner.liftReserve(account, true) } })
         } else {
             let job = row.job
             JobView(job: job, place: "This Mac", account: desk.accounts.accounts.first { $0.account.id == job.account }?.account.name,
-                    onStop: { stop(row) }, onPublish: { try await desk.publish(job.id, approve: Publish.touchID) },
-                    onMessage: { try desk.message(job.id, $0) }, onDismiss: { try await dismiss(row) })
+                    onStop: { stop(row) },
+                    publishing: JobView.Publishing(action: { Publish.action(for: job, base: job.base ?? "") },
+                                                   publish: { _ in _ = try await desk.publish(job.id, approve: Publish.touchID) }),
+                    onMessage: { try desk.message(job.id, $0) }, onDismiss: { try await dismiss(row) },
+                    extras: RunnerJobExtras(local: job),
+                    onMode: { try desk.changeMode(job.id, to: $0) },
+                    onPermission: { try desk.answerPermission(job.id, $0, message: $1) },
+                    accounts: desk.accounts.accounts, onMove: mover(row), onStartNow: { try desk.startNow(job.id) },
+                    onUseAnyway: { _ = desk.liftReserve($0, true) })
         }
     }
 
@@ -676,15 +766,28 @@ private struct OpenIsland: View {
         if row.host == nil {
             desk.stop(row.job.id)
         } else {
-            Task { if let job = try? await feed.runner?.stop(row.job.id) { feed.apply(job) } }
+            Task { if let job = try? await feed.about(row.job.id, { try await $0.stop(row.job.id) }) { feed.apply(job) } }
+        }
+    }
+
+    /// Moves the job, here or on the runner; nil for Oby's own reviews, which pick their account themselves.
+    private func mover(_ row: Row) -> ((MoveTarget) async throws -> Void)? {
+        guard row.job.reviewOf == nil else { return nil }
+        let id = row.job.id
+        if row.host == nil {
+            return { target in _ = try desk.move(id, to: target) }
+        }
+        return { target in
+            guard feed.runner != nil else { throw RunnerError(message: "The runner isn't set up.") }
+            feed.apply(try await feed.about(id) { try await $0.move(id, agent: target.agent, account: target.account, model: target.model) })
         }
     }
 
     private func dismiss(_ row: Row) async throws {
         if row.host == nil {
             try desk.dismiss(row.job.id)
-        } else if let runner = feed.runner {
-            feed.apply(try await runner.dismiss(row.job.id))
+        } else if feed.runner != nil {
+            feed.apply(try await feed.about(row.job.id) { try await $0.dismiss(row.job.id) })
         }
     }
 
@@ -707,7 +810,7 @@ private struct OpenIsland: View {
             Text(model.summary).font(.system(size: 19, weight: .semibold))
             switch desk.talk {
             case .question:
-                Text("Pick one, or type below.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+                Text("Pick one, or type your own.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
             case .thinking:
                 Text("Esc cancels. Type to ask something else.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
             default:
@@ -730,6 +833,40 @@ private struct OpenIsland: View {
             .font(.system(size: 12, weight: .semibold))
             .padding(.horizontal, 12).frame(height: 28)
             .background(.white.opacity(0.12), in: Capsule())
+    }
+
+    private var compactChat: some View {
+        ScrollView {
+            VStack(spacing: 6) {
+                ForEach(model.recentTurns) { turn in
+                    HStack {
+                        if turn.who == .user { Spacer(minLength: 50) }
+                        Text(turn.text).font(.system(size: 13)).lineLimit(3)
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .background(turn.who == .user ? Color.accentColor : .white.opacity(0.08),
+                                        in: RoundedRectangle(cornerRadius: 13))
+                        if turn.who == .oby { Spacer(minLength: 50) }
+                    }
+                }
+                if model.speaker.speaking {
+                    Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
+                }
+                if thinking { thinkingRow }
+            }
+        }
+        .defaultScrollAnchor(.bottom)
+        .frame(height: model.recentTurns.isEmpty && !thinking ? 0 : 150)
+        .accessibilityLabel("Recent conversation with Oby")
+    }
+
+    /// Oby's bubble while it thinks: never left there, with a way out in sight.
+    private var thinkingRow: some View {
+        HStack {
+            ProgressView().controlSize(.mini)
+            Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
+            Button("Cancel") { desk.cancel() }.buttonStyle(.plain).help("Cancel (Esc)")
+            Spacer()
+        }
     }
 
     private var field: some View {
@@ -769,7 +906,7 @@ private struct OpenIsland: View {
                     .background(.white.opacity(text.isEmpty ? 0.4 : 1), in: Circle())
             }
             .buttonStyle(.plain)
-            .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty)
+            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .accessibilityLabel("Send")
         }
         .padding(.leading, 18)
@@ -779,9 +916,9 @@ private struct OpenIsland: View {
     }
 
     private func send() {
-        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         // The chips stay until Dispatch, which hands them to the jobs. The thread shows your words alone.
-        desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text, shown: text)
+        model.sendChat(text)
         text = ""
     }
 
@@ -800,80 +937,9 @@ private struct OpenIsland: View {
     }
 }
 
-/// The conversation: your words on the right, Oby's replies on the left, newest at the bottom,
-/// the last 50 kept across launches. While Oby thinks, its bubble says so, with × (or Esc) to
-/// cancel; typing something else replaces the turn.
-private struct ConversationThread: View {
-    let desk: Desk
-    let speaker: Speaker
-    let onCancel: () -> Void
-    @State private var height: CGFloat = 0
-
-    /// The thread grows up to here, then scrolls, pinned to the newest turn.
-    private static let maxHeight: CGFloat = 200
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(desk.turns) { turn in bubble(turn) }
-                    if case .thinking = desk.talk { pending }
-                    if speaker.speaking {
-                        Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
-                            .padding(.leading, 4)
-                    }
-                    Color.clear.frame(height: 1).id("end")
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
-            }
-            .frame(height: min(height, Self.maxHeight))
-            .defaultScrollAnchor(.bottom)
-            .onChange(of: desk.turns.count) { withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
-            .onChange(of: desk.talk) { proxy.scrollTo("end", anchor: .bottom) }
-        }
-        .accessibilityLabel("Conversation")
-    }
-
-    private func bubble(_ turn: Turn) -> some View {
-        let yours = turn.who == .user
-        return HStack {
-            if yours { Spacer(minLength: 60) }
-            Text(turn.text)
-                .font(.system(size: 14, weight: yours ? .regular : .medium))
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Color.white.opacity(yours ? 0.16 : 0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            if !yours { Spacer(minLength: 60) }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(yours ? "You" : "Oby"): \(turn.text)")
-    }
-
-    /// Oby's bubble while it thinks: never left there, with a way out in sight.
-    private var pending: some View {
-        HStack {
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small).tint(.white)
-                Text("Thinking…").font(.system(size: 14, weight: .medium)).foregroundStyle(.white.opacity(0.75))
-                Button(action: onCancel) {
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
-                        .frame(width: 20, height: 20).background(.white.opacity(0.14), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .help("Cancel (Esc)")
-                .accessibilityLabel("Cancel")
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            Spacer(minLength: 60)
-        }
-    }
-}
-
 /// The plan, before anything runs: agent, account, repository and branch. Dispatch, Edit, Cancel.
-private struct PlanCard: View {
+/// The window shows it under the thread too (Mac/App/ChatWindow.swift).
+struct PlanCard: View {
     let draft: Desk.Draft
     let accounts: [AccountState]
     let onDispatch: (Desk.Draft) -> Void
@@ -1011,7 +1077,7 @@ private struct PlanCard: View {
 }
 
 /// Several jobs from one request, one row each with its own account, and Dispatch all.
-private struct PlansCard: View {
+struct PlansCard: View {
     let drafts: [Desk.Draft]
     let accounts: [AccountState]
     let onDispatch: ([Desk.Draft]) -> Void

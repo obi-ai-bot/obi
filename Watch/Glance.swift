@@ -1,11 +1,15 @@
 import Foundation
 
-/// What the complications and the Smart Stack show: how many jobs need you and how many are
-/// working, as the iPhone last sent them. Compiled into the watch app, which saves it to the app
-/// group whenever the job list arrives, and into the widget extension, which reads it.
+/// What the complications and the Smart Stack show: how many jobs need you, how many are working
+/// and how many wait their turn (#238), as the iPhone last sent them. Compiled into the watch app,
+/// which saves it to the app group whenever the job list arrives, and into the widget extension,
+/// which reads it.
 nonisolated struct Glance: Codable, Equatable {
     var needs: Int
+    /// Running, or getting ready to: jobs waiting their turn aren't working.
     var working: Int
+    /// Queued behind something; nil from a glance saved before #238.
+    var waiting: Int? = nil
     /// The first job that needs you, for the rectangular complication.
     var top: String?
 
@@ -14,10 +18,11 @@ nonisolated struct Glance: Codable, Equatable {
     /// What the watch face's gallery shows.
     static let sample = Glance(needs: 1, working: 2, top: "Fix the login redirect")
 
-    /// "1 needs you", "2 working", or "All quiet", as Home says it.
+    /// "1 needs you", "2 working", "14 waiting", or "All quiet", as Home says it.
     var line: String {
         if needs > 0 { return needs == 1 ? "1 needs you" : "\(needs) need you" }
-        return working > 0 ? "\(working) working" : "All quiet"
+        if working > 0 { return "\(working) working" }
+        return Summary.waitingLine(waiting ?? 0) ?? "All quiet"
     }
 
     private static let key = "glance"

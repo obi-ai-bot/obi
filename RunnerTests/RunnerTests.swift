@@ -17,6 +17,21 @@ func temporaryFolder() throws -> URL {
     return folder
 }
 
+/// Writes `script` at `url` as an executable, through `install`, a process of its own. A file this
+/// process writes is open for writing for a moment in any process another test starts just then,
+/// until that one execs, and running the file in that moment fails with "Text file busy" (#193).
+func executable(_ script: String, at url: URL) throws {
+    let source = url.appendingPathExtension("source")
+    try script.write(to: source, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: source) }
+    let install = Process()
+    install.executableURL = URL(filePath: "/usr/bin/install")
+    install.arguments = ["-m", "700", source.path, url.path]
+    try install.run()
+    install.waitUntilExit()
+    guard install.terminationStatus == 0 else { throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path]) }
+}
+
 /// The job from docs/runner-api.md.
 let job = Job(id: "9f08fd10", request: "Review oby PR #33", agent: "claude", account: "default", repo: "deskree-inc/oby",
               branch: "oby/review-33", pr: 33, kind: .review, task: "Review pull request #33 in deskree-inc/oby.",
@@ -171,6 +186,10 @@ final class APITests {
                 #expect(account["label"] is NSNull && account["fullUntil"] is NSNull)
                 let claude = (status["models"] as? [String: Any])?["claude"] as? [String: Any]
                 #expect(claude?["model"] as? String == AgentModels.value("claude", "model"))
+                // No GitHub app here: the runner's own calls go with the owner's login.
+                #expect(status["github"] as? String == "owner")
+                // Nor any check runs: the owner can't write them, so reviews and Mac checks stay in Oby (#198).
+                #expect(status["checks"] as? String == "no app")
             }
             try await client.execute(uri: "/v1/nowhere", method: .get, headers: owner) { response in
                 #expect(response.status == .notFound)
@@ -272,11 +291,14 @@ final class APITests {
         let json = String(decoding: try API.encode(JobJSON(job: job)), as: UTF8.self)
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
-        for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "check", "model", "notes", "pullRequest", "pullRequestError",
-                    "dismissed", "reviewing", "review", "reviewError", "reviewOf", "files", "lead", "claim", "question", "limit", "startCommit", "macCheck", "mergeError", "appleCheck", "appleRan"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
+        for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "fromPR", "check", "model", "notes", "pullRequest", "pullRequestError",
+                    "dismissed", "reviewing", "review", "reviewError", "reviewOf", "files", "lead", "claim", "question", "limit", "startCommit", "macCheck", "mergeError", "appleCheck", "appleRan", "tetrix", "xcodeCloud", "xcodeCloudError", "startWhen", "waiting", "permission"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 50)
-        #expect(json.contains(#""outgoing":[]"#) && json.contains(#""connectionUses":[]"#))
+        #expect(decoded.count == 61)
+        #expect(decoded["cloudNeedsYou"] as? Bool == false)
+        // A job from before modes ran as Bypass does.
+        #expect(decoded["mode"] as? String == "bypass")
+        #expect(json.contains(#""outgoing":[]"#) && json.contains(#""moves":[]"#) && json.contains(#""connectionUses":[]"#))
         #expect(decoded["pipeline"] is [String: Any])
         #expect(decoded["title"] as? String == "Review oby #33")
         #expect(decoded["rounds"] as? Int == 1 && decoded["round"] as? Int == 1)
@@ -644,12 +666,51 @@ struct ConnectorTests {
         for account in [nil, URL(filePath: "/tmp/oby/accounts/personal")] {
             let launch = try ClaudeAgent.launch(worktree: worktree, configDirectory: account, model: "opus", resume: nil)
             #expect(launch.environment["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false")
-            // Still the account's own login and config, where its mcpServers live.
+            // Still the account's own login and config.
             #expect(launch.environment["CLAUDE_CONFIG_DIR"] == account?.path)
-            #expect(launch.arguments.contains("claude") && launch.arguments.contains("--setting-sources"))
-            // Nothing that would also drop the account's own servers.
-            for flag in ["--strict-mcp-config", "--mcp-config", "--bare"] { #expect(!launch.arguments.contains(flag), "\(flag)") }
+            // No settings file, the account's included (#134): its MCP servers come from the job's own file, and only they do.
+            let arguments = launch.arguments
+            let after = { (flag: String) in arguments.firstIndex(of: flag).map { arguments[arguments.index(after: $0)] } }
+            #expect(after("--setting-sources") == "" && arguments.contains("--strict-mcp-config") && !arguments.contains("--bare"))
+            #expect(after("--mcp-config") == ClaudeAgent.mcpFile(worktree: worktree).path)
+            // In Oby's own folder, not the worktree the agent works in.
+            #expect(!ClaudeAgent.mcpFile(worktree: worktree).path.hasPrefix(worktree.path + "/"))
+            #expect(ClaudeAgent.mcpFile(worktree: worktree).path.hasPrefix(Workspace.root.path + "/"))
         }
+    }
+
+    /// The account's own servers, from its `.claude.json`, and nothing else from it: no header and
+    /// no environment variable (a token) ever reaches the file the agent's box shows.
+    @Test func theJobGetsTheAccountsOwnMCPServers() throws {
+        let account = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: account) }
+        let claude = #"""
+            {"mcpServers": {"tetrix": {"type": "http", "url": "https://tetrix.example/mcp", "oauth": {"callbackPort": 3118}},
+                            "github": {"type": "http", "url": "https://api.example/mcp", "headers": {"Authorization": "Bearer ghp_secret1"}},
+                            "local": {"command": "npx", "args": ["server"], "env": {"API_TOKEN": "tok_secret2"}},
+                            "files": {"command": "files-mcp", "args": ["--root", "."]}},
+             "projects": {"/x": {"allowedTools": ["Bash"]}}}
+            """#
+        try Data(claude.utf8).write(to: account.appending(path: ".claude.json"))
+        let data = ClaudeAgent.mcpConfig(configDirectory: account)
+        let written = String(decoding: data, as: UTF8.self)
+        for secret in ["ghp_secret1", "tok_secret2", "Authorization", "headers", "env", "oauth"] { #expect(!written.contains(secret), "\(secret)") }
+        let config = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(config.keys.sorted() == ["mcpServers"])
+        let servers = try #require(config["mcpServers"] as? [String: Any])
+        // A server that needs a header or a variable is left out; the others keep what starts them.
+        #expect(servers.keys.sorted() == ["files", "tetrix"])
+        #expect((servers["tetrix"] as? [String: Any])?.keys.sorted() == ["type", "url"])
+        #expect((servers["files"] as? [String: Any])?["args"] as? [String] == ["--root", "."])
+        // Written for Oby alone.
+        let file = account.appending(path: "mcp/job.json")
+        try ClaudeAgent.writeMCP(data, to: file)
+        let permissions = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber
+        let read = try Data(contentsOf: file)
+        #expect(permissions?.intValue == 0o600 && read == data)
+        // An account without the file has none.
+        let none = try #require(JSONSerialization.jsonObject(with: ClaudeAgent.mcpConfig(configDirectory: account.appending(path: "missing"))) as? [String: Any])
+        #expect((none["mcpServers"] as? [String: Any])?.isEmpty == true)
     }
 
     @Test func aResumedSessionKeepsThemOffToo() throws {

@@ -4,25 +4,41 @@ import SwiftUI
 #endif
 
 /// The one line Home's header on the iPhone and the closed notch and the island's header on the
-/// Mac all say about the jobs: who's working, and what needs you. Foundation only: the runner's
-/// tests build it too.
+/// Mac all say about the jobs: who's working, who waits, and what needs you. Foundation only: the
+/// runner's tests build it too.
 nonisolated enum Summary {
     static let quiet = "All quiet."
 
-    /// "2 agents are working. 1 job failed.", "1 job is ready to publish." or "All quiet."
-    /// `needs` is `NeedsYou.line` over the jobs shown, without its full stop.
-    static func line(working: Int, needs: String?) -> String {
+    /// "2 agents are working. 1 job failed.", "1 agent is working, 14 waiting. Nothing needs you.",
+    /// "3 jobs are waiting.", "1 job is ready to publish." or "All quiet." Only working jobs count
+    /// as agents working; jobs queued behind something are `waiting` (#238). `needs` is
+    /// `NeedsYou.line` over the jobs shown, without its full stop.
+    static func line(working: Int, waiting: Int = 0, needs: String?) -> String {
         let needs = needs.map { "\($0)." }
-        if working == 0 { return needs ?? quiet }
-        let agents = working == 1 ? "1 agent is working." : "\(working) agents are working."
+        if working == 0 && waiting == 0 { return needs ?? quiet }
+        let agents = switch (working, waiting) {
+        case (0, 1): "1 job is waiting."
+        case (0, _): "\(waiting) jobs are waiting."
+        case (1, 0): "1 agent is working."
+        case (_, 0): "\(working) agents are working."
+        case (1, _): "1 agent is working, \(waiting) waiting."
+        default: "\(working) agents are working, \(waiting) waiting."
+        }
         return "\(agents) \(needs ?? "Nothing needs you.")"
     }
+
+    /// "14 waiting", or nil when none: the line under Live's working jobs on the Mac, and the
+    /// Watch's, that opens the Waiting list.
+    static func waitingLine(_ waiting: Int) -> String? { waiting == 0 ? nil : "\(waiting) waiting" }
 }
 
-/// The groups the job list shows, in this order, on the iPhone and the Mac. The raw value is the heading.
+/// The groups the job list shows, in this order, on the iPhone and the Mac. The raw value is the
+/// heading. Working holds running jobs and ones getting ready; Waiting the ones queued behind
+/// something, each saying what for (#238).
 nonisolated enum JobGroup: String, CaseIterable, Hashable, Sendable {
-    case needsYou = "Needs you"
     case working = "Working"
+    case waiting = "Waiting"
+    case needsYou = "Needs you"
     case inReview = "In review"
     case done = "Done"
 }
@@ -32,6 +48,9 @@ nonisolated struct JobBadge: Equatable, Sendable {
     enum Tone: Sendable { case blue, green, orange, red, gray }
     var text: String
     var tone: Tone
+
+    /// A job queued behind something (#238), in gray: what it waits for goes on its row.
+    static let waiting = JobBadge(text: "Waiting", tone: .gray)
 }
 
 /// The job list as both apps show it: the same groups in the same order, and the same jobs hidden
@@ -51,16 +70,27 @@ nonisolated enum JobList {
         return JobGroup.allCases.compactMap { group in grouped[group].map { Section(group: group, jobs: $0) } }
     }
 
-    /// Whether a job stays in the list after Clear done: it's queued or running, it still needs
-    /// the user (ready to publish, failed, interrupted, out of review rounds: only Dismiss lets
-    /// those go), or `shows` keeps it by its finish time.
-    static func lists(active: Bool, needsYou: Bool, finished: Date?, clearedAt: Date?) -> Bool {
-        active || needsYou || shows(finished: finished, clearedAt: clearedAt)
+    /// Whether a job is settled, so Clear done may take it (#280): nothing more is to happen for it.
+    /// Never while it's queued, running or waiting (`active`), or needs the user (ready to publish,
+    /// failed, interrupted, out of review rounds: only Dismiss lets those go). Then always once the
+    /// user dismissed or stopped it (`letGo`); else not while its pull request is open (in review,
+    /// waiting for its checks or an account, about to merge), and, for a review job, not while the
+    /// job it reviews isn't settled (`author`, nil when it's no review or its author isn't listed).
+    /// So it's settled once its pull request was merged or closed, or it ended with nothing to publish.
+    static func settled(active: Bool, needsYou: Bool, letGo: Bool, openPullRequest: Bool, author: Bool? = nil) -> Bool {
+        if active || needsYou { return false }
+        return letGo || !openPullRequest && (author ?? true)
     }
 
-    /// Whether Clear done would take the job from the list: it finished and needs the user no
-    /// more. While no listed job would go, the iPhone's Home offers no Clear done.
-    static func clears(active: Bool, needsYou: Bool) -> Bool { !active && !needsYou }
+    /// Whether a job stays in the list after Clear done: it isn't `settled`, or `shows` keeps it
+    /// by its finish time. The runner keeps only the clear's time; every app applies this rule.
+    static func lists(settled: Bool, finished: Date?, clearedAt: Date?) -> Bool {
+        !settled || shows(finished: finished, clearedAt: clearedAt)
+    }
+
+    /// Whether Clear done would take the job from the list: it's settled. While no listed job
+    /// would go, neither the iPhone's Home nor the Mac's island offers Clear done.
+    static func clears(settled: Bool) -> Bool { settled }
 
     /// Clear done by time alone: the job hasn't finished, nothing was ever cleared, or it finished
     /// after the last clear. A job that finished at the clear's second or before is hidden on
@@ -78,6 +108,13 @@ nonisolated enum JobList {
         var list = fresh
         for job in old where missing.contains(id(job)) { list = placed(job, in: list, id: id, created: created) }
         return (list, missing.sorted())
+    }
+
+    /// The list after the runner answered `status` about the job `gone`: a 404 says it has no such
+    /// job (#223), so the job leaves the list instead of staying under Needs you with a Dismiss that
+    /// can't work. Any other answer leaves the list as it is.
+    static func answered<J>(_ status: Int?, about gone: String, in list: [J], id: (J) -> String) -> [J] {
+        status == 404 ? list.filter { id($0) != gone } : list
     }
 
     /// `job` in the list: in place of the one with its id, else where its age puts it (newest first).

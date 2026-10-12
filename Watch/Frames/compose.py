@@ -18,6 +18,7 @@ FRAME_PX = 160
 STILL_PX = 128
 # The still poses: (image set, loop, frame).
 STILLS = [("ObyCalm", "idle", 30), ("ObyWorking", "working", 30), ("ObyNeedsYou", "needs", 25)]
+CROP_LOOPS = {"idle", "working", "needs"}
 
 
 def contents(images=None):
@@ -63,7 +64,9 @@ def main(frames_dir, repo):
     loops = sorted(p for p in frames_dir.iterdir() if p.is_dir())
     every = sorted(frames_dir.glob("*/*.png"))
     size = Image.open(every[0]).width
-    crop = square(union_box(every), size, 0.02)
+    # The loops Home plays all the time set the crop; the tap reactions share it, so Oby keeps its
+    # size, and a reaction's flourish past it is cut off.
+    crop = square(union_box([p for p in every if p.parent.name in CROP_LOOPS]), size, 0.02)
 
     catalog = repo / "Watch/Frames.xcassets"
     shutil.rmtree(catalog, ignore_errors=True)

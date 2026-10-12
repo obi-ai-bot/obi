@@ -192,7 +192,7 @@ struct LimitRetryTests {
         for _ in 0..<500 where desk.job("moved")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
         let ended = try #require(desk.job("moved"))
         #expect(ended.status == .done && ended.published != nil && ended.session == "e6a24229")
-        #expect(ended.summary == "fix(engine): dismiss\n\nCodex · Deskree hit its limit (resets \(Limits.clock(resets))); continued on Claude Code · Default.")
+        #expect(ended.summary == "fix(engine): dismiss\n\nCodex · Deskree hit its limit (resets \(Limits.clock(resets))); continued on Claude Code · Default: its usage isn't known yet.")
         #expect(ended.doneLine == "fix(engine): dismiss")
     }
 
@@ -228,7 +228,7 @@ struct LimitRetryTests {
         made.agents.last?.agent.onEvent(.turnEnded(summary: "Looks good.", failed: false))
         made.agents.last?.agent.onEvent(.finished(summary: "Looks good.", failed: false))
         for _ in 0..<500 where desk.job("hour")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
-        #expect(desk.job("hour")?.summary == "Looks good.\n\nCodex · Deskree hit its limit; continued on Claude Code · Default.")
+        #expect(desk.job("hour")?.summary == "Looks good.\n\nCodex · Deskree hit its limit; continued on Claude Code · Default: its usage isn't known yet.")
     }
 
     /// A looping job does its round over: the new agent hears the check's output that started it.

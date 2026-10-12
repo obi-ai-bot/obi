@@ -11,6 +11,7 @@ final class API {
     static let version = "0.2.0"
 
     let desk: Desk
+    var updates: Updates?
     let speech: Speech
     let devices: Devices
     /// Push to the iPhone (Live Activity and alerts), or nil when this runner has none.
@@ -23,6 +24,8 @@ final class API {
     private var streams: [UUID: AsyncStream<String>.Continuation] = [:]
     /// The accounts as last sent, so an unchanged list isn't sent again.
     private var sentAccounts = Data()
+    /// Keeps the cap on running jobs (`PUT /v1/settings/jobs`). Tests put in their own.
+    var saveMaxRunning: (Int) -> Void = JobSlots.save
 
     /// Without `cleared` (the tests), the clear time lives in memory only; without `broker`, so do
     /// the connections and their use log.
@@ -40,6 +43,7 @@ final class API {
         }
         desk.onInboxChange = { [weak self] item in self?.send("inbox", InboxJSON(item: item)) }
         desk.onCheckChange = { [weak self] check in self?.send("check", MacCheckJSON(check: check)) }
+        desk.onTurnChange = { [weak self] turn in self?.send("turn", TurnJSON(turn: turn)) }
         watchAccounts()
     }
 
@@ -52,6 +56,10 @@ final class API {
         }
         router.get("v1/status") { _, _ in await self.status() }
         router.post("v1/plans") { request, _ in try await self.plan(try await Self.decode(PlanRequest.self, from: request)) }
+        router.get("v1/conversation") { request, _ in
+            try await self.conversation(before: request.uri.queryParameters.get("before").map { String($0) },
+                                        limit: request.uri.queryParameters.get("limit", as: Int.self))
+        }
         router.post("v1/jobs") { request, _ in try await self.dispatch(try await Self.decode(DispatchRequest.self, from: request)) }
         router.get("v1/jobs") { request, _ in await self.jobs(limit: request.uri.queryParameters.get("limit", as: Int.self) ?? 50) }
         router.get("v1/jobs/:id") { _, context in try await self.job(context.parameters.require("id")) }
@@ -59,6 +67,19 @@ final class API {
         router.post("v1/jobs/:id/stop") { _, context in try await self.stop(context.parameters.require("id")) }
         router.post("v1/stop-all") { _, _ in await self.stopAll() }
         router.post("v1/jobs/:id/dismiss") { _, context in try await self.dismiss(context.parameters.require("id")) }
+        router.post("v1/jobs/:id/move") { request, context in
+            try await self.move(context.parameters.require("id"), try await Self.decode(MoveRequest.self, from: request))
+        }
+        router.post("v1/jobs/:id/start") { _, context in try await self.startNow(context.parameters.require("id")) }
+        router.post("v1/jobs/:id/start-when") { request, context in
+            try await self.startWhen(context.parameters.require("id"), try await Self.decode(StartWhenRequest.self, from: request))
+        }
+        router.post("v1/jobs/:id/mode") { request, context in
+            try await self.mode(context.parameters.require("id"), try await Self.decode(ModeJSON.self, from: request))
+        }
+        router.post("v1/jobs/:id/permission") { request, context in
+            try await self.permission(context.parameters.require("id"), try await Self.decode(PermissionAnswer.self, from: request))
+        }
         router.post("v1/jobs/:id/messages") { request, context in
             try await self.message(context.parameters.require("id"), try await Self.decode(NewMessage.self, from: request))
         }
@@ -67,11 +88,20 @@ final class API {
             try await self.publish(context.parameters.require("id"), try await Self.decode(Approval.self, from: request))
         }
         router.post("v1/clear") { _, _ in try await self.clear() }
-        router.get("v1/inbox") { _, _ in await self.inbox() }
+        router.post("v1/accounts/:id/reserve") { request, context in
+            try await self.reserve(context.parameters.require("id"), try await Self.decode(ReserveRequest.self, from: request))
+        }
+        router.get("v1/inbox") { request, _ in
+            try await self.inbox(state: request.uri.queryParameters.get("state").map { String($0) },
+                                 limit: request.uri.queryParameters.get("limit", as: Int.self))
+        }
         router.post("v1/inbox/:id/answer") { request, context in
             try await self.answer(context.parameters.require("id"), try await Self.decode(InboxAnswer.self, from: request))
         }
         router.get("v1/events") { _, _ in await self.events() }
+        router.get("v1/failures") { request, _ in await self.failures(limit: request.uri.queryParameters.get("limit", as: Int.self) ?? 50) }
+        router.get("v1/failures/:id") { _, context in try await self.failure(context.parameters.require("id")) }
+        router.post("v1/failures/:id/fix") { _, context in try await self.fix(context.parameters.require("id")) }
         router.get("v1/checks/next") { request, _ in
             await self.nextCheck(mac: request.uri.queryParameters.get("mac").map { String($0) },
                                  kinds: request.uri.queryParameters.get("kinds").map { String($0) })
@@ -107,14 +137,22 @@ final class API {
         router.get("v1/settings/models") { _, _ in Self.json(Models.current) }
         router.put("v1/settings/models") { request, _ in try Self.change(try await Self.decode(Models.self, from: request)) }
         router.get("v1/settings/models/options") { _, _ in await Self.options() }
+        router.get("v1/settings/jobs") { _, _ in await self.jobSettings() }
+        router.put("v1/settings/jobs") { request, _ in try await self.change(try await Self.decode(JobSettings.self, from: request)) }
+        router.get("v1/settings/permissions") { _, _ in await self.permissionSettings() }
+        router.put("v1/settings/permissions") { request, _ in try await self.changePermissions(try await Self.decode(ModeJSON.self, from: request)) }
+        router.get("v1/permissions/rules") { _, _ in await self.rules() }
+        router.delete("v1/permissions/rules/:id") { _, context in try await self.forget(context.parameters.require("id")) }
         return router
     }
 
     // MARK: Endpoints
 
     func status() -> Response {
-        Self.json(Status(runner: .init(version: Self.version, host: ProcessInfo.processInfo.hostName),
-                         accounts: accounts, models: .current, clearedAt: cleared.at))
+        Self.json(Status(runner: .init(version: Self.version, host: ProcessInfo.processInfo.hostName, update: updates?.status),
+                         accounts: accounts, models: .current, maxRunning: desk.maxRunning, running: desk.runningCount, clearedAt: cleared.at,
+                         github: (GitHubApp.inUse ? GitHubActor.app : .owner).rawValue, checks: GitHubApp.checks,
+                         permissions: ModeJSON(mode: desk.defaultMode.rawValue)))
     }
 
     /// Clear done, on the iPhone or the Mac: the runner records now, answers it, and tells every
@@ -142,6 +180,18 @@ final class API {
         return Self.json(PlanAnswer(await desk.converse(said, shown: request.answer?.option, turns: turns)))
     }
 
+    /// One page of the conversation, oldest first: the latest `limit` turns (50 unless asked,
+    /// at most `Conversation.stored`), or the ones before the turn `before` names. Fewer than
+    /// `limit` means there are no older ones.
+    func conversation(before: String?, limit: Int?) throws -> Response {
+        let limit = min(max(limit ?? 50, 1), Conversation.stored)
+        let before = before.flatMap { $0.isEmpty ? nil : $0 }
+        guard let turns = desk.conversation(before: before, limit: limit) else {
+            throw APIError(.notFound, "There's no turn \(before ?? "") in the conversation.")
+        }
+        return Self.json(turns.map(TurnJSON.init))
+    }
+
     /// The client's recent turns, checked: at most `Conversation.kept`, each from the user or Oby,
     /// with 1 to 2,000 characters.
     nonisolated static func turns(_ sent: [PlanRequest.Turn]) throws -> [Turn] {
@@ -156,8 +206,10 @@ final class API {
 
     func dispatch(_ request: DispatchRequest) throws -> Response {
         do {
+            let mode = try request.job.mode.map { try Self.mode($0) }
             let job = try desk.dispatch(request.job.id, branch: request.job.branch, account: request.job.account,
-                                        rounds: request.job.rounds, check: request.job.check, model: request.job.model)
+                                        rounds: request.job.rounds, check: request.job.check, model: request.job.model,
+                                        files: request.job.files, startWhen: request.job.startWhen, mode: mode)
             return Self.json(JobJSON(job: job), status: .created)
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
@@ -219,6 +271,46 @@ final class API {
         return Self.json(JobJSON(job: try known(id)))
     }
 
+    /// Moves a job to another tool, account or model (Engine/Move.swift): a queued one starts
+    /// there, a running one starts its round over there, a finished one's next round runs there.
+    func move(_ id: String, _ request: MoveRequest) throws -> Response {
+        _ = try known(id)
+        do {
+            return Self.json(JobJSON(job: try desk.move(id, to: MoveTarget(agent: request.agent, account: request.account, model: request.model), why: request.why)))
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+    }
+
+    /// Start now (#216): a job waiting for its `startWhen` starts as if it had come.
+    func startNow(_ id: String) throws -> Response {
+        _ = try known(id)
+        do {
+            try desk.startNow(id)
+        } catch {
+            throw APIError(.conflict, error.localizedDescription)
+        }
+        return Self.json(JobJSON(job: try known(id)))
+    }
+
+    /// What a job that hasn't started waits for, replaced (#216); an empty list starts it now.
+    func startWhen(_ id: String, _ request: StartWhenRequest) throws -> Response {
+        _ = try known(id)
+        do {
+            return Self.json(JobJSON(job: try desk.setStartWhen(id, request.startWhen)))
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+    }
+
+    /// "Use anyway" (#278): the account takes automatic work past its weekly reserve until its
+    /// week resets, or, with `lift` false, is reserved again now. Jobs and reviews waiting for
+    /// room look again at once.
+    func reserve(_ id: String, _ request: ReserveRequest) throws -> Response {
+        guard let state = desk.liftReserve(id, request.lift) else { throw APIError(.notFound, "There's no account \(id).") }
+        return Self.json(AccountJSON(state: state))
+    }
+
     /// Words for the job's agent: a running job hears them now, a finished one runs again.
     func message(_ id: String, _ message: NewMessage) throws -> Response {
         _ = try known(id)
@@ -230,15 +322,80 @@ final class API {
         return Self.json(JobJSON(job: try known(id)))
     }
 
+    /// The job's mode changes: a waiting permission the new mode allows is answered, and a plan
+    /// waiting for approval is approved in it.
+    func mode(_ id: String, _ body: ModeJSON) throws -> Response {
+        _ = try known(id)
+        let mode = try Self.mode(body.mode)
+        do {
+            try desk.setMode(id, mode)
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+        return Self.json(JobJSON(job: try known(id)))
+    }
+
+    /// The user answers the job's waiting permission: allow, always (a rule for the repository) or deny.
+    func permission(_ id: String, _ answer: PermissionAnswer) throws -> Response {
+        let job = try known(id)
+        guard let decision = PermissionDecision(rawValue: answer.decision) else {
+            throw APIError(.unprocessableContent, "decision is allow, always or deny.")
+        }
+        guard job.permission?.id == answer.id else { throw APIError(.conflict, "That permission isn't waiting any more.") }
+        do {
+            try desk.answerPermission(id, answer.id, decision, message: answer.message)
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+        return Self.json(JobJSON(job: try known(id)))
+    }
+
+    func permissionSettings() -> Response {
+        Self.json(ModeJSON(mode: desk.defaultMode.rawValue))
+    }
+
+    /// Settings › Permissions: the mode new jobs get.
+    func changePermissions(_ body: ModeJSON) throws -> Response {
+        desk.defaultMode = try Self.mode(body.mode)
+        return permissionSettings()
+    }
+
+    func rules() -> Response {
+        Self.json(desk.permissionRules)
+    }
+
+    /// Forgets a saved rule: answers with the rules left.
+    func forget(_ id: String) throws -> Response {
+        do {
+            try desk.forgetRule(id)
+        } catch {
+            throw APIError(.notFound, error.localizedDescription)
+        }
+        return rules()
+    }
+
+    nonisolated static func mode(_ name: String) throws -> PermissionMode {
+        guard let mode = PermissionMode(rawValue: name) else { throw APIError(.unprocessableContent, "mode is ask, acceptEdits, plan or bypass.") }
+        return mode
+    }
+
     /// What only the user can answer and hasn't settled, the longest-waiting first. Items put off
     /// until later are in it too, saying so.
-    func inbox() -> Response {
-        Self.json(desk.inbox.filter(\.isOpen).map { InboxJSON(item: $0) })
+    /// With `state` `done`, the history instead (#215): settled items and the reports that arrived
+    /// done (an audit's repairs, a failure whose fix was under way), the latest settled first, at most `limit`.
+    func inbox(state: String? = nil, limit: Int? = nil) throws -> Response {
+        switch state ?? "open" {
+        case "open": return Self.json(desk.inbox.filter(\.isOpen).map { InboxJSON(item: $0) })
+        case "done":
+            let done = desk.inbox.filter { !$0.isOpen }.sorted { ($0.done ?? $0.created) > ($1.done ?? $1.created) }
+            return Self.json(done.prefix(min(max(limit ?? 50, 0), 1000)).map { InboxJSON(item: $0) })
+        default: throw APIError(.unprocessableContent, "state is open or done.")
+        }
     }
 
     /// The user settles an inbox item: answers it (the answer goes to its job), marks it done, or
     /// puts it off until later.
-    func answer(_ id: String, _ answer: InboxAnswer) throws -> Response {
+    func answer(_ id: String, _ answer: InboxAnswer) async throws -> Response {
         guard let item = desk.item(id) else { throw APIError(.notFound, "There's no inbox item \(id).") }
         guard item.isOpen else { throw APIError(.conflict, "That's done already.") }
         let how: Desk.Settle
@@ -251,9 +408,32 @@ final class API {
         default: throw APIError(.unprocessableContent, "Send one of answer, done or later.")
         }
         do {
-            return Self.json(InboxJSON(item: try desk.settle(id, how)))
+            // Fix it, or Dismiss, on a failure's item (Engine/Failures.swift).
+            if item.kind == .failure, case .answer(let words) = how { return Self.json(InboxJSON(item: try desk.failureLog.answer(id, words))) }
+            return Self.json(InboxJSON(item: try await desk.answer(id, how)))
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+    }
+
+    /// The failure records, newest first, with their post-mortems (Engine/Failures.swift), at most 1,000.
+    func failures(limit: Int) -> Response {
+        Self.json(desk.failureLog.store.failures(limit: min(max(0, limit), 1000)).map(FailureJSON.init))
+    }
+
+    func failure(_ id: String) throws -> Response {
+        guard let record = desk.failureLog.store.failure(id) else { throw APIError(.notFound, "There's no failure \(id).") }
+        return Self.json(FailureJSON(record: record))
+    }
+
+    /// Fix it: the fix job starts in Oby's repository, with the post-mortem as its brief.
+    func fix(_ id: String) throws -> Response {
+        do {
+            return Self.json(JobJSON(job: try desk.failureLog.fix(id)), status: .created)
+        } catch let unknown as Failures.Unknown {
+            throw APIError(.notFound, unknown.localizedDescription)
+        } catch {
+            throw APIError(.conflict, error.localizedDescription)
         }
     }
 
@@ -261,7 +441,7 @@ final class API {
     /// check, now that Mac's, or none. `kinds` (`merge,apple`) says which it takes: merge checks
     /// only when it says nothing, as Macs from before Apple checks do.
     func nextCheck(mac: String?, kinds: String? = nil) -> Response {
-        let name = mac.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)) }.flatMap { $0.isEmpty ? nil : $0 } ?? "a Mac"
+        let name = mac.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)) }.flatMap { $0.isEmpty ? nil : $0 } ?? MacCheck.unnamedMac
         let taken = kinds.map { Set($0.split(separator: ",").compactMap { MacCheck.Kind(rawValue: String($0)) }) } ?? [.merge]
         return Self.json(CheckAnswer(check: desk.nextMacCheck(mac: name, kinds: taken).map(MacCheckJSON.init)))
     }
@@ -281,15 +461,17 @@ final class API {
     }
 
     /// An agent asks for an Apple check of its worktree's commit (`ask`), or where its latest one
-    /// is (Engine/AppleChecks.swift). Only with its job's token, while the job runs.
+    /// is (Engine/AppleChecks.swift). Only with its job's token (its agent's, or its final check's), while the job runs.
     func appleCheck(_ authorization: String?, ask: Bool) async throws -> Response {
         let token = authorization.flatMap { $0.hasPrefix("Bearer ") ? String($0.dropFirst("Bearer ".count)) : nil } ?? ""
-        guard let id = AppleCheck.job(forToken: token) else {
+        guard let asker = AppleCheck.asker(forToken: token) else {
             throw APIError(.unauthorized, "oby-check works only inside an Oby job on the runner.")
         }
+        let id = asker.job
         if ask {
             do {
-                _ = try await desk.askAppleCheck(id)
+                // The job's final check waits for a Mac longer than its agent does (#68).
+                _ = try await desk.askAppleCheck(id, final: asker.final)
             } catch {
                 throw APIError(.conflict, error.localizedDescription)
             }
@@ -527,6 +709,19 @@ final class API {
         }
     }
 
+    func jobSettings() -> Response { Self.json(JobSettings(maxRunning: desk.maxRunning)) }
+
+    /// A new cap on running jobs, 1 to 20 (#237): waiting jobs start at once when it goes up; when
+    /// it goes down, running jobs carry on and new ones wait until there's room under it.
+    func change(_ settings: JobSettings) throws -> Response {
+        guard JobSlots.range.contains(settings.maxRunning) else {
+            throw APIError(.unprocessableContent, "maxRunning goes from \(JobSlots.range.lowerBound) to \(JobSlots.range.upperBound).")
+        }
+        saveMaxRunning(settings.maxRunning)
+        desk.maxRunning = settings.maxRunning
+        return jobSettings()
+    }
+
     nonisolated static func change(_ models: Models) throws -> Response {
         guard AgentModels.claude.contains(where: { $0.0 == models.claude.model }),
               AgentModels.claudeEfforts.contains(models.claude.effort) else {
@@ -601,28 +796,79 @@ struct Status: Encodable {
     struct Runner: Encodable {
         var version: String
         var host: String
+        var update: Updates.Status? = nil
     }
 
     var runner: Runner
     var accounts: [AccountJSON]
     var models: Models
+    /// At most this many jobs run at once (#237), and how many slots are taken now.
+    var maxRunning: Int
+    var running: Int
     /// When Clear done was last pressed, or null: the API promises the key either way.
     var clearedAt: Date?
+    /// Who the runner's own GitHub calls act as: "app" (Oby by Deskree) or "owner" (the owner's gh login).
+    var github: String = GitHubActor.owner.rawValue
+    /// Whether Oby's review and Mac check go on pull requests as check runs: "ok", "missing
+    /// permission" (the app lacks Checks: write) or "no app" (`GitHubApp.checks`).
+    var checks: String = "no app"
+    /// Settings › Permissions: the mode new jobs get.
+    var permissions: ModeJSON
 
-    private enum Keys: String, CodingKey { case runner, accounts, models, clearedAt }
+    private enum Keys: String, CodingKey { case runner, accounts, models, maxRunning, running, clearedAt, github, checks, permissions }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
         try keys.encode(runner, forKey: .runner)
         try keys.encode(accounts, forKey: .accounts)
         try keys.encode(models, forKey: .models)
+        try keys.encode(maxRunning, forKey: .maxRunning)
+        try keys.encode(running, forKey: .running)
         try keys.encode(clearedAt, forKey: .clearedAt)
+        try keys.encode(github, forKey: .github)
+        try keys.encode(checks, forKey: .checks)
+        try keys.encode(permissions, forKey: .permissions)
     }
+}
+
+/// A mode, as `POST /v1/jobs/{id}/mode`, Settings › Permissions and the status carry it.
+struct ModeJSON: Codable {
+    var mode: String
+}
+
+/// How `POST /v1/jobs/{id}/permission` answers the job's waiting permission.
+struct PermissionAnswer: Decodable {
+    var id: String
+    var decision: String
+    /// The user's words for the agent, with a deny.
+    var message: String?
 }
 
 /// What `POST /v1/clear` answers and the `clear` event carries.
 struct ClearedJSON: Encodable {
     var clearedAt: Date
+}
+
+/// One turn of the conversation as `GET /v1/conversation` lists it and the `turn` event carries
+/// it: who said it, the words, when, and the jobs it started (always a list, empty for none).
+struct TurnJSON: Encodable {
+    var turn: Turn
+
+    private enum Keys: String, CodingKey { case id, who, text, at, jobs }
+
+    func encode(to encoder: any Encoder) throws {
+        var keys = encoder.container(keyedBy: Keys.self)
+        try keys.encode(turn.id, forKey: .id)
+        try keys.encode(turn.who, forKey: .who)
+        try keys.encode(turn.text, forKey: .text)
+        try keys.encode(turn.date, forKey: .at)
+        try keys.encode(turn.jobs ?? [], forKey: .jobs)
+    }
+}
+
+/// How many jobs run at once, as Settings keeps it (`GET` and `PUT /v1/settings/jobs`).
+struct JobSettings: Codable {
+    var maxRunning: Int
 }
 
 /// Each tool's model and effort, as Settings › Models keeps them.
@@ -667,9 +913,9 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, connectionUses }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, fromPR, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting, mode, permission, connectionUses }
 
-    private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou }
+    private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou }
 
     func encode(to encoder: any Encoder) throws {
         // Oby's own review makes no commits; the ones in its worktree are the pull request's. Saying 0
@@ -681,6 +927,8 @@ struct JobJSON: Encodable {
         try derived.encode(job.pipeline, forKey: .pipeline)
         try derived.encode(job.shortTitle, forKey: .title)
         try derived.encode(job.mergeNeedsYou, forKey: .mergeNeedsYou)
+        try derived.encode(job.reviewNeedsYou, forKey: .reviewNeedsYou)
+        try derived.encode(job.cloudNeedsYou, forKey: .cloudNeedsYou)
         var nulls = encoder.container(keyedBy: Nullable.self)
         if job.base == nil { try nulls.encodeNil(forKey: .base) }
         if job.pr == nil { try nulls.encodeNil(forKey: .pr) }
@@ -693,6 +941,7 @@ struct JobJSON: Encodable {
         if job.publishError == nil { try nulls.encodeNil(forKey: .publishError) }
         if job.summaries == nil { try nulls.encodeNil(forKey: .summaries) }
         if job.issue == nil { try nulls.encodeNil(forKey: .issue) }
+        if job.fromPR == nil { try nulls.encodeNil(forKey: .fromPR) }
         // Rounds always has a value in the API: 1 when the job doesn't loop.
         try nulls.encode(job.maxRounds, forKey: .rounds)
         try nulls.encode(job.currentRound, forKey: .round)
@@ -712,14 +961,50 @@ struct JobJSON: Encodable {
         if job.question == nil { try nulls.encodeNil(forKey: .question) }
         if job.limit == nil { try nulls.encodeNil(forKey: .limit) }
         if job.startCommit == nil { try nulls.encodeNil(forKey: .startCommit) }
+        if job.xcodeCloud == nil { try nulls.encodeNil(forKey: .xcodeCloud) }
+        if job.xcodeCloudError == nil { try nulls.encodeNil(forKey: .xcodeCloudError) }
         if job.macCheck == nil { try nulls.encodeNil(forKey: .macCheck) }
         if job.mergeError == nil { try nulls.encodeNil(forKey: .mergeError) }
         if job.appleCheck == nil { try nulls.encodeNil(forKey: .appleCheck) }
         if job.appleRan == nil { try nulls.encodeNil(forKey: .appleRan) }
-        // What went out is always a list: empty before anything did.
+        if job.tetrix == nil { try nulls.encodeNil(forKey: .tetrix) }
+        if job.startWhen == nil { try nulls.encodeNil(forKey: .startWhen) }
+        if job.waiting == nil { try nulls.encodeNil(forKey: .waiting) }
+        // Older jobs ran before modes: Oby answered everything, as Bypass does.
+        try nulls.encode(job.currentMode, forKey: .mode)
+        if job.permission == nil { try nulls.encodeNil(forKey: .permission) }
+        // What went out and where it moved are always lists: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
         // So are the calls its agent made to connected apps.
         if job.connectionUses == nil { try nulls.encode([ConnectionUse](), forKey: .connectionUses) }
+        if job.moves == nil { try nulls.encode([Job.Move](), forKey: .moves) }
+    }
+}
+
+/// A failure record with every key the API promises, null where Swift would leave one out.
+struct FailureJSON: Encodable {
+    var record: FailureRecord
+
+    private enum Nullable: String, CodingKey { case job, repo, rounds, postMortem, studyError, issue, issueError, fix, fixedBy, fixedAt }
+    private enum Derived: String, CodingKey { case intervention, tries, acted }
+
+    func encode(to encoder: any Encoder) throws {
+        try record.encode(to: encoder)
+        var derived = encoder.container(keyedBy: Derived.self)
+        try derived.encode(record.isIntervention, forKey: .intervention)
+        try derived.encode(record.tries ?? 0, forKey: .tries)
+        try derived.encode(record.acted ?? false, forKey: .acted)
+        var nulls = encoder.container(keyedBy: Nullable.self)
+        if record.job == nil { try nulls.encodeNil(forKey: .job) }
+        if record.repo == nil { try nulls.encodeNil(forKey: .repo) }
+        if record.rounds == nil { try nulls.encodeNil(forKey: .rounds) }
+        if record.postMortem == nil { try nulls.encodeNil(forKey: .postMortem) }
+        if record.studyError == nil { try nulls.encodeNil(forKey: .studyError) }
+        if record.issue == nil { try nulls.encodeNil(forKey: .issue) }
+        if record.issueError == nil { try nulls.encodeNil(forKey: .issueError) }
+        if record.fix == nil { try nulls.encodeNil(forKey: .fix) }
+        if record.fixedBy == nil { try nulls.encodeNil(forKey: .fixedBy) }
+        if record.fixedAt == nil { try nulls.encodeNil(forKey: .fixedAt) }
     }
 }
 
@@ -739,7 +1024,7 @@ struct CheckAnswer: Encodable {
 struct MacCheckJSON: Encodable {
     var check: MacCheck
 
-    private enum Nullable: String, CodingKey { case started, finished, mac, steps, failures, comment, postError, kind }
+    private enum Nullable: String, CodingKey { case started, finished, mac, steps, failures, checkRun, comment, postError, kind }
 
     func encode(to encoder: any Encoder) throws {
         try check.encode(to: encoder)
@@ -751,6 +1036,7 @@ struct MacCheckJSON: Encodable {
         if check.mac == nil { try nulls.encodeNil(forKey: .mac) }
         if check.steps == nil { try nulls.encodeNil(forKey: .steps) }
         if check.failures == nil { try nulls.encodeNil(forKey: .failures) }
+        if check.checkRun == nil { try nulls.encodeNil(forKey: .checkRun) }
         if check.comment == nil { try nulls.encodeNil(forKey: .comment) }
         if check.postError == nil { try nulls.encodeNil(forKey: .postError) }
     }
@@ -823,7 +1109,7 @@ struct ConnectionRemoval: Decodable {
 struct InboxJSON: Encodable {
     var item: InboxItem
 
-    private enum Keys: String, CodingKey { case id, kind, job, title, text, options, created, done, later, answer, state, outgoing }
+    private enum Keys: String, CodingKey { case id, kind, job, title, text, options, details, created, done, later, answer, state, outgoing, headline, happened, recommended, why }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -833,11 +1119,18 @@ struct InboxJSON: Encodable {
         try keys.encode(item.title, forKey: .title)
         try keys.encode(item.text, forKey: .text)
         try keys.encode(item.options, forKey: .options)
+        // What each option does, as many as `options`, or null.
+        try keys.encode(item.details, forKey: .details)
         try keys.encode(item.created, forKey: .created)
         try keys.encode(item.done, forKey: .done)
         try keys.encode(item.later, forKey: .later)
         try keys.encode(item.answer, forKey: .answer)
         try keys.encodeIfPresent(item.outgoing, forKey: .outgoing)
+        // Plain words (InboxRewriter), null until they come or when they couldn't: `text` says it then.
+        try keys.encode(item.headline, forKey: .headline)
+        try keys.encode(item.happened, forKey: .happened)
+        try keys.encode(item.recommended, forKey: .recommended)
+        try keys.encode(item.why, forKey: .why)
         try keys.encode(item.done != nil ? "done" : item.waiting() ? "open" : "later", forKey: .state)
     }
 }
@@ -852,10 +1145,18 @@ struct InboxAnswer: Decodable {
     var later: String?
 }
 
+/// What `POST /v1/accounts/{id}/reserve` asks: past the account's weekly reserve until its reset, or not.
+struct ReserveRequest: Decodable {
+    var lift: Bool
+}
+
 struct AccountJSON: Encodable {
     var state: AccountState
 
-    private enum Keys: String, CodingKey { case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil }
+    private enum Keys: String, CodingKey {
+        case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed,
+             reserved, reserveLiftedUntil
+    }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -870,6 +1171,11 @@ struct AccountJSON: Encodable {
         try keys.encode(state.sevenDayResets, forKey: .sevenDayResets)
         try keys.encode(state.running, forKey: .running)
         try keys.encode(state.fullUntil, forKey: .fullUntil)
+        try keys.encode(state.tetrix, forKey: .tetrix)
+        try keys.encode(state.tetrixJobs, forKey: .tetrixJobs)
+        try keys.encode(state.tetrixUsed, forKey: .tetrixUsed)
+        try keys.encode(state.isReserved(), forKey: .reserved)
+        try keys.encode(state.reserveLiftedUntil(), forKey: .reserveLiftedUntil)
     }
 }
 
@@ -953,8 +1259,17 @@ struct DispatchRequest: Decodable {
         var check: String??
         /// The draft's suggested model to use it, or null to stay on Settings › Models.
         var model: String??
+        /// The files the job claims (#209), replacing the plan's; an empty list claims none. Left
+        /// out or null, the plan's stay.
+        var files: [String]?
+        /// What the job waits for before it starts (#216), replacing the plan's; an empty list starts
+        /// it at once. Left out or null, the plan's stay.
+        var startWhen: [StartCondition]?
 
-        private enum Keys: String, CodingKey { case id, branch, account, rounds, check, model }
+        /// How the job asks (`ask`, `acceptEdits`, `plan` or `bypass`); left out, Settings' default.
+        var mode: String?
+
+        private enum Keys: String, CodingKey { case id, branch, account, rounds, check, model, files, startWhen, mode }
 
         init(from decoder: any Decoder) throws {
             let keys = try decoder.container(keyedBy: Keys.self)
@@ -964,6 +1279,9 @@ struct DispatchRequest: Decodable {
             rounds = try keys.decodeIfPresent(Int.self, forKey: .rounds)
             check = keys.contains(.check) ? .some(try keys.decodeIfPresent(String.self, forKey: .check)) : nil
             model = keys.contains(.model) ? .some(try keys.decodeIfPresent(String.self, forKey: .model)) : nil
+            files = try keys.decodeIfPresent([String].self, forKey: .files)
+            startWhen = try keys.decodeIfPresent([StartCondition].self, forKey: .startWhen)
+            mode = try keys.decodeIfPresent(String.self, forKey: .mode)
         }
     }
 
@@ -987,6 +1305,20 @@ struct NotificationToken: Decodable {
     var token: String
     var topic: String
     var environment: String
+}
+
+/// What `POST /v1/jobs/{id}/start-when` sets a queued job to wait for (#216).
+struct StartWhenRequest: Decodable {
+    var startWhen: [StartCondition]
+}
+
+/// Where `POST /v1/jobs/{id}/move` moves the job: each key optional, at least one of the first three.
+struct MoveRequest: Decodable {
+    var agent: String?
+    var account: String?
+    var model: String?
+    /// Why, in the user's words: the agent that takes it over hears it.
+    var why: String?
 }
 
 struct NewMessage: Decodable {

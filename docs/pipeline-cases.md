@@ -109,7 +109,14 @@ Before stage 1. People connect only what they have. That decides which model the
 ### 0.5 Several tools
 - **What happens:** one tool thinks, and jobs spread across every account by usage. First launch shows "Oby thinks with X and works with Y and Z". Goes to 1.
 - **Lead thinks with:** the best planner connected: Claude (enforced schema), then Codex, then Cursor, then Gemini.
-- **Jobs work with:** every connected account, routed by usage. The score is the higher of the 5-hour and 7-day use, plus 0.15 per running job.
+- **Jobs work with:** every connected account, budgeted by each subscription's weekly pace, not just the 5-hour window (decided 2026-10-10, repeated 2026-10-11, #176). New work goes to accounts on pace; accounts running ahead of pace get reviews or nothing; among them, the account with the most weekly room per remaining day wins. A week burned early can't recover until its reset days later, which leaves the team without that tool.
+  - **Room per remaining day:** the share of the week left over the days until it resets (at least a quarter of a day; a whole week when the tool didn't say when). 57% left with 4.8 days to go is 0.12/day.
+  - **Ahead of pace:** the share of the week used over the share of it gone (at least a seventh, so the first hours of a week don't swing it) is above 1: at this burn it runs out before its reset.
+  - **New work** (the brain's dispatch, the Lead's picks, failure fixes, failover) goes to an account on pace first, then one whose usage isn't known yet (Claude Code reports it only during a job, so after a restart it reads unknown), and only when none is left to the one ahead of pace with the most room per day. **Reviews** are short, so they take an account ahead of pace first; the other tool still comes first.
+  - **The 5-hour window:** at 95% an account gets nothing; above 80% it gets work only when every account is.
+  - **Running jobs** only break ties: within 0.01/day of room, the fewer running jobs wins.
+  - At 80% of its week an account is kept for jobs sent to it by name until its week resets, and a job named to an account skips routing.
+  - The job's report says why, once: `On Claude Code · Deskree: most weekly room per day left (0.12/day), though 1.4× ahead of pace: none is on pace; Codex · Deskree is 2.3× ahead of pace.`
 - **Oby today:** Partial. Jobs are routed across Claude and Codex, and the brain is always Claude.
 - **Decided 2026-10-10:** you pick the Lead's model at first launch, like the jobs' models. If you connect a new tool later, Oby asks in the conversation whether to change anything: no pop-ups.
 - **Approved 2026-10-10:** the Lead's own usage counts toward routing.
@@ -119,6 +126,8 @@ Before stage 1. People connect only what they have. That decides which model the
 ## Your inbox
 
 Like email: each item waits for your decision, with no timeout and no guessing. If something is here, Oby doesn't know what to do, or only a person can do it. Every decision teaches Oby (X.4), so the inbox shrinks: generic at first, personal later. Oby today has none of this, only one card slot (`Desk.talk`).
+
+**The inbox is for taking actions** (decided 2026-10-12, #215). Every item offers at least one answer that changes something, besides Later and Done. What has nothing to decide (a report, drift Oby fixed by itself, a failure whose fix is already queued, running or in review) doesn't go to the inbox: it arrives done and stays with the job's or Oby's reports, where it can be read. Each kind of item declares its answers (docs/runner-api.md, "Inbox item"), and a kind that declares none can't reach the inbox. Every option says what choosing it does, in one line under its button, and the recommended one comes first, the way Claude Code asks; agents ask the same way. The daily audit asks only what needs you: a board column the roadmap lacks, as a decision (Add the column, recommended; Use the closest column instead; or Ignore this status, remembered for that status), and what failed, with Try again.
 
 ### What the best tools teach (researched 2026-10-10)
 
@@ -250,7 +259,8 @@ From your goal to a list of jobs, then on to stage 2.
 - **Codex:** not found.
 - **Others:** Devin's preflight script dedupes by item id and version. Copilot: not found.
 - **Open for Oby:** nobody has a claim check.
-  - Decided 2026-10-10: when a job starts, Oby assigns the issue to you and moves it to In progress. Swift refuses a job on an issue that already has a running job or an open PR.
+  - Decided 2026-10-10: when a job starts, Oby moves the issue to In progress. Swift refuses a job on an issue that already has a running job or an open PR.
+  - Decided 2026-10-11 (#162): Oby neither assigns the issue nor comments on it. Done as the Oby app, both email you; the `status:` label, the board and Oby's inbox say it already.
 
 ### 1.4 Unclear or misheard: "OB", "Obi"
 - **What happens:** resolve against known repos, the conversation's last repo and similar names. Ask only when two readings lead to different work. Goes to 2, or to one question with options.
@@ -270,7 +280,7 @@ From your goal to a list of jobs, then on to stage 2.
 Each job works in its own worktree off Oby's clone, on one of your accounts. These are the things that go wrong while nobody is watching.
 
 ### 2.1 Same files: two jobs would touch the same code
-- **What happens:** the Lead lists the files each job will touch. Overlapping jobs run one after another, not side by side. Goes to 2 in sequence, or to 5.4 later if dev moved.
+- **What happens:** the Lead lists the files each job will touch. Overlapping jobs run side by side, each told about the others, and conflicts are settled at merge: the older merges first and the other is rebased. At most `maxRunning` jobs run at once (6 by default). Goes to 2, then 5.4 if dev moved.
 - **Oby today:** Partial. One worktree per job, but no overlap check, so parallel PRs can conflict.
 - **Claude Code:** each background session and worktree subagent gets its own worktree. Cloud sessions get separate VMs and `claude/` branches. Conflicts aren't handled.
 - **Cursor:** one worktree per task, 25 per machine by default. Conflicts aren't described.
@@ -278,6 +288,7 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
 - **Others:** Devin uses child VMs, and its coordinator "resolves conflicts". Copilot uses one branch per task.
 - **Open for Oby:**
   - Decided 2026-10-10: Oby plans the work to keep conflicts rare. Each job claims the files it will touch, and overlapping jobs run one after another.
+  - Decided 2026-10-12 (#237), replacing the line above: overlapping jobs run in parallel like Claude Code's worktrees, under a cap on running jobs. Claims tell each agent about the others and set the merge order; #159's rebase round settles conflicts, and a rebase that keeps the same patch skips a new review.
   - With Tetrix, `code_impact` predicts overlap. Without it, the Lead's list is checked against the real diff (X.7).
 
 ### 2.2 Risky command: a permission prompt with nobody watching
@@ -307,7 +318,7 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
 
 ### 2.4 Usage limit: the account runs out mid-job
 - **What happens:** the job pauses, then carries on with another account of the same tool (same worktree, a new session given the summary so far) or waits for the reset. Goes back to 2.
-- **Oby today:** Partial. Routing skips accounts at 95% of their 5-hour window or 80% of their week (kept for jobs sent to them by name, until the week resets) and ranks an account lower the further its week is ahead of pace. A job whose account hits its limit carries on with the next account with room, or fails when none has.
+- **Oby today:** Partial. Routing skips accounts at 95% of their 5-hour window or 80% of their week (kept for jobs sent to them by name, until the week resets) and sends new work to accounts on their weekly pace, with the most weekly room per remaining day (case 0.5). A job whose account hits its limit carries on with the next account with room, or fails when none has.
 - **Claude Code:** shows the reset time, and interactive sessions can continue at the reset. Headless auto-resume is undocumented. Project threads retry after the reset.
 - **Cursor:** not found.
 - **Codex:** 5-hour and weekly limits. What happens mid-task: not found.
@@ -368,6 +379,7 @@ A job counts as done only when its check passes. Then the Lead reviews the diff 
   - Changed 2026-10-11, after real rounds took 20 to 47 minutes and the 15-minute timer stopped jobs mid-work: **45 minutes a round, 3 hours a job, 20 minutes a test run.**
   - Stop early when the same failure repeats twice (failures compared with timestamps and durations stripped), the failure count doesn't drop in 2 rounds, a round changes nothing, or 3 actions in a row are denied.
   - At the limit: stop, keep the branch and push nothing. The inbox offers "one more round" or "one more round on the stronger model".
+  - Changed 2026-10-12 (#203): a round's clock stands still while the agent waits for an Apple check it asked for (the job's cap still counts it), and a round that runs out with its work committed and its check passing on the last commit ends done and publishes; the review still gates the merge.
   - Limits live in Swift, never in prompts, and Oby tunes them per repo (X.4).
   - Inside a round: Claude Code jobs run with `--max-turns` and Oby's own timer. Codex and Cursor have no turn limit, so the timer alone applies.
 

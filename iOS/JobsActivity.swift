@@ -23,8 +23,9 @@ enum JobsActivity {
         // A push-started activity and the app's own can meet: keep one.
         for extra in open.dropFirst() { await extra.end(nil, dismissalPolicy: .immediate) }
         let active = jobs.filter(\.isActive)
-        if let job = active.first {
-            let state = state(job, working: active.count)
+        // A job working first, and only those count as working: not the ones waiting their turn (#238).
+        if let job = active.first(where: \.isWorking) ?? active.first {
+            let state = state(job, working: active.count(where: \.isWorking))
             if let current {
                 guard current.content.state != state || current.content.staleDate != nil else { return }
                 await current.update(ActivityContent(state: state, staleDate: nil))
@@ -90,6 +91,6 @@ enum JobsActivity {
 
     private static func state(_ job: Job, working: Int) -> ObyActivity.ContentState {
         ObyActivity.ContentState(working: working, title: job.heading, line: job.line.isEmpty ? "Starting…" : job.line,
-                                 started: job.started ?? job.created, status: job.status.rawValue, agent: job.agent)
+                                 started: job.started ?? job.created, status: job.isWaiting ? "waiting" : job.status.rawValue, agent: job.agent)
     }
 }

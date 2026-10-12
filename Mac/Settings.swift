@@ -2,18 +2,19 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
-/// Settings › General.
+/// Settings › General: what the iPhone's Settings has too (Shared/SettingsSections.swift),
+/// opening at login, and how much this Mac's own jobs ask.
 struct SettingsView: View {
+    /// This Mac's desk: Settings › Permissions' default for the jobs it runs itself (#134). The
+    /// runner's is in Settings › Runner.
+    let desk: Desk
+    @State private var mode = PermissionMode.bypass
+    /// The rules Always allow (or a deny) saved on this Mac, read when Settings opens.
+    @State private var rules: [PermissionRule] = []
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var problem: String?
-    /// The always-on runner whose jobs the island lists and RunnerFeed follows; empty turns that off.
-    @AppStorage("runnerURL") private var runnerURL = ""
     /// Oby reads its reply out loud when you talked to it (Mac/Speech.swift).
     @AppStorage(Speaker.setting) private var speaks = true
-    /// Merge checks on this Mac (Mac/MacChecks.swift).
-    @AppStorage(MacChecks.setting) private var runMergeChecks = true
-    /// Apple checks agents ask for (Engine/AppleChecks.swift).
-    @AppStorage(MacChecks.appleSetting) private var runAppleChecks = true
 
     var body: some View {
         Form {
@@ -30,15 +31,87 @@ struct SettingsView: View {
             if let problem {
                 Text(problem).font(.caption).foregroundStyle(.red)
             }
-            Section("Voice") {
-                Toggle("Oby speaks its replies", isOn: $speaks)
-                Text("When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer until you press fn or say “stop”. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
-                    .font(.caption).foregroundStyle(.secondary)
+            Section {
+                Picker("Default mode", selection: $mode) {
+                    ForEach(RunnerMode.allCases) { choice in
+                        Text(choice.label).tag(PermissionMode(rawValue: choice.rawValue) ?? .bypass)
+                    }
+                }
+                .onChange(of: mode) { _, chosen in if desk.defaultMode != chosen { desk.defaultMode = chosen } }
+                if let help = RunnerMode(mode.rawValue)?.help {
+                    Text(help).font(.footnote).foregroundStyle(.secondary)
+                }
+                if rules.isEmpty {
+                    Text("No saved rules").foregroundStyle(.secondary)
+                }
+                ForEach(rules) { rule in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(rule.rule).font(.body.monospaced())
+                            Text("\(rule.decision == .deny ? "Denied" : "Allowed") · \(rule.repo)")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Remove", role: .destructive) { forget(rule) }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Remove \(rule.rule)")
+                    }
+                }
+            } header: {
+                Text("Permissions on this Mac")
+            } footer: {
+                Text("How much the jobs this Mac runs itself ask. Each job's Mode menu changes it while it runs. Always allow saves a rule, so it doesn't ask again; remove the rule to be asked again. The runner's jobs follow Settings › Runner.")
             }
-            Section("Runner") {
+            VoiceSection(speaks: $speaks, footer: "When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer until you press fn or say “stop”. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
+            NotificationsSection()
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
+        .onAppear {
+            NSApp.activate()
+            mode = desk.defaultMode
+            rules = desk.permissionRules
+        }
+    }
+
+    private func forget(_ rule: PermissionRule) {
+        do {
+            try desk.forgetRule(rule.id)
+            problem = nil
+        } catch {
+            problem = error.localizedDescription
+        }
+        rules = desk.permissionRules
+    }
+}
+
+/// Settings › Runner: the always-on runner and how this Mac reaches it, the checks this Mac runs
+/// for it, and the Apple Watches paired with it.
+struct RunnerSettingsView: View {
+    let feed: RunnerFeed
+    /// The always-on runner whose jobs the island lists and RunnerFeed follows; empty turns that off.
+    @AppStorage("runnerURL") private var runnerURL = ""
+    /// Merge checks on this Mac (Mac/MacChecks.swift).
+    @AppStorage(MacChecks.setting) private var runMergeChecks = true
+    /// Apple checks agents ask for (Engine/AppleChecks.swift).
+    @AppStorage(MacChecks.appleSetting) private var runAppleChecks = true
+    @State private var watches: [PairedWatch] = []
+    @State private var removing: PairedWatch?
+    @State private var watchProblem: String?
+
+    var body: some View {
+        Form {
+            Section {
                 TextField("URL", text: $runnerURL, prompt: Text(Runner.defaultURL.absoluteString))
-                Text("The island lists the jobs running there too, and Oby tells you when one needs you. Leave it empty to turn this off.")
-                    .font(.caption).foregroundStyle(.secondary)
+                LabeledContent("Status", value: feed.runner == nil ? "Off" : feed.connection.status(host: feed.name))
+            } header: {
+                Text("Runner")
+            } footer: {
+                Text("The runner does the work while your Mac is closed. The island lists the jobs running there too, and Oby tells you when one needs you. It answers only your Tailscale login, so this Mac needs Tailscale on. Leave it empty to turn this off.")
+            }
+            // As on the iPhone (Shared/PermissionsSection.swift). This Mac's own jobs' default is in General.
+            PermissionsSection(runner: feed.runner, defaultMode: feed.defaultMode, setDefault: feed.setDefaultMode)
+            Section("Checks on this Mac") {
                 Toggle("Run merge checks on this Mac", isOn: $runMergeChecks)
                 Text("When Oby's review approves a pull request, this Mac runs its tests and builds the Mac and iPhone apps, one at a time, before Oby merges it into dev.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -46,16 +119,69 @@ struct SettingsView: View {
                 Text("When an agent on the runner asks (oby-check apple), this Mac builds and tests the Mac and iPhone apps at its latest commit, before Oby's review has read it, and the agent gets the compiler's errors and failing tests.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section {
+                if watches.isEmpty {
+                    Text("None yet").foregroundStyle(.secondary)
+                }
+                ForEach(watches) { watch in
+                    HStack {
+                        LabeledContent(watch.name, value: "Paired")
+                        Button("Remove", role: .destructive) { removing = watch }
+                    }
+                }
+                if let watchProblem { Text(watchProblem).font(.caption).foregroundStyle(.red) }
+            } header: {
+                Text("Apple Watch without iPhone")
+            } footer: {
+                Text("Away from your iPhone, a paired watch reaches the runner through your Cloudflare Tunnel. Pair one in Oby's Settings on your iPhone, with Oby open on the watch: pairing asks for Face ID.")
+            }
+            Section {
+                LabeledContent("Publishing key", value: feed.runner == nil ? "Off" : feed.device.status)
+                // The runner's own line (pairing is closed: how to open it), then Try again.
+                if feed.runner != nil, let problem = feed.device.problem {
+                    Text(problem).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                    Button("Try again") { feed.register() }
+                }
+            } footer: {
+                Text("Oby opens a pull request by itself once a job's check passes and the secret scan is clean. When that failed, publish by hand here or on your iPhone: this Mac's key, like the iPhone's, signs only after Touch ID, and the runner learns it once, while pairing is open on it. Oby merges only into dev, once its review approves and your Mac's checks pass.")
+            }
         }
         .formStyle(.grouped)
         .frame(width: 460)
-        .onAppear { NSApp.activate() }
+        // Once the runner answers, and again after it comes back.
+        .task(id: feed.connection) {
+            guard feed.connection == .live, let runner = feed.runner else { return }
+            // A runner older than the Watch API has no list: then there's nothing to show.
+            watches = (try? await runner.watches()) ?? []
+        }
+        .confirmationDialog("Remove \(removing?.name ?? "this watch")?",
+                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            presenting: removing) { watch in
+            Button("Remove", role: .destructive) { remove(watch) }
+        } message: { _ in
+            Text("The runner forgets it: away from your iPhone, it reaches the runner again once you pair it on your iPhone.")
+        }
+    }
+
+    private func remove(_ watch: PairedWatch) {
+        guard let runner = feed.runner else { return }
+        Task {
+            do {
+                try await runner.removeWatch(watch.id)
+                watches.removeAll { $0.id == watch.id }
+                watchProblem = nil
+            } catch {
+                watchProblem = error.localizedDescription
+            }
+        }
     }
 }
 
-/// Settings › Accounts: the logins Oby spreads jobs across, who pays for each, and how much each has used.
+/// Settings › Accounts: the logins Oby spreads jobs across, who pays for each, and how much each has
+/// used, on this Mac and on the runner, as the iPhone shows them (Shared/SettingsSections.swift).
 struct AccountsSettingsView: View {
     let store: AccountStore
+    let feed: RunnerFeed
     @State private var agent = "claude"
     @State private var name = ""
     @State private var payer = ""
@@ -64,14 +190,8 @@ struct AccountsSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Accounts") {
-                Text(Usage.summary(store.accounts.map(\.usage))).font(.subheadline)
-            }
-            ForEach(Usage.agents(store.accounts.map(\.account.agent)), id: \.self) { agent in
-                Section(Usage.tool(agent)) {
-                    ForEach(store.accounts.filter { $0.account.agent == agent }, id: \.account.id, content: row)
-                }
-            }
+            AccountSections("Accounts on this Mac", items: store.accounts, id: \.account.id, usage: \.usage,
+                            place: "on this Mac", row: row)
             Section("Add an account") {
                 Picker("Tool", selection: $agent) {
                     Text("Claude Code").tag("claude")
@@ -90,6 +210,23 @@ struct AccountsSettingsView: View {
             }
             if let problem {
                 Text(problem).font(.caption).foregroundStyle(.red)
+            }
+            if feed.runner != nil {
+                AccountSections("Accounts on \(feed.name)", items: feed.accounts, id: \.account.id, usage: \.usage,
+                                place: "on \(feed.name)") { state in
+                    VStack(alignment: .leading, spacing: 4) {
+                        UsageCard(snapshot: state.usage)
+                        // The runner's "accounts" event brings the change back.
+                        ReserveSwitch(snapshot: state.usage) { lift in
+                            guard let runner = feed.runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+                            _ = try await runner.liftReserve(state.account.id, lift)
+                        }
+                        if state.signedIn {
+                            Text(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed))
+                                .font(.caption).foregroundStyle(state.tetrix == false ? Color.orange : Color.secondary)
+                        }
+                    }
+                }
             }
         }
         .formStyle(.grouped)
@@ -113,6 +250,7 @@ struct AccountsSettingsView: View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 UsageCard(snapshot: state.usage)
+                ReserveSwitch(snapshot: state.usage) { lift in _ = store.liftReserve(state.account.id, lift) }
                 // A job of its hit the limit: no job goes to it until then.
                 if state.isFull(), let until = state.fullUntil {
                     Text("Full until \(Limits.clock(until))").font(.caption).foregroundStyle(.orange)
@@ -120,10 +258,16 @@ struct AccountsSettingsView: View {
                 if !state.account.payer.isEmpty {
                     Text("Paid by \(state.account.payer)").font(.caption).foregroundStyle(.secondary)
                 }
+                if state.signedIn {
+                    Text(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed))
+                        .font(.caption).foregroundStyle(state.tetrix == false ? Color.orange : Color.secondary)
+                }
             }
             VStack(alignment: .trailing, spacing: 6) {
                 if !state.signedIn {
                     Button("Sign In") { attempt { try store.signIn(state.account) } }
+                } else if state.tetrix == false {
+                    Button("Sign In to Tetrix") { attempt { try store.signIn(state.account, tetrix: true) } }
                 }
                 Button("Remove", role: .destructive) { removing = state.account }
             }
@@ -207,18 +351,23 @@ struct VaultSettingsView: View {
     }
 }
 
-/// Settings › Models: which model and effort Claude Code and Codex jobs use.
+/// Settings › Models: which model and effort Claude Code and Codex jobs use, on this Mac and on the
+/// runner (as the iPhone sets them, Shared/SettingsSections.swift).
 struct ModelsSettingsView: View {
+    let feed: RunnerFeed
     @AppStorage("claude.model") private var claudeModel = AgentModels.defaults["claude.model"] ?? ""
     @AppStorage("claude.effort") private var claudeEffort = AgentModels.defaults["claude.effort"] ?? ""
     @AppStorage("codex.model") private var codexModel = AgentModels.defaults["codex.model"] ?? ""
     @AppStorage("codex.effort") private var codexEffort = AgentModels.defaults["codex.effort"] ?? ""
     /// What the signed-in Codex account offers, from its own model list.
     @State private var codexModels: [CodexModel] = []
+    /// What the runner offers, once it has answered.
+    @State private var runnerOptions: ModelOptions?
+    @State private var problem: String?
 
     var body: some View {
         Form {
-            Section("Claude Code") {
+            Section("Claude Code on this Mac") {
                 Picker("Model", selection: $claudeModel) {
                     ForEach(AgentModels.claude, id: \.0) { Text($0.1).tag($0.0) }
                 }
@@ -226,7 +375,7 @@ struct ModelsSettingsView: View {
                     ForEach(AgentModels.claudeEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
                 }
             }
-            Section("Codex") {
+            Section("Codex on this Mac") {
                 Picker("Model", selection: $codexModel) {
                     ForEach(codexChoices, id: \.id) { Text($0.name).tag($0.id) }
                 }
@@ -234,12 +383,28 @@ struct ModelsSettingsView: View {
                     ForEach(codexEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
                 }
             }
-            Text("New jobs use these. Oby's brain stays on Haiku: it plans and answers in the conversation, so it should be quick.")
+            Text("New jobs on this Mac use these. Oby's brain stays on Haiku: it plans and answers in the conversation, so it should be quick.")
                 .font(.caption).foregroundStyle(.secondary)
+            if feed.runner != nil {
+                RunnerModelsSections(options: runnerOptions, models: feed.models, save: feed.setModels, place: "on \(feed.name)")
+            }
+            if let problem {
+                Text(problem).font(.caption).foregroundStyle(.red)
+            }
         }
         .formStyle(.grouped)
         .frame(width: 460)
         .task { codexModels = (try? await CodexAgent.models(home: nil)) ?? [] }
+        // Once the runner answers, and again after it comes back or its URL changes.
+        .task(id: feed.connection) {
+            guard feed.connection == .live, let runner = feed.runner else { return }
+            do {
+                runnerOptions = try await runner.modelOptions()
+                problem = nil
+            } catch {
+                problem = error.localizedDescription
+            }
+        }
     }
 
     /// The account's models, plus the chosen one while the list loads (or if the plan dropped it).
@@ -258,16 +423,18 @@ extension AccountState {
     /// What Settings' usage card shows.
     var usage: Usage.Snapshot {
         Usage.Snapshot(agent: account.agent, name: account.name, label: label, fiveHour: fiveHour, sevenDay: sevenDay,
-                       fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running)
+                       fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running,
+                       reserveLiftedUntil: reserveLifted)
     }
 }
 
 extension AccountStore {
-    /// Opens Terminal on the tool's own login, with the account's home in the environment.
-    func signIn(_ account: Account) throws {
-        let script = URL(filePath: account.home ?? homes.path).appending(path: "sign-in-\(account.id).command")
+    /// Opens Terminal on the tool's own login, with the account's home in the environment; with
+    /// `tetrix`, on the tool's own login to its Tetrix MCP server (Engine/TetrixUse.swift).
+    func signIn(_ account: Account, tetrix: Bool = false) throws {
+        let script = URL(filePath: account.home ?? homes.path).appending(path: "sign-in-\(tetrix ? "tetrix-" : "")\(account.id).command")
         try FileManager.default.createDirectory(at: script.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Self.signInScript(for: account).write(to: script, atomically: true, encoding: .utf8)
+        try (tetrix ? TetrixUse.signInScript(for: account) : Self.signInScript(for: account)).write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
         guard NSWorkspace.shared.open(script) else { throw Shell.Failure(message: "Couldn't open Terminal to sign in.") }
     }

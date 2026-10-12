@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// One job, opened from the island's list: the same screen as the iPhone's (iOS/JobScreen.swift),
-/// in the island's own style. Its stages, the result (Publish after Touch ID for this Mac's own
-/// jobs, Dismiss for one that needs you), what you asked, its details, what you told the agent,
-/// Stop, and a line to tell the agent more.
+/// in the island's own style. What its agent waits for (a decision card), its stages, the result
+/// (Publish after Touch ID, Dismiss for one that needs you), what you asked, its details, what you
+/// told the agent, Move to…, Stop, and a line to tell the agent more. A runner's job has a Mode menu too.
 struct JobView: View {
     let job: Job
     /// Where it runs: the runner's name, like "tetrix-lab", or "This Mac".
@@ -11,25 +11,60 @@ struct JobView: View {
     /// The account's name, when this Mac knows it (its own accounts), else nil and the id shows.
     let account: String?
     let onStop: () -> Void
-    /// Nil where this Mac can't publish: a runner's job needs the iPhone's Face ID.
-    let onPublish: (() async throws -> Void)?
+    /// Nil where this Mac can't publish: a runner's job, on a Mac without Touch ID.
+    let publishing: Publishing?
     let onMessage: (String) async throws -> Void
     let onDismiss: () async throws -> Void
+    /// Its mode, the permission it waits on and its question with the plan: what the runner says
+    /// about its job, or this Mac's own job's (`RunnerJobExtras(local:)`).
+    var extras: RunnerJobExtras? = nil
+    /// Changes the job's mode, here or on the runner.
+    var onMode: ((RunnerMode) async throws -> Void)? = nil
+    /// Allow, Always allow or Deny, with words for a deny.
+    var onPermission: ((RunnerPermission.Decision, String?) async throws -> Void)? = nil
+    /// The job's alert's Publish opened this screen: it shows the sentence and asks for Touch ID now.
+    var publishNow = false
+    /// Called as that starts, so it starts once.
+    var onPublishNow: () -> Void = {}
+    /// The accounts where it runs (this Mac's or the runner's), for Move to…, with their usage.
+    var accounts: [AccountState] = []
+    /// Moves it (Engine/Move.swift); nil for Oby's own reviews, which pick their account themselves.
+    var onMove: ((MoveTarget) async throws -> Void)? = nil
+    /// Starts it now when it waits for its `startWhen` (#216, Engine/StartWhen.swift); nil where it can't.
+    var onStartNow: (() async throws -> Void)? = nil
+    /// Lifts an account's weekly reserve, by id, when the job waits for room only reserves hold
+    /// back (#278); nil where it can't.
+    var onUseAnyway: ((String) async throws -> Void)? = nil
     @State private var busy = false
+    @State private var moving = false
+    @State private var moveAgent = ""
+    /// Nil: keep its account on the same tool, else the least busy with room.
+    @State private var moveAccount: String?
+    /// Nil: its model as it is.
+    @State private var moveModel: String?
     @State private var problem: String?
-    @State private var confirming = false
+    /// The exact sentence Publish would carry out, shown before Touch ID approves it, or nil.
+    @State private var action: String?
     @State private var note = ""
     @State private var telling = false
     @State private var noteProblem: String?
     @State private var requestExpanded = false
 
+    /// Publishing by hand: what it would do, in the words shown and approved (the runner's own,
+    /// for its jobs), and doing exactly that, after Touch ID.
+    struct Publishing {
+        var action: () async throws -> String
+        var publish: (String) async throws -> Void
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             header
+            decision
             pipeline
             result
             DisclosureGroup("What you asked", isExpanded: $requestExpanded) {
-                Text(job.request).font(.system(size: 13)).textSelection(.enabled)
+                ReadingText(job.request).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
             }
             .font(.system(size: 13, weight: .semibold))
@@ -38,26 +73,58 @@ struct JobView: View {
                 DisclosureGroup("You told the agent (\(notes.count))") {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(notes.indices, id: \.self) { index in
-                            Label(notes[index], systemImage: "text.bubble").font(.system(size: 13))
+                            Label { ReadingText(notes[index]) } icon: { Image(systemName: "text.bubble") }.readingText()
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
                 }
                 .font(.system(size: 13, weight: .semibold))
             }
-            if job.isActive {
-                Button(action: onStop) { pill("Stop job") }
-                    .buttonStyle(.plain)
-                    .disabled(busy)
+            // Waiting for room while only weekly reserves stand in the way (#278): one tap lifts
+            // one until its reset, and the job starts on it.
+            if job.waitsToStart, let onUseAnyway {
+                ForEach(Usage.liftable(job.waiting?.reserved, among: accounts, id: \.account.id, usage: \.usage), id: \.account.id) { state in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button { Task { await run { try await onUseAnyway(state.account.id) } } } label: { pill(Usage.useAnyway(state.usage)) }
+                            .buttonStyle(.plain)
+                            .disabled(busy)
+                        Text(Usage.liftNote(state.usage)).font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                }
             }
-            if let problem, !confirming {
+            if moving {
+                movePanel
+            } else if job.isActive || onMove != nil {
+                HStack(spacing: 10) {
+                    if job.waitsToStart, let onStartNow {
+                        Button { Task { await run(onStartNow) } } label: { pill("Start now") }
+                            .buttonStyle(.plain)
+                            .disabled(busy)
+                            .help("Start it now instead of waiting")
+                    }
+                    if onMove != nil {
+                        Button { moveAgent = job.agent; moveAccount = nil; moveModel = nil; problem = nil; moving = true } label: { pill("Move to…") }
+                            .buttonStyle(.plain)
+                            .disabled(busy)
+                            .help("Move this job to another tool, account or model")
+                    }
+                    if job.isActive {
+                        Button(action: onStop) { pill("Stop job") }
+                            .buttonStyle(.plain)
+                            .disabled(busy)
+                    }
+                }
+            }
+            if let problem, action == nil {
                 Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(3)
             }
-            if job.status == .running || (!job.isActive && job.session != nil) {
+            if job.status == .running || (!job.isActive && job.resumable) {
                 composer
             }
         }
         .padding(.horizontal, 4)
+        // Not a task tied to publishNow: starting clears it, which would cancel the publish.
+        .onChange(of: publishNow, initial: true) { if publishNow { Task { await publishFromNotification() } } }
     }
 
     private var header: some View {
@@ -77,9 +144,65 @@ struct JobView: View {
                         .font(.system(size: 12).monospacedDigit()).foregroundStyle(.white.opacity(0.6))
                 }
             }
-            Text("\(job.agentName) · \(account ?? job.account) · \(place)")
-                .font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+            HStack(spacing: 10) {
+                Text("\(job.agentName) · \(account ?? job.account) · \(place)")
+                    .font(.system(size: 13)).foregroundStyle(.white.opacity(0.6))
+                if let onMode, job.isActive, let mode = RunnerMode(extras?.mode) { modeMenu(mode, onMode) }
+            }
+            if let moved = job.movedLine {
+                Label(moved, systemImage: "arrow.left.arrow.right").font(.system(size: 12)).foregroundStyle(.white.opacity(0.6))
+            }
         }
+    }
+
+    /// Its OK on a command or a file, else the answer to its question or its plan: the runner's
+    /// with the recommended option first, this Mac's own jobs' as they ask.
+    @ViewBuilder private var decision: some View {
+        if let permission = extras?.permission, let onPermission, job.isActive {
+            DecisionCard(title: permission.title, detail: permission.detail, options: CardOption.permission(permission),
+                         busy: busy, wordsNote: CardOption.denyWords,
+                         onChoose: { option in
+                             guard let decision = RunnerPermission.Decision(rawValue: option.answer) else { return }
+                             Task { await run { try await onPermission(decision, nil) } }
+                         },
+                         onWords: { words in Task { await run { try await onPermission(.deny, words) } } })
+                .id(permission.id)
+                .padding(14)
+                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        } else if job.waitsForAnswer, let question = extras?.question ?? job.question.map({ Question(text: $0.text, options: $0.options, recommended: $0.recommended, plan: $0.plan) }) {
+            DecisionCard(title: question.text, plan: question.plan, options: question.cardOptions, busy: busy,
+                         onChoose: { option in Task { await run { try await onMessage(option.answer) } } },
+                         onWords: { words in Task { await run { try await onMessage(words) } } })
+                .id(question.text)
+                .padding(14)
+                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+    }
+
+    /// Ask, Accept edits, Plan or Bypass, while it runs.
+    private func modeMenu(_ mode: RunnerMode, _ change: @escaping (RunnerMode) async throws -> Void) -> some View {
+        Menu {
+            ForEach(RunnerMode.allCases) { choice in
+                Button {
+                    Task { await run { try await change(choice) } }
+                } label: {
+                    if choice == mode { Label(choice.label, systemImage: "checkmark") } else { Text(choice.label) }
+                }
+                .help(choice.help)
+            }
+        } label: {
+            Label(mode.label, systemImage: mode.symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.horizontal, 10).frame(height: 24)
+                .background(.white.opacity(0.12), in: Capsule())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(busy)
+        .help("Mode: \(mode.help)")
+        .accessibilityLabel("Mode: \(mode.label)")
     }
 
     /// "Stage 2 of 5" and the stages, as the iPhone's job screen draws them.
@@ -100,11 +223,11 @@ struct JobView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Result").font(.system(size: 14, weight: .semibold)).accessibilityAddTraits(.isHeader)
                 if !job.summary.isEmpty {
-                    Text(job.summary).font(.system(size: 13)).foregroundStyle(.white.opacity(0.85)).textSelection(.enabled)
+                    ReadingText(job.summary).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if let sent = job.sentLines {
-                    Text(sent).font(.system(size: 12)).foregroundStyle(.white.opacity(0.6)).textSelection(.enabled)
+                    ReadingText(sent, secondary: true).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if let commits = job.commits {
@@ -136,25 +259,25 @@ struct JobView: View {
         }
     }
 
-    /// Oby's own publish failed: Publish by hand, after Oby shows exactly what that does. A
-    /// runner's job is published from the iPhone instead.
+    /// Oby's own publish failed, or new commits wait: Publish by hand, after Oby shows exactly
+    /// what that does (for a runner's job, the runner's sentence, unchanged).
     @ViewBuilder private var publishActions: some View {
         if let reason = job.publishError {
             Text(reason).font(.system(size: 12)).foregroundStyle(.orange).lineLimit(3)
         }
-        if onPublish == nil {
+        if publishing == nil {
             HStack(spacing: 10) {
                 Text("Publish from your iPhone").font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
                 dismissButton
             }
-        } else if confirming {
+        } else if let action {
             VStack(alignment: .leading, spacing: 8) {
-                Text(Publish.action(for: job, base: job.base ?? "")).font(.system(size: 13, weight: .medium))
+                ReadingText(action, weight: .medium)
                 if let problem {
                     Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(3)
                 }
                 HStack(spacing: 8) {
-                    Button(action: publish) {
+                    Button { publish(action) } label: {
                         Label(busy ? "Publishing…" : "Publish with Touch ID", systemImage: "touchid")
                             .font(.system(size: 13, weight: .semibold)).foregroundStyle(.black)
                             .padding(.horizontal, 14).frame(height: 30)
@@ -162,16 +285,90 @@ struct JobView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(busy)
-                    Button { confirming = false; problem = nil } label: { pill("Not now") }
+                    Button { self.action = nil; problem = nil } label: { pill("Not now") }
                         .buttonStyle(.plain)
                         .disabled(busy)
                 }
             }
         } else {
             HStack(spacing: 10) {
-                Button { confirming = true } label: { pill(job.published == nil ? "Publish" : "Publish the new commits") }
+                Button(action: ask) { pill(job.published == nil ? "Publish" : "Publish the new commits") }
                     .buttonStyle(.plain)
+                    .disabled(busy)
                 dismissButton
+            }
+        }
+    }
+
+    /// Move to…: a tool, one of its accounts with its usage, and a model, then what the move will do.
+    private var movePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Move to").font(.system(size: 14, weight: .semibold)).accessibilityAddTraits(.isHeader)
+            HStack(spacing: 6) {
+                ForEach(MoveChoice.tools, id: \.0) { tool in
+                    choice(tool.1, selected: moveAgent == tool.0) { moveAgent = tool.0; moveAccount = nil; moveModel = nil }
+                }
+            }
+            Text("Account").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.6))
+            choice(moveAgent == job.agent ? "Keep its account" : "Least busy with room", selected: moveAccount == nil) { moveAccount = nil }
+            ForEach(accounts.filter { $0.account.agent == moveAgent }, id: \.account.id) { state in
+                let usage = MoveChoice.usage(signedIn: state.signedIn, fiveHour: state.fiveHour, sevenDay: state.sevenDay)
+                choice("\(state.account.name) · \(usage)", selected: moveAccount == state.account.id,
+                       warn: MoveChoice.busy(fiveHour: state.fiveHour, sevenDay: state.sevenDay)) { moveAccount = state.account.id }
+                    .disabled(!state.signedIn)
+            }
+            Text("Oby never picks an account past 80% of its 5-hour or weekly limit; one you pick takes the job anyway.")
+                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
+            Text("Model").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.6))
+            HStack(spacing: 6) {
+                choice("As it is", selected: moveModel == nil) { moveModel = nil }
+                choice("Settings default", selected: moveModel == Moves.toolDefault) { moveModel = Moves.toolDefault }
+            }
+            HStack(spacing: 6) {
+                ForEach(Moves.models[moveAgent] ?? [], id: \.self) { model in
+                    choice(AgentModels.name(model), selected: moveModel == model) { moveModel = model }
+                }
+            }
+            Text(MoveChoice.effect(active: job.isActive, running: job.status == .running))
+                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.75))
+            if let problem {
+                Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(3)
+            }
+            HStack(spacing: 8) {
+                Button(action: move) {
+                    Text(busy ? "Moving…" : "Move").font(.system(size: 13, weight: .semibold)).foregroundStyle(.black)
+                        .padding(.horizontal, 14).frame(height: 30)
+                        .background(.white, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(busy)
+                Button { moving = false; problem = nil } label: { pill("Not now") }
+                    .buttonStyle(.plain)
+                    .disabled(busy)
+            }
+        }
+        .padding(14)
+        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func choice(_ title: String, selected: Bool, warn: Bool = false, _ pick: @escaping () -> Void) -> some View {
+        Button(action: pick) {
+            Text(title).font(.system(size: 12, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Color.black : warn ? Color.orange : Color.white)
+                .padding(.horizontal, 10).frame(height: 24)
+                .background(selected ? Color.white : Color.white.opacity(0.12), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func move() {
+        guard let onMove else { return }
+        let target = MoveTarget(agent: moveAgent, account: moveAccount, model: moveModel)
+        Task {
+            await run {
+                try await onMove(target)
+                moving = false
             }
         }
     }
@@ -212,7 +409,7 @@ struct JobView: View {
             HStack(spacing: 8) {
                 TextField("Tell the agent…", text: $note)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .readingText()
                     .onSubmit(tell)
                 Button(action: tell) {
                     Image(systemName: "arrow.up")
@@ -234,12 +431,32 @@ struct JobView: View {
         }
     }
 
-    private func publish() {
+    /// What Publish would do, to show before anything goes out.
+    private func ask() {
+        guard let publishing else { return }
+        Task { await run { action = try await publishing.action() } }
+    }
+
+    /// Exactly the sentence shown goes to Touch ID and out; a cancel sends nothing.
+    private func publish(_ action: String) {
+        guard let publishing else { return }
         Task {
             await run {
-                try await onPublish?()
-                confirming = false
+                try await publishing.publish(action)
+                self.action = nil
             }
+        }
+    }
+
+    /// The alert's Publish, as on the iPhone: the sentence shows, and Touch ID asks with it.
+    private func publishFromNotification() async {
+        onPublishNow()
+        guard let publishing, job.canPublish, !busy else { return }
+        await run {
+            let action = try await publishing.action()
+            self.action = action
+            try await publishing.publish(action)
+            self.action = nil
         }
     }
 
@@ -345,5 +562,19 @@ private struct StageRow: View {
             }
             Image(systemName: symbol).font(.system(size: 15)).foregroundStyle(color).accessibilityHidden(true)
         }
+    }
+}
+
+extension Desk {
+    /// The Mode menu of one of this Mac's own jobs (#134), as the runner's does for its jobs.
+    func changeMode(_ id: String, to mode: RunnerMode) throws {
+        guard let mode = PermissionMode(rawValue: mode.rawValue) else { return }
+        try setMode(id, mode)
+    }
+
+    /// Allow, Always allow or Deny on what one of this Mac's own jobs waits for; words go with a deny.
+    func answerPermission(_ id: String, _ decision: RunnerPermission.Decision, message: String?) throws {
+        guard let permission = job(id)?.permission, let decision = PermissionDecision(rawValue: decision.rawValue) else { return }
+        try answerPermission(id, permission.id, decision, message: message)
     }
 }

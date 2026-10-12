@@ -172,6 +172,8 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Character.swift,
+				Pokes.swift,
+				DecisionCard.swift,
 			);
 			target = 0B1E0C0A0000000000AE0007 /* ObyWatchWidget */;
 		};
@@ -917,7 +919,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Oby asks for Face ID before it publishes anything for you.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens while you hold the mic button or slide up to lock listening, for up to 60 seconds.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens when you tap the mic to dictate, until you tap stop or for up to 60 seconds.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Oby writes down your iPhone and Apple Watch speech on this iPhone to plan your request.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
@@ -960,7 +962,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Oby asks for Face ID before it publishes anything for you.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens while you hold the mic button or slide up to lock listening, for up to 60 seconds.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens when you tap the mic to dictate, until you tap stop or for up to 60 seconds.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Oby writes down your iPhone and Apple Watch speech on this iPhone to plan your request.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";

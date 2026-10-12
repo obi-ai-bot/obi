@@ -1,14 +1,12 @@
 import SwiftUI
 
-/// The runner Oby talks to, the accounts signed in there, each tool's model and effort, and the
-/// Apple Watches that reach it without this iPhone.
+/// The Settings tab: the runner Oby talks to, the accounts signed in there, each tool's model and
+/// effort, and the Apple Watches that reach it without this iPhone. The sections the Mac has too
+/// are shared (Shared/SettingsSections.swift).
 struct SettingsScreen: View {
     @Environment(Phone.self) private var phone
-    @Environment(\.dismiss) private var dismiss
-    @AppStorage("voice.language") private var speechLanguage = "system"
     @State private var address = ""
     @State private var options: ModelOptions?
-    @State private var models: ModelSettings?
     @State private var problem: String?
     @State private var watchPairing = WatchPairing()
     @State private var watchProblem: String?
@@ -22,58 +20,30 @@ struct SettingsScreen: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .onSubmit(saveAddress)
-                    LabeledContent("Status", value: status)
+                    LabeledContent("Status", value: phone.connection.status(host: phone.host))
                 } header: {
                     Text("Runner")
                 } footer: {
                     Text("The runner does the work while your Mac is closed. It answers only your Tailscale login, so this iPhone needs Tailscale on.")
                 }
 
-                Section("Voice") {
-                    Toggle("Speak replies to spoken requests", isOn: Binding(get: { phone.speakReplies }, set: { phone.speakReplies = $0 }))
-                    Picker("Speech language", selection: $speechLanguage) {
-                        Text("iPhone language").tag("system")
-                        Text("English").tag("en-US")
-                        Text("Português (Brasil)").tag("pt-BR")
-                        Text("Português (Portugal)").tag("pt-PT")
+                VoiceSection(speaks: Binding(get: { phone.speakReplies }, set: { phone.speakReplies = $0 }))
+
+                NotificationsSection { UIApplication.shared.registerForRemoteNotifications() }
+
+                AccountSections("Accounts on the runner", items: phone.accounts, id: \.id, usage: \.usage) { account in
+                    UsageCard(snapshot: account.usage)
+                    // The runner's "accounts" event brings the change back.
+                    ReserveSwitch(snapshot: account.usage) { lift in _ = try await phone.runner.liftReserve(account.id, lift) }
+                    if account.signedIn {
+                        Text(Usage.tetrix(account.tetrix, jobs: account.tetrixJobs ?? 0, used: account.tetrixUsed ?? 0))
+                            .font(.footnote).foregroundStyle(account.tetrix == false ? Color.orange : Color.secondary)
                     }
                 }
 
-                Section("Accounts on the runner") {
-                    if phone.accounts.isEmpty {
-                        Text("None yet").foregroundStyle(.secondary)
-                    } else {
-                        Text(Usage.summary(phone.accounts.map(\.usage))).font(.subheadline)
-                    }
-                }
-                ForEach(Usage.agents(phone.accounts.map(\.agent)), id: \.self) { agent in
-                    Section(Usage.tool(agent)) {
-                        ForEach(phone.accounts.filter { $0.agent == agent }) { account in
-                            UsageCard(snapshot: account.usage)
-                        }
-                    }
-                }
+                PermissionsSection(runner: phone.runner, defaultMode: phone.defaultMode, setDefault: phone.setDefaultMode)
 
-                if let options, let models {
-                    Section("Claude Code") {
-                        Picker("Model", selection: binding(\.claude.model)) {
-                            ForEach(options.claude.models, id: \.id) { Text($0.name).tag($0.id) }
-                        }
-                        Picker("Effort", selection: binding(\.claude.effort)) {
-                            ForEach(options.claude.efforts ?? [], id: \.self) { Text(effortName($0)).tag($0) }
-                        }
-                    }
-                    Section("Codex") {
-                        Picker("Model", selection: binding(\.codex.model)) {
-                            ForEach(options.codex.models, id: \.id) { Text($0.name).tag($0.id) }
-                        }
-                        Picker("Effort", selection: binding(\.codex.effort)) {
-                            ForEach(options.codex.models.first { $0.id == models.codex.model }?.efforts ?? [], id: \.self) {
-                                Text(effortName($0)).tag($0)
-                            }
-                        }
-                    }
-                }
+                RunnerModelsSections(options: options, models: phone.models, save: phone.setModels)
 
                 Section {
                     TextField("Client ID", text: $watchPairing.clientID)
@@ -114,22 +84,12 @@ struct SettingsScreen: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("Done") { dismiss() } }
             .task {
                 address = phone.runnerURL.absoluteString
-                models = phone.models
-                do { options = try await phone.modelOptions() } catch { problem = error.localizedDescription }
+                do { options = try await phone.runner.modelOptions() } catch { problem = error.localizedDescription }
                 // A runner older than the Watch API has no list: then there's nothing to show.
                 try? await watchPairing.load(phone)
             }
-        }
-    }
-
-    private var status: String {
-        switch phone.connection {
-        case .live: "Connected to \(phone.host)"
-        case .connecting: "Connecting…"
-        case .offline(let why): why
         }
     }
 
@@ -142,19 +102,4 @@ struct SettingsScreen: View {
         if url != phone.runnerURL { phone.runnerURL = url }
     }
 
-    /// A picker binding that saves on the runner as soon as it changes.
-    private func binding(_ path: WritableKeyPath<ModelSettings, String>) -> Binding<String> {
-        Binding {
-            models?[keyPath: path] ?? ""
-        } set: { value in
-            guard var changed = models else { return }
-            changed[keyPath: path] = value
-            models = changed
-            Task {
-                do { try await phone.setModels(changed) } catch { problem = error.localizedDescription }
-            }
-        }
-    }
-
-    private func effortName(_ effort: String) -> String { effort == "xhigh" ? "Extra high" : effort.capitalized }
 }

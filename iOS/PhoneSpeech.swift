@@ -34,10 +34,7 @@ final class PhoneSpeech {
 
     /// Explicit English/Portuguese settings override the system language. Keep the Watch's
     /// existing system-language behavior for every locale SpeechTranscriber supports.
-    static var locale: Locale {
-        let selected = UserDefaults.standard.string(forKey: "voice.language") ?? "system"
-        return selected == "system" ? .current : Locale(identifier: selected)
-    }
+    static var locale: Locale { VoiceSettings.locale }
 
     static func context(repos: [String]) -> [String] {
         var names = ["Oby", "Claude", "Claude Code", "Codex", "Cursor", "Gemini", "GitHub", "PR", "pull request"]
@@ -199,11 +196,11 @@ final class PhoneSpeech {
     /// Phone input has no Watch packet sequence, and reports interruptions as phone listening errors.
     func finish() async throws -> String {
         guard !cancelled, !ending else {
-            throw RunnerError(message: "Listening was interrupted. Hold the mic to try again.")
+            throw RunnerError(message: "Listening was interrupted. Tap the mic to try again.")
         }
         do { return try await finish(sequence: nextSequence) }
         catch is CancellationError {
-            throw RunnerError(message: "Listening was interrupted. Hold the mic to try again.")
+            throw RunnerError(message: "Listening was interrupted. Tap the mic to try again.")
         }
     }
 

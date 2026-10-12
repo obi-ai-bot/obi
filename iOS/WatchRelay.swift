@@ -101,14 +101,17 @@ final class WatchRelay: NSObject {
     /// WatchConnectivity carries about 65 KB. The watch shows what needs you and what's running,
     /// so those jobs go first, then the ones that finished in the last two days, without the long
     /// texts; the list is cut at 20 and then from the end until it fits, so what needs you stays.
-    /// A job hidden by Clear done on the phone (`clearedAt`), or one that failed over a week ago,
-    /// doesn't count as needing you on the wrist either.
+    /// A job hidden by Clear done on the phone (`clearedAt`, settled jobs only, `Job.settled`), or
+    /// one that failed over a week ago, doesn't count as needing you on the wrist either.
     nonisolated static func fit(_ context: WatchContext, clearedAt: Date = .distantPast, now: Date = .now, limit: Int = WatchWire.limit) throws -> Data {
         var context = context
         let jobs = context.jobs
         func finished(_ job: Job, after date: Date) -> Bool { (job.finished ?? now) > date }
         let needing = jobs.filter { $0.needsYou && finished($0, after: max(clearedAt, now.addingTimeInterval(-7 * 86400))) }
-        let recent = jobs.filter { !$0.needsYou && !$0.isActive && finished($0, after: max(clearedAt, now.addingTimeInterval(-2 * 86400))) }
+        let recent = jobs.filter {
+            !$0.needsYou && !$0.isActive && finished($0, after: now.addingTimeInterval(-2 * 86400))
+                && $0.listed(after: clearedAt, among: jobs)
+        }
         context.jobs = (needing + jobs.filter { $0.isActive && !$0.needsYou } + recent)
             .prefix(20)
             .map { job in
@@ -116,6 +119,8 @@ final class WatchRelay: NSObject {
                 job.notes = nil
                 job.request = String(job.request.prefix(300))
                 job.summary = String(job.summary.prefix(600))
+                // A plan to approve can be long: the wrist gets its start.
+                if let plan = job.question?.plan, plan.count > 1500 { job.question?.plan = String(plan.prefix(1500)) + "…" }
                 return job
             }
         while true {
@@ -176,8 +181,7 @@ final class WatchRelay: NSObject {
                 defer { if liveVoice === live { liveVoice = nil } }
                 let said = try await live.finish(sequence: sequence)
                 guard liveVoice === live, !live.cancelled else { return bad }
-                guard !said.isEmpty else { return [WatchWire.error: "Oby didn't catch that."] }
-                startPlan(said, answer: nil, request: request)
+                // Only the words: the watch keeps them as a draft, and its Send is a `plan`.
                 return [WatchWire.text: said]
             case .voiceCancel:
                 if preparingVoice == request { preparingVoice = nil }
@@ -212,6 +216,23 @@ final class WatchRelay: NSObject {
             case .dismiss:
                 guard let id = message[WatchWire.job] as? String else { return bad }
                 let job = try await phone.runner.dismiss(id)
+                _ = await refresh()
+                return [WatchWire.job: try Runner.encoder.encode(job)]
+            case .start:
+                guard let id = message[WatchWire.job] as? String else { return bad }
+                let job = try await phone.runner.startNow(id)
+                _ = await refresh()
+                return [WatchWire.job: try Runner.encoder.encode(job)]
+            case .permission:
+                guard let id = message[WatchWire.job] as? String, let prompt = message[WatchWire.permission] as? String,
+                      let decision = (message[WatchWire.decision] as? String).flatMap(RunnerPermission.Decision.init(rawValue:)) else { return bad }
+                let job = try await phone.runner.answer(id, permission: prompt, decision, message: message[WatchWire.text] as? String)
+                _ = await refresh()
+                return [WatchWire.job: try Runner.encoder.encode(job)]
+            case .move:
+                guard let id = message[WatchWire.job] as? String else { return bad }
+                let job = try await phone.runner.move(id, agent: message[WatchWire.agent] as? String, account: message[WatchWire.account] as? String,
+                                                      model: message[WatchWire.model] as? String)
                 _ = await refresh()
                 return [WatchWire.job: try Runner.encoder.encode(job)]
             case .publishAction:

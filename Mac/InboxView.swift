@@ -1,16 +1,18 @@
 import SwiftUI
 
 /// The island's Inbox, at the top of the list: what only you can answer, from the runner's jobs
-/// and this Mac's, the longest-waiting first (docs/pipeline-cases.md, I.1). The first one is open:
-/// its answers are on ⌘1 to ⌘9, a question takes your own words too, Later puts it off for an hour
-/// and Done lets it go. Once it's settled, the next one opens. Answered on the iPhone, it goes from
-/// here too.
+/// and this Mac's, the longest-waiting first (docs/pipeline-cases.md, I.1). The first one is open,
+/// as a decision card (Shared/DecisionCard.swift): its answers are on ⌘1 to ⌘3, your own words
+/// go too, Later puts it off for an hour and Done lets it go; Open job opens its job's screen, where
+/// a runner's job publishes too. Every kind the iPhone settles settles here, the same way. Once it's
+/// settled, the next one opens. Answered on the iPhone, it goes from here too.
 struct IslandInbox: View {
     let desk: Desk
     let feed: RunnerFeed
+    /// Opens the item's job: its id, and whether it's this Mac's own.
+    var onOpen: (_ job: String, _ local: Bool) -> Void = { _, _ in }
     /// The item open now (an Entry's id), or nil for the longest-waiting one.
     @State private var opened: String?
-    @State private var reply = ""
     /// Why the last answer didn't go through, until the next one does.
     @State private var problem: String?
     @State private var busy = false
@@ -48,56 +50,45 @@ struct IslandInbox: View {
                         if entry.id == current.id { card(entry, now: context.date) } else { row(entry, now: context.date) }
                     }
                 }
-                // Settled elsewhere, or another one opened: what was typed was for the one before.
-                .onChange(of: current.id, initial: true) {
-                    reply = ""
-                    problem = nil
-                }
+                // Settled elsewhere, or another one opened: the problem was the one before's.
+                .onChange(of: current.id, initial: true) { problem = nil }
             }
         }
     }
 
-    /// The open item: what it asks, its answers, and the ways out.
+    /// The open item: what it asks, its answers (on ⌘1 to ⌘3, the recommended one first), your
+    /// own words, and the ways out.
     private func card(_ entry: Entry, now: Date) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(entry.item.line(now: now)).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.5))
-            Text(entry.item.text).font(.system(size: 15, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
-            ForEach(Array(entry.item.options.prefix(9).enumerated()), id: \.offset) { index, option in
-                Button { settle(entry, answer: option) } label: {
-                    HStack {
-                        Text(option).font(.system(size: 13, weight: .medium))
-                        Spacer(minLength: 8)
-                        Text("⌘\(index + 1)").font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.4))
-                    }
-                    .padding(.horizontal, 14).padding(.vertical, 9)
-                    .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
-            }
-            if entry.item.kind == .question {
-                HStack(spacing: 8) {
-                    TextField(entry.item.options.isEmpty ? "Your answer" : "Or type your answer", text: $reply)
-                        .textFieldStyle(.plain).font(.system(size: 13))
-                        .onSubmit { answerTyped(entry) }
-                    Button { answerTyped(entry) } label: {
-                        Image(systemName: "arrow.up").font(.system(size: 12, weight: .bold)).foregroundStyle(.black)
-                            .frame(width: 24, height: 24)
-                            .background(.white.opacity(typed.isEmpty ? 0.4 : 1), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(typed.isEmpty)
-                    .accessibilityLabel("Answer")
-                }
-                .padding(.leading, 14).padding(.trailing, 5).frame(height: 34)
-                .background(.white.opacity(0.06), in: Capsule())
-            }
+        let item = entry.item
+        // The Mac's `kind` is Engine's enum, the runner's a string: both read the same.
+        let kind = "\(item.kind)"
+        let extras = entry.local ? nil : feed.extras[item.job]
+        let permission = kind == "permission" ? extras?.permission : nil
+        // Oby's plain words (#65), when the runner wrote them; the item as it is otherwise.
+        let words = entry.local ? InboxWords() : feed.inboxWords[item.id] ?? InboxWords()
+        // A permission's words go with a deny; anything else's are the answer. An item without a job takes none.
+        let answerWords: ((String) -> Void)? = item.job.isEmpty ? nil : { words in
+            if permission != nil { deny(entry, words) } else { settle(entry, answer: words) }
+        }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(item.line(now: now)).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.5))
+            DecisionCard(title: words.title(item.text), happened: words.body, behindDetails: words.details(item.text),
+                         detail: permission?.detail,
+                         plan: kind == "question" ? extras?.question?.plan : nil,
+                         options: CardOption.inbox(item.options, kind: kind, question: extras?.question, permission: permission, words: words, details: item.details),
+                         busy: busy, wordsNote: kind == "permission" ? CardOption.denyWords : nil,
+                         onChoose: { settle(entry, answer: $0.answer) },
+                         onWords: answerWords)
+                .id(entry.id)
             HStack(spacing: 14) {
                 Button("Later") { settle(entry, later: .now.addingTimeInterval(3600)) }
                     .help("Put it off for an hour")
                 Button("Done") { settle(entry, done: true) }
                     .help("Let it go without answering")
+                if !item.job.isEmpty {
+                    Button("Open job") { onOpen(item.job, entry.local) }
+                        .help("The job's screen: its result, Publish and Dismiss")
+                }
                 if let problem {
                     Text(problem).foregroundStyle(.red).lineLimit(2)
                 }
@@ -114,7 +105,6 @@ struct IslandInbox: View {
     private func row(_ entry: Entry, now: Date) -> some View {
         Button {
             opened = entry.id
-            reply = ""
             problem = nil
         } label: {
             VStack(alignment: .leading, spacing: 2) {
@@ -129,11 +119,19 @@ struct IslandInbox: View {
         .buttonStyle(.plain)
     }
 
-    private var typed: String { reply.trimmingCharacters(in: .whitespacesAndNewlines) }
-
-    private func answerTyped(_ entry: Entry) {
-        guard !typed.isEmpty else { return }
-        settle(entry, answer: typed)
+    /// Deny, with the user's words for the agent: the runner settles the item.
+    private func deny(_ entry: Entry, _ words: String) {
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                try await feed.answer(entry.item.job, .deny, message: words)
+                opened = nil
+                problem = nil
+            } catch {
+                problem = error.localizedDescription
+            }
+        }
     }
 
     /// This Mac's own items settle on its desk, the runner's through the runner; then the next one opens.
@@ -144,12 +142,11 @@ struct IslandInbox: View {
             do {
                 if entry.local {
                     let how: Desk.Settle = if let answer { .answer(answer) } else if let later { .later(later) } else { .done }
-                    try desk.settle(entry.item.id, how)
+                    try await desk.answer(entry.item.id, how)
                 } else {
                     try await feed.settle(entry.item.id, answer: answer, done: done, later: later)
                 }
                 opened = nil
-                reply = ""
                 problem = nil
             } catch {
                 problem = error.localizedDescription

@@ -25,6 +25,17 @@ The runner works as the user it runs as, with that user's own logins, like Oby d
 
 Oby never reads these logins. More accounts go in `accounts.json` in `OBY_HOME`, each with its own home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`); sign in to each with that variable set.
 
+### The GitHub app
+
+The runner's own GitHub calls (reading pull requests, checks, issues and the board, writing Oby's reviews and Mac check results as check runs, merging into `dev`, the failure records) go as a GitHub App with an hourly budget of its own, so jobs that finish together don't run the owner's login out of it. Pushing, opening and editing pull requests, and who the owner is stay with the owner's `gh` login ([the runner API](../docs/runner-api.md#get-v1status) lists which is which). Deskree's app is **Oby by Deskree** (`oby-by-deskree`, App ID `5276623`). To set one up:
+
+1. Create a GitHub App (Settings › Developer settings › GitHub Apps) with no webhook and these permissions: Contents, Pull requests, Issues and Checks read and write; Commit statuses read; organization Projects read and write; no Workflows.
+2. Install it on the account that owns the repositories, for those repositories.
+3. Generate a private key and put it on the runner at `~/.config/oby/github-app.pem`, owned by the runner's user, mode 600. The runner refuses a key others may read.
+4. Set `OBY_GITHUB_APP_ID` in the service (the service file has Deskree's), and `OBY_GITHUB_APP_KEY` if the key is elsewhere, then restart it.
+
+The journal says at start whether calls go as the app (`GitHub: as the app 5276623, installed for deskree-inc`), and `GET /v1/status` says `"github": "app"` or `"owner"`. Oby's review and Mac check go on pull requests as the check runs `Oby review` and `Oby Mac check`, never as comments, so they email no one: that needs **Checks: Read and write**. An installation from before then has Checks read only: the app's settings ask for write, GitHub shows the request on the installation, and until the owner accepts it the results stay in Oby and `GET /v1/status` says `"checks": "missing permission"`. With no App ID, a key that's missing or that others may read, or no installation for a repository's owner, those calls go as the owner, as before. The key is read once and never leaves the runner: it isn't logged, and neither its path nor a token reaches an agent (`GH_TOKEN` is set only on the runner's own `gh` calls).
+
 ## Install
 
 ```sh
@@ -44,14 +55,18 @@ Put the owner's Tailscale login in place of `you@example.com` (`tailscale status
 | `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs, and the brain's latest 200 turns), `accounts.json`, `devices.json` (the phones that may approve publishing; to add one, `touch $OBY_HOME/pairing` and open the app within 10 minutes), `cleared.json` (when Clear done was last pressed, on any app), `apns/` (the APNs key and the phones' Live Activity tokens), `vault/` (the secrets Oby uses but never shows), `watch.json` and `watches.json` (the Watch API's Cloudflare Access settings and the paired Apple Watches), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
 | `OBY_PORT` | The port on `127.0.0.1`. 7777 by default. |
 | `OBY_WATCH_PORT` | The Watch API's port on `127.0.0.1`, for the Cloudflare Tunnel. 7778 by default. |
+| `OBY_GITHUB_APP_ID` | The GitHub app's App ID (or Client ID), for the runner's own GitHub calls ([The GitHub app](#the-github-app)). Unset: every call goes with the owner's `gh` login. |
+| `OBY_GITHUB_APP_KEY` | Where the app's private key is. `~/.config/oby/github-app.pem` by default. |
 
 The models and efforts the app picks in Settings › Models are kept in `~/.config/oby-runner.plist`.
 
 ## Speech
 
-Speech runs directly on the runner's CPU with whisper.cpp. As the runner's owner on tetrix-lab, run `OBY_HOME=/srv/nvme/oby Runner/scripts/setup-whisper.sh` to build the CLI and download the multilingual fast and final models. The script needs `git cmake build-essential curl util-linux`, can be run again safely, and stores everything under `OBY_HOME/whisper`.
+Speech runs directly on the runner's CPU with whisper.cpp. As the runner's owner on tetrix-lab, run `OBY_HOME=/srv/nvme/oby Runner/scripts/setup-whisper.sh` to build whisper-cli and whisper-server and download the multilingual fast and quantized final models. The script needs `git cmake build-essential curl util-linux`, can be run again safely, and stores everything under `OBY_HOME/whisper`.
 
 `POST /v1/speech` accepts short PCM/WAV chunks and returns partial or final text. It never sends audio to an agent or logs it. The prompt uses product names and the runner's current repository names by default. Model paths, CPU threads and a prompt override are environment settings; the full contract and defaults are in [the runner API](../docs/runner-api.md#post-v1speechdeviceuuidutteranceuuidfinalfalselanguageauto).
+
+The runner owns resident loopback model servers (ports 8171/8172 by default), outside agent sandboxes. See [speech configuration](../docs/runner-api.md#post-v1speechdeviceuuidutteranceuuidfinalfalselanguageauto) for overrides and measured latency.
 
 ## Vault
 
@@ -120,7 +135,7 @@ watchOS can't run Tailscale, so the Watch reaches a second, smaller API (`docs/r
 journalctl --user -u oby-runner -f
 ```
 
-The log lists the registered phones at startup, and every turn of the brain: the words the user typed, the plan it made (or the rules' plan when it didn't answer), and any plan Swift refused, with why. Stopping the service ends running agents, and their jobs show as interrupted.
+The log lists the registered phones at startup, and every turn of the brain: the words the user typed, the plan it made (or the rules' plan when it didn't answer), and any plan Swift refused, with why. Stopping the service ends running agents; their jobs carry on in their own sessions when it starts again (docs/runner-api.md, "After any restart").
 
 ## Run it by hand
 
