@@ -137,15 +137,13 @@ struct GuardTests {
         // A 9-minute wait: at minute 49, the agent's 40th, the round has 5 minutes left.
         let at = start.addingTimeInterval(49 * minute)
         #expect(clock.used(at: at) == 40 * minute)
-        #expect(clock.left(at: at) == 5 * minute && clock.next(at: at) == 5 * minute)
-        // Its waits stand it still for an hour at most, all of them together.
+        #expect(clock.left(at: at) == 5 * minute)
+        // However long a wait takes, 40 minutes working and 65 waiting leave the round its 5 minutes.
         clock.pause(at: at)
-        #expect(clock.next(at: at) == 51 * minute)
-        let late = start.addingTimeInterval(200 * minute)
-        #expect(clock.stood(at: late) == 60 * minute)
+        let late = at.addingTimeInterval(65 * minute)
+        #expect(clock.standing && clock.left(at: late) == 5 * minute)
         clock.resume(at: late)
-        clock.pause(at: late)
-        #expect(!clock.standing && clock.left(at: late) == 45 * minute - 140 * minute)
+        #expect(!clock.standing && clock.used(at: late.addingTimeInterval(minute)) == 41 * minute)
     }
 
     /// Apple checks on: the job's worktree is on `head`.
@@ -174,6 +172,31 @@ struct GuardTests {
         _ = try desk.appleCheckEnded(check.id, appleReport(passed: true))
         try await until { desk.job("apple")?.isActive == false }
         try expectHeld("apple", "the round ran past 0.4 seconds", agent: agent)
+    }
+
+    @Test func anAgentWaitingForTheAppleCheckItsFinalCheckAskedForStopsTheRoundClock() async throws {
+        desk.limits.round = 0.4
+        appleChecks()
+        // The final check asks for an Apple check of the commit and waits for a Mac.
+        desk.runCheck = { [desk] id, command, _, _ in
+            _ = try? await desk.askAppleCheck(id, final: true)
+            try? await Task.sleep(for: .seconds(10))
+            return Rounds.Check(command: command, passed: true, output: "ok")
+        }
+        let agent = try await start("final")
+        agent.onEvent(.turnEnded(summary: "Done.", failed: false))
+        try await until { desk.job("final")?.appleCheck?.finalCheck != nil }
+        // The user's words start a turn while it runs, and the agent asks for the same commit's check.
+        try desk.message("final", "Check the Watch app too.")
+        let check = try await desk.askAppleCheck("final")
+        #expect(check.finalCheck != nil && check.agentAsked != nil && check.agentWaits)
+        try await Task.sleep(for: .milliseconds(800))
+        #expect(desk.job("final")?.status == .running)
+        // The check answers: the round runs on, and runs out.
+        #expect(desk.nextAppleCheck(mac: "Mac")?.id == check.id)
+        _ = try desk.appleCheckEnded(check.id, appleReport(passed: true))
+        try await until { desk.job("final")?.isActive == false }
+        try expectHeld("final", "the round ran past 0.4 seconds", agent: agent)
     }
 
     @Test func aRoundThatRunsOutAfterItsWorkPassedPublishes() async throws {

@@ -1494,23 +1494,21 @@ final class Desk {
     }
 
     /// Keeps job `id`'s round clock in step with its agent's Apple check (#203): it stands still
-    /// while the check the agent asked for is queued or running, and runs again once it answers.
-    /// The job's final check asks for one between turns, when no round is timed. Called whenever
-    /// the job's Apple check changes, and when the timer needs looking at.
+    /// while the agent waits for a check it asked for (`MacCheck.agentWaits`), and runs again once
+    /// the check answers. Called whenever the job's Apple check changes.
     func paceRound(_ id: String, now: Date = .now) {
         guard var timer = roundTimers[id] else { return }
-        let check = job(id)?.appleCheck
-        let waiting = check.map { $0.finalCheck == nil && ($0.state == .queued || $0.state == .running) } ?? false
-        if waiting { timer.clock.pause(at: now) } else { timer.clock.resume(at: now) }
-        // Its waits used up: the round runs on, check or not.
-        if timer.clock.standing, timer.clock.next(at: now) <= 0 { timer.clock.resume(at: now) }
+        if job(id)?.appleCheck?.agentWaits == true { timer.clock.pause(at: now) } else { timer.clock.resume(at: now) }
         guard timer.task == nil || timer.clock != roundTimers[id]?.clock else { return }
         timer.task?.cancel()
-        let clock = timer.clock
-        timer.task = after(clock.next(at: now)) { [weak self] _ in
-            guard let self, self.roundTimers[id]?.clock == clock else { return }
-            if clock.standing { return self.paceRound(id) }
-            self.roundRanOut(id, after: clock.limit)
+        timer.task = nil
+        // Standing still, nothing runs out until the check answers.
+        if !timer.clock.standing {
+            let clock = timer.clock
+            timer.task = after(max(0, clock.left(at: now))) { [weak self] _ in
+                guard let self, self.roundTimers[id]?.clock == clock else { return }
+                self.roundRanOut(id, after: clock.limit)
+            }
         }
         roundTimers[id] = timer
     }

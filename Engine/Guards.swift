@@ -28,12 +28,10 @@ nonisolated struct JobLimits: Equatable, Sendable {
 
 /// A round's clock (case 3.1, #203): it runs while the agent works, and stands still while the
 /// agent waits for an Apple check it asked for (`oby-check apple`), queued for a Mac or running on
-/// one. For `most` a round at the longest, all its waits together: a Mac that took a check and
-/// went quiet doesn't stop the round for good.
+/// one, however long that takes: the job's cap, which counts everything, holds a check that never ends.
 nonisolated struct RoundClock: Equatable, Sendable {
     var limit: TimeInterval
     var started: Date
-    var most: TimeInterval = AppleCheck.stale
     /// How long it stood still in the round's earlier waits.
     var waited: TimeInterval = 0
     /// When the wait it stands still for began, or nil while it runs.
@@ -42,16 +40,14 @@ nonisolated struct RoundClock: Equatable, Sendable {
     var standing: Bool { since != nil }
 
     /// How long it has stood still in the round, the wait under way included.
-    func stood(at now: Date) -> TimeInterval { min(most, waited + (since.map { max(0, now.timeIntervalSince($0)) } ?? 0)) }
+    func stood(at now: Date) -> TimeInterval { waited + (since.map { max(0, now.timeIntervalSince($0)) } ?? 0) }
     /// The agent's time in the round.
     func used(at now: Date) -> TimeInterval { now.timeIntervalSince(started) - stood(at: now) }
     func left(at now: Date) -> TimeInterval { limit - used(at: now) }
-    /// How long until it next has to be looked at: the round runs out, or, standing still, its waits do.
-    func next(at now: Date) -> TimeInterval { max(0, since == nil ? left(at: now) : most - stood(at: now)) }
 
-    /// A wait begins. Not once the round's waits used up `most`.
+    /// A wait begins.
     mutating func pause(at now: Date) {
-        guard since == nil, waited < most else { return }
+        guard since == nil else { return }
         since = now
     }
 

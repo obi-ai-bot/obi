@@ -97,8 +97,14 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// When a job's final check asked for this Apple check (`Desk.afterTurn`), or nil when only its
     /// agent did: from then it waits for a Mac up to the final check's time limit (#68).
     var finalCheck: Date?
+    /// When the job's agent asked for this Apple check (`oby-check apple`), its own or one its final
+    /// check asked for first; nil when only the final check did, and on checks from before #203.
+    /// While the agent waits for it, queued or running, the round's clock stands still (`Desk.paceRound`).
+    var agentAsked: Date?
 
     var isApple: Bool { kind == .apple }
+    /// The agent waits for it (#203): it asked for it, or, from before `agentAsked`, the final check didn't.
+    var agentWaits: Bool { isApple && (agentAsked != nil || finalCheck == nil) && (state == .queued || state == .running) }
 
     /// The only branch Oby merges into.
     static let into = "dev"
