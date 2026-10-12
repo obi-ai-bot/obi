@@ -87,6 +87,29 @@ final class Phone {
             start()
         }
     }
+    /// The Mac this iPhone is linked to (#285, Shared/RemoteRoute.swift), kept in the defaults;
+    /// nil until pairing, or Settings › Your Mac, gives one. Then the Mac is where the calls go.
+    var link: MacLink? {
+        didSet {
+            if let link, let data = try? link.encoded() {
+                UserDefaults.standard.set(data, forKey: "mac.link")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "mac.link")
+            }
+            if loop != nil { finder.find(named: link?.name) { [weak self] url in self?.lan = url } }
+            reroute()
+        }
+    }
+    /// The gateway's address on the local network while Bonjour sees the linked Mac (MacFinder);
+    /// nil away from home.
+    private(set) var lan: URL? {
+        didSet { if lan != oldValue { reroute() } }
+    }
+    /// The way to the Mac now: home or away. Nil with no Mac linked: then the runner at `runnerURL`.
+    var route: RemoteRoute? { RemoteRoute.choose(lan: lan, link: link) }
+    /// Where the calls go: the linked Mac by its route, else the runner.
+    var base: URL { route?.url ?? runnerURL }
+    @ObservationIgnored private let finder = MacFinder()
     var talk: Talk = .none
     private(set) var connection: RunnerConnection = .connecting
     private(set) var host = ""
@@ -104,7 +127,7 @@ final class Phone {
                 await syncing?.value
                 await JobsActivity.sync(jobs)
             }
-            JobWaiter.shared.wait(for: jobs, runner: runnerURL)
+            JobWaiter.shared.wait(for: jobs, runner: base)
         }
     }
     /// The jobs whose screens are open (JobScreen): a new list keeps them, even older than its 50.
@@ -128,6 +151,7 @@ final class Phone {
 
     init() {
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
+        if let data = UserDefaults.standard.data(forKey: "mac.link") { link = try? MacLink.paired(data) }
         JobsActivity.watchTokens { [weak self] in self?.runner }
         conversation.page = { [weak self] before, limit in
             guard let self else { return [] }
@@ -138,7 +162,7 @@ final class Phone {
     /// The thread Chat shows: the runner's turns and this iPhone's words still on their way, by time.
     var thread: [Turn] { conversation.thread(with: ChatThread.pending(echoes, runner: conversation.runnerTurns)) }
 
-    var runner: Runner { Runner(base: runnerURL) }
+    var runner: Runner { Runner(base: base) }
     var active: [Job] { jobs.filter(\.isActive) }
     var signedIn: [Account] { accounts.filter(\.signedIn) }
 
@@ -148,9 +172,29 @@ final class Phone {
 
     // MARK: Staying live
 
+    /// The app is in front: looks for the linked Mac on the local network, and follows the runner
+    /// (or the Mac) from there.
+    func start() {
+        finder.find(named: link?.name) { [weak self] url in self?.lan = url }
+        follow()
+    }
+
+    /// The app went to the background: no connection, no battery spent.
+    func stop() {
+        finder.stop()
+        unfollow()
+    }
+
+    /// The way to the Mac changed (home to away, or back): followed anew, keeping the thread.
+    private func reroute() {
+        guard loop != nil else { return }
+        unfollow()
+        follow()
+    }
+
     /// Follows the runner's events and, once it's following, fetches everything; after any drop it
     /// tries again, waiting a little longer each time.
-    func start() {
+    private func follow() {
         guard loop == nil else { return }
         loop = Task {
             var wait = 1.0
@@ -217,8 +261,7 @@ final class Phone {
         }
     }
 
-    /// The app went to the background: no connection, no battery spent.
-    func stop() {
+    private func unfollow() {
         loop?.cancel()
         loop = nil
         if connection == .live { connection = .connecting }
@@ -487,7 +530,8 @@ final class Phone {
 
     // MARK: This phone's publishing key
 
-    private var deviceKey: String { "device.\(runnerURL.host() ?? runnerURL.absoluteString)" }
+    /// By the linked Mac's hostname, the same at home and away, or by the runner's.
+    private var deviceKey: String { "device.\(link?.hostname ?? runnerURL.host() ?? runnerURL.absoluteString)" }
     var deviceID: String? { UserDefaults.standard.string(forKey: deviceKey) }
 
     /// Registers the phone's Face ID key with the runner and returns its id. On every connection it
