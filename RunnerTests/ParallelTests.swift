@@ -191,15 +191,16 @@ struct ParallelTests {
         #expect(desk.mergesAfter(try #require(desk.job("newer")))?.id == "older")
 
         #expect(desk.nextMacCheck(mac: "Studio")?.job == "older")
-        // The older one is being checked: the newer one still waits, the other goes.
-        #expect(desk.nextMacCheck(mac: "Studio")?.job == "other")
-        #expect(desk.nextMacCheck(mac: "Studio") == nil)
+        // The older one is being checked: the newer one still waits, the other goes. Other Macs ask:
+        // Studio asking again would get back the check it holds (#227).
+        #expect(desk.nextMacCheck(mac: "Laptop")?.job == "other")
+        #expect(desk.nextMacCheck(mac: "Mini") == nil)
 
         // Merged: the newer one's turn (a conflict with what merged is rebased then).
         var older = try #require(desk.job("older"))
         older.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now)
         desk.replace(older)
-        #expect(desk.nextMacCheck(mac: "Studio")?.job == "newer")
+        #expect(desk.nextMacCheck(mac: "Mini")?.job == "newer")
     }
 
     /// The older one's merge stopped (it needs a person): the newer one isn't held behind it.
