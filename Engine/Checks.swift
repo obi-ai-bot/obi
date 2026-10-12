@@ -1161,30 +1161,26 @@ extension Job {
 }
 
 extension Desk {
-    /// Oby's review `review` approved `id`'s pull request (Engine/Review.swift): the commit it read
-    /// waits for a Mac to check it, when it's still the pull request's head.
-    func reviewApproved(_ id: String, review: String) {
-        // Only where a Mac takes checks: the runner. The Mac's own jobs wait for a person to merge them.
-        guard queuesMacChecks else { return }
-        Task {
-            let read = await reviewedHead(review)
-            guard var author = job(id), author.review?.job == review, author.review?.verdict == .approved, !author.isActive else { return }
-            author.mergeError = nil
-            if let why = MacCheck.unqueueable(author) {
-                author.mergeError = why
-                return replace(author)
-            }
-            guard let read, read == author.pushedHead, let pr = Review.pullRequest(of: author) else {
-                author.mergeError = read == nil ? "Not merged: Oby can't tell which commit its review read."
-                    : "Not merged: Oby's review read \((read ?? "").prefix(12)), not the pull request's head."
-                return replace(author)
-            }
-            let check = MacCheck.make(for: author, pr: pr, head: read)
-            author.macCheck = check
-            replace(author)
-            Logger.jobs.notice("job \(id, privacy: .public): Mac check \(check.id, privacy: .public) queued for \(read, privacy: .public)")
-            onCheckChange(check)
+    /// Oby's review approved `author`'s pull request (Engine/Review.swift): the commit it read
+    /// (`read`) waits for a Mac to check it, when it's still the pull request's head. The author with
+    /// its Mac check queued, or why not in `mergeError`, unsaved: it's saved with the end of the
+    /// review's verdict (`Desk.applyReview`). Unchanged where no Mac takes checks (the Mac's own
+    /// jobs wait for a person to merge them) or the author runs again.
+    func approved(_ author: Job, read: String?) -> Job {
+        guard queuesMacChecks, !author.isActive else { return author }
+        var author = author
+        author.mergeError = nil
+        if let why = MacCheck.unqueueable(author) {
+            author.mergeError = why
+            return author
         }
+        guard let read, read == author.pushedHead, let pr = Review.pullRequest(of: author) else {
+            author.mergeError = read == nil ? "Not merged: Oby can't tell which commit its review read."
+                : "Not merged: Oby's review read \((read ?? "").prefix(12)), not the pull request's head."
+            return author
+        }
+        author.macCheck = MacCheck.make(for: author, pr: pr, head: read)
+        return author
     }
 
     /// A Mac asks for work: the oldest queued check whose job still waits for it, or one a Mac
