@@ -146,7 +146,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The one line a finished job is known by; a waiting one says what for.
     var line: String {
         if let waiting, status == .queued { return Self.waitingLine(waiting.text) }
-        switch status {
+        return switch status {
         case .queued, .running: step
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
         case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
@@ -574,7 +574,7 @@ extension Job {
     /// runs, else the summary's first line.
     nonisolated var line: String {
         if let waiting, status == .queued { return Self.waitingLine(waiting.text) }
-        switch status {
+        return switch status {
         case .queued, .running: step
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
         case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
