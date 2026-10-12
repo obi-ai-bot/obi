@@ -500,7 +500,8 @@ private struct JobPane: View {
                     extras: RunnerJobExtras(local: job),
                     onMode: { try desk.changeMode(job.id, to: $0) },
                     onPermission: { try desk.answerPermission(job.id, $0, message: $1) },
-                    onStartNow: { try desk.startNow(job.id) })
+                    accounts: desk.accounts.accounts,
+                    onStartNow: { try desk.startNow(job.id) }, onUseAnyway: { _ = desk.liftReserve($0, true) })
         } else {
             JobView(job: job, place: feed.name, account: nil,
                     onStop: { Task { if let stopped = try? await feed.about(job.id, { try await $0.stop(job.id) }) { feed.apply(stopped) } } },
@@ -512,7 +513,9 @@ private struct JobPane: View {
                     extras: feed.extras[job.id],
                     onMode: { try await feed.setMode(job.id, $0) },
                     onPermission: { try await feed.answer(job.id, $0, message: $1) },
-                    onStartNow: { if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.startNow(job.id) }) } })
+                    accounts: feed.accounts,
+                    onStartNow: { if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.startNow(job.id) }) } },
+                    onUseAnyway: { account in if let runner = feed.runner { _ = try await runner.liftReserve(account, true) } })
         }
     }
 }

@@ -156,6 +156,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         var kind: Kind
         var text: String
         var job: String?
+        /// Waiting for room while only these accounts' weekly reserves stand in the way (#278), by
+        /// id: the apps offer "Use Personal anyway" on each. Nil otherwise.
+        var reserved: [String]?
 
         static let update = Waiting(kind: .update, text: "runner update")
         /// Every slot is taken (`Desk.maxRunning`, #237): it starts in its turn, oldest first.

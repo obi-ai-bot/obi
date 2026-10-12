@@ -85,6 +85,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         var kind: String
         var text: String
         var job: String?
+        /// Waiting for room while only these accounts' weekly reserves stand in the way (#278), by
+        /// id: "Use Personal anyway" shows on each. Newer runners only.
+        var reserved: [String]?
     }
 
     /// Queued until what its `startWhen` names happens (#216: `waiting`'s kind `schedule` or
@@ -273,6 +276,10 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     var tetrix: Bool?
     var tetrixJobs: Int?
     var tetrixUsed: Int?
+    /// Whether it gets only jobs sent to it by name, its week at 80%, and until when the user let
+    /// it past that (#278); newer runners only.
+    var reserved: Bool?
+    var reserveLiftedUntil: Date?
 
     /// "Personal · Claude Code"
     var title: String { "\(name) · \(Usage.tool(agent))" }
@@ -280,7 +287,8 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     /// What Settings' usage card shows.
     var usage: Usage.Snapshot {
         Usage.Snapshot(agent: agent, name: name, label: label, fiveHour: fiveHour, sevenDay: sevenDay,
-                       fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running)
+                       fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running,
+                       reserveLiftedUntil: reserveLiftedUntil)
     }
 }
 #endif
@@ -442,7 +450,9 @@ typealias RunnerAccount = Account
 typealias RunnerAccount = AccountState
 
 extension AccountState: Decodable {
-    private enum Keys: String, CodingKey { case id, agent, name, label, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed }
+    private enum Keys: String, CodingKey {
+        case id, agent, name, label, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed, reserveLiftedUntil
+    }
 
     init(from decoder: any Decoder) throws {
         let keys = try decoder.container(keyedBy: Keys.self)
@@ -457,7 +467,8 @@ extension AccountState: Decodable {
                   fullUntil: try keys.decodeIfPresent(Date.self, forKey: .fullUntil),
                   tetrix: try keys.decodeIfPresent(Bool.self, forKey: .tetrix),
                   tetrixJobs: try keys.decodeIfPresent(Int.self, forKey: .tetrixJobs) ?? 0,
-                  tetrixUsed: try keys.decodeIfPresent(Int.self, forKey: .tetrixUsed) ?? 0)
+                  tetrixUsed: try keys.decodeIfPresent(Int.self, forKey: .tetrixUsed) ?? 0,
+                  reserveLifted: try keys.decodeIfPresent(Date.self, forKey: .reserveLiftedUntil))
     }
 }
 #endif
@@ -745,6 +756,13 @@ nonisolated struct Runner: Sendable {
     /// the runner answers with the job, or why it couldn't.
     func move(_ id: String, agent: String?, account: String?, model: String?, why: String? = nil) async throws -> Job {
         try await call("POST", "v1/jobs/\(id)/move", body: MoveBody(agent: agent, account: account, model: model, why: why))
+    }
+
+    /// "Use anyway" (#278): the account takes automatic work past its weekly reserve until its
+    /// week resets, or with `lift` false is reserved again. The runner answers with the account.
+    func liftReserve(_ id: String, _ lift: Bool) async throws -> RunnerAccount {
+        struct Body: Encodable { var lift: Bool }
+        return try await call("POST", "v1/accounts/\(id)/reserve", body: Body(lift: lift))
     }
 
     /// Starts a job that waits for its `startWhen` now (#216): the runner answers with the job.

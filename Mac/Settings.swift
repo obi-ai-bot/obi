@@ -216,6 +216,11 @@ struct AccountsSettingsView: View {
                                 place: "on \(feed.name)") { state in
                     VStack(alignment: .leading, spacing: 4) {
                         UsageCard(snapshot: state.usage)
+                        // The runner's "accounts" event brings the change back.
+                        ReserveSwitch(snapshot: state.usage) { lift in
+                            guard let runner = feed.runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
+                            _ = try await runner.liftReserve(state.account.id, lift)
+                        }
                         if state.signedIn {
                             Text(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed))
                                 .font(.caption).foregroundStyle(state.tetrix == false ? Color.orange : Color.secondary)
@@ -245,6 +250,7 @@ struct AccountsSettingsView: View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 UsageCard(snapshot: state.usage)
+                ReserveSwitch(snapshot: state.usage) { lift in _ = store.liftReserve(state.account.id, lift) }
                 // A job of its hit the limit: no job goes to it until then.
                 if state.isFull(), let until = state.fullUntil {
                     Text("Full until \(Limits.clock(until))").font(.caption).foregroundStyle(.orange)
@@ -417,7 +423,8 @@ extension AccountState {
     /// What Settings' usage card shows.
     var usage: Usage.Snapshot {
         Usage.Snapshot(agent: account.agent, name: account.name, label: label, fiveHour: fiveHour, sevenDay: sevenDay,
-                       fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running)
+                       fiveHourResets: fiveHourResets, sevenDayResets: sevenDayResets, running: running,
+                       reserveLiftedUntil: reserveLifted)
     }
 }
 

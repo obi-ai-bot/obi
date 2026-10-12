@@ -52,6 +52,18 @@ struct JobScreen: View {
                             }.padding(.top, 8)
                         }
                     }
+                    // Waiting for room while only weekly reserves stand in the way (#278): one tap
+                    // lifts one until its reset, and the job starts on it.
+                    if job.waitsToStart {
+                        ForEach(Usage.liftable(job.waiting?.reserved, among: phone.accounts, id: \.id, usage: \.usage)) { account in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Button(Usage.useAnyway(account.usage), systemImage: "lock.open") {
+                                    Task { await run { _ = try await phone.runner.liftReserve(account.id, true) } }
+                                }.disabled(busy)
+                                Text(Usage.liftNote(account.usage)).font(.footnote).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
                     // Waiting for its start condition (#216): it can start now instead.
                     if job.waitsToStart {
                         Button("Start now", systemImage: "play.fill") {
