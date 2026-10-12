@@ -101,7 +101,9 @@ struct PullRequestTests {
             store.save(newer)
         }
         let restarted = Desk(accounts: AccountStore(root: folder), store: store)
-        #expect(restarted.job("published") == nil)
+        // Older than the newest 50, and kept on the list: its pull request is open (#223).
+        #expect(restarted.jobs.prefix(Desk.listed).allSatisfy { $0.id != "published" })
+        #expect(restarted.jobs.last?.id == "published")
         let follower = PullRequests(desk: restarted)
         var calls = 0
         follower.read = { _ in calls += 1; return response(review: "APPROVED") }

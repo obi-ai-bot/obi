@@ -186,6 +186,13 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var needsYou: Bool {
         dismissed == nil && (canPublish || stranded || status == .failed || status == .interrupted || reviewNeedsYou || mergeNeedsYou)
     }
+    /// Something is still to happen for it, however old (#223): it's queued, running or was
+    /// interrupted, needs the user or waits for their answer, or its pull request is open and Oby
+    /// follows its reviews, checks and merge. Not once dismissed. The desk keeps these past its
+    /// newest jobs when Oby starts.
+    var outstanding: Bool {
+        dismissed == nil && (isActive || needsYou || waitsForAnswer || published != nil && (pullRequest?.state ?? .open) == .open)
+    }
     var agentName: String { Job.agentNames[agent] ?? agent }
     static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
@@ -1378,6 +1385,7 @@ nonisolated final class JobStore {
         if sqlite3_step(statement) != SQLITE_DONE { Logger.jobs.error("saving job \(job.id, privacy: .public) failed") }
     }
 
+    /// The newest `limit` jobs, newest first; every job for -1.
     func recent(_ limit: Int = 50) -> [Job] {
         var statement: OpaquePointer?
         sqlite3_prepare_v2(db, "SELECT body FROM jobs ORDER BY created DESC LIMIT ?", -1, &statement, nil)
@@ -1385,12 +1393,23 @@ nonisolated final class JobStore {
         sqlite3_bind_int(statement, 1, Int32(limit))
         var jobs: [Job] = []
         while sqlite3_step(statement) == SQLITE_ROW {
-            if let text = sqlite3_column_text(statement, 0),
-               let job = try? JSONDecoder().decode(Job.self, from: Data(String(cString: text).utf8)) {
-                jobs.append(job)
-            }
+            if let job = Self.job(statement) { jobs.append(job) }
         }
         return jobs
+    }
+
+    /// One job by its id, however old, or nil.
+    func job(_ id: String) -> Job? {
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT body FROM jobs WHERE id = ?", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, id, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        return sqlite3_step(statement) == SQLITE_ROW ? Self.job(statement) : nil
+    }
+
+    private static func job(_ statement: OpaquePointer?) -> Job? {
+        guard let text = sqlite3_column_text(statement, 0) else { return nil }
+        return try? JSONDecoder().decode(Job.self, from: Data(String(cString: text).utf8))
     }
 
     /// How many of the brain's turns are kept.

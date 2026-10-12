@@ -450,21 +450,21 @@ extension Desk {
     func linkIssue(_ id: String, _ number: Int) {
         guard var latest = issueJobs.first(where: { $0.id == id }) else { return }
         latest.issue = number
-        if job(id) != nil { replace(latest) } else { issueSync.store.save(latest); onJobChange(latest) }
+        if lists(id) { replace(latest) } else { issueSync.store.save(latest); onJobChange(latest) }
     }
     func recordIssueOutgoing(_ id: String, _ outgoing: Outgoing) {
         guard var latest = issueJobs.first(where: { $0.id == id }) else { return }
         latest.outgoing = (latest.outgoing ?? []) + [outgoing]
-        if job(id) != nil { replace(latest) } else { issueSync.store.save(latest); onJobChange(latest) }
+        if lists(id) { replace(latest) } else { issueSync.store.save(latest); onJobChange(latest) }
     }
     func issueSyncError(_ id: String, _ line: String) {
         guard var latest = issueJobs.first(where: { $0.id == id }) else { return }
         latest.claim = line
-        if job(id) != nil { replace(latest) } else { issueSync.store.save(latest); onJobChange(latest) }
+        if lists(id) { replace(latest) } else { issueSync.store.save(latest); onJobChange(latest) }
     }
     func clearIssueSyncError(_ id: String) {
         guard var latest = issueJobs.first(where: { $0.id == id }), latest.claim?.hasPrefix("Issue sync:") == true else { return }
         latest.claim = nil
-        if job(id) != nil { replace(latest) } else { issueSync.store.save(latest); onJobChange(latest) }
+        if lists(id) { replace(latest) } else { issueSync.store.save(latest); onJobChange(latest) }
     }
 }

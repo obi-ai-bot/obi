@@ -1130,7 +1130,7 @@ final class Failures {
     private func report(_ id: String, _ postMortem: PostMortem) {
         guard let desk, var job = desk.job(id) ?? store.recent(-1).first(where: { $0.id == id }), !job.isActive else { return }
         job.summary = Self.reported(job.summary, line: Self.line(postMortem))
-        if desk.job(id) != nil { desk.replace(job) } else { store.save(job); desk.onJobChange(job) }
+        if desk.lists(id) { desk.replace(job) } else { store.save(job); desk.onJobChange(job) }
     }
 
     /// Brings `issue`, the open one the post-mortem said it's the same as, or the signature's open

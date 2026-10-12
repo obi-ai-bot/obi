@@ -298,27 +298,34 @@ final class Desk {
     /// Where each goal's context files go: `leads/<goal>/.oby/context/`.
     @ObservationIgnored var leadRoot = Workspace.root.appending(path: "leads")
 
+    /// How many of the newest jobs the desk lists when Oby starts, with the outstanding ones however old.
+    static let listed = 50
+
     init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite")), restarts: Restarts? = nil) {
         self.accounts = accounts
         self.store = store
         self.restarts = restarts
-        jobs = store.recent()
+        // ponytail: every job is read to find the outstanding ones; a column to query when there are many thousands.
+        let all = store.recent(-1)
+        jobs = Array(all.prefix(Self.listed))
         inbox = store.inbox()
         turns = store.conversation()
+        let byID = Dictionary(all.map { ($0.id, $0) }) { first, _ in first }
+        // Every job that still needs something, however old (#223): its pull request is followed,
+        // and it can be dismissed or told something, after any number of restarts.
+        let outstanding = all.filter(\.outstanding)
         // The jobs open inbox items are about, however old: answering one needs its job.
         // A review item's One more round quotes the review, so that job comes too.
-        let asking = Set(inbox.filter(\.isOpen).map(\.job)).subtracting(jobs.map(\.id))
-        if !asking.isEmpty || restarts != nil {
-            let all = Dictionary(store.recent(-1).map { ($0.id, $0) }) { first, _ in first }
-            let reviews = asking.compactMap { all[$0]?.review?.job }
-            // On the runner, every job that went down with it, however old, and the authors of the reviews among them.
-            let down = restarts == nil ? [] : all.values.filter(\.isActive)
-            // And the reviews whose verdict a restart kept from their authors, with them (`resumeReviews`).
-            let unapplied = restarts == nil ? [] : all.values.filter { $0.reviewOf == nil && ($0.review?.applying == true || $0.reviewing != nil) }
-            let applying = unapplied.map(\.id) + unapplied.compactMap(\.reviewing) + unapplied.compactMap { $0.review?.applying == true ? $0.review?.job : nil }
-            let wanted = asking.union(reviews).union(down.map(\.id)).union(down.compactMap(\.reviewOf)).union(applying).subtracting(jobs.map(\.id))
-            jobs += all.values.filter { wanted.contains($0.id) }.sorted { $0.created > $1.created }
-        }
+        let asking = Set(inbox.filter(\.isOpen).map(\.job))
+        let reviews = asking.compactMap { byID[$0]?.review?.job }
+        // On the runner, every job that went down with it, however old, and the authors of the reviews among them.
+        let down = restarts == nil ? [] : all.filter(\.isActive)
+        // And the reviews whose verdict a restart kept from their authors, with them (`resumeReviews`).
+        let unapplied = restarts == nil ? [] : all.filter { $0.reviewOf == nil && ($0.review?.applying == true || $0.reviewing != nil) }
+        let applying = unapplied.map(\.id) + unapplied.compactMap(\.reviewing) + unapplied.compactMap { $0.review?.applying == true ? $0.review?.job : nil }
+        let wanted = Set(outstanding.map(\.id)).union(outstanding.compactMap(\.reviewOf)).union(asking).union(reviews)
+            .union(down.map(\.id)).union(down.compactMap(\.reviewOf)).union(applying).subtracting(jobs.map(\.id))
+        jobs += all.filter { wanted.contains($0.id) }
         // Running when Oby last quit (or crashed): it didn't finish. On the runner it carries on
         // (`resumeAfterRestart`), unless it waits for the user's answer.
         for index in jobs.indices.reversed() where jobs[index].isActive {
@@ -1179,7 +1186,11 @@ final class Desk {
         Halt.settle()
     }
 
-    func job(_ id: String) -> Job? { jobs.first { $0.id == id } }
+    /// The job, however old (#223): the list's, else the store's.
+    func job(_ id: String) -> Job? { jobs.first { $0.id == id } ?? store.job(id) }
+
+    /// Whether the list holds the job. `replace` brings one only in the store onto the list.
+    func lists(_ id: String) -> Bool { jobs.contains { $0.id == id } }
 
     private func start(_ prepared: Job) {
         if drainingForUpdate {
@@ -1645,15 +1656,17 @@ final class Desk {
 
     /// Apply only the observation to the latest job: it may have resumed while gh was running.
     func followed(_ id: String, published: String, pushed: Int?, status: PullRequestStatus?, error: String?) {
-        guard var latest = job(id) ?? store.recent(-1).first(where: { $0.id == id }),
-              latest.published == published, latest.pushed == pushed else { return }
+        guard var latest = job(id), latest.published == published, latest.pushed == pushed else { return }
         if let status { latest.pullRequest = status }
         latest.pullRequestError = error
-        if job(id) != nil { replace(latest) }
+        if lists(id) { replace(latest) }
         else { store.save(latest); onJobChange(latest); issueSync.observe(latest) }
     }
 
     func replace(_ job: Job, save: Bool = true) {
+        // A job only in the store, however old (#223), joins the list at the end with the older
+        // ones when something changes it (dismissed, told something, moved), and is kept as any other.
+        if !lists(job.id), let stored = store.job(job.id) { jobs.append(stored) }
         guard let index = jobs.firstIndex(where: { $0.id == job.id }) else { return }
         let claimed = jobs[index].holdsClaim
         jobs[index] = job
