@@ -11,6 +11,6 @@
     "skipLibCheck": true,
     "isolatedModules": true
   },
-  // vitest.config.ts is Node code (it reads the migrations' folder): vitest compiles it itself.
+  // worker.vitest.ts is Node code (it reads the migrations' folder): vitest compiles it itself.
   "include": ["src", "test"]
 }
