@@ -211,6 +211,8 @@ struct GitHubAppTests {
             case ["gh", "api", "repos/deskree-inc/oby/commits/\(CheckTests.head)/check-runs?check_name=Oby%20review&filter=latest&per_page=100"],
                  ["gh", "api", "repos/deskree-inc/oby/commits/\(CheckTests.head)/check-runs?check_name=Oby%20Mac%20check&filter=latest&per_page=100"]:
                 #"{"check_runs":[]}"#
+            // Xcode Cloud's checks, read right before the merge (#122).
+            case ["gh", "api", "repos/deskree-inc/oby/commits/\(CheckTests.head)/check-runs?per_page=100"]: #"[{"check_runs":[]}]"#
             case ["gh", "api", "-X"] where arguments.contains("repos/deskree-inc/oby/check-runs"): #"{"html_url":"https://github.com/deskree-inc/oby/runs/1"}"#
             case ["gh", "pr", "create"]: "https://github.com/deskree-inc/oby/pull/152"
             case ["gh", "pr", "view"]: #"{"state":"OPEN","reviewDecision":"","mergedAt":null,"baseRefName":"dev","headRefOid":"\#(CheckTests.head)"}"#
@@ -251,6 +253,7 @@ struct GitHubAppTests {
         #expect(ran.token(["gh", "pr", "create"]) == .some(nil))
         #expect(ran.token(["gh", "api", "repos/deskree-inc/oby/pulls/152"]) == app)
         #expect(ran.token(["gh", "api", "repos/deskree-inc/oby/pulls/152/commits?per_page=100"]) == app)
+        #expect(ran.token(["gh", "api", "repos/deskree-inc/oby/commits/\(CheckTests.head)/check-runs?per_page=100", "--paginate", "--slurp"]) == app)
         #expect(ran.token(["gh", "api", "-X", "PUT", "repos/deskree-inc/oby/pulls/152/merge", "-f", "merge_method=squash", "-f", "sha=\(CheckTests.head)",
                            "-f", "commit_title=fix: it (#151) (#152)", "-f", "commit_message=Part of #151"]) == app)
         #expect(ran.token(["gh", "api", "-X", "DELETE", "repos/deskree-inc/oby/git/refs/heads/oby/fix-151"]) == app)

@@ -40,6 +40,15 @@ final class PullRequests {
                     seen.pullRequest = status
                     desk.failureLog.observe(seen)
                 }
+                // Xcode Cloud's results on that head (#122), read with the same login.
+                if status.state == .open, let head = status.head {
+                    do {
+                        let cloud = try await XcodeCloud.fetch(repo: job.repo, head: head, at: now, read: read)
+                        await desk.cloudObserved(job.id, published: url, pushed: job.pushed, head: head, result: cloud)
+                    } catch {
+                        await desk.cloudObserved(job.id, published: url, pushed: job.pushed, head: head, result: nil, error: true)
+                    }
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 desk.followed(job.id, published: url, pushed: job.pushed, status: nil,

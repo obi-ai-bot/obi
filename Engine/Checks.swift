@@ -184,6 +184,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             return "Not merged: the check is of another pull request."
         }
         guard check.head == job.pushedHead, job.unpublished == 0 else { return "Not merged: the pull request has commits the Mac didn't check." }
+        if job.cloudWaiting { return "Not merged: Xcode Cloud hasn't passed on this commit." }
         return nil
     }
 
@@ -300,7 +301,8 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// Squash-merges the pull request into dev and deletes its branch, as the GitHub app (the
     /// owner's gh login without one), through GitHub's REST API: only while GitHub says it's open,
     /// into dev, with the checked commit as its head, and with Oby's own commit message (`squash`).
-    /// Throws `Conflict` when GitHub says it conflicts with dev, before the merge or as the reason it failed.
+    /// Throws `Conflict` when GitHub says it conflicts with dev, before the merge or as the reason it failed,
+    /// and `XcodeCloud.Waiting` while Xcode Cloud hasn't passed on the checked commit.
     static func merge(_ job: Job, _ check: MacCheck) async throws {
         // Outside any checkout, so gh touches no local branch.
         let away = FileManager.default.temporaryDirectory
@@ -309,6 +311,10 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         let view = try await Shell.ok(["gh", "api", pull], in: away, env: env, as: .app)
         if let why = mismatch(Data(view.utf8), check) { throw Shell.Failure(message: why) }
         if conflicted(Data(view.utf8)) { throw Conflict(base: into) }
+        // Xcode Cloud passed on this very commit, whenever the pull request has its checks (#122).
+        let cloud: XcodeCloud?
+        do { cloud = try await XcodeCloud.read(job, head: check.head) } catch { throw XcodeCloud.Waiting(unread: true) }
+        if cloud?.state != .passed && (cloud != nil || job.xcodeCloud != nil) { throw XcodeCloud.Waiting() }
         let commits = try await Shell.ok(["gh", "api", "\(pull)/commits?per_page=100"], in: away, env: env, as: .app)
         guard let squash = squash(Data(view.utf8), commits: Data(commits.utf8), pr: check.pr) else {
             throw Shell.Failure(message: "gh said something else about the pull request's commits.")
@@ -1162,7 +1168,7 @@ extension Job {
         switch check.state {
         case .queued: return (.current, "Waiting for a Mac check", nil)
         case .running: return (.current, "Checking on \(check.macName)", nil)
-        case .passed: return (.current, "Mac check passed · merging", nil)
+        case .passed: return (.current, cloudWaiting ? "Mac check passed · waiting for Xcode Cloud" : "Mac check passed · merging", nil)
         case .failed: return (.failed, "Mac check failed", check.failureLine + (checkStop.map { " " + $0 } ?? ""))
         case .error: return (.failed, "Mac check couldn't run", check.problemLine ?? "The Mac couldn't run it.")
         }
@@ -1375,6 +1381,7 @@ extension Desk {
     /// dev and deletes its branch. The job's report lists the merge, and Merged completes.
     func mergeChecked(_ id: String) async {
         guard var job = job(id), let check = job.macCheck else { return }
+        if job.cloudWaiting { return }
         if let why = MacCheck.refusal(job) {
             job.mergeError = why
             job.macCheck?.transient = false
@@ -1393,6 +1400,7 @@ extension Desk {
             transient = true
         }
         guard var latest = self.job(id), latest.macCheck?.id == check.id else { return }
+        if latest.cloudWaiting { return }
         if problem == nil, let why = MacCheck.refusal(latest) { problem = why }
         if problem == nil {
             do {
@@ -1401,6 +1409,12 @@ extension Desk {
                 // Trying the merge again changes nothing: the branch needs a rebase.
                 problem = "Not merged: \(conflict.localizedDescription)"
                 conflicted = true
+            } catch let waiting as XcodeCloud.Waiting {
+                // The follower merges it once it sees Cloud pass (`cloudObserved`).
+                guard var current = self.job(id), current.macCheck?.id == check.id else { return }
+                current.macCheck?.tries = check.tries
+                if waiting.unread { current.xcodeCloudError = "Couldn't refresh Xcode Cloud. Will try again shortly." }
+                return replace(current)
             } catch {
                 problem = "Not merged: \(error.localizedDescription)"
                 transient = true
@@ -1436,14 +1450,25 @@ extension Desk {
     /// again (the last rebase didn't resolve it), `Job.rebasesPerDay` rebases in a day already, no
     /// session, or no base to rebase onto. `check` is the Mac check whose merge conflicted.
     func rebaseConflicted(_ id: String, _ problem: String, check: String) async {
-        func stop(_ why: String) {
-            guard var latest = job(id), !latest.isActive, latest.macCheck?.id == check else { return }
+        await rebase(id, holds: { $0.macCheck?.id == check }) { latest, why in
             latest.mergeError = problem + " " + why
             latest.macCheck?.transient = false
-            Logger.jobs.error("job \(id, privacy: .public): \(latest.mergeError ?? "", privacy: .public)")
+        }
+    }
+
+    /// The author's rebase round onto its base as GitHub has it now, while `holds` says the job is
+    /// still the one that conflicted (`rebaseConflicted`, or Xcode Cloud's, `recoverCloud`).
+    /// `prepare` marks the job once the base is fetched, before the round starts. Where the rebase
+    /// can't settle it, `stop` writes why on the job, and a person takes it from here.
+    func rebase(_ id: String, holds: (Job) -> Bool, prepare: (inout Job) -> Void = { _ in },
+                stop write: (inout Job, String) -> Void) async {
+        func stop(_ why: String) {
+            guard var latest = job(id), !latest.isActive, holds(latest) else { return }
+            write(&latest, why)
+            Logger.jobs.error("job \(id, privacy: .public): not rebased: \(why, privacy: .public)")
             replace(latest)
         }
-        guard let author = job(id), !author.isActive, author.macCheck?.id == check else { return }
+        guard let author = job(id), !author.isActive, holds(author) else { return }
         guard let base = author.base else { return stop("The job has no base branch to rebase onto.") }
         guard let session = author.session else { return stop("The job has no session to rebase it.") }
         let today = (author.rebases ?? []).filter { Date.now.timeIntervalSince($0) < 86_400 }
@@ -1456,7 +1481,8 @@ extension Desk {
         } catch {
             return stop("Oby couldn't fetch \(base) to rebase onto: \(error.localizedDescription)")
         }
-        guard var latest = job(id), !latest.isActive, latest.macCheck?.id == check else { return }
+        guard var latest = job(id), !latest.isActive, holds(latest) else { return }
+        prepare(&latest)
         // Rebased onto that commit already, and it still conflicts: a person takes it from here.
         guard latest.rebasedOnto != onto else { return stop("Oby rebased it onto \(onto.prefix(12)) already, and it still conflicts.") }
         latest.rebasedOnto = onto

@@ -63,6 +63,9 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
 nonisolated enum Inbox {
     /// What a failed job's item offers: run it again from where it was, or let it go.
     static let tryAgain = "Try again"
+    /// What an Xcode Cloud item offers besides One more round and Dismiss: the author's agent
+    /// explains the failure and suggests what to do (`Desk.askAboutCloud`).
+    static let askOby = "Ask Oby"
     static let dismiss = "Dismiss"
     /// What an item out of review rounds, or for a job Oby stopped at one of its limits (case 3.1),
     /// offers besides Dismiss.
@@ -82,6 +85,10 @@ nonisolated enum Inbox {
             return item(.question, "question-\(job.notes?.count ?? 0)", question.text, question.options)
         }
         guard !job.isActive else { return nil }
+        // Xcode Cloud still fails after Oby handed it back (#122): one item per head and round.
+        if job.cloudNeedsYou, let cloud = job.xcodeCloud {
+            return item(.failed, "cloud-\(cloud.head.prefix(12))-\(job.currentRound)-\(cloud.stops)", cloud.stopLine, [oneMoreRound, askOby, dismiss])
+        }
         if job.reviewNeedsYou, let review = job.review {
             return item(.review, "review-\(review.job)", review.stopReason, [oneMoreRound, dismiss])
         }
