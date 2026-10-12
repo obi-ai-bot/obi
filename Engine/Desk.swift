@@ -179,8 +179,9 @@ final class Desk {
     /// Why routing chose each job's account, and how it moved between accounts when one hit its
     /// limit, oldest first: the report says so.
     private var handoffs: [String: [String]] = [:]
-    /// Each running job's round timer and job cap (case 3.1): one ending first holds the job.
-    private var roundTimers: [String: Task<Void, Never>] = [:]
+    /// Each running job's round timer and job cap (case 3.1): one ending first holds the job. The
+    /// round's clock stands still while its agent waits for an Apple check (`paceRound`, #203).
+    private var roundTimers: [String: RoundTimer] = [:]
     private var jobTimers: [String: Task<Void, Never>] = [:]
     /// The fingerprint of each looping job's last failing round (Engine/Guards.swift).
     private var failures: [String: String] = [:]
@@ -287,6 +288,11 @@ final class Desk {
         try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-parse", "--verify", "HEAD^{commit}"])
     }
     @ObservationIgnored var bundleCommits: (MacCheck) async throws -> Data = { try await AppleCheck.bundle($0) }
+    /// What job `id`'s worktree has that isn't committed (`git status --porcelain`), or nil when
+    /// git can't say: a job whose round ran out publishes only work it committed (#203).
+    @ObservationIgnored var worktreeStatus: (_ id: String) async -> String? = { id in
+        try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "status", "--porcelain"])
+    }
     @ObservationIgnored var appleLogs: [String: String] = [:]
     /// What everything on its way to an agent is checked against (Engine/Vault.swift): prompts,
     /// messages, files, reviews and environments. Tests put in their own.
@@ -1377,41 +1383,15 @@ final class Desk {
         let current = { [weak self] in !Task.isCancelled && self?.agents[id] === agent }
         var check: Rounds.Check?
         if let command = job.check, !failed {
-            job.phase = .check
-            job.step = "Checking: \(command)"
-            replace(job)
-            // The check runs the agent's code: it gets no variable that holds a vault secret, and doesn't run when the vault can't be read.
-            // It has the agent's `oby-check apple`, waiting for the Mac up to the check's time limit (#68).
-            let env: [String: String?]
             do {
-                env = try Agents.overrides(vault: vault)
-                    .merging(AppleCheck.environment(worktree: Workspace.worktree(id), tool: appleTool(), wait: limits.testRun)) { $1 }
+                // Stopped or moved while the check ran.
+                guard let result = try await checkWork(id, command, current: current), let checked = self.job(id) else { return }
+                job = checked
+                check = result
             } catch {
                 agent.end()
                 return finish(id, .failed, "The check didn't run: \(error.localizedDescription)")
             }
-            let started = Date.now
-            var result = await runCheck(id, command, limits.testRun, env)
-            // No Mac took the Apple check it asked for (#68): the Apple apps weren't built, and the
-            // rest of the command still decides. When it failed, it runs again without `oby-check`'s build.
-            if appleUnbuilt(id, since: started) {
-                if !result.passed, current(), var again = self.job(id), again.isActive {
-                    again.step = "Checking without the Apple build: \(command)"
-                    replace(again, save: false)
-                    result = await runCheck(id, command, limits.testRun, env.merging([AppleCheck.skipVariable: "1"]) { $1 })
-                }
-                result.appleUnbuilt = true
-            }
-            // Stopped or moved while the check ran.
-            guard current(), var latest = self.job(id), latest.isActive else { return }
-            // Oby compares the tests with where the branch started too: weakening them fails the round (case 3.2).
-            latest.step = "Comparing the tests with where the branch started"
-            replace(latest, save: false)
-            let report = await integrity(latest)
-            (result.problems, result.notes) = (report.problems, report.notes)
-            guard current(), let checked = self.job(id), checked.isActive else { return }
-            job = checked
-            check = result
         }
         // The user spoke since the turn ended: the agent took it up, and that turn decides.
         guard (job.notes?.count ?? 0) == heard else { return }
@@ -1472,10 +1452,120 @@ final class Desk {
         return files.isEmpty ? nil : files
     }
 
+    /// Runs job `id`'s check in its worktree, then compares its tests with where the branch started
+    /// (case 3.2). Nil once `current` no longer holds (stopped, moved, a newer turn); throws when
+    /// the check can't run.
+    private func checkWork(_ id: String, _ command: String, current: () -> Bool) async throws -> Rounds.Check? {
+        guard var job = job(id), job.isActive else { return nil }
+        job.phase = .check
+        job.step = "Checking: \(command)"
+        replace(job)
+        // The check runs the agent's code: it gets no variable that holds a vault secret, and doesn't run when the vault can't be read.
+        // It has the agent's `oby-check apple`, waiting for the Mac up to the check's time limit (#68).
+        let env = try Agents.overrides(vault: vault)
+            .merging(AppleCheck.environment(worktree: Workspace.worktree(id), tool: appleTool(), wait: limits.testRun)) { $1 }
+        let started = Date.now
+        var result = await runCheck(id, command, limits.testRun, env)
+        // No Mac took the Apple check it asked for (#68): the Apple apps weren't built, and the
+        // rest of the command still decides. When it failed, it runs again without `oby-check`'s build.
+        if appleUnbuilt(id, since: started) {
+            if !result.passed, current(), var again = self.job(id), again.isActive {
+                again.step = "Checking without the Apple build: \(command)"
+                replace(again, save: false)
+                result = await runCheck(id, command, limits.testRun, env.merging([AppleCheck.skipVariable: "1"]) { $1 })
+            }
+            result.appleUnbuilt = true
+        }
+        guard current(), var latest = self.job(id), latest.isActive else { return nil }
+        // Oby compares the tests with where the branch started too: weakening them fails the round (case 3.2).
+        latest.step = "Comparing the tests with where the branch started"
+        replace(latest, save: false)
+        let report = await integrity(latest)
+        (result.problems, result.notes) = (report.problems, report.notes)
+        guard current(), self.job(id)?.isActive == true else { return nil }
+        return result
+    }
+
     /// Starts the job's round timer over.
     private func timeRound(_ id: String) {
         roundTimers[id]?.cancel()
-        roundTimers[id] = after(limits.round) { [weak self] in self?.hold(id, "the round ran past \(JobLimits.span($0))") }
+        roundTimers[id] = RoundTimer(clock: RoundClock(limit: limits.round, started: .now))
+        paceRound(id)
+    }
+
+    /// Keeps job `id`'s round clock in step with its agent's Apple check (#203): it stands still
+    /// while the agent waits for a check it asked for (`MacCheck.agentWaits`), and runs again once
+    /// the check answers. Called whenever the job's Apple check changes.
+    func paceRound(_ id: String, now: Date = .now) {
+        guard var timer = roundTimers[id] else { return }
+        if job(id)?.appleCheck?.agentWaits == true { timer.clock.pause(at: now) } else { timer.clock.resume(at: now) }
+        guard timer.task == nil || timer.clock != roundTimers[id]?.clock else { return }
+        timer.task?.cancel()
+        timer.task = nil
+        // Standing still, nothing runs out until the check answers.
+        if !timer.clock.standing {
+            let clock = timer.clock
+            timer.task = after(max(0, clock.left(at: now))) { [weak self] _ in
+                guard let self, self.roundTimers[id]?.clock == clock else { return }
+                self.roundRanOut(id, after: clock.limit)
+            }
+        }
+        roundTimers[id] = timer
+    }
+
+    /// Job `id`'s round ran out (case 3.1). When its work is all committed and the job's check
+    /// passes on its last commit, it ends done and publishes as any finished job does (#203): the
+    /// review still gates the merge. Otherwise, or with no check to run, it's held. Its agent is
+    /// stopped and ended first, so nothing changes the worktree while the check runs.
+    private func roundRanOut(_ id: String, after seconds: TimeInterval) {
+        let limit = "the round ran past \(JobLimits.span(seconds))"
+        guard let job = job(id), job.isActive, !finishing.contains(id), !ending.contains(id),
+              let command = job.check, let agent = agents.removeValue(forKey: id) else { return hold(id, limit) }
+        Logger.jobs.notice("job \(id, privacy: .public): \(limit, privacy: .public); checking its last commit")
+        roundTimers.removeValue(forKey: id)?.cancel()
+        afterTurns.removeValue(forKey: id)?.cancel()
+        // Out of `agents` first: nothing it says as it stops counts.
+        halt(agent)
+        var stopped = job
+        stopped.step = "The round ran out: checking its last commit"
+        replace(stopped, save: false)
+        let summary = job.summaries?.last
+        afterTurns[id] = Task {
+            await agent.ended()
+            let current = { [weak self] in !Task.isCancelled && self?.job(id)?.isActive == true }
+            let why = await self.unfinished(id)
+            guard current() else { return }
+            if let why { return self.hold(id, limit, Self.withSummary(why, summary)) }
+            let check: Rounds.Check
+            do {
+                guard let result = try await self.checkWork(id, command, current: current) else { return }
+                check = result
+            } catch {
+                return self.hold(id, limit, Self.withSummary("The check didn't run on its last commit: \(error.localizedDescription)", summary))
+            }
+            guard check.succeeded else {
+                let failed = check.passed ? "it weakens the tests" : "`\(command)` fails on its last commit"
+                return self.hold(id, limit, Self.withSummary("Oby checked the work when the round ran out, and \(failed).", summary))
+            }
+            self.finish(id, .done, Rounds.atLimit(after: seconds, agent: job.agentName, check: check, summary: summary))
+        }
+    }
+
+    /// Why job `id`'s work can't go out as it is when its round ran out, or nil when it can be
+    /// checked: nothing committed since it started, work left uncommitted, or its agent's Apple
+    /// check of the last commit failed.
+    private func unfinished(_ id: String) async -> String? {
+        let head = await worktreeHead(id)
+        guard let status = await worktreeStatus(id) else { return "Oby couldn't read its worktree's status." }
+        guard let job = job(id) else { return nil }
+        if head == nil || head == job.startCommit { return "It has no commits to check." }
+        if !status.isEmpty { return "It left work uncommitted." }
+        if let apple = job.appleRan, apple.head == head, apple.state == .failed { return "Its Apple check of the last commit failed." }
+        return nil
+    }
+
+    nonisolated static func withSummary(_ text: String, _ summary: String?) -> String {
+        [text, summary].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
 
     /// Calls `then` with `seconds` once they've passed, unless the task is cancelled first.
@@ -1803,6 +1893,14 @@ final class Desk {
     }
 }
 
+/// A running job's round timer: its clock, and the task that looks at it next (`Desk.paceRound`).
+private struct RoundTimer {
+    var clock: RoundClock
+    var task: Task<Void, Never>?
+
+    func cancel() { task?.cancel() }
+}
+
 /// What happens after an agent's turn in a job that loops: the job's check decides, or the
 /// agent's own last line (`GOAL MET` / `GOAL NOT MET: …`), within the job's rounds.
 nonisolated enum Rounds {
@@ -1859,6 +1957,21 @@ nonisolated enum Rounds {
         return named + (ids.count > 20 ? ["and \(ids.count - 20) more"] : [])
     }
 
+    /// What a check that passed says in the job's summary, with the changes to existing tests for review.
+    static func checked(_ check: Check) -> String {
+        // No Mac took its Apple check (#68): the rest of it passed, and the merge stage's Mac check builds the apps.
+        let passed = check.appleUnbuilt ? "passed without its Apple build. " + AppleCheck.unbuiltLine : "passed."
+        let notes = check.notes.isEmpty ? "" : "\n\nChanged in the existing tests, for review:\n" + check.notes.map { "- " + $0 }.joined(separator: "\n")
+        return "Checked: `\(check.command)` " + passed + notes
+    }
+
+    /// The summary of a job whose round ran out with its work committed and passing (#203): it's
+    /// published like a finished one. `summary` is its agent's last round summary, if any.
+    static func atLimit(after seconds: TimeInterval, agent: String, check: Check, summary: String?) -> String {
+        "The round ran past \(JobLimits.span(seconds)) before \(agent) finished its turn; its work was all committed and passed the check, so Oby publishes it for review."
+            + "\n\n" + checked(check) + (summary.map { $0.isEmpty ? "" : "\n\nIts last round summary:\n" + $0 } ?? "")
+    }
+
     /// The summary of a job stopped at a limit.
     static func held(_ limit: String, summary: String?) -> String {
         "Stopped at a limit: \(limit). The branch is kept and nothing was pushed; one more round is possible."
@@ -1877,12 +1990,7 @@ nonisolated enum Rounds {
         let rounds = "\(job.maxRounds) round\(job.maxRounds == 1 ? "" : "s")"
         if failed { return .finish(.failed, summary) }
         if let check {
-            let notes = check.notes.isEmpty ? "" : "\n\nChanged in the existing tests, for review:\n" + check.notes.map { "- " + $0 }.joined(separator: "\n")
-            if check.succeeded {
-                // No Mac took its Apple check (#68): the rest of it passed, and the merge stage's Mac check builds the apps.
-                let passed = check.appleUnbuilt ? "passed without its Apple build. " + AppleCheck.unbuiltLine : "passed."
-                return .finish(.done, summary + "\n\nChecked: `\(check.command)` " + passed + notes)
-            }
+            if check.succeeded { return .finish(.done, summary + "\n\n" + checked(check)) }
             if let previous, Fingerprint.of(check) == previous { return .hold("the same failure twice in a row", summary) }
             if last {
                 return .hold(check.passed ? "the tests are still weakened after \(rounds)" : "`\(check.command)` still fails after \(rounds)", summary)

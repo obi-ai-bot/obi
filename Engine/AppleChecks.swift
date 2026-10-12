@@ -283,11 +283,18 @@ extension Desk {
         }
         guard var job = job(id), job.isActive else { throw Shell.Failure(message: "Oby checks only a job that's running.") }
         if var check = job.appleCheck, check.head == head, check.state != .error {
-            // The agent's own check, still waiting for a Mac when the final check asks: it waits as long as the final check now.
-            guard final, check.state == .queued else { return check }
-            check.finalCheck = now
+            if final {
+                // The agent's own check, still waiting for a Mac when the final check asks: it waits as long as the final check now.
+                guard check.state == .queued else { return check }
+                check.finalCheck = now
+            } else {
+                // One its final check asked for first: the agent waits for it now too (#203).
+                guard check.agentAsked == nil else { return check }
+                check.agentAsked = now
+            }
             job.appleCheck = check
             replace(job)
+            paceRound(id)
             return check
         }
         let round = (job.appleCheck?.round ?? 0) + 1
@@ -297,12 +304,13 @@ extension Desk {
         var check = MacCheck(id: String(UUID().uuidString.prefix(8)).lowercased(), job: id, repo: job.repo, pr: Review.pullRequest(of: job) ?? 0,
                              branch: job.branch, base: job.base ?? MacCheck.into, head: head, round: round, created: now)
         check.kind = .apple
-        if final { check.finalCheck = now }
+        if final { check.finalCheck = now } else { check.agentAsked = now }
         // What the check it replaces printed goes, unless the reviewer may still read it.
         if let old = job.appleCheck, old.id != job.appleRan?.id { appleLogs[old.id] = nil }
         job.appleCheck = check
         replace(job)
         Logger.jobs.notice("job \(id, privacy: .public): Apple check \(check.id, privacy: .public) queued for \(head, privacy: .public)")
+        paceRound(id)
         onCheckChange(check)
         return check
     }
@@ -328,6 +336,7 @@ extension Desk {
         check.finished = now
         job.appleCheck = check
         replace(job)
+        paceRound(id)
         onCheckChange(check)
         return check
     }
@@ -344,6 +353,7 @@ extension Desk {
             check.problem = AppleCheck.unbuiltLine
             job.appleCheck = check
             replace(job)
+            paceRound(id)
             onCheckChange(check)
             return true
         case .error: return true
@@ -382,6 +392,7 @@ extension Desk {
         check.problem = nil
         job.appleCheck = check
         replace(job)
+        paceRound(job.id)
         onCheckChange(check)
         return check
     }
@@ -406,6 +417,7 @@ extension Desk {
             job.appleRan = check
         }
         replace(job)
+        paceRound(job.id)
         onCheckChange(check)
         Logger.jobs.notice("job \(job.id, privacy: .public): Apple check \(id, privacy: .public) \(check.state.rawValue, privacy: .public) on \(check.macName, privacy: .public)")
         return check

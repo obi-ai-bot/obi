@@ -26,6 +26,38 @@ nonisolated struct JobLimits: Equatable, Sendable {
     }
 }
 
+/// A round's clock (case 3.1, #203): it runs while the agent works, and stands still while the
+/// agent waits for an Apple check it asked for (`oby-check apple`), queued for a Mac or running on
+/// one, however long that takes: the job's cap, which counts everything, holds a check that never ends.
+nonisolated struct RoundClock: Equatable, Sendable {
+    var limit: TimeInterval
+    var started: Date
+    /// How long it stood still in the round's earlier waits.
+    var waited: TimeInterval = 0
+    /// When the wait it stands still for began, or nil while it runs.
+    var since: Date?
+
+    var standing: Bool { since != nil }
+
+    /// How long it has stood still in the round, the wait under way included.
+    func stood(at now: Date) -> TimeInterval { waited + (since.map { max(0, now.timeIntervalSince($0)) } ?? 0) }
+    /// The agent's time in the round.
+    func used(at now: Date) -> TimeInterval { now.timeIntervalSince(started) - stood(at: now) }
+    func left(at now: Date) -> TimeInterval { limit - used(at: now) }
+
+    /// A wait begins.
+    mutating func pause(at now: Date) {
+        guard since == nil else { return }
+        since = now
+    }
+
+    /// The wait ended.
+    mutating func resume(at now: Date) {
+        waited = stood(at: now)
+        since = nil
+    }
+}
+
 /// What a failing round looks like, to tell whether the next one made progress (case 3.1): the
 /// failing tests' ids plus the end of the check's output, with what changes from run to run
 /// (times, durations, addresses, ids) taken out. The same fingerprint twice in a row stops the job.
