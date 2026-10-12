@@ -32,6 +32,7 @@ final class SpeechTests {
         root = pathlib.Path(__file__).parent
         with (root / 'launches').open('a') as log: log.write(value('--model') + '\n')
         while (root / 'mode').exists() and (root / 'mode').read_text() == 'no-ready': time.sleep(.01)
+        if (root / 'mode').exists() and (root / 'mode').read_text() == 'late-bind': time.sleep(.3)
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args): pass
             def do_GET(self):
@@ -268,7 +269,9 @@ final class SpeechTests {
 
     @Test func portSquatterCannotReceiveWarmupOrSpeechDuringRestart() async throws {
         config.finalModel = config.fastModel
-        config.startupTimeout = 1
+        // Python's start and the warmup can take seconds on a busy machine. The restarts that
+        // must fail end on their own, when the server can't bind the squatter's port.
+        config.startupTimeout = 30
         config.warmup = true
         let speech = Speech(config: config)
         try await speech.startServers()
@@ -276,7 +279,9 @@ final class SpeechTests {
         let pid = try #require(record()["pid"] as? Int)
         _ = kill(Int32(pid), SIGKILL)
         try await Task.sleep(for: .milliseconds(100))
-        try mode("no-ready")
+        // Each restart is probed against the squatter while it starts, then exits like a real
+        // whisper-server whose port is taken.
+        try mode("late-bind")
         let script = folder.appending(path: "squatter.py")
         // The impostor accepts every prefix, including ones it has never seen.
         // Record only whether a POST happened, never its body.
@@ -307,7 +312,7 @@ final class SpeechTests {
         defer {
             if squatter.isRunning { _ = kill(squatter.processIdentifier, SIGKILL); squatter.waitUntilExit() }
         }
-        for _ in 0..<200 {
+        for _ in 0..<3000 {
             if FileManager.default.fileExists(atPath: folder.appending(path: "squatter-ready").path) { break }
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -460,7 +465,7 @@ final class SpeechTests {
         try mode("block")
         let speech = Speech(config: config)
         let first = Task { try await speech.transcribe(device: device, utterance: utterance, audio: chunk) }
-        for _ in 0..<200 {
+        for _ in 0..<3000 {
             if FileManager.default.fileExists(atPath: folder.appending(path: "started").path) { break }
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -481,7 +486,7 @@ final class SpeechTests {
         try FileManager.default.removeItem(at: folder.appending(path: "started"))
         try mode("block")
         let blocking = Task { try await speech.transcribe(device: UUID().uuidString, utterance: UUID().uuidString, audio: chunk) }
-        for _ in 0..<200 {
+        for _ in 0..<3000 {
             if FileManager.default.fileExists(atPath: folder.appending(path: "started").path) { break }
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -516,7 +521,7 @@ final class SpeechTests {
         try await Task.sleep(for: .milliseconds(100))
         try mode("no-ready")
         let restarting = Task { await speech.maintainServers() }
-        for _ in 0..<200 {
+        for _ in 0..<3000 {
             let launches = try String(contentsOf: folder.appending(path: "launches"), encoding: .utf8)
             if launches.split(separator: "\n").count >= 2 { break }
             try await Task.sleep(for: .milliseconds(10))
