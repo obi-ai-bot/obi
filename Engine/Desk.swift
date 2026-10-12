@@ -4,29 +4,44 @@ import Observation
 import OSLog
 #endif
 
-/// Oby's desk: the conversation that turns words into a plan, and the jobs it dispatched.
+/// Oby's desk: the conversation that turns words into work, and the jobs it started.
 @Observable
 final class Desk {
+    /// What Oby answers: a reply (the work it started, what it stopped, an answer in words), or
+    /// a question. There's no plan to confirm (#269): planned work starts as the plan is made.
     enum Talk: Equatable {
         case none
         case thinking(String)
-        /// One draft per job, at least one.
-        case plan([Draft])
         case reply(String)
         case question(said: String, Plan.Question)
     }
 
-    /// A plan on the card, before the user presses Dispatch.
-    struct Draft: Equatable {
-        var said: String
-        var reply: String
-        var job: Job
-        /// Made by rules because the brain didn't answer.
-        var guessed: Bool
-        /// A stronger model for complex work, offered on the card and used only if the user turns it on.
-        var suggestedModel: String? = nil
-        /// The account routing chose and why, or nil when the user named it.
-        var route: AccountStore.Route? = nil
+    /// A job to start whole, from the runner's `POST /v1/jobs` (#269): what a plan's dispatch
+    /// holds, from a client that knows the work already (oby-mcp, scripts). What the user says
+    /// to Oby needs none of this: the brain plans it and it starts (`card`).
+    nonisolated struct NewJob: Equatable, Sendable {
+        var repo: String
+        var kind: String
+        var task: String
+        var pr: Int? = nil
+        var issue: Int? = nil
+        var title: String? = nil
+        var branch: String? = nil
+        var base: String? = nil
+        /// An account by id or name; nil or "auto" for routing.
+        var account: String? = nil
+        /// The tool routing keeps to ("claude", "codex"); nil or "auto" for any.
+        var agent: String? = nil
+        var rounds: Int? = nil
+        var check: String? = nil
+        /// A model of the job's tool, or nil for Settings › Models.
+        var model: String? = nil
+        var files: [String]? = nil
+        var startWhen: [StartCondition]? = nil
+        /// The user's own words, or nil for the task.
+        var request: String? = nil
+        /// How the job asks (#134), or nil for Settings › Permissions' default.
+        var mode: PermissionMode? = nil
     }
 
     var talk: Talk = .none
@@ -37,7 +52,7 @@ final class Desk {
     /// Called with every turn that's added or changes (a job dispatched from it), for the runner's
     /// event stream. Not when a cancelled turn leaves the thread: that happens only on the Mac.
     var onTurnChange: (Turn) -> Void = { _ in }
-    /// The jobs the Lead just started, for the reply turn that tells of them.
+    /// The jobs the brain's plan or the Lead just started, for the reply turn that tells of them.
     private var justStarted: [String] = []
     private(set) var jobs: [Job] {
         didSet { accounts.countRunning(jobs) }
@@ -197,8 +212,9 @@ final class Desk {
     func noteStart(_ line: String, for id: String) { handoffs[id, default: []].append(line) }
     /// How many slots are taken: jobs running (`Job.takesSlot`), and those about to.
     var runningCount: Int { jobs.filter(\.takesSlot).count + startingUp.count }
-    /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
-    private var drafts: [Draft] = []
+    /// Why routing chose the account of each job a guessed plan proposes (#269), by job id, until
+    /// Start queues it: its report then says so.
+    private var routes: [String: String] = [:]
     var agents: [String: any AgentRun] = [:]
     /// Each job's permission prompts waiting for the user, oldest first (Engine/Permissions.swift):
     /// the first is the job's `permission`, or its plan question.
@@ -483,8 +499,9 @@ final class Desk {
     /// speaks the reply. A bare "never mind", "stop" or "cancel" never reaches the brain: it ends
     /// the turn under way (its words leave the thread) and otherwise does nothing, so no job stops
     /// on a word; stopping work takes a job's name or "stop everything". Any other words replace
-    /// the turn under way.
-    func ask(_ words: String, shown: String? = nil, spoken: Bool = false) {
+    /// the turn under way. `attachments` (a screenshot, what the user copied, as paths on this
+    /// machine) go to the jobs the words start (#269).
+    func ask(_ words: String, shown: String? = nil, spoken: Bool = false, attachments: [String] = []) {
         let said = words.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !said.isEmpty else { return }
         if Conversation.cancels(said) { return cancel() }
@@ -501,7 +518,7 @@ final class Desk {
             // Cancelled, replaced or past its time while the brain was thinking: its plan does
             // nothing, whichever of the plan and the clock is heard first.
             let live = { self.asking == mine && ContinuousClock.now < deadline }
-            let result = await Self.within(limit) { await self.plan(said, live: live) }
+            let result = await Self.within(limit) { await self.plan(said, attachments: attachments, live: live) }
             guard asking == mine else { return }
             // Too long: the turn ends here, and the plan, when it comes, is dead.
             let late = result == nil || (result == .none && ContinuousClock.now >= deadline)
@@ -517,7 +534,7 @@ final class Desk {
     }
 
     /// Drops the turn under way: its words leave the thread, and its answer, when it comes, is
-    /// ignored. Also takes a plan's card down.
+    /// ignored. Work the plan started already goes on: stop it by name.
     func cancel() {
         asking += 1
         if let pending {
@@ -532,11 +549,17 @@ final class Desk {
     /// the runner's own). A bare cancel word is answered with nothing. The plan acts unless the
     /// request's task was cancelled meanwhile; a client that merely stopped waiting can't be told apart.
     func converse(_ said: String, shown: String? = nil, turns given: [Turn]? = nil) async -> Talk {
-        guard !Conversation.cancels(said) else { return .none }
+        await exchange(said, shown: shown, turns: given).talk
+    }
+
+    /// `converse`, with the jobs Oby's answer started (#269): `POST /v1/plans` answers them.
+    func exchange(_ said: String, shown: String? = nil, turns given: [Turn]? = nil) async -> (talk: Talk, started: [Job]) {
+        guard !Conversation.cancels(said) else { return (.none, []) }
         let talk = await plan(said, turns: given) { !Task.isCancelled }
         add(Turn(who: .user, text: shown ?? said))
-        if let reply = Self.reply(in: talk) { addReply(reply) }
-        return talk
+        guard let reply = Self.reply(in: talk) else { return (talk, []) }
+        let turn = addReply(reply)
+        return (talk, (turn.jobs ?? []).compactMap(job))
     }
 
     /// The conversation's turns before `before` (a turn's id; nil for the newest), at most `limit`,
@@ -551,11 +574,10 @@ final class Desk {
         return Array(turns[start..<end])
     }
 
-    /// What Oby says for a talk, as the thread shows it and the Mac speaks it: a plan's line,
-    /// the question, or the reply. Nothing for nothing.
+    /// What Oby says for a talk, as the thread shows it and the Mac speaks it: the question, or
+    /// the reply. Nothing for nothing.
     static func reply(in talk: Talk) -> String? {
         switch talk {
-        case .plan(let drafts): drafts.first?.reply
         case .question(_, let question): question.text
         case .reply(let text): text
         case .none, .thinking: nil
@@ -569,23 +591,15 @@ final class Desk {
         onTurnChange(turn)
     }
 
-    /// Oby's reply joins the thread, with the jobs the Lead just started for it, if any.
-    private func addReply(_ text: String) {
+    /// Oby's reply joins the thread, with the jobs its plan or the Lead just started, if any: the
+    /// window shows them as cards under Oby's words, each with Stop.
+    @discardableResult
+    private func addReply(_ text: String) -> Turn {
         let started = justStarted
         justStarted = []
-        add(Turn(who: .oby, text: text, jobs: started.isEmpty ? nil : started))
-    }
-
-    /// A job dispatched from Oby's latest plan joins the turn that proposed it: the window shows
-    /// it as a card under Oby's words. The turn is saved again and sent again (`onTurnChange`).
-    private func link(_ job: String) {
-        guard let index = turns.lastIndex(where: { $0.who == .oby }) else { return }
-        var turn = turns[index]
-        guard !(turn.jobs ?? []).contains(job) else { return }
-        turn.jobs = (turn.jobs ?? []) + [job]
-        turns[index] = turn
-        store.save(turn)
-        onTurnChange(turn)
+        let turn = Turn(who: .oby, text: text, jobs: started.isEmpty ? nil : started)
+        add(turn)
+        return turn
     }
 
     private func remove(_ id: String) {
@@ -614,7 +628,8 @@ final class Desk {
     /// `turns` as the conversation so far: the thread's, but for the words waiting for this answer.
     /// `live` is asked before anything happens for the plan (a job stopped or started): false once
     /// the turn was cancelled, replaced or given up on, and then nothing does, and the answer is `.none`.
-    func plan(_ said: String, turns given: [Turn]? = nil, live: @escaping () -> Bool = { true }) async -> Talk {
+    /// `attachments` go to the jobs the plan starts.
+    func plan(_ said: String, turns given: [Turn]? = nil, attachments: [String] = [], live: @escaping () -> Bool = { true }) async -> Talk {
         if repos.isEmpty { await refresh() }
         // The brain and the Lead think with the least busy Claude account too, so a busy one doesn't slow them.
         let thinker = AccountStore.thinker(accounts.accounts)
@@ -622,7 +637,7 @@ final class Desk {
         // Like Claude Code's loop: the brain picks one action, Oby does it and tells the brain what
         // happened, and the brain picks the next, until the user's request is done ("Deskree is
         // full, move its jobs to Personal and Codex" is several moves). It ends on an answer (a
-        // reply, a question, a plan to dispatch), an action it already took, or the turn's budget.
+        // reply, a question, jobs it started), an action it already took, or the turn's budget.
         let deadline = ContinuousClock.now + turnBudget
         var done: [String] = []
         var taken: Set<String> = []
@@ -641,7 +656,7 @@ final class Desk {
             let acting = Self.acting.contains(result.plan.action)
             // The same action twice in one turn: it's done; the brain only repeated itself.
             if acting, !taken.insert(Self.signature(result.plan)).inserted { break }
-            guard acting else { return Self.after(done, await answer(result, said: said)) }
+            guard acting else { return Self.after(done, await answer(result, said: said, attachments: attachments, live: live)) }
             let talk = await card(for: result, said: said)
             guard case .reply(let text) = talk else { return Self.after(done, talk) }
             if !text.isEmpty { done.append(text) }
@@ -682,28 +697,19 @@ final class Desk {
         case .question(let said, var question):
             question.text = did + " " + question.text
             return .question(said: said, question)
-        case .plan(var list):
-            if !list.isEmpty { list[0].reply = did + " " + list[0].reply }
-            return .plan(list)
         case .none, .thinking: return .reply(did)
         }
     }
 
-    /// A plan that answers rather than acts: a reply, a question, or jobs to dispatch.
-    private func answer(_ result: Planner.Result, said: String) async -> Talk {
+    /// A plan that answers rather than acts: a reply, a question, or jobs it starts (#269).
+    private func answer(_ result: Planner.Result, said: String, attachments: [String], live: () -> Bool) async -> Talk {
         var result = result
         var epics: [Int: Int] = [:]
         (result.plan.dispatches, epics) = await Self.expandEpics(result.plan.dispatches)
         if result.plan.action == .dispatch, result.plan.dispatches.isEmpty {
             return .reply(epics.isEmpty ? "Oby couldn't plan that. Try saying it another way." : "That epic has no open sub-issues to work on.")
         }
-        let talk = await card(for: result, said: said)
-        if case .plan(let list) = talk {
-            // ponytail: the last 20 drafts, in memory; a plan made before a restart is made again.
-            drafts.append(contentsOf: list)
-            if drafts.count > 20 { drafts.removeFirst(drafts.count - 20) }
-        }
-        return talk
+        return await card(for: result, said: said, attachments: attachments, live: live)
     }
 
     /// Every turn of the brain goes to the log (the runner's journal) and `oby.sqlite`, with the words.
@@ -850,15 +856,19 @@ final class Desk {
         "\(said)\n\n(Oby asked: \(question) The user answered: \(option))"
     }
 
-    /// What the user sees for the brain's plan. Stopping happens here: there's nothing to confirm,
-    /// and the reply says what stopped once it has, here and elsewhere.
-    func card(for result: Planner.Result, said: String) async -> Talk {
+    /// What the brain's plan does, and what the user hears of it. Planned work starts here, as
+    /// the Lead's does (#269): there's nothing to confirm, the reply says what started, and the
+    /// jobs join Oby's turn. Only a plan rules guessed (the brain didn't answer) waits: as a
+    /// Start/Cancel decision in the inbox. Stopping happens here too, and the reply says what
+    /// stopped once it has, here and elsewhere. `attachments` go to the jobs that start. `live` is
+    /// asked again right before they do: the epics and the issues' files take network time, and a
+    /// turn cancelled or given up on meanwhile starts nothing (the answer is `.none`).
+    func card(for result: Planner.Result, said: String, attachments: [String] = [], live: () -> Bool = { true }) async -> Talk {
         let plan = result.plan
         switch plan.action {
         case .dispatch:
             // Each job is routed knowing where the ones before it went, so a plan spreads out.
             var states = accounts.accounts
-            var drafts: [Draft] = []
             // Each job's claim (case 2.1): the files its issue names, read all at once.
             let claims = plan.dispatches.map { dispatch in
                 Task { () async -> [String]? in
@@ -866,62 +876,40 @@ final class Desk {
                     return await self.issueFiles(dispatch.repo, issue)
                 }
             }
+            var made: [(job: Job, route: AccountStore.Route?, held: [AccountState])] = []
             for (index, dispatch) in plan.dispatches.enumerated() {
-                let agent = dispatch.agent == "auto" ? nil : dispatch.agent
-                // A job waiting for an account's room runs on that account (#216).
-                let waitsOn = dispatch.startWhen?.compactMap(\.account).first
-                let wanted = waitsOn ?? dispatch.account
-                let named = states.first { $0.signedIn && $0.account.name == wanted && (agent == nil || $0.account.agent == agent) }
-                    ?? states.first { $0.signedIn && $0.account.name == waitsOn }
-                if wanted != "auto", named == nil {
-                    return .reply("\(wanted) isn't signed in. Sign in from Settings › Accounts.")
+                let files = await claims[index].value
+                do {
+                    made.append(try make(dispatch, said: said, states: &states, files: files, attachments: attachments))
+                } catch {
+                    return .reply(error.localizedDescription)
                 }
-                let route = named == nil ? AccountStore.choose(states, agent: agent) : nil
-                // Only accounts in their weekly reserve could take it (#278): it waits for room, on
-                // the first of them until then, and the apps offer to use one anyway.
-                let held = named == nil && route == nil ? AccountStore.heldInReserve(states, agent: agent) : []
-                guard let account = named?.account ?? route?.account ?? held.first?.account else {
-                    let tool = agent.map { Job.agentNames[$0] ?? $0 } ?? "coding tool"
-                    return .reply("No \(tool) account is signed in with room to spare. Check Settings › Accounts.")
-                }
-                if let index = states.firstIndex(where: { $0.account.id == account.id }) { states[index].running += 1 }
-                let id = String(UUID().uuidString.prefix(8)).lowercased()
-                // An issue and a pull request ("finish #19 from PR #124", #219): the issue's work,
-                // started from the pull request's head.
-                let from = dispatch.issue == nil ? nil : dispatch.pr
-                let pr = from == nil ? dispatch.pr : nil
-                var job = Job(id: id, request: said, agent: account.agent, account: account.id, repo: dispatch.repo,
-                              branch: Job.branch(kind: dispatch.kind, pr: pr, issue: dispatch.issue, id: id),
-                              base: dispatch.baseBranch, pr: pr, kind: dispatch.kind, task: dispatch.task)
-                job.issue = dispatch.issue
-                job.fromPR = from
-                job.title = dispatch.title
-                job.rounds = dispatch.rounds > 1 ? dispatch.rounds : nil
-                job.check = dispatch.check
-                job.files = await claims[index].value
-                let conditions = (dispatch.startWhen ?? []) + (held.isEmpty ? [] : [StartCondition.room(agent: agent)])
-                if !conditions.isEmpty {
-                    // Its account's name is the one it runs on, by id.
-                    let named = conditions.map { condition -> StartCondition in
-                        switch condition {
-                        case .window(_, let window, let under): .window(account: account.id, window, under: under)
-                        case .onPace: .onPace(account: account.id)
-                        default: condition
-                        }
-                    }
-                    do {
-                        job.startWhen = try StartWhen.checked(named, job: id, jobs: startWhenLookup.job, accounts: accounts.accounts)
-                    } catch {
-                        return .reply("Oby couldn't plan when that starts: \(error.localizedDescription)")
-                    }
-                }
-                job.mode = dispatch.mode ?? defaultMode
-                var reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
-                if !held.isEmpty { reply += " " + AccountStore.roomWait(held) }
-                drafts.append(Draft(said: said, reply: reply, job: job, guessed: result.by == "rules",
-                                    suggestedModel: dispatch.complexity == .complex ? AgentModels.stronger[account.agent] : nil, route: route))
             }
-            return drafts.isEmpty ? .none : .plan(drafts)
+            guard !made.isEmpty else { return .none }
+            // Cancelled, replaced or given up on while the files were read: nothing starts, and
+            // nothing asks.
+            guard live() else {
+                Logger.brain.notice("\(said.debugDescription, privacy: .public): the turn ended while its jobs were made; nothing started")
+                return .none
+            }
+            // The brain didn't answer, so rules guessed: the user says whether that's what they
+            // meant, from the inbox (the thread shows it too), and nothing starts until Start.
+            if result.by == "rules" {
+                for (job, route, _) in made {
+                    if let route { routes[job.id] = route.why }
+                    add(Inbox.proposal(job, account: accountHeading(job.account)))
+                }
+                return .reply(guessedLine(made.map(\.job)))
+            }
+            let started = made.map { dispatch($0.job, why: $0.route?.why) }
+            justStarted = started.map(\.id)
+            var reply = plan.reply.isEmpty ? startedLine(started) : plan.reply
+            // Only reserves kept a job from an account (#278): the reply says whose, and the job
+            // screens offer to use one anyway.
+            var held: [AccountState] = []
+            for state in made.flatMap(\.held) where !held.contains(where: { $0.account.id == state.account.id }) { held.append(state) }
+            if !held.isEmpty { reply += " " + AccountStore.roomWait(held) }
+            return .reply(reply)
         case .askUser:
             return plan.question.map { .question(said: said, $0) } ?? .reply(plan.reply)
         case .stopAgent:
@@ -996,16 +984,156 @@ final class Desk {
         }
     }
 
+    /// One job of a plan, routed and ready to queue: `states` is each account's load so far, so a
+    /// plan spreads out. Throws, with what to tell the user, when it can't be made: the account it
+    /// names isn't signed in, none has room, or what it waits for can't be.
+    private func make(_ dispatch: Plan.Dispatch, said: String, states: inout [AccountState], files: [String]?,
+                      attachments: [String]) throws -> (job: Job, route: AccountStore.Route?, held: [AccountState]) {
+        let agent = dispatch.agent == "auto" ? nil : dispatch.agent
+        // A job waiting for an account's room runs on that account (#216).
+        let waitsOn = dispatch.startWhen?.compactMap(\.account).first
+        let wanted = waitsOn ?? dispatch.account
+        let matches = { (state: AccountState, name: String?) in state.signedIn && (state.account.name == name || state.account.id == name) }
+        let named = states.first { matches($0, wanted) && (agent == nil || $0.account.agent == agent) }
+            ?? states.first { matches($0, waitsOn) }
+        if wanted != "auto", named == nil {
+            throw Shell.Failure(message: "\(wanted) isn't signed in. Sign in from Settings › Accounts.")
+        }
+        let route = named == nil ? AccountStore.choose(states, agent: agent) : nil
+        // Only accounts in their weekly reserve could take it (#278): it waits for room, on the
+        // first of them until then, and the apps offer to use one anyway.
+        let held = named == nil && route == nil ? AccountStore.heldInReserve(states, agent: agent) : []
+        guard let account = named?.account ?? route?.account ?? held.first?.account else {
+            let tool = agent.map { Job.agentNames[$0] ?? $0 } ?? "coding tool"
+            throw Shell.Failure(message: "No \(tool) account is signed in with room to spare. Check Settings › Accounts.")
+        }
+        if let index = states.firstIndex(where: { $0.account.id == account.id }) { states[index].running += 1 }
+        let id = String(UUID().uuidString.prefix(8)).lowercased()
+        // An issue and a pull request ("finish #19 from PR #124", #219): the issue's work,
+        // started from the pull request's head.
+        let from = dispatch.issue == nil ? nil : dispatch.pr
+        let pr = from == nil ? dispatch.pr : nil
+        var job = Job(id: id, request: said, agent: account.agent, account: account.id, repo: dispatch.repo,
+                      branch: Job.branch(kind: dispatch.kind, pr: pr, issue: dispatch.issue, id: id),
+                      base: dispatch.baseBranch, pr: pr, kind: dispatch.kind, task: dispatch.task)
+        job.issue = dispatch.issue
+        job.fromPR = from
+        job.title = dispatch.title
+        job.rounds = dispatch.rounds > 1 ? dispatch.rounds : nil
+        job.check = dispatch.check
+        job.files = files
+        job.attachments = attachments.isEmpty ? nil : attachments
+        // The mode the user named ("plan first", #134), or Settings › Permissions' default when it queues.
+        job.mode = dispatch.mode
+        let conditions = (dispatch.startWhen ?? []) + (held.isEmpty ? [] : [StartCondition.room(agent: agent)])
+        if !conditions.isEmpty {
+            // Its account's name is the one it runs on, by id.
+            let named = conditions.map { condition -> StartCondition in
+                switch condition {
+                case .window(_, let window, let under): .window(account: account.id, window, under: under)
+                case .onPace: .onPace(account: account.id)
+                default: condition
+                }
+            }
+            do {
+                job.startWhen = try StartWhen.checked(named, job: id, jobs: startWhenLookup.job, accounts: accounts.accounts)
+            } catch {
+                throw Shell.Failure(message: "Oby couldn't plan when that starts: \(error.localizedDescription)")
+            }
+        }
+        return (job, route, held)
+    }
+
+    /// "Claude Code · Deskree", for the account with that id.
+    private func accountHeading(_ id: String) -> String { accounts.state(id)?.account.heading ?? id }
+
+    /// What a job is, in a reply: "oby #12 (Login screen)", "oby PR #33", "oby".
+    nonisolated private static func what(_ job: Job) -> String {
+        var what = job.repoName
+        if let pr = job.pr { what += " PR #\(pr)" } else if let issue = job.issue { what += " #\(issue)" }
+        if let title = job.brainTitle { what += " (\(title))" }
+        return what
+    }
+
+    /// "a", "a, and b", "a, b, and c".
+    nonisolated private static func list(_ parts: [String]) -> String {
+        guard parts.count > 1, let last = parts.last else { return parts.first ?? "" }
+        return parts.dropLast().joined(separator: ", ") + ", and " + last
+    }
+
+    /// What started, in Oby's voice: "On it. Claude Code is fixing oby #12 (Login screen) on
+    /// Deskree." A job that waits for something says so.
+    func startedLine(_ jobs: [Job]) -> String {
+        let doing = ["review": "reviewing", "fix": "fixing", "build": "building", "test": "testing", "investigate": "investigating"]
+        return "On it. " + Self.list(jobs.map { job in
+            let account = accounts.state(job.account)?.account.name ?? job.account
+            return job.startWhen == nil
+                ? "\(job.agentName) is \(doing[job.kind.rawValue] ?? job.kind.rawValue) \(Self.what(job)) on \(account)"
+                : "\(job.agentName) will \(job.kind.rawValue) \(Self.what(job)) on \(account) once what it waits for has happened"
+        }) + "."
+    }
+
+    /// What rules guessed, and where to say yes: "Oby's brain didn't answer, so this is a guess:
+    /// Fix oby #12 on Claude Code · Deskree. Start it from your inbox, or say it another way."
+    private func guessedLine(_ jobs: [Job]) -> String {
+        let plural = jobs.count > 1
+        return "Oby's brain didn't answer, so this is a guess: "
+            + Self.list(jobs.map { "\($0.kind.rawValue.capitalized) \(Self.what($0)) on \(accountHeading($0.account))" })
+            + ". Start \(plural ? "them" : "it") from your inbox, or say it another way."
+    }
+
     // MARK: Jobs
 
+    /// Queues a job that's ready to run, with why routing chose its account for its report (#269):
+    /// a plan's jobs, a guessed plan's on Start, and the runner's `POST /v1/jobs`.
     @discardableResult
-    func dispatch(_ draft: Draft) -> Job {
-        talk = .none
-        drafts.removeAll { $0.job.id == draft.job.id }
-        // Why routing chose its account, unless the user picked another on the card.
-        let job = enqueue(draft.job, why: draft.route.flatMap { $0.id == draft.job.account ? $0.why : nil })
-        link(job.id)
-        return job
+    func dispatch(_ job: Job, why: String? = nil) -> Job {
+        enqueue(job, why: why)
+    }
+
+    /// Starts a job from a whole body (#269), as the brain's plan would have made it: checked
+    /// like a plan (`Plan.problems`), routed unless it names an account, with the client's
+    /// branch, files, model and what it waits for. For oby-mcp and scripts.
+    func dispatch(_ new: NewJob) async throws -> Job {
+        if repos.isEmpty { await refresh() }
+        guard let kind = Plan.Kind(rawValue: new.kind) else {
+            throw Shell.Failure(message: "kind is one of " + Plan.Kind.allCases.map(\.rawValue).joined(separator: ", ") + ".")
+        }
+        var agent = new.agent.flatMap { $0.isEmpty || $0 == "auto" ? nil : $0 } ?? "auto"
+        var account = "auto"
+        if let named = new.account?.trimmingCharacters(in: .whitespaces), !named.isEmpty, named.lowercased() != "auto" {
+            guard let state = accounts.accounts.first(where: { $0.account.id == named || $0.account.name == named }) else {
+                throw Shell.Failure(message: "There's no account \(named).")
+            }
+            guard state.signedIn else { throw Shell.Failure(message: "\(state.account.heading) isn't signed in.") }
+            (agent, account) = (state.account.agent, state.account.name)
+        }
+        var dispatch = Plan.Dispatch(agent: agent, account: account, repo: new.repo, baseBranch: new.base, pr: new.pr, issue: new.issue,
+                                     epic: nil, kind: kind, title: new.title, task: new.task, inputs: [], rounds: new.rounds ?? 1,
+                                     check: new.check, complexity: .routine)
+        let canary = String(UUID().uuidString.prefix(8)).lowercased()
+        let problems = Plan(action: .dispatch, reply: "", dispatches: [dispatch], question: nil).problems(in: brainContext(turns: []), canary: canary)
+        guard problems.isEmpty else { throw Shell.Failure(message: problems.joined(separator: "; ") + ".") }
+        // What it waits for is checked as the job is made (`StartWhen.checked`): accounts by id or name.
+        dispatch.startWhen = new.startWhen
+        dispatch.mode = new.mode
+        let files: [String]?
+        if let given = new.files { files = try Claims.validated(given) }
+        else if let issue = new.issue { files = await issueFiles(new.repo, issue) }
+        else { files = nil }
+        var states = accounts.accounts
+        var (job, route, _) = try make(dispatch, said: new.request ?? new.task, states: &states, files: files, attachments: [])
+        if let branch = new.branch?.trimmingCharacters(in: .whitespaces), !branch.isEmpty {
+            guard Plan.isBranchName(branch) else { throw Shell.Failure(message: "That isn't a branch name Oby can create.") }
+            job.branch = branch
+        }
+        if let model = new.model?.trimmingCharacters(in: .whitespaces), !model.isEmpty {
+            guard (Moves.models[job.agent] ?? []).contains(model) || AgentModels.stronger[job.agent] == model else {
+                throw Shell.Failure(message: "\(model) isn't a model of \(job.agentName).")
+            }
+            job.model = model
+        }
+        return self.dispatch(job, why: route?.why)
     }
 
     /// Queues a job: its worktree gets ready, then its agent starts. Oby's own jobs (reviews) start here.
@@ -1144,40 +1272,7 @@ final class Desk {
         return shared
     }
 
-    /// Dispatches one of the latest plans, by its job's id, with the user's changes (the runner's API).
-    /// Rounds and check keep the plan's values unless the client sends them.
-    /// `files`, when the client sends them, replace the plan's claim (an empty list claims none).
-    /// `startWhen`, when the client sends it, replaces what the plan's job waits for (#216; an empty
-    /// list starts it at once), and a condition on an account runs it on that account.
-    func dispatch(_ id: String, branch: String, account: String, rounds: Int? = nil, check: String?? = nil, model: String?? = nil,
-                  files: [String]? = nil, startWhen: [StartCondition]? = nil, mode: PermissionMode? = nil) throws -> Job {
-        guard var draft = drafts.first(where: { $0.job.id == id }) else {
-            throw Shell.Failure(message: "Oby doesn't have that plan any more. Ask again.")
-        }
-        var account = account
-        if let startWhen {
-            draft.job.startWhen = startWhen.isEmpty ? nil : try StartWhen.checked(startWhen, job: id, jobs: startWhenLookup.job, accounts: accounts.accounts)
-        }
-        if let waitsOn = draft.job.startWhen?.compactMap(\.account).first { account = waitsOn }
-        // Another account picked on the card: it runs there, not wherever room comes (#278).
-        if account != draft.job.account, let conditions = draft.job.startWhen, conditions.contains(where: \.isRoom) {
-            let left = conditions.filter { !$0.isRoom }
-            draft.job.startWhen = left.isEmpty ? nil : left
-        }
-        draft.job = try Self.edit(draft.job, branch: branch, account: accounts.state(account), rounds: rounds, check: check)
-        if let files { draft.job.files = try Claims.validated(files) }
-        if let model {
-            // Only the stronger model the plan offered (for the tool the job ended up with), or none.
-            guard model == nil || (draft.suggestedModel != nil && AgentModels.stronger.values.contains(model ?? "")) else {
-                throw Shell.Failure(message: "That model wasn't offered for this job.")
-            }
-            draft.job.model = model == nil ? nil : AgentModels.stronger[draft.job.agent]
-        }
-        if let mode { draft.job.mode = mode }
-        return dispatch(draft)
-    }
-
-    /// A plan's job with the only changes the user may make: a branch name Oby can create, a
+    /// A job with the changes a client may make to one: a branch name Oby can create, a
     /// signed-in account (whose tool the job then runs with), and how it loops: 1 to 10 rounds,
     /// and a one-line check or none.
     nonisolated static func edit(_ job: Job, branch: String, account: AccountState?, rounds: Int? = nil, check: String?? = nil) throws -> Job {
@@ -2255,11 +2350,13 @@ final class Desk {
         case .answer(let words):
             let text = words.trimmingCharacters(in: .whitespacesAndNewlines)
             guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Answer with 1 to 2,000 characters.") }
-            // Items about Oby, not a job, take only what they offer.
-            if item.kind == .audit || item.job == Self.updateJob {
+            // Items about Oby, not a job, and a guessed plan's, take only what they offer.
+            if item.kind == .audit || item.kind == .start || item.job == Self.updateJob {
                 guard item.options.contains(text) else { throw Shell.Failure(message: "Answer \(item.options.joined(separator: " or ")).") }
             }
             switch (item.kind, text) {
+            case (.start, Inbox.start): try startProposed(item)
+            case (.start, _): routes[item.job] = nil
             case (.failed, Inbox.tryAgain) where item.job == Self.updateJob: retryUpdate?()
             case (.audit, Inbox.addColumn): throw Shell.Failure(message: "Adding a column takes GitHub: answer it with Desk.answer.")
             case (.audit, Inbox.tryAgain): issueSync.again()
@@ -2293,6 +2390,17 @@ final class Desk {
         store.save(item)
         onInboxChange(item)
         return item
+    }
+
+    /// Start on a guessed plan's item (#269): the job it proposes starts now, as the plan would
+    /// have, and Oby's turn says so, with the job's card.
+    private func startProposed(_ item: InboxItem) throws {
+        guard let proposed = item.proposed else { throw Shell.Failure(message: "Oby no longer has that plan. Ask again.") }
+        guard let state = accounts.state(proposed.account), state.signedIn else {
+            throw Shell.Failure(message: "\(accountHeading(proposed.account)) isn't signed in any more. Ask again.")
+        }
+        let job = dispatch(proposed, why: routes.removeValue(forKey: proposed.id))
+        add(Turn(who: .oby, text: startedLine([job]), jobs: [job.id]))
     }
 
     /// What the agent hears for One more round, after Oby's last review: quoted in a file, as

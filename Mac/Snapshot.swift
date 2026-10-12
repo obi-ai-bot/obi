@@ -27,7 +27,7 @@ struct Attachment: Identifiable, Equatable {
     }
 }
 
-/// The chips by the field: what goes with the request, until its jobs are dispatched. Oby looks at
+/// The chips by the field: what goes with the request, to the jobs it starts (#269). Oby looks at
 /// the screen only when you click the camera, and reads the clipboard only when you click its chip.
 @Observable
 final class Tray {
@@ -66,12 +66,8 @@ final class Tray {
         return "(The user attached \(parts.joined(separator: " and ")).)"
     }
 
-    /// The draft's job with the attachments, for Dispatch.
-    func attach(_ draft: Desk.Draft) -> Desk.Draft {
-        var draft = draft
-        draft.job.attachments = items.isEmpty ? nil : items.map(\.file.path)
-        return draft
-    }
+    /// The attachments' paths, for the jobs a request starts (`Desk.ask`).
+    var paths: [String] { items.map(\.file.path) }
 
     /// The request went out: the chips go, and the files stay for its jobs.
     func clear() {

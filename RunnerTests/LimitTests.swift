@@ -158,7 +158,7 @@ struct LimitRetryTests {
         fix.account = codex.id
         fix.agent = "codex"
         fix.rounds = rounds
-        desk.dispatch(Desk.Draft(said: "work on oby #75", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         for _ in 0..<500 where desk.job(id)?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         let first = try #require(made.agents.first?.agent)
         first.onEvent(.session("thread-1"))
@@ -217,7 +217,7 @@ struct LimitRetryTests {
         fix.id = "hour"
         fix.account = codex.id
         fix.agent = "codex"
-        desk.dispatch(Desk.Draft(said: "review", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         for _ in 0..<500 where desk.job("hour")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         let before = Date.now
         made.agents.first?.agent.onEvent(.limit(resets: nil))
@@ -242,7 +242,7 @@ struct LimitRetryTests {
         fix.account = codex.id
         fix.agent = "codex"
         fix.rounds = 3
-        desk.dispatch(Desk.Draft(said: "work on oby #75", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         for _ in 0..<500 where desk.job("loop")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         let first = try #require(made.agents.first?.agent)
         first.onEvent(.turnEnded(summary: "Half done.\n\nGOAL NOT MET: the tests", failed: false))

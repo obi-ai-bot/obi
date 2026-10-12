@@ -97,7 +97,7 @@ struct AppleCheckTests {
         var author = author
         author.check = check
         author.rounds = rounds
-        desk.dispatch(Desk.Draft(said: "build oby #118", reply: "", job: author, guessed: false))
+        desk.dispatch(author)
         try await until("the author runs") { desk.job("apple118")?.status == .running }
     }
 
@@ -287,7 +287,7 @@ struct AppleCheckTests {
         other.id = "merge80"
         other.issue = 80
         other.branch = "oby/fix-80"
-        desk.dispatch(Desk.Draft(said: "fix oby #80", reply: "", job: other, guessed: false))
+        desk.dispatch(other)
         try await until("the other job runs") { desk.job("merge80")?.status == .running }
         desk.stop("merge80")
         try await until("the other job ended") { desk.job("merge80")?.isActive == false }

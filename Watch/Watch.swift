@@ -22,8 +22,8 @@ final class Watch: NSObject {
         case thinking(String)
         /// Dictated while the phone was out of reach: the phone plans it when it's back.
         case queued(String)
-        case plan([Draft])
         case question(said: String, Question)
+        /// What Oby said: the work it started (#269) is in the jobs, with nothing to confirm.
         case reply(String)
     }
 
@@ -231,29 +231,6 @@ final class Watch: NSObject {
     func open(_ id: String, publish: Bool) {
         opening = id
         publishing = publish ? id : nil
-    }
-
-    func dispatch(_ draft: Draft) async throws {
-        let previous = talk
-        try await send(draft)
-        if talk == previous { talk = .none }
-    }
-
-    /// One dispatch per draft, in order; a draft whose job is here already was sent before.
-    func dispatch(all drafts: [Draft]) async throws {
-        let previous = talk
-        for draft in drafts where !jobs.contains(where: { $0.id == draft.job.id }) {
-            try await send(draft)
-        }
-        if talk == previous { talk = .none }
-    }
-
-    private func send(_ draft: Draft) async throws {
-        if let link = direct {
-            apply(try await link.dispatch(draft.job))
-        } else {
-            try apply(try await request([WatchWire.kind: WatchWire.Kind.dispatch.rawValue, WatchWire.draft: try Runner.encoder.encode(draft)]))
-        }
     }
 
     /// The Watch API has no Stop: that waits for the phone.
@@ -593,10 +570,12 @@ final class Watch: NSObject {
             talk = .thinking(said)
             Task {
                 do {
-                    let plan = RelayedPlan(try await link.plan(said, answer: answer))
+                    let result = try await link.plan(said, answer: answer)
                     guard asking == request else { return }
                     asking = nil
-                    show(plan)
+                    // The work it started (#269) shows in the jobs at once.
+                    if case .reply(_, let started) = result { for job in started { apply(job) } }
+                    show(RelayedPlan(result))
                 } catch {
                     if asking == request, talk == .thinking(said) { talk = .reply(error.localizedDescription) }
                 }
@@ -686,8 +665,7 @@ final class Watch: NSObject {
     private func show(_ plan: RelayedPlan) {
         // The answer is here: a step whose end was missed is done.
         steps = ConversationModel.settled(steps, as: .done)
-        if !plan.drafts.isEmpty { talk = .plan(plan.drafts) }
-        else if let question = plan.question { talk = .question(said: plan.questionSaid ?? "", question) }
+        if let question = plan.question { talk = .question(said: plan.questionSaid ?? "", question) }
         else if let reply = plan.reply { talk = .reply(reply) }
         else { talk = .none }
     }

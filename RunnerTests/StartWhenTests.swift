@@ -84,7 +84,7 @@ struct StartWhenTests {
     @discardableResult
     func dispatch(_ job: Job, on desk: Desk? = nil) async throws -> Job {
         let desk = desk ?? self.desk
-        desk.dispatch(Desk.Draft(said: job.request, reply: "", job: job, guessed: false))
+        desk.dispatch(job)
         try await until("\(job.id) is ready") { desk.job(job.id)?.status == .running || desk.scheduled.contains(job.id) }
         return try #require(desk.job(job.id))
     }
@@ -245,7 +245,7 @@ struct StartWhenTests {
 
     /// A job ending wakes the jobs waiting for it at once, not at their next minute.
     @Test func afterAnotherJobEnds() async throws {
-        desk.dispatch(Desk.Draft(said: "first", reply: "", job: job("first"), guessed: false))
+        desk.dispatch(job("first"))
         try await until("the first runs") { desk.job("first")?.status == .running }
         try await dispatch(job("second", [.job("first", is: .ended)]))
         #expect(desk.job("second")?.step == "Waiting for fix first to end")
@@ -419,8 +419,8 @@ struct StartWhenTests {
             return job
         }
         let later = clock.now.addingTimeInterval(3600)
-        desk.dispatch(Desk.Draft(said: "early", reply: "", job: job("early", [.at(later)]), guessed: false))
-        desk.dispatch(Desk.Draft(said: "told", reply: "", job: job("told"), guessed: false))
+        desk.dispatch(job("early", [.at(later)]))
+        desk.dispatch(job("told"))
         try desk.startNow("early")
         try desk.setStartWhen("told", [.at(later)])
         ready.release()
@@ -446,7 +446,7 @@ struct StartWhenTests {
         #expect(desk.job("first")?.holdsClaim == true)
         var later = job("later", files: ["Engine/Desk.swift"])
         later.created = clock.now.addingTimeInterval(5)
-        desk.dispatch(Desk.Draft(said: "later", reply: "", job: later, guessed: false))
+        desk.dispatch(later)
         try await until("the later one runs") { desk.job("later")?.status == .running }
         let prompt = try #require(made.agents.first { $0.job.id == "later" }?.prompt)
         #expect(prompt.contains("(job first) on the branch oby/fix-first: both touch Engine/Desk.swift"))
@@ -458,23 +458,18 @@ struct StartWhenTests {
         let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
         let app = Application(router: api.router(owner: "well@example.com"))
         let owner: HTTPFields = [.tailscaleUserLogin: "well@example.com"]
-        // A plan's draft, as the brain leaves it.
-        let brain = ConversationTests.FakeBrain([
-            #"{"action":"dispatch","reply":"","question":null,"jobs":[],"all":false,"move":null,"dispatches":[{"agent":"claude","account":"auto","repo":"deskree-inc/oby","base_branch":null,"pr":null,"issue":14,"epic":null,"kind":"fix","title":"Login screen","task":"Fix #14","inputs":[],"rounds":1,"check":null,"complexity":"routine","start_when":[]}]}"#,
-        ])
-        desk.makeBrain = { _, _ in [brain] }
-        guard case .plan(let drafts) = await desk.plan("fix oby #14"), let id = drafts.first?.job.id else { Issue.record("no plan"); return }
-        #expect(drafts.first?.job.startWhen == nil && drafts.first?.job.account == "default")
         try await app.test(.router) { client in
             func post(_ path: String, _ body: String) async throws -> (HTTPResponse.Status, [String: Any]) {
                 try await client.execute(uri: path, method: .post, headers: owner, body: ByteBuffer(string: body)) { response in
                     (response.status, (try? JSONSerialization.jsonObject(with: Data(response.body.readableBytesView)) as? [String: Any]) ?? [:])
                 }
             }
-            // On an account by name: the job runs on it, and says what it waits for.
-            let (status, created) = try await post("/v1/jobs", #"{"job": {"id": "\#(id)", "branch": "oby/fix-14", "account": "default", "startWhen": [{"account": "Deskree", "window": "fiveHour"}]}}"#)
-            #expect(status == .created)
-            #expect(created["account"] as? String == codex.id && created["agent"] as? String == "codex")
+            // A whole job (#269) waiting on an account by name: it runs on it, whatever account it
+            // names, and says what it waits for.
+            let (status, created) = try await post("/v1/jobs", #"{"job": {"repo": "deskree-inc/oby", "kind": "fix", "task": "Fix #14", "issue": 14, "title": "Login screen", "branch": "oby/fix-14", "account": "default", "startWhen": [{"account": "Deskree", "window": "fiveHour"}]}}"#)
+            #expect(status == .created, "\(created)")
+            let id = try #require(created["id"] as? String)
+            #expect(created["account"] as? String == codex.id && created["agent"] as? String == "codex" && created["branch"] as? String == "oby/fix-14")
             #expect((created["startWhen"] as? [[String: Any]])?.first?["account"] as? String == codex.id)
             try await until("it waits") { desk.scheduled.contains(id) }
             #expect(try await post("/v1/jobs/\(id)/start-when", #"{"startWhen": [{"job": "nobody"}]}"#).0 == .unprocessableContent)
@@ -497,8 +492,10 @@ struct StartWhenTests {
             #"{"action":"dispatch","reply":"Oby will fix #12 on Codex once it resets.","question":null,"jobs":[],"all":false,"move":null,"dispatches":[{"agent":"auto","account":"auto","repo":"deskree-inc/oby","base_branch":null,"pr":null,"issue":12,"epic":null,"kind":"fix","title":"Login screen","task":"Fix #12","inputs":[],"rounds":1,"check":null,"complexity":"routine","start_when":[{"account":"Deskree","window":"fiveHour","under":null}]}]}"#,
         ])
         desk.makeBrain = { _, _ in [brain] }
-        guard case .plan(let drafts) = await desk.plan("fix oby #12 on Codex when it resets") else { Issue.record("no plan"); return }
-        let draft = try #require(drafts.first?.job)
+        // The job starts waiting as the plan is made (#269), and the reply says what it waits for.
+        guard case .reply(let text) = await desk.plan("fix oby #12 on Codex when it resets") else { Issue.record("no plan"); return }
+        #expect(text == "Oby will fix #12 on Codex once it resets.")
+        let draft = try #require(desk.jobs.first { $0.issue == 12 })
         #expect(draft.account == codex.id && draft.agent == "codex")
         #expect(draft.startWhen == [.window(account: codex.id, .fiveHour, under: nil)])
         #expect(brain.prompts.last?.contains("Now is ") == true)

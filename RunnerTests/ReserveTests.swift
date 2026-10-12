@@ -128,8 +128,10 @@ final class ReserveTests {
         return Planner.Result(plan: Plan(action: .dispatch, reply: "", dispatches: [dispatch], question: nil), by: "claude")
     }
 
-    /// The plan's first draft, or nil for a reply or a question.
-    func draft(_ talk: Desk.Talk) -> Desk.Draft? { if case .plan(let drafts) = talk { drafts.first } else { nil } }
+    /// What the plan started (#269): its reply and the newest job, or nil when it started none.
+    func started(_ desk: Desk, _ talk: Desk.Talk) -> (reply: String, job: Job)? {
+        if case .reply(let text) = talk, let job = desk.jobs.first { (text, job) } else { nil }
+    }
 
     func until(_ what: String, _ condition: () -> Bool) async throws {
         for _ in 0..<500 where !condition() { try await Task.sleep(for: .milliseconds(10)) }
@@ -139,12 +141,12 @@ final class ReserveTests {
     @Test func aJobOnlyReservesHoldBackWaitsAndStartsWhenOneIsLifted() async throws {
         let made = Made()
         let (desk, _) = desk(made)
-        let draft = try #require(draft(await desk.card(for: plan("claude"), said: "fix it")))
-        #expect(draft.reply == "Claude Code will fix in oby. Waiting: Default is in its weekly reserve. "
-                + "Use it anyway to start it now; otherwise it starts when an account has room.")
-        #expect(draft.job.startWhen == [.room(agent: "claude")] && draft.job.account == "default")
+        let started = try #require(started(desk, await desk.card(for: plan("claude"), said: "fix it")))
+        #expect(started.reply == "On it. Claude Code will fix oby on Default once what it waits for has happened. "
+                + "Waiting: Default is in its weekly reserve. Use it anyway to start it now; otherwise it starts when an account has room.")
+        #expect(started.job.startWhen == [.room(agent: "claude")] && started.job.account == "default")
 
-        let job = desk.dispatch(draft)
+        let job = started.job
         try await until("it waits") { desk.scheduled.contains(job.id) }
         let waiting = try #require(desk.job(job.id))
         #expect(waiting.status == .queued && waiting.step == "Waiting for room: Default is in its weekly reserve")
@@ -160,9 +162,8 @@ final class ReserveTests {
     @Test func aJobWaitingForRoomStartsWhereRoutingFindsIt() async throws {
         let made = Made()
         let (desk, accounts) = desk(made)
-        let draft = try #require(draft(await desk.card(for: plan("auto"), said: "fix it")))
-        #expect(draft.job.startWhen == [.room(agent: nil)])
-        let job = desk.dispatch(draft)
+        let job = try #require(started(desk, await desk.card(for: plan("auto"), said: "fix it"))).job
+        #expect(job.startWhen == [.room(agent: nil)])
         try await until("it waits") { desk.scheduled.contains(job.id) }
         // A Codex account signs in with room: the job goes there, as if just sent.
         let codex = try accounts.add(agent: "codex", name: "Deskree", payer: "")

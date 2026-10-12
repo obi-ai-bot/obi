@@ -59,7 +59,7 @@ struct UncommittedTests {
         fix.branch = "oby/fix-214"
         fix.check = "swift test"
         fix.rounds = rounds
-        desk.dispatch(Desk.Draft(said: "fix oby #214", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         try await until { desk.job(id)?.status == .running }
         let agent = try #require(made.agents.last)
         agent.onEvent(.session("s-\(id)"))

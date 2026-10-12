@@ -51,8 +51,9 @@ struct TalkButton: View {
 }
 
 /// Lives below Oby on Home; the ScrollView takes the crown naturally. The words appear here as
-/// they're said; a draft, a reply or a plan stays until Send, Done, dispatch or the next tap
-/// that replaces it. No sheet takes the microphone away.
+/// they're said; a draft, a reply or a question stays until Send, Done, an answer or the next
+/// tap that replaces it. Planned work starts by itself (#269): its jobs show in the list, with
+/// nothing to confirm. No sheet takes the microphone away.
 struct TalkView: View {
     @Environment(Watch.self) private var watch
 
@@ -97,9 +98,6 @@ struct TalkView: View {
                         Text("Your iPhone isn't in reach. Oby plans it when it is.").font(.footnote)
                         ReadingText(said)
                         Button("Dismiss") { watch.cancel() }
-                    case .plan(let drafts):
-                        steps
-                        PlanCard(drafts: drafts)
                     case .question(let said, let question):
                         steps
                         QuestionCard(said: said, question: question)
@@ -306,59 +304,6 @@ final class Recorder {
         pending.removeAll(keepingCapacity: false)
         deliver = nil
         reachedLimit = nil
-    }
-}
-
-/// The plan, before anything runs: what Oby will do, where, and Dispatch with one tap.
-struct PlanCard: View {
-    @Environment(Watch.self) private var watch
-    let drafts: [Draft]
-    @State private var sending = false
-    @State private var problem: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if drafts.count == 1 {
-                Text(drafts[0].reply).font(.headline)
-            } else {
-                Text("Oby will start \(drafts.count) jobs.").font(.headline)
-            }
-            if drafts.contains(where: \.guessed) {
-                Label("The brain didn't answer: this plan is a guess.", systemImage: "exclamationmark.triangle")
-                    .font(.caption2).foregroundStyle(.orange)
-            }
-            // First, so it's on screen without the crown on the smallest watch; details follow.
-            Button(sending ? "Dispatching…" : drafts.count == 1 ? "Dispatch" : "Dispatch all \(drafts.count)", action: dispatch)
-                .tint(.accentColor).buttonStyle(.borderedProminent).disabled(sending)
-            if let problem { Text(problem).font(.caption2).foregroundStyle(.red) }
-            ForEach(drafts, id: \.job.id) { draft in
-                VStack(alignment: .leading, spacing: 1) {
-                    if drafts.count > 1 { Text(draft.job.heading).font(.footnote.weight(.semibold)).lineLimit(2) }
-                    Text("\(draft.job.repoName) · \(draft.job.branch)").font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(2)
-                    Text("\(draft.job.agentName) · \(watch.account(draft.job.account))").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                    if !draft.job.extras.isEmpty {
-                        Text(draft.job.extras).font(.caption2).foregroundStyle(.secondary)
-                    }
-                    if watch.jobs.contains(where: { $0.id == draft.job.id }) {
-                        Label("Sent", systemImage: "checkmark.circle.fill").font(.caption2).foregroundStyle(.green)
-                    }
-                }
-            }
-            Button("Cancel") { watch.cancel() }.disabled(sending)
-        }
-    }
-
-    private func dispatch() {
-        sending = true
-        Task {
-            defer { sending = false }
-            do {
-                if drafts.count == 1 { try await watch.dispatch(drafts[0]) } else { try await watch.dispatch(all: drafts) }
-                problem = nil
-            } catch {
-                problem = error.localizedDescription
-            }
-        }
     }
 }
 

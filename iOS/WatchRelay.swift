@@ -196,13 +196,6 @@ final class WatchRelay: NSObject {
                 }
                 startPlan(said, answer: answer, request: request)
                 return [WatchWire.ok: true]
-            case .dispatch:
-                guard let data = message[WatchWire.draft] as? Data else { return bad }
-                let draft = try Runner.decoder.decode(Draft.self, from: data)
-                let job = try await phone.runner.dispatch(draft.job)
-                Notifications.ask()
-                _ = await refresh()
-                return [WatchWire.job: try Runner.encoder.encode(job)]
             case .tell:
                 guard let id = message[WatchWire.job] as? String, let text = message[WatchWire.text] as? String else { return bad }
                 let job = try await phone.runner.tell(id, text)
@@ -270,7 +263,11 @@ final class WatchRelay: NSObject {
         let following = Task { await follow(steps: request) }
         defer { following.cancel() }
         do {
-            message[WatchWire.plan] = try Runner.encoder.encode(RelayedPlan(try await phone.runner.plan(said, answer: answer)))
+            let result = try await phone.runner.plan(said, answer: answer)
+            // The work it started (#269) reaches the watch with the jobs, as the runner's events
+            // bring them; the phone asks to notify of them the first time.
+            if case .reply(_, let started) = result, !started.isEmpty { Notifications.ask() }
+            message[WatchWire.plan] = try Runner.encoder.encode(RelayedPlan(result))
         } catch {
             message[WatchWire.error] = error.localizedDescription
         }

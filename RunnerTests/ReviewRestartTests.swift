@@ -130,7 +130,7 @@ struct ReviewRestartTests {
     // MARK: Draining
 
     @Test func aReviewThatEndsDuringADrainIsAppliedBeforeTheRestart() async throws {
-        desk.dispatch(Desk.Draft(said: "fix oby #75", reply: "", job: author, guessed: false))
+        desk.dispatch(author)
         try await until("the author runs") { desk.job("author")?.status == .running }
         let first = try #require(made.agents.last?.agent)
         first.onEvent(.session("e6a24229"))

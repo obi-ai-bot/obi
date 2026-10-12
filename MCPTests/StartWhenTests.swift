@@ -3,8 +3,8 @@ import Testing
 @testable import oby_mcp
 
 /// oby-mcp's side of starting a job when something happens (#216, docs/mcp.md): dispatch passes
-/// `startWhen` to the runner, the draft and the job say what they wait for, and `start` starts a
-/// waiting job now or changes what it waits for.
+/// `startWhen` to the runner, a job ask started and the job say what they wait for, and `start`
+/// starts a waiting job now or changes what it waits for.
 @Suite struct StartWhenTests {
     func waitingJob(_ id: String = "ab12cd34") -> JSON {
         var waiting = job(id, status: "queued", stage: 1).object!
@@ -16,27 +16,27 @@ import Testing
 
     @Test func dispatchWaitsForWhatItsToldTo() async throws {
         let stub = StubRunner()
-        var draftJob = job("ab12cd34", status: "queued", stage: 1).object!
-        draftJob["startWhen"] = [["account": "work", "window": "fiveHour"]]
-        stub.answer("POST /v1/plans", ["kind": "plan", "drafts": [["said": "fix oby #140 on Codex when it resets", "reply": "", "guessed": false,
-                                                                  "job": .object(draftJob), "suggestedModel": nil]]])
+        var waiting = job("ab12cd34", status: "queued", stage: 1).object!
+        waiting["startWhen"] = [["account": "work", "window": "fiveHour"]]
+        stub.answer("POST /v1/plans", ["kind": "reply", "text": "On it: fixing #140 in oby on Codex once it resets.", "jobs": [.object(waiting)], "drafts": []])
         stub.answer("POST /v1/jobs", waitingJob(), status: 201)
         let server = server(stub)
 
-        let plan = await server.call("plan", ["said": "fix oby #140 on Codex when it resets"])
-        #expect(plan.text.contains("starts when: account work 5-hour window has room"))
+        // A job ask started that waits says what for (#269).
+        let asked = await server.call("ask", ["said": "fix oby #140 on Codex when it resets"])
+        #expect(asked.text.contains("starts when: account work 5-hour window has room"))
+        #expect(asked.text.hasPrefix("Oby started 1 job, queued on the runner (one or more wait for what they're told to; start starts one now)."))
 
         let conditions: JSON = [["pr": 205, "is": "merged"], ["at": "2026-10-13T09:00:00Z"]]
-        let dispatched = await server.call("dispatch", ["draft": "ab12cd34", "startWhen": conditions])
+        let dispatched = await server.call("dispatch", ["repo": "deskree-inc/oby", "kind": "fix", "task": "Fix #140", "issue": 140, "startWhen": conditions])
         #expect(!dispatched.isError, "\(dispatched.text)")
-        #expect(dispatched.text.hasPrefix("Dispatched: it's queued on the runner and starts once what it waits for has happened"))
+        #expect(dispatched.text.hasPrefix("Started: it's queued on the runner and starts once what it waits for has happened"))
         #expect(stub.calls.last?.body?["job"]?["startWhen"] == conditions)
 
         // Not a list of objects: refused before the runner hears of it.
-        _ = await server.call("plan", ["said": "fix oby #140 on Codex when it resets"])
         let calls = stub.calls.count
-        #expect(await server.call("dispatch", ["draft": "ab12cd34", "startWhen": "tomorrow"]).isError)
-        #expect(await server.call("dispatch", ["draft": "ab12cd34", "startWhen": ["tomorrow"]]).isError)
+        #expect(await server.call("dispatch", ["repo": "deskree-inc/oby", "kind": "fix", "task": "Fix #140", "startWhen": "tomorrow"]).isError)
+        #expect(await server.call("dispatch", ["repo": "deskree-inc/oby", "kind": "fix", "task": "Fix #140", "startWhen": ["tomorrow"]]).isError)
         #expect(stub.calls.count == calls)
     }
 

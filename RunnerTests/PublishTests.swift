@@ -46,7 +46,7 @@ struct PublishOnItsOwnTests {
         job.issue = 75
         job.base = "dev"
         job.branch = "oby/fix-75"
-        desk.dispatch(Desk.Draft(said: "work on oby #75", reply: "", job: job, guessed: false))
+        desk.dispatch(job)
         for _ in 0..<500 where desk.job(id)?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         agent.onEvent(.session("e6a24229"))
         agent.onEvent(.turnEnded(summary: summary, failed: failed))
@@ -155,7 +155,7 @@ struct PublishOnItsOwnTests {
         new.pr = nil
         new.base = "dev"
         new.branch = "oby/fix-80"
-        restarted.dispatch(Desk.Draft(said: "fix oby #80", reply: "", job: new, guessed: false))
+        restarted.dispatch(new)
         for _ in 0..<500 where restarted.job("new")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         agent.onEvent(.turnEnded(summary: "fix(engine): publish only what ends now", failed: false))
         agent.onEvent(.finished(summary: "fix(engine): publish only what ends now", failed: false))

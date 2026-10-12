@@ -68,8 +68,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Oby's Xcode Cloud recovery stopped, where a person takes over (the runner derives it,
     /// docs/runner-api.md "Xcode Cloud"), or nil from older runners.
     var stoppedCloud: Bool?
-    /// How freely its agent works ("ask", "acceptEdits", "plan" or "bypass", `RunnerMode`); sent
-    /// with a dispatch to pick one. Nil from older runners, and on a draft for the default.
+    /// How freely its agent works ("ask", "acceptEdits", "plan" or "bypass", `RunnerMode`).
+    /// Nil from older runners, and for the runner's default.
     var mode: String?
     /// What its agent waits for the user's OK on, or nil. Older runners don't send it.
     var permission: RunnerPermission?
@@ -293,23 +293,6 @@ nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
 }
 #endif
 
-/// The plan card, before anything runs.
-nonisolated struct Draft: Codable, Equatable, Sendable {
-    var said: String
-    var reply: String
-    var guessed: Bool
-    var job: Job
-    /// A stronger model the brain offers for complex work, or nil.
-    var suggestedModel: String?
-
-    /// The stronger model on `agent`'s tool, or nil when none was offered. The runner runs the
-    /// stronger model of the tool the job ends up with, so picking another account changes it.
-    func strongerModel(for agent: String) -> String? {
-        guard let suggestedModel else { return nil }
-        return agent == job.agent ? suggestedModel : ["claude": "claude-fable-5-1", "codex": "gpt-6-astra"][agent]
-    }
-}
-
 nonisolated struct Question: Codable, Equatable, Sendable {
     var text: String
     /// At most 3 (docs/runner-api.md); the user's own words answer too.
@@ -364,6 +347,7 @@ extension InboxItem {
         case "audit": "Issue audit"
         case "merge": "Not merged"
         case "failure": "Oby failure"
+        case "start": "Start it?"
         case "permission": "Permission"
         default: "Failed"
         }
@@ -376,25 +360,23 @@ extension InboxItem {
     }
 }
 
-/// What the brain made of the user's words.
+/// What the brain made of the user's words (`POST /v1/plans`): the work it planned has started
+/// (#269), and the reply carries those jobs. A `plan` from an older runner reads as a reply with
+/// nothing started.
 nonisolated enum PlanResult: Decodable, Equatable, Sendable {
-    /// One draft per job, 1 to 10.
-    case plan([Draft])
     case question(said: String, Question)
-    case reply(String)
+    /// What Oby said, and the jobs it started for it, 0 to 10.
+    case reply(String, started: [Job])
     case none
 
-    private enum Keys: String, CodingKey { case kind, drafts, draft, said, question, text }
+    private enum Keys: String, CodingKey { case kind, jobs, said, question, text }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
         switch try c.decode(String.self, forKey: .kind) {
-        case "plan":
-            // Older runners send only `draft`.
-            let drafts = try c.decodeIfPresent([Draft].self, forKey: .drafts) ?? []
-            self = .plan(drafts.isEmpty ? [try c.decode(Draft.self, forKey: .draft)] : drafts)
         case "question": self = .question(said: try c.decode(String.self, forKey: .said), try c.decode(Question.self, forKey: .question))
-        case "reply": self = .reply(try c.decode(String.self, forKey: .text))
+        case "reply", "plan":
+            self = .reply(try c.decodeIfPresent(String.self, forKey: .text) ?? "", started: try c.decodeIfPresent([Job].self, forKey: .jobs) ?? [])
         default: self = .none
         }
     }
@@ -843,21 +825,6 @@ nonisolated struct Runner: Sendable {
         try await send("POST", "v1/conversation/stop")
     }
 
-    func dispatch(_ job: Job) async throws -> Job {
-        struct Body: Encodable { var job: DispatchedJob; var mode: String? }
-        return try await call("POST", "v1/jobs", body: Body(job: DispatchedJob(job: job), mode: Self.mode(of: job)))
-    }
-
-    /// The mode a dispatch picked, said next to the job too, or nil for the default. The Mac's
-    /// Engine Job has none yet (#134).
-    static func mode(of job: Job) -> String? {
-        #if os(macOS)
-        return nil
-        #else
-        return job.mode
-        #endif
-    }
-
     // MARK: Permissions (#134)
 
     /// Changes a job's mode; a permission it waits on that the new mode allows is answered.
@@ -1126,21 +1093,6 @@ nonisolated enum MoveChoice {
     static func effect(active: Bool, running: Bool) -> String {
         running ? "Its agent stops, and the round starts over there with the work so far."
             : active ? "It starts there." : "Its next round runs there: tell it something, or Try again."
-    }
-}
-
-/// The job `POST /v1/jobs` sends back. Swift leaves nils out, but a missing check keeps the plan's,
-/// so no check and the usual model go as null.
-nonisolated struct DispatchedJob: Encodable {
-    var job: Job
-
-    private enum Nulls: String, CodingKey { case check, model }
-
-    func encode(to encoder: any Encoder) throws {
-        try job.encode(to: encoder)
-        var nulls = encoder.container(keyedBy: Nulls.self)
-        if job.check == nil { try nulls.encodeNil(forKey: .check) }
-        if job.model == nil { try nulls.encodeNil(forKey: .model) }
     }
 }
 

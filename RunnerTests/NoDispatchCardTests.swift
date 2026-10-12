@@ -1,0 +1,220 @@
+import Foundation
+import HTTPTypes
+import Hummingbird
+import HummingbirdTesting
+import Testing
+@testable import ObyEngine
+@testable import oby_runner
+
+/// No Dispatch card (#269): the work the brain plans starts as it's planned and joins Oby's turn,
+/// with nothing to tap; a plan rules guessed waits in the inbox as Start/Cancel and starts nothing
+/// by itself; `POST /v1/plans` answers the jobs it started; `POST /v1/jobs` takes a whole job, and
+/// a draft's id from before is gone.
+@MainActor
+struct NoDispatchCardTests {
+    let folder: URL
+    let desk: Desk
+    let brain: ConversationTests.FakeBrain
+    let owner: HTTPFields = [.tailscaleUserLogin: "well@example.com"]
+
+    /// The brain's plan for "fix oby #12", with a line of its own.
+    static let fix12 = #"{"action":"dispatch","reply":"On it: fixing #12 in oby.","question":null,"jobs":[],"dispatches":[{"agent":"auto","account":"auto","repo":"deskree-inc/oby","base_branch":null,"pr":null,"issue":12,"epic":null,"kind":"fix","title":"Login screen","task":"Fix #12","inputs":[],"rounds":1,"check":null,"complexity":"routine"}]}"#
+    /// Two jobs from one message, with no line of the brain's: Oby says what started.
+    static let twoJobs = #"{"action":"dispatch","reply":"","question":null,"jobs":[],"dispatches":[{"agent":"auto","account":"auto","repo":"deskree-inc/oby","base_branch":null,"pr":null,"issue":12,"epic":null,"kind":"fix","title":"Login screen","task":"Fix #12","inputs":[],"rounds":1,"check":null,"complexity":"routine"},{"agent":"auto","account":"auto","repo":"deskree-inc/oby","base_branch":null,"pr":33,"issue":null,"epic":null,"kind":"review","title":null,"task":"Review PR #33","inputs":[],"rounds":1,"check":null,"complexity":"routine"}]}"#
+
+    init() throws {
+        folder = try temporaryFolder()
+        let accounts = AccountStore(root: folder)
+        accounts.setLabel("Max · well@example.com", for: "default")
+        desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        desk.repos = ["deskree-inc/oby"]
+        desk.prepare = { $0 }
+        desk.makeAgent = { _, _, _ in ConversationTests.IdleAgent() }
+        desk.issueFiles = { _, issue in issue == 12 ? ["iOS/Home.swift"] : nil }
+        brain = ConversationTests.FakeBrain([Self.fix12])
+        desk.makeBrain = { [brain] _, _ in [brain] }
+    }
+
+    func until(_ what: String, _ condition: () -> Bool) async throws {
+        for _ in 0..<500 where !condition() { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(condition(), Comment(rawValue: what))
+    }
+
+    /// A dispatch plan enqueues its jobs as it's made, routed, with their issues' files and the
+    /// request's attachments, and links them to Oby's turn: no tap, and nothing in the inbox.
+    @Test func aPlanStartsItsJobsAndLinksThemToTheTurn() async throws {
+        brain.plans = [Self.twoJobs]
+        desk.ask("fix oby #12 and review PR 33", attachments: ["/tmp/shot.png"])
+        try await until("the reply comes") { if case .reply = desk.talk { true } else { false } }
+        let turn = try #require(desk.turns.last)
+        #expect(turn.who == .oby)
+        #expect(turn.text == "On it. Claude Code is fixing oby #12 (Login screen) on Default, and Claude Code is reviewing oby PR #33 on Default.")
+        #expect(desk.talk == .reply(turn.text))
+        let started = (turn.jobs ?? []).compactMap(desk.job)
+        #expect(started.map(\.issue) == [12, nil] && started.map(\.pr) == [nil, 33])
+        #expect(started.map(\.branch) == ["oby/fix-12", "oby/review-33"] && started.map(\.account) == ["default", "default"])
+        #expect(started.first?.title == "Login screen" && started.first?.files == ["iOS/Home.swift"])
+        #expect(started.map(\.attachments) == [["/tmp/shot.png"], ["/tmp/shot.png"]])
+        #expect(desk.inbox.isEmpty && JobStore(url: folder.appending(path: "oby.sqlite")).conversation().last?.jobs == started.map(\.id))
+        try await until("they run") { started.allSatisfy { desk.job($0.id)?.status == .running } }
+
+        // The brain's own line, when it gave one.
+        brain.plans = [Self.fix12]
+        desk.ask("fix oby #12")
+        try await until("the brain's line comes") { desk.turns.last?.text == "On it: fixing #12 in oby." }
+        #expect(desk.turns.last?.jobs?.count == 1 && desk.jobs.count == 3)
+    }
+
+    /// A turn cancelled, or given up on, while the plan's jobs were being made (the issues' files
+    /// take network time) starts nothing and asks nothing: `live` is checked again right before.
+    @Test func aCancelledOrLateTurnStartsNothing() async throws {
+        final class Gate: @unchecked Sendable {
+            var reading = false
+            var open = false
+        }
+        let gate = Gate()
+        desk.issueFiles = { [gate] _, _ in
+            gate.reading = true
+            while !gate.open { try? await Task.sleep(for: .milliseconds(10)) }
+            return ["iOS/Home.swift"]
+        }
+        desk.ask("fix oby #12")
+        try await until("the files are being read") { gate.reading }
+        desk.cancel()
+        gate.open = true
+        try await until("the plan is dead") { brain.answered.count == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(desk.jobs.isEmpty && desk.inbox.isEmpty && desk.turns.isEmpty && desk.talk == .none)
+
+        // Past its time while the files are still being read: the turn ends with "didn't answer
+        // in time", and the plan, when the files come, starts nothing.
+        gate.reading = false
+        gate.open = false
+        desk.patience = .seconds(1)
+        desk.ask("fix oby #12")
+        try await until("the files are being read again") { gate.reading }
+        #expect(desk.talk == .thinking("fix oby #12"))
+        try await until("the turn gives up") { desk.talk == .reply(Conversation.timedOut) }
+        gate.open = true
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(desk.jobs.isEmpty && desk.inbox.isEmpty && desk.turns.count == 2 && desk.turns.last?.jobs == nil)
+        // A guess that comes late asks nothing either.
+        brain.plans = ["not a plan"]
+        gate.reading = false
+        gate.open = false
+        desk.ask("fix oby #12")
+        try await until("the files are being read for the guess") { gate.reading }
+        try await until("the turn gives up again") { desk.turns.count == 4 && desk.talk == .reply(Conversation.timedOut) }
+        gate.open = true
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(desk.jobs.isEmpty && desk.inbox.isEmpty)
+    }
+
+    /// The permission mode the user named ("plan first", #134) goes with the job a plan starts;
+    /// without one, Settings' default. `POST /v1/jobs` takes one too, and refuses any other.
+    @Test func startedJobsKeepTheirMode() async throws {
+        brain.plans = [Self.fix12.replacingOccurrences(of: #""complexity":"routine"}"#, with: #""complexity":"routine","mode":"plan"}"#), Self.fix12]
+        _ = await desk.converse("fix oby #12, plan first")
+        #expect(desk.jobs.first?.mode == .plan)
+        _ = await desk.converse("fix oby #12")
+        #expect(desk.jobs.first?.mode == desk.defaultMode && desk.jobs.count == 2)
+
+        let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
+        let app = Application(router: api.router(owner: "well@example.com"))
+        try await app.test(.router) { [owner] client in
+            func post(_ body: String) async throws -> (HTTPResponse.Status, [String: Any]) {
+                try await client.execute(uri: "/v1/jobs", method: .post, headers: owner, body: ByteBuffer(string: body)) { response in
+                    (response.status, (try? JSONSerialization.jsonObject(with: Data(response.body.readableBytesView)) as? [String: Any]) ?? [:])
+                }
+            }
+            let (status, started) = try await post(#"{"job": {"repo": "deskree-inc/oby", "kind": "fix", "task": "Fix #12", "issue": 12, "mode": "acceptEdits"}}"#)
+            #expect(status == .created && started["mode"] as? String == "acceptEdits")
+            let (_, defaulted) = try await post(#"{"job": {"repo": "deskree-inc/oby", "kind": "fix", "task": "Fix #12", "issue": 12}}"#)
+            #expect(defaulted["mode"] as? String == desk.defaultMode.rawValue)
+            #expect(try await post(#"{"job": {"repo": "deskree-inc/oby", "kind": "fix", "task": "Fix #12", "mode": "sometimes"}}"#).0 == .unprocessableContent)
+        }
+    }
+
+    /// When no brain answers, rules guess: the reply says so, nothing starts, and each guessed job
+    /// waits in the inbox with Start (recommended) and Cancel. Start queues it as planned and adds
+    /// Oby's turn with its card; Cancel drops it; other words are refused.
+    @Test func aRulesGuessAsksBeforeAnythingStarts() async throws {
+        brain.plans = ["not a plan"]
+        let talk = await desk.converse("fix oby #12")
+        #expect(talk == .reply("Oby's brain didn't answer, so this is a guess: Fix oby #12 on Claude Code · Default. Start it from your inbox, or say it another way."))
+        #expect(desk.jobs.isEmpty && desk.turns.last?.jobs == nil)
+        let item = try #require(desk.inbox.first)
+        #expect(item.kind == .start && item.isOpen && item.isDecision && item.options == ["Start", "Cancel"] && item.recommended == 0)
+        #expect(item.text == "Oby's brain didn't answer, so this plan is a guess. Start Fix oby #12 on Claude Code · Default?")
+        #expect(item.title == "Fix oby #12" && item.job == item.proposed?.id && item.proposed?.issue == 12 && item.proposed?.files == ["iOS/Home.swift"])
+        #expect(item.details?.count == 2 && item.id == "\(item.job)-start")
+        // Kept with the job, so Start works after a restart.
+        #expect(JobStore(url: folder.appending(path: "oby.sqlite")).inbox().first?.proposed?.id == item.job)
+
+        // Cancel: done, nothing started.
+        try desk.settle(item.id, .answer(Inbox.cancelStart))
+        #expect(desk.inbox.first?.isOpen == false && desk.inbox.first?.answer == "Cancel" && desk.jobs.isEmpty)
+
+        // Asked again: a new proposal. Only Start or Cancel answer it.
+        _ = await desk.converse("fix oby #12")
+        let open = desk.inbox.filter(\.isOpen)
+        let again = try #require(open.last)
+        #expect(again.id != item.id)
+        #expect(throws: Shell.Failure.self) { try desk.settle(again.id, .answer("Yes")) }
+        #expect(desk.jobs.isEmpty)
+        try desk.settle(again.id, .answer(Inbox.start))
+        let job = try #require(desk.jobs.first)
+        #expect(job.id == again.proposed?.id && job.issue == 12 && job.account == "default")
+        #expect(desk.inbox.last?.isOpen == false && desk.inbox.last?.answer == "Start")
+        #expect(desk.turns.last?.who == .oby && desk.turns.last?.jobs == [job.id] && desk.turns.last?.text == "On it. Claude Code is fixing oby #12 on Default.")
+        try await until("it runs") { desk.job(job.id)?.status == .running }
+    }
+
+    /// `POST /v1/plans` answers the jobs it started, in full, with `drafts` empty; `POST /v1/jobs`
+    /// takes a whole job, checked like a plan, and answers `410` to a draft's id from before.
+    @Test func theAPIAnswersTheJobsItStartedAndRefusesDrafts() async throws {
+        let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
+        let app = Application(router: api.router(owner: "well@example.com"))
+        try await app.test(.router) { [owner, desk] client in
+            func post(_ path: String, _ body: String) async throws -> (HTTPResponse.Status, [String: Any]) {
+                try await client.execute(uri: path, method: .post, headers: owner, body: ByteBuffer(string: body)) { response in
+                    (response.status, (try? JSONSerialization.jsonObject(with: Data(response.body.readableBytesView)) as? [String: Any]) ?? [:])
+                }
+            }
+            let (status, plan) = try await post("/v1/plans", #"{"said": "fix oby #12"}"#)
+            #expect(status == .ok && plan["kind"] as? String == "reply" && plan["text"] as? String == "On it: fixing #12 in oby.")
+            let jobs = try #require(plan["jobs"] as? [[String: Any]])
+            #expect(jobs.count == 1 && jobs.first?["issue"] as? Int == 12 && jobs.first?["status"] as? String == "queued")
+            #expect(jobs.first?["files"] as? [String] == ["iOS/Home.swift"] && jobs.first?["title"] as? String == "Login screen")
+            #expect((plan["drafts"] as? [Any])?.isEmpty == true)
+            let id = try #require(jobs.first?["id"] as? String)
+            #expect(desk.turns.last?.jobs == [id])
+
+            // A draft's id, from a client from before: gone, and told where to go.
+            let (gone, error) = try await post("/v1/jobs", #"{"job": {"id": "\#(id)", "branch": "oby/fix-12", "account": "default"}}"#)
+            #expect(gone == .gone && (error["error"] as? String)?.hasPrefix("Oby starts planned work by itself now") == true)
+            #expect(try await post("/v1/jobs", #"{"job": {"repo": "deskree-inc/oby"}}"#).0 == .unprocessableContent)
+
+            // A whole job: routed, checked like a plan, with what the client set.
+            let (created, started) = try await post("/v1/jobs", #"{"job": {"repo": "deskree-inc/oby", "kind": "review", "task": "Review PR 33", "pr": 33, "title": "Cards review", "account": "Default", "rounds": 3, "check": "swift test", "model": "claude-fable-5-1", "files": ["Engine/Desk.swift"]}}"#)
+            #expect(created == .created, "\(started)")
+            #expect(started["kind"] as? String == "review" && started["pr"] as? Int == 33 && started["title"] as? String == "Cards review")
+            #expect(started["account"] as? String == "default" && started["agent"] as? String == "claude" && started["branch"] as? String == "oby/review-33")
+            #expect(started["rounds"] as? Int == 3 && started["check"] as? String == "swift test" && started["model"] as? String == "claude-fable-5-1")
+            #expect(started["files"] as? [String] == ["Engine/Desk.swift"] && started["status"] as? String == "queued")
+
+            // What a plan would be refused for, this is: an unknown repository or kind, a path
+            // outside the repository, a model the tool hasn't, an account there isn't.
+            for body in [#"{"job": {"repo": "deskree-inc/nope", "kind": "fix", "task": "x"}}"#,
+                         #"{"job": {"repo": "deskree-inc/oby", "kind": "deploy", "task": "x"}}"#,
+                         #"{"job": {"repo": "deskree-inc/oby", "kind": "fix", "task": "x", "files": ["/etc/passwd"]}}"#,
+                         #"{"job": {"repo": "deskree-inc/oby", "kind": "fix", "task": "x", "model": "gpt-6-astra"}}"#,
+                         #"{"job": {"repo": "deskree-inc/oby", "kind": "fix", "task": "x", "account": "Nobody"}}"#,
+                         #"{"job": {"repo": "deskree-inc/oby", "kind": "fix", "task": "x", "branch": "-rf"}}"#] {
+                #expect(try await post("/v1/jobs", body).0 == .unprocessableContent, Comment(rawValue: body))
+            }
+        }
+        try await until("both run") { desk.jobs.filter { $0.status == .running }.count == 2 }
+        #expect(desk.jobs.count == 2)
+    }
+}

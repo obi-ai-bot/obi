@@ -49,7 +49,7 @@ struct RestartTests {
         work.id = id
         work.rounds = rounds
         let before = made.agents.count
-        (desk ?? self.desk).dispatch(Desk.Draft(said: "review", reply: "", job: work, guessed: false))
+        (desk ?? self.desk).dispatch(work)
         for _ in 0..<500 where made.agents.count == before { try await Task.sleep(for: .milliseconds(10)) }
         let agent = try #require(made.agents.last?.agent)
         agent.onEvent(.session("\(id)-session"))
@@ -125,7 +125,7 @@ struct RestartTests {
         fix.pr = nil
         fix.base = "dev"
         fix.branch = "oby/fix-206"
-        desk.dispatch(Desk.Draft(said: "fix oby #206", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         for _ in 0..<500 where made.agents.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
         let asking = try #require(made.agents.last?.agent)
         asking.onEvent(.session("fixing-session"))

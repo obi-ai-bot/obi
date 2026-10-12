@@ -164,7 +164,7 @@ struct MoveJobTests {
         fix.agent = "codex"
         fix.rounds = rounds
         fix.check = check
-        desk.dispatch(Desk.Draft(said: "work on oby #75", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         try await until { desk.job(id)?.status == .running }
         return try #require(made.agents.last?.agent)
     }
@@ -281,7 +281,7 @@ struct MoveJobTests {
         fix.id = "queued"
         fix.account = codex.id
         fix.agent = "codex"
-        desk.dispatch(Desk.Draft(said: "review", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         let moved = try desk.move("queued", to: MoveTarget(account: "Personal"))
         #expect(moved.status == .queued && moved.agent == "claude")
         gate.continuation.yield()
@@ -329,7 +329,7 @@ struct MoveJobTests {
         other.title = "Watch home"
         other.account = codex.id
         other.agent = "codex"
-        desk.dispatch(Desk.Draft(said: "work on oby #76", reply: "", job: other, guessed: false))
+        desk.dispatch(other)
         try await until { desk.job("bbbb2222")?.status == .running }
         let second = try #require(made.agents.last?.agent)
         second.onEvent(.session("thread-2"))

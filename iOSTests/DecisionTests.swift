@@ -57,14 +57,15 @@ struct DecisionTests {
         #expect(decoded[1].repo == nil && decoded[1].created == nil)
     }
 
-    /// A dispatch that picked a mode says it on the job and beside it; one that didn't leaves it out.
-    @Test func dispatchCarriesTheMode() throws {
+    /// A job's mode, as the runner sends it (#134), stays on the job; one without leaves it out.
+    /// Nothing picks it at a dispatch any more (#269): it changes on the job's screen.
+    @Test func jobsCarryTheirMode() throws {
         var job = try Runner.decoder.decode(Job.self, from: Data((job + "}").utf8))
-        #expect((try JSONSerialization.jsonObject(with: Runner.encoder.encode(DispatchedJob(job: job))) as? [String: Any])?["mode"] == nil)
+        #expect((try JSONSerialization.jsonObject(with: Runner.encoder.encode(job)) as? [String: Any])?["mode"] == nil)
         job.mode = RunnerMode.plan.rawValue
-        let body = try JSONSerialization.jsonObject(with: Runner.encoder.encode(DispatchedJob(job: job))) as? [String: Any]
+        let body = try JSONSerialization.jsonObject(with: Runner.encoder.encode(job)) as? [String: Any]
         #expect(body?["mode"] as? String == "plan")
-        #expect(Runner.mode(of: job) == "plan")
+        #expect(try Runner.decoder.decode(Job.self, from: Runner.encoder.encode(job)).mode == "plan")
     }
 
     @Test func recommendedComesFirst() {

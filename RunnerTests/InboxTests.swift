@@ -66,7 +66,7 @@ final class InboxTests {
         desk.makeAgent = { _, _, _ in agent }
         desk.prepare = { $0 }
         desk.countCommits = { _, _ in 0 }
-        desk.dispatch(Desk.Draft(said: "work on oby #62", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         for _ in 0..<500 where desk.job("ask62")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         agent.onEvent(.session("e6a24229"))
         return desk

@@ -72,7 +72,8 @@ final class IslandModel {
 
     func sendChat(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text, shown: text)
+        desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text, shown: text, attachments: tray.paths)
+        tray.clear()
     }
 
     func stopChatJob(_ id: String, local: Bool) {
@@ -746,7 +747,7 @@ private struct OpenIsland: View {
     /// The job list is on screen, a runner is set (it keeps the clear's time), and a settled job is listed.
     private var clearable: Bool {
         switch desk.talk {
-        case .plan, .question: false
+        case .question: false
         default: feed.runner != nil && rows.contains { model.clears($0.job) }
         }
     }
@@ -953,16 +954,6 @@ private struct OpenIsland: View {
                             onOpenJob: { onOpenWindow((id: $0, local: $1)) }, showTime: false)
                 }
                 switch desk.talk {
-                case .plan(let drafts) where drafts.count == 1:
-                    PlanCard(draft: drafts[0], accounts: desk.accounts.accounts.filter(\.signedIn),
-                             onDispatch: { desk.dispatch(tray.attach($0)); tray.clear() },
-                             onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
-                             onCancel: { desk.cancel() })
-                case .plan(let drafts):
-                    PlansCard(drafts: drafts, accounts: desk.accounts.accounts.filter(\.signedIn),
-                              onDispatch: { for draft in $0 { desk.dispatch(tray.attach(draft)) }; tray.clear() },
-                              onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
-                              onCancel: { desk.cancel() })
                 case .question(let said, let question):
                     DecisionCard(title: question.text, options: question.cardOptions,
                                  keyboardEnabled: true, onLater: { desk.cancel() },
@@ -1014,6 +1005,7 @@ private struct OpenIsland: View {
     }
 }
 
+/*
 /// The plan, before anything runs: agent, account, repository and branch. Dispatch, Edit, Cancel.
 /// The window shows it under the thread too (Mac/App/ChatWindow.swift).
 struct PlanCard: View {
@@ -1273,6 +1265,8 @@ private struct StrongerModel: View {
         }
     }
 }
+
+*/
 
 /// One job in the list, as the iPhone's row: its tool's mark, its title, where it runs, the stage
 /// it's at, its line, the status pill and Oby's verdict. Click it for the job's screen. A job that

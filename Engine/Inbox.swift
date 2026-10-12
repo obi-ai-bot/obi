@@ -25,6 +25,9 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         case merge
         /// A failure's post-mortem found an Oby bug or a repeat (Engine/Failures.swift): Fix it starts the fix job.
         case failure
+        /// A plan the brain didn't make: rules guessed it from the words (#269). Start starts the
+        /// job it proposes (`proposed`), as planned; Cancel drops it. Nothing runs until then.
+        case start
         /// The job's agent waits for the user's OK to run a command or edit a file (`Job.permission`, #134).
         case permission
 
@@ -39,6 +42,7 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
             case .merge: [Inbox.oneMoreRound, Inbox.tryAgain, Inbox.dismiss]
             case .audit: [Inbox.addColumn, Inbox.tryAgain, Inbox.ignoreStatus]
             case .failure: [Failures.fixIt, Inbox.dismiss]
+            case .start: [Inbox.start, Inbox.cancelStart]
             case .permission: [Inbox.allow, Inbox.alwaysAllow, Inbox.deny]
             }
         }
@@ -81,6 +85,9 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
     var happened: String?
     var recommended: Int?
     var why: String?
+    /// On a `start` item, the job a guessed plan proposes (#269), routed and ready to queue: Start
+    /// starts it, after a restart too. Nil on every other kind, and never sent to clients.
+    var proposed: Job?
 
     var isOpen: Bool { done == nil }
 
@@ -110,6 +117,23 @@ nonisolated enum Inbox {
     static let addColumn = "Add the column"
     static let ignoreStatus = "Ignore this status"
     static func useInstead(_ column: String) -> String { "Use \(column) instead" }
+    /// What a guessed plan's item offers (#269): start the job as rules planned it, or drop it.
+    static let start = "Start"
+    static let cancelStart = "Cancel"
+
+    /// The item a guessed plan's job waits in: the brain didn't answer, so the user says whether
+    /// what rules made of their words is what they meant. `account` is where it would run.
+    static func proposal(_ job: Job, account: String) -> InboxItem {
+        var item = InboxItem(id: "\(job.id)-start", kind: .start, job: job.id, title: job.shortTitle,
+                             text: "Oby's brain didn't answer, so this plan is a guess. Start \(job.heading) on \(account)?",
+                             options: [start, cancelStart],
+                             details: ["Starts it now, as planned: \(job.kind.rawValue) in \(job.repoName) on \(account), on the branch \(job.branch).",
+                                       "Drops the plan. Nothing starts; say it another way."],
+                             created: .now)
+        item.recommended = 0
+        item.proposed = job
+        return item
+    }
     /// The column a `Use <column> instead` answer names, or nil.
     static func instead(_ answer: String) -> String? {
         answer.wholeMatch(of: /Use (.+) instead/).map { String($0.1) }

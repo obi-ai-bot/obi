@@ -171,13 +171,14 @@ final class API {
 
     /// One turn of the conversation. The client may send the recent turns it shows; the brain
     /// reads them as the conversation so far, else the runner's own. Either way the exchange joins
-    /// the runner's conversation.
+    /// the runner's conversation, and the work it plans starts (#269): the answer carries the jobs.
     func plan(_ request: PlanRequest) async throws -> Response {
         let words = request.said.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !words.isEmpty else { return Self.json(PlanAnswer(.none)) }
         let turns = try request.turns.map(Self.turns)
         let said = request.answer.map { Desk.answered(words, question: $0.question, option: $0.option) } ?? words
-        return Self.json(PlanAnswer(await desk.converse(said, shown: request.answer?.option, turns: turns)))
+        let (talk, started) = await desk.exchange(said, shown: request.answer?.option, turns: turns)
+        return Self.json(PlanAnswer(talk, started: started))
     }
 
     /// One page of the conversation, oldest first: the latest `limit` turns (50 unless asked,
@@ -204,13 +205,18 @@ final class API {
         }
     }
 
-    func dispatch(_ request: DispatchRequest) throws -> Response {
+    /// `POST /v1/jobs`: a whole job to start (#269). A body with a draft's id and no work of its
+    /// own is from before Oby started planned work by itself: `410`, with where it went.
+    func dispatch(_ request: DispatchRequest) async throws -> Response {
+        guard var new = request.job.new else {
+            if request.job.id != nil {
+                throw APIError(.gone, "Oby starts planned work by itself now: POST /v1/plans starts it and answers the jobs. POST /v1/jobs takes a whole job (repo, kind, task).")
+            }
+            throw APIError(.unprocessableContent, "A job needs repo, kind and task.")
+        }
+        new.mode = try request.job.mode.map { try Self.mode($0) }
         do {
-            let mode = try request.job.mode.map { try Self.mode($0) }
-            let job = try desk.dispatch(request.job.id, branch: request.job.branch, account: request.job.account,
-                                        rounds: request.job.rounds, check: request.job.check, model: request.job.model,
-                                        files: request.job.files, startWhen: request.job.startWhen, mode: mode)
-            return Self.json(JobJSON(job: job), status: .created)
+            return Self.json(JobJSON(job: try await desk.dispatch(new)), status: .created)
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
@@ -1179,43 +1185,21 @@ struct AccountJSON: Encodable {
     }
 }
 
-/// What `POST /v1/plans` answers: a plan, the brain's question, a reply, or nothing.
+/// What `POST /v1/plans` answers: a reply with the jobs it started, the brain's question, or
+/// nothing. `drafts` is always empty (#269): there's no plan to dispatch any more, and older
+/// clients read it as a plan with no jobs.
 struct PlanAnswer: Encodable {
-    struct Draft: Encodable {
-        var said: String
-        var reply: String
-        var guessed: Bool
-        var job: JobJSON
-        /// A stronger model for complex work, or null; the job uses it only if the client asks.
-        var suggestedModel: String?
-
-        private enum Keys: String, CodingKey { case said, reply, guessed, job, suggestedModel }
-
-        func encode(to encoder: any Encoder) throws {
-            var keys = encoder.container(keyedBy: Keys.self)
-            try keys.encode(said, forKey: .said)
-            try keys.encode(reply, forKey: .reply)
-            try keys.encode(guessed, forKey: .guessed)
-            try keys.encode(job, forKey: .job)
-            try keys.encode(suggestedModel, forKey: .suggestedModel)
-        }
-    }
-
     var kind: String
-    /// Every job of the plan.
-    var drafts: [Draft]?
-    /// The first one, for apps that know only one job per plan.
-    var draft: Draft?
+    /// The jobs the turn started, for a reply; always a list.
+    var jobs: [JobJSON]
+    var drafts: [JobJSON] = []
     var said: String?
     var question: Plan.Question?
     var text: String?
 
-    @MainActor init(_ talk: Desk.Talk) {
+    @MainActor init(_ talk: Desk.Talk, started: [Job] = []) {
+        jobs = started.map { JobJSON(job: $0) }
         switch talk {
-        case .plan(let list):
-            kind = "plan"
-            drafts = list.map { Draft(said: $0.said, reply: $0.reply, guessed: $0.guessed, job: JobJSON(job: $0.job), suggestedModel: $0.suggestedModel) }
-            draft = drafts?.first
         case .question(let said, let question):
             kind = "question"
             self.said = said
@@ -1247,45 +1231,43 @@ struct PlanRequest: Decodable {
     var turns: [Turn]?
 }
 
-/// Only what the user may change on a plan, and the plan's job id; the rest comes from the plan.
+/// A whole job for `POST /v1/jobs` (#269): the work (`repo`, `kind`, `task`), what it's about
+/// (`pr`, `issue`, `title`), and what a client may set (branch, base, account, rounds, check,
+/// model, files, startWhen). `id` alone is an older client's draft: refused with `410`.
 struct DispatchRequest: Decodable {
-    /// The plan's job as the client sends it back. Rounds and check are optional: an older app
-    /// leaves them out and the plan's values stay; `"check": null` clears the check.
-    struct Edited: Decodable {
-        var id: String
-        var branch: String
-        var account: String
+    struct Body: Decodable {
+        var id: String?
+        var repo: String?
+        var kind: String?
+        var task: String?
+        var pr: Int?
+        var issue: Int?
+        var title: String?
+        var branch: String?
+        var base: String?
+        var account: String?
+        var agent: String?
         var rounds: Int?
-        var check: String??
-        /// The draft's suggested model to use it, or null to stay on Settings › Models.
-        var model: String??
-        /// The files the job claims (#209), replacing the plan's; an empty list claims none. Left
-        /// out or null, the plan's stay.
+        var check: String?
+        var model: String?
+        /// The files the job claims (#209); an empty list claims none, left out its issue's.
         var files: [String]?
-        /// What the job waits for before it starts (#216), replacing the plan's; an empty list starts
-        /// it at once. Left out or null, the plan's stay.
+        /// What the job waits for before it starts (#216); left out or empty, it starts at once.
         var startWhen: [StartCondition]?
-
-        /// How the job asks (`ask`, `acceptEdits`, `plan` or `bypass`); left out, Settings' default.
+        var request: String?
+        /// How the job asks (`ask`, `acceptEdits`, `plan` or `bypass`, #134); left out, Settings' default.
         var mode: String?
 
-        private enum Keys: String, CodingKey { case id, branch, account, rounds, check, model, files, startWhen, mode }
-
-        init(from decoder: any Decoder) throws {
-            let keys = try decoder.container(keyedBy: Keys.self)
-            id = try keys.decode(String.self, forKey: .id)
-            branch = try keys.decode(String.self, forKey: .branch)
-            account = try keys.decode(String.self, forKey: .account)
-            rounds = try keys.decodeIfPresent(Int.self, forKey: .rounds)
-            check = keys.contains(.check) ? .some(try keys.decodeIfPresent(String.self, forKey: .check)) : nil
-            model = keys.contains(.model) ? .some(try keys.decodeIfPresent(String.self, forKey: .model)) : nil
-            files = try keys.decodeIfPresent([String].self, forKey: .files)
-            startWhen = try keys.decodeIfPresent([StartCondition].self, forKey: .startWhen)
-            mode = try keys.decodeIfPresent(String.self, forKey: .mode)
+        /// The job to start, or nil when the body holds no work of its own. Its mode is checked by the endpoint.
+        var new: Desk.NewJob? {
+            guard let repo, let kind, let task else { return nil }
+            return Desk.NewJob(repo: repo, kind: kind, task: task, pr: pr, issue: issue, title: title, branch: branch, base: base,
+                               account: account, agent: agent, rounds: rounds, check: check, model: model, files: files,
+                               startWhen: startWhen.flatMap { $0.isEmpty ? nil : $0 }, request: request)
         }
     }
 
-    var job: Edited
+    var job: Body
 }
 
 /// A phone's approval to publish one job.

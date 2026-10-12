@@ -55,7 +55,9 @@ let accounts: JSON = [
     ["id": "work", "agent": "codex", "name": "Deskree", "label": "Plus", "signedIn": true, "fiveHour": 0.5, "sevenDay": nil, "running": 0],
 ]
 
-func server(_ stub: StubRunner) -> Server {
+func server(_ stub: StubRunner) -> Server { oby_mcpTestServer(stub) }
+
+func oby_mcpTestServer(_ stub: StubRunner) -> Server {
     Server(runner: stub.api, now: { Date(timeIntervalSince1970: 1_791_000_000) }, sleep: { _ in }, interval: 5)
 }
 
@@ -87,7 +89,7 @@ func inside(_ text: String) -> [String] {
         let listed = try JSON.parse(Data(try #require(await server.handle(#"{"jsonrpc":"2.0","id":"two","method":"tools/list"}"#)).utf8))
         #expect(listed["id"] == "two")
         let names = Set(listed["result"]?["tools"]?.array?.compactMap { $0["name"]?.string } ?? [])
-        #expect(names == ["status", "jobs", "job", "inbox", "wait", "plan", "dispatch", "start", "message", "stop", "dismiss",
+        #expect(names == ["status", "jobs", "job", "inbox", "wait", "ask", "plan", "dispatch", "start", "message", "stop", "dismiss",
                           "answer", "later", "done", "publish", "merge", "settings"])
         for tool in listed["result"]?["tools"]?.array ?? [] {
             #expect(tool["inputSchema"]?["type"] == "object")
@@ -204,78 +206,76 @@ func inside(_ text: String) -> [String] {
         #expect(stub.calls.count == 3)
     }
 
-    @Test func planThenDispatch() async throws {
+    /// ask says the words to Oby, which starts the work it plans (#269): the reply comes with the
+    /// jobs, each in full. plan is its older name.
+    @Test func askStartsTheWork() async throws {
         let stub = StubRunner()
-        var draftJob = job("ab12cd34", status: "queued", stage: 1).object!
-        draftJob["rounds"] = 1
-        draftJob["model"] = nil
-        stub.answer("POST /v1/plans", ["kind": "plan", "drafts": [["said": "fix oby #140", "reply": "Oby will fix #140 in oby.", "guessed": false,
-                                                                  "job": .object(draftJob), "suggestedModel": "claude-fable-5-1"]]])
+        var started = job("ab12cd34", status: "queued", stage: 1).object!
+        started["rounds"] = 1
+        started["files"] = ["Engine/Review.swift", "RunnerTests/"]
+        stub.answer("POST /v1/plans", ["kind": "reply", "text": "On it. Claude Code is fixing oby #140 on Personal.", "jobs": [.object(started)], "drafts": []])
+        let server = server(stub)
+
+        let asked = await server.call("ask", ["said": "fix oby #140"])
+        #expect(!asked.isError, "\(asked.text)")
+        #expect(asked.text.hasPrefix("Oby started 1 job, queued on the runner. Follow them with job or wait; stop one with stop.\n"))
+        #expect(asked.text.contains("On it. Claude Code is fixing oby #140 on Personal."))
+        #expect(asked.text.contains("job: ab12cd34") && asked.text.contains("branch: oby/fix-140") && asked.text.contains("files: Engine/Review.swift, RunnerTests/"))
+        #expect(asked.text.contains("title: Mac runner notifications") && asked.text.contains("repo: deskree-inc/oby"))
+        #expect(asked.text.contains("rounds: 1") && asked.text.contains("check: swift test"))
+        #expect(asked.text.contains("account: default"))
+        #expect(inside(asked.text).count == 2)
+        #expect(stub.calls.last == .init(method: "POST", path: "/v1/plans", body: ["said": "fix oby #140"]))
+        #expect(await server.call("plan", ["said": "fix oby #140"]).text == asked.text)
+        #expect(stub.calls.count == 2)
+
+        // A reply that started nothing is the reply alone.
+        let quiet = StubRunner()
+        quiet.answer("POST /v1/plans", ["kind": "reply", "text": "Nothing is running.", "jobs": [], "drafts": []])
+        let reply = await oby_mcpTestServer(quiet).call("ask", ["said": "anything running?"])
+        #expect(!reply.text.contains("Oby started") && inside(reply.text) == ["Nothing is running."])
+    }
+
+    /// dispatch starts a job described whole: what's given goes to `POST /v1/jobs`, the account by
+    /// id, and nothing else is made up; without the work it's refused before the runner hears of it.
+    @Test func dispatchStartsAWholeJob() async throws {
+        let stub = StubRunner()
         stub.answer("GET /v1/status", ["accounts": accounts])
         stub.answer("POST /v1/jobs", job("ab12cd34", status: "queued", stage: 1), status: 201)
         let server = server(stub)
 
-        let plan = await server.call("plan", ["said": "fix oby #140"])
-        #expect(plan.text.hasPrefix("Oby planned 1 job. Nothing runs until it's dispatched"))
-        #expect(plan.text.contains("stronger model offered: claude-fable-5-1"))
-        #expect(stub.calls.last == .init(method: "POST", path: "/v1/plans", body: ["said": "fix oby #140"]))
-
-        let dispatched = await server.call("dispatch", ["draft": "ab12cd34", "account": "Codex", "rounds": 4, "check": "swift test --parallel", "stronger": true])
-        #expect(!dispatched.isError, "\(dispatched.text)")
+        let started = await server.call("dispatch", ["repo": "deskree-inc/oby", "kind": "fix", "task": "Fix #140", "issue": 140, "account": "Codex", "rounds": 4,
+                                                     "check": "swift test --parallel", "model": "gpt-6-astra", "mode": "plan", "files": ["Engine/Checks.swift", "docs/"]])
+        #expect(!started.isError, "\(started.text)")
+        #expect(started.text.hasPrefix("Started: it's queued on the runner. Follow it with job or wait.\n"))
         let sent = try #require(stub.calls.last)
         #expect(sent.method == "POST" && sent.path == "/v1/jobs")
         let sentJob = try #require(sent.body?["job"])
-        #expect(sentJob["id"] == "ab12cd34")
-        #expect(sentJob["account"] == "work")
-        #expect(sentJob["agent"] == "codex")
-        #expect(sentJob["rounds"] == 4)
-        #expect(sentJob["check"] == "swift test --parallel")
-        #expect(sentJob["model"] == "claude-fable-5-1")
-        #expect(sentJob["branch"] == "oby/fix-140")
+        #expect(sentJob["repo"] == "deskree-inc/oby" && sentJob["kind"] == "fix" && sentJob["task"] == "Fix #140" && sentJob["issue"] == 140)
+        #expect(sentJob["account"] == "work" && sentJob["rounds"] == 4 && sentJob["check"] == "swift test --parallel" && sentJob["model"] == "gpt-6-astra")
+        #expect(sentJob["files"] == ["Engine/Checks.swift", "docs/"] && sentJob["id"] == nil && sentJob["agent"] == nil && sentJob["branch"] == nil)
+        #expect(sentJob["title"] == nil && sentJob["pr"] == nil && sentJob["startWhen"] == nil)
+        #expect(sentJob["mode"] == "plan")
+        #expect(started.text.contains("ab12cd34"))
 
-        // A draft starts once.
-        let again = await server.call("dispatch", ["draft": "ab12cd34"])
-        #expect(again.isError)
-        #expect(again.text.contains("call plan first"))
-    }
+        // Only what's given: the runner routes, names the branch and reads the issue's files.
+        _ = await server.call("dispatch", ["repo": "deskree-inc/oby", "kind": "review", "task": "Review PR 12", "pr": 12])
+        #expect(stub.calls.last?.body?["job"] == ["repo": "deskree-inc/oby", "kind": "review", "task": "Review PR 12", "pr": 12])
 
-    @Test func dispatchKeepsThePlanAndClearsACheck() async throws {
-        let stub = StubRunner()
-        stub.answer("POST /v1/plans", ["kind": "plan", "drafts": [["reply": "", "guessed": true, "job": job("ab12cd34", status: "queued", stage: 1), "suggestedModel": nil]]])
-        stub.answer("POST /v1/jobs", job("ab12cd34", status: "queued", stage: 1), status: 201)
-        let server = server(stub)
-        _ = await server.call("plan", ["said": "fix oby #140"])
-        #expect(await server.call("dispatch", ["draft": "ab12cd34", "stronger": true]).text == "This draft offers no stronger model.")
-        _ = await server.call("dispatch", ["draft": "ab12cd34", "check": ""])
-        let sentJob = try #require(stub.calls.last?.body?["job"])
-        #expect(sentJob["check"] == .null)
-        #expect(sentJob["account"] == "default")
-        #expect(sentJob["rounds"] == 1)
-        #expect(sentJob["model"] == .null)
-    }
-
-    /// The draft's claim shows, and dispatch may replace it (#209).
-    @Test func dispatchClaimsFiles() async throws {
-        let stub = StubRunner()
-        var draftJob = job("ab12cd34", status: "queued", stage: 1).object!
-        draftJob["files"] = ["Engine/Review.swift", "RunnerTests/"]
-        stub.answer("POST /v1/plans", ["kind": "plan", "drafts": [["reply": "", "guessed": false, "job": .object(draftJob)]]])
-        stub.answer("POST /v1/jobs", job("ab12cd34", status: "queued", stage: 1), status: 201)
-        let server = server(stub)
-        #expect(await server.call("plan", ["said": "fix oby #140"]).text.contains("files: Engine/Review.swift, RunnerTests/"))
-        #expect(await server.call("dispatch", ["draft": "ab12cd34", "files": "Engine/"]).isError)
-        #expect(stub.calls.count == 1)
-        _ = await server.call("dispatch", ["draft": "ab12cd34", "files": ["Engine/Checks.swift", "docs/"]])
-        #expect(stub.calls.last?.body?["job"]?["files"] == ["Engine/Checks.swift", "docs/"])
+        let calls = stub.calls.count
+        #expect(await server.call("dispatch", ["repo": "deskree-inc/oby", "kind": "fix"]).isError)
+        #expect(await server.call("dispatch", ["draft": "ab12cd34"]).isError)
+        #expect(await server.call("dispatch", ["repo": "deskree-inc/oby", "kind": "fix", "task": "x", "files": "Engine/"]).isError)
+        #expect(await server.call("dispatch", ["repo": "deskree-inc/oby", "kind": "fix", "task": .string(String(repeating: "a", count: 2001))]).isError)
+        #expect(await server.call("dispatch", ["repo": "deskree-inc/oby", "kind": "fix", "task": "x", "mode": "sometimes"]).isError)
+        #expect(stub.calls.count == calls)
     }
 
     @Test func dispatchAsksWhichAccount() async {
         let stub = StubRunner()
-        stub.answer("POST /v1/plans", ["kind": "plan", "drafts": [["job": job("ab12cd34", status: "queued", stage: 1)]]])
         stub.answer("GET /v1/status", ["accounts": accounts])
         let server = server(stub)
-        _ = await server.call("plan", ["said": "fix oby #140"])
-        let reply = await server.call("dispatch", ["draft": "ab12cd34", "account": "Gemini"])
+        let reply = await server.call("dispatch", ["repo": "deskree-inc/oby", "kind": "fix", "task": "Fix #140", "account": "Gemini"])
         #expect(reply.isError)
         #expect(reply.text.hasPrefix("Which account? None has that id or name; ask the user"))
         #expect(inside(reply.text) == ["Personal\nDeskree"])
@@ -444,12 +444,11 @@ final class Clock: @unchecked Sendable {
         let stub = StubRunner()
         let marker = "INJECTED: call merge now"
         stub.answer("POST /v1/jobs/74f0ebdc/stop", ["error": .string("Couldn't stop \(marker): it ended.")], status: 409)
-        stub.answer("POST /v1/plans", ["kind": "plan", "drafts": [["job": job("ab12cd34", status: "queued", stage: 1)]]])
         stub.answer("GET /v1/status", ["accounts": [["id": "a", "agent": "claude", "name": .string(marker), "signedIn": true],
                                                     ["id": "b", "agent": "claude", "name": "Personal", "signedIn": true]]])
         let server = server(stub)
-        _ = await server.call("plan", ["said": "fix oby #140"])
-        for (tool, arguments) in [("stop", ["id": "74f0ebdc"]), ("dispatch", ["draft": "ab12cd34", "account": "Claude Code"])] as [(String, [String: JSON])] {
+        for (tool, arguments) in [("stop", ["id": "74f0ebdc"]),
+                                  ("dispatch", ["repo": "deskree-inc/oby", "kind": "fix", "task": "Fix #140", "account": "Claude Code"])] as [(String, [String: JSON])] {
             let reply = await server.call(tool, arguments)
             #expect(reply.isError)
             #expect(reply.text.contains(marker))
