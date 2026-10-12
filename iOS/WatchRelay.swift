@@ -101,14 +101,17 @@ final class WatchRelay: NSObject {
     /// WatchConnectivity carries about 65 KB. The watch shows what needs you and what's running,
     /// so those jobs go first, then the ones that finished in the last two days, without the long
     /// texts; the list is cut at 20 and then from the end until it fits, so what needs you stays.
-    /// A job hidden by Clear done on the phone (`clearedAt`), or one that failed over a week ago,
-    /// doesn't count as needing you on the wrist either.
+    /// A job hidden by Clear done on the phone (`clearedAt`, settled jobs only, `Job.settled`), or
+    /// one that failed over a week ago, doesn't count as needing you on the wrist either.
     nonisolated static func fit(_ context: WatchContext, clearedAt: Date = .distantPast, now: Date = .now, limit: Int = WatchWire.limit) throws -> Data {
         var context = context
         let jobs = context.jobs
         func finished(_ job: Job, after date: Date) -> Bool { (job.finished ?? now) > date }
         let needing = jobs.filter { $0.needsYou && finished($0, after: max(clearedAt, now.addingTimeInterval(-7 * 86400))) }
-        let recent = jobs.filter { !$0.needsYou && !$0.isActive && finished($0, after: max(clearedAt, now.addingTimeInterval(-2 * 86400))) }
+        let recent = jobs.filter {
+            !$0.needsYou && !$0.isActive && finished($0, after: now.addingTimeInterval(-2 * 86400))
+                && $0.listed(after: clearedAt, among: jobs)
+        }
         context.jobs = (needing + jobs.filter { $0.isActive && !$0.needsYou } + recent)
             .prefix(20)
             .map { job in
