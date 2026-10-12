@@ -41,6 +41,7 @@ final class WatchAPI {
             try await self.api.message(context.parameters.require("id"), try await API.decode(NewMessage.self, from: request))
         }
         router.post("v1/jobs/:id/dismiss") { _, context in try await self.api.dismiss(context.parameters.require("id")) }
+        router.post("v1/jobs/:id/start") { _, context in try await self.api.startNow(context.parameters.require("id")) }
         router.post("v1/jobs/:id/move") { request, context in
             try await self.api.move(context.parameters.require("id"), try await API.decode(MoveRequest.self, from: request))
         }

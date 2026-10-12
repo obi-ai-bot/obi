@@ -87,7 +87,7 @@ func inside(_ text: String) -> [String] {
         let listed = try JSON.parse(Data(try #require(await server.handle(#"{"jsonrpc":"2.0","id":"two","method":"tools/list"}"#)).utf8))
         #expect(listed["id"] == "two")
         let names = Set(listed["result"]?["tools"]?.array?.compactMap { $0["name"]?.string } ?? [])
-        #expect(names == ["status", "jobs", "job", "inbox", "wait", "plan", "dispatch", "message", "stop", "dismiss",
+        #expect(names == ["status", "jobs", "job", "inbox", "wait", "plan", "dispatch", "start", "message", "stop", "dismiss",
                           "answer", "later", "done", "publish", "merge", "settings"])
         for tool in listed["result"]?["tools"]?.array ?? [] {
             #expect(tool["inputSchema"]?["type"] == "object")

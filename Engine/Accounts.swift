@@ -84,15 +84,38 @@ nonisolated struct AccountState: Equatable, Sendable {
 final class AccountStore {
     private(set) var accounts: [AccountState]
     private let file: URL
+    /// What Oby last knew of each account's usage, by id, in `usage.json`: a restart keeps it, so
+    /// a job waiting for an account's room doesn't start early (#216). Claude Code reports usage
+    /// only during a job, so its refresh can't learn it again.
+    private let usageFile: URL
+
+    /// One account's usage as `usage.json` keeps it.
+    private struct Usage: Codable, Equatable {
+        var fiveHour, sevenDay: Double?
+        var fiveHourResets, sevenDayResets, fullUntil: Date?
+
+        init(_ state: AccountState) {
+            (fiveHour, sevenDay, fiveHourResets, sevenDayResets, fullUntil) = (state.fiveHour, state.sevenDay, state.fiveHourResets, state.sevenDayResets, state.fullUntil)
+        }
+    }
     /// Where the homes Oby makes for accounts live.
     let homes: URL
 
     init(root: URL = Workspace.root) {
         file = root.appending(path: "accounts.json")
+        usageFile = root.appending(path: "usage.json")
         homes = root.appending(path: "accounts")
         let saved = (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode([Account].self, from: $0) }
+        let usage = (try? Data(contentsOf: usageFile)).flatMap { try? JSONDecoder().decode([String: Usage].self, from: $0) } ?? [:]
         accounts = (saved ?? [Account(id: "default", agent: "claude", name: "Default", payer: "", home: nil)])
-            .map { AccountState(account: $0) }
+            .map { account in
+                var state = AccountState(account: account)
+                if let kept = usage[account.id] {
+                    (state.fiveHour, state.sevenDay, state.fiveHourResets, state.sevenDayResets, state.fullUntil)
+                        = (kept.fiveHour, kept.sevenDay, kept.fiveHourResets, kept.sevenDayResets, kept.fullUntil)
+                }
+                return state
+            }
     }
 
     /// Adds an account with a fresh, empty home. It's signed out until the user signs in.
@@ -121,6 +144,8 @@ final class AccountStore {
     func record(_ usage: AgentEvent, for accountID: String) {
         guard case let .usage(fiveHour, sevenDay, fiveHourResets, sevenDayResets) = usage,
               let index = accounts.firstIndex(where: { $0.account.id == accountID }) else { return }
+        let before = Usage(accounts[index])
+        defer { if Usage(accounts[index]) != before { saveUsage() } }
         if let fiveHour {
             accounts[index].fiveHour = fiveHour
             if let fiveHourResets { accounts[index].fiveHourResets = fiveHourResets }
@@ -135,6 +160,7 @@ final class AccountStore {
     func markFull(_ accountID: String, until: Date) {
         guard let index = accounts.firstIndex(where: { $0.account.id == accountID }) else { return }
         accounts[index].fullUntil = until
+        saveUsage()
     }
 
     /// Whether the account's agents have Tetrix connected, as its tool just said. Nil changes nothing.
@@ -152,10 +178,10 @@ final class AccountStore {
     func state(_ id: String) -> AccountState? { accounts.first { $0.account.id == id } }
 
     /// Counts each account's active jobs, and its recent ones that used Tetrix; `Job.account`
-    /// holds the account's id.
+    /// holds the account's id. A job waiting for its `startWhen` (#216) isn't on it yet.
     func countRunning(_ jobs: [Job]) {
         for index in accounts.indices {
-            accounts[index].running = jobs.filter { $0.isActive && $0.account == accounts[index].account.id }.count
+            accounts[index].running = jobs.filter { $0.isActive && !$0.waitsToStart && $0.account == accounts[index].account.id }.count
             (accounts[index].tetrixJobs, accounts[index].tetrixUsed) = TetrixUse.share(jobs, account: accounts[index].account.id)
         }
     }
@@ -197,6 +223,13 @@ final class AccountStore {
 
     /// What the tool said about an account's login: a label while signed in, nil when it isn't.
     /// `refresh` learns it; tests set it.
+
+    /// Keeps every account's usage in `usage.json`; a failure only costs it after a restart.
+    private func saveUsage() {
+        let usage = Dictionary(accounts.map { ($0.account.id, Usage($0)) }) { first, _ in first }
+        try? FileManager.default.createDirectory(at: usageFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? JSONEncoder().encode(usage).write(to: usageFile, options: .atomic)
+    }
 
     private func save() throws {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)

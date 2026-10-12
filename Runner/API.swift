@@ -66,6 +66,10 @@ final class API {
         router.post("v1/jobs/:id/move") { request, context in
             try await self.move(context.parameters.require("id"), try await Self.decode(MoveRequest.self, from: request))
         }
+        router.post("v1/jobs/:id/start") { _, context in try await self.startNow(context.parameters.require("id")) }
+        router.post("v1/jobs/:id/start-when") { request, context in
+            try await self.startWhen(context.parameters.require("id"), try await Self.decode(StartWhenRequest.self, from: request))
+        }
         router.post("v1/jobs/:id/messages") { request, context in
             try await self.message(context.parameters.require("id"), try await Self.decode(NewMessage.self, from: request))
         }
@@ -165,7 +169,7 @@ final class API {
         do {
             let job = try desk.dispatch(request.job.id, branch: request.job.branch, account: request.job.account,
                                         rounds: request.job.rounds, check: request.job.check, model: request.job.model,
-                                        files: request.job.files)
+                                        files: request.job.files, startWhen: request.job.startWhen)
             return Self.json(JobJSON(job: job), status: .created)
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
@@ -233,6 +237,27 @@ final class API {
         _ = try known(id)
         do {
             return Self.json(JobJSON(job: try desk.move(id, to: MoveTarget(agent: request.agent, account: request.account, model: request.model), why: request.why)))
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+    }
+
+    /// Start now (#216): a job waiting for its `startWhen` starts as if it had come.
+    func startNow(_ id: String) throws -> Response {
+        _ = try known(id)
+        do {
+            try desk.startNow(id)
+        } catch {
+            throw APIError(.conflict, error.localizedDescription)
+        }
+        return Self.json(JobJSON(job: try known(id)))
+    }
+
+    /// What a job that hasn't started waits for, replaced (#216); an empty list starts it now.
+    func startWhen(_ id: String, _ request: StartWhenRequest) throws -> Response {
+        _ = try known(id)
+        do {
+            return Self.json(JobJSON(job: try desk.setStartWhen(id, request.startWhen)))
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
@@ -699,7 +724,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting }
 
     private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou }
 
@@ -753,6 +778,8 @@ struct JobJSON: Encodable {
         if job.appleCheck == nil { try nulls.encodeNil(forKey: .appleCheck) }
         if job.appleRan == nil { try nulls.encodeNil(forKey: .appleRan) }
         if job.tetrix == nil { try nulls.encodeNil(forKey: .tetrix) }
+        if job.startWhen == nil { try nulls.encodeNil(forKey: .startWhen) }
+        if job.waiting == nil { try nulls.encodeNil(forKey: .waiting) }
         // What went out and where it moved are always lists: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
         if job.moves == nil { try nulls.encode([Job.Move](), forKey: .moves) }
@@ -983,8 +1010,11 @@ struct DispatchRequest: Decodable {
         /// The files the job claims (#209), replacing the plan's; an empty list claims none. Left
         /// out or null, the plan's stay.
         var files: [String]?
+        /// What the job waits for before it starts (#216), replacing the plan's; an empty list starts
+        /// it at once. Left out or null, the plan's stay.
+        var startWhen: [StartCondition]?
 
-        private enum Keys: String, CodingKey { case id, branch, account, rounds, check, model, files }
+        private enum Keys: String, CodingKey { case id, branch, account, rounds, check, model, files, startWhen }
 
         init(from decoder: any Decoder) throws {
             let keys = try decoder.container(keyedBy: Keys.self)
@@ -995,6 +1025,7 @@ struct DispatchRequest: Decodable {
             check = keys.contains(.check) ? .some(try keys.decodeIfPresent(String.self, forKey: .check)) : nil
             model = keys.contains(.model) ? .some(try keys.decodeIfPresent(String.self, forKey: .model)) : nil
             files = try keys.decodeIfPresent([String].self, forKey: .files)
+            startWhen = try keys.decodeIfPresent([StartCondition].self, forKey: .startWhen)
         }
     }
 
@@ -1018,6 +1049,11 @@ struct NotificationToken: Decodable {
     var token: String
     var topic: String
     var environment: String
+}
+
+/// What `POST /v1/jobs/{id}/start-when` sets a queued job to wait for (#216).
+struct StartWhenRequest: Decodable {
+    var startWhen: [StartCondition]
 }
 
 /// Where `POST /v1/jobs/{id}/move` moves the job: each key optional, at least one of the first three.

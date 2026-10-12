@@ -282,6 +282,15 @@ final class Watch: NSObject {
         saveGlance()
     }
 
+    /// Starts a job waiting for its `startWhen` now (#216).
+    func startNow(_ id: String) async throws {
+        if let link = direct {
+            apply(try await link.startNow(id))
+        } else {
+            try apply(try await request([WatchWire.kind: WatchWire.Kind.start.rawValue, WatchWire.job: id]))
+        }
+    }
+
     /// Moves a job to another tool, account or model; the runner picks what's left nil.
     func move(_ id: String, agent: String? = nil, account: String? = nil, model: String? = nil) async throws {
         if let link = direct {

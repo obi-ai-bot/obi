@@ -88,7 +88,9 @@ struct AccountsTests {
 
         let loaded = AccountStore(root: root)
         #expect(loaded.accounts.map(\.account) == store.accounts.map(\.account))
-        #expect(loaded.accounts.allSatisfy { $0.label == nil && $0.fiveHour == nil && $0.running == 0 })
+        #expect(loaded.accounts.allSatisfy { $0.label == nil && $0.running == 0 })
+        // Usage stays, so a job waiting for an account's room doesn't start early after a restart (#216).
+        #expect(loaded.accounts.map(\.fiveHour) == [nil, 0.4, nil])
     }
 
     @MainActor @Test func storeKeepsLiveState() throws {

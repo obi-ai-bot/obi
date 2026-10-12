@@ -710,7 +710,8 @@ private struct OpenIsland: View {
                     onPermission: { try await feed.answer(id, $0, message: $1) },
                     publishNow: model.publishing == id,
                     onPublishNow: { model.publishing = nil },
-                    accounts: feed.accounts, onMove: mover(row))
+                    accounts: feed.accounts, onMove: mover(row),
+                    onStartNow: { if feed.runner != nil { feed.apply(try await feed.about(id) { try await $0.startNow(id) }) } })
         } else {
             let job = row.job
             JobView(job: job, place: "This Mac", account: desk.accounts.accounts.first { $0.account.id == job.account }?.account.name,
@@ -718,7 +719,7 @@ private struct OpenIsland: View {
                     publishing: JobView.Publishing(action: { Publish.action(for: job, base: job.base ?? "") },
                                                    publish: { _ in _ = try await desk.publish(job.id, approve: Publish.touchID) }),
                     onMessage: { try desk.message(job.id, $0) }, onDismiss: { try await dismiss(row) },
-                    accounts: desk.accounts.accounts, onMove: mover(row))
+                    accounts: desk.accounts.accounts, onMove: mover(row), onStartNow: { try desk.startNow(job.id) })
         }
     }
 

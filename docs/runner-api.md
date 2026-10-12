@@ -67,6 +67,8 @@ This document is the contract between the runner and its clients. Change it in t
   "appleCheck": null,
   "appleRan": null,
   "tetrix": null,
+  "startWhen": null,
+  "waiting": null,
   "mergeNeedsYou": false,
   "reviewNeedsYou": false,
   "title": "Review oby #33",
@@ -123,6 +125,7 @@ This document is the contract between the runner and its clients. Change it in t
 - `model`: a model the user chose for this job (the stronger one on the plan's card, or one it was moved to), or null for the one in Settings › Models.
 - `moves`: every time the user moved the job to another tool, account or model (`POST /v1/jobs/{id}/move`), oldest first. Always a list, empty when it never moved. Each is `{"from": "Codex · Deskree", "to": "Claude Code · Personal", "why": "Codex keeps looping", "date": "2026-10-11T14:02:10Z"}`: `from` and `to` are the tool and the account, with the model after another ` · ` when the job ran one of its own (`"Claude Code · Personal · Fable 5.1"`); `why` is what the user said when they moved it, or null. The job screens show the latest as "Moved from Codex · Deskree to Claude Code · Personal".
 - `notes`: what the user told the agent along the way (`POST /v1/jobs/{id}/messages`), oldest first, or null.
+- `startWhen`: what the job waits for before it starts (Start when, below), as a list of conditions, or null for a job that starts at once and once it started. `waiting`: why a queued job isn't running yet (#238's shape), or null: while it waits for its `startWhen`, `{"kind": "limit", "text": "for Codex · Deskree: 5-hour window resets at 4:59 PM", "job": null}`. `kind` is `limit` when the first thing it still waits for is an account's room, else `schedule`; `text` follows "Waiting", as `step` says it whole (`"Waiting for Codex · Deskree: 5-hour window resets at 4:59 PM"`); `job` is the first job it still waits for, by id, or null. It's null once the job isn't queued. Grouping waiting jobs under Waiting in the apps comes with #238. Older runners don't send these keys.
 - `title`: what to call the job in rows, the job screen, the notch and alerts. It's the brain's short title (3 to 6 words, like `"Mac runner notifications"`), which every planned dispatch gets and the job keeps. Jobs without one (the rules' plans when the brain is down, an epic's sub-issue jobs, jobs from before titles) get `"<Kind> <repo name> #<number>"` when `pr` or `issue` is set, otherwise the first line of `task` (falling back to `request`), capped at 60 characters. It's always a string; older runners don't send it, so clients fall back the same way. Show "Round 2 of 5" when `rounds` is above 1.
 - `files`: the files or folders (ending in `/`) the job is expected to touch, relative to the repository: its claim (below). From the Lead's brief, from the client that dispatched it (`POST /v1/jobs`), or else from its issue: the issue's `Files:` line (paths and folders, in backticks or separated by commas), or when it has none, the paths its title and text name (in backticks, or with a folder, like `Engine/Checks.swift` or `MCP/`). The runner reads the issue as it plans, so a draft from `POST /v1/plans` shows them; a job that still has none claims them when its worktree gets ready. Null when nothing named any (the job then neither waits nor blocks), `[]` when the client claimed none. `lead` is set on jobs the Lead started (below), null otherwise: the goal (one Lead turn) that started it. `claim` also reports issue-sync errors on any job; successful changes are listed in `outgoing`. Older runners don't send these keys.
 - `question`: what the job's agent asked the user, `{"text": "Should a job that commits nothing end as failed, or get a new status?", "options": ["Failed", "A new status"]}` (`options` may be empty), or null. Agents are told to end their summary with `QUESTION: …` and optionally `OPTIONS: a | b` rather than bury a decision in their report; the runner reads those last lines when a turn ends. Markdown around the label (`**QUESTION:**`) is ignored; the question and its options keep every character, like `*.swift`. The job then waits for the answer: it stays `running` with `step` `"Waiting for your answer"`, its agent idle, and its round doesn't move on (no check runs). Other jobs keep going. The question lands in the inbox (below) and alerts the phone. The answer reaches the agent as its next message, exactly as `POST /v1/jobs/{id}/messages` would send it, and `question` goes back to null. Telling the job anything else answers it too; stopping it drops it. A job whose agent exits while its question waits is `interrupted` and keeps `question`: nothing is checked or published until it's answered, and answering picks its session up again. Across a runner restart it keeps waiting instead: still `running` with `step` `"Waiting for your answer"` and its `question`, nothing running until the answer picks its session up again, in the same round. Neither is recorded as a failure. Older runners don't send the key.
@@ -138,6 +141,24 @@ This document is the contract between the runner and its clients. Change it in t
   - When the job ends, its `summary` ends with a line like `Tetrix: 4 calls (search_entities 2, get_entity 1, save_session 1). Session saved. 2 of 2 commits stamped Tetrix-Session (ses_8f2a).`, or `Tetrix: connected, but the agent didn't use it.`, or `Tetrix: not connected for this account's agent, so it wasn't asked. …`. Not on review jobs: their last line is the verdict. Older runners don't send the key.
 - **Jobs run side by side, at most `maxRunning` at once** (#237, `GET /v1/status`, `PUT /v1/settings/jobs`, 6 unless changed). A job whose worktree is ready starts when fewer than `maxRunning` jobs are running and no older job waits; otherwise it waits, `queued`, with `step` `Waiting for a free slot: 6 of 6 jobs running`, and the waiting jobs start oldest first as slots free up. Every job whose agent is running takes a slot: Oby's reviews, and the rounds of a job that started already (a review's changes, a rebase, a failed Mac check, the user's words), which never wait for one, so the count can briefly pass the cap. A job waiting for the user's answer takes none. Before a job that waited starts, its branch moves to its base as GitHub has it now (`step` `Bringing <branch> up to date with dev`), so it works on top of what merged meanwhile: only while its worktree has no work of its own, and never on a pull request's branch. When `dev` can't be fetched, it's `failed` with `Couldn't bring <branch> up to date with dev: <why>` rather than start on stale code. Account routing still picks each job's account.
 - **`files` is the job's claim, and holds nothing back.** Jobs whose `files` overlap in the same repository (the same path, or one inside a folder the other names) run side by side, each in its own worktree; conflicts are settled when they merge. A claim lasts while the job is queued or running, and after, while its pull request is open or its commits wait to be published (#209); it ends when the pull request is merged or closed, the user dismisses or stops the job, or the job ends with nothing to publish. It does two things. The agent's prompt names the in-flight jobs whose claims overlap its own, with their titles, ids, branches and pull requests, and asks it to keep its change small and expect a rebase. And when two approved pull requests overlap, the older job's merges first: the newer one's Mac check stays queued while the older one's is queued, running or passed and not merged yet, then it's checked, and a conflict with what merged is rebased (Mac check, below).
+
+### Start when
+
+A job can wait for something before it starts (#216): another job or a pull request to finish, an account to have room, or a time. Its `startWhen` lists what must all hold, each one of:
+
+- `{"job": "ab12cd34", "is": "done"}`: after another job, by id. `is` is `done` (it ended done), `merged` (its pull request was merged), `published` (its pull request is out) or `ended` (it ended in any way); left out, `done`.
+- `{"pr": 205, "is": "merged"}`: after a pull request in the job's repository. `is` is `merged` or `closed` (closed in any way, a merge too); left out, `merged`.
+- `{"account": "<id or name>", "window": "fiveHour", "under": 0.5}`: once the account has room in its 5-hour (`fiveHour`) or weekly (`sevenDay`) window: its use is under `under` (a share above 0 and up to 1; left out, 0.8, the share routing calls busy). A window whose reset time has passed counts as empty (Claude Code reports usage only during a job, so its last share would stay), so `"do this on Codex once its 5-hour window resets"` starts at the reset, or at once when Codex has room already. Not while the account is signed out or stopped at its limit. The runner keeps every account's last usage, reset times and limit in `usage.json`, so a restart doesn't forget a window it waits on (Claude Code reports usage only during a job).
+- `{"account": "<id or name>", "onPace": true}`: once the account's weekly use is back on pace (Account, `isAhead` false: its share of the week used is no more than the share of the week gone).
+- `{"at": "2026-10-13T09:00:00-03:00"}`: at a time, ISO 8601 with its offset.
+
+At most 5. The runner checks them when the job is dispatched (`422` with why: an unknown job or account, the job itself, a share out of range, or two accounts), and keeps accounts by id. A job waiting on an account runs on it: `account` and `agent` are that account's.
+
+The job gets its worktree ready, then waits `queued`, with `waiting` and `step` saying what for, joining every condition still to hold with ", and": `"Waiting for Cards screen (#250) to merge, and until 9:00 AM"`. It doesn't count as running on its account, takes no slot (`maxRunning`), and its `files` claim holds from when it was queued, like any queued job's. The runner checks every minute, and as soon as any job ends: pull requests it waits on (and the pull request of a job it waits to see merged) are read from GitHub then. Once everything holds, `startWhen` goes back to null, it's brought up to date with its base and starts (or waits for a slot), and its report says `Started when what it waited for came: …`. It keeps waiting across runner restarts, however many: it never ran, so it isn't picked up like a job whose agent crashed. What changes while its worktree gets ready (started now, told to wait for something else) holds once it's ready. The Mac's, the iPhone's and the Watch's job screens have Start now, and the Watch's list says `Scheduled, waiting …` where it would say Starting.
+
+A condition that can never hold (the job it waits on failed, was stopped or ended with nothing published; the pull request was closed without merging; the account is gone) makes it a decision: `step` is `"Waiting for you: Broken build failed, so it won't be done."` and `question` asks `"It can't start as planned: …. Start it anyway, cancel it, or wait for something else?"` with the options `Start anyway`, `Cancel` and `Wait for something else`, as a `question` inbox item. `Start anyway` starts it now; `Cancel` stops it; `Wait for something else` keeps it waiting, unasked (a failed job tried again, a pull request reopened, may still come), until you change what it waits for (`POST /v1/jobs/{id}/start-when`), start it or stop it. Other words are refused (`422`). After a restart it asks again.
+
+A waiting job can be started now (`POST /v1/jobs/{id}/start`), told to wait for something else (`POST /v1/jobs/{id}/start-when`), moved (`POST /v1/jobs/{id}/move`: what it waited for on an account it left goes, and with nothing left it starts; a new model on the same account keeps it) or stopped (`POST /v1/jobs/{id}/stop`). In words, the brain fills `startWhen` on a plan's draft (`POST /v1/plans`): "do this on Codex when it resets", "after the cards job merges", "once #205 is merged", "tomorrow at 9", "when Personal has room".
 
 ### Job pipeline and pull request following
 
@@ -426,14 +447,15 @@ Dispatches the draft's job. The user may have changed:
 - `check`: one line of up to 200 characters, or `null` for none. Leaving it out keeps the plan's check, so to clear it send `"check": null` explicitly (Swift's encoder leaves nils out).
 - `model`: `claude-fable-5-1` or `gpt-6-astra` to take the stronger model, or `null` (or left out) to stay on Settings › Models. It works only on a draft that came with a `suggestedModel`. The job runs the stronger model of the tool its account uses, so a Claude draft moved to a Codex account runs GPT-6-Astra. Any other model is refused.
 - `files`: the files and folders (ending in `/`) the job will touch, relative to the repository, up to 30: they replace the draft's claim (Job, `files`), and `[]` claims none. Left out or `null`, the draft's stay.
+- `startWhen`: what the job waits for before it starts (Start when, above), replacing the draft's (the brain fills it from words like "after #205 merges"); `[]` starts it at once. Left out or `null`, the draft's stay. A condition on an account runs the job on that account, whatever `account` says.
 
-Leave `rounds`, `check` or `files` out to keep the plan's values (older apps do). Everything else comes from the draft unchanged.
+Leave `rounds`, `check`, `files` or `startWhen` out to keep the plan's values (older apps do). Everything else comes from the draft unchanged.
 
 ```json
 {"job": { …the draft's Job }}
 ```
 
-Returns the queued `Job` (`201`). `422` if the branch isn't valid, the account isn't signed in, or `files` holds more than 30 paths or one outside the repository.
+Returns the queued `Job` (`201`). `422` if the branch isn't valid, the account isn't signed in, `files` holds more than 30 paths or one outside the repository, or `startWhen` can't be (Start when).
 
 ### `GET /v1/jobs?limit=50`
 
@@ -486,6 +508,20 @@ Every key may be left out (or null), but not all of the first three. `agent` is 
 - **Finished** (`done`, `failed`, `stopped` or `interrupted`): it stays as it ended, and its next round (`POST /v1/jobs/{id}/messages`, or Try again from the inbox) runs on the new choice, with a new session that hears what a running job's would, then the user's words.
 
 The job keeps its `id`, branch and history, and a move is added to `moves`. Returns the job. `404` for an unknown job. `422` with why when it can't move: nothing named, an unknown tool, account or model, a model of another tool, an account signed out or at its limit, no account of the tool with room, the job already there, one of Oby's own reviews (they pick their account themselves), or a job wrapping up its only turn or publishing (move it once it's done).
+
+### `POST /v1/jobs/{id}/start`
+
+Start now: a job waiting for its `startWhen` starts as if it had come (or waits for a slot); one still getting its worktree ready starts once it's ready. No body. Returns the job, with `startWhen` null; its report says `Started by you before what it waited for came.` `404` for an unknown job, `409` when it isn't waiting to start.
+
+### `POST /v1/jobs/{id}/start-when`
+
+Changes what a job that hasn't started waits for:
+
+```json
+{"startWhen": [{"pr": 205, "is": "merged"}, {"at": "2026-10-13T09:00:00Z"}]}
+```
+
+The list replaces the job's (Start when); `[]` starts it now. A condition on an account moves the job to that account. A job waiting to be asked about a condition that can't hold stops asking. Returns the job. `404` for an unknown job; `422` with why for a job that started already, one of Oby's own reviews, or conditions that can't be.
 
 ### `POST /v1/jobs/{id}/messages`
 
@@ -854,6 +890,7 @@ The endpoints, each as on the tailnet API unless it says otherwise:
 | `POST /v1/jobs/{id}/messages` | A word to the job's agent. |
 | `POST /v1/jobs/{id}/dismiss` | Dismiss. |
 | `POST /v1/jobs/{id}/move` | Move to another tool, account or model. |
+| `POST /v1/jobs/{id}/start` | Start now, a job waiting for its `startWhen`. |
 | `GET /v1/jobs/{id}/publish` | The sentence publishing would carry out. |
 | `POST /v1/jobs/{id}/publish` | Publish, approved on the Watch (below). |
 | `POST /v1/notifications` | The Watch's push tokens (below). |

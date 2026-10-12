@@ -91,6 +91,9 @@ nonisolated struct WatchLink: Sendable {
 
     func dismiss(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/dismiss") }
 
+    /// Starts a job waiting for its `startWhen` now (#216).
+    func startNow(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/start") }
+
     /// Allow, Always allow or Deny (with words for the agent). A Watch API without it answers 404:
     /// that waits for the iPhone.
     func answer(_ id: String, permission: String, _ decision: RunnerPermission.Decision, message: String?) async throws -> Job {

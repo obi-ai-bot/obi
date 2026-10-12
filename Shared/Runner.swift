@@ -75,6 +75,21 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var permission: RunnerPermission?
     /// Every time the user moved it to another tool, account or model, oldest first (newer runners only).
     var moves: [Move]?
+    /// What a queued job waits for (#238), or nil: getting ready, about to start, not queued, or an older runner.
+    var waiting: Waiting?
+
+    /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
+    /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
+    /// newer runner's kinds still decode.
+    struct Waiting: Codable, Equatable, Sendable {
+        var kind: String
+        var text: String
+        var job: String?
+    }
+
+    /// Queued until what its `startWhen` names happens (#216: `waiting`'s kind `schedule` or
+    /// `limit`): it can start now (`Runner.startNow`).
+    var waitsToStart: Bool { status == .queued && (waiting.map { ["schedule", "limit"].contains($0.kind) } ?? false) }
 
     /// One move, as the runner words it: "Codex · Deskree" to "Claude Code · Personal · Fable 5.1".
     struct Move: Codable, Equatable, Sendable {
@@ -87,7 +102,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
-             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves
+             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -704,6 +719,9 @@ nonisolated struct Runner: Sendable {
     func move(_ id: String, agent: String?, account: String?, model: String?, why: String? = nil) async throws -> Job {
         try await call("POST", "v1/jobs/\(id)/move", body: MoveBody(agent: agent, account: account, model: model, why: why))
     }
+
+    /// Starts a job that waits for its `startWhen` now (#216): the runner answers with the job.
+    func startNow(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/start") }
 
     /// Tells the job's agent something. A finished job picks its session up again.
     func tell(_ id: String, _ text: String) async throws -> Job {

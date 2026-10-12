@@ -29,6 +29,8 @@ struct JobView: View {
     var accounts: [AccountState] = []
     /// Moves it (Engine/Move.swift); nil for Oby's own reviews, which pick their account themselves.
     var onMove: ((MoveTarget) async throws -> Void)? = nil
+    /// Starts it now when it waits for its `startWhen` (#216, Engine/StartWhen.swift); nil where it can't.
+    var onStartNow: (() async throws -> Void)? = nil
     @State private var busy = false
     @State private var moving = false
     @State private var moveAgent = ""
@@ -78,6 +80,12 @@ struct JobView: View {
                 movePanel
             } else if job.isActive || onMove != nil {
                 HStack(spacing: 10) {
+                    if job.waitsToStart, let onStartNow {
+                        Button { Task { await run(onStartNow) } } label: { pill("Start now") }
+                            .buttonStyle(.plain)
+                            .disabled(busy)
+                            .help("Start it now instead of waiting")
+                    }
                     if onMove != nil {
                         Button { moveAgent = job.agent; moveAccount = nil; moveModel = nil; problem = nil; moving = true } label: { pill("Move to…") }
                             .buttonStyle(.plain)

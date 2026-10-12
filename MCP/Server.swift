@@ -115,6 +115,9 @@ actor Server {
         ["type": "integer", "description": .string(description), "minimum": .number(Double(range.lowerBound)), "maximum": .number(Double(range.upperBound))]
     }
     static let job = string("The job's id, like 74f0ebdc.")
+    /// What a job waits for before it starts (#216, docs/runner-api.md "Start when").
+    static let startWhen: JSON = ["type": "array", "maxItems": 5, "items": ["type": "object"],
+                                  "description": "What must all happen before the job starts, each one of: {\"job\": id, \"is\": \"done\"|\"merged\"|\"published\"|\"ended\"}, {\"pr\": number in the job's repository, \"is\": \"merged\"|\"closed\"}, {\"account\": id or name, \"window\": \"fiveHour\"|\"sevenDay\", \"under\": 0.5 (left out: until it has room)}, {\"account\": id or name, \"onPace\": true}, {\"at\": ISO 8601 time}. A job waiting on an account runs on it."]
     static let item = string("The inbox item's id, as inbox lists it.")
 
     static let tools: [Tool] = [
@@ -130,15 +133,18 @@ actor Server {
              properties: ["said": string("The user's words, like \"fix oby #140\"."),
                           "answer": string("The user's answer to the question the brain asked about these same words.")],
              required: ["said"]),
-        Tool(name: "dispatch", description: "Starts a draft from plan (POST /v1/jobs). Account, rounds, check and files may change; leave them out to keep the plan's.",
+        Tool(name: "dispatch", description: "Starts a draft from plan (POST /v1/jobs), now or once what startWhen lists has happened. Account, rounds, check, files and startWhen may change; leave them out to keep the plan's.",
              properties: ["draft": string("The draft's id, from plan."),
                           "account": string("The account to run on: its id or name, or a tool (Claude Code, Codex) when it has one account."),
                           "rounds": integer("How many rounds the agent may take.", 1...10),
                           "check": string("A one-line command that must pass for the work to count as done; an empty string for none."),
                           "stronger": ["type": "boolean", "description": "Use the stronger model the draft suggests (plan says so when it does)."],
                           "files": ["type": "array", "items": ["type": "string"], "maxItems": 30,
-                                    "description": "The files and folders (ending in /) the job will touch, relative to the repository: it claims them, and a job touching the same files waits for it. Replaces the draft's; an empty list claims none."]],
+                                    "description": "The files and folders (ending in /) the job will touch, relative to the repository: it claims them, and a job touching the same files waits for it. Replaces the draft's; an empty list claims none."],
+                          "startWhen": startWhen],
              required: ["draft"]),
+        Tool(name: "start", description: "A job waiting to start (its startWhen): starts it now, or with startWhen, changes what it waits for (POST /v1/jobs/{id}/start-when). Cancel one with stop.",
+             properties: ["id": job, "startWhen": startWhen], required: ["id"]),
         Tool(name: "message", description: "Tells a job's agent something (POST /v1/jobs/{id}/messages): a running job hears it now; a finished one picks its session up again and runs another round.",
              properties: ["id": job, "text": string("What to tell it, 1 to 2,000 characters.")], required: ["id", "text"]),
         Tool(name: "stop", description: "Stops a queued or running job.", properties: ["id": job], required: ["id"]),
@@ -199,6 +205,15 @@ actor Server {
             }
         }
 
+        /// `startWhen`, when given: up to 5 conditions, each an object; the runner checks the rest.
+        func startWhen() throws -> [JSON]? {
+            guard let value = arguments["startWhen"], !value.isNull else { return nil }
+            guard let list = value.array, list.count <= 5, list.allSatisfy({ $0.object != nil }) else {
+                throw Refusal(message: "startWhen must be a list of up to 5 conditions, each an object like {\"pr\": 205, \"is\": \"merged\"}.")
+            }
+            return list
+        }
+
         switch name {
         case "status":
             return Reply(text: Render.status(try await runner.call("GET", "/v1/status")))
@@ -216,7 +231,16 @@ actor Server {
         case "dispatch":
             return try await dispatch(try text("draft"), account: arguments["account"]?.text.flatMap { $0.isEmpty ? nil : $0 },
                                       rounds: try number("rounds", 1...10), check: arguments["check"]?.string,
-                                      stronger: arguments["stronger"]?.bool == true, files: try files())
+                                      stronger: arguments["stronger"]?.bool == true, files: try files(), startWhen: try startWhen())
+        case "start":
+            let id = try id()
+            let job: JSON
+            if let conditions = try startWhen(), !conditions.isEmpty {
+                job = try await runner.call("POST", "/v1/jobs/\(id)/start-when", ["startWhen": .array(conditions)])
+                return Reply(text: "It waits for that now.\n" + Render.quoted("Job \(job["id"]?.string ?? id)", Render.row(job)))
+            }
+            job = try await runner.call("POST", "/v1/jobs/\(id)/start")
+            return Reply(text: "Starting it now.\n" + Render.quoted("Job \(job["id"]?.string ?? id)", Render.row(job)))
         case "message":
             let words = try text("text")
             guard words.count <= 2000 else { throw Refusal(message: "A message is 2,000 characters at most.") }
@@ -330,13 +354,14 @@ actor Server {
         lines.add("rounds", job?["rounds"])
         lines.add("check", job?["check"]?.string ?? "none")
         lines.add("files", job?["files"]?.array.map { $0.compactMap(\.string).joined(separator: ", ") }.flatMap { $0.isEmpty ? nil : $0 } ?? "none claimed")
+        lines.add("starts when", Render.startWhen(job?["startWhen"]))
         lines.add("stronger model offered", draft["suggestedModel"])
         if draft["guessed"]?.bool == true { lines.add("guessed", "the brain didn't answer, so rules made this plan") }
         lines.add("task", job?["task"])
         return lines.text
     }
 
-    func dispatch(_ id: String, account: String?, rounds: Int?, check: String?, stronger: Bool, files: [String]? = nil) async throws -> Reply {
+    func dispatch(_ id: String, account: String?, rounds: Int?, check: String?, stronger: Bool, files: [String]? = nil, startWhen: [JSON]? = nil) async throws -> Reply {
         guard let draft = drafts[id], var job = draft["job"]?.object else {
             throw Refusal(message: "There's no draft \(id) here: call plan first. Drafts last as long as this oby-mcp runs.")
         }
@@ -351,6 +376,7 @@ actor Server {
             job["check"] = line.isEmpty ? .null : .string(line)
         }
         if let files { job["files"] = .array(files.map { .string($0) }) }
+        if let startWhen { job["startWhen"] = .array(startWhen) }
         if stronger {
             guard let model = draft["suggestedModel"], !model.isNull else { throw Refusal(message: "This draft offers no stronger model.") }
             job["model"] = model
@@ -359,7 +385,9 @@ actor Server {
         }
         let started = try await runner.call("POST", "/v1/jobs", ["job": .object(job)])
         drafts[id] = nil
-        return Reply(text: "Dispatched: it's queued on the runner. Follow it with job or wait.\n" + Render.quoted("Job \(started["id"]?.string ?? id)", Render.row(started)))
+        let waits = !(started["startWhen"]?.array ?? []).isEmpty
+        return Reply(text: (waits ? "Dispatched: it's queued on the runner and starts once what it waits for has happened (start starts it now). Follow it with job or wait.\n"
+                                  : "Dispatched: it's queued on the runner. Follow it with job or wait.\n") + Render.quoted("Job \(started["id"]?.string ?? id)", Render.row(started)))
     }
 
     /// The account the user named: by id, by name, or by its tool when the tool has one account.
