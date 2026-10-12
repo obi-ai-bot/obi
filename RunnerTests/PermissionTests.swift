@@ -144,6 +144,10 @@ final class PermissionTests {
         let engine = PermissionRule(id: "e", rule: "Edit(Engine/*)", repo: "deskree-inc/oby", decision: .allow, created: .now)
         #expect(PermissionPolicy.decide(ToolCall(request: "e", tool: "Edit", paths: ["/tmp/oby/jobs/abc/Engine/Jobs.swift"]), mode: .ask, rules: [engine], worktree: worktree) == .allow)
         #expect(PermissionPolicy.decide(ToolCall(request: "e", tool: "Edit", paths: ["/tmp/oby/jobs/abc/Mac/App.swift"]), mode: .ask, rules: [engine], worktree: worktree) == .ask)
+        // Plan changes nothing: a saved allow rule doesn't let a command through while planning.
+        let touch = PermissionRule(id: "t", rule: "Bash(touch:*)", repo: "deskree-inc/oby", decision: .allow, created: .now)
+        #expect(PermissionPolicy.decide(bash("touch example.swift"), mode: .ask, rules: [touch], worktree: worktree) == .allow)
+        #expect(PermissionPolicy.decide(bash("touch example.swift"), mode: .plan, rules: [touch], worktree: worktree) == .ask)
     }
 
     @Test func theCardSaysWhatAndWhichRule() {
@@ -349,6 +353,35 @@ final class PermissionTests {
         #expect(desk.job("perm1")?.permission != nil)
     }
 
+    /// A plan given as a turn's summary waits like a permission: the job's clock stops, so waiting
+    /// for the user never reaches the job's limit, and goes on once the plan is approved.
+    @Test func aPlanAsASummaryPausesTheJobClock() async throws {
+        let agent = Agent()
+        let desk = makeDesk()
+        desk.limits.job = 0.5
+        _ = try await running(agent, mode: .plan, desk: desk)
+        agent.onEvent(.turnEnded(summary: "Here's the plan:\n1. Add modes", failed: false))
+        try await Task.sleep(for: .milliseconds(900))
+        #expect(desk.job("perm1")?.status == .running && desk.job("perm1")?.limit == nil)
+        try desk.setMode("perm1", .acceptEdits)
+        for _ in 0..<300 where desk.job("perm1")?.isActive == true { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(desk.job("perm1")?.limit == "the job ran past 0.5 seconds")
+    }
+
+    /// The user's words for the agent with a no, or a plan sent back, are a message like any
+    /// other: the vault's secrets don't reach the agent.
+    @Test func denyWordsLeaveTheVaultsSecretsOut() async throws {
+        let agent = Agent()
+        let desk = makeDesk()
+        let value = "tok/\(UUID().uuidString.prefix(12))+a=b"
+        desk.vault = Vault(store: FileVault(folder: folder.appending(path: "vault")))
+        try desk.vault.add(value, as: "staging-api-key")
+        _ = try await running(agent, mode: .ask, desk: desk)
+        agent.onEvent(.ask(bash("swift test", "r1")))
+        try desk.answerPermission("perm1", try #require(desk.job("perm1")?.permission?.id), .deny, message: "use \(value) instead")
+        #expect(agent.answers.last?.answer == .deny("use [vault: staging-api-key] instead"))
+    }
+
     /// Codex, or an agent that ends its turn with the plan: the plan is the summary, and approving
     /// it sends the go-ahead for the next turn, in the mode picked.
     @Test func aPlanAsASummaryIsApprovedForTheNextTurn() async throws {
@@ -462,22 +495,18 @@ final class PermissionTests {
     // MARK: The agents' answers
 
     @Test func claudeCodeHearsTheAnswer() {
-        let suggestions: [[String: Any]] = [["type": "addRules", "rules": [["toolName": "Bash", "ruleContent": "swift test:*"]], "behavior": "allow", "destination": "localSettings"],
-                                            ["type": "setMode", "mode": "acceptEdits", "destination": "session"]]
         let input: [String: Any] = ["command": "swift test"]
-        let always = StreamJSON.answer(.always, tool: "Bash", input: input, suggestions: suggestions)
-        let rules = always["updatedPermissions"] as? [[String: Any]] ?? []
-        #expect(always["behavior"] as? String == "allow" && rules.count == 1)
-        #expect(rules.first?["destination"] as? String == "session" && rules.first?["type"] as? String == "addRules")
-        let allow = StreamJSON.answer(.allow, tool: "Bash", input: input, suggestions: suggestions)
+        // An always is a plain allow: no session rule of Claude Code's own, so every later call still
+        // comes to Oby, whose saved rule (and the user's deny rules) answer it.
+        let always = StreamJSON.answer(.always, tool: "Bash", input: input)
+        #expect(always["behavior"] as? String == "allow" && always["updatedPermissions"] == nil)
+        let allow = StreamJSON.answer(.allow, tool: "Bash", input: input)
         #expect(allow["behavior"] as? String == "allow" && allow["updatedPermissions"] == nil && (allow["updatedInput"] as? [String: Any])?["command"] as? String == "swift test")
-        let deny = StreamJSON.answer(.deny("Run only RunnerTests"), tool: "Bash", input: input, suggestions: suggestions)
+        let deny = StreamJSON.answer(.deny("Run only RunnerTests"), tool: "Bash", input: input)
         #expect(deny["behavior"] as? String == "deny" && deny["message"] as? String == "Run only RunnerTests")
-        let plan = StreamJSON.answer(.allow, tool: "ExitPlanMode", input: ["plan": "1."], suggestions: [])
+        let plan = StreamJSON.answer(.allow, tool: "ExitPlanMode", input: ["plan": "1."])
         #expect(((plan["updatedPermissions"] as? [[String: Any]])?.first?["mode"] as? String) == "default")
         #expect(StreamJSON.claudeMode(.plan) == "plan" && StreamJSON.claudeMode(.bypass) == "default" && StreamJSON.claudeMode(.acceptEdits) == "default")
-        let request = try? JSONSerialization.jsonObject(with: Data(#"{"type":"control_request","request_id":"a1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"permission_suggestions":[{"type":"addRules"}]}}"#.utf8)) as? [String: Any]
-        #expect(StreamJSON.suggestions(request ?? [:]).count == 1)
         #expect(ToolCall.claude("a1", tool: "Write", input: ["file_path": "/tmp/a"]) == ToolCall(request: "a1", tool: "Write", paths: ["/tmp/a"]))
     }
 

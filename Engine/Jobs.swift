@@ -608,9 +608,8 @@ final class ClaudeAgent: AgentRun {
     /// The job's mode: Plan starts Claude Code in its own plan mode; every other mode starts it in
     /// its default mode, which asks Oby about every command and edit. Never its bypass mode.
     var mode = PermissionMode.bypass
-    /// The prompts waiting for an answer, by request id: their input goes back with an allow, and
-    /// their suggestions with an always.
-    private var pending: [String: (input: [String: Any], suggestions: [[String: Any]])] = [:]
+    /// The prompts waiting for an answer, by request id: their input goes back with an allow.
+    private var pending: [String: [String: Any]] = [:]
     private var onEvent: (AgentEvent) -> Void = { _ in }
     private var finished = false
     /// The latest turn's result. The job ends when Claude Code exits, not when a turn ends.
@@ -755,7 +754,7 @@ final class ClaudeAgent: AgentRun {
                 onEvent(.permission(denied: denied))
                 return
             }
-            pending[id] = (toolInput, StreamJSON.suggestions(message))
+            pending[id] = toolInput
             onEvent(.ask(ToolCall.claude(id, tool: tool, input: toolInput)))
             return
         }
@@ -785,8 +784,8 @@ final class ClaudeAgent: AgentRun {
     }
 
     func answer(_ call: ToolCall, _ decision: ToolAnswer) {
-        guard let (input, suggestions) = pending.removeValue(forKey: call.request) else { return }
-        answer(call.request, StreamJSON.answer(decision, tool: call.tool, input: input, suggestions: suggestions))
+        guard let input = pending.removeValue(forKey: call.request) else { return }
+        answer(call.request, StreamJSON.answer(decision, tool: call.tool, input: input))
     }
 
     /// Claude Code's own mode follows the job's: plan, or its default mode, where every command and
@@ -857,31 +856,23 @@ nonisolated enum StreamJSON {
         return (id, tool, request["input"] as? [String: Any] ?? [:])
     }
 
-    /// The rules a permission prompt suggests (`permission_suggestions`), for "always".
-    static func suggestions(_ message: [String: Any]) -> [[String: Any]] {
-        ((message["request"] as? [String: Any])?["permission_suggestions"] as? [[String: Any]]) ?? []
-    }
-
     /// Claude Code's mode for the job's: its plan mode, or its default one. Never `bypassPermissions`
     /// or `acceptEdits`: Oby answers every prompt, so its fixed rules hold.
     static func claudeMode(_ mode: PermissionMode) -> String { mode == .plan ? "plan" : "default" }
 
-    /// The `control_response` for Oby's answer. An always passes on the prompt's suggested rules
-    /// for this session only (`updatedPermissions`), and never a mode; approving a plan
-    /// (ExitPlanMode) leaves plan mode for the default one.
-    static func answer(_ answer: ToolAnswer, tool: String, input: [String: Any], suggestions: [[String: Any]]) -> [String: Any] {
+    /// The `control_response` for Oby's answer. An always is a plain allow: Claude Code gets no
+    /// rule of its own (`updatedPermissions`), since a session rule would let later calls through
+    /// without asking Oby, past the user's deny rules and a rule they forgot. Oby's saved rule
+    /// answers those prompts instead. Approving a plan (ExitPlanMode) leaves plan mode for the default one.
+    static func answer(_ answer: ToolAnswer, tool: String, input: [String: Any]) -> [String: Any] {
         switch answer {
         case .deny(let message):
             return ["behavior": "deny", "message": message]
         case .allow where tool == "ExitPlanMode", .always where tool == "ExitPlanMode":
             return ["behavior": "allow", "updatedInput": input,
                     "updatedPermissions": [["type": "setMode", "mode": "default", "destination": "session"]]]
-        case .allow:
+        case .allow, .always:
             return ["behavior": "allow", "updatedInput": input]
-        case .always:
-            let rules = suggestions.filter { $0["type"] as? String == "addRules" && ($0["behavior"] as? String ?? "allow") == "allow" }
-                .map { $0.merging(["destination": "session"]) { $1 } }
-            return rules.isEmpty ? ["behavior": "allow", "updatedInput": input] : ["behavior": "allow", "updatedInput": input, "updatedPermissions": rules]
         }
     }
 

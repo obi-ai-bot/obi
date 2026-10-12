@@ -147,13 +147,13 @@ final class CodexAgent: AgentRun {
         self.mode = mode
     }
 
-    /// Oby's answer, or the user's: accept, acceptForSession for always (Oby applies the saved rule
-    /// to later jobs itself), or decline, with why as a word to the turn.
+    /// Oby's answer, or the user's: accept (an always too: `acceptForSession` would let the same
+    /// command through without asking Oby, past the user's deny rules; Oby's saved rule answers
+    /// it instead), or decline, with why as a word to the turn.
     func answer(_ call: ToolCall, _ answer: ToolAnswer) {
         guard let server, let (id, thread, turn) = pending.removeValue(forKey: call.request) else { return }
         switch answer {
-        case .allow: server.reply(id, ["decision": "accept"])
-        case .always: server.reply(id, ["decision": "acceptForSession"])
+        case .allow, .always: server.reply(id, ["decision": "accept"])
         case .deny(let reason):
             server.reply(id, ["decision": "decline"])
             if let thread, let turn {

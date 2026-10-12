@@ -65,7 +65,8 @@ nonisolated struct ToolCall: Equatable, Sendable {
 /// What Oby answers an agent's prompt with.
 nonisolated enum ToolAnswer: Equatable, Sendable {
     case allow
-    /// Allowed, and not asked again in this session (Claude Code's `updatedPermissions`, Codex's `acceptForSession`).
+    /// Allowed, and the permission's rule saved: Oby answers what it covers from then on. The agent
+    /// gets a plain allow, never a rule of its own, so every later call still comes to Oby.
     case always
     /// No, with the words for the agent.
     case deny(String)
@@ -129,7 +130,9 @@ nonisolated enum PermissionPolicy {
             return .deny("The user's rule \(deny.rule) refuses this in \(deny.repo). Do it another way, or say in your summary what you'd have done.")
         }
         if mode == .plan, edits.contains(call.tool) { return .deny(planOnly) }
-        if rules.contains(where: { $0.decision == .allow && matches($0.rule, call, worktree: worktree, allowing: true) }) { return .allow }
+        // Plan changes nothing: a saved allow rule doesn't let a command through while planning
+        // (`Bash(touch:*)` would write a file), so everything but reads asks the user.
+        if mode != .plan, rules.contains(where: { $0.decision == .allow && matches($0.rule, call, worktree: worktree, allowing: true) }) { return .allow }
         switch mode {
         case .bypass: return .allow
         case .acceptEdits: return edits.contains(call.tool) ? .allow : .ask
@@ -490,7 +493,10 @@ extension Desk {
         case .always:
             guard ask.permission.rule != nil else { throw Shell.Failure(message: "This one has no rule to save: allow it once instead.") }
             answer = .always
-        case .deny: answer = .deny(words ?? PermissionPolicy.saidNo)
+        case .deny:
+            // The user's words reach the agent as any message does: without the vault's secrets, and
+            // not at all while the vault can't be read.
+            answer = .deny(try vault.forAgent(words ?? PermissionPolicy.saidNo))
         }
         asks[id]?.removeFirst()
         agents[id]?.answer(ask.call, answer)
@@ -527,11 +533,13 @@ extension Desk {
         if let mode = PermissionPolicy.approval(text) { return try approvePlan(id, mode, said: text) }
         let words = text == PermissionPolicy.changeIt ? PermissionPolicy.changePlan : text
         if let ask = asks[id]?.first, ask.call.plan != nil, var job = job(id), job.isActive {
+            // As any message: without the vault's secrets, and not at all while it can't be read.
+            let said = try vault.forAgent(words)
             asks[id]?.removeFirst()
             job.question = nil
             job.notes = (job.notes ?? []) + [text]
             replace(job)
-            agents[id]?.answer(ask.call, .deny(words))
+            agents[id]?.answer(ask.call, .deny(said))
             return show(id, step: "You: \(text)")
         }
         try tell(id, text, agentText: words)
@@ -591,6 +599,9 @@ extension Desk {
             }
             guard let job = others[id] else { return "That job isn't waiting for your OK any more." }
             if let why = await answerElsewhere(job, decision, message) { return "Couldn't answer \(job.heading): \(why)" }
+            if job.question?.plan != nil {
+                return decision == .deny ? "Sent \(job.heading)'s plan back." : "Approved \(job.heading)'s plan: it goes on in Accept edits."
+            }
             return said(job)
         case .setMode:
             guard let mode = plan.mode else { return "Say which mode." }

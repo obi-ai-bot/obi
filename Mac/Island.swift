@@ -142,6 +142,34 @@ final class IslandController {
             feed.apply(job)
             return job
         }
+        // "Allow it", "no, run only the runner tests" and "stop asking on the Watch job" reach the
+        // runner's jobs too (#134): a permission through its answer, a plan through the job's words,
+        // as its card would send them.
+        desk.answerElsewhere = { [weak self] job, decision, message in
+            guard let self, let runner = feed.runner else { return "The runner isn't set up." }
+            do {
+                if job.question?.plan != nil {
+                    let words = decision == .deny ? (message ?? PermissionPolicy.changeIt) : "Approve: \(PermissionMode.acceptEdits.title)"
+                    feed.apply(try await runner.tell(job.id, words))
+                    return nil
+                }
+                guard let permission = job.permission?.id ?? feed.extras[job.id]?.permission?.id,
+                      let answer = RunnerPermission.Decision(rawValue: decision.rawValue) else { return "It isn't waiting for your OK any more." }
+                feed.apply(try await runner.answer(job.id, permission: permission, answer, message: message))
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }
+        desk.modeElsewhere = { [weak self] job, mode in
+            guard let self, let choice = RunnerMode(rawValue: mode.rawValue) else { return "The runner isn't set up." }
+            do {
+                try await feed.setMode(job.id, choice)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }
         desk.onReply = { [weak self] text, spoken in self?.replied(text, spoken: spoken) }
         feed.start()
         Task { await desk.refresh() }
@@ -719,6 +747,9 @@ private struct OpenIsland: View {
                     publishing: JobView.Publishing(action: { Publish.action(for: job, base: job.base ?? "") },
                                                    publish: { _ in _ = try await desk.publish(job.id, approve: Publish.touchID) }),
                     onMessage: { try desk.message(job.id, $0) }, onDismiss: { try await dismiss(row) },
+                    extras: RunnerJobExtras(local: job),
+                    onMode: { try desk.changeMode(job.id, to: $0) },
+                    onPermission: { try desk.answerPermission(job.id, $0, message: $1) },
                     accounts: desk.accounts.accounts, onMove: mover(row), onStartNow: { try desk.startNow(job.id) })
         }
     }

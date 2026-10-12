@@ -2,9 +2,13 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
-/// Settings › General: what the iPhone's Settings has too (Shared/SettingsSections.swift), and
-/// opening at login.
+/// Settings › General: what the iPhone's Settings has too (Shared/SettingsSections.swift),
+/// opening at login, and how much this Mac's own jobs ask.
 struct SettingsView: View {
+    /// This Mac's desk: Settings › Permissions' default for the jobs it runs itself (#134). The
+    /// runner's is in Settings › Runner.
+    let desk: Desk
+    @State private var mode = PermissionMode.bypass
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var problem: String?
     /// Oby reads its reply out loud when you talked to it (Mac/Speech.swift).
@@ -25,12 +29,30 @@ struct SettingsView: View {
             if let problem {
                 Text(problem).font(.caption).foregroundStyle(.red)
             }
+            Section {
+                Picker("Default mode", selection: $mode) {
+                    ForEach(RunnerMode.allCases) { choice in
+                        Text(choice.label).tag(PermissionMode(rawValue: choice.rawValue) ?? .bypass)
+                    }
+                }
+                .onChange(of: mode) { _, chosen in if desk.defaultMode != chosen { desk.defaultMode = chosen } }
+                if let help = RunnerMode(mode.rawValue)?.help {
+                    Text(help).font(.footnote).foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Permissions on this Mac")
+            } footer: {
+                Text("How much the jobs this Mac runs itself ask. Each job's Mode menu changes it while it runs. The runner's jobs follow Settings › Runner.")
+            }
             VoiceSection(speaks: $speaks, footer: "When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer until you press fn or say “stop”. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
             NotificationsSection()
         }
         .formStyle(.grouped)
         .frame(width: 460)
-        .onAppear { NSApp.activate() }
+        .onAppear {
+            NSApp.activate()
+            mode = desk.defaultMode
+        }
     }
 }
 
@@ -58,7 +80,7 @@ struct RunnerSettingsView: View {
             } footer: {
                 Text("The runner does the work while your Mac is closed. The island lists the jobs running there too, and Oby tells you when one needs you. It answers only your Tailscale login, so this Mac needs Tailscale on. Leave it empty to turn this off.")
             }
-            // As on the iPhone (Shared/PermissionsSection.swift). This Mac's own jobs don't ask yet (#134).
+            // As on the iPhone (Shared/PermissionsSection.swift). This Mac's own jobs' default is in General.
             PermissionsSection(runner: feed.runner, defaultMode: feed.defaultMode, setDefault: feed.setDefaultMode)
             Section("Checks on this Mac") {
                 Toggle("Run merge checks on this Mac", isOn: $runMergeChecks)

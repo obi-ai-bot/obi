@@ -1269,6 +1269,8 @@ final class Desk {
             let said = try vault.forAgent(heard)
             replace(Self.heard(job, text))
             let betweenTurns = roundTimers[id] == nil || job.question != nil
+            // The answer to a question or plan its turn ended on: the job's clock goes on from where it stopped.
+            if asks[id]?.isEmpty ?? true { resumeClocks(id) }
             // Words between turns (while the check runs) start a turn: it gets a round timer too.
             if roundTimers[id] == nil, !waitingForUser.contains(id) { timeRound(id) }
             restarts?.give(id, heard, adding: true)
@@ -1474,15 +1476,18 @@ final class Desk {
             job.tetrix?.endRound()
             // A question for the user (case I.1): the job waits for the answer, its agent idle, and
             // the inbox has it. The answer comes as its next message (`message`); others keep going.
+            // Waiting doesn't count toward the job's limit: its clock stops until the answer comes (`tell`).
             if !failed, let question = Inbox.question(in: summary) {
                 job.question = question
                 job.step = "Waiting for your answer"
+                pauseClocks(id)
                 return replace(job)
             }
             // A plan-only turn (Plan mode) ends with its plan, which waits for approval the same way.
             if !failed, job.currentMode == .plan {
                 job.question = PermissionPolicy.planQuestion(summary)
                 job.step = "Waiting for your OK on the plan"
+                pauseClocks(id)
                 return replace(job)
             }
             replace(job)
