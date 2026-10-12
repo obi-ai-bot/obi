@@ -75,18 +75,21 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var permission: RunnerPermission?
     /// Every time the user moved it to another tool, account or model, oldest first (newer runners only).
     var moves: [Move]?
-    /// What it waits for before it starts (#216), as the runner words it, or nil (older runners too).
+    /// What a queued job waits for (#238), or nil: getting ready, about to start, not queued, or an older runner.
     var waiting: Waiting?
 
-    /// `{"kind": "schedule", "text": "for #205 to merge", "job": null}`: `text` follows "Waiting".
+    /// What it waits for, as the runner words it: `text` like "after #223 merges" or "runner
+    /// update"; `kind` ("job", "files", "update", "cap", "schedule", "limit") stays a string so a
+    /// newer runner's kinds still decode.
     struct Waiting: Codable, Equatable, Sendable {
         var kind: String
         var text: String
         var job: String?
     }
 
-    /// Queued until what it waits for happens (#216): it can start now (`Runner.startNow`).
-    var waitsToStart: Bool { status == .queued && waiting?.kind == "schedule" }
+    /// Queued until what its `startWhen` names happens (#216: `waiting`'s kind `schedule` or
+    /// `limit`): it can start now (`Runner.startNow`).
+    var waitsToStart: Bool { status == .queued && (waiting.map { ["schedule", "limit"].contains($0.kind) } ?? false) }
 
     /// One move, as the runner words it: "Codex · Deskree" to "Claude Code · Personal · Fable 5.1".
     struct Move: Codable, Equatable, Sendable {
@@ -594,8 +597,6 @@ extension Job {
     nonisolated var badge: JobBadge {
         if dismissed != nil { return JobBadge(text: "Dismissed", tone: .gray) }
         switch status {
-        // Waiting for what it waits for before it starts (#216), else about to start.
-        case .queued where waitsToStart: return JobBadge(text: "Waiting", tone: .gray)
         case .queued: return JobBadge(text: "Starting", tone: .blue)
         case .running: return JobBadge(text: "Working", tone: .blue)
         case .done where canPublish: return JobBadge(text: "Ready to publish", tone: .orange)

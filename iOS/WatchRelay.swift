@@ -215,6 +215,11 @@ final class WatchRelay: NSObject {
                 let job = try await phone.runner.dismiss(id)
                 _ = await refresh()
                 return [WatchWire.job: try Runner.encoder.encode(job)]
+            case .start:
+                guard let id = message[WatchWire.job] as? String else { return bad }
+                let job = try await phone.runner.startNow(id)
+                _ = await refresh()
+                return [WatchWire.job: try Runner.encoder.encode(job)]
             case .permission:
                 guard let id = message[WatchWire.job] as? String, let prompt = message[WatchWire.permission] as? String,
                       let decision = (message[WatchWire.decision] as? String).flatMap(RunnerPermission.Decision.init(rawValue:)) else { return bad }

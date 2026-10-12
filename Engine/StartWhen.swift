@@ -181,26 +181,34 @@ enum StartWhen {
         return nil
     }
 
-    /// The job's step and question for what its conditions came to: "Waiting for Codex ·
-    /// Deskree: 5-hour window resets at 4:59", and, when one can never hold and the user hasn't
-    /// chosen to keep waiting, the inbox's decision. Nil when they all hold.
-    nonisolated static func wait(_ verdicts: [Verdict], kept: Bool) -> (step: String, question: Plan.Question?)? {
+    /// The job's step, `waiting` and question for what its conditions came to: "Waiting for
+    /// Codex · Deskree: 5-hour window resets at 4:59", `waiting` with what follows "Waiting" (kind
+    /// `limit` when the first thing it waits for is an account's room, else `schedule`, as #238
+    /// defines them), and, when one can never hold and the user hasn't chosen to keep waiting, the
+    /// inbox's decision. Nil when they all hold.
+    nonisolated static func wait(_ checked: [(condition: StartCondition, verdict: Verdict)], kept: Bool)
+        -> (step: String, waiting: Job.Waiting, question: Plan.Question?)? {
         var waits: [String] = []
         var never: [String] = []
-        for verdict in verdicts {
+        let open = checked.filter { $0.verdict != .holds }
+        for (_, verdict) in open {
             switch verdict {
             case .holds: continue
             case .waits(let text): waits.append(text)
             case .never(let why): never.append(why)
             }
         }
+        guard let first = open.first?.condition else { return nil }
+        let kind: Job.Waiting.Kind = first.account == nil ? .schedule : .limit
+        let job = open.lazy.compactMap { if case .job(let id, _) = $0.condition { id } else { nil } }.first
         if let why = never.first {
-            let line = "Waiting for you: \(why)."
-            return (line, kept ? nil : Plan.Question(text: "It can't start as planned: \(why). Start it anyway, cancel it, or wait for something else?",
-                                                       options: [startAnyway, cancel, somethingElse]))
+            let text = "for you: \(why)"
+            return ("Waiting \(text).", Job.Waiting(kind: kind, text: text, job: job),
+                    kept ? nil : Plan.Question(text: "It can't start as planned: \(why). Start it anyway, cancel it, or wait for something else?",
+                                               options: [startAnyway, cancel, somethingElse]))
         }
-        guard !waits.isEmpty else { return nil }
-        return ("Waiting " + waits.joined(separator: ", and "), nil)
+        let text = waits.joined(separator: ", and ")
+        return ("Waiting " + text, Job.Waiting(kind: kind, text: text, job: job), nil)
     }
 
     /// What started it, for its report: "Started when every condition held: job ab12cd34 merged, at 9:00 AM."
@@ -347,21 +355,21 @@ extension Desk {
             keptWaiting.remove(id)
             return false
         }
-        let verdicts = conditions.map { StartWhen.verdict($0, of: job, now: now, lookup: startWhenLookup) }
-        guard let wait = StartWhen.wait(verdicts, kept: keptWaiting.contains(id)) else {
+        let checked = conditions.map { ($0, StartWhen.verdict($0, of: job, now: now, lookup: startWhenLookup)) }
+        guard let wait = StartWhen.wait(checked, kept: keptWaiting.contains(id)) else {
             scheduled.remove(id)
             keptWaiting.remove(id)
             Logger.jobs.notice("job \(id, privacy: .public): starts, what it waited for came")
             job.startWhen = nil
+            job.waiting = nil
             job.question = nil
             job.step = "Getting \(job.repoName) ready"
             noteStart("Started when what it waited for came: \(StartWhen.describe(conditions, accounts: accounts.state)).", for: id)
             replace(job)
             return true
         }
-        if job.step != wait.step || job.question != wait.question {
-            job.step = wait.step
-            job.question = wait.question
+        if job.step != wait.step || job.waiting != wait.waiting || job.question != wait.question {
+            (job.step, job.waiting, job.question) = (wait.step, wait.waiting, wait.question)
             replace(job)
         }
         return false
@@ -385,6 +393,7 @@ extension Desk {
     func startNow(_ id: String) throws {
         guard var job = job(id), job.waitsToStart else { throw Shell.Failure(message: "That job isn't waiting to start.") }
         job.startWhen = nil
+        job.waiting = nil
         job.question = nil
         let held = scheduled.remove(id) != nil
         keptWaiting.remove(id)

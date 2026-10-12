@@ -1867,6 +1867,9 @@ final class Desk {
         // ones when something changes it (dismissed, told something, moved), and is kept as any other.
         if !lists(job.id), let stored = store.job(job.id) { jobs.append(stored) }
         guard let index = jobs.firstIndex(where: { $0.id == job.id }) else { return }
+        var job = job
+        // Only a queued job waits for something (#238).
+        if job.status != .queued { job.waiting = nil }
         let tookSlot = jobs[index].takesSlot
         jobs[index] = job
         if save { store.save(job) }

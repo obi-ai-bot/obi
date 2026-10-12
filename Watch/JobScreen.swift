@@ -42,6 +42,12 @@ struct JobScreen: View {
                         }
                         .disabled(busy)
                     }
+                    // Waiting for its start condition (#216): it can start now instead.
+                    if job.waitsToStart {
+                        Button("Start now") {
+                            Task { await run { try await watch.startNow(job.id) } }
+                        }.disabled(busy)
+                    }
                     // Oby's own reviews pick their account themselves.
                     if job.reviewOf == nil {
                         NavigationLink("Move to…") { MoveList(job: job) }.disabled(busy)

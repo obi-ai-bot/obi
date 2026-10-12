@@ -724,33 +724,9 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting }
 
-    private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou, waiting }
-
-    /// What a queued job waits for before it starts (#216): `{"kind": "schedule", "text": "for
-    /// Codex · Deskree: 5-hour window resets at 4:59 PM", "job": id or null}`, the text following
-    /// "Waiting" as its step says it, `job` the first job it waits for.
-    private struct Waiting: Encodable {
-        var kind = "schedule"
-        var text: String
-        var job: String?
-
-        private enum Keys: String, CodingKey { case kind, text, job }
-
-        func encode(to encoder: any Encoder) throws {
-            var keys = encoder.container(keyedBy: Keys.self)
-            try keys.encode(kind, forKey: .kind)
-            try keys.encode(text, forKey: .text)
-            try keys.encode(job, forKey: .job)
-        }
-
-        init?(_ job: Job) {
-            guard job.waitsToStart else { return nil }
-            text = job.step.hasPrefix("Waiting ") ? String(job.step.dropFirst("Waiting ".count)) : "to start"
-            self.job = job.startWhen?.lazy.compactMap { if case .job(let id, _) = $0 { id } else { nil } }.first
-        }
-    }
+    private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou }
 
     func encode(to encoder: any Encoder) throws {
         // Oby's own review makes no commits; the ones in its worktree are the pull request's. Saying 0
@@ -764,7 +740,6 @@ struct JobJSON: Encodable {
         try derived.encode(job.mergeNeedsYou, forKey: .mergeNeedsYou)
         try derived.encode(job.reviewNeedsYou, forKey: .reviewNeedsYou)
         try derived.encode(job.cloudNeedsYou, forKey: .cloudNeedsYou)
-        try derived.encode(Waiting(job), forKey: .waiting)
         var nulls = encoder.container(keyedBy: Nullable.self)
         if job.base == nil { try nulls.encodeNil(forKey: .base) }
         if job.pr == nil { try nulls.encodeNil(forKey: .pr) }
@@ -804,6 +779,7 @@ struct JobJSON: Encodable {
         if job.appleRan == nil { try nulls.encodeNil(forKey: .appleRan) }
         if job.tetrix == nil { try nulls.encodeNil(forKey: .tetrix) }
         if job.startWhen == nil { try nulls.encodeNil(forKey: .startWhen) }
+        if job.waiting == nil { try nulls.encodeNil(forKey: .waiting) }
         // What went out and where it moved are always lists: empty before anything did.
         if job.outgoing == nil { try nulls.encode([Outgoing](), forKey: .outgoing) }
         if job.moves == nil { try nulls.encode([Job.Move](), forKey: .moves) }

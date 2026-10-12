@@ -207,7 +207,9 @@ struct StartWhenTests {
         #expect(accounts.state(codex.id)?.running == 0 && made.agents.isEmpty)
         let json = try JSONSerialization.jsonObject(with: API.encode(JobJSON(job: waiting))) as? [String: Any]
         #expect((json?["waiting"] as? [String: Any])?["text"] as? String == "for Codex · Deskree: 5-hour window resets at \(resets)")
-        #expect((json?["waiting"] as? [String: Any])?["kind"] as? String == "schedule")
+        // As #238 defines `waiting`: an account's room is a `limit`.
+        #expect((json?["waiting"] as? [String: Any])?["kind"] as? String == "limit")
+        #expect(waiting.waiting == Job.Waiting(kind: .limit, text: "for Codex · Deskree: 5-hour window resets at \(resets)"))
         #expect((json?["startWhen"] as? [[String: Any]])?.first?["window"] as? String == "fiveHour")
         #expect(!Failures.stuckCandidate(waiting))
 
@@ -217,7 +219,7 @@ struct StartWhenTests {
         await desk.checkStartWhen()
         try await until("it runs") { desk.job("reset")?.status == .running }
         let started = try #require(desk.job("reset"))
-        #expect(started.startWhen == nil && started.question == nil)
+        #expect(started.startWhen == nil && started.question == nil && started.waiting == nil)
         #expect(made.agents.map(\.job.id) == ["reset"])
         desk.finish("reset", .stopped, "Stopped by you.")
         #expect(desk.job("reset")?.summary.contains("Started when what it waited for came: Codex · Deskree 5-hour window under 80%.") == true)
@@ -257,6 +259,7 @@ struct StartWhenTests {
         try await dispatch(job("both", [.pullRequest(205, is: .merged), .at(nine)]))
         await desk.checkStartWhen()
         #expect(desk.job("both")?.step == "Waiting for #205 to merge, and until \(Limits.clock(nine))")
+        #expect(desk.job("both")?.waiting == Job.Waiting(kind: .schedule, text: "for #205 to merge, and until \(Limits.clock(nine))"))
         github.states["deskree-inc/oby#205"] = .merged
         await desk.checkStartWhen()
         #expect(desk.job("both")?.step == "Waiting until \(Limits.clock(nine))" && desk.job("both")?.status == .queued)
@@ -282,6 +285,7 @@ struct StartWhenTests {
         #expect(item.kind == .question && item.options == [StartWhen.startAnyway, StartWhen.cancel, StartWhen.somethingElse])
         #expect(item.text.contains("Broken build failed, so it won't be done"))
         #expect(desk.job("blocked")?.status == .queued && desk.job("blocked")?.step == "Waiting for you: Broken build failed, so it won't be done.")
+        #expect(desk.job("blocked")?.waiting == Job.Waiting(kind: .schedule, text: "for you: Broken build failed, so it won't be done", job: "broken"))
 
         // Words that aren't a choice are refused; Wait for something else keeps it waiting, unasked.
         #expect(throws: (any Error).self) { try desk.settle(item.id, .answer("maybe later")) }

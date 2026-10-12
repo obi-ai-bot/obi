@@ -154,6 +154,8 @@ struct JobRow: View {
 enum JobStatus {
     static func of(_ job: Job) -> (String, Color) {
         switch job.status {
+        // Waiting for its start condition (#216): what for, as the runner says it.
+        case .queued where job.waitsToStart: ("Scheduled, waiting \(job.waiting?.text ?? "to start")", .secondary)
         case .queued: ("Starting", .blue)
         case .running: ("Working", .blue)
         case .done where job.canPublish: ("Ready to publish", .orange)

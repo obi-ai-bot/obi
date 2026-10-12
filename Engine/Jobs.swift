@@ -133,6 +133,28 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Every time the user moved it to another tool, account or model (Engine/Move.swift), oldest
     /// first, or nil when it never moved.
     var moves: [Move]?
+    /// Why it's queued and not running yet (#238): what it waits for, or nil when nothing holds it
+    /// (it's getting ready, or about to start) and once it isn't queued.
+    var waiting: Waiting?
+
+    /// What a queued job waits for, in the words every app shows after "Waiting": "after #223
+    /// merges", "runner update". `job` is the job it waits behind, for `job` and `files`.
+    struct Waiting: Codable, Equatable, Sendable {
+        enum Kind: String, Codable, Sendable {
+            /// Another job on the same files that's still queued or running.
+            case job
+            /// Another job's files, held by its pull request until it's merged or closed, or by its
+            /// commits until they're published.
+            case files
+            /// The runner is updating: nothing starts until it restarts.
+            case update
+            /// The running-jobs cap (#237), a start time (#216), or its account's usage limit.
+            case cap, schedule, limit
+        }
+        var kind: Kind
+        var text: String
+        var job: String?
+    }
     /// What it waits for before it starts (#216, Engine/StartWhen.swift): it stays queued until every
     /// condition holds. Nil for a job that starts at once, and once it started.
     var startWhen: [StartCondition]?

@@ -53,6 +53,7 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 /// - `tell`: `job` (its id) and `text`; answered with `job`.
 /// - `stop`: `job` (its id); answered with `job`.
 /// - `dismiss`: `job` (its id); answered with `job`.
+/// - `start`: `job` (its id), waiting for its `startWhen` (#216): it starts now; answered with `job`.
 /// - `permission`: `job` (its id), `permission` (the prompt's id), `decision` ("allow", "always" or
 ///   "deny") and, with a deny, `text` for the agent; answered with `job`.
 /// - `move`: `job` (its id), with any of `agent`, `account` and `model` (docs/runner-api.md,
@@ -74,7 +75,7 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 ///
 /// Any reply may carry `error` instead of what was asked for.
 nonisolated enum WatchWire {
-    enum Kind: String { case refresh, voice, voiceStart, voiceChunk, voiceEnd, voiceCancel, transcript, plan, dispatch, tell, stop, dismiss, permission, move, publishAction, publish, planned, published, pairKey, paired, unpaired }
+    enum Kind: String { case refresh, voice, voiceStart, voiceChunk, voiceEnd, voiceCancel, transcript, plan, dispatch, tell, stop, dismiss, start, permission, move, publishAction, publish, planned, published, pairKey, paired, unpaired }
 
     static let kind = "kind"
     static let ok = "ok"
