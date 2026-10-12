@@ -170,6 +170,9 @@ final class Desk {
     /// Jobs running again for the user's words (`message` on a finished job): that round is theirs,
     /// so ending it with nothing committed is done, not "nothing committed".
     private var asked: Set<String> = []
+    /// Jobs that had their round to commit work they'd left uncommitted (#220): that's once, then
+    /// ending with nothing committed fails.
+    private var committingRound: Set<String> = []
     /// The message that started a looping job's current round (the check's output, "Keep going"),
     /// for an agent that takes the round over; nil when the round began with the task or the user's words.
     private var roundMessage: [String: String] = [:]
@@ -200,6 +203,13 @@ final class Desk {
     /// How many commits the job's worktree has beyond `since`, or nil when git can't say. Tests put in their own.
     @ObservationIgnored var countCommits: (_ id: String, _ since: String) async -> Int? = { id, since in
         (try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-list", "--count", "\(since)..HEAD"])).flatMap { Int($0) }
+    }
+    /// The files the job's worktree has changed but not committed; none when git can't say. Ignored
+    /// files (`.oby/`) aren't among them. Read untrimmed: a record's first column can be a space. Tests put in their own.
+    @ObservationIgnored var changedFiles: (_ id: String) async -> [String] = { id in
+        guard let status = try? await Shell.run(["git", "-C", Workspace.worktree(id).path, "status", "--porcelain", "-z"]),
+              status.status == 0 else { return [] }
+        return Job.changedFiles(porcelain: String(decoding: status.out, as: UTF8.self))
     }
     /// How many commits the job's worktree has beyond `since` that `pushed` (the commit Oby pushed
     /// last) doesn't: the new ones, or all of them after a rebase. Nil when git can't say. Tests put in their own.
@@ -1394,7 +1404,19 @@ final class Desk {
         }
         // The user spoke since the turn ended: the agent took it up, and that turn decides.
         guard (job.notes?.count ?? 0) == heard else { return }
-        switch Rounds.next(job, summary: summary, failed: failed, check: check, previous: failures[id]) {
+        var next = Rounds.next(job, summary: summary, failed: failed, check: check, previous: failures[id])
+        // Done with its work left uncommitted, and rounds left: one more round to commit it (#220).
+        if case .finish(.done, _) = next {
+            let files = await uncommitted(job)
+            // Superseded while git looked (the user's words, another agent): that turn decides, whatever git said.
+            guard current(), let latest = self.job(id), latest.isActive, (latest.notes?.count ?? 0) == heard else { return }
+            job = latest
+            if let files {
+                committingRound.insert(id)
+                next = .again(Prompts.commitRound(job, files: files))
+            }
+        }
+        switch next {
         case let .finish(status, text):
             agent.end()
             finish(id, status, text)
@@ -1426,6 +1448,17 @@ final class Desk {
         case let .hold(limit, text):
             hold(id, limit, text)
         }
+    }
+
+    /// The files a committing job that's done left uncommitted, when it made no commits and has a
+    /// round left for them: nil once it had its commit round, or for a round the user asked for.
+    private func uncommitted(_ job: Job) async -> [String]? {
+        guard Job.committing.contains(job.kind), let base = job.base, job.currentRound < job.maxRounds,
+              !asked.contains(job.id), !committingRound.contains(job.id) else { return nil }
+        let made = await countCommits(job.id, job.pr.map { "refs/oby/pr-\($0)" } ?? "refs/remotes/origin/\(base)")
+        guard made == 0 else { return nil }
+        let files = await changedFiles(job.id)
+        return files.isEmpty ? nil : files
     }
 
     /// Starts the job's round timer over.
@@ -1480,16 +1513,18 @@ final class Desk {
             // A pull request's branch has its own commits beyond the base: only the ones after its head are the job's.
             let made = job.pr == nil ? commits : await countCommits(id, "refs/oby/pr-\(job.pr ?? 0)")
             let pushed = await stillPushed(job, base: base, commits: commits)
+            // Nothing committed: what it left uncommitted is why (#220).
+            let dirty = made == 0 && Job.committing.contains(job.kind) ? await changedFiles(id) : []
             await noteTetrixStamps(id)
             guard var running = self.job(id), running.isActive else { return }
             // The job as it would end, which is what gets published.
             var ended = running
-            (ended.status, ended.summary) = Job.ending(ended, status, summary, made: made, asked: asked.contains(id))
+            (ended.status, ended.summary) = Job.ending(ended, status, summary, made: made, asked: asked.contains(id), dirty: dirty)
             ended.commits = commits
             ended.pushed = pushed
             guard ended.canPublish, let before = ranHere[id], (commits ?? 0) > before.commits || ended.unpublished > before.unpublished else {
                 // Still waiting for Publish by hand: why its own publish failed still holds.
-                return end(id, status, summary, commits: commits, pushed: pushed, made: made,
+                return end(id, status, summary, commits: commits, pushed: pushed, made: made, dirty: dirty,
                            publishError: ended.canPublish ? ended.publishError : nil)
             }
             running.phase = .publish
@@ -1523,7 +1558,7 @@ final class Desk {
     /// request has. `made`: the ones this job made. `published`: the pull request it just published
     /// to, or `publishError`, why it couldn't.
     private func end(_ id: String, _ status: Job.Status, _ summary: String, commits: Int? = nil, pushed: Int? = nil, made: Int? = nil,
-                     published: URL? = nil, publishError: String? = nil) {
+                     dirty: [String] = [], published: URL? = nil, publishError: String? = nil) {
         guard var job = job(id) else { return }
         guard job.isActive else {
             // Stopped while publishing: the pull request is out all the same.
@@ -1536,7 +1571,7 @@ final class Desk {
             }
             return
         }
-        (job.status, job.summary) = Job.ending(job, status, summary, made: made, asked: asked.contains(id))
+        (job.status, job.summary) = Job.ending(job, status, summary, made: made, asked: asked.contains(id), dirty: dirty)
         if job.status == .failed && status == .done { job.phase = .work }
         // Why it went to its account, and how it moved between accounts, for the report.
         if let moves = handoffs[id], !moves.isEmpty { job.summary += "\n\n" + moves.joined(separator: "\n") }
@@ -1563,6 +1598,7 @@ final class Desk {
         pickedUp.remove(id)
         ending.remove(id)
         asked.remove(id)
+        committingRound.remove(id)
         roundMessage[id] = nil
         handoffs[id] = nil
         restarts?.forget(id)
