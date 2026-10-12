@@ -545,22 +545,22 @@ extension Desk {
         applyReview(id, review: review)
     }
 
-    /// The rest of a review's end, once its verdict is on the author (`Review.applying`): the approval
-    /// queues its Mac check, the check run goes on the pull request, then changes requested go to the
-    /// author's agent as its next round. A runner update waits for it (`wrapUp`); one a restart cut
-    /// short is done again when the runner starts (`resumeReviews`), so its check run may be written
-    /// twice, never lost. An approval whose Mac check was queued already isn't queued again.
+    /// The rest of a review's end, once its verdict is on the author (`Review.applying`): the check
+    /// run goes on the pull request, then the approval queues its Mac check, or changes requested go
+    /// to the author's agent as its next round. A runner update waits for it (`wrapUp`). The marker
+    /// goes in the same save as the Mac check or the round, after the round's message is on disk,
+    /// so a restart anywhere before leaves it set, and the runner does it all again when it starts
+    /// (`resumeReviews`): its check run may be written twice, never lost.
     func applyReview(_ id: String, review: Job) {
         guard let author = job(id), let applying = author.review, applying.job == review.id, applying.applying == true else { return }
         let verdict = applying.verdict
-        if verdict == .approved, (author.macCheck.map { $0.created < applying.date } ?? true) { reviewApproved(id, review: review.id) }
         wrapUp("review:\(id)") { [self] in
             var result = applying
             result.applying = nil
+            // The commit the reviewer read; the pull request's head when its worktree can't say.
+            let read = await reviewedHead(review.id)
             do {
-                // The commit the reviewer read; the pull request's head when its worktree can't say.
-                let head = await reviewedHead(review.id) ?? author.pushedHead ?? ""
-                let url = try await postReview(author, Review.checkRun(result, summary: review.summary, head: head)).absoluteString
+                let url = try await postReview(author, Review.checkRun(result, summary: review.summary, head: read ?? author.pushedHead ?? "")).absoluteString
                 result.checkRun = url
                 sent(id, Outgoing(action: .checkRun, repo: author.repo, id: url))
             } catch {
@@ -574,10 +574,18 @@ extension Desk {
             }
             guard var latest = self.job(id), latest.review?.job == review.id else { return }
             latest.review = result
-            replace(latest)
+            if verdict == .approved {
+                latest = approved(latest, read: read)
+                replace(latest)
+                if let check = latest.macCheck, check.created >= result.date, check.state == .queued {
+                    Logger.jobs.notice("job \(id, privacy: .public): Mac check \(check.id, privacy: .public) queued for \(check.head, privacy: .public)")
+                    onCheckChange(check)
+                }
+                return
+            }
             // Changes requested: the author's agent takes them up as its next round. One that's
             // running already will publish again and get a fresh review then.
-            guard verdict == .changesRequested, !result.stopsHere, !latest.isActive, let pr = Review.pullRequest(of: latest) else { return }
+            guard !result.stopsHere, !latest.isActive, let pr = Review.pullRequest(of: latest) else { return replace(latest) }
             guard let session = latest.session else {
                 latest.reviewError = "Oby requested changes, but the job has no session to pick up."
                 return replace(latest)
@@ -590,8 +598,12 @@ extension Desk {
                 return replace(latest)
             }
             let again = Review.round(latest)
+            let prompt = Review.roundPrompt(again, file: file)
+            // The round's message is on disk before the round is: a restart in between finds the
+            // review still applying, and hands it over again.
+            restarts?.give(id, prompt)
             replace(again)
-            run(again, prompt: Review.roundPrompt(again, file: file), resume: session)
+            run(again, prompt: prompt, resume: session)
         }
     }
 

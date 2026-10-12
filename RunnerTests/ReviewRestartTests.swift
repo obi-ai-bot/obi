@@ -222,4 +222,47 @@ struct ReviewRestartTests {
         #expect(author.macCheck?.state == .queued && author.macCheck?.head == head)
         #expect(author.review?.checkRun != nil && made.posted.count == 1 && made.agents.isEmpty)
     }
+
+    // MARK: Where a crash can land
+
+    /// Every state of the author saved while its verdict is applied is one the runner finishes when a
+    /// crash leaves it there: still `applying`, or its Mac check or its round (with its message in
+    /// the restart journal) saved with the marker gone (#212).
+    @Test(arguments: ["One thing.\n\nBlocking:\n- It crashes\n\nVERDICT: CHANGES REQUESTED", "Looks right.\n\nVERDICT: APPROVED"])
+    func everyStateACrashCanLeaveFinishesTheVerdict(summary: String) async throws {
+        saveEnded(review: "rev1", summary: summary, applied: false)
+        let restored = restarted()
+        restored.queuesMacChecks = true
+        var lost: [String] = []
+        restored.onJobChange = { [weak restored] job in
+            let ended = job.id == "author" && job.review?.job == "rev1" && job.review?.applying == nil
+            if ended && job.review?.verdict == .approved && job.macCheck?.state != .queued {
+                lost.append("an approval saved without its Mac check")
+            }
+            if ended && job.review?.verdict == .changesRequested
+                && (job.status != .running || restored?.restarts?.message("author")?.contains("review-1.md") != true) {
+                lost.append("changes requested saved without the round and its message")
+            }
+        }
+        restored.resumeAfterRestart()
+        try await until("the verdict is applied") { restored.job("author")?.review?.applying == nil && restored.wrappingUp.isEmpty }
+        #expect(lost.isEmpty)
+        #expect(restored.job("author")?.review?.verdict == Review.decide(summary))
+        #expect(made.posted.count == 1)
+        restored.quit()
+    }
+
+    @Test func aCrashAfterTheRoundsMessageWasSavedStartsTheRoundOnce() async throws {
+        saveEnded(review: "rev1", summary: "One thing.\n\nBlocking:\n- It crashes\n\nVERDICT: CHANGES REQUESTED", applied: true)
+        // The round's message reached the journal; the round itself was never saved.
+        Restarts(file: folder.appending(path: "restarts.json")).give("author", "The round's message, as it was saved")
+        let restored = restarted()
+        restored.resumeAfterRestart()
+        try await until("the author runs again") { restored.job("author")?.status == .running && made.agents.count == 1 }
+        let round = try #require(made.agents.first)
+        #expect(round.resume == "e6a24229" && round.agent.prompt.contains(".oby/inputs/review-1.md"))
+        #expect(!round.agent.prompt.contains("as it was saved") && !round.agent.prompt.hasPrefix(Restarts.notice))
+        #expect(restored.job("author")?.round == 2 && made.quoted.map(\.file) == ["review-1.md"])
+        restored.quit()
+    }
 }
