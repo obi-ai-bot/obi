@@ -140,16 +140,23 @@ nonisolated struct TetrixUse: Codable, Equatable, Sendable {
         let commits = Job.committing.contains(job.kind)
         return [
             "Tetrix first: if the tetrix MCP server is connected, start by asking it about \(subject(job)) and the area it touches, before you read many files: search_entities to find it and what's related (pull requests, commits, owners, past sessions and decisions), get_entity for the details, and code_impact on the files you expect to change where the repository's code is indexed. Ask it again for questions about code structure, ownership and impact: it saves tokens.",
+            sessionsLine(job),
             commits
                 ? "When it's connected, end by calling Tetrix's save_session with what you did, decided and left open, and stamp your commits with the session it returns: a trailer `\(trailer): <id>` in the commit message (git commit --trailer \"\(trailer): <id>\"), so save it before your last commit, or amend that commit. Oby checks both and notes them in the job's report."
                 : "When it's connected, end by calling Tetrix's save_session with what you found and decided. Oby checks it and notes it in the job's report.",
         ]
     }
 
+    /// Earlier sessions' digests (#214): what agents before this one decided, learned and left open
+    /// on the same work, read before starting so it isn't investigated or got wrong again.
+    static func sessionsLine(_ job: Job) -> String {
+        "Before you start, also read in Tetrix what earlier sessions on \(subject(job)) left: repo_sessions on it (and on the files you expect to change) lists the sessions that worked on it, session_context shows what one touched, and session_digest reads its decisions, lessons and open items. Build on them instead of redoing their investigation, and say in your summary where you depart from one."
+    }
+
     /// Oby's review: the reviewer asks Tetrix too, hears what Oby saw of the author's use of it,
     /// and flags a change that ignores what Tetrix knew.
     static func reviewLines(_ job: Job) -> [String] {
-        var lines = ["Tetrix first: if the tetrix MCP server is connected, start by asking it about \(subject(job)) and the area it touches, before you read many files: search_entities, get_entity, and code_impact where the repository's code is indexed. A change that ignores what Tetrix knew (an owner, a past decision, a related pull request, a known impact) is a finding: say so. End by calling save_session with what you found."]
+        var lines = ["Tetrix first: if the tetrix MCP server is connected, start by asking it about \(subject(job)) and the area it touches, before you read many files: search_entities, get_entity, and code_impact where the repository's code is indexed, and repo_sessions and session_digest for what earlier sessions on it decided. A change that ignores what Tetrix knew (an owner, a past decision, a related pull request, a known impact) is a finding: say so. End by calling save_session with what you found."]
         if let author = job.tetrix?.author { lines.append("What Oby saw of the author's agent and Tetrix: \(author)") }
         return lines
     }

@@ -802,10 +802,13 @@ nonisolated enum Policy {
     // the agent has no GitHub login and Oby's clone can't push. F3 asks the user instead.
     static let publishing = /\bgit(\s+(-[cC]\s+\S+|--\S+))*\s+(push|remote\s+(set-url|add))\b|(?i:pushurl)|\bgh\s+(pr\s+(create|merge|review|comment|close|edit|ready|reopen)|issue\s+(create|comment|close|edit|reopen|delete)|release|repo\s+(create|delete|edit|fork|rename|archive)|api|auth)\b/
 
-    /// The only MCP tools an agent may call: Tetrix's graph reads, and saving its own session there
-    /// (#130). Every other server (GitHub, Slack, …) holds a login of its own that could publish as the user.
+    /// The only MCP tools an agent may call: Tetrix's graph reads, the digests of earlier sessions
+    /// (#214), and saving its own session there (#130). `resume_session` stays out (it returns the
+    /// owner's private session state), as do Tetrix's admin, write and diagnostics tools. Every other
+    /// server (GitHub, Slack, …) holds a login of its own that could publish as the user.
     static let tetrixTools: Set<String> = ["graph_summary", "search_entities", "get_entity", "operational_context",
-                                           "impact_radius", "service_topology", "code_impact", "query_graph", TetrixUse.save]
+                                           "impact_radius", "service_topology", "code_impact", "query_graph",
+                                           "session_digest", "session_context", "repo_sessions", "list_sessions", TetrixUse.save]
 
     /// Why this tool call is refused, or nil to allow it.
     static func deny(tool: String, input: [String: Any], worktree: URL) -> String? {
@@ -813,7 +816,7 @@ nonisolated enum Policy {
         let mcp = tool.components(separatedBy: "__")
         if mcp.first == "mcp" {
             guard mcp.count == 3, mcp[1].lowercased().contains("tetrix"), tetrixTools.contains(mcp[2]) else {
-                return "Oby's agents use only Tetrix's graph reads and save_session among MCP tools. Say in your summary what you'd have done with \(tool)."
+                return "Oby's agents use only Tetrix's graph reads, earlier sessions' digests and save_session among MCP tools. Say in your summary what you'd have done with \(tool)."
             }
             return nil
         }
