@@ -355,6 +355,13 @@ final class Desk {
                 wentDown.append(jobs[index].id)
                 continue
             }
+            // One waiting for the user's answer keeps waiting, nothing running (#206): the answer
+            // picks its session up again (`message`).
+            if restarts != nil {
+                jobs[index].step = "Waiting for your answer"
+                store.save(jobs[index])
+                continue
+            }
             jobs[index].status = .interrupted
             jobs[index].finished = jobs[index].finished ?? .now
             store.save(jobs[index])
@@ -1115,7 +1122,10 @@ final class Desk {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Tell the agent something of 1 to 2,000 characters.") }
         guard let job = job(id) else { throw Shell.Failure(message: "There's no job \(id).") }
-        if job.isActive {
+        // Waiting for its answer since the runner restarted: no agent hears it, so the answer
+        // picks its session up again, in the same round (#206).
+        let waiting = job.isActive && job.question != nil && agents[id] == nil && updateWaiting[id] == nil && handovers[id] == nil
+        if job.isActive && !waiting {
             let held = updateWaiting[id]
             guard let agent = agents[id], !ending.contains(id) else {
                 if let held {
@@ -1147,10 +1157,11 @@ final class Desk {
             guard job.session != nil || moved != nil else { throw Shell.Failure(message: "This job never started, so there's no session to pick up.") }
             // Nothing is picked up while the vault can't be read: the user hears why.
             _ = try vault.forAgents()
-            let resumed = Self.resumed(job, text)
+            let resumed = waiting ? Self.heard(job, text) : Self.resumed(job, text)
             replace(resumed)
             if let author = resumed.reviewOf { reconnect(review: id, to: author) }
-            asked.insert(id)
+            // A round the user asked for. Not an answer: its round goes on, checked as it would be live.
+            if !waiting { asked.insert(id) }
             roundMessage[id] = nil
             // One the runner kept going down with still has the message it was about to get: it comes first.
             let prompt = [restarts?.message(id), text].compactMap { $0 }.joined(separator: "\n\n")

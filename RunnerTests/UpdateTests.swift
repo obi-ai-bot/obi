@@ -395,7 +395,8 @@ struct UpdateTests {
         let restored = restarted()
         restored.resumeAfterRestart()
         #expect(fake.agents.count == 1)
-        #expect(restored.job("updating")?.status == .interrupted)
+        // It keeps waiting, not interrupted (#206).
+        #expect(restored.job("updating")?.status == .running && restored.job("updating")?.step == "Waiting for your answer")
         #expect(restored.job("updating")?.question?.text == "Which option?")
         #expect(restored.inbox.contains { $0.kind == .question && $0.isOpen })
         try restored.message("updating", "One")
