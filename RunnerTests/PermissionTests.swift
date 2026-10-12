@@ -276,6 +276,29 @@ final class PermissionTests {
         #expect(stopping.job("perm2")?.permission == nil && stopping.inbox.allSatisfy { !$0.isOpen || $0.job != "perm2" })
     }
 
+    /// On the runner, a restart picks running jobs up again, but not one waiting for the user's OK:
+    /// it stays interrupted, keeping its permission, as one waiting on a question does. Nor does it
+    /// hold up a runner update's drain.
+    @Test func theRunnerKeepsAWaitingPermissionThroughARestart() async throws {
+        let restarts = folder.appending(path: "restarts.json")
+        let runner = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")),
+                          restarts: Restarts(file: restarts))
+        let agent = Agent()
+        _ = try await running(agent, mode: .ask, desk: runner)
+        agent.onEvent(.ask(bash("swift test", "r1")))
+        let permission = try #require(runner.job("perm1")?.permission)
+        runner.drainingForUpdate = true
+        #expect(runner.updateIsIdle)
+
+        let again = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")),
+                         restarts: Restarts(file: restarts))
+        var made = 0
+        again.makeAgent = { _, _, _ in made += 1; return Agent() }
+        again.resumeAfterRestart()
+        let interrupted = try #require(again.job("perm1"))
+        #expect(interrupted.status == .interrupted && interrupted.permission == permission && made == 0)
+    }
+
     @Test func changingTheModeAnswersWhatItAllows() async throws {
         let agent = Agent()
         let desk = try await running(agent, mode: .ask)
@@ -502,7 +525,8 @@ final class PermissionTests {
             #expect(try await call("/v1/jobs/nope/permission", .post, #"{"id": "p1", "decision": "allow"}"#).0 == .notFound)
             let (status, denied) = try await call("/v1/jobs/perm1/permission", .post, #"{"id": "\#(permission.id)", "decision": "deny", "message": "run only RunnerTests"}"#)
             #expect(status == .ok && (denied as? [String: Any])?["permission"] is NSNull)
-            #expect(agent.answers.last?.answer == .deny("run only RunnerTests"))
+            let answered = await MainActor.run { agent.answers.last?.answer }
+            #expect(answered == .deny("run only RunnerTests"))
 
             #expect(try await call("/v1/jobs/perm1/mode", .post, #"{"mode": "sometimes"}"#).0 == .unprocessableContent)
             let (changed, moded) = try await call("/v1/jobs/perm1/mode", .post, #"{"mode": "acceptEdits"}"#)
@@ -514,7 +538,7 @@ final class PermissionTests {
             let (_, set) = try await call("/v1/settings/permissions", .put, #"{"mode": "ask"}"#)
             #expect((set as? [String: Any])?["mode"] as? String == "ask" && desk.defaultMode == .ask)
 
-            desk.saveRule("Bash(swift test:*)", repo: "deskree-inc/oby")
+            _ = await MainActor.run { desk.saveRule("Bash(swift test:*)", repo: "deskree-inc/oby") }
             let (_, rules) = try await call("/v1/permissions/rules", .get)
             let rule = (rules as? [[String: Any]])?.first ?? [:]
             #expect(Set(rule.keys) == ["id", "rule", "repo", "decision", "created"] && rule["decision"] as? String == "allow")

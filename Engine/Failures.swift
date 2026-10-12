@@ -546,7 +546,7 @@ final class Failures {
     /// Keeps when each active job entered its step. A job waiting its turn for a slot
     /// (`Desk.startOrWait`, #231, #237) isn't in a step yet: its clock starts when it starts.
     private func track(_ job: Job) {
-        guard job.isActive, !job.waitsForAnswer, !Self.waitsItsTurn(job) else { since[job.id] = nil; return }
+        guard job.isActive, !job.waitsForAnswer, !job.waitsForPermission, !Self.waitsItsTurn(job) else { since[job.id] = nil; return }
         let key = "\(job.phase?.rawValue ?? "prepare")-\(job.currentRound)-\(job.publishStep?.rawValue ?? "")"
         if since[job.id]?.key != key { since[job.id] = (key, now()) }
     }

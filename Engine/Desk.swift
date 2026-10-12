@@ -96,7 +96,7 @@ final class Desk {
     private var updateWaiting: [String: (job: Job, prompt: String, resume: String?, notice: String?)] = [:]
     private var updatePreparing: Set<String> = []
     var updateIsIdle: Bool {
-        active.allSatisfy { $0.status == .queued || updateWaiting[$0.id] != nil || $0.question != nil } && updateIsBetweenSteps
+        active.allSatisfy { $0.status == .queued || updateWaiting[$0.id] != nil || $0.question != nil || $0.permission != nil } && updateIsBetweenSteps
     }
     /// No job is inside a step of its end of turn: counting its commits and publishing, a review's
     /// verdict reaching its author (its check run, then the round or the Mac check), merging. A
@@ -402,16 +402,18 @@ final class Desk {
             .union(down.map(\.id)).union(down.compactMap(\.reviewOf)).union(applying).subtracting(jobs.map(\.id))
         jobs += all.filter { wanted.contains($0.id) }
         // Running when Oby last quit (or crashed): it didn't finish. On the runner it carries on
-        // (`resumeAfterRestart`), unless it waits for the user's answer.
+        // (`resumeAfterRestart`), unless it waits for the user's answer or OK.
         for index in jobs.indices.reversed() where jobs[index].isActive {
             // One waiting for its `startWhen` asks only about that, and keeps waiting (#216).
-            if restarts != nil && (jobs[index].question == nil || jobs[index].waitsToStart) {
+            if restarts != nil && ((jobs[index].question == nil && jobs[index].permission == nil) || jobs[index].waitsToStart) {
                 wentDown.append(jobs[index].id)
                 continue
             }
             // One waiting for the user's answer keeps waiting, nothing running (#206): the answer
-            // picks its session up again (`message`).
-            if restarts != nil {
+            // picks its session up again (`message`). One waiting for their OK on a permission is
+            // interrupted, keeping it (#134): its agent's prompt went down with it, and the answer
+            // picks the session up again with what it asked and the answer.
+            if restarts != nil && jobs[index].permission == nil {
                 jobs[index].step = "Waiting for your answer"
                 store.save(jobs[index])
                 continue
@@ -1188,7 +1190,10 @@ final class Desk {
         let check = afterTurns.removeValue(forKey: id)
         check?.cancel()
         handoffs[id, default: []].append("Moved from \(from) to \(to) by you.")
+        // What the agent it left waited for goes with it: the new one asks again if it needs to.
+        dropAsks(id)
         moved.question = nil
+        moved.permission = nil
         moved.phase = .work
         moved.step = "Moving to \(to)"
         replace(moved)
