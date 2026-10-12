@@ -4,6 +4,7 @@
 #   scripts/release.sh <version> [--dry-run] [--notes <file>]
 #
 # Run on a Mac with Xcode 27. In order:
+#   0. runs the checks (swift test, the Mac app with MacTests): nothing is built unless they pass;
 #   1. bumps the version: CFBundleShortVersionString from <version>, the build number from the git
 #      commit count, committed on the current branch;
 #   2. archives the Oby scheme (Release) and exports it with Developer ID
@@ -12,7 +13,9 @@
 #   4. builds Oby-<version>.dmg with an Applications link (and a background, with create-dmg), then
 #      signs, notarizes and staples the DMG;
 #   5. signs the DMG for Sparkle (sign_update, the EdDSA key in the keychain);
-#   6. writes the appcast entry, with the merged pull requests since the last tag as release notes;
+#   6. writes the appcast entry, with the merged pull requests since the last tag as release notes,
+#      then scans the app, the appcast and the commits since the last tag for secrets (gitleaks):
+#      a finding, or no scanner, and nothing is published;
 #   7. uploads the DMG and appcast.xml to R2 (wrangler, or aws against the R2 endpoint);
 #   8. tags v<version>.
 #
@@ -145,6 +148,39 @@ developer_id_identity() {
     security find-identity -v -p codesigning | grep "Developer ID Application" | grep "($team)" | head -n 1 | awk '{print $2}'
 }
 
+# gitleaks over what's about to be published: the exported app, the appcast, and every commit
+# since `since` (a tag, or empty for the whole history). Findings are redacted, so no secret is
+# printed. A finding stops the release. Without gitleaks a real release stops too (AGENTS.md: if
+# the scanner can't run, nothing goes out); a dry run notes it, since it publishes nothing.
+secret_scan() {
+    local app="$1" appcast="$2" since="$3" dry_run="$4" report="$out/gitleaks.json" status
+    say "Secret scan (gitleaks)"
+    if ! command -v gitleaks >/dev/null 2>&1; then
+        $dry_run || die "gitleaks isn't installed (brew install gitleaks): nothing is published unscanned"
+        note "gitleaks isn't installed: a real release stops here (brew install gitleaks)"
+        return
+    fi
+    local target
+    for target in "$app" "$appcast"; do
+        status=0
+        gitleaks dir "$target" --no-banner --redact --exit-code=99 --report-format=json --report-path="$report" > "$out/gitleaks.log" 2>&1 || status=$?
+        case "$status" in
+            0) ;;
+            99) die "possible secret in ${target#"$out/"}: build/release/gitleaks.json says where (redacted)" ;;
+            *) tail -n 20 "$out/gitleaks.log"; die "gitleaks couldn't scan ${target#"$out/"}: nothing is published unscanned" ;;
+        esac
+    done
+    local -a log_opts=()
+    [[ -n "$since" ]] && log_opts=("--log-opts=$since..HEAD")
+    status=0
+    gitleaks git "$root" "${log_opts[@]}" --no-banner --redact --exit-code=99 --report-format=json --report-path="$report" > "$out/gitleaks.log" 2>&1 || status=$?
+    case "$status" in
+        0) note "clean: the app, the appcast and the commits since ${since:-the beginning}" ;;
+        99) die "possible secret in a commit since ${since:-the beginning}: build/release/gitleaks.json says where (redacted)" ;;
+        *) tail -n 20 "$out/gitleaks.log"; die "gitleaks couldn't scan the commits: nothing is published unscanned" ;;
+    esac
+}
+
 upload_r2() {
     local file="$1" name="$2" type="$3"
     if command -v wrangler >/dev/null 2>&1; then
@@ -172,7 +208,7 @@ main() {
         case "$1" in
             --dry-run) dry_run=true ;;
             --notes) shift; notes_file="${1:-}"; [[ -f "$notes_file" ]] || die "--notes needs a file" ;;
-            -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}"; exit 0 ;;
+            -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}"; exit 0 ;;
             -*) die "unknown option $1" ;;
             *) [[ -z "$version" ]] || die "one version only"; version="$1" ;;
         esac
@@ -181,7 +217,7 @@ main() {
     [[ -n "$version" ]] || die "usage: scripts/release.sh <version> [--dry-run] [--notes <file>]"
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "the version is X.Y.Z, like 1.2.3"
     [[ "$(uname)" == "Darwin" ]] || die "runs on a Mac with Xcode"
-    for tool in xcodebuild xcrun hdiutil codesign xmllint plutil git; do
+    for tool in xcodebuild xcrun swift hdiutil codesign xmllint plutil git; do
         command -v "$tool" >/dev/null 2>&1 || die "$tool isn't installed"
     done
 
@@ -207,6 +243,15 @@ main() {
 
     rm -rf "$out"
     mkdir -p "$out"
+
+    # 0. The checks Oby runs before a merge (docs/ci.md), without the iPhone app, which this release
+    #    doesn't ship: nothing is built for release, let alone uploaded, unless they pass.
+    say "Checks: swift test"
+    swift test > "$out/swift-test.log" 2>&1 || { tail -n 40 "$out/swift-test.log"; die "swift test failed: build/release/swift-test.log"; }
+    say "Checks: the Mac app and MacTests"
+    xcodebuild -project Oby.xcodeproj -scheme Oby -destination 'platform=macOS' -derivedDataPath "$out/DerivedData" \
+        test > "$out/mac-test.log" 2>&1 || { tail -n 40 "$out/mac-test.log"; die "MacTests failed: build/release/mac-test.log"; }
+    note "both passed"
 
     # 1. The version. For real, it's committed first, so the build number counts that commit and
     #    the tag names it; a dry run passes both to xcodebuild and changes nothing.
@@ -266,7 +311,10 @@ main() {
     fi
 
     # 4. The DMG: Oby.app and an Applications link; create-dmg lays it out with the background.
-    local dmg_name="Oby-$version.dmg" dmg="$out/$dmg_name" staging="$out/dmg"
+    # One local per line: a local's value can't read a name declared on the same line.
+    local dmg_name="Oby-$version.dmg"
+    local dmg="$out/$dmg_name"
+    local staging="$out/dmg"
     say "Building $dmg_name"
     rm -rf "$staging" && mkdir -p "$staging"
     cp -R "$app" "$staging/Oby.app"
@@ -327,6 +375,10 @@ main() {
     xmllint --noout "$out/appcast.xml"
     say "Appcast entry (xmllint: well-formed)"
     printf '%s\n' "$item"
+
+    # 6b. The secret scan of what goes out: the app in the DMG, the appcast, and the commits since
+    #     the last release (AGENTS.md). If the scanner can't run, nothing is published.
+    secret_scan "$app" "$out/appcast.xml" "$last_tag" "$dry_run"
 
     # 7. Upload, 8. tag.
     if $dry_run; then
