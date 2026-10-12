@@ -410,7 +410,9 @@ struct HaltTests {
         let child = folder.appending(path: "child.pid")
         let process = Process()
         process.executableURL = URL(filePath: "/bin/sh")
-        process.arguments = ["-c", "(trap '' TERM; sleep 30) & echo $! > '\(child.path)'; wait"]
+        // The child writes its pid once it ignores SIGTERM (and `sleep` keeps ignoring it): written by
+        // the shell, the pid could come before the trap, and SIGTERM would end the child at once.
+        process.arguments = ["-c", "sh -c 'trap \"\" TERM; echo $$ > \"\(child.path)\"; exec sleep 30' & wait"]
         let group = try ProcessGroup.run(process)
         for _ in 0..<200 where (try? String(contentsOf: child, encoding: .utf8))?.isEmpty ?? true { try await Task.sleep(for: .milliseconds(10)) }
         let sleeper = try #require(Int32((try String(contentsOf: child, encoding: .utf8)).trimmingCharacters(in: .whitespacesAndNewlines)))
