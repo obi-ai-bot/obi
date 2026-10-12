@@ -234,8 +234,9 @@ final class AccountStore {
     /// - the most weekly room per day left (`roomPerDay`); within 0.01/day of it, the fewest
     ///   running jobs, then the most room, then list order.
     /// Each account's usage is measured against its own plan. Every automatic choice goes through
-    /// here (the brain's dispatch, the Lead's picks, failure fixes, failover, reviews); only a job
-    /// the user sends to an account by name skips it.
+    /// here (the brain's dispatch, the Lead's picks, failure fixes, failover, reviews, and a move
+    /// with no account named, among accounts under 80% of both windows: Engine/Move.swift); only a
+    /// job the user sends to an account by name skips it.
     nonisolated static func choose(_ accounts: [AccountState], agent: String?, for work: Work = .new, now: Date = .now) -> Route? {
         let open = accounts.filter { $0.signedIn && (agent == nil || $0.account.agent == agent) && !$0.isFull(at: now)
             && ($0.fiveHour ?? 0) < 0.95 && !$0.isReserved(at: now) }
