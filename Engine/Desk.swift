@@ -778,10 +778,15 @@ final class Desk {
                 }
                 if let index = states.firstIndex(where: { $0.account.id == account.id }) { states[index].running += 1 }
                 let id = String(UUID().uuidString.prefix(8)).lowercased()
+                // An issue and a pull request ("finish #19 from PR #124", #219): the issue's work,
+                // started from the pull request's head.
+                let from = dispatch.issue == nil ? nil : dispatch.pr
+                let pr = from == nil ? dispatch.pr : nil
                 var job = Job(id: id, request: said, agent: account.agent, account: account.id, repo: dispatch.repo,
-                              branch: Job.branch(kind: dispatch.kind, pr: dispatch.pr, issue: dispatch.issue, id: id),
-                              base: dispatch.baseBranch, pr: dispatch.pr, kind: dispatch.kind, task: dispatch.task)
+                              branch: Job.branch(kind: dispatch.kind, pr: pr, issue: dispatch.issue, id: id),
+                              base: dispatch.baseBranch, pr: pr, kind: dispatch.kind, task: dispatch.task)
                 job.issue = dispatch.issue
+                job.fromPR = from
                 job.title = dispatch.title
                 job.rounds = dispatch.rounds > 1 ? dispatch.rounds : nil
                 job.check = dispatch.check
@@ -976,9 +981,9 @@ final class Desk {
 
     /// The job with its branch on the base as GitHub has it now (`fetchBase`), when it has no work of
     /// its own yet: its worktree is still at `startCommit`, which becomes the base's commit. Not a job
-    /// on a pull request: its branch is the pull request's.
+    /// on a pull request, nor one started from one's head: its branch holds the pull request's commits.
     func caughtUp(_ job: Job) async throws -> Job {
-        guard job.pr == nil, let base = job.base, let start = job.startCommit else { return job }
+        guard job.pr == nil, job.fromPR == nil, let base = job.base, let start = job.startCommit else { return job }
         let onto = try await fetchBase(job, base)
         guard onto != start, try await moveWorktree(job.id, start, onto) else { return job }
         var job = job
@@ -1715,8 +1720,10 @@ final class Desk {
         Task {
             defer { finishing.remove(id) }
             let commits = await countCommits(id, "refs/remotes/origin/\(base)")
-            // A pull request's branch has its own commits beyond the base: only the ones after its head are the job's.
-            let made = job.pr == nil ? commits : await countCommits(id, "refs/oby/pr-\(job.pr ?? 0)")
+            // A pull request's branch has its own commits beyond the base: only the ones after its head
+            // are the job's, on a job started from its head too.
+            let from = job.pr ?? job.fromPR
+            let made = from == nil ? commits : await countCommits(id, "refs/oby/pr-\(from ?? 0)")
             let pushed = await stillPushed(job, base: base, commits: commits)
             // Nothing committed: what it left uncommitted is why (#220).
             let dirty = made == 0 && Job.committing.contains(job.kind) ? await changedFiles(id) : []
