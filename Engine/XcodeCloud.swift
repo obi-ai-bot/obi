@@ -48,7 +48,7 @@ nonisolated struct XcodeCloud: Codable, Equatable, Sendable {
         var app: App
         var output: Output?
 
-        var passed: Bool { status == "completed" && ["success", "neutral", "skipped"].contains(conclusion ?? "") }
+        var passed: Bool { status == "completed" && conclusion == "success" }
         var failed: Bool { status == "completed" && !passed }
         var text: String { [output?.title, output?.summary, output?.text].compactMap { $0 }.joined(separator: "\n") }
     }

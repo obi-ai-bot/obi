@@ -73,7 +73,6 @@ struct XcodeCloudTests {
         let failed = try #require(try XcodeCloud.decode(data([run(conclusion: "failure", summary: "Your source code changes conflict with changes made on the pull request target branch")]), head: head))
         #expect(failed.conflict && failed.state == .failed)
         #expect(try XcodeCloud.decode(data([run(conclusion: "cancelled")]), head: head)?.state == .failed)
-        #expect(try XcodeCloud.decode(data([run(), run(2, name: "Archive", conclusion: "skipped")]), head: head)?.state == .passed)
         #expect(throws: (any Error).self) { try XcodeCloud.decode(Data("{}".utf8), head: head) }
         #expect(throws: (any Error).self) { try XcodeCloud.arguments(repo: "deskree-inc/oby", head: "--help") }
     }
