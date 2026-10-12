@@ -120,21 +120,16 @@ struct LocalRunnerTests {
     }
 
     @Test func makesATokenOnceAndKeepsIt() throws {
-        let home = try temporaryFolder().appending(path: "Runner")
-        defer { try? FileManager.default.removeItem(at: home.deletingLastPathComponent()) }
-        #expect(LocalRunner.token(in: home) == nil)
-        let token = try LocalRunner.makeToken(in: home)
+        let store = MemoryTokens()
+        #expect(LocalRunner.token(from: store) == nil)
+        let token = try LocalRunner.makeToken(in: store)
         #expect(LocalRunner.isToken(token))
-        #expect(try LocalRunner.makeToken(in: home) == token)
-        #expect(LocalRunner.token(in: home) == token)
-        let file = home.appending(path: LocalRunner.tokenFile)
-        let mode = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int
-        #expect(mode == 0o600)
-        #expect(try String(contentsOf: file, encoding: .utf8) == token + "\n")
-        // A file that isn't a token is replaced; two runners' tokens differ.
-        try "not a token".write(to: file, atomically: true, encoding: .utf8)
-        #expect(LocalRunner.token(in: home) == nil)
-        let fresh = try LocalRunner.makeToken(in: home)
+        #expect(try LocalRunner.makeToken(in: store) == token)
+        #expect(LocalRunner.token(from: store) == token)
+        // A value that isn't a token is ignored and replaced; two runners' tokens differ.
+        try store.write("not a token")
+        #expect(LocalRunner.token(from: store) == nil)
+        let fresh = try LocalRunner.makeToken(in: store)
         #expect(LocalRunner.isToken(fresh))
         #expect(fresh != token)
     }

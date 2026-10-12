@@ -37,7 +37,7 @@ if let owner = environment["OBY_OWNER"], !owner.isEmpty {
     exit(1)
     #else
     do {
-        access = .local(token: try LocalRunner.makeToken(in: Workspace.root))
+        access = .local(token: try LocalRunner.makeToken())
     } catch {
         Logger.runner.error("\(error.localizedDescription, privacy: .public) The runner can't let Oby in without it.")
         exit(1)

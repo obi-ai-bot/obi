@@ -297,6 +297,8 @@ nonisolated struct KeychainVault: VaultStore {
     static let runnerService = "com.deskree.oby.runner.vault"
 
     var service = appService
+    /// What Keychain Access shows an item as, before its name.
+    var label = "Oby vault"
 
     private var base: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service]
@@ -345,7 +347,7 @@ nonisolated struct KeychainVault: VaultStore {
         var status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: Data(value.utf8)] as CFDictionary)
         if status == errSecItemNotFound {
             query[kSecValueData as String] = Data(value.utf8)
-            query[kSecAttrLabel as String] = "Oby vault: \(name)"
+            query[kSecAttrLabel as String] = "\(label): \(name)"
             query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             status = SecItemAdd(query as CFDictionary, nil)
         }

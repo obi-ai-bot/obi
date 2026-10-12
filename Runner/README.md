@@ -4,7 +4,7 @@ The runner is Oby's engine without the notch, as a Linux service: the brain, Oby
 
 It shares `Engine/` with the Mac app. `Package.swift` at the root of the repository builds both the engine and the runner.
 
-It also runs on the user's own Mac (#283), inside Oby.app as a login item: the Xcode build's "Bundle the runner" phase builds `oby-runner` with `swift build -c release` and puts it at `Contents/Helpers/oby-runner`, with `com.deskree.oby.runner.plist` at `Contents/Library/LaunchAgents`; Settings › Runner › "This Mac" registers it (`SMAppService`, Mac/LoginItem.swift). Without `OBY_OWNER` the runner is a Mac runner: it keeps its files in `~/Library/Application Support/Oby/Runner`, answers only the Oby app on the same Mac, with a token it makes itself in `OBY_HOME/token`, and only on `127.0.0.1` ([the runner API](../docs/runner-api.md#reaching-it), "On a Mac"). No bubblewrap there: agents run in their own sandboxes, as the app's jobs do.
+It also runs on the user's own Mac (#283), inside Oby.app as a login item: the Xcode build's "Bundle the runner" phase builds `oby-runner` with `swift build -c release` and puts it at `Contents/Helpers/oby-runner`, with `com.deskree.oby.runner.plist` at `Contents/Library/LaunchAgents`; Settings › Runner › "This Mac" registers it (`SMAppService`, Mac/LoginItem.swift). Without `OBY_OWNER` the runner is a Mac runner: it keeps its files in `~/Library/Application Support/Oby/Runner`, answers only the Oby app on the same Mac, with a token it makes itself in the macOS keychain, and only on `127.0.0.1` ([the runner API](../docs/runner-api.md#reaching-it), "On a Mac"). No bubblewrap there: agents run in their own sandboxes, as the app's jobs do.
 
 ## Build
 
