@@ -302,7 +302,7 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
 {"id": "default", "agent": "claude", "name": "Personal", "label": "Max · well0cp@gmail.com",
  "signedIn": true, "fiveHour": 0.12, "sevenDay": 0.4,
  "fiveHourResets": "2026-10-10T02:14:40Z", "sevenDayResets": "2026-10-14T19:27:22Z", "running": 1, "fullUntil": null,
- "tetrix": true, "tetrixJobs": 12, "tetrixUsed": 9}
+ "tetrix": true, "tetrixJobs": 12, "tetrixUsed": 9, "reserved": false, "reserveLiftedUntil": null}
 ```
 
 - `label` is what the tool says about the login (null while signed out). Its first part is the plan (`Max`, `Team`, `Plus`), which Settings shows next to the account's name.
@@ -311,12 +311,14 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
 - `running`: jobs queued or running on the account.
 - `fullUntil` is set while a job of the account's hit its usage limit: no job goes to it before then. Accounts are signed in on the runner itself, through each tool's own login; the app only shows them.
 - `tetrix`: whether the account's agents have Tetrix's MCP server connected, or null before the runner knows. The runner asks on startup (Claude Code: `claude mcp list`, with claude.ai's connectors off as for agents; Codex: its app-server's `mcpServerStatus/list`), and every job's tool says it again as its session starts. `tetrixJobs`: of the account's recent jobs (the latest 50 the runner keeps in memory) that ended and whose tool said what it had, how many there are; `tetrixUsed`: how many of them called Tetrix. Settings shows `Tetrix: connected · used in 9 of 12 recent jobs (75%)`, or `Tetrix: not connected: sign in` (signing in is the tool's own login for its `tetrix` server, on the runner; never Oby holding the token). Older runners don't send these keys.
+- `reserved`: the account is at 80% of its week before `sevenDayResets`, so it gets only jobs sent to it by name (and reviews, last: Routing below). False while its reserve is lifted. `reserveLiftedUntil`: until when the user let it past its reserve (`POST /v1/accounts/{id}/reserve`), its week's reset; null when they didn't, or once that time has passed. Older runners don't send these keys.
 
 Accounts are signed in on the runner itself, through each tool's own login; the app only shows them. Settings shows one card per account, grouped by tool, with a bar per window, its reset time, and the running count.
 
 **Routing.** Oby budgets each subscription by its weekly pace, not just the 5-hour window: new work goes to accounts on pace, accounts running ahead of pace get reviews or nothing, and the account with the most weekly room per remaining day wins. Every automatic choice goes through it (the brain's dispatch, the Lead's picks, failure fixes, failover, reviews); a job named to an account skips it.
 
-- An account gets nothing while it's signed out, marked `fullUntil`, at 95% of its 5-hour window, or at 80% of its week (kept for jobs sent to it by name until `sevenDayResets`). Above 80% of its 5-hour window it gets work only when every account is.
+- An account gets nothing while it's signed out, marked `fullUntil`, at 95% of either window, or at 80% of its week (`reserved`: kept for jobs sent to it by name until `sevenDayResets`; a review may take it, last). Above 80% of its 5-hour window it gets work only when every account is.
+- **Use anyway:** the user can lift an account's reserve until its week resets (`POST /v1/accounts/{id}/reserve`): it then takes new work, failovers, the Lead's picks and moves like any account, still never at 95% of a window or while marked full. When only reserves keep new work from starting, the reply says whose: `Personal and Codex are in their weekly reserve: use one anyway from Settings › Accounts. Or name the account in your request.` A failover with nowhere to go, and the Lead's jobs that found no account, say the same. Settings shows `Use past reserve this week` on an account in its reserve, with `Oby keeps 20% of each week in reserve; this lifts it for Personal until Thu 7:00 PM.`
 - **Room per remaining day:** `(1 − sevenDay) / daysLeft`, `daysLeft` from `sevenDayResets` (at least 0.25; 7 when null). Higher is better.
 - **Ahead of pace:** `sevenDay / max(weekGone, 1/7) > 1`, the share used over the share of the week gone: at this burn it runs out before its reset. The floor keeps the first hours of a week from swinging it.
 - **New work** takes an account on pace first, then one whose `sevenDay` is null (unknown, not 0%: Claude Code reports usage only during a job), then one ahead of pace. **A review** takes one ahead of pace first, then on pace, then unknown; the other tool still comes first.
@@ -582,6 +584,16 @@ Changes what a job that hasn't started waits for:
 
 The list replaces the job's (Start when); `[]` starts it now. A condition on an account moves the job to that account. A job waiting to be asked about a condition that can't hold stops asking. Returns the job. `404` for an unknown job; `422` with why for a job that started already, one of Oby's own reviews, or conditions that can't be.
 
+### `POST /v1/accounts/{id}/reserve`
+
+Lifts an account's weekly reserve, or puts it back (#278):
+
+```json
+{"lift": true}
+```
+
+With `true`, the account takes automatic work past 80% of its week until `sevenDayResets` (a week from now while that's unknown or past), then it's reserved again by itself; `false` puts the reserve back now. Saved with the account's usage, so a restart keeps it. A review waiting for an account looks again at once. Returns the Account, and every app following `GET /v1/events` gets `accounts`. `404` for an unknown account.
+
 ### `POST /v1/jobs/{id}/messages`
 
 Tells the job's agent something:
@@ -621,7 +633,7 @@ data: { …Turn }
 ```
 
 - A `job` event comes with every change: a new step, a status, the summary, `commits`, `published`, `publishError`, `pipeline`, `pullRequest`, `pullRequestError`, `dismissed`, `macCheck`, `mergeError`, a move to another account. The app replaces the job with that `id`.
-- `accounts` comes when sign-ins, usage, reset times, running counts, `fullUntil` or Tetrix (`tetrix`, `tetrixJobs`, `tetrixUsed`) change.
+- `accounts` comes when sign-ins, usage, reset times, running counts, `fullUntil`, a lifted reserve (`reserveLiftedUntil`) or Tetrix (`tetrix`, `tetrixJobs`, `tetrixUsed`) change.
 - `clear` comes when Clear done is pressed on any app (`POST /v1/clear`): hide the jobs that finished by `clearedAt`.
 - `inbox` comes with every inbox item that arrives or changes: answered, done or put off, on any app, or settled by itself. Replace the item with that `id`; one whose `state` is `done` leaves the inbox.
 - `check` comes when a Mac check or an Apple check (below) is queued, taken by a Mac or ends. A Mac that runs checks asks for one (`GET /v1/checks/next`) when one is `queued`; other apps can ignore it, since the job's own event carries `macCheck` and `appleCheck` too.

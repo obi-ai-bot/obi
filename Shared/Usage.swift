@@ -30,6 +30,8 @@ nonisolated enum Usage {
         var fiveHourResets: Date?
         var sevenDayResets: Date?
         var running = 0
+        /// Until when the user let it past its weekly reserve (#278), or nil.
+        var reserveLiftedUntil: Date? = nil
 
         var tool: String { Usage.tool(agent) }
         var signedIn: Bool { label != nil }
@@ -46,9 +48,19 @@ nonisolated enum Usage {
         /// The busier window, or nil without usage.
         var busiest: Double? { [fiveHour, sevenDay].compactMap { $0 }.max() }
         /// At 80% of its weekly limit the account takes only jobs the user sends to it by name, until
-        /// its week resets (`AccountState.isReserved` in the engine).
-        func reserved(at now: Date = .now) -> Bool {
+        /// its week resets, unless the user lifted that (`AccountState.isReserved` in the engine).
+        func reserved(at now: Date = .now) -> Bool { inReserve(at: now) && liftedUntil(at: now) == nil }
+        /// At 80% of its week before the reset, lifted or not: Settings' switch shows then.
+        func inReserve(at now: Date = .now) -> Bool {
             (sevenDay ?? 0) >= Usage.reserve && (sevenDayResets ?? .distantFuture) > now
+        }
+        /// Until when it's past its reserve, or nil.
+        func liftedUntil(at now: Date = .now) -> Date? { reserveLiftedUntil.flatMap { $0 > now ? $0 : nil } }
+        /// "Use Personal anyway" shows for it: reserved, signed in, and under 95% of both windows
+        /// (`AccountState.mayLiftReserve`; a window past its reset is empty).
+        func mayLift(at now: Date = .now) -> Bool {
+            let under = { (used: Double?, resets: Date?) in (used ?? 0) < Usage.nearlyFull || (resets ?? .distantFuture) <= now }
+            return signedIn && reserved(at: now) && under(fiveHour, fiveHourResets) && under(sevenDay, sevenDayResets)
         }
     }
 
@@ -66,7 +78,33 @@ nonisolated enum Usage {
     /// The share of the weekly limit kept for jobs sent to the account by name, as routing keeps it
     /// (`AccountState.reserve`; a test keeps the two equal).
     static let reserve = 0.8
+    /// Past this share of a window an account gets nothing, its reserve lifted or not (`AccountState.nearlyFull`).
+    static let nearlyFull = 0.95
     static let reservedText = "Reserved: only jobs you send it"
+    /// Settings' switch on an account in its weekly reserve (#278).
+    static let liftText = "Use past reserve this week"
+
+    /// "Use Personal anyway (82% of week)": the button that lifts an account's reserve (#278).
+    static func useAnyway(_ snapshot: Snapshot) -> String {
+        "Use \(snapshot.name) anyway" + (snapshot.sevenDay.map { " (\(percent($0)) of week)" } ?? "")
+    }
+
+    /// The quiet line under it: "Oby keeps 20% of each week in reserve; this lifts it for Personal
+    /// until Thu 7:00 PM." Without a reset time, "until its week resets".
+    static func liftNote(_ snapshot: Snapshot, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        let until = snapshot.sevenDayResets.map { "until " + day($0, locale: locale, timeZone: timeZone) } ?? "until its week resets"
+        return "Oby keeps \(percent(1 - reserve)) of each week in reserve; this lifts it for \(snapshot.name) \(until)."
+    }
+
+    /// "Past its reserve until Thu 7:00 PM", on the card of an account whose reserve is lifted.
+    static func liftedText(_ until: Date, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        "Past its reserve until " + day(until, locale: locale, timeZone: timeZone)
+    }
+
+    /// "Thu 7:00 PM", as the locale writes times.
+    static func day(_ date: Date, locale: Locale, timeZone: TimeZone) -> String {
+        date.formatted(Date.FormatStyle(locale: locale, timeZone: timeZone).weekday(.abbreviated).hour().minute())
+    }
 
     /// How the 7-day window is paced, or nil for another window or one without a reset time. At
     /// this rate, used/gone of the limit is gone by the reset, so it runs out early when used > gone.
@@ -190,6 +228,7 @@ nonisolated enum Usage {
                 }
             }
             if snapshot.reserved(at: now) { parts.append(reservedText) }
+            if snapshot.inReserve(at: now), let until = snapshot.liftedUntil(at: now) { parts.append(liftedText(until, locale: locale, timeZone: timeZone)) }
         }
         if snapshot.running > 0 { parts.append(runningText(snapshot.running)) }
         return "\(snapshot.tool), \(snapshot.name): " + parts.joined(separator: ", ")
@@ -261,6 +300,9 @@ struct UsageCard: View {
                     if snapshot.reserved(at: context.date) {
                         Label(Usage.reservedText, systemImage: "lock")
                             .font(.caption.weight(.medium)).foregroundStyle(.orange)
+                    } else if snapshot.inReserve(at: context.date), let until = snapshot.liftedUntil(at: context.date) {
+                        Label(Usage.liftedText(until), systemImage: "lock.open")
+                            .font(.caption.weight(.medium)).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -282,6 +324,32 @@ struct UsageCard: View {
         case .fine: .green
         case .warning: .orange
         case .critical: .red
+        }
+    }
+}
+
+/// Settings' "Use past reserve this week" switch on an account in its weekly reserve (#278), with
+/// the line that says until when. It turns off by itself at the reset: the account leaves its
+/// reserve then. `lift` asks the engine or the runner; what it says wrong shows under the switch.
+struct ReserveSwitch: View {
+    var snapshot: Usage.Snapshot
+    var lift: @MainActor (Bool) async throws -> Void
+    @State private var problem: String?
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            if snapshot.signedIn, snapshot.inReserve(at: context.date) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Toggle(Usage.liftText, isOn: Binding(get: { snapshot.liftedUntil(at: context.date) != nil }, set: { on in
+                        Task {
+                            problem = nil
+                            do { try await lift(on) } catch { problem = error.localizedDescription }
+                        }
+                    }))
+                    Text(Usage.liftNote(snapshot)).font(.caption).foregroundStyle(.secondary)
+                    if let problem { Text(problem).font(.caption).foregroundStyle(.red) }
+                }
+            }
         }
     }
 }

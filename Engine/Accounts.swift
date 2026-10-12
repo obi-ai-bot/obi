@@ -39,16 +39,41 @@ nonisolated struct AccountState: Equatable, Sendable {
     /// many used Tetrix.
     var tetrixJobs = 0
     var tetrixUsed = 0
+    /// The user let it past its weekly reserve until this time, its week's reset (#278): until
+    /// then it isn't `isReserved`. Saved with its usage, so a restart keeps it.
+    var reserveLifted: Date?
 
     var signedIn: Bool { label != nil }
     func isFull(at now: Date = .now) -> Bool { (fullUntil ?? .distantPast) > now }
 
     /// The share of its weekly limit an account keeps for jobs the user sends to it by name.
     static let reserve = 0.8
+    /// Past this share of either window an account gets nothing, its reserve lifted or not.
+    static let nearlyFull = 0.95
     /// At 80% of its weekly limit an account gets no automatic work, only jobs sent to it by name,
     /// until its week resets: Claude Code reports usage only during a job, so the 80% would stay.
-    func isReserved(at now: Date = .now) -> Bool {
+    /// Not while the user lifted it (`reserveLiftedUntil`).
+    func isReserved(at now: Date = .now) -> Bool { inReserve(at: now) && reserveLiftedUntil(at: now) == nil }
+
+    /// At 80% of its week before the reset, lifted or not: what Settings' switch is for.
+    func inReserve(at now: Date = .now) -> Bool {
         (sevenDay ?? 0) >= Self.reserve && (sevenDayResets ?? .distantFuture) > now
+    }
+
+    /// Until when the user let it past its reserve, or nil when they didn't or that has passed.
+    func reserveLiftedUntil(at now: Date = .now) -> Date? { reserveLifted.flatMap { $0 > now ? $0 : nil } }
+
+    /// Its week is at 95%: no automatic work, not even a review or with its reserve lifted. A week
+    /// whose reset has passed is empty.
+    func weekNearlyFull(at now: Date = .now) -> Bool {
+        (sevenDay ?? 0) >= Self.nearlyFull && (sevenDayResets ?? .distantFuture) > now
+    }
+
+    /// Lifting its reserve would let it take work (#278): reserved, signed in, not marked full and
+    /// under 95% of both windows. The apps' "Use Personal anyway" button shows for these.
+    func mayLiftReserve(at now: Date = .now) -> Bool {
+        signedIn && isReserved(at: now) && !isFull(at: now) && !weekNearlyFull(at: now)
+            && ((fiveHour ?? 0) < Self.nearlyFull || (fiveHourResets ?? .distantFuture) <= now)
     }
 
     /// How much of the 7-day window has passed, 0...1, or nil when its reset time is unknown.
@@ -93,9 +118,12 @@ final class AccountStore {
     private struct Usage: Codable, Equatable {
         var fiveHour, sevenDay: Double?
         var fiveHourResets, sevenDayResets, fullUntil: Date?
+        /// Older files don't have it.
+        var reserveLifted: Date?
 
         init(_ state: AccountState) {
             (fiveHour, sevenDay, fiveHourResets, sevenDayResets, fullUntil) = (state.fiveHour, state.sevenDay, state.fiveHourResets, state.sevenDayResets, state.fullUntil)
+            reserveLifted = state.reserveLifted
         }
     }
     /// Where the homes Oby makes for accounts live.
@@ -113,6 +141,7 @@ final class AccountStore {
                 if let kept = usage[account.id] {
                     (state.fiveHour, state.sevenDay, state.fiveHourResets, state.sevenDayResets, state.fullUntil)
                         = (kept.fiveHour, kept.sevenDay, kept.fiveHourResets, kept.sevenDayResets, kept.fullUntil)
+                    state.reserveLifted = kept.reserveLifted
                 }
                 return state
             }
@@ -161,6 +190,21 @@ final class AccountStore {
         guard let index = accounts.firstIndex(where: { $0.account.id == accountID }) else { return }
         accounts[index].fullUntil = until
         saveUsage()
+    }
+
+    /// "Use anyway" (#278): with `lift`, the account takes automatic work past its weekly reserve
+    /// until its week resets (a week from now while its reset time is unknown), then it's reserved
+    /// again by itself; without, it's reserved again now. Nil for an unknown account.
+    @discardableResult
+    func liftReserve(_ accountID: String, _ lift: Bool, now: Date = .now) -> AccountState? {
+        guard let index = accounts.firstIndex(where: { $0.account.id == accountID }) else { return nil }
+        let resets = accounts[index].sevenDayResets.flatMap { $0 > now ? $0 : nil }
+        let until = lift ? resets ?? now.addingTimeInterval(7 * 86_400) : nil
+        if accounts[index].reserveLifted != until {
+            accounts[index].reserveLifted = until
+            saveUsage()
+        }
+        return accounts[index]
     }
 
     /// Whether the account's agents have Tetrix connected, as its tool just said. Nil changes nothing.
@@ -258,8 +302,9 @@ final class AccountStore {
     nonisolated static let even = 0.01
 
     /// The account for a job, budgeted by each account's weekly pace: a signed-in account of that
-    /// agent (any agent if nil) under 95% of its 5-hour window, not reserved for the week
-    /// (`isReserved`) and not marked full. Of those, in order:
+    /// agent (any agent if nil) under 95% of both windows, not reserved for the week (`isReserved`:
+    /// a review may take one that is, last; the user can lift it, #278) and not marked full. Of
+    /// those, in order:
     /// - one under 80% of its 5-hour window, when there is one;
     /// - for new work, one on pace (`isAhead` false) with its usage known, then one whose usage
     ///   isn't known yet, then one ahead of pace; a review takes one ahead of pace first, then
@@ -273,10 +318,11 @@ final class AccountStore {
     nonisolated static func choose(_ accounts: [AccountState], agent: String?, for work: Work = .new, now: Date = .now) -> Route? {
         // A review is small: it may use an account in its weekly reserve (80%), last, while that
         // week is under 95%. Otherwise a job written on the only account outside its reserve
-        // waits for a review no account will ever take (#269's PR, 2026-10-12).
+        // waits for a review no account will ever take (#269's PR, 2026-10-12). One whose reserve
+        // the user lifted (#278) isn't reserved, but at 95% it's still left alone.
         let open = accounts.filter { $0.signedIn && (agent == nil || $0.account.agent == agent) && !$0.isFull(at: now)
-            && ($0.fiveHour ?? 0) < 0.95
-            && (work == .review ? (($0.sevenDay ?? 0) < 0.95 || ($0.sevenDayResets ?? .distantFuture) <= now) : !$0.isReserved(at: now)) }
+            && ($0.fiveHour ?? 0) < AccountState.nearlyFull && !$0.weekNearlyFull(at: now)
+            && (work == .review || !$0.isReserved(at: now)) }
         let calm = open.filter { ($0.fiveHour ?? 0) < busy }
         let pool = calm.isEmpty ? open : calm
         func tier(_ state: AccountState) -> Int {
@@ -321,6 +367,29 @@ final class AccountStore {
 
     /// 2.31 as "2.3×".
     nonisolated static func times(_ pace: Double) -> String { String(format: "%.1f×", pace) }
+
+    /// The accounts in their weekly reserve that would take this work if the user lifted it
+    /// (`mayLiftReserve`): when `choose` finds none, these are why, and what "Use anyway" offers.
+    nonisolated static func heldInReserve(_ accounts: [AccountState], agent: String?, now: Date = .now) -> [AccountState] {
+        accounts.filter { (agent == nil || $0.account.agent == agent) && $0.mayLiftReserve(at: now) }
+    }
+
+    /// "Personal is in its weekly reserve", "Personal and Codex are in their weekly reserve".
+    nonisolated static func reserveLine(_ held: [AccountState]) -> String {
+        let names = held.map(\.account.name)
+        let listed = names.count < 2 ? names.joined() : names.dropLast().joined(separator: ", ") + " and " + names.last!
+        return listed + (names.count == 1 ? " is in its weekly reserve" : " are in their weekly reserve")
+    }
+
+    /// Why no account takes new work, when only reserves stand in the way: "Personal and Codex are
+    /// in their weekly reserve: use one anyway from Settings › Accounts." Nil when an account would
+    /// take it, or none would even with its reserve lifted.
+    nonisolated static func reserveWait(_ accounts: [AccountState], agent: String?, now: Date = .now) -> String? {
+        guard choose(accounts, agent: agent, now: now) == nil else { return nil }
+        let held = heldInReserve(accounts, agent: agent, now: now)
+        guard !held.isEmpty else { return nil }
+        return reserveLine(held) + ": use \(held.count == 1 ? "it" : "one") anyway from Settings › Accounts."
+    }
 
     /// The account `choose` chose, without the why.
     nonisolated static func route(_ accounts: [AccountState], agent: String?, for work: Work = .new, now: Date = .now) -> Account? {

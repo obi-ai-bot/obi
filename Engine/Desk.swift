@@ -729,12 +729,16 @@ final class Desk {
             justStarted = started.map(\.id)
             guard !started.isEmpty else {
                 if !taken.isEmpty, unrouted == 0 { return .reply("Nothing new to start: " + taken.map { "#\($0)" }.joined(separator: ", ") + " already \(taken.count == 1 ? "has" : "have") a job.") }
+                if let held = AccountStore.reserveWait(states, agent: nil) { return .reply(held) }
                 return .reply("No account is signed in with room to spare. Check Settings › Accounts.")
             }
             var text = "Started \(started.count) job\(started.count == 1 ? "" : "s"): "
                 + started.map { "\($0.heading) (#\($0.issue ?? 0))" }.joined(separator: ", ") + "."
             if !taken.isEmpty { text += " " + taken.map { "#\($0)" }.joined(separator: ", ") + " already \(taken.count == 1 ? "has" : "have") a job." }
-            if unrouted > 0 { text += " \(unrouted) more had no account with room." }
+            if unrouted > 0 {
+                text += " \(unrouted) more had no account with room."
+                if let held = AccountStore.reserveWait(states, agent: nil) { text += " " + held }
+            }
             if !skipped.isEmpty { text += " Skipped \(skipped.count) on the board." }
             return .reply(text)
         }
@@ -801,6 +805,8 @@ final class Desk {
                 }
                 let route = named == nil ? AccountStore.choose(states, agent: agent) : nil
                 guard let account = named?.account ?? route?.account else {
+                    // Only reserves in the way (#278): say whose, and how to use one anyway.
+                    if let held = AccountStore.reserveWait(states, agent: agent) { return .reply(held + " Or name the account in your request.") }
                     let tool = agent.map { Job.agentNames[$0] ?? $0 } ?? "coding tool"
                     return .reply("No \(tool) account is signed in with room to spare. Check Settings › Accounts.")
                 }
@@ -1537,9 +1543,11 @@ final class Desk {
         guard let route = AccountStore.next(accounts.accounts, agent: job.agent) else {
             let first = accounts.accounts.filter(\.signedIn).compactMap(\.fullUntil).min()
             let soonest = first.map { " The first resets at \(Limits.clock($0))." } ?? ""
+            // Only reserves in the way (#278): lifting one and trying again goes on there.
+            let held = AccountStore.reserveWait(accounts.accounts, agent: nil).map { " " + $0 } ?? ""
             Logger.jobs.error("job \(id, privacy: .public): \(from, privacy: .public) hit its limit, and no account has room")
             limited.insert(id)
-            return finish(id, .failed, "\(from) hit its usage limit\(when), and no other account has room.\(soonest)")
+            return finish(id, .failed, "\(from) hit its usage limit\(when), and no other account has room.\(soonest)\(held)")
         }
         let next = route.account
         Logger.jobs.notice("job \(id, privacy: .public): \(from, privacy: .public) hit its limit\(when, privacy: .public); continuing on \(next.heading, privacy: .public)")

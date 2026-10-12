@@ -84,6 +84,9 @@ final class API {
             try await self.publish(context.parameters.require("id"), try await Self.decode(Approval.self, from: request))
         }
         router.post("v1/clear") { _, _ in try await self.clear() }
+        router.post("v1/accounts/:id/reserve") { request, context in
+            try await self.reserve(context.parameters.require("id"), try await Self.decode(ReserveRequest.self, from: request))
+        }
         router.get("v1/inbox") { request, _ in
             try await self.inbox(state: request.uri.queryParameters.get("state").map { String($0) },
                                  limit: request.uri.queryParameters.get("limit", as: Int.self))
@@ -276,6 +279,14 @@ final class API {
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
+    }
+
+    /// "Use anyway" (#278): the account takes automatic work past its weekly reserve until its
+    /// week resets, or, with `lift` false, is reserved again now. Work waiting for an account
+    /// looks again as the accounts change.
+    func reserve(_ id: String, _ request: ReserveRequest) throws -> Response {
+        guard let state = desk.accounts.liftReserve(id, request.lift) else { throw APIError(.notFound, "There's no account \(id).") }
+        return Self.json(AccountJSON(state: state))
     }
 
     /// Words for the job's agent: a running job hears them now, a finished one runs again.
@@ -1005,10 +1016,18 @@ struct InboxAnswer: Decodable {
     var later: String?
 }
 
+/// What `POST /v1/accounts/{id}/reserve` asks: past the account's weekly reserve until its reset, or not.
+struct ReserveRequest: Decodable {
+    var lift: Bool
+}
+
 struct AccountJSON: Encodable {
     var state: AccountState
 
-    private enum Keys: String, CodingKey { case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed }
+    private enum Keys: String, CodingKey {
+        case id, agent, name, label, signedIn, fiveHour, sevenDay, fiveHourResets, sevenDayResets, running, fullUntil, tetrix, tetrixJobs, tetrixUsed,
+             reserved, reserveLiftedUntil
+    }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -1026,6 +1045,8 @@ struct AccountJSON: Encodable {
         try keys.encode(state.tetrix, forKey: .tetrix)
         try keys.encode(state.tetrixJobs, forKey: .tetrixJobs)
         try keys.encode(state.tetrixUsed, forKey: .tetrixUsed)
+        try keys.encode(state.isReserved(), forKey: .reserved)
+        try keys.encode(state.reserveLiftedUntil(), forKey: .reserveLiftedUntil)
     }
 }
 
