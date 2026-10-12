@@ -303,6 +303,7 @@ extension Desk {
         job.appleCheck = check
         replace(job)
         Logger.jobs.notice("job \(id, privacy: .public): Apple check \(check.id, privacy: .public) queued for \(head, privacy: .public)")
+        paceRound(id)
         onCheckChange(check)
         return check
     }
@@ -328,6 +329,7 @@ extension Desk {
         check.finished = now
         job.appleCheck = check
         replace(job)
+        paceRound(id)
         onCheckChange(check)
         return check
     }
@@ -382,6 +384,7 @@ extension Desk {
         check.problem = nil
         job.appleCheck = check
         replace(job)
+        paceRound(job.id)
         onCheckChange(check)
         return check
     }
@@ -406,6 +409,7 @@ extension Desk {
             job.appleRan = check
         }
         replace(job)
+        paceRound(job.id)
         onCheckChange(check)
         Logger.jobs.notice("job \(job.id, privacy: .public): Apple check \(id, privacy: .public) \(check.state.rawValue, privacy: .public) on \(check.macName, privacy: .public)")
         return check
