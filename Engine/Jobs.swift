@@ -402,8 +402,11 @@ nonisolated final class ProcessGroup: Sendable {
         for waiter in waiters { waiter.resume() }
     }
 
-    /// Returns once the process has ended (what's left of its group is sent SIGKILL as it does).
-    func ended() async {
+    /// Returns once the process and everything left in its group have ended. What it started may
+    /// outlive it for a while: `end`'s SIGKILL comes only after the grace it gave, and a child that
+    /// ignores SIGTERM runs until then. Checked every 50 ms, for at most `patience` seconds, which no
+    /// group outlasts unless it's stuck in the kernel, where it writes nothing either.
+    func ended(patience: TimeInterval = 30) async {
         await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
             let done = state.withLock { state -> Bool in
                 if !state.exited { state.waiters.append(waiter) }
@@ -411,6 +414,33 @@ nonisolated final class ProcessGroup: Sendable {
             }
             if done { waiter.resume() }
         }
+        guard let target = state.withLock({ $0.target }), target < 0 else { return }
+        let deadline = ContinuousClock.now + .seconds(patience)
+        while Self.running(group: -target), ContinuousClock.now < deadline {
+            // Not Task.sleep: a cancelled task would spin here instead of waiting.
+            await withCheckedContinuation { (tick: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { tick.resume() }
+            }
+        }
+    }
+
+    /// Whether a process of group `pgid` is still running. A zombie isn't: it runs nothing, and the
+    /// group's leader stays one until Foundation reaps it (`run`).
+    static func running(group pgid: pid_t) -> Bool {
+        #if os(Linux)
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: "/proc") else { return kill(-pgid, 0) == 0 }
+        let group = "\(pgid)"
+        for entry in entries where entry.first?.isNumber == true {
+            // "pid (name) state ppid pgrp …": the name may hold spaces and parentheses, so the fields start after the last ")".
+            guard let stat = try? String(contentsOfFile: "/proc/\(entry)/stat", encoding: .utf8),
+                  let close = stat.lastIndex(of: ")") else { continue }
+            let fields = stat[stat.index(after: close)...].split(separator: " ", maxSplits: 3)
+            if fields.count > 2, fields[0] != "Z", fields[2] == group { return true }
+        }
+        return false
+        #else
+        return kill(-pgid, 0) == 0 || errno == EPERM
+        #endif
     }
 
     /// SIGTERM to the whole group now, SIGKILL `after` seconds later (`Halt`). Once: a second call,
