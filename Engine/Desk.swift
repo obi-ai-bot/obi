@@ -134,7 +134,13 @@ final class Desk {
     /// Jobs that were queued or running when the runner went down, oldest first, for `resumeAfterRestart`.
     @ObservationIgnored var wentDown: [String] = []
 
-    func updateFailed(_ item: InboxItem) {
+    /// The runner's own update's items name this job (Runner/Updates.swift).
+    nonisolated static let updateJob = "runner-update"
+    /// Try again on a failed update's item: the runner tries that commit again now. Nil on the Mac.
+    @ObservationIgnored var retryUpdate: (() -> Void)?
+
+    func updateFailed(_ new: InboxItem) {
+        let item = Self.decided(new)
         guard !inbox.contains(where: { $0.id == item.id }) else { return }
         inbox.append(item)
         store.save(item)
@@ -1915,12 +1921,22 @@ final class Desk {
 
     func addIssueAudit(_ item: InboxItem) { add(item) }
 
+    /// An item with nothing to decide (#215) arrives done: it's kept with the reports, never waits in the inbox.
+    private static func decided(_ item: InboxItem) -> InboxItem {
+        guard !item.isDecision, item.done == nil else { return item }
+        var report = item
+        report.done = item.created
+        return report
+    }
+
     /// A new item: one open item per job, so a newer one settles the older, with no answer. Of the
-    /// items with no job, audits share one; failures keep one open per signature (Engine/Failures.swift).
-    /// Then it's rewritten in plain words, without waiting for it.
-    private func add(_ item: InboxItem) {
+    /// items with no job, audits share one per title (the day's report, a status's decision);
+    /// failures keep one open per signature (Engine/Failures.swift). Then it's rewritten in plain
+    /// words, without waiting for it.
+    private func add(_ new: InboxItem) {
+        let item = Self.decided(new)
         let shares = { (other: InboxItem) in
-            other.job == item.job && (!item.job.isEmpty || (item.kind == .audit && other.kind == .audit))
+            other.job == item.job && (!item.job.isEmpty || (item.kind == .audit && other.kind == .audit && other.title == item.title))
         }
         for index in inbox.indices where shares(inbox[index]) && inbox[index].isOpen && inbox[index].id != item.id {
             inbox[index].done = .now
@@ -1980,7 +1996,17 @@ final class Desk {
         case .answer(let words):
             let text = words.trimmingCharacters(in: .whitespacesAndNewlines)
             guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Answer with 1 to 2,000 characters.") }
+            // Items about Oby, not a job, take only what they offer.
+            if item.kind == .audit || item.job == Self.updateJob {
+                guard item.options.contains(text) else { throw Shell.Failure(message: "Answer \(item.options.joined(separator: " or ")).") }
+            }
             switch (item.kind, text) {
+            case (.failed, Inbox.tryAgain) where item.job == Self.updateJob: retryUpdate?()
+            case (.audit, Inbox.tryAgain): issueSync.again()
+            case (.audit, Inbox.ignoreStatus): try issueSync.decide(item.id, use: nil)
+            case (.audit, _):
+                guard let column = Inbox.instead(text) else { throw Shell.Failure(message: "Answer \(item.options.joined(separator: " or ")).") }
+                try issueSync.decide(item.id, use: column)
             case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss), (.merge, Inbox.dismiss): try dismiss(item.job)
             case (.failed, Inbox.oneMoreRound) where job(item.job)?.cloudNeedsYou == true: try oneMoreCloudRound(item.job)
             case (.failed, Inbox.askOby) where job(item.job)?.cloudNeedsYou == true: try askAboutCloud(item.job)

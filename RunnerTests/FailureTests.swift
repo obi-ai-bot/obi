@@ -565,15 +565,39 @@ struct FailureTests {
         await log.drain()
         let record = try #require(log.store.failures().first)
         #expect(record.issue == "https://github.com/deskree-inc/oby/issues/200")
+        // Its fix is in review already (#215): the issue counts it, and the item has nothing to decide, so it arrives done.
+        #expect(test.github.created.count == 1)
         let item = try #require(desk.inbox.first { $0.kind == .failure })
+        #expect(item.done != nil && item.options.isEmpty && item.text.hasPrefix("Already being fixed by #81, its pull request open."))
         do {
-            try log.answer(item.id, Failures.fixIt)
+            try log.fix(record.id)
             Issue.record("Fix it started a job")
         } catch {
             #expect(error.localizedDescription == "Already being fixed by #81, its pull request open.")
         }
         try await Task.sleep(for: .milliseconds(50))
-        #expect(test.made.prepared.isEmpty && desk.item(item.id)?.isOpen == true)
+        #expect(test.made.prepared.isEmpty && desk.inbox.filter(\.isOpen).isEmpty)
+    }
+
+    /// A repeat while its fix job is queued (#215, seen 2026-10-12): the issue's count and evidence
+    /// grow, nothing reaches the inbox, and the signature's open item is done by itself.
+    @Test func aRepeatWhileItsFixIsQueuedStaysOutOfTheInbox() async throws {
+        let test = try FailureTests(answers: [FailureTests.answer("oby-bug", "review-cap-hit-while-each-round-fixed-previous-blocker")])
+        let desk = test.desk
+        let log = desk.failureLog
+        log.observe(test.job("first") { $0.status = .failed })
+        await log.drain()
+        let first = try #require(log.store.failures().first)
+        let item = try #require(desk.inbox.first { $0.kind == .failure && $0.isOpen })
+        // A fix job on its issue, waiting its turn; the item from before is still open.
+        desk.enqueue(FailureTests.job("fixer") { $0.issue = 200; $0.status = .queued; $0.finished = nil; $0.published = nil })
+        #expect(log.underway(first) != nil)
+        log.observe(test.job("second") { $0.status = .failed; $0.branch = "oby/fix-76" })
+        await log.drain()
+        #expect(test.github.created.count == 1 && test.github.edits.last?.body.contains("seen 2 times") == true)
+        #expect(desk.item(item.id)?.done != nil && desk.inbox.filter(\.isOpen).isEmpty)
+        let second = try #require(log.store.failures().first { $0.job == "second" })
+        #expect(desk.item("failure-\(second.id)")?.done != nil)
     }
 
     @Test func mergingAFixIntoDevClosesItsFailureIssueAndNotAFeatureIssue() async throws {

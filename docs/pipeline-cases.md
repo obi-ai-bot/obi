@@ -127,6 +127,8 @@ Before stage 1. People connect only what they have. That decides which model the
 
 Like email: each item waits for your decision, with no timeout and no guessing. If something is here, Oby doesn't know what to do, or only a person can do it. Every decision teaches Oby (X.4), so the inbox shrinks: generic at first, personal later. Oby today has none of this, only one card slot (`Desk.talk`).
 
+**The inbox is for taking actions** (decided 2026-10-12, #215). Every item offers at least one answer that changes something, besides Later and Done. What has nothing to decide (a report, drift Oby fixed by itself, a failure whose fix is already queued, running or in review) doesn't go to the inbox: it arrives done and stays with the job's or Oby's reports, where it can be read. Each kind of item declares its answers (docs/runner-api.md, "Inbox item"), and a kind that declares none can't reach the inbox. The daily audit asks only what needs you: a board column the roadmap lacks, as a decision (Use the closest column instead, or Ignore this status, remembered for that status), and what failed, with Try again.
+
 ### What the best tools teach (researched 2026-10-10)
 
 1. **Grouped by what you must do:** Needs you, Ready for review, Working, Done. Longest-waiting first, with "waiting 3m". (Claude Code agent view)

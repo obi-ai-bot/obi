@@ -10,7 +10,7 @@ import CSQLite
 /// limits, or a merge that stopped. Like email, it waits for the user, with no timeout: they answer it, mark it done, or
 /// put it off until later. Its job waits; the others keep going.
 nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
-    enum Kind: String, Codable, Sendable {
+    enum Kind: String, Codable, Sendable, CaseIterable {
         /// The job's agent asked something (`Job.question`) and waits for the answer.
         case question
         /// Oby's review stopped asking for changes: a blocker came back (`Job.reviewNeedsYou`).
@@ -19,12 +19,34 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         case failed
         /// The job's account hit its usage limit, and no other account had room.
         case limit
-        /// One line from the runner's daily issue and board reconciliation.
+        /// The runner's daily issue and board reconciliation: a status the roadmap lacks, or what failed.
         case audit
         /// Oby's merge stopped: it couldn't merge, or the Mac check failed with no round left (`Job.mergeNeedsYou`).
         case merge
         /// A failure's post-mortem found an Oby bug or a repeat (Engine/Failures.swift): Fix it starts the fix job.
         case failure
+
+        /// The answers that change something on an item of this kind, besides Later and Done (#215).
+        /// A question's are its own options, or the user's words; an audit's `Use <column> instead`
+        /// too (`Inbox.instead`). A new kind declares its own, or none of its items reach the inbox.
+        var actions: [String] {
+            switch self {
+            case .question: []
+            case .review: [Inbox.oneMoreRound, Inbox.dismiss]
+            case .failed, .limit: [Inbox.tryAgain, Inbox.oneMoreRound, Inbox.dismiss]
+            case .merge: [Inbox.oneMoreRound, Inbox.tryAgain, Inbox.dismiss]
+            case .audit: [Inbox.tryAgain, Inbox.ignoreStatus]
+            case .failure: [Failures.fixIt, Inbox.dismiss]
+            }
+        }
+
+        /// Any words answer it: a question.
+        var takesWords: Bool { self == .question }
+
+        /// Whether answering `option` on this kind changes something.
+        func acts(on option: String) -> Bool {
+            takesWords || actions.contains(option) || (self == .audit && Inbox.instead(option) != nil)
+        }
     }
 
     /// The job, what it needs and when it came: the same need never comes twice, even once it's done.
@@ -56,6 +78,10 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
 
     var isOpen: Bool { done == nil }
 
+    /// It offers something to decide (#215): a question, or an option that changes something. One
+    /// that doesn't never waits in the inbox: it arrives done, kept with the reports.
+    var isDecision: Bool { kind.takesWords || options.contains(where: kind.acts) }
+
     /// Waiting for the user now: open, and not put off past `now`.
     func waiting(at now: Date = .now) -> Bool { done == nil && (later.map { $0 <= now } ?? true) }
 }
@@ -72,6 +98,14 @@ nonisolated enum Inbox {
     static let oneMoreRound = "One more round"
     /// What the agent hears for Try again.
     static let tryAgainMessage = "Try again, picking up where you left off. Finish with a short summary as asked."
+    /// What the audit offers for a status the roadmap has no column for (#215): leave its issues
+    /// where they are from now on, or move them to another column, remembered for that status.
+    static let ignoreStatus = "Ignore this status"
+    static func useInstead(_ column: String) -> String { "Use \(column) instead" }
+    /// The column a `Use <column> instead` answer names, or nil.
+    static func instead(_ answer: String) -> String? {
+        answer.wholeMatch(of: /Use (.+) instead/).map { String($0.1) }
+    }
 
     /// The item `job` calls for now, or nil when it needs nothing from the user. `limited`: it
     /// failed because no account had room.

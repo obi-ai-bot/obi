@@ -19,6 +19,7 @@ struct IssueSyncTests {
         var extraItems: [[String: Any]] = []
         var repositoryFailure: String?
         var projectTitle = Lead.boardTitle
+        var options = ["Todo", "In progress", "In review", "Blocked", "Needs test"]
         var number = 116
         var issueURL: String { "https://github.com/deskree-inc/oby/issues/\(number)" }
 
@@ -50,7 +51,7 @@ struct IssueSyncTests {
             case ["api", "user"]: return "well-prado"
             case ["project", "list"]: return try encode(["projects": [["title": projectTitle, "number": 20, "id": "PVT_20"]]])
             case ["project", "field-list"]:
-                return try encode(["fields": [["id": "FIELD", "name": "Status", "options": ["Todo", "In progress", "In review", "Blocked", "Needs test"].map { ["id": $0, "name": $0] }]]])
+                return try encode(["fields": [["id": "FIELD", "name": "Status", "options": options.map { ["id": $0, "name": $0] }]]])
             case ["api", "graphql"]:
                 let firstPage = laterPage && !args.contains("cursor=next")
                 let items: [[String: Any]] = firstPage || missingItem ? [] : [["id": "ITEM", "content": ["url": issueURL], "fieldValueByName": ["name": column]]] + extraItems
@@ -212,8 +213,9 @@ struct IssueSyncTests {
         #expect(fake.labels == ["feature"] && fake.column == "In progress")
         #expect(fake.notes.isEmpty && !fake.calls.contains { $0.prefix(2) == ["issue", "comment"] })
         #expect(desk.inbox.count == 1 && desk.inbox.first?.text == "Issue audit: fixed drift on 1 issue(s).")
-        // It fixed the drift by itself and nothing failed: the report arrives done.
-        #expect(desk.inbox.first?.done == day)
+        // It fixed the drift by itself and nothing failed: the report arrives done, with nothing to decide (#215).
+        #expect(desk.inbox.first?.done == day && desk.inbox.first?.options == [])
+        #expect(desk.inbox.filter(\.isOpen).isEmpty)
         #expect(desk.issueJobs.first(where: { $0.id == original.id })?.outgoing?.count == 1)
         let count = fake.calls.count
         await desk.issueSync.audit(now: day)
@@ -560,5 +562,114 @@ struct IssueSyncTests {
         macJob.status = .done
         await send(macJob, to: mac)
         #expect(!fake.labels.contains("status:in-progress"))
+    }
+
+    // MARK: A status the roadmap lacks is a decision (#215)
+
+    /// A merged slice whose Build list is done belongs in Needs test, on a roadmap with no such column.
+    func lackingNeedsTest() throws -> (Desk, FakeGH, Date) {
+        let (desk, fake, original) = try fixture()
+        var merged = original
+        merged.status = .done
+        merged.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now)
+        desk.issueSync.store.save(merged)
+        fake.body = "## Build\n- [x] First slice\n\n## Test it when it's done\n- [ ] Test on a Mac"
+        fake.column = "In progress"
+        fake.options = ["Todo", "In progress", "In review", "Blocked", "Done"]
+        return (desk, fake, Date(timeIntervalSince1970: 1_800_000_000))
+    }
+
+    func decision(_ desk: Desk) -> InboxItem? { desk.inbox.first { $0.isOpen && $0.title == IssueSync.statusTitle("Needs test") } }
+
+    @Test func aMissingStatusIsADecisionNotAReport() async throws {
+        let (desk, fake, day) = try lackingNeedsTest()
+        await desk.issueSync.audit(now: day)
+        // Nothing fixed, nothing failed: no report. The missing column asks the owner, with what it can do.
+        let item = try #require(decision(desk))
+        #expect(desk.inbox.count == 1 && item.kind == .audit && item.job == "" && item.isDecision)
+        #expect(item.options == ["Use In review instead", "Ignore this status"])
+        #expect(item.text == "The roadmap's Status field has no Needs test option. Issues that belong there stay where they are: deskree-inc/oby#116.")
+        #expect(fake.column == "In progress" && fake.mutations.isEmpty)
+        // Asked once: the next day's audit doesn't ask again while it waits, even put off.
+        try desk.settle(item.id, .later(day.addingTimeInterval(3600)))
+        await desk.issueSync.audit(now: day.addingTimeInterval(86400))
+        #expect(desk.inbox.filter { $0.title == item.title }.count == 1)
+        // Only what it offers: other words change nothing.
+        #expect(throws: (any Error).self) { try desk.settle(item.id, .answer("Make one up")) }
+        #expect(desk.item(item.id)?.isOpen == true)
+    }
+
+    @Test func useInsteadMovesTheIssuesAndIsRemembered() async throws {
+        let (desk, fake, day) = try lackingNeedsTest()
+        await desk.issueSync.audit(now: day)
+        let item = try #require(decision(desk))
+        let settled = try desk.settle(item.id, .answer("Use In review instead"))
+        #expect(settled.done != nil && settled.answer == "Use In review instead")
+        // It moves them now, and remembers it for that status.
+        await desk.issueSync.drain()
+        #expect(fake.column == "In review")
+        #expect(desk.issueSync.choice(for: "Needs test") == IssueSync.Choice(use: "In review"))
+        // The next audit, and a job's own step, use it: no item, no move back.
+        fake.column = "In progress"
+        await desk.issueSync.audit(now: day.addingTimeInterval(2 * 86400))
+        #expect(fake.column == "In review" && desk.inbox.filter(\.isOpen).isEmpty)
+        // After a restart too.
+        let restarted = IssueSync(desk: desk, store: desk.issueSync.store)
+        restarted.auditURL = desk.issueSync.auditURL
+        #expect(restarted.choice(for: "needs test")?.use == "In review")
+    }
+
+    @Test func ignoreThisStatusLeavesItsIssuesAloneAndIsRemembered() async throws {
+        let (desk, fake, day) = try lackingNeedsTest()
+        await desk.issueSync.audit(now: day)
+        let item = try #require(decision(desk))
+        try desk.settle(item.id, .answer(Inbox.ignoreStatus))
+        await desk.issueSync.drain()
+        #expect(desk.issueSync.choice(for: "Needs test") == IssueSync.Choice(use: nil))
+        let calls = fake.calls.count
+        await desk.issueSync.audit(now: day.addingTimeInterval(86400))
+        #expect(fake.calls.count > calls)
+        #expect(fake.column == "In progress" && fake.mutations.isEmpty && desk.inbox.filter(\.isOpen).isEmpty)
+    }
+
+    /// Once the column exists, the decision is done by itself and the issue moves there.
+    @Test func theDecisionGoesOnceTheColumnExists() async throws {
+        let (desk, fake, day) = try lackingNeedsTest()
+        await desk.issueSync.audit(now: day)
+        let item = try #require(decision(desk))
+        fake.options.append("Needs test")
+        await desk.issueSync.audit(now: day.addingTimeInterval(86400))
+        #expect(desk.item(item.id)?.done != nil && desk.item(item.id)?.answer == nil)
+        #expect(fake.column == "Needs test" && desk.inbox.filter(\.isOpen).isEmpty)
+        #expect(desk.issueSync.choice(for: "Needs test") == nil)
+    }
+
+    /// No column to offer instead: only Ignore.
+    @Test func closestColumnIsTheStepBefore() {
+        #expect(IssueSync.closest(to: "Needs test", in: ["Todo", "In progress", "in review"]) == "in review")
+        #expect(IssueSync.closest(to: "Needs test", in: ["Todo", "In progress"]) == "In progress")
+        #expect(IssueSync.closest(to: "Needs test", in: ["Todo", "Done"]) == nil)
+        #expect(IssueSync.closest(to: "In progress", in: ["Todo", "In review"]) == nil)
+    }
+
+    /// What failed waits with Try again, which runs the audit again now.
+    @Test func aFailedAuditCanBeTriedAgain() async throws {
+        let (desk, fake, original) = try fixture()
+        var job = original
+        job.status = .done
+        desk.issueSync.store.save(job)
+        fake.repositoryFailure = "Resource not accessible"
+        fake.labels = ["status:in-progress", "feature"]
+        fake.body = IssueSync.claimed(fake.body, by: original.id)
+        let day = Date(timeIntervalSince1970: 1_800_000_000)
+        await desk.issueSync.audit(now: day)
+        let report = try #require(desk.inbox.first { $0.isOpen })
+        #expect(report.title == IssueSync.reportTitle && report.options == [Inbox.tryAgain] && report.text.contains("Resource not accessible"))
+        fake.repositoryFailure = nil
+        try desk.settle(report.id, .answer(Inbox.tryAgain))
+        await desk.issueSync.drain()
+        #expect(fake.labels == ["feature"])
+        // The second run's report is its own item, done: it fixed the drift by itself.
+        #expect(desk.inbox.count == 2 && desk.inbox.filter(\.isOpen).isEmpty && desk.inbox.last?.id != report.id)
     }
 }

@@ -373,6 +373,47 @@ final class InboxTests {
         #expect(Inbox.need(of: stopped) == nil)
     }
 
+    /// The inbox is for decisions (#215): every kind declares the answers that change something,
+    /// every item Oby makes offers one, and one that offers none arrives done, with the reports.
+    @Test func everyKindHasAnActionAndOnlyDecisionsWait() throws {
+        for kind in InboxItem.Kind.allCases {
+            #expect(kind.takesWords || !kind.actions.isEmpty, "\(kind) declares no action")
+        }
+        var reviewed = fix
+        reviewed.status = .done
+        reviewed.published = "https://github.com/deskree-inc/oby/pull/80"
+        reviewed.review = Review(verdict: .changesRequested, job: "rev4", agent: "codex", account: "Work", round: 4)
+        var never = failed
+        never.session = nil
+        var asked = fix
+        asked.question = Plan.Question(text: "Which?", options: [])
+        let made = [Inbox.need(of: failed), Inbox.need(of: failed, limited: true), Inbox.need(of: reviewed), Inbox.need(of: never), Inbox.need(of: asked)].compactMap { $0 }
+        #expect(made.count == 5)
+        for item in made { #expect(item.isDecision && item.options.allSatisfy(item.kind.acts), "\(item.id)") }
+        #expect(InboxItem.Kind.audit.acts(on: "Use In review instead") && !InboxItem.Kind.failed.acts(on: "Use In review instead"))
+        #expect(Inbox.instead("Use In review instead") == "In review" && Inbox.instead("In review") == nil)
+
+        let desk = makeDesk()
+        let day = Date(timeIntervalSince1970: 1_800_000_000)
+        desk.addIssueAudit(InboxItem(id: "report", kind: .audit, job: "", title: "Daily issue audit", text: "Fixed 7.", options: [], created: day))
+        desk.addIssueAudit(InboxItem(id: "nothing", kind: .failure, job: "", title: "Oby failure: x", text: "Bug.", options: ["Later"], created: day))
+        #expect(desk.item("report")?.done == day && desk.item("nothing")?.done == day)
+        #expect(desk.inbox.filter(\.isOpen).isEmpty && makeDesk().inbox.count == 2)
+    }
+
+    /// A failed runner update offers Try again, which tries that commit again.
+    @Test func aFailedUpdateCanBeTriedAgain() throws {
+        let desk = makeDesk()
+        var retried = 0
+        desk.retryUpdate = { retried += 1 }
+        desk.updateFailed(InboxItem(id: "runner-update-abc", kind: .failed, job: Desk.updateJob, title: "Runner update failed",
+                                    text: "Runner update failed at swift test (abc).", options: [Inbox.tryAgain], created: .now))
+        #expect(desk.item("runner-update-abc")?.isOpen == true)
+        #expect(throws: (any Error).self) { try desk.settle("runner-update-abc", .answer(Inbox.dismiss)) }
+        let item = try desk.settle("runner-update-abc", .answer(Inbox.tryAgain))
+        #expect(retried == 1 && item.done != nil && item.answer == Inbox.tryAgain)
+    }
+
     /// How long an item has waited, as both apps say it next to it.
     @Test func itemsSayHowLongTheyWaited() {
         let now = Date(timeIntervalSince1970: 1_791_582_173)

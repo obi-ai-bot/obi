@@ -73,6 +73,7 @@ final class Updates {
         // A manual install must not report the previous executable's commit.
         let commit = state.digest == (try? Self.digest(binary)) ? state.installed : nil
         status = Status(commit: commit, waiting: nil, phase: "idle")
+        desk.retryUpdate = { [weak self] in self?.retry() }
     }
 
     private func save() throws {
@@ -185,9 +186,19 @@ final class Updates {
         // No build output is stored: it can contain credentials. A single durable item identifies
         // the step; polling/network failures are deduplicated too. Mark done after reading.
         let id = head ?? "fetch-\(Int(now().timeIntervalSince1970))"
-        desk.updateFailed(InboxItem(id: "runner-update-\(id)", kind: .failed, job: "runner-update",
+        // Try again (#215) tries the same commit again now; otherwise the next one is.
+        desk.updateFailed(InboxItem(id: "runner-update-\(id)", kind: .failed, job: Desk.updateJob,
                                     title: "Runner update failed", text: "Runner update failed at \(step)\(head.map { " (\($0))" } ?? ""). The old binary is kept. \(head == nil ? "The next poll tries again." : "The next dev commit tries again.")",
-                                    options: [], created: now()))
+                                    options: [Inbox.tryAgain], created: now()))
+    }
+
+    /// Try again on a failed update's item: that commit is tried once more, now.
+    func retry() {
+        if state.failed != nil {
+            state.failed = nil
+            try? save()
+        }
+        Task { await poll() }
     }
 
     static func digest(_ file: URL) throws -> String {

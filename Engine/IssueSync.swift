@@ -25,10 +25,17 @@ final class IssueSync {
     var now: () -> Date = { .now }
     private struct Retry: Codable { var transition: String; var failures: Int; var after: Date }
     var auditURL = Workspace.root.appending(path: "issue-audit.json")
+    /// What the owner chose for a status the roadmap has no column for (#215): the column its issues
+    /// go to instead, or nil to leave them where they are.
+    struct Choice: Codable, Equatable { var use: String? }
     private struct AuditState: Codable {
         var day: String?
         var outgoing: [Outgoing] = []
         var retries: [String: Retry]?
+        /// By the missing column's name, lowercased.
+        var choices: [String: Choice]?
+        /// The column each open decision is about, by its inbox item's id.
+        var asked: [String: String]?
     }
     private var auditState = AuditState()
     private var stateLoaded = false
@@ -255,17 +262,33 @@ final class IssueSync {
         return project
     }
 
+    /// The roadmap's Status field has no option for the column an issue belongs in: the audit asks
+    /// the owner what to do (#215). `options` are the columns it has.
+    struct MissingStatus: LocalizedError {
+        var column: String
+        var options: [String]
+        var errorDescription: String? { "Issue sync: roadmap has no Status option \(column)." }
+    }
+
     private func board(status: String?, job: Job) async throws -> Bool {
         guard let status, let project = try await roadmap() else { return false }
         let url = "https://github.com/\(job.repo)/issues/\(job.issue!)"
         guard let item = project.items.first(where: { ($0["content"] as? [String: Any])?["url"] as? String == url }), let itemID = item["id"] as? String else { return false }
         let current = ((item["fieldValueByName"] as? [String: Any])?["name"] as? String)?.lowercased()
         guard !["done", "shipped", "closed"].contains(current ?? "") else { return false }
-        let column = switch status { case "status:in-progress": "In progress"; case "status:in-review": "In review"; case "status:blocked": "Blocked"; default: "Needs test" }
+        var column = switch status { case "status:in-progress": "In progress"; case "status:in-review": "In review"; case "status:blocked": "Blocked"; default: "Needs test" }
+        // What the owner chose for a column the roadmap lacks: another, or leave it where it is.
+        if let choice = auditState.choices?[column.lowercased()] {
+            guard let use = choice.use else { return false }
+            column = use
+        }
         if current == column.lowercased() { return false }
         guard let field = project.fields.first(where: { $0["name"] as? String == "Status" }), let fieldID = field["id"] as? String,
-              let options = field["options"] as? [[String: Any]], let option = options.first(where: { ($0["name"] as? String)?.lowercased() == column.lowercased() }), let optionID = option["id"] as? String else {
-            throw Shell.Failure(message: "Issue sync: roadmap has no Status option \(column).")
+              let options = field["options"] as? [[String: Any]] else {
+            throw Shell.Failure(message: "Issue sync: roadmap has no Status field.")
+        }
+        guard let option = options.first(where: { ($0["name"] as? String)?.lowercased() == column.lowercased() }), let optionID = option["id"] as? String else {
+            throw MissingStatus(column: column, options: options.compactMap { $0["name"] as? String })
         }
         try await write(["project", "item-edit", "--id", itemID, "--project-id", project.id, "--field-id", fieldID, "--single-select-option-id", optionID], texts: [column], job: job, action: "projectStatus")
         return true
@@ -366,21 +389,66 @@ final class IssueSync {
     /// Called hourly by the runner; a separate ledger keeps quiet days out of the inbox.
     func audit(now: Date = .now) async {
         guard enabled else { return }
+        await schedule(now: now, again: false).value
+    }
+
+    /// The audit again now, whatever day it is: Try again on its report, or a status decided.
+    func again() {
+        guard enabled else { return }
+        schedule(now: now(), again: true)
+    }
+
+    @discardableResult
+    private func schedule(now: Date, again: Bool) -> Task<Void, Never> {
         let previous = tail
         let task = Task { [weak self] in
             await previous?.value
             guard let self else { return }
-            await self.auditRun(now: now)
+            await self.auditRun(now: now, again: again)
         }
         tail = task
-        await task.value
+        return task
     }
 
-    private func auditRun(now: Date) async {
-        guard enabled, let desk else { return }
-        let auditID = "issue-audit-\(Int(now.timeIntervalSince1970 / 86400))"
+    /// The owner's answer on a missing status's item: `use` that column for it from now on, or nil
+    /// to leave its issues where they are. Remembered in `issue-audit.json`; a column chosen moves them now.
+    func decide(_ item: String, use column: String?) throws {
         loadState()
-        guard auditState.day != auditID else { return }
+        guard let status = auditState.asked?[item] else { throw Shell.Failure(message: "Oby no longer knows which status that was about.") }
+        if auditState.choices == nil { auditState.choices = [:] }
+        auditState.choices?[status.lowercased()] = Choice(use: column)
+        auditState.asked?[item] = nil
+        try saveAuditState()
+        if column != nil { again() }
+    }
+
+    /// What the owner chose for `column`, or nil while they haven't.
+    func choice(for column: String) -> Choice? {
+        loadState()
+        return auditState.choices?[column.lowercased()]
+    }
+
+    /// The column to offer instead of a missing one: the nearest step before it that the roadmap
+    /// has (Needs test → In review). Never Todo or a finished column, which the audit never sets.
+    nonisolated static func closest(to column: String, in options: [String]) -> String? {
+        let nearer = ["needs test": ["In review", "In progress"], "in review": ["In progress"], "blocked": ["In progress"]]
+        for name in nearer[column.lowercased()] ?? [] {
+            if let option = options.first(where: { $0.lowercased() == name.lowercased() }) { return option }
+        }
+        return nil
+    }
+
+    private func auditRun(now: Date, again: Bool = false) async {
+        guard enabled, let desk else { return }
+        let day = "issue-audit-\(Int(now.timeIntervalSince1970 / 86400))"
+        loadState()
+        guard again || auditState.day != day else { return }
+        // Run again the same day, its report is another item.
+        var auditID = day, count = 1
+        while desk.item(auditID) != nil {
+            count += 1
+            auditID = "\(day)-\(count)"
+        }
         if desk.repos.isEmpty { desk.repos = (try? await Workspace.knownRepos()) ?? [] }
         guard !desk.repos.isEmpty || !desk.issueJobs.isEmpty else { return }
         let outgoingBefore = Dictionary(desk.issueJobs.map { ($0.id, $0.outgoing?.count ?? 0) }, uniquingKeysWith: { _, last in last })
@@ -388,6 +456,8 @@ final class IssueSync {
         auditing = true; project = nil; projectRead = false
         defer { auditing = false; project = nil; projectRead = false }
         var changed = 0, failures: [String] = []
+        // Columns the roadmap lacks, with the columns it has and the issues that belong there.
+        var missing: [String: (options: [String], issues: [String])] = [:]
         let roadmap: Project?
         do { roadmap = try await self.roadmap() }
         catch { roadmap = nil; failures.append(error.localizedDescription) }
@@ -422,23 +492,54 @@ final class IssueSync {
                             status = pr != nil ? "status:in-review" : merged ? (Self.remainingBuild(row["body"] as? String ?? "") ? "status:in-progress" : "status:needs-test") : (Board.names(row["labels"], key: "name").contains("status:needs-test") ? "status:needs-test" : nil)
                         }
                         let labeled = try await labels(row, status: status, job: job)
-                        let moved = try await board(status: status, job: job)
+                        var moved = false
+                        do { moved = try await board(status: status, job: job) }
+                        catch let lacking as MissingStatus {
+                            missing[lacking.column, default: (lacking.options, [])].issues.append("\(repo)#\(number)")
+                        }
                         if labeled || moved { changed += 1 }
                     } catch { failures.append("\(repo)#\(number): \(error.localizedDescription)") }
                 }
             } catch { failures.append(error.localizedDescription) }
         }
         let outgoing = desk.issueJobs.flatMap { Array(($0.outgoing ?? []).dropFirst(outgoingBefore[$0.id] ?? 0)) } + Array(auditState.outgoing.dropFirst(ledgerBefore))
-        auditState.day = auditID
+        // A column the roadmap lacks needs the owner (#215): one decision per column, until they make it.
+        var decisions: [InboxItem] = []
+        for (column, lacking) in missing.sorted(by: { $0.key < $1.key }) {
+            let id = "\(day)-status-\(Self.marker(column.lowercased()))"
+            let title = Self.statusTitle(column)
+            guard desk.item(id) == nil, !desk.inbox.contains(where: { $0.isOpen && $0.kind == .audit && $0.title == title }) else { continue }
+            let text = "The roadmap's Status field has no \(column) option. Issues that belong there stay where they are: \(lacking.issues.sorted().joined(separator: ", "))."
+            let safe = (try? desk.vault.forAgent(text)) ?? "The roadmap's Status field has no \(column) option."
+            let instead = Self.closest(to: column, in: lacking.options).map { [Inbox.useInstead($0)] } ?? []
+            if auditState.asked == nil { auditState.asked = [:] }
+            auditState.asked?[id] = column
+            decisions.append(InboxItem(id: id, kind: .audit, job: "", title: title, text: safe, options: instead + [Inbox.ignoreStatus], created: now))
+        }
+        // A decision nothing needs any more (the column was added, or no issue belongs there) is done by itself.
+        let lacking = Set(missing.keys.map(Self.statusTitle))
+        if roadmap != nil, failures.isEmpty {
+            for item in desk.inbox where item.isOpen && item.kind == .audit && auditState.asked?[item.id] != nil && !lacking.contains(item.title) {
+                auditState.asked?[item.id] = nil
+                _ = try? desk.settle(item.id, .done)
+            }
+        }
+        auditState.day = day
         do { try saveAuditState() } catch { failures.append("Couldn't save the audit ledger.") }
         if changed > 0 || !failures.isEmpty {
             let line = "Issue audit: fixed drift on \(changed) issue(s)." + (failures.isEmpty ? "" : " " + failures.joined(separator: "; ").replacingOccurrences(of: "\n", with: " "))
             let safe = (try? desk.vault.forAgent(line)) ?? "Issue audit failed: couldn't read the vault."
-            // Drift it fixed by itself needs nothing from the user: that report arrives done.
-            desk.addIssueAudit(InboxItem(id: auditID, kind: .audit, job: "", title: "Daily issue audit", text: safe, options: [], created: now,
-                                         done: failures.isEmpty ? now : nil, outgoing: outgoing.sorted { $0.date < $1.date }))
+            // Drift it fixed by itself needs nothing from the user: that report arrives done, with
+            // the reports (Desk.add). What failed can be tried again.
+            desk.addIssueAudit(InboxItem(id: auditID, kind: .audit, job: "", title: Self.reportTitle, text: safe, options: failures.isEmpty ? [] : [Inbox.tryAgain],
+                                         created: now, outgoing: outgoing.sorted { $0.date < $1.date }))
         }
+        for decision in decisions { desk.addIssueAudit(decision) }
     }
+
+    nonisolated static let reportTitle = "Daily issue audit"
+    /// The title of the decision about a column the roadmap lacks.
+    nonisolated static func statusTitle(_ column: String) -> String { "Roadmap column \(column)" }
 }
 
 extension Desk {
