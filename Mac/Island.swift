@@ -815,7 +815,7 @@ private struct OpenIsland: View {
     private var compactChat: some View {
         let turns = model.recentTurns
         let decisions = IslandInbox.entries(desk: desk, feed: feed, now: .now)
-        let permissions = feed.permissionHistory.filter { $0.waits(at: .now) }
+        let permissions = feed.chatPermissions.filter { $0.waits(at: .now) }
         return ScrollView {
             VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
                 ForEach(decisions.filter { ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns) == nil }) { entry in

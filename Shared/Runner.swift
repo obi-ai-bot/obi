@@ -601,9 +601,7 @@ extension Job {
     /// where its pull request is. A job you let go says Dismissed, however it ended.
     nonisolated var badge: JobBadge {
         if dismissed != nil { return JobBadge(text: "Dismissed", tone: .gray) }
-        #if os(iOS) || os(watchOS)
         if waitsForPermission { return JobBadge(text: "Awaiting approval", tone: .orange) }
-        #endif
         if waitsForAnswer { return JobBadge(text: "Needs input", tone: .orange) }
         if step == "Waiting for your OK", isActive { return JobBadge(text: "Awaiting approval", tone: .orange) }
         switch status {

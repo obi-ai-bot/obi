@@ -247,6 +247,20 @@ struct ChatWindowTests {
         #expect(job.badge == JobBadge(text: "Failed", tone: .red))
     }
 
+    @Test func nativePermissionsNameTheirSubjectAndUseApprovalStatus() {
+        let permission = Permission(id: "p", tool: "Bash", title: "Run tests", detail: "swift test")
+        var job = Job(id: "j", request: "Work", agent: "codex", account: "default", repo: "deskree-inc/oby",
+                      branch: "oby/fix-270", base: "dev", pr: nil, kind: .fix, task: "Work")
+        job.status = .running
+        job.permission = permission
+        #expect(job.badge.text == "Awaiting approval")
+        var item = InboxItem(id: "j-permission-p", kind: .permission, job: "j", title: "Job", text: "Run tests", options: ["Allow", "Deny"], created: now)
+        item.done = now
+        item.answer = "Allow"
+        let rendered = RunnerPermission(id: "p", tool: "Bash", title: "Run tests", detail: "swift test")
+        #expect(InlineDecision.receipt(item, permission: rendered)?.hasPrefix("Allowed once: swift test · ") == true)
+    }
+
     @Test func statusVocabularyIsShared() {
         var job = Job(id: "j", request: "Work", agent: "codex", account: "default", repo: "deskree-inc/oby",
                       branch: "oby/fix-270", base: "dev", pr: nil, kind: .fix, task: "Work")

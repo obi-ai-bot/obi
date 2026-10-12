@@ -198,7 +198,7 @@ private struct ConversationColumn: View {
                 .filter { $0.item.isDecision && ($0.item.later == nil || $0.item.later! <= context.date) }
                 .sorted { $0.item.created < $1.item.created }
             let waiting = entries.filter { $0.item.isOpen }
-            let permissions = feed.permissionHistory.filter { $0.done != nil || $0.waits(at: context.date) }
+            let permissions = feed.chatPermissions.filter { $0.done != nil || $0.waits(at: context.date) }
             let permissionWaits = permissions.filter { $0.waits(at: context.date) }
             let oldest = (waiting.map { ($0.id, $0.item.created) } + permissionWaits.map { ($0.id, $0.created) })
                 .min { $0.1 < $1.1 }?.0

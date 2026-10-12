@@ -107,7 +107,7 @@ struct SidebarView: View {
     }
 
     private var preview: String {
-        let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count + feed.permissionHistory.count { $0.waits(at: .now) }
+        let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count + feed.chatPermissions.count { $0.waits(at: .now) }
         if waiting > 0 { return "Waiting on your yes" }
         if model.working > 0 { return "\(model.working) working" }
         return SidebarSections.obyPreview(model.thread.last?.text)
@@ -126,7 +126,7 @@ struct SidebarView: View {
                     if let last = model.thread.last {
                         Text(Date.now.timeIntervalSince(last.date) < 60 ? "now" : ConversationModel.clock(last.date)).font(OBYStyle.caption).foregroundStyle(OBYStyle.tertiary)
                     }
-                    let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count + feed.permissionHistory.count { $0.waits(at: .now) }
+                    let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count + feed.chatPermissions.count { $0.waits(at: .now) }
                     if waiting > 0 {
                         Text("\(waiting)").font(OBYStyle.caption.weight(.semibold))
                             .padding(.horizontal, OBYStyle.Space.sm).padding(.vertical, OBYStyle.Space.xs)

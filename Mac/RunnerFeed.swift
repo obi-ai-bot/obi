@@ -58,6 +58,13 @@ final class RunnerFeed {
     }
     private(set) var permissionHistory: [PermissionRecord] = []
 
+    /// #134 supplies canonical permission inbox records. Legacy runners only send job extras;
+    /// use their temporary records only when the same request is absent from the inbox/history.
+    var chatPermissions: [PermissionRecord] {
+        let canonical = Set((inbox + inboxHistory).filter { $0.kind == .permission }.map(\.id))
+        return permissionHistory.filter { !canonical.contains("\($0.job)-permission-\($0.permission.id)") }
+    }
+
     private func capturePermissions() {
         for (job, extra) in extras {
             guard let permission = extra.permission else { continue }
