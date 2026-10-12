@@ -180,6 +180,15 @@ final class Desk {
         try await Publish.fetch(base, of: job, into: worktree)
         return try await Shell.ok(["git", "-C", worktree.path, "rev-parse", "--verify", "refs/remotes/origin/\(base)^{commit}"])
     }
+    /// Moves a job's worktree from commit `from` to `to`, only while its head is still `from` (no
+    /// work of its own): whether it moved. Ignored files (`.oby/`) stay. Tests put in their own.
+    @ObservationIgnored var moveWorktree: (_ id: String, _ from: String, _ to: String) async throws -> Bool = { id, from, to in
+        let path = Workspace.worktree(id).path
+        guard try await Shell.ok(["git", "-C", path, "rev-parse", "--verify", "HEAD^{commit}"]) == from,
+              try await Shell.ok(["git", "-C", path, "status", "--porcelain"]).isEmpty else { return false }
+        try await Shell.ok(["git", "-C", path, "reset", "--quiet", "--hard", to])
+        return true
+    }
     /// The limits every job is held to (case 3.1). Tests put in their own.
     @ObservationIgnored var limits = JobLimits()
     /// `oby-check apple` as the runner installed it, or nil (Engine/AppleChecks.swift). Tests put in their own.
@@ -711,8 +720,9 @@ final class Desk {
 
     /// A job that's ready runs now, unless an earlier job's claim covers the same files (case 2.1,
     /// `Job.holdsClaim`): then it waits, queued, until that job is merged, closed or let go.
-    func startOrWait(_ prepared: Job) {
-        guard let blocker = blocker(of: prepared) else { return start(prepared) }
+    /// `catchUp`: its worktree was set up a while ago (a restart), so it's brought up to date first.
+    func startOrWait(_ prepared: Job, catchUp: Bool = false) {
+        guard let blocker = blocker(of: prepared) else { return catchUp ? startCaughtUp(prepared) : start(prepared) }
         var job = prepared
         job.step = "Waiting for \(blocker.heading) (\(blocker.id)): both touch \(Self.overlap(prepared, blocker).joined(separator: ", "))"
         replace(job)
@@ -731,8 +741,40 @@ final class Desk {
         for waiter in waiting {
             guard let latest = job(waiter.id), latest.status == .queued, blocker(of: latest) == nil else { continue }
             waiting.removeAll { $0.id == waiter.id }
-            start(latest)
+            startCaughtUp(latest)
         }
+    }
+
+    /// A job whose worktree was set up before what it waited for merged: its branch moves to the
+    /// base as GitHub has it now, then it starts (or waits again), so it works on top of what merged
+    /// meanwhile rather than conflict with it (#209). It fails, saying why, when that can't be done.
+    private func startCaughtUp(_ job: Job) {
+        var job = job
+        job.step = "Bringing \(job.branch) up to date with \(job.base ?? "its base")"
+        replace(job, save: false)
+        updatePreparing.insert(job.id)
+        Task {
+            defer { updatePreparing.remove(job.id) }
+            do {
+                let caught = try await caughtUp(job)
+                guard self.job(job.id)?.status == .queued else { return }
+                startOrWait(caught)
+            } catch {
+                finish(job.id, .failed, "Couldn't bring \(job.branch) up to date with \(job.base ?? "its base"): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// The job with its branch on the base as GitHub has it now (`fetchBase`), when it has no work of
+    /// its own yet: its worktree is still at `startCommit`, which becomes the base's commit. Not a job
+    /// on a pull request: its branch is the pull request's.
+    func caughtUp(_ job: Job) async throws -> Job {
+        guard job.pr == nil, let base = job.base, let start = job.startCommit else { return job }
+        let onto = try await fetchBase(job, base)
+        guard onto != start, try await moveWorktree(job.id, start, onto) else { return job }
+        var job = job
+        job.startCommit = onto
+        return job
     }
 
     /// The files two jobs would both touch: the same repository, and a path of one that is the
@@ -1662,7 +1704,7 @@ nonisolated enum Rounds {
 /// What a job claims (case 2.1, #209): the files its issue says it will touch, so jobs on the same
 /// code run one after another rather than all at once, each putting the next in conflict.
 nonisolated enum Claims {
-    /// At most as many paths as a Lead's brief holds.
+    /// At most as many paths as a Lead's brief holds, from a client. An issue's are all kept.
     static let most = 30
     /// What a file named without a folder ends with to count as one (`Package.swift`, `README.md`).
     static let extensions: Set<String> = ["swift", "md", "json", "yml", "yaml", "toml", "plist", "pbxproj", "xcscheme", "entitlements",
@@ -1726,10 +1768,11 @@ nonisolated enum Claims {
         return extensions.contains(name[name.index(after: dot)...].lowercased())
     }
 
-    /// A list `files` takes from a client: at most `most` paths inside the repository. Throws why not.
+    /// A list `files` takes from a client: at most `most` paths inside the repository, all of them
+    /// checked, none dropped. Throws why not.
     static func validated(_ files: [String]) throws -> [String] {
         let paths = unique(files.map(cleaned).filter { !$0.isEmpty })
-        guard paths.count <= most else { throw Shell.Failure(message: "files holds at most \(most) paths.") }
+        guard paths.count <= most else { throw Shell.Failure(message: "files holds at most \(most) paths, not \(paths.count).") }
         if let bad = paths.first(where: { !Lead.isPath($0) }) { throw Shell.Failure(message: "\(bad.debugDescription) isn't a path inside the repository.") }
         return paths
     }
@@ -1741,9 +1784,10 @@ nonisolated enum Claims {
         return Lead.normalized(text)
     }
 
+    /// Each path once, in order, every one kept: a path left out would be a file left unclaimed.
     private static func unique(_ paths: [String]) -> [String] {
         var seen: [String] = []
         for path in paths where !seen.contains(path) { seen.append(path) }
-        return Array(seen.prefix(most))
+        return seen
     }
 }

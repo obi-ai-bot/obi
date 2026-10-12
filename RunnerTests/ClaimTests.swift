@@ -13,7 +13,17 @@ import Testing
 struct ClaimTests {
     final class Made {
         var agents: [(job: Job, agent: CheckTests.Agent)] = []
+        /// dev on GitHub, and what fetching it throws instead.
+        var dev = ClaimTests.devBefore
+        var fetchError: Error?
+        var fetched: [String] = []
+        /// Worktrees moved to a newer dev: the job, from, to. `moves` says whether they can.
+        var moved: [(id: String, from: String, to: String)] = []
+        var moves = true
     }
+
+    nonisolated static let devBefore = String(repeating: "a", count: 40)
+    nonisolated static let devMerged = String(repeating: "c", count: 40)
 
     let folder: URL
     let desk: Desk
@@ -40,10 +50,21 @@ struct ClaimTests {
         desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
         desk.repos = ["deskree-inc/oby"]
         // As a worktree on dev: its work publishes.
-        desk.prepare = { job in
+        desk.prepare = { [made] job in
             var job = job
             job.base = job.base ?? "dev"
+            job.startCommit = made.dev
             return job
+        }
+        desk.fetchBase = { [made] job, _ in
+            made.fetched.append(job.id)
+            if let error = made.fetchError { throw error }
+            return made.dev
+        }
+        desk.moveWorktree = { [made] id, from, to in
+            guard made.moves else { return false }
+            made.moved.append((id, from, to))
+            return true
         }
         desk.makeAgent = { [made] job, _, _ in
             let agent = CheckTests.Agent()
@@ -139,11 +160,49 @@ struct ClaimTests {
         waiting = try #require(desk.job(second.id))
         #expect(waiting.status == .queued && made.agents.count == 1)
 
-        // Merged: #198 starts, on top of it.
+        // Merged: #198 starts, on top of it. Its worktree was set up on dev before the merge: it
+        // moves to dev as GitHub has it now first, so it doesn't edit stale code.
+        #expect(made.fetched.isEmpty && made.moved.isEmpty)
+        made.dev = Self.devMerged
         desk.followed(first.id, published: url.absoluteString, pushed: published.pushed,
                       status: PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now), error: nil)
         try await until("#198 runs") { desk.job(second.id)?.status == .running }
         #expect(made.agents.count == 2 && made.agents.last?.job.issue == 198)
+        #expect(made.fetched == [second.id] && made.moved.map { "\($0.id) \($0.from) \($0.to)" } == ["\(second.id) \(Self.devBefore) \(Self.devMerged)"])
+        #expect(desk.job(second.id)?.startCommit == Self.devMerged && made.agents.last?.job.startCommit == Self.devMerged)
+    }
+
+    /// A waiting job that can't be brought up to date fails, saying why, rather than start on stale code.
+    @Test func aWaitingJobThatCantCatchUpFails() async throws {
+        let drafts = try await drafts()
+        let first = desk.dispatch(drafts[0])
+        let second = desk.dispatch(drafts[1])
+        try await until("#198 waits") { desk.job(second.id)?.step.hasPrefix("Waiting for") == true }
+        made.fetchError = Shell.Failure(message: "github.com unreachable")
+        desk.stop(first.id)
+        try await until("#198 fails") { desk.job(second.id)?.status == .failed }
+        #expect(desk.job(second.id)?.summary.hasPrefix("Couldn't bring oby/fix-198 up to date with dev: github.com unreachable") == true)
+        #expect(made.agents.count == 1)
+    }
+
+    /// Bringing a job up to date moves only a worktree with no work of its own, and never a pull request's.
+    @Test func catchingUpLeavesWorkAndPullRequestsAlone() async throws {
+        var job = Job(id: "j1", request: "fix", agent: "claude", account: "default", repo: "deskree-inc/oby",
+                      branch: "oby/fix-1", base: "dev", pr: nil, kind: .fix, task: "Fix")
+        job.startCommit = Self.devBefore
+        made.dev = Self.devMerged
+        #expect(try await desk.caughtUp(job).startCommit == Self.devMerged)
+        // Its head moved on (or it has changes): it stays where it is.
+        made.moves = false
+        #expect(try await desk.caughtUp(job).startCommit == Self.devBefore)
+        // dev hasn't moved: nothing to do.
+        made.moves = true
+        made.dev = Self.devBefore
+        #expect(try await desk.caughtUp(job).startCommit == Self.devBefore && made.moved.count == 1)
+        // A job on a pull request works on its branch: nothing is fetched.
+        job.pr = 33
+        let fetched = made.fetched.count
+        #expect(try await desk.caughtUp(job) == job && made.fetched.count == fetched)
     }
 
     /// The claim lasts until the job is merged, closed or let go, not just while its agent runs.
@@ -196,6 +255,20 @@ struct ClaimTests {
     }
 
     // MARK: The runner's API and oby-mcp
+
+    /// A client's list is checked whole: a 31st path is refused, never dropped and left unclaimed.
+    /// An issue's are all kept.
+    @Test func everyPathIsCheckedAndKept() throws {
+        let paths = (1...31).map { "Engine/File\($0).swift" }
+        #expect(throws: Shell.Failure.self) { try Claims.validated(paths) }
+        #expect((try? Claims.validated(paths)) == nil)
+        #expect(try Claims.validated(Array(paths.prefix(30))) == Array(paths.prefix(30)))
+        // The same path twice counts once.
+        #expect(try Claims.validated(Array(paths.prefix(30)) + ["./Engine/File1.swift"]) == Array(paths.prefix(30)))
+        // A bad path anywhere is refused, the 31st too.
+        #expect((try? Claims.validated(Array(paths.prefix(29)) + ["Mac/", "/etc/passwd"])) == nil)
+        #expect(Claims.files(title: "", body: "Files: " + paths.map { "`\($0)`" }.joined(separator: ", ")) == paths)
+    }
 
     /// `POST /v1/plans` answers drafts with their `files`; `POST /v1/jobs` may replace them, and
     /// refuses a path outside the repository.

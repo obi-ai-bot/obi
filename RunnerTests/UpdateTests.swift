@@ -64,6 +64,8 @@ struct UpdateTests {
                             restarts: Restarts(file: folder.appending(path: "restarts.json")))
         restored.makeAgent = desk.makeAgent
         restored.prepare = { $0 }
+        // dev hasn't moved since: a queued job catching up stays where it is.
+        restored.fetchBase = { [fake] _, _ in fake.head }
         return restored
     }
 
@@ -317,7 +319,7 @@ struct UpdateTests {
         restored.quit()
     }
 
-    @Test func preparedQueuedJobsReuseTheirWorktreeAfterRestart() throws {
+    @Test func preparedQueuedJobsReuseTheirWorktreeAfterRestart() async throws {
         let store = JobStore(url: folder.appending(path: "queued.sqlite"))
         var queued = job
         queued.id = "prepared"
@@ -327,6 +329,8 @@ struct UpdateTests {
         let restored = restarted(store: "queued.sqlite")
         restored.prepare = { _ in throw Shell.Failure(message: "must reuse the existing worktree") }
         restored.resumeAfterRestart()
+        // It's brought up to date with dev first, then starts.
+        for _ in 0..<500 where restored.job(queued.id)?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         #expect(restored.job(queued.id)?.status == .running)
         #expect(fake.agents.count == 1 && fake.resumes.count == 1 && fake.resumes[0] == nil)
         restored.quit()
