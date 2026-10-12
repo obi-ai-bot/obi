@@ -22,6 +22,8 @@ final class API {
     private var streams: [UUID: AsyncStream<String>.Continuation] = [:]
     /// The accounts as last sent, so an unchanged list isn't sent again.
     private var sentAccounts = Data()
+    /// Keeps the cap on running jobs (`PUT /v1/settings/jobs`). Tests put in their own.
+    var saveMaxRunning: (Int) -> Void = JobSlots.save
 
     /// Without `cleared` (the tests), the clear time lives in memory only.
     init(desk: Desk, devices: Devices, push: Push? = nil, cleared: Cleared? = nil, speech: Speech = Speech()) {
@@ -97,6 +99,8 @@ final class API {
         router.get("v1/settings/models") { _, _ in Self.json(Models.current) }
         router.put("v1/settings/models") { request, _ in try Self.change(try await Self.decode(Models.self, from: request)) }
         router.get("v1/settings/models/options") { _, _ in await Self.options() }
+        router.get("v1/settings/jobs") { _, _ in await self.jobSettings() }
+        router.put("v1/settings/jobs") { request, _ in try await self.change(try await Self.decode(JobSettings.self, from: request)) }
         return router
     }
 
@@ -104,7 +108,7 @@ final class API {
 
     func status() -> Response {
         Self.json(Status(runner: .init(version: Self.version, host: ProcessInfo.processInfo.hostName, update: updates?.status),
-                         accounts: accounts, models: .current, clearedAt: cleared.at,
+                         accounts: accounts, models: .current, maxRunning: desk.maxRunning, running: desk.runningCount, clearedAt: cleared.at,
                          github: (GitHubApp.inUse ? GitHubActor.app : .owner).rawValue, checks: GitHubApp.checks))
     }
 
@@ -507,6 +511,19 @@ final class API {
         }
     }
 
+    func jobSettings() -> Response { Self.json(JobSettings(maxRunning: desk.maxRunning)) }
+
+    /// A new cap on running jobs, 1 to 20 (#237): waiting jobs start at once when it goes up; when
+    /// it goes down, running jobs carry on and new ones wait until there's room under it.
+    func change(_ settings: JobSettings) throws -> Response {
+        guard JobSlots.range.contains(settings.maxRunning) else {
+            throw APIError(.unprocessableContent, "maxRunning goes from \(JobSlots.range.lowerBound) to \(JobSlots.range.upperBound).")
+        }
+        saveMaxRunning(settings.maxRunning)
+        desk.maxRunning = settings.maxRunning
+        return jobSettings()
+    }
+
     nonisolated static func change(_ models: Models) throws -> Response {
         guard AgentModels.claude.contains(where: { $0.0 == models.claude.model }),
               AgentModels.claudeEfforts.contains(models.claude.effort) else {
@@ -587,6 +604,9 @@ struct Status: Encodable {
     var runner: Runner
     var accounts: [AccountJSON]
     var models: Models
+    /// At most this many jobs run at once (#237), and how many slots are taken now.
+    var maxRunning: Int
+    var running: Int
     /// When Clear done was last pressed, or null: the API promises the key either way.
     var clearedAt: Date?
     /// Who the runner's own GitHub calls act as: "app" (Oby by Deskree) or "owner" (the owner's gh login).
@@ -595,13 +615,15 @@ struct Status: Encodable {
     /// permission" (the app lacks Checks: write) or "no app" (`GitHubApp.checks`).
     var checks: String = "no app"
 
-    private enum Keys: String, CodingKey { case runner, accounts, models, clearedAt, github, checks }
+    private enum Keys: String, CodingKey { case runner, accounts, models, maxRunning, running, clearedAt, github, checks }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
         try keys.encode(runner, forKey: .runner)
         try keys.encode(accounts, forKey: .accounts)
         try keys.encode(models, forKey: .models)
+        try keys.encode(maxRunning, forKey: .maxRunning)
+        try keys.encode(running, forKey: .running)
         try keys.encode(clearedAt, forKey: .clearedAt)
         try keys.encode(github, forKey: .github)
         try keys.encode(checks, forKey: .checks)
@@ -628,6 +650,11 @@ struct TurnJSON: Encodable {
         try keys.encode(turn.date, forKey: .at)
         try keys.encode(turn.jobs ?? [], forKey: .jobs)
     }
+}
+
+/// How many jobs run at once, as Settings keeps it (`GET` and `PUT /v1/settings/jobs`).
+struct JobSettings: Codable {
+    var maxRunning: Int
 }
 
 /// Each tool's model and effort, as Settings › Models keeps them.

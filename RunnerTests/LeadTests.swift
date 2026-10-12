@@ -5,7 +5,7 @@ import Testing
 
 /// The Lead's first slice (#64, Engine/Lead.swift): Swift's skipped list from the board, the
 /// context files, the typed plan Swift checks, jobs that start with no Dispatch tap and claim
-/// their issue, overlapping jobs that run one after another, and every turn logged.
+/// their issue, overlapping jobs that run side by side, told about each other, and every turn logged.
 @MainActor
 struct LeadTests {
     /// An agent whose events the test sends.
@@ -351,26 +351,29 @@ struct LeadTests {
         #expect(desk.jobs.count == 2 && !why.contains("{"))
     }
 
-    @Test func jobsThatTouchTheSameFilesRunOneAfterAnother() async throws {
+    @Test func jobsThatTouchTheSameFilesRunSideBySide() async throws {
         let three = #"{"action":"start_jobs","reply":"","question":null,"jobs":[{"repo":"deskree-inc/oby","issue":7,"kind":"build","title":"Safe when nobody watches","goal":"Implement F3.","files":["Engine/Desk.swift"],"check":"swift test","out_of_scope":""},{"repo":"deskree-inc/oby","issue":12,"kind":"build","title":"Watch first slice","goal":"Implement F8.","files":["Engine/"],"check":"swift test","out_of_scope":""},{"repo":"deskree-inc/oby","issue":13,"kind":"build","title":"Voice hold fn","goal":"Implement F9.","files":["Mac/Voice.swift"],"check":"swift test","out_of_scope":""}]}"#
+        desk.maxRunning = 6
         desk.makeLead = { _ in [FakeLead([three])] }
         _ = await desk.plan("Work on the roadmap")
-        try await until("#7 and #13 run") { desk.jobs.filter { $0.status == .running }.count == 2 }
+        try await until("all three run") { desk.jobs.filter { $0.status == .running }.count == 3 }
         let seven = try #require(desk.jobs.first { $0.issue == 7 })
         let twelve = try #require(desk.jobs.first { $0.issue == 12 })
         #expect(seven.status == .running && desk.job(13)?.status == .running)
-        // #12 names Engine/, which holds #7's file: it waits, queued, saying for what.
-        #expect(twelve.status == .queued && twelve.step == "Waiting for Safe when nobody watches (\(seven.id)): both touch Engine/")
-        #expect(made.agents.count == 2 && !made.agents.contains { $0.job.issue == 12 })
+        // #12 names Engine/, which holds #7's file: it runs all the same, with nothing waiting.
+        #expect(twelve.status == .running && !twelve.step.hasPrefix("Waiting for"))
+        #expect(made.agents.count == 3 && made.agents.contains { $0.job.issue == 12 })
         #expect(Desk.overlap(twelve, seven) == ["Engine/"] && Desk.overlap(seven, twelve) == ["Engine/Desk.swift"])
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(made.claims.count == 2 && !made.claims.contains { $0.issue == 12 })
-        // #7 ends: #12 starts, and claims its issue then.
+        // #12 names Engine/, which holds #7's file: its agent is told about #7, and #13's about nothing.
+        let prompt = { (issue: Int) in made.agents.first { $0.job.issue == issue }?.agent.prompt ?? "" }
+        #expect(prompt(12).contains("Safe when nobody watches (job \(seven.id)) on the branch \(seven.branch): both touch Engine/"))
+        #expect(!prompt(13).contains("Other jobs are changing the same files"))
+        try await until("all three are claimed") { made.claims.count == 3 }
+        #expect(made.claims.contains { $0.issue == 12 })
+        // #7 ends: #12 carries on.
         desk.stop(seven.id)
-        try await until("#12 runs") { desk.jobs.first { $0.issue == 12 }?.status == .running }
-        #expect(made.agents.count == 3 && made.agents.last?.job.issue == 12)
-        try await until("#12 is claimed") { made.claims.count == 3 }
-        #expect(made.claims.last?.issue == 12)
+        try await until("#7 stops") { desk.jobs.first { $0.issue == 7 }?.status == .stopped }
+        #expect(desk.jobs.first { $0.issue == 12 }?.status == .running && made.agents.count == 3)
         #expect(desk.jobs.first { $0.issue == 12 }?.pipeline.stages.first { $0.id == .work }?.state == .current)
     }
 

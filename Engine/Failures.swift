@@ -517,15 +517,15 @@ final class Failures {
 
     // MARK: The sweep
 
-    /// Keeps when each active job entered its step. A job waiting its turn behind another job's
-    /// claim (`Desk.startOrWait`, #231) isn't in a step yet: its clock starts when it starts.
+    /// Keeps when each active job entered its step. A job waiting its turn for a slot
+    /// (`Desk.startOrWait`, #231, #237) isn't in a step yet: its clock starts when it starts.
     private func track(_ job: Job) {
         guard job.isActive, !job.waitsForAnswer, !Self.waitsItsTurn(job) else { since[job.id] = nil; return }
         let key = "\(job.phase?.rawValue ?? "prepare")-\(job.currentRound)-\(job.publishStep?.rawValue ?? "")"
         if since[job.id]?.key != key { since[job.id] = (key, now()) }
     }
 
-    /// Queued on purpose: an earlier job holds a claim on the same files, or the runner is updating.
+    /// Queued on purpose: it waits for a free slot (`Desk.maxRunning`), or the runner is updating.
     nonisolated static func waitsItsTurn(_ job: Job) -> Bool {
         job.status == .queued && job.step.hasPrefix("Waiting for ")
     }

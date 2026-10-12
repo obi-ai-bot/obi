@@ -421,7 +421,8 @@ struct UpdateTests {
         restored.quit()
     }
 
-    @Test func recoveryPreservesQueuesForOverlappingFiles() throws {
+    /// After a restart, a queued job still waits for a slot while the cap's jobs run (#237).
+    @Test func recoveryKeepsQueuedJobsUnderTheCap() throws {
         let store = JobStore(url: folder.appending(path: "overlap.sqlite"))
         var older = job
         older.id = "blocker"
@@ -437,10 +438,11 @@ struct UpdateTests {
         queued.created = older.created.addingTimeInterval(1)
         store.save(queued)
         let restored = restarted(store: "overlap.sqlite")
+        restored.maxRunning = 1
         restored.resumeAfterRestart()
         #expect(fake.agents.count == 1 && fake.resumes[0] == "blocker-session")
         #expect(restored.job(queued.id)?.status == .queued)
-        #expect(restored.job(queued.id)?.step.contains("Waiting for") == true)
+        #expect(restored.job(queued.id)?.step == "Waiting for a free slot: 1 of 1 jobs running")
         restored.quit()
     }
 

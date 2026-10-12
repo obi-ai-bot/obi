@@ -278,7 +278,7 @@ From your goal to a list of jobs, then on to stage 2.
 Each job works in its own worktree off Oby's clone, on one of your accounts. These are the things that go wrong while nobody is watching.
 
 ### 2.1 Same files: two jobs would touch the same code
-- **What happens:** the Lead lists the files each job will touch. Overlapping jobs run one after another, not side by side. Goes to 2 in sequence, or to 5.4 later if dev moved.
+- **What happens:** the Lead lists the files each job will touch. Overlapping jobs run side by side, each told about the others, and conflicts are settled at merge: the older merges first and the other is rebased. At most `maxRunning` jobs run at once (6 by default). Goes to 2, then 5.4 if dev moved.
 - **Oby today:** Partial. One worktree per job, but no overlap check, so parallel PRs can conflict.
 - **Claude Code:** each background session and worktree subagent gets its own worktree. Cloud sessions get separate VMs and `claude/` branches. Conflicts aren't handled.
 - **Cursor:** one worktree per task, 25 per machine by default. Conflicts aren't described.
@@ -286,6 +286,7 @@ Each job works in its own worktree off Oby's clone, on one of your accounts. The
 - **Others:** Devin uses child VMs, and its coordinator "resolves conflicts". Copilot uses one branch per task.
 - **Open for Oby:**
   - Decided 2026-10-10: Oby plans the work to keep conflicts rare. Each job claims the files it will touch, and overlapping jobs run one after another.
+  - Decided 2026-10-12 (#237), replacing the line above: overlapping jobs run in parallel like Claude Code's worktrees, under a cap on running jobs. Claims tell each agent about the others and set the merge order; #159's rebase round settles conflicts, and a rebase that keeps the same patch skips a new review.
   - With Tetrix, `code_impact` predicts overlap. Without it, the Lead's list is checked against the real diff (X.7).
 
 ### 2.2 Risky command: a permission prompt with nobody watching

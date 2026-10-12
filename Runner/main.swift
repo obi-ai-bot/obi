@@ -67,7 +67,7 @@ desk.failureLog.enabled = true
 // agents ask for with `oby-check apple` (Engine/AppleChecks.swift), which runs this executable.
 desk.queuesMacChecks = true
 // A plan's job about an issue claims the files the issue names (case 2.1, #209), so jobs on the
-// same code run one after another.
+// same code know about each other and merge oldest first (#237).
 desk.issueFiles = { repo, issue in
     guard let text = try? await Shell.ok(["gh", "issue", "view", "\(issue)", "-R", repo, "--json", "title,body"], as: .app),
           let info = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return nil }
