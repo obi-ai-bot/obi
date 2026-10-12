@@ -65,10 +65,11 @@ final class Phone {
         speaker.stop()
     }
 
-    /// The app left the front. In the background dictation stops and keeps its words; a
-    /// permission prompt makes the app inactive too, so the mic's preparation carries on then.
+    /// The app left the front: dictation stops and keeps its words, and a microphone still being
+    /// prepared never opens. Except for the permission prompt dictation itself asked for, which
+    /// makes the app inactive too: preparation carries on through it.
     func leftForeground(background: Bool) {
-        if background || voice.listening { voice.finish() }
+        if background || !voice.asking { voice.finish() }
         spoken = false
         speaker.stop()
     }

@@ -15,6 +15,9 @@ final class PhoneVoice {
     /// The input level while listening, 0 to 1, for the mic's meter.
     private(set) var level: Float = 0
     private(set) var problem: String?
+    /// Waiting on the microphone or speech recognition permission: iOS's prompt makes the app
+    /// inactive, and that alone mustn't stop the dictation it's asking for.
+    @ObservationIgnored private(set) var asking = false
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var work: Task<Void, Never>?
     @ObservationIgnored private var engine: AVAudioEngine?
@@ -77,11 +80,13 @@ final class PhoneVoice {
                     !(Bundle.main.object(forInfoDictionaryKey: $0) as? String ?? "").isEmpty
                 }) else { throw RunnerError(message: "Voice input isn't available in this build. You can still type.") }
                 // Request each permission separately. Stop during either prompt never opens audio.
+                asking = true
                 let microphone = await AVAudioApplication.requestRecordPermission()
-                guard active, generation == token else { return }
+                guard active, generation == token else { asking = false; return }
                 let recognition = await withCheckedContinuation { continuation in
                     SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
                 }
+                asking = false
                 guard active, generation == token else { return }
                 guard microphone, recognition else {
                     throw RunnerError(message: "Allow Microphone and Speech Recognition for Oby in Settings to talk. You can still type.")
@@ -90,6 +95,10 @@ final class PhoneVoice {
                 try session.setCategory(.record, mode: .measurement)
                 // The start and stop haptics happen while capturing; iOS otherwise suppresses them.
                 try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
+                // Never open the microphone for an app that isn't in front.
+                guard UIApplication.shared.applicationState != .background else {
+                    throw RunnerError(message: "Listening was interrupted. Tap the mic to try again.")
+                }
                 try session.setActive(true)
                 let engine = AVAudioEngine()
                 let source = engine.inputNode.outputFormat(forBus: 0)
@@ -180,6 +189,7 @@ final class PhoneVoice {
     /// Stops listening and drops any words still to come; those already in the draft stay.
     func cancel() {
         generation += 1
+        asking = false
         active = false
         update = nil
         finishing = false
