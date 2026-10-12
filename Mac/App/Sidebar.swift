@@ -27,9 +27,14 @@ nonisolated enum SidebarSections {
     static let channelsEmpty = "Team channels come with F11."
     static let obysEmpty = "Other people's Obys come with F12."
 
-    /// "2 working" under Oby's name, or "Quiet".
-    static func obyLine(working: Int) -> String {
-        working == 0 ? "Quiet" : "\(working) working"
+    /// What Oby's pinned row says under its name: the last message, or a hello.
+    static func obyPreview(_ last: String?) -> String {
+        last ?? "Say hello to Oby"
+    }
+
+    /// What VoiceOver reads for Oby's pinned row: what it shows, and an unread reply.
+    static func obyLabel(last: String?, unread: Bool) -> String {
+        "Oby, \(obyPreview(last))" + (unread ? ", unread reply" : "")
     }
 
     /// "2 active" beside Agents, or "None".
@@ -38,7 +43,7 @@ nonisolated enum SidebarSections {
     }
 
     /// The jobs the sidebar lists under Agents: every one that's queued or running, and every one
-    /// that needs you, this Mac's and the runner's, newest first. Dismissed and finished jobs stay
+    /// that needs you, this Mac's and the runner's, most recently active first. Dismissed and finished jobs stay
     /// out: the window's job cards and the island's list have them.
     static func agents(local: [Job], runner: [Job]) -> [AgentRow] {
         let rows = local.map { ($0, true) } + runner.map { ($0, false) }
@@ -47,7 +52,14 @@ nonisolated enum SidebarSections {
             if job.needsYou { return AgentRow(job: job, local: local, dot: .needsYou) }
             return nil
         }
-        .sorted { $0.job.created > $1.job.created }
+        .sorted {
+            let left = activity($0.job), right = activity($1.job)
+            return left == right ? $0.id < $1.id : left > right
+        }
+    }
+
+    static func activity(_ job: Job) -> Date {
+        [job.created, job.started, job.finished, job.pullRequest?.checkedAt].compactMap { $0 }.max() ?? job.created
     }
 
     /// "WP" for Wellington Prado: the first letters of the first two names.
@@ -57,20 +69,29 @@ nonisolated enum SidebarSections {
     }
 }
 
-/// The window's sidebar, as `docs/images/app-chat.webp` has it: Oby with how many are working,
-/// Agents (running and needs-you jobs, live dots), Channels and Obys with their empty states, then
-/// Accounts and keys, Integrations, Memory and Settings (the Settings tabs), and you at the bottom.
+/// A messenger chat list: pinned Oby with a preview and unread dot, searchable agent
+/// chats by activity, future channels and Obys, and account/settings links below.
 struct SidebarView: View {
     let model: IslandModel
+    @State private var search = ""
     @Binding var selection: ChatSelection
     let onOpenSettings: (SettingsTab) -> Void
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
-    private var agents: [SidebarSections.AgentRow] { SidebarSections.agents(local: desk.jobs, runner: feed.jobs) }
+    private var agents: [SidebarSections.AgentRow] {
+        SidebarSections.agents(local: desk.jobs, runner: feed.jobs).filter {
+            search.isEmpty || $0.job.heading.localizedCaseInsensitiveContains(search)
+                || $0.job.agentName.localizedCaseInsensitiveContains(search)
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            TextField("Search chats", text: $search)
+                .textFieldStyle(.plain).font(.system(size: 13))
+                .padding(10).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+                .padding(.horizontal, 14).padding(.top, 46).padding(.bottom, 12)
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     obyRow
@@ -83,7 +104,7 @@ struct SidebarView: View {
                     }
                 }
                 .padding(.horizontal, 14)
-                .padding(.top, 46)
+                .padding(.top, 4)
                 .padding(.bottom, 16)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -106,16 +127,24 @@ struct SidebarView: View {
                 ObyFace(size: 34)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Oby").font(.system(size: 15, weight: .semibold))
-                    Text(SidebarSections.obyLine(working: model.working)).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
+                    Text(SidebarSections.obyPreview(model.thread.last?.text)).lineLimit(1).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
                 }
                 Spacer(minLength: 0)
+                VStack(alignment: .trailing, spacing: 8) {
+                    if let last = model.thread.last {
+                        Text(ConversationModel.clock(last.date)).font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
+                    }
+                    if model.unreadReply {
+                        Circle().fill(Color.accentColor).frame(width: 7, height: 7).accessibilityLabel("Unread reply")
+                    }
+                }
             }
             .padding(.horizontal, 10).padding(.vertical, 10)
             .background(.white.opacity(selection == .oby ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Oby, \(SidebarSections.obyLine(working: model.working))")
+        .accessibilityLabel(SidebarSections.obyLabel(last: model.thread.last?.text, unread: model.unreadReply))
     }
 
     private var agentsSection: some View {
@@ -129,7 +158,10 @@ struct SidebarView: View {
                 Button { selection = .job(id: row.job.id, local: row.local) } label: {
                     HStack(spacing: 10) {
                         AgentMark(agent: row.job.agent).font(.system(size: 14, weight: .semibold)).frame(width: 18)
-                        Text(row.job.heading).font(.system(size: 14, weight: .medium)).lineLimit(1)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(row.job.heading).font(.system(size: 14, weight: .medium)).lineLimit(1)
+                            Text(row.job.line).font(.system(size: 11)).foregroundStyle(.white.opacity(0.5)).lineLimit(1)
+                        }
                         Spacer(minLength: 6)
                         Circle().fill(row.dot == .working ? Color.blue : Color.orange).frame(width: 8, height: 8)
                             .accessibilityLabel(row.dot == .working ? "Working" : "Needs you")

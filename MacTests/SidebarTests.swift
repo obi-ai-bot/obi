@@ -34,14 +34,37 @@ struct SidebarTests {
         #expect(SidebarSections.agents(local: [done], runner: []).isEmpty)
     }
 
+    @Test func agentChatsOrderByLatestActivityWithStableTies() {
+        var old = job("old", status: .running, created: 600)
+        old.started = now
+        let recent = job("recent", status: .queued, created: 10)
+        #expect(SidebarSections.agents(local: [recent, old], runner: []).map(\.job.id) == ["old", "recent"])
+        #expect(SidebarSections.agents(local: [job("b", status: .running), job("a", status: .running)], runner: []).map(\.job.id) == ["a", "b"])
+    }
+
+    @MainActor @Test func openChatAlwaysReturnsToThePinnedObyThread() {
+        let state = ChatState()
+        #expect(state.selection == .oby)
+        state.open(job: ("job", true))
+        #expect(state.selection == .job(id: "job", local: true))
+        state.open()
+        #expect(state.selection == .oby)
+    }
+
     @Test func channelsAndObysSayTheyAreNotHereYet() {
         #expect(SidebarSections.channelsEmpty == "Team channels come with F11.")
         #expect(SidebarSections.obysEmpty == "Other people's Obys come with F12.")
-        #expect(SidebarSections.obyLine(working: 0) == "Quiet" && SidebarSections.obyLine(working: 2) == "2 working")
         #expect(SidebarSections.initials("Wellington Prado") == "WP" && SidebarSections.initials("oby") == "O" && SidebarSections.initials("") == "?")
     }
 
-    /// The sidebar's "N working", the notch's count and the brain's briefing all count the same
+    /// Oby's pinned row previews the last message, and VoiceOver reads it with an unread reply.
+    @Test func obysRowPreviewsTheLastMessage() {
+        #expect(SidebarSections.obyPreview(nil) == "Say hello to Oby" && SidebarSections.obyPreview("Done.") == "Done.")
+        #expect(SidebarSections.obyLabel(last: "Done.", unread: true) == "Oby, Done., unread reply")
+        #expect(SidebarSections.obyLabel(last: nil, unread: false) == "Oby, Say hello to Oby")
+    }
+
+    /// The window's "N working", the notch's count and the brain's briefing all count the same
     /// jobs: this Mac's active ones and the runner's.
     @Test func theCountsAgreeWithTheHeader() {
         let here = [job("r1", status: .running, created: 300), job("q1", status: .queued, created: 100), job("f1", status: .failed)]
@@ -51,7 +74,6 @@ struct SidebarTests {
         let places = [Briefing.Place(name: "this Mac", jobs: here, inbox: []), Briefing.Place(name: "tetrix-lab", jobs: there, inbox: [])]
         let briefing = Briefing(turns: [], places: places, accounts: [], now: now)
         #expect(header == 3 && briefing.working == header)
-        #expect(SidebarSections.obyLine(working: header) == "3 working")
         #expect(Summary.line(working: header, needs: nil) == "3 agents are working. Nothing needs you.")
         #expect(briefing.text.contains("Working now: 3 agents are working: Job q1 on this Mac, Job a1 on tetrix-lab, Job r1 on this Mac."))
         #expect(Briefing.contradicts("No jobs are running right now.") && !Briefing.contradicts("3 agents are working."))

@@ -146,6 +146,14 @@ final class ConversationModel {
     /// "9:12 AM", as the thread labels a turn.
     nonisolated static func clock(_ date: Date) -> String { date.formatted(Date.FormatStyle().hour().minute()) }
 
+    /// Consecutive bubbles share an avatar within five minutes, never across midnight.
+    nonisolated static func grouped(_ turn: Turn, after previous: Turn?, calendar: Calendar = .current) -> Bool {
+        guard let previous else { return false }
+        let gap = turn.date.timeIntervalSince(previous.date)
+        return turn.who == previous.who && gap >= 0 && gap < 300
+            && calendar.isDate(turn.date, inSameDayAs: previous.date)
+    }
+
     // MARK: Jobs
 
     /// The jobs a turn started, among `jobs`, in the turn's order; ids not among them are left out
