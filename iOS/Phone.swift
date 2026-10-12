@@ -1,6 +1,9 @@
 import Foundation
 import OSLog
 
+/// The app's tabs (#11): Home is the glance, Chat the thread with Oby, Settings the runner and its accounts.
+nonisolated enum PhoneTab: String, Hashable, Sendable { case home, chat, settings }
+
 /// The phone's view of the runner: its jobs and accounts, kept live while the app is open, and
 /// the conversation that turns words into a plan.
 @Observable
@@ -14,6 +17,14 @@ final class Phone {
     }
 
     let voice = PhoneVoice()
+    /// The tab in front; a notification's job opens on Home.
+    var tab = PhoneTab.home
+    /// The runner's conversation, read in pages and followed over `turn` events, for the Chat
+    /// tab's thread (Shared/ConversationModel.swift): one thread for every device (#11).
+    let conversation = ConversationModel()
+    /// What this iPhone said and the runner hasn't listed yet (ChatThread): the runner adds the
+    /// user's turn with Oby's answer, so the words show here from the moment they're sent.
+    private(set) var echoes: [Turn] = []
     @ObservationIgnored private let speaker = PhoneSpeaker()
     @ObservationIgnored private var planning: Task<Void, Never>?
     @ObservationIgnored private var spoken = false
@@ -42,6 +53,9 @@ final class Phone {
         didSet {
             UserDefaults.standard.set(runnerURL, forKey: "runner.url")
             stop()
+            // Another runner: nothing the last one said holds.
+            conversation.forget()
+            echoes = []
             start()
         }
     }
@@ -87,7 +101,14 @@ final class Phone {
     init() {
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
         JobsActivity.watchTokens { [weak self] in self?.runner }
+        conversation.page = { [weak self] before, limit in
+            guard let self else { return [] }
+            return try await runner.conversation(before: before, limit: limit)
+        }
     }
+
+    /// The thread Chat shows: the runner's turns and this iPhone's words still on their way, by time.
+    var thread: [Turn] { conversation.thread(with: ChatThread.pending(echoes, runner: conversation.runnerTurns)) }
 
     var runner: Runner { Runner(base: runnerURL) }
     var active: [Job] { jobs.filter(\.isActive) }
@@ -134,6 +155,9 @@ final class Phone {
         defaultMode = RunnerMode(status.permissions?.mode)
         await take(try await runner.jobs())
         inbox = try await runner.inbox()
+        // The thread's latest page every time: what was said on the Mac while the connection was
+        // down is in it.
+        await conversation.reload()
         loaded = true
         // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
         await Notifications.clear(Set(jobs.filter { !$0.needsYou && !$0.waitsForAnswer }.map(\.id)))
@@ -187,17 +211,20 @@ final class Phone {
             // One that's done leaves the list.
             inbox.removeAll { $0.id == item.id }
             if item.isOpen { inbox.append(item) }
+        case .turn(let turn):
+            conversation.apply(turn)
+            // The runner listed what this iPhone said: its echo has done its job.
+            echoes = ChatThread.pending(echoes, runner: conversation.runnerTurns)
         }
     }
 
     // MARK: Planning
 
     func ask(_ words: String, spoken: Bool = false) {
-        let said = words.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !said.isEmpty else { return }
+        guard let said = ChatThread.words(words) else { return }
         cancelVoice()
         self.spoken = spoken
-        plan(said, answer: nil)
+        plan(said, answer: nil, voice: spoken)
     }
 
     /// The user picked one of the brain's options.
@@ -210,13 +237,20 @@ final class Phone {
         planning = nil
         spoken = false
         speaker.stop()
+        // The words the user gave up on leave the thread, as on the Mac; the runner still lists
+        // them with its answer if it got them, and then they show.
+        if case .thinking = talk, !echoes.isEmpty { echoes.removeLast() }
         talk = .none
     }
 
-    private func plan(_ said: String, answer: (question: String, option: String)?) {
+    private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false) {
         planning?.cancel()
         speaker.stop()
+        if case .thinking = talk, !echoes.isEmpty { echoes.removeLast() }
         talk = .thinking(said)
+        // The thread shows the words as the runner will list them: an answer is its option.
+        let echo = Turn(who: .user, text: answer?.option ?? said, voice: voice ? true : nil)
+        echoes.append(echo)
         planning = Task {
             let result: Talk
             do {
@@ -228,6 +262,8 @@ final class Phone {
                 }
             } catch {
                 result = .reply(error.localizedDescription)
+                // Never reached the runner (or it answered with an error): nothing will list the words.
+                if !Task.isCancelled { echoes.removeAll { $0.id == echo.id } }
             }
             // Cancelled or replaced while the brain was thinking.
             guard !Task.isCancelled else { return }
@@ -245,8 +281,9 @@ final class Phone {
 
     // MARK: Jobs
 
-    /// A notification was tapped: open its job, and publish it if that's what was tapped.
+    /// A notification was tapped: open its job on Home, and publish it if that's what was tapped.
     func open(_ id: String, publish: Bool) {
+        tab = .home
         opening = id
         publishing = publish ? id : nil
     }

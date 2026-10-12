@@ -468,15 +468,41 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     #if os(macOS)
     /// A merge check was queued, taken or ended (Engine/Checks.swift): a Mac that runs them asks for one.
     case check(MacCheck)
-    /// A turn of the conversation was added, from any app, or changed (a job dispatched from it):
-    /// the window's thread replaces it by id, or adds it by time (#11).
-    case turn(Turn)
     #endif
+    /// A turn of the conversation was added, from any app, or changed (a job dispatched from it):
+    /// the Mac window's and the iPhone's thread replace it by id, or add it by time (#11).
+    case turn(Turn)
 }
 
-#if os(macOS)
+#if os(iOS) || os(watchOS)
+/// One turn of the conversation with Oby, as Engine/Conversation.swift has it: the Mac compiles
+/// that one; the iPhone reads the runner's turns into this copy (Shared/ConversationModel.swift).
+nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
+    enum Who: String, Codable, Sendable { case user, oby }
+
+    var id: String
+    var date: Date
+    var who: Who
+    var text: String
+    /// The jobs this turn started, for a card under Oby's words. Nil on the user's turns and on older ones.
+    var jobs: [String]?
+    /// The user said it out loud (the iPhone's mic), so the thread says "You, by voice". Nil when
+    /// typed, and on turns the runner kept.
+    var voice: Bool?
+
+    init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String, jobs: [String]? = nil, voice: Bool? = nil) {
+        self.id = id
+        self.date = date
+        self.who = who
+        self.text = text
+        self.jobs = jobs
+        self.voice = voice
+    }
+}
+#endif
+
 /// One turn of the runner's conversation as `GET /v1/conversation` and the `turn` event send it
-/// (docs/runner-api.md), read into Engine's own Turn.
+/// (docs/runner-api.md), read into the app's Turn.
 nonisolated struct RunnerTurn: Decodable, Sendable {
     var id: String
     var who: String
@@ -488,7 +514,6 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
         Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text, jobs: (jobs ?? []).isEmpty ? nil : jobs)
     }
 }
-#endif
 
 extension Job {
     #if os(iOS) || os(watchOS)
@@ -879,6 +904,8 @@ nonisolated struct Runner: Sendable {
         return (try Self.decoder.decode([Job].self, from: data), RunnerJobExtras.of(data))
     }
 
+    #endif
+
     /// One page of the runner's conversation, oldest first (#11): the latest `limit` turns, or the
     /// ones before the turn `before` names. A runner older than the thread has none.
     func conversation(before: String? = nil, limit: Int = 50) async throws -> [Turn] {
@@ -891,7 +918,6 @@ nonisolated struct Runner: Sendable {
             return []
         }
     }
-    #endif
 
     static func check(_ response: URLResponse, _ data: Data?) throws {
         guard let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) else { return }
@@ -949,8 +975,8 @@ nonisolated struct EventParser {
             #endif
             #if os(macOS)
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
-            case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn) }
             #endif
+            case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn) }
             default: return nil
             }
         }

@@ -1,10 +1,11 @@
 import Foundation
 import Observation
 
-/// The window's thread (#11): the runner's conversation, read in pages (`GET /v1/conversation`)
-/// and followed over its `turn` events, with this Mac's own turns (its desk's) in the same list
-/// by time. One thread for every device: what was said from the iPhone is here too. The thread
-/// is grouped by day, and each turn's jobs resolve to cards.
+/// The thread the Mac's window and the iPhone's Chat show (#11): the runner's conversation, read
+/// in pages (`GET /v1/conversation`) and followed over its `turn` events, with the app's own
+/// turns (the Mac's desk's, the iPhone's words still on their way) in the same list by time. One
+/// thread for every device: what was said elsewhere is here too. The thread is grouped by day,
+/// and each turn's jobs resolve to cards.
 @Observable
 final class ConversationModel {
     /// How many turns a page holds, as the runner serves them.
@@ -79,7 +80,7 @@ final class ConversationModel {
         problem = nil
     }
 
-    /// The thread: the runner's turns and this Mac's own, oldest first, one per id.
+    /// The thread: the runner's turns and the app's own, oldest first, one per id.
     func thread(with local: [Turn]) -> [Turn] { Self.merged(runnerTurns, local) }
 
     // MARK: Order
@@ -148,7 +149,7 @@ final class ConversationModel {
     // MARK: Jobs
 
     /// The jobs a turn started, among `jobs`, in the turn's order; ids not among them are left out
-    /// (the window fetches a runner's job that's older than its list).
+    /// (the apps fetch a runner's job that's older than its list).
     nonisolated static func jobs(of turn: Turn, among jobs: [Job]) -> [Job] {
         (turn.jobs ?? []).compactMap { id in jobs.first { $0.id == id } }
     }
