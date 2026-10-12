@@ -42,6 +42,7 @@ This document is the contract between the runner and its clients. Change it in t
   "publishError": null,
   "summaries": null,
   "issue": null,
+  "fromPR": null,
   "rounds": 1,
   "round": 1,
   "check": null,
@@ -91,7 +92,7 @@ This document is the contract between the runner and its clients. Change it in t
 - `step`: what it's doing now, while queued or running. `summary`: the agent's final message; its first line is the one-line notice.
 - A `build`, `fix` or `test` job that ends with no commits of its own is `failed`, and its `summary` starts with `Nothing committed: ` followed by the agent's first line. Not a round the user started with `POST /v1/jobs/{id}/messages`: their words say what it should do (reset the branch, drop the work), so that round ending with nothing committed is `done`.
 - When the job's account hits its usage limit mid-round (Codex: "You've hit your usage limit… try again at 10:45 PM"; Claude Code: a `rate_limit_event` at 100%, or a usage-limit result), the runner marks the account full until the reset time it named (an hour when it named none), and the job does that round over on the next account with room, the same tool first, then another tool, in the same worktree and branch with a new session: `account`, `agent` and `session` change, and `step` says so. Its `summary` then ends with a line like `Codex · Deskree hit its limit (resets 10:45 PM); continued on Claude Code · Personal.` When no account has room, the job is `failed`, and its `summary` says when the first one resets. An account marked full isn't picked for a new job before its reset (`fullUntil`).
-- `base`: the branch the work started from (filled in once the job is ready). `pr`: the pull request it works on, if any.
+- `base`: the branch the work started from (filled in once the job is ready). `pr`: the pull request it works on, if any. `fromPR`: on a job about an `issue` that picks up an existing pull request ("finish #19 from PR #124"), that pull request: the job's branch starts from its head, `base` stays the branch it would have had (`dev`), only the commits after that head count as the job's, and the job publishes a pull request of its own. Null otherwise; older runners don't send this key.
 - `commits`: commits made beyond `base` (set when a job ends as done).
 - Publishing happens by itself. A job that ends `done` with commits not on its pull request (its check passed, or it has none) publishes before it ends, with no device signature: `step` is `"Publishing"` meanwhile, and `publishStep` follows the scan, push and PR creation.
   - It pushes the branch and opens a pull request into `base`, ready for review (never a draft), or pushes to the one already open.

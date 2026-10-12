@@ -724,7 +724,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, fromPR, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting }
 
     private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou }
 
@@ -752,6 +752,7 @@ struct JobJSON: Encodable {
         if job.publishError == nil { try nulls.encodeNil(forKey: .publishError) }
         if job.summaries == nil { try nulls.encodeNil(forKey: .summaries) }
         if job.issue == nil { try nulls.encodeNil(forKey: .issue) }
+        if job.fromPR == nil { try nulls.encodeNil(forKey: .fromPR) }
         // Rounds always has a value in the API: 1 when the job doesn't loop.
         try nulls.encode(job.maxRounds, forKey: .rounds)
         try nulls.encode(job.currentRound, forKey: .round)

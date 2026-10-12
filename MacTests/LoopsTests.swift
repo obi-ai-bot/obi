@@ -34,12 +34,14 @@ struct LoopsTests {
         dispatch.rounds = 11
         dispatch.check = "swift test\nrm -rf /"
         dispatch.pr = 3
+        dispatch.kind = .investigate
         var bad = plan
         bad.dispatches = [dispatch]
         let problems = bad.problems(in: context, canary: "7f3a9c")
         #expect(problems.contains("rounds must be 1 to 10"))
         #expect(problems.contains("check must be one line of 1 to 200 characters"))
-        #expect(problems.contains("a job is about a pr or an issue, not both"))
+        // Both is only an issue's fix, build or test started from a pull request (#219).
+        #expect(problems.contains("a job is about a pr or an issue, not both, unless it's a fix, build or test of the issue that starts from the pr"))
         #expect(plan.problems(in: context, canary: "7f3a9c").isEmpty)
     }
 
