@@ -171,14 +171,22 @@ struct PaceTests {
         #expect(state("unknown", sevenDay: 0.85).isReserved(at: later))
     }
 
-    @Test func reviewsDontUseAReservedAccount() {
+    @Test func reviewsUseAReservedAccountOnlyLastAndUnder95() {
         let author = Job(id: "author", request: "", agent: "claude", account: "mine", repo: "deskree-inc/oby",
                          branch: "oby/fix-author", kind: .fix, task: "")
         let codex = state("codex", "codex", sevenDay: 0.85, gone: 0.9)
         let personal = state("personal", sevenDay: 0.3, gone: 0.5)
-        // At the fixtures' time: codex's week resets at `now + 0.1 week`, and on the real clock it already has.
+        // At the fixtures' time: codex's week resets at `now + 0.1 week`.
+        // An account outside its reserve comes first.
         #expect(Review.reviewer([state("mine"), codex, personal], for: author, now: now)?.id == "personal")
-        #expect(Review.reviewer([state("mine"), codex], for: author, now: now) == nil)
+        // When every other account is in its reserve, a review still runs on one under 95% of its week.
+        #expect(Review.reviewer([state("mine"), codex], for: author, now: now)?.id == "codex")
+        // At 95% of its week it doesn't, and the wait says when that week resets.
+        let full = state("codex", "codex", sevenDay: 0.96, gone: 0.9)
+        #expect(Review.reviewer([state("mine"), full], for: author, now: now) == nil)
+        #expect(Review.roomAt([state("mine"), full], for: author, now: now).map { $0 > now } == true)
+        // New work still never goes to a reserved account.
+        #expect(AccountStore.choose([codex], agent: nil, for: .new, now: now) == nil)
     }
 
     @Test func onlyAJobSentByNameGoesToAReservedAccount() async throws {

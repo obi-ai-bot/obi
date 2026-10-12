@@ -271,11 +271,16 @@ final class AccountStore {
     /// with no account named, among accounts under 80% of both windows: Engine/Move.swift); only a
     /// job the user sends to an account by name skips it.
     nonisolated static func choose(_ accounts: [AccountState], agent: String?, for work: Work = .new, now: Date = .now) -> Route? {
+        // A review is small: it may use an account in its weekly reserve (80%), last, while that
+        // week is under 95%. Otherwise a job written on the only account outside its reserve
+        // waits for a review no account will ever take (#269's PR, 2026-10-12).
         let open = accounts.filter { $0.signedIn && (agent == nil || $0.account.agent == agent) && !$0.isFull(at: now)
-            && ($0.fiveHour ?? 0) < 0.95 && !$0.isReserved(at: now) }
+            && ($0.fiveHour ?? 0) < 0.95
+            && (work == .review ? (($0.sevenDay ?? 0) < 0.95 || ($0.sevenDayResets ?? .distantFuture) <= now) : !$0.isReserved(at: now)) }
         let calm = open.filter { ($0.fiveHour ?? 0) < busy }
         let pool = calm.isEmpty ? open : calm
         func tier(_ state: AccountState) -> Int {
+            if state.isReserved(at: now) { return 4 }
             guard state.sevenDay != nil else { return 2 }
             switch work {
             case .new: return state.isAhead(at: now) ? 3 : 1
