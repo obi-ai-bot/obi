@@ -90,7 +90,10 @@ nonisolated enum Shell {
     private static func run(_ arguments: [String], in directory: URL?, input: Data?, env: [String: String?],
                             timeout: TimeInterval, running: Running) async throws -> Output {
         try await withCheckedThrowingContinuation { done in
-            DispatchQueue.global().async {
+            // Threads of its own, not Dispatch's: this blocks until the tool ends, and with many
+            // running at once (a busy Mac's `swift test`) Dispatch's workers ran out, and a run waited
+            // half a minute for one, its stderr reader too.
+            Thread.detachNewThread {
                 let process = Process()
                 let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
                 process.executableURL = URL(filePath: "/usr/bin/env")
@@ -113,7 +116,11 @@ nonisolated enum Shell {
                 // Read stderr on its own thread so a chatty tool can't fill the pipe and stall.
                 let err = Collected()
                 let reading = DispatchGroup()
-                DispatchQueue.global().async(group: reading) { err.data = stderr.fileHandleForReading.readDataToEndOfFile() }
+                reading.enter()
+                Thread.detachNewThread {
+                    err.data = stderr.fileHandleForReading.readDataToEndOfFile()
+                    reading.leave()
+                }
                 if let input { try? stdin.fileHandleForWriting.write(contentsOf: input) }
                 try? stdin.fileHandleForWriting.close()
                 let out = stdout.fileHandleForReading.readDataToEndOfFile()
