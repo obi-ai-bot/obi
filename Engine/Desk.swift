@@ -657,7 +657,7 @@ final class Desk {
             // The same action twice in one turn: it's done; the brain only repeated itself.
             if acting, !taken.insert(Self.signature(result.plan)).inserted { break }
             guard acting else { return Self.after(done, await answer(result, said: said, attachments: attachments, live: live)) }
-            let talk = await card(for: result, said: said)
+            let talk = await card(for: result, said: said, live: live)
             guard case .reply(let text) = talk else { return Self.after(done, talk) }
             if !text.isEmpty { done.append(text) }
             // An action that couldn't happen ends the turn: the user hears why.
@@ -952,6 +952,7 @@ final class Desk {
             let target = MoveTarget(agent: auto(move.agent), account: auto(move.account), model: auto(move.model))
             var lines: [String] = []
             for id in ids {
+                guard live() else { return .none }
                 do {
                     if job(id) != nil {
                         var moved = try self.move(id, to: target, why: said)

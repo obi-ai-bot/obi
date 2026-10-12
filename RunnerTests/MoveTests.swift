@@ -366,6 +366,26 @@ struct MoveJobTests {
         #expect(brain.prompts.count == 3)
     }
 
+    @Test func cancellingABatchMoveStopsBeforeTheNextJob() async throws {
+        var first = job
+        first.id = "aaaa1111"
+        first.status = .done
+        var second = first
+        second.id = "bbbb2222"
+        desk.elsewhere = { [Briefing.Place(name: "tetrix-lab", jobs: [first, second], inbox: [])] }
+        var live = true
+        var moved: [String] = []
+        desk.moveElsewhere = { id, _, _ in
+            moved.append(id)
+            live = false
+            return first
+        }
+
+        let result = Planner.Result(plan: try Plan.decode(Data(Self.move([first.id, second.id], agent: "claude").utf8)), by: "fake")
+        #expect(await desk.card(for: result, said: "move both jobs", live: { live }) == .none)
+        #expect(moved == [first.id])
+    }
+
     @Test func movePlansAreChecked() throws {
         let context = BrainContext(accounts: ["claude": ["default"]], repos: ["deskree-inc/oby"], jobs: ["ab12cd34"], movable: ["ab12cd34", "d0ne0000"],
                                    models: ["claude": ["claude-fable-5-1"], "codex": ["gpt-6-astra"]], moveAccounts: ["claude": ["Personal"], "codex": ["Deskree"]])
