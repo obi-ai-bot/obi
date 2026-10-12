@@ -17,11 +17,21 @@ struct ObyApp: App {
                 .keyboardShortcut(",")
             Button("Show First Launch…") { app.firstLaunch.show() }
             Divider()
+            // Updates (Mac/Updater.swift): the version, and Sparkle's window on demand.
+            Text("Oby \(Updater.version)")
+            Button("Check for Updates…") { app.island.updater.check() }
+            Divider()
             Button("Quit Oby") { NSApp.terminate(nil) }
                 .keyboardShortcut("q")
         } label: {
             Image(nsImage: .obyMenuBarIcon)
                 .accessibilityLabel("Oby")
+        }
+        // The app menu, when a window of Oby's is up: Check for Updates… under About.
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { app.island.updater.check() }
+            }
         }
 
         Settings {
@@ -42,6 +52,7 @@ private struct SettingsTabs: View {
             AccountsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Accounts", systemImage: "person.2") }.tag(SettingsTab.accounts)
             ModelsSettingsView(feed: app.island.feed).tabItem { Label("Models", systemImage: "cpu") }.tag(SettingsTab.models)
             VaultSettingsView(vault: .shared).tabItem { Label("Vault", systemImage: "lock") }.tag(SettingsTab.vault)
+            AboutSettingsView(updater: app.island.updater).tabItem { Label("About", systemImage: "info.circle") }.tag(SettingsTab.about)
         }
     }
 }
@@ -72,6 +83,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         RunnerFeed.registerCategories()
         island.openWindow = { [weak self] job in self?.chat.show(job: job) }
         island.start()
+        // Scheduled update checks (Mac/Updater.swift), in the build that ships. A Debug build from
+        // Xcode checks only when asked, so a release never replaces it quietly.
+        #if !DEBUG
+        island.updater.start()
+        #endif
         if !FirstLaunch.done { firstLaunch.show() }
     }
 

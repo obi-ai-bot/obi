@@ -29,7 +29,7 @@ What it does today, in three tabs (Home, Chat, Settings):
 
 ## Signing and TestFlight
 
-Until Deskree's team can make certificates, the iPhone app signs with Wellington's paid personal team (`PQKAL8E36D`) under a beta bundle ID, `dev.wellprado.oby`; the Live Activity extension is `dev.wellprado.oby.activity`. On the phone it's still called Oby.
+Until Deskree's team can make certificates, the iPhone app signs with Wellington's paid personal team (`PQKAL8E36D`) under a beta bundle ID, `dev.wellprado.oby`; the Live Activity extension is `dev.wellprado.oby.activity`. On the phone it's still called Oby. Both the team (`OBY_TEAM_ID`) and the bundle ID (`OBY_IPHONE_BUNDLE_ID`) are set once, in `Config/Signing.xcconfig`; moving to Deskree's team is [docs/release.md](../docs/release.md).
 
 `com.deskree.oby` stays unused on purpose. Once an app record has a build, its bundle ID belongs to that account, and Apple only moves an app between accounts after it has been released on the App Store. So the beta lives on Wellington's account and the real app starts on Deskree's.
 
