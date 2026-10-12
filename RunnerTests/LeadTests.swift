@@ -385,7 +385,7 @@ struct LeadTests {
         b.files = ["Engine/Desk.swift"]
         b.repo = "deskree-inc/other"
         #expect(Desk.overlap(a, b).isEmpty)
-        // A job without a list (the brain's) never blocks or waits.
+        // A job without a list never blocks or waits.
         b.repo = a.repo
         b.files = nil
         #expect(Desk.overlap(a, b).isEmpty)

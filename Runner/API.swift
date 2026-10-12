@@ -157,7 +157,8 @@ final class API {
     func dispatch(_ request: DispatchRequest) throws -> Response {
         do {
             let job = try desk.dispatch(request.job.id, branch: request.job.branch, account: request.job.account,
-                                        rounds: request.job.rounds, check: request.job.check, model: request.job.model)
+                                        rounds: request.job.rounds, check: request.job.check, model: request.job.model,
+                                        files: request.job.files)
             return Self.json(JobJSON(job: job), status: .created)
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
@@ -933,8 +934,11 @@ struct DispatchRequest: Decodable {
         var check: String??
         /// The draft's suggested model to use it, or null to stay on Settings › Models.
         var model: String??
+        /// The files the job claims (#209), replacing the plan's; an empty list claims none. Left
+        /// out or null, the plan's stay.
+        var files: [String]?
 
-        private enum Keys: String, CodingKey { case id, branch, account, rounds, check, model }
+        private enum Keys: String, CodingKey { case id, branch, account, rounds, check, model, files }
 
         init(from decoder: any Decoder) throws {
             let keys = try decoder.container(keyedBy: Keys.self)
@@ -944,6 +948,7 @@ struct DispatchRequest: Decodable {
             rounds = try keys.decodeIfPresent(Int.self, forKey: .rounds)
             check = keys.contains(.check) ? .some(try keys.decodeIfPresent(String.self, forKey: .check)) : nil
             model = keys.contains(.model) ? .some(try keys.decodeIfPresent(String.self, forKey: .model)) : nil
+            files = try keys.decodeIfPresent([String].self, forKey: .files)
         }
     }
 

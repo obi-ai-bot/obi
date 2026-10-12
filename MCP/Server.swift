@@ -130,12 +130,14 @@ actor Server {
              properties: ["said": string("The user's words, like \"fix oby #140\"."),
                           "answer": string("The user's answer to the question the brain asked about these same words.")],
              required: ["said"]),
-        Tool(name: "dispatch", description: "Starts a draft from plan (POST /v1/jobs). Account, rounds and check may change; leave them out to keep the plan's.",
+        Tool(name: "dispatch", description: "Starts a draft from plan (POST /v1/jobs). Account, rounds, check and files may change; leave them out to keep the plan's.",
              properties: ["draft": string("The draft's id, from plan."),
                           "account": string("The account to run on: its id or name, or a tool (Claude Code, Codex) when it has one account."),
                           "rounds": integer("How many rounds the agent may take.", 1...10),
                           "check": string("A one-line command that must pass for the work to count as done; an empty string for none."),
-                          "stronger": ["type": "boolean", "description": "Use the stronger model the draft suggests (plan says so when it does)."]],
+                          "stronger": ["type": "boolean", "description": "Use the stronger model the draft suggests (plan says so when it does)."],
+                          "files": ["type": "array", "items": ["type": "string"], "maxItems": 30,
+                                    "description": "The files and folders (ending in /) the job will touch, relative to the repository: it claims them, and a job touching the same files waits for it. Replaces the draft's; an empty list claims none."]],
              required: ["draft"]),
         Tool(name: "message", description: "Tells a job's agent something (POST /v1/jobs/{id}/messages): a running job hears it now; a finished one picks its session up again and runs another round.",
              properties: ["id": job, "text": string("What to tell it, 1 to 2,000 characters.")], required: ["id", "text"]),
@@ -187,6 +189,16 @@ actor Server {
             return int
         }
 
+        /// `files`, when given: up to 30 paths.
+        func files() throws -> [String]? {
+            guard let value = arguments["files"], !value.isNull else { return nil }
+            guard let list = value.array, list.count <= 30 else { throw Refusal(message: "files must be a list of up to 30 paths.") }
+            return try list.map { item in
+                guard let path = item.string?.trimmingCharacters(in: .whitespaces), !path.isEmpty else { throw Refusal(message: "files must be a list of paths.") }
+                return path
+            }
+        }
+
         switch name {
         case "status":
             return Reply(text: Render.status(try await runner.call("GET", "/v1/status")))
@@ -204,7 +216,7 @@ actor Server {
         case "dispatch":
             return try await dispatch(try text("draft"), account: arguments["account"]?.text.flatMap { $0.isEmpty ? nil : $0 },
                                       rounds: try number("rounds", 1...10), check: arguments["check"]?.string,
-                                      stronger: arguments["stronger"]?.bool == true)
+                                      stronger: arguments["stronger"]?.bool == true, files: try files())
         case "message":
             let words = try text("text")
             guard words.count <= 2000 else { throw Refusal(message: "A message is 2,000 characters at most.") }
@@ -317,13 +329,14 @@ actor Server {
         lines.add("account", "\(job?["account"]?.string ?? "?") (\(Render.agent(job?["agent"]?.string)))")
         lines.add("rounds", job?["rounds"])
         lines.add("check", job?["check"]?.string ?? "none")
+        lines.add("files", job?["files"]?.array.map { $0.compactMap(\.string).joined(separator: ", ") }.flatMap { $0.isEmpty ? nil : $0 } ?? "none claimed")
         lines.add("stronger model offered", draft["suggestedModel"])
         if draft["guessed"]?.bool == true { lines.add("guessed", "the brain didn't answer, so rules made this plan") }
         lines.add("task", job?["task"])
         return lines.text
     }
 
-    func dispatch(_ id: String, account: String?, rounds: Int?, check: String?, stronger: Bool) async throws -> Reply {
+    func dispatch(_ id: String, account: String?, rounds: Int?, check: String?, stronger: Bool, files: [String]? = nil) async throws -> Reply {
         guard let draft = drafts[id], var job = draft["job"]?.object else {
             throw Refusal(message: "There's no draft \(id) here: call plan first. Drafts last as long as this oby-mcp runs.")
         }
@@ -337,6 +350,7 @@ actor Server {
             let line = check.trimmingCharacters(in: .whitespacesAndNewlines)
             job["check"] = line.isEmpty ? .null : .string(line)
         }
+        if let files { job["files"] = .array(files.map { .string($0) }) }
         if stronger {
             guard let model = draft["suggestedModel"], !model.isNull else { throw Refusal(message: "This draft offers no stronger model.") }
             job["model"] = model

@@ -27,6 +27,9 @@ struct RestartTests {
             return agent
         }
         desk.prepare = { $0 }
+        // dev as GitHub has it now, for a queued job that catches up: the worktree moves.
+        desk.fetchBase = { _, _ in String(repeating: "b", count: 40) }
+        desk.moveWorktree = { _, _, _ in true }
     }
 
     /// The runner starting again on the same folder, after it went down with no warning: nothing
@@ -149,12 +152,17 @@ struct RestartTests {
         var queued = job
         queued.id = "queued"
         queued.status = .queued
+        queued.pr = nil
+        queued.kind = .fix
+        queued.base = "dev"
         queued.startCommit = String(repeating: "a", count: 40)
         store.save(queued)
         let restarted = restart()
+        for _ in 0..<500 where made.agents.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
         #expect(made.agents.count == 1 && made.agents[0].resume == nil)
         #expect(made.agents[0].agent.prompt.contains(queued.task))
-        #expect(restarted.job("queued")?.status == .running)
+        // Set up before the restart: it starts on dev as it is now.
+        #expect(restarted.job("queued")?.status == .running && restarted.job("queued")?.startCommit == String(repeating: "b", count: 40))
     }
 
     @Test func quittingTheRunnerLeavesItsJobsToCarryOn() async throws {

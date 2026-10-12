@@ -54,9 +54,10 @@ extension CheckTests {
         #expect(author.outgoing?.filter { $0.action == .push }.map(\.id) == [Self.head, Self.next])
     }
 
-    /// GitHub says the pull request conflicts with dev: the merge says so, isn't tried again, and the
-    /// author's agent gets one rebase round onto dev as Oby fetched it. The rebase publishes, is
-    /// reviewed, checked and merged again; the same conflict with the same dev again needs you.
+    /// GitHub says the pull request conflicts with dev: the merge isn't tried again, and the author's
+    /// agent gets one rebase round onto dev as Oby fetched it. Oby handles that by itself: no merge
+    /// error, nothing in the inbox and no failure (#209). The rebase publishes, is reviewed, checked
+    /// and merged again; the same conflict with the same dev again needs you, and is a failure.
     @Test func aConflictStartsOneRebaseRoundPerDevHead() async throws {
         final class Fetched { var count = 0; var onto = CheckTests.onto }
         let fetched = Fetched()
@@ -71,8 +72,9 @@ extension CheckTests {
         try desk.macCheckEnded(check.id, MacCheck.Report(passed: true, steps: steps, failures: []))
         try await until("the author rebases") { desk.job("author")?.status == .running && made.agents.count == 3 }
         var author = try #require(desk.job("author"))
-        #expect(author.mergeError == "Not merged: it conflicts with dev." && author.macCheck?.transient == false)
-        #expect(author.rebasedOnto == Self.onto && author.step == "Rebasing onto dev" && fetched.count == 1)
+        #expect(author.mergeError == nil && !author.needsYou && desk.inbox.allSatisfy { $0.job != "author" || !$0.isOpen })
+        #expect(!Failures.found(in: author).contains { $0.trigger == .mergeError })
+        #expect(author.rebasedOnto == Self.onto && author.rebases?.count == 1 && author.step == "Rebasing onto dev" && fetched.count == 1)
         let round = try #require(made.agents.last)
         #expect(round.job.id == "author" && round.resume == "e6a24229")
         #expect(round.agent.prompt.contains("origin/dev is at \(Self.onto)") && round.agent.prompt.contains("`git rebase \(Self.onto)`"))
@@ -94,7 +96,9 @@ extension CheckTests {
         try await Task.sleep(for: .milliseconds(100))
         author = try #require(desk.job("author"))
         #expect(made.agents.count == 4 && !author.isActive && made.merged.isEmpty)
-        #expect(author.mergeError == "Not merged: it conflicts with dev." && author.mergeNeedsYou)
+        #expect(author.mergeError == "Not merged: it conflicts with dev. Oby rebased it onto dddd0000dddd already, and it still conflicts."
+                && author.mergeNeedsYou && author.macCheck?.transient == false)
+        #expect(Failures.found(in: author).map(\.trigger) == [.mergeError])
         // Nothing retries it by itself.
         desk.resumeChecks()
         try await Task.sleep(for: .milliseconds(100))
@@ -105,6 +109,44 @@ extension CheckTests {
         try desk.retryMerge("author")
         try await until("the author rebases again") { made.agents.count == 5 && desk.job("author")?.status == .running }
         #expect(desk.job("author")?.rebasedOnto == fetched.onto)
+    }
+
+    /// Oby rebases a pull request 3 times a day at most: a 4th conflict needs you, and is a failure.
+    @Test func aFourthConflictInADayIsntRebased() async throws {
+        final class Fetched { var count = 0 }
+        let fetched = Fetched()
+        desk.fetchBase = { _, _ in
+            fetched.count += 1
+            return "ffff\(fetched.count)"
+        }
+        let check = try await approved()
+        var author = try #require(desk.job("author"))
+        // Rebased 3 times today (and once yesterday, which no longer counts).
+        author.rebases = [Date.now.addingTimeInterval(-90_000)] + (1...3).map { Date.now.addingTimeInterval(TimeInterval(-3600 * $0)) }
+        desk.replace(author)
+        _ = desk.nextMacCheck(mac: "Studio")
+        made.mergeError = MacCheck.Conflict(base: "dev")
+        try desk.macCheckEnded(check.id, MacCheck.Report(passed: true, steps: steps, failures: []))
+        try await until("the merge stops") { desk.job("author")?.mergeError != nil }
+        author = try #require(desk.job("author"))
+        #expect(author.mergeError == "Not merged: it conflicts with dev. Oby rebased it 3 times today already: a person takes it from here.")
+        #expect(fetched.count == 0 && !author.isActive && author.mergeNeedsYou && made.agents.count == 2)
+        #expect(Failures.found(in: author).map(\.trigger) == [.mergeError])
+    }
+
+    /// A conflict Oby can't rebase (the job has no session) is a merge error and a failure.
+    @Test func aConflictWithNoSessionToRebaseIsAFailure() async throws {
+        let check = try await approved()
+        var author = try #require(desk.job("author"))
+        author.session = nil
+        desk.replace(author)
+        _ = desk.nextMacCheck(mac: "Studio")
+        made.mergeError = MacCheck.Conflict(base: "dev")
+        try desk.macCheckEnded(check.id, MacCheck.Report(passed: true, steps: steps, failures: []))
+        try await until("the merge stops") { desk.job("author")?.mergeError != nil }
+        author = try #require(desk.job("author"))
+        #expect(author.mergeError == "Not merged: it conflicts with dev. The job has no session to rebase it.")
+        #expect(Failures.found(in: author).map(\.trigger) == [.mergeError])
     }
 
     @Test func gitHubsConflictIsReadFromThePullRequest() {

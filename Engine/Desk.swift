@@ -163,6 +163,10 @@ final class Desk {
     private var limited: Set<String> = []
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
+    /// The files an issue claims (`Claims`), for a plan's job about it, or nil: none named, or it
+    /// couldn't be read. Nothing on a desk that doesn't read issues while planning (the job claims
+    /// them when its worktree gets ready, `Workspace.inputs`); the runner reads them with gh. Tests put in their own.
+    @ObservationIgnored var issueFiles: (_ repo: String, _ issue: Int) async -> [String]? = { _, _ in nil }
     /// Gets a job's worktree ready, and makes its agent (nil for a tool that can't run jobs yet). Tests put in their own.
     @ObservationIgnored var prepare: (Job) async throws -> Job = { try await Workspace.prepare($0) }
     @ObservationIgnored var makeAgent: (Job, _ home: URL?, _ resume: String?) -> (any AgentRun)? = Desk.agent
@@ -181,6 +185,15 @@ final class Desk {
         let worktree = Workspace.worktree(job.id)
         try await Publish.fetch(base, of: job, into: worktree)
         return try await Shell.ok(["git", "-C", worktree.path, "rev-parse", "--verify", "refs/remotes/origin/\(base)^{commit}"])
+    }
+    /// Moves a job's worktree from commit `from` to `to`, only while its head is still `from` (no
+    /// work of its own): whether it moved. Ignored files (`.oby/`) stay. Tests put in their own.
+    @ObservationIgnored var moveWorktree: (_ id: String, _ from: String, _ to: String) async throws -> Bool = { id, from, to in
+        let path = Workspace.worktree(id).path
+        guard try await Shell.ok(["git", "-C", path, "rev-parse", "--verify", "HEAD^{commit}"]) == from,
+              try await Shell.ok(["git", "-C", path, "status", "--porcelain"]).isEmpty else { return false }
+        try await Shell.ok(["git", "-C", path, "reset", "--quiet", "--hard", to])
+        return true
     }
     /// The limits every job is held to (case 3.1). Tests put in their own.
     @ObservationIgnored var limits = JobLimits()
@@ -630,7 +643,14 @@ final class Desk {
             // Each job is routed knowing where the ones before it went, so a plan spreads out.
             var states = accounts.accounts
             var drafts: [Draft] = []
-            for dispatch in plan.dispatches {
+            // Each job's claim (case 2.1): the files its issue names, read all at once.
+            let claims = plan.dispatches.map { dispatch in
+                Task { () async -> [String]? in
+                    guard let issue = dispatch.issue else { return nil }
+                    return await self.issueFiles(dispatch.repo, issue)
+                }
+            }
+            for (index, dispatch) in plan.dispatches.enumerated() {
                 let agent = dispatch.agent == "auto" ? nil : dispatch.agent
                 let named = states.first { $0.signedIn && $0.account.name == dispatch.account && (agent == nil || $0.account.agent == agent) }
                 if dispatch.account != "auto", named == nil {
@@ -650,6 +670,7 @@ final class Desk {
                 job.title = dispatch.title
                 job.rounds = dispatch.rounds > 1 ? dispatch.rounds : nil
                 job.check = dispatch.check
+                job.files = await claims[index].value
                 let reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
                 drafts.append(Draft(said: said, reply: reply, job: job, guessed: result.by == "rules",
                                     suggestedModel: dispatch.complexity == .complex ? AgentModels.stronger[account.agent] : nil, route: route))
@@ -743,30 +764,63 @@ final class Desk {
         return job
     }
 
-    /// A job that's ready runs now, unless an earlier active job expects to touch the same files
-    /// (case 2.1): then it waits, queued, until that job ends.
-    func startOrWait(_ prepared: Job) {
-        guard let blocker = blocker(of: prepared) else { return start(prepared) }
+    /// A job that's ready runs now, unless an earlier job's claim covers the same files (case 2.1,
+    /// `Job.holdsClaim`): then it waits, queued, until that job is merged, closed or let go.
+    /// `catchUp`: its worktree was set up a while ago (a restart), so it's brought up to date first.
+    func startOrWait(_ prepared: Job, catchUp: Bool = false) {
+        guard let blocker = blocker(of: prepared) else { return catchUp ? startCaughtUp(prepared) : start(prepared) }
         var job = prepared
         job.step = "Waiting for \(blocker.heading) (\(blocker.id)): both touch \(Self.overlap(prepared, blocker).joined(separator: ", "))"
         replace(job)
         waiting.append(job)
     }
 
-    /// The earlier job (older in the list, queued or running) this one would collide with, if any.
+    /// The earlier job (older in the list, still holding its claim) this one would collide with, if any.
     private func blocker(of job: Job) -> Job? {
         guard let index = jobs.firstIndex(where: { $0.id == job.id }) else { return nil }
-        return jobs[(index + 1)...].first { $0.isActive && !Self.overlap(job, $0).isEmpty }
+        return jobs[(index + 1)...].first { $0.holdsClaim && !Self.overlap(job, $0).isEmpty }
     }
 
-    /// A job ended: the waiting jobs it was blocking run now, in order, unless another blocks them.
+    /// A job let go of its claim: the waiting jobs it was blocking run now, in order, unless another blocks them.
     private func releaseWaiting() {
         guard !drainingForUpdate else { return }
         for waiter in waiting {
             guard let latest = job(waiter.id), latest.status == .queued, blocker(of: latest) == nil else { continue }
             waiting.removeAll { $0.id == waiter.id }
-            start(latest)
+            startCaughtUp(latest)
         }
+    }
+
+    /// A job whose worktree was set up before what it waited for merged: its branch moves to the
+    /// base as GitHub has it now, then it starts (or waits again), so it works on top of what merged
+    /// meanwhile rather than conflict with it (#209). It fails, saying why, when that can't be done.
+    private func startCaughtUp(_ job: Job) {
+        var job = job
+        job.step = "Bringing \(job.branch) up to date with \(job.base ?? "its base")"
+        replace(job, save: false)
+        updatePreparing.insert(job.id)
+        Task {
+            defer { updatePreparing.remove(job.id) }
+            do {
+                let caught = try await caughtUp(job)
+                guard self.job(job.id)?.status == .queued else { return }
+                startOrWait(caught)
+            } catch {
+                finish(job.id, .failed, "Couldn't bring \(job.branch) up to date with \(job.base ?? "its base"): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// The job with its branch on the base as GitHub has it now (`fetchBase`), when it has no work of
+    /// its own yet: its worktree is still at `startCommit`, which becomes the base's commit. Not a job
+    /// on a pull request: its branch is the pull request's.
+    func caughtUp(_ job: Job) async throws -> Job {
+        guard job.pr == nil, let base = job.base, let start = job.startCommit else { return job }
+        let onto = try await fetchBase(job, base)
+        guard onto != start, try await moveWorktree(job.id, start, onto) else { return job }
+        var job = job
+        job.startCommit = onto
+        return job
     }
 
     /// The files two jobs would both touch: the same repository, and a path of one that is the
@@ -780,11 +834,14 @@ final class Desk {
 
     /// Dispatches one of the latest plans, by its job's id, with the user's changes (the runner's API).
     /// Rounds and check keep the plan's values unless the client sends them.
-    func dispatch(_ id: String, branch: String, account: String, rounds: Int? = nil, check: String?? = nil, model: String?? = nil) throws -> Job {
+    /// `files`, when the client sends them, replace the plan's claim (an empty list claims none).
+    func dispatch(_ id: String, branch: String, account: String, rounds: Int? = nil, check: String?? = nil, model: String?? = nil,
+                  files: [String]? = nil) throws -> Job {
         guard var draft = drafts.first(where: { $0.job.id == id }) else {
             throw Shell.Failure(message: "Oby doesn't have that plan any more. Ask again.")
         }
         draft.job = try Self.edit(draft.job, branch: branch, account: accounts.state(account), rounds: rounds, check: check)
+        if let files { draft.job.files = try Claims.validated(files) }
         if let model {
             // Only the stronger model the plan offered (for the tool the job ended up with), or none.
             guard model == nil || (draft.suggestedModel != nil && AgentModels.stronger.values.contains(model ?? "")) else {
@@ -1393,7 +1450,8 @@ final class Desk {
         if published != nil { reviewPublished(job) }
         if job.reviewOf != nil { reviewEnded(job) }
         onFinish(job)
-        // A job that waited on this one for the same files runs now (case 2.1).
+        // A job that waited on this one for the same files runs now (case 2.1), unless its claim
+        // holds on while its pull request is open (`Job.holdsClaim`).
         releaseWaiting()
     }
 
@@ -1434,6 +1492,7 @@ final class Desk {
 
     func replace(_ job: Job, save: Bool = true) {
         guard let index = jobs.firstIndex(where: { $0.id == job.id }) else { return }
+        let claimed = jobs[index].holdsClaim
         jobs[index] = job
         if save { store.save(job) }
         onJobChange(job)
@@ -1442,6 +1501,8 @@ final class Desk {
         failureLog.observe(job)
         // A step changes nothing the user must answer.
         if save { syncInbox(job) }
+        // Merged, closed, dismissed or ended with nothing to publish: jobs waiting on its files run now.
+        if claimed && !job.holdsClaim { releaseWaiting() }
     }
 
     // MARK: The inbox
@@ -1683,5 +1744,96 @@ nonisolated enum Rounds {
         guard plain.uppercased().hasPrefix("GOAL NOT MET") else { return nil }
         let left = plain.dropFirst("GOAL NOT MET".count).trimmingCharacters(in: CharacterSet(charactersIn: ": "))
         return .notMet(left.isEmpty ? "the goal isn't met yet" : left)
+    }
+}
+
+/// What a job claims (case 2.1, #209): the files its issue says it will touch, so jobs on the same
+/// code run one after another rather than all at once, each putting the next in conflict.
+nonisolated enum Claims {
+    /// At most as many paths as a Lead's brief holds, from a client. An issue's are all kept.
+    static let most = 30
+    /// What a file named without a folder ends with to count as one (`Package.swift`, `README.md`).
+    static let extensions: Set<String> = ["swift", "md", "json", "yml", "yaml", "toml", "plist", "pbxproj", "xcscheme", "entitlements",
+                                          "strings", "xcstrings", "html", "css", "js", "mjs", "ts", "tsx", "jsx", "py", "go", "rs", "rb",
+                                          "kt", "kts", "java", "gradle", "sh", "c", "h", "m", "mm", "cpp", "sql", "txt", "xml", "service"]
+
+    /// The files an issue claims: its `Files:` line (the owner's issues carry one, paths and
+    /// folders), else the paths its title and body name. Nil when they name none.
+    static func files(title: String, body: String) -> [String]? {
+        let lines = body.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if let line = lines.last(where: { $0.firstMatch(of: /^[\s>*_]*Files[*_]*:/) != nil }),
+           let listed = listed(line), !listed.isEmpty {
+            return listed
+        }
+        let named = named(title + "\n" + body)
+        return named.isEmpty ? nil : named
+    }
+
+    /// The files an issue as `gh issue view --json` has it claims.
+    static func files(issue info: [String: Any]) -> [String]? {
+        files(title: info["title"] as? String ?? "", body: info["body"] as? String ?? "")
+    }
+
+    /// The paths a `Files:` line lists: the ones in backticks, else what its commas separate.
+    static func listed(_ line: String) -> [String]? {
+        guard let colon = line.firstIndex(of: ":") else { return nil }
+        let rest = String(line[line.index(after: colon)...])
+        let ticked = rest.matches(of: /`([^`\n]+)`/).map { String($0.1) }
+        let items = !ticked.isEmpty ? ticked : rest.split(whereSeparator: { ",;".contains($0) }).flatMap { $0.components(separatedBy: " and ") }
+        return unique(items.map(cleaned).filter(isPath))
+    }
+
+    /// The paths a text names: in backticks, or on their own with a folder (`Engine/Checks.swift`, `MCP/`).
+    static func named(_ text: String) -> [String] {
+        var found: [String] = []
+        for match in text.matches(of: /`([^`\n]+)`/) {
+            let token = cleaned(String(match.1))
+            if isPath(token), token.contains("/") ? looksLikeFile(token) : hasExtension(token) { found.append(token) }
+        }
+        let bare = text.replacing(/`[^`\n]*`/, with: " ")
+        for word in bare.split(whereSeparator: { $0.isWhitespace || ",;()[]<>\"'|".contains($0) }) {
+            let token = cleaned(String(word))
+            if token.contains("/"), isPath(token), looksLikeFile(token) { found.append(token) }
+        }
+        return unique(found)
+    }
+
+    /// A path inside the repository, as a word: no spaces, no URL, no `#` or `@`.
+    static func isPath(_ path: String) -> Bool {
+        Lead.isPath(path) && path.wholeMatch(of: /[A-Za-z0-9_.\-\/+]+/) != nil && path.contains(where: \.isLetter)
+            && !path.contains("//") && !path.hasPrefix("-")
+    }
+
+    /// A path with a folder that ends in a folder (`/`) or a file with an extension: not `and/or`.
+    static func looksLikeFile(_ path: String) -> Bool {
+        path.hasSuffix("/") || path.split(separator: "/").last.map(String.init)?.firstMatch(of: /\.[A-Za-z][A-Za-z0-9]{0,9}$/) != nil
+    }
+
+    static func hasExtension(_ name: String) -> Bool {
+        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return false }
+        return extensions.contains(name[name.index(after: dot)...].lowercased())
+    }
+
+    /// A list `files` takes from a client: at most `most` paths inside the repository, all of them
+    /// checked, none dropped. Throws why not.
+    static func validated(_ files: [String]) throws -> [String] {
+        let paths = unique(files.map(cleaned).filter { !$0.isEmpty })
+        guard paths.count <= most else { throw Shell.Failure(message: "files holds at most \(most) paths, not \(paths.count).") }
+        if let bad = paths.first(where: { !Lead.isPath($0) }) { throw Shell.Failure(message: "\(bad.debugDescription) isn't a path inside the repository.") }
+        return paths
+    }
+
+    private static func cleaned(_ token: String) -> String {
+        var text = token.trimmingCharacters(in: .whitespaces)
+        while let last = text.last, ".:!?*_".contains(last) { text.removeLast() }
+        while let first = text.first, "*_".contains(first) { text.removeFirst() }
+        return Lead.normalized(text)
+    }
+
+    /// Each path once, in order, every one kept: a path left out would be a file left unclaimed.
+    private static func unique(_ paths: [String]) -> [String] {
+        var seen: [String] = []
+        for path in paths where !seen.contains(path) { seen.append(path) }
+        return seen
     }
 }

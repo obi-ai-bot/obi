@@ -77,8 +77,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var extraReviews: Int?
     /// The job whose pull request this job reviews: set on the review jobs Oby starts itself.
     var reviewOf: String?
-    /// The files the job is expected to touch, from the Lead's brief: jobs whose files overlap
-    /// run one after another (case 2.1). Nil on jobs the brain planned.
+    /// The files the job is expected to touch, its claim: jobs whose files overlap run one after
+    /// another (case 2.1, `holdsClaim`). From the Lead's brief, the client that dispatched it, or its
+    /// issue (`Claims.files`, #209); nil when none of them named any, and an empty list when the
+    /// client claimed none.
     var files: [String]?
     /// The goal (a Lead turn, Engine/Lead.swift) that started the job, or nil for the brain's jobs.
     var lead: String?
@@ -107,6 +109,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The base's commit Oby last had the agent rebase onto because the pull request conflicted
     /// with it (`Desk.rebaseConflicted`): one rebase round per commit of the base. Nil before then.
     var rebasedOnto: String?
+    /// When Oby started each rebase round of the last day: a 4th conflict in a day isn't rebased
+    /// again (`Desk.rebaseConflicted`). Nil before the first.
+    var rebases: [Date]?
     /// The latest Apple build and test its agent asked for mid-round (`oby-check apple`,
     /// Engine/AppleChecks.swift), or nil.
     var appleCheck: MacCheck?
@@ -117,6 +122,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var tetrix: TetrixUse?
 
     var maxRounds: Int { rounds ?? 1 }
+    /// How many times in a day Oby rebases a pull request that conflicts with its base by itself (#209).
+    static let rebasesPerDay = 3
     /// How many times Oby may review its pull request: `Review.maxRounds`, and what the user allowed beyond.
     var reviewCap: Int { Review.maxRounds + (extraReviews ?? 0) }
     /// Its agent asked the user something and waits for the answer: the inbox has it.
@@ -126,6 +133,15 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var loops: Bool { check != nil || maxRounds > 1 }
 
     var isActive: Bool { status == .queued || status == .running }
+    /// Its `files` stay claimed (case 2.1, #209): while it's queued or running, and after, while its
+    /// pull request is open or its commits wait to be published, so a sibling touching the same
+    /// files doesn't start while it's in review and about to conflict. Not once it's merged or
+    /// closed, the user dismissed or stopped it, or it ended with nothing to publish.
+    var holdsClaim: Bool {
+        if isActive { return true }
+        guard dismissed == nil, reviewOf == nil, status != .stopped else { return false }
+        return published != nil && (pullRequest?.state ?? .open) == .open || canPublish
+    }
     /// Commits beyond its base that aren't on its pull request yet: all of them before it's
     /// published, then the ones later rounds made. A job published before Oby counted has none.
     var unpublished: Int { max(0, (commits ?? 0) - (published == nil ? 0 : pushed ?? commits ?? 0)) }
@@ -1107,6 +1123,8 @@ nonisolated enum Workspace {
         if let number = job.issue, let issue, let info = try? JSONSerialization.jsonObject(with: issue) as? [String: Any] {
             try vault.forAgent(Prompts.quoted("Issue", number, info))
                 .write(to: worktree.appending(path: ".oby/inputs/issue-\(number).md"), atomically: true, encoding: .utf8)
+            // A job nobody gave files claims the ones its issue names (case 2.1, #209).
+            if job.files == nil { job.files = Claims.files(issue: info) }
         }
         return job
     }

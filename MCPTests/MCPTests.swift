@@ -254,6 +254,21 @@ func inside(_ text: String) -> [String] {
         #expect(sentJob["model"] == .null)
     }
 
+    /// The draft's claim shows, and dispatch may replace it (#209).
+    @Test func dispatchClaimsFiles() async throws {
+        let stub = StubRunner()
+        var draftJob = job("ab12cd34", status: "queued", stage: 1).object!
+        draftJob["files"] = ["Engine/Review.swift", "RunnerTests/"]
+        stub.answer("POST /v1/plans", ["kind": "plan", "drafts": [["reply": "", "guessed": false, "job": .object(draftJob)]]])
+        stub.answer("POST /v1/jobs", job("ab12cd34", status: "queued", stage: 1), status: 201)
+        let server = server(stub)
+        #expect(await server.call("plan", ["said": "fix oby #140"]).text.contains("files: Engine/Review.swift, RunnerTests/"))
+        #expect(await server.call("dispatch", ["draft": "ab12cd34", "files": "Engine/"]).isError)
+        #expect(stub.calls.count == 1)
+        _ = await server.call("dispatch", ["draft": "ab12cd34", "files": ["Engine/Checks.swift", "docs/"]])
+        #expect(stub.calls.last?.body?["job"]?["files"] == ["Engine/Checks.swift", "docs/"])
+    }
+
     @Test func dispatchAsksWhichAccount() async {
         let stub = StubRunner()
         stub.answer("POST /v1/plans", ["kind": "plan", "drafts": [["job": job("ab12cd34", status: "queued", stage: 1)]]])

@@ -66,6 +66,13 @@ desk.failureLog.enabled = true
 // Macs that follow the runner take its merge checks (Engine/Checks.swift), and the Apple checks
 // agents ask for with `oby-check apple` (Engine/AppleChecks.swift), which runs this executable.
 desk.queuesMacChecks = true
+// A plan's job about an issue claims the files the issue names (case 2.1, #209), so jobs on the
+// same code run one after another.
+desk.issueFiles = { repo, issue in
+    guard let text = try? await Shell.ok(["gh", "issue", "view", "\(issue)", "-R", repo, "--json", "title,body"], as: .app),
+          let info = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return nil }
+    return Claims.files(issue: info)
+}
 // Inbox items get a headline in plain words from the brain's cheap model (Engine/Inbox.swift).
 desk.rewritesInbox = true
 do {

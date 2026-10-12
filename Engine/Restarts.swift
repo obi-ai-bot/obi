@@ -128,7 +128,8 @@ extension Desk {
                 run(job, prompt: message)
             } else if job.startCommit != nil {
                 job.status = .queued
-                startOrWait(job)
+                // Set up before the restart: what merged meanwhile comes first.
+                startOrWait(job, catchUp: true)
             } else {
                 // A setup the restart cut short: its worktree gets ready again.
                 let job = job
