@@ -312,7 +312,8 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         if let why = mismatch(Data(view.utf8), check) { throw Shell.Failure(message: why) }
         if conflicted(Data(view.utf8)) { throw Conflict(base: into) }
         // Xcode Cloud passed on this very commit, whenever the pull request has its checks (#122).
-        let cloud = try await XcodeCloud.read(job, head: check.head)
+        let cloud: XcodeCloud?
+        do { cloud = try await XcodeCloud.read(job, head: check.head) } catch { throw XcodeCloud.Waiting(unread: true) }
         if cloud?.state != .passed && (cloud != nil || job.xcodeCloud != nil) { throw XcodeCloud.Waiting() }
         let commits = try await Shell.ok(["gh", "api", "\(pull)/commits?per_page=100"], in: away, env: env, as: .app)
         guard let squash = squash(Data(view.utf8), commits: Data(commits.utf8), pr: check.pr) else {
@@ -1408,9 +1409,11 @@ extension Desk {
                 // Trying the merge again changes nothing: the branch needs a rebase.
                 problem = "Not merged: \(conflict.localizedDescription)"
                 conflicted = true
-            } catch is XcodeCloud.Waiting {
+            } catch let waiting as XcodeCloud.Waiting {
+                // The follower merges it once it sees Cloud pass (`cloudObserved`).
                 guard var current = self.job(id), current.macCheck?.id == check.id else { return }
                 current.macCheck?.tries = check.tries
+                if waiting.unread { current.xcodeCloudError = "Couldn't refresh Xcode Cloud. Will try again shortly." }
                 return replace(current)
             } catch {
                 problem = "Not merged: \(error.localizedDescription)"

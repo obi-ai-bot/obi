@@ -353,6 +353,67 @@ struct XcodeCloudTests {
         #expect(merges == 1 && desk.job("cloud")?.pullRequest?.state == .merged)
     }
 
+    /// One more round while Oby reviews the pull request can't start: it says so and the item stays
+    /// open, for once the review ended.
+    @Test func oneMoreRoundDuringAReviewKeepsTheItem() async throws {
+        var agents: [Agent] = []
+        desk.quoteReview = { _, _, _ in }
+        desk.makeAgent = { _, _, _ in let agent = Agent(); agents.append(agent); return agent }
+        var author = desk.job("cloud")!
+        author.xcodeCloud = result()
+        author.xcodeCloud?.rounds = 1
+        desk.replace(author)
+        let item = try #require(desk.inbox.first { $0.isOpen && $0.job == "cloud" })
+        author = desk.job("cloud")!
+        author.reviewing = "review"
+        desk.replace(author)
+        #expect(throws: (any Error).self) { try desk.settle(item.id, .answer(Inbox.oneMoreRound)) }
+        #expect(desk.inbox.first { $0.id == item.id }?.isOpen == true && agents.isEmpty)
+        author = desk.job("cloud")!
+        author.reviewing = nil
+        desk.replace(author)
+        try desk.settle(item.id, .answer(Inbox.oneMoreRound))
+        try await waitFor { agents.count == 1 }
+        #expect(desk.job("cloud")?.status == .running && desk.job("cloud")?.xcodeCloud?.rounds == 2)
+    }
+
+    /// One more round on a conflict that stops again (dev still can't be fetched) brings a new item.
+    @Test func aRetryThatStopsAgainComesBack() async throws {
+        desk.makeAgent = { _, _, _ in Issue.record("No agent should start"); return nil }
+        desk.fetchBase = { _, _ in throw Shell.Failure(message: "the network is down") }
+        await observe(result(conflict: true))
+        let first = try #require(desk.inbox.first { $0.isOpen && $0.job == "cloud" })
+        try desk.settle(first.id, .answer(Inbox.oneMoreRound))
+        try await waitFor { desk.job("cloud")?.xcodeCloud?.stops == 2 }
+        let second = try #require(desk.inbox.first { $0.isOpen && $0.job == "cloud" })
+        #expect(second.id != first.id && second.text == desk.job("cloud")?.xcodeCloud?.problem)
+    }
+
+    /// Xcode Cloud can't be read right before the merge: the merge waits, with no merge error and
+    /// none of its tries used, and goes on once the follower reads Cloud passed.
+    @Test func aCloudReadErrorAtMergeWaitsAndResumes() async throws {
+        var author = desk.job("cloud")!
+        author.review = Review(verdict: .approved, job: "review", agent: "codex", account: "Work", round: 1)
+        var check = MacCheck.make(for: author, pr: 99, head: head)
+        check.state = .passed
+        check.checkRun = "https://github.com/deskree-inc/oby/runs/1"
+        author.macCheck = check
+        author.xcodeCloud = result(.passed)
+        desk.replace(author)
+        desk.scanForMerge = { _, _ in [] }
+        for _ in 0..<(MacCheck.maxTries + 1) {
+            desk.mergePullRequest = { _, _ in throw XcodeCloud.Waiting(unread: true) }
+            await desk.mergeChecked("cloud")
+        }
+        author = try #require(desk.job("cloud"))
+        #expect(author.mergeError == nil && (author.macCheck?.tries ?? 0) == 0 && !author.needsYou)
+        #expect(author.xcodeCloudError != nil && desk.inbox.filter(\.isOpen).isEmpty)
+        var merges = 0
+        desk.mergePullRequest = { _, _ in merges += 1 }
+        await observe(result(.passed))
+        #expect(merges == 1 && desk.job("cloud")?.pullRequest?.state == .merged)
+    }
+
     /// The fix round's budget is kept, and an older job with its pull request open is still followed
     /// past the desk's newest jobs (#223).
     @Test func theRoundBudgetSurvivesARestart() async throws {

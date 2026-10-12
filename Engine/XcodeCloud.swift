@@ -20,15 +20,20 @@ nonisolated struct XcodeCloud: Codable, Equatable, Sendable {
     var handedOff: Bool = false
     /// Why Oby couldn't hand this head's failure on, or nil.
     var problem: String?
+    /// How many times that happened on this head: each is its own inbox item, so One more round
+    /// that stops again comes back.
+    var stops: Int = 0
 
     /// A failed build or test goes back to the author once; the next failure is the user's.
     static let maxRounds = 1
     /// What Xcode Cloud says when the pull request conflicts with its base.
     static let conflictLine = "Your source code changes conflict with changes made on the pull request target branch"
 
-    /// Xcode Cloud hasn't passed on the commit Oby is about to merge: the merge waits for the follower.
+    /// Xcode Cloud hasn't passed on the commit Oby is about to merge, or couldn't be read (`unread`):
+    /// the merge waits for the follower, using up none of its tries.
     struct Waiting: LocalizedError {
-        var errorDescription: String? { "Xcode Cloud hasn't passed on this commit." }
+        var unread = false
+        var errorDescription: String? { unread ? "Couldn't read Xcode Cloud's checks." : "Xcode Cloud hasn't passed on this commit." }
     }
 
     static func arguments(repo: String, head: String) throws -> [String] {
@@ -186,6 +191,7 @@ extension Desk {
                     if previous.head == head {
                         result.handedOff = previous.handedOff
                         result.problem = previous.problem
+                        result.stops = previous.stops
                     }
                 }
                 author.xcodeCloud = result
@@ -223,12 +229,14 @@ extension Desk {
                 if again { latest.rebasedOnto = nil }
             }, stop: { latest, why in
                 latest.xcodeCloud?.problem = "Xcode Cloud says it conflicts with \(latest.base ?? "its base"). \(why)"
+                latest.xcodeCloud?.stops += 1
             })
         }
         author.xcodeCloud?.handedOff = true
         author.xcodeCloud?.problem = nil
         func stop(_ why: String) {
             author.xcodeCloud?.problem = why
+            author.xcodeCloud?.stops += 1
             replace(author)
         }
         guard let session = author.session else { return stop("Xcode Cloud failed, but the job has no session to pick up.") }
@@ -247,6 +255,17 @@ extension Desk {
         replace(round)
         Logger.jobs.notice("job \(id, privacy: .public): Xcode Cloud failed on \(head, privacy: .public), round \(round.currentRound, privacy: .public)")
         run(round, prompt: XcodeCloud.prompt(round, file: file), resume: session)
+    }
+
+    /// One more round on an Xcode Cloud item (the inbox): `recoverCloud` past its limit. Throws,
+    /// leaving the item open, when it can't start now: Oby is reviewing the pull request, or already
+    /// handing the failure on.
+    func oneMoreCloudRound(_ id: String) throws {
+        guard let author = job(id), author.cloudNeedsYou else { throw Shell.Failure(message: "There's no Xcode Cloud failure to hand on.") }
+        guard author.reviewing == nil, !cloudRecovering.contains(id) else {
+            throw Shell.Failure(message: "Oby is reviewing it now. Ask for one more round once the review ends.")
+        }
+        Task { await recoverCloud(id, again: true) }
     }
 
     /// Ask Oby on an Xcode Cloud item (the inbox): the author's agent reads the failure again and

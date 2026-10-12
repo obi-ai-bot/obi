@@ -1894,7 +1894,7 @@ final class Desk {
             guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Answer with 1 to 2,000 characters.") }
             switch (item.kind, text) {
             case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss), (.merge, Inbox.dismiss): try dismiss(item.job)
-            case (.failed, Inbox.oneMoreRound) where job(item.job)?.cloudNeedsYou == true: Task { await recoverCloud(item.job, again: true) }
+            case (.failed, Inbox.oneMoreRound) where job(item.job)?.cloudNeedsYou == true: try oneMoreCloudRound(item.job)
             case (.failed, Inbox.askOby) where job(item.job)?.cloudNeedsYou == true: try askAboutCloud(item.job)
             case (.merge, Inbox.tryAgain): try retryMerge(item.job)
             case (.merge, Inbox.oneMoreRound): try oneMoreMergeRound(item.job)

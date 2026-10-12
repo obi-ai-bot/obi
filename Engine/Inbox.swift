@@ -87,7 +87,7 @@ nonisolated enum Inbox {
         guard !job.isActive else { return nil }
         // Xcode Cloud still fails after Oby handed it back (#122): one item per head and round.
         if job.cloudNeedsYou, let cloud = job.xcodeCloud {
-            return item(.failed, "cloud-\(cloud.head.prefix(12))-\(job.currentRound)", cloud.stopLine, [oneMoreRound, askOby, dismiss])
+            return item(.failed, "cloud-\(cloud.head.prefix(12))-\(job.currentRound)-\(cloud.stops)", cloud.stopLine, [oneMoreRound, askOby, dismiss])
         }
         if job.reviewNeedsYou, let review = job.review {
             return item(.review, "review-\(review.job)", review.stopReason, [oneMoreRound, dismiss])
