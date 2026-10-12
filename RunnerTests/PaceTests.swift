@@ -201,12 +201,9 @@ struct PaceTests {
                                          epic: nil, kind: .fix, title: nil, task: "Fix it", inputs: [], rounds: 1, check: nil, complexity: .routine)
             return Planner.Result(plan: Plan(action: .dispatch, reply: "", dispatches: [dispatch], question: nil), by: "claude")
         }
-        // Only its reserve keeps it from the job: it waits for room, saying so (#278, RunnerTests/ReserveTests.swift).
-        guard case .plan(let waiting) = await desk.card(for: plan(account: "auto"), said: "fix it") else {
-            Issue.record("expected a plan")
-            return
-        }
-        #expect(waiting.map(\.job.startWhen) == [[.room(agent: "claude")]] && waiting.map(\.job.account) == ["default"])
+        // Only its reserve keeps it from the job: it waits for room (#278, RunnerTests/ReserveTests.swift).
+        func waits(_ talk: Desk.Talk) -> [[StartCondition]?]? { if case .plan(let drafts) = talk { drafts.map(\.job.startWhen) } else { nil } }
+        #expect(waits(await desk.card(for: plan(account: "auto"), said: "fix it")) == [[.room(agent: "claude")]])
         guard case .plan(let drafts) = await desk.card(for: plan(account: "Default"), said: "fix it on Default") else {
             Issue.record("expected a plan")
             return
@@ -217,13 +214,11 @@ struct PaceTests {
         let context = BrainContext(accounts: ["auto": ["auto", "Default"], "claude": ["auto", "Default"]], repos: ["deskree-inc/oby"])
         let rules = Rules.plan("fix oby #12", context: context)
         #expect(rules.dispatches.map { "\($0.agent)/\($0.account)" } == ["auto/auto"] && rules.problems(in: context, canary: "7f3a9c").isEmpty)
-        guard case .plan(let auto) = await desk.card(for: Planner.Result(plan: rules, by: "rules"), said: "fix oby #12") else {
-            Issue.record("expected a plan")
-            return
-        }
-        #expect(auto.map(\.job.startWhen) == [[.room(agent: nil)]])
-        // At 95% of its week lifting wouldn't help: no account has room.
+        #expect(waits(await desk.card(for: Planner.Result(plan: rules, by: "rules"), said: "fix oby #12")) == [[.room(agent: nil)]])
+        // At 95% of its week lifting its reserve wouldn't help: no account has room, and nothing waits.
         accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.96), for: "default")
+        #expect(await desk.card(for: plan(account: "auto"), said: "fix it")
+                == .reply("No Claude Code account is signed in with room to spare. Check Settings › Accounts."))
         #expect(await desk.card(for: Planner.Result(plan: rules, by: "rules"), said: "fix oby #12")
                 == .reply("No coding tool account is signed in with room to spare. Check Settings › Accounts."))
         // Without "auto" on offer it names what the context has, and the plan still checks out.

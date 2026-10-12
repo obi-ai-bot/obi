@@ -128,6 +128,9 @@ final class ReserveTests {
         return Planner.Result(plan: Plan(action: .dispatch, reply: "", dispatches: [dispatch], question: nil), by: "claude")
     }
 
+    /// The plan's first draft, or nil for a reply or a question.
+    func draft(_ talk: Desk.Talk) -> Desk.Draft? { if case .plan(let drafts) = talk { drafts.first } else { nil } }
+
     func until(_ what: String, _ condition: () -> Bool) async throws {
         for _ in 0..<500 where !condition() { try await Task.sleep(for: .milliseconds(10)) }
         #expect(condition(), Comment(rawValue: what))
@@ -136,10 +139,7 @@ final class ReserveTests {
     @Test func aJobOnlyReservesHoldBackWaitsAndStartsWhenOneIsLifted() async throws {
         let made = Made()
         let (desk, _) = desk(made)
-        guard case .plan(let drafts) = await desk.card(for: plan("claude"), said: "fix it"), let draft = drafts.first else {
-            Issue.record("expected a plan")
-            return
-        }
+        let draft = try #require(draft(await desk.card(for: plan("claude"), said: "fix it")))
         #expect(draft.reply == "Claude Code will fix in oby. Waiting: Default is in its weekly reserve. "
                 + "Use it anyway to start it now; otherwise it starts when an account has room.")
         #expect(draft.job.startWhen == [.room(agent: "claude")] && draft.job.account == "default")
@@ -160,10 +160,7 @@ final class ReserveTests {
     @Test func aJobWaitingForRoomStartsWhereRoutingFindsIt() async throws {
         let made = Made()
         let (desk, accounts) = desk(made)
-        guard case .plan(let drafts) = await desk.card(for: plan("auto"), said: "fix it"), let draft = drafts.first else {
-            Issue.record("expected a plan")
-            return
-        }
+        let draft = try #require(draft(await desk.card(for: plan("auto"), said: "fix it")))
         #expect(draft.job.startWhen == [.room(agent: nil)])
         let job = desk.dispatch(draft)
         try await until("it waits") { desk.scheduled.contains(job.id) }
