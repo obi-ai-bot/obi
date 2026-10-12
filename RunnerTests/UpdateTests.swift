@@ -270,37 +270,52 @@ struct UpdateTests {
         #expect(fake.installs == 1 && fake.restarts == 1 && updates.state.installed == tested)
     }
 
-    @Test(arguments: [false, true])
-    func updatesRestartAtMostOnceEveryFifteenMinutesUnlessTheyFixAFailure(fixes: Bool) async throws {
+    @Test func updatesRestartAtMostOnceEveryFifteenMinutes() async throws {
         var date = Date(timeIntervalSince1970: 1_791_582_173)
         updates.now = { date }
         await updates.poll()
         #expect(fake.restarts == 1)
         // The runner is back, and dev moves a minute later.
         let fresh = restarted()
-        let restarted = Updates(desk: fresh, root: updates.root, binary: updates.binary)
-        restarted.command = fakeCommand
-        restarted.install = updates.install
-        restarted.restart = updates.restart
-        restarted.now = { date }
-        restarted.fixesFailure = { _ in fixes }
+        let next = Updates(desk: fresh, root: updates.root, binary: updates.binary)
+        next.command = fakeCommand
+        next.install = updates.install
+        next.restart = updates.restart
+        next.now = { date }
+        next.fixesFailure = { _ in false }
         fake.head = String(repeating: "b", count: 40)
         date += 60
-        await restarted.poll()
-        guard !fixes else {
-            // It brings the fix of one of Oby's own failures: no waiting.
-            #expect(fake.restarts == 2 && restarted.state.installed == fake.head)
-            return
-        }
-        #expect(restarted.status.phase == "ready" && restarted.status.waiting == fake.head)
+        await next.poll()
+        #expect(next.status.phase == "ready" && next.status.waiting == fake.head)
         // Waiting its turn doesn't hold any agent back.
         #expect(!fresh.drainingForUpdate && fake.restarts == 1)
         date += Updates.spacing - 61
-        restarted.deployIfReady()
+        next.deployIfReady()
         #expect(fake.restarts == 1)
         date += 1
-        restarted.deployIfReady()
-        #expect(fake.restarts == 2 && restarted.state.installed == fake.head)
+        next.deployIfReady()
+        #expect(fake.restarts == 2 && next.state.installed == fake.head)
+    }
+
+    @Test func anUpdateThatFixesOneOfObysFailuresDoesntWait() async throws {
+        var date = Date(timeIntervalSince1970: 1_791_582_173)
+        updates.now = { date }
+        await updates.poll()
+        #expect(fake.restarts == 1)
+        // The runner is back, and dev moves a minute later.
+        let fresh = restarted()
+        let next = Updates(desk: fresh, root: updates.root, binary: updates.binary)
+        next.command = fakeCommand
+        next.install = updates.install
+        next.restart = updates.restart
+        next.now = { date }
+        next.fixesFailure = { _ in true }
+        fake.head = String(repeating: "b", count: 40)
+        date += 60
+        await next.poll()
+        // It brings the fix of one of Oby's own failures: no waiting.
+        #expect(fake.restarts == 2 && next.state.installed == fake.head)
+        #expect(next.status.phase == "restarting" && fresh.drainingForUpdate)
     }
 
     @Test func drainCapRestartsAndRecoversTheSameSessionWithoutAnotherRound() async throws {
