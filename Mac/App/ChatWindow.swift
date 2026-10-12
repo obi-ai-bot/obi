@@ -133,6 +133,13 @@ private struct ConversationColumn: View {
     @Binding var liveExpanded: Bool
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
     @State private var text = ""
+    struct ReplyTarget {
+        var title: String
+        var send: @MainActor (String) async throws -> Void
+    }
+    @State private var replyTarget: ReplyTarget?
+    @State private var sendingAnswer = false
+    @State private var sendProblem: String?
     @State private var decisionFocus = 0
     @State private var columnHeight: CGFloat = 600
     @FocusState private var typing: Bool
@@ -230,7 +237,7 @@ private struct ConversationColumn: View {
                             decision(entry, active: oldest == entry.id)
                         }
                         ForEach(permissions.filter { ConversationModel.decisionAnchor(job: $0.job, created: $0.created, turns: turns) == nil }) { record in
-                            InlinePermission(record: record, feed: feed, keyboardEnabled: oldest == record.id, focusRequest: decisionFocus).id(record.id)
+                            permission(record, active: oldest == record.id).id(record.id)
                         }
                         ForEach(days) { day in
                             ForEach(Array(day.turns.enumerated()), id: \.element.id) { index, turn in
@@ -247,7 +254,7 @@ private struct ConversationColumn: View {
                                     decision(entry, active: oldest == entry.id)
                                 }
                                 ForEach(permissions.filter { ConversationModel.decisionAnchor(job: $0.job, created: $0.created, turns: turns) == turn.id }) { record in
-                                    InlinePermission(record: record, feed: feed, keyboardEnabled: oldest == record.id, focusRequest: decisionFocus).id(record.id)
+                                    permission(record, active: oldest == record.id).id(record.id)
                                 }
                             }
                         }
@@ -275,8 +282,32 @@ private struct ConversationColumn: View {
     }
 
     private func decision(_ entry: IslandInbox.Entry, active: Bool) -> some View {
-        InlineDecision(entry: entry, desk: desk, feed: feed, keyboardEnabled: active, focusRequest: decisionFocus, onOpen: onOpenJob)
+        InlineDecision(entry: entry, desk: desk, feed: feed, keyboardEnabled: active, focusRequest: decisionFocus, onOpen: onOpenJob,
+                       onTell: {
+                           guard !sendingAnswer else { return }
+                           replyTarget = ReplyTarget(title: entry.item.title, send: { value in
+                               if entry.local { try await desk.answer(entry.item.id, .answer(value)) }
+                               else { try await feed.settle(entry.item.id, answer: value) }
+                           })
+                           sendProblem = nil
+                           typing = true
+                       })
             .id(entry.id)
+    }
+
+    private func permission(_ record: RunnerFeed.PermissionRecord, active: Bool) -> some View {
+        InlinePermission(record: record, feed: feed, keyboardEnabled: active, focusRequest: decisionFocus,
+                         onTell: {
+                             guard !sendingAnswer else { return }
+                             replyTarget = ReplyTarget(title: record.permission.title, send: { value in
+                                 guard feed.extras[record.job]?.permission?.id == record.permission.id else {
+                                     throw RunnerError(message: "This request has already been answered.")
+                                 }
+                                 try await feed.answer(record.job, .deny, message: value)
+                             })
+                             sendProblem = nil
+                             typing = true
+                         })
     }
 
     private var pending: some View {
@@ -313,16 +344,47 @@ private struct ConversationColumn: View {
     // MARK: The composer
 
     private var composer: some View {
-        ChatComposer(text: $text, focused: Binding(get: { typing }, set: { typing = $0 }), tray: model.tray,
-                     maximumHeight: columnHeight * 0.5, onSend: send, onScreenshot: screenshot,
-                     onStop: { if thinking { desk.cancel() } })
+        VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
+            if let replyTarget {
+                HStack {
+                    Text("Replying to \(replyTarget.title)").font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary).lineLimit(1)
+                    Spacer()
+                    Button { self.replyTarget = nil; sendProblem = nil } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).disabled(sendingAnswer).accessibilityLabel("Cancel reply")
+                }
+            }
+            if let sendProblem {
+                HStack {
+                    Text(sendProblem).font(OBYStyle.caption).foregroundStyle(.red)
+                    Button("Try again", action: send).buttonStyle(.plain).font(OBYStyle.caption)
+                }
+            }
+            if sendingAnswer { ProgressView().controlSize(.small).accessibilityLabel("Sending answer") }
+            ChatComposer(text: $text, focused: Binding(get: { typing }, set: { typing = $0 }), tray: model.tray,
+                         maximumHeight: columnHeight * 0.5, onSend: send, onScreenshot: screenshot,
+                         onStop: { if thinking { desk.cancel() } })
+                .disabled(sendingAnswer)
+        }
     }
 
     private func send() {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        // The chips stay until Dispatch, which hands them to the jobs. The thread shows your words alone.
-        model.sendChat(text)
-        text = ""
+        let value = text
+        guard !sendingAnswer, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard let target = replyTarget else {
+            model.sendChat(value)
+            text = ""
+            return
+        }
+        sendingAnswer = true
+        sendProblem = nil
+        Task {
+            defer { sendingAnswer = false }
+            do {
+                try await target.send(value)
+                if text == value { text = "" }
+                replyTarget = nil
+            } catch { sendProblem = error.localizedDescription }
+        }
     }
 
     /// Your words without the line about the chips, to edit them: it's added again when you send.

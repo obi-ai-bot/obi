@@ -6,6 +6,7 @@ struct InlinePermission: View {
     let feed: RunnerFeed
     var keyboardEnabled = false
     var focusRequest = 0
+    var onTell: (() -> Void)? = nil
     @State private var expanded = false
     @State private var busy = false
     @State private var problem: String?
@@ -28,6 +29,10 @@ struct InlinePermission: View {
                              onChoose: { option in
                                  if let decision = RunnerPermission.Decision(rawValue: option.answer) { answer(decision) }
                              }, onWords: { answer(.deny, note: $0) })
+            }
+            if record.done == nil, let onTell {
+                Button("No, and tell the agent what to do differently", action: onTell)
+                    .buttonStyle(.plain).font(OBYStyle.caption).disabled(busy)
             }
             if let problem { Text(problem).font(OBYStyle.caption).foregroundStyle(.red) }
         }

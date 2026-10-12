@@ -67,7 +67,7 @@ struct DecisionCard: View {
         .disabled(busy)
         #if os(macOS)
         .focusable().focusEffectDisabled().focused($cardFocused)
-        .onAppear { if keyboardEnabled && focusRequest > 0 { cardFocused = true } }
+        .onAppear { if keyboardEnabled { cardFocused = true } }
         .onExitCommand { if keyboardEnabled && !busy { onLater?() } }
         .onChange(of: focusRequest) { if keyboardEnabled { cardFocused = true } }
         .onKeyPress(phases: .down) { press in

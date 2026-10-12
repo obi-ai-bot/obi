@@ -9,6 +9,7 @@ struct InlineDecision: View {
     var keyboardEnabled = false
     var focusRequest = 0
     var onOpen: (_ job: String, _ local: Bool) -> Void = { _, _ in }
+    var onTell: (() -> Void)? = nil
     @State private var expanded = false
     @State private var busy = false
     @State private var problem: String?
@@ -56,6 +57,9 @@ struct InlineDecision: View {
                              onLater: settled ? nil : { answer(later: .now.addingTimeInterval(3600)) },
                              onChoose: { answer($0.answer) },
                              onWords: item.kind.takesWords ? { answer($0) } : nil)
+                if !settled, item.kind.takesWords, let onTell {
+                    Button("Tell it instead", action: onTell).buttonStyle(.plain).font(OBYStyle.caption).disabled(busy)
+                }
                 if !item.job.isEmpty {
                     Button("Open job") { onOpen(item.job, entry.local) }.buttonStyle(.plain).font(OBYStyle.caption)
                 }
