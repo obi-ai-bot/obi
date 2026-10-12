@@ -50,17 +50,26 @@ final class Phone {
         }
     }
 
-    func holdMic() {
-        guard !voice.held, !voice.finishing else { return }
-        cancel()
-        voice.start(context: PhoneSpeech.context(repos: jobs.map(\.repo))) { [weak self] in self?.ask($0, spoken: true) }
+    /// Tap the mic: Oby stops talking, and what you say goes to `update` as it's heard. A reply
+    /// still on its way stays silent: speaking it would take the microphone's audio session.
+    func dictate(update: @escaping (String) -> Void) {
+        guard !voice.active, !voice.finishing else { return }
+        spoken = false
+        speaker.stop()
+        voice.start(context: PhoneSpeech.context(repos: jobs.map(\.repo)), update: update)
     }
-
-    func releaseMic() { voice.release() }
 
     func cancelVoice() {
         spoken = false
         voice.cancel()
+        speaker.stop()
+    }
+
+    /// The app left the front. In the background dictation stops and keeps its words; a
+    /// permission prompt makes the app inactive too, so the mic's preparation carries on then.
+    func leftForeground(background: Bool) {
+        if background || voice.listening { voice.finish() }
+        spoken = false
         speaker.stop()
     }
 

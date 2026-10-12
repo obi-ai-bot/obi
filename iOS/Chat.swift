@@ -65,7 +65,7 @@ struct ChatScreen: View {
                     }
                 }
                 .onDisappear { phone.cancelVoice() }
-                .onChange(of: scenePhase) { if scenePhase != .active { phone.cancelVoice() } }
+                .onChange(of: scenePhase) { if scenePhase != .active { phone.leftForeground(background: scenePhase == .background) } }
                 .onChange(of: path) { if !path.isEmpty { phone.cancelVoice() } }
         }
     }
@@ -195,8 +195,9 @@ struct ChatScreen: View {
 
     // MARK: The composer
 
-    private func send() {
-        phone.ask(text)
+    /// `spoken`: the draft has dictated words, so Oby may speak its reply.
+    private func send(spoken: Bool) {
+        phone.ask(text, spoken: spoken)
         text = ""
         typing = false
     }

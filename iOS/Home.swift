@@ -73,7 +73,7 @@ struct HomeView: View {
             // The plan and the question are sheets here; Chat shows them in the thread.
             .sheet(isPresented: sheetShown) { sheet }
             .onDisappear { phone.cancelVoice() }
-            .onChange(of: scenePhase) { if scenePhase != .active { phone.cancelVoice() } }
+            .onChange(of: scenePhase) { if scenePhase != .active { phone.leftForeground(background: scenePhase == .background) } }
             .onChange(of: path) { if !path.isEmpty { phone.cancelVoice() } }
             .onChange(of: phone.opening, initial: true) {
                 guard let id = phone.opening else { return }
@@ -173,8 +173,9 @@ struct HomeView: View {
         }
     }
 
-    private func send() {
-        phone.ask(text)
+    /// `spoken`: the draft has dictated words, so Oby may speak its reply.
+    private func send(spoken: Bool) {
+        phone.ask(text, spoken: spoken)
         text = ""
         typing = false
     }
