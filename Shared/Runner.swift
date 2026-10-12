@@ -121,6 +121,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var cloudNeedsYou: Bool { dismissed == nil && stoppedCloud == true }
 
     var isActive: Bool { status == .queued || status == .running }
+    /// Queued behind something (`waiting`): listed under Waiting, not counted as working (#238).
+    var isWaiting: Bool { status == .queued && waiting != nil }
+    /// Running, or getting ready to: what every app counts as an agent working (as Engine's).
+    var isWorking: Bool { isActive && !isWaiting }
     /// Its agent asked the user something and waits for the answer: its alert stays until then.
     var waitsForAnswer: Bool { question != nil && dismissed == nil && status != .stopped }
     /// Its agent waits for the user's OK (Allow, Always allow or Deny).
@@ -142,9 +146,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         return (task.isEmpty ? request : task).split(separator: "\n").first.map(String.init) ?? request
     }
 
-    /// The one line a finished job is known by.
+    /// The one line a finished job is known by; a waiting one says what for.
     var line: String {
-        switch status {
+        if let waiting, status == .queued { return Self.waitingLine(waiting.text) }
+        return switch status {
         case .queued, .running: step
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
         case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
@@ -579,7 +584,8 @@ extension Job {
     /// The one line a job's row says under its title, as the iPhone's `Job.line`: the step while it
     /// runs, else the summary's first line.
     nonisolated var line: String {
-        switch status {
+        if let waiting, status == .queued { return Self.waitingLine(waiting.text) }
+        return switch status {
         case .queued, .running: step
         case .done: summary.split(separator: "\n").first.map(String.init) ?? "Done"
         case .failed, .stopped, .interrupted: summary.split(separator: "\n").first.map(String.init) ?? status.rawValue.capitalized
@@ -591,28 +597,44 @@ extension Job {
     /// moved since its last round and starts a new one where it went (docs/runner-api.md).
     nonisolated var resumable: Bool { session != nil || (started != nil && !(moves ?? []).isEmpty) }
 
-    /// Where the list puts the job (Shared/JobList.swift): what needs you first, then the ones
-    /// working, then published ones whose pull request is still open, then everything else.
+    /// "After #223 merges", "Runner update": a waiting job's row, under the Waiting heading (#238).
+    nonisolated static func waitingLine(_ text: String) -> String { text.prefix(1).uppercased() + text.dropFirst() }
+
+    /// Where the list puts the job (Shared/JobList.swift): what needs you, the ones working, the
+    /// ones waiting their turn (#238), published ones whose pull request is still open, then
+    /// everything else.
     nonisolated var group: JobGroup {
         if needsYou { return .needsYou }
+        if isWaiting { return .waiting }
         if isActive { return .working }
         if status == .done, published != nil, (pullRequestState ?? "OPEN") == "OPEN" { return .inReview }
         return .done
     }
 
+    /// Nothing more is to happen for it, so Clear done may take it (`JobList.settled`, #280): it
+    /// was dismissed or stopped, its pull request was merged or closed, or it ended with nothing
+    /// to publish. `jobs` is the list it's in, where a review job finds the job it reviews.
+    nonisolated func settled(among jobs: [Job]) -> Bool {
+        let author = reviewOf.flatMap { id in jobs.first { $0.id == id } }
+        return JobList.settled(active: isActive || waiting != nil, needsYou: needsYou, letGo: dismissed != nil || status == .stopped,
+                               openPullRequest: published != nil && (pullRequestState ?? "OPEN") == "OPEN",
+                               author: author.map { $0.settled(among: []) })
+    }
+
     /// Whether the list shows the job after the last Clear done, on any app (Shared/JobList.swift).
-    nonisolated func listed(after clearedAt: Date?) -> Bool {
-        JobList.lists(active: isActive, needsYou: needsYou, finished: finished, clearedAt: clearedAt)
+    nonisolated func listed(after clearedAt: Date?, among jobs: [Job]) -> Bool {
+        JobList.lists(settled: settled(among: jobs), finished: finished, clearedAt: clearedAt)
     }
 
     /// Clear done would take it from the list (Shared/JobList.swift).
-    nonisolated var clearable: Bool { JobList.clears(active: isActive, needsYou: needsYou) }
+    nonisolated func clearable(among jobs: [Job]) -> Bool { JobList.clears(settled: settled(among: jobs)) }
 
     /// The status pill, the same on the iPhone and the Mac: how it's going, how it ended, and
     /// where its pull request is. A job you let go says Dismissed, however it ended.
     nonisolated var badge: JobBadge {
         if dismissed != nil { return JobBadge(text: "Dismissed", tone: .gray) }
         switch status {
+        case .queued where waiting != nil: return .waiting
         case .queued: return JobBadge(text: "Starting", tone: .blue)
         case .running: return JobBadge(text: "Working", tone: .blue)
         case .done where canPublish: return JobBadge(text: "Ready to publish", tone: .orange)

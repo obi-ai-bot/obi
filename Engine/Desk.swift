@@ -975,6 +975,7 @@ final class Desk {
         if runningCount < maxRunning && !older { return catchUp ? startCaughtUp(prepared) : start(prepared) }
         var job = prepared
         job.step = JobSlots.waitLine(running: runningCount, of: maxRunning)
+        job.waiting = .slot
         replace(job)
         if !waiting.contains(where: { $0.id == job.id }) { waiting.append(job) }
         // It waits behind an older job with a slot free (one it caught up for, given back): the
@@ -995,6 +996,15 @@ final class Desk {
         }
     }
 
+    /// Queued while the runner drains for an update: it starts once the update is done or cancelled.
+    private func waitForUpdate(_ job: Job) {
+        var queued = job
+        queued.step = "Waiting for runner update"
+        queued.waiting = .update
+        if !waiting.contains(where: { $0.id == job.id }) { waiting.append(queued) }
+        replace(queued)
+    }
+
     /// A job whose worktree was set up a while ago (it waited for a slot, or for a restart): its
     /// branch moves to the base as GitHub has it now, then it starts (or waits again), so it works on
     /// top of what merged meanwhile rather than conflict with it (#209). It fails, saying why, when
@@ -1002,6 +1012,8 @@ final class Desk {
     private func startCaughtUp(_ job: Job) {
         var job = job
         job.step = "Bringing \(job.branch) up to date with \(job.base ?? "its base")"
+        // Getting ready: nothing holds it now.
+        job.waiting = nil
         replace(job, save: false)
         updatePreparing.insert(job.id)
         startingUp.insert(job.id)
@@ -1379,13 +1391,7 @@ final class Desk {
     func lists(_ id: String) -> Bool { jobs.contains { $0.id == id } }
 
     private func start(_ prepared: Job) {
-        if drainingForUpdate {
-            var queued = prepared
-            queued.step = "Waiting for runner update"
-            replace(queued)
-            if !waiting.contains(where: { $0.id == prepared.id }) { waiting.append(prepared) }
-            return
-        }
+        if drainingForUpdate { return waitForUpdate(prepared) }
         var job = prepared
         job.status = .running
         job.phase = .work

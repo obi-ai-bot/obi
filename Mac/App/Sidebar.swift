@@ -16,7 +16,7 @@ nonisolated enum ChatSelection: Hashable, Sendable {
 nonisolated enum SidebarSections {
     /// A job in Agents: running, or needing you, with its dot.
     struct AgentRow: Identifiable, Equatable, Sendable {
-        enum Dot: Sendable { case working, needsYou }
+        enum Dot: Sendable { case working, waiting, needsYou }
         var job: Job
         var local: Bool
         var dot: Dot
@@ -42,12 +42,14 @@ nonisolated enum SidebarSections {
         rows.isEmpty ? "None" : "\(rows.count) active"
     }
 
-    /// The jobs the sidebar lists under Agents: every one that's queued or running, and every one
-    /// that needs you, this Mac's and the runner's, most recently active first. Dismissed and finished jobs stay
+    /// The jobs the sidebar lists under Agents: every one that's queued or running (a gray dot for
+    /// one waiting its turn, #238), and every one that needs you, this Mac's and the runner's, most
+    /// recently active first. Dismissed and finished jobs stay
     /// out: the window's job cards and the island's list have them.
     static func agents(local: [Job], runner: [Job]) -> [AgentRow] {
         let rows = local.map { ($0, true) } + runner.map { ($0, false) }
         return rows.compactMap { job, local in
+            if job.isWaiting { return AgentRow(job: job, local: local, dot: .waiting) }
             if job.isActive { return AgentRow(job: job, local: local, dot: .working) }
             if job.needsYou { return AgentRow(job: job, local: local, dot: .needsYou) }
             return nil
@@ -163,8 +165,8 @@ struct SidebarView: View {
                             Text(row.job.line).font(.system(size: 11)).foregroundStyle(.white.opacity(0.5)).lineLimit(1)
                         }
                         Spacer(minLength: 6)
-                        Circle().fill(row.dot == .working ? Color.blue : Color.orange).frame(width: 8, height: 8)
-                            .accessibilityLabel(row.dot == .working ? "Working" : "Needs you")
+                        Circle().fill(row.dot.color).frame(width: 8, height: 8)
+                            .accessibilityLabel(row.dot.label)
                     }
                     .padding(.horizontal, 10).padding(.vertical, 8)
                     .background(.white.opacity(picked ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -224,5 +226,23 @@ struct SidebarView: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+extension SidebarSections.AgentRow.Dot {
+    var color: Color {
+        switch self {
+        case .working: .blue
+        case .waiting: .gray
+        case .needsYou: .orange
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .working: "Working"
+        case .waiting: "Waiting"
+        case .needsYou: "Needs you"
+        }
     }
 }
