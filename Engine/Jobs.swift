@@ -174,6 +174,12 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
 
     /// "Moved from Codex · Deskree to Claude Code · Personal": its latest move, or nil.
     var movedLine: String? { moves?.last.map { "Moved from \($0.from) to \($0.to)" } }
+    /// How much the job asks the user (Engine/Permissions.swift): Settings › Permissions' default
+    /// when it was dispatched, or what the user changed it to. Nil on older jobs, which are `bypass`.
+    var mode: PermissionMode?
+    /// The command or edit its agent waits for the user's OK on, or nil. The job stays running,
+    /// its agent idle and its clocks paused; a runner restart leaves it interrupted, keeping it.
+    var permission: Permission?
 
     var maxRounds: Int { rounds ?? 1 }
     /// How many times in a day Oby rebases a pull request that conflicts with its base by itself
@@ -183,6 +189,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var reviewCap: Int { Review.maxRounds + (extraReviews ?? 0) }
     /// Its agent asked the user something and waits for the answer: the inbox has it.
     var waitsForAnswer: Bool { question != nil && dismissed == nil && status != .stopped }
+    /// Its agent waits for the user's OK on a command or an edit: the inbox has it.
+    var waitsForPermission: Bool { permission != nil && dismissed == nil && status != .stopped }
+    var currentMode: PermissionMode { mode ?? .bypass }
     var currentRound: Int { round ?? 1 }
     /// It keeps going after a turn: there's a check to pass or more than one round.
     var loops: Bool { check != nil || maxRounds > 1 }
@@ -372,6 +381,9 @@ nonisolated enum AgentEvent: Equatable, Sendable {
     case cutOff(summary: String)
     /// Oby answered a permission prompt: nil when it allowed the action, else why it denied it.
     case permission(denied: String?)
+    /// A prompt Policy's fixed rules let through: the job's mode and the user's rules decide, and
+    /// the answer goes back with `AgentRun.answer` (now, or once the user answers).
+    case ask(ToolCall)
     /// Claude Code used up its `--max-turns` in this round without finishing.
     case maxTurns
     /// Whether Tetrix's MCP server is connected, or a call to one of its tools (Engine/TetrixUse.swift).
@@ -397,11 +409,18 @@ protocol AgentRun: AnyObject {
     func kill()
     /// Returns once its process has ended, or right away when it never started.
     func ended() async
+    /// Answers a prompt it asked about (`AgentEvent.ask`).
+    func answer(_ call: ToolCall, _ answer: ToolAnswer)
+    /// The job's mode changed: Claude Code's session switches in or out of plan, Codex's next turn
+    /// runs with the mode's sandbox and approvals.
+    func setMode(_ mode: PermissionMode)
 }
 
 extension AgentRun {
     /// One without a process of its own (a test's) has nothing to wait for.
     func ended() async {}
+    func answer(_ call: ToolCall, _ answer: ToolAnswer) {}
+    func setMode(_ mode: PermissionMode) {}
 }
 
 /// Ending an agent with everything it started: SIGTERM to its process group, then SIGKILL.
@@ -586,6 +605,11 @@ final class ClaudeAgent: AgentRun {
     var model: String?
     /// The most turns it takes for one message (`JobLimits.maxTurns`), or nil for no limit.
     var maxTurns: Int?
+    /// The job's mode: Plan starts Claude Code in its own plan mode; every other mode starts it in
+    /// its default mode, which asks Oby about every command and edit. Never its bypass mode.
+    var mode = PermissionMode.bypass
+    /// The prompts waiting for an answer, by request id: their input goes back with an allow.
+    private var pending: [String: [String: Any]] = [:]
     private var onEvent: (AgentEvent) -> Void = { _ in }
     private var finished = false
     /// The latest turn's result. The job ends when Claude Code exits, not when a turn ends.
@@ -606,18 +630,67 @@ final class ClaudeAgent: AgentRun {
         self.resume = resume
     }
 
+    /// Where a job's Claude Code reads its MCP servers from (`mcpConfig`): in Oby's own folder,
+    /// outside the worktree and hidden from the sandbox but for this one file, shown read-only.
+    /// Written as the agent starts (0600) and removed once its turn ends or it exits (`dropMCP`).
+    nonisolated static func mcpFile(worktree: URL) -> URL {
+        Workspace.root.appending(path: "mcp/\(worktree.lastPathComponent).json")
+    }
+
+    /// What a server may keep: what it needs to start. No `headers` (an Authorization token) and
+    /// no `env` (a token for a command), which would reach the agent.
+    nonisolated static let mcpKeys: Set<String> = ["type", "url", "command", "args"]
+
+    /// The account's own MCP servers (Tetrix), from its `.claude.json`, as `--mcp-config` reads
+    /// them: a job reads none of the account's settings files, which would drop them too. Only
+    /// `mcpKeys` of each: a server that needs a header or an environment variable is left out, and
+    /// one signed in with OAuth keeps its login in the account's own store.
+    nonisolated static func mcpConfig(configDirectory: URL?) -> Data {
+        let file = configDirectory?.appending(path: ".claude.json") ?? URL(filePath: "\(Agents.home)/.claude.json")
+        let account = (try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        var servers: [String: Any] = [:]
+        for (name, value) in account?["mcpServers"] as? [String: Any] ?? [:] {
+            guard let server = value as? [String: Any], server["headers"] == nil, server["env"] == nil else { continue }
+            servers[name] = server.filter { mcpKeys.contains($0.key) }
+        }
+        return (try? JSONSerialization.data(withJSONObject: ["mcpServers": servers], options: [.sortedKeys])) ?? Data(#"{"mcpServers":{}}"#.utf8)
+    }
+
+    /// Writes the job's MCP config where only Oby reads it, 0600.
+    nonisolated static func writeMCP(_ data: Data, to file: URL) throws {
+        let folder = file.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? FileManager.default.removeItem(at: file)
+        guard FileManager.default.createFile(atPath: file.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            throw Shell.Failure(message: "Oby couldn't write the agent's MCP config.")
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+
+    /// Claude Code has read its MCP config by the end of its first turn: it goes.
+    private func dropMCP() {
+        try? FileManager.default.removeItem(at: Self.mcpFile(worktree: worktree))
+    }
+
     /// The command line and environment Claude Code starts with.
-    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil) throws -> (arguments: [String], environment: [String: String]) {
-        // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
-        // mcpServers (Tetrix) stay; only its claude.ai connectors are off.
+    nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil,
+                                   mode: PermissionMode = .bypass) throws -> (arguments: [String], environment: [String: String]) {
+        // Never --bare: it skips the user's own login. No settings file at all, the account's
+        // included: its permission rules (an allow list, a defaultMode) would let commands through
+        // before Oby is asked (#134), and a repo's .claude/settings.json could too. The account's
+        // own mcpServers (Tetrix) come explicitly, and nothing else does: no claude.ai connectors.
+        // Its mode is always said: its plan mode, or its default one, which asks Oby about every
+        // command and edit.
         let arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                              "--verbose", "--replay-user-messages", "--permission-prompt-tool", "stdio",
-                             // Only the account's own settings: a repo's .claude/settings.json could allow tools past Oby.
-                             "--setting-sources", "user",
+                             "--setting-sources", "", "--strict-mcp-config", "--mcp-config", mcpFile(worktree: worktree).path,
+                             "--permission-mode", StreamJSON.claudeMode(mode),
                              "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
                             + (maxTurns.map { ["--max-turns", String($0)] } ?? [])
                             + (resume.map { ["--resume", $0] } ?? []),
-                            in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude")
+                            in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude",
+                            // Oby's folder is hidden in the box: only the MCP config shows, read-only.
+                            reading: [mcpFile(worktree: worktree).path])
         let environment = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 }
             .merging(AppleCheck.environment(worktree: worktree)) { $1 })
         return (arguments, environment)
@@ -626,7 +699,15 @@ final class ClaudeAgent: AgentRun {
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
         self.onEvent = onEvent
         process.executableURL = URL(filePath: "/usr/bin/env")
-        let launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns)
+        // Before the command line: the box shows the file only when it exists.
+        try Self.writeMCP(Self.mcpConfig(configDirectory: configDirectory), to: Self.mcpFile(worktree: worktree))
+        let launch: (arguments: [String], environment: [String: String])
+        do {
+            launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mode: mode)
+        } catch {
+            dropMCP()
+            throw error
+        }
         process.arguments = launch.arguments
         process.environment = launch.environment
         process.currentDirectoryURL = worktree
@@ -635,7 +716,12 @@ final class ClaudeAgent: AgentRun {
         let log = worktree.appending(path: ".oby/agent.log")
         _ = FileManager.default.createFile(atPath: log.path, contents: nil)
         process.standardError = (try? FileHandle(forWritingTo: log)) ?? FileHandle.nullDevice
-        group = try ProcessGroup.run(process)
+        do {
+            group = try ProcessGroup.run(process)
+        } catch {
+            dropMCP()
+            throw error
+        }
 
         Task {
             do {
@@ -646,6 +732,7 @@ final class ClaudeAgent: AgentRun {
             // The output ends when the process does: how it ended is what's left to say, since a
             // process that's killed says nothing on stderr.
             let exit = await Self.exit(of: process)
+            self.dropMCP()
             let job = worktree.lastPathComponent
             guard let result, !waiting else {
                 Logger.jobs.error("job \(job, privacy: .public): Claude Code ended mid-turn, \(exit, privacy: .public)")
@@ -721,14 +808,15 @@ final class ClaudeAgent: AgentRun {
             return
         }
         if let (id, tool, toolInput) = StreamJSON.permission(message) {
-            let denied = Policy.deny(tool: tool, input: toolInput, worktree: worktree)
-            if let denied {
+            // Policy's fixed denials first, in every mode; then the job's mode and the user's rules (Desk).
+            if let denied = Policy.deny(tool: tool, input: toolInput, worktree: worktree) {
                 Logger.jobs.notice("denied \(tool, privacy: .public): \(denied, privacy: .public)")
                 answer(id, ["behavior": "deny", "message": denied])
-            } else {
-                answer(id, ["behavior": "allow", "updatedInput": toolInput])
+                onEvent(.permission(denied: denied))
+                return
             }
-            onEvent(.permission(denied: denied))
+            pending[id] = toolInput
+            onEvent(.ask(ToolCall.claude(id, tool: tool, input: toolInput)))
             return
         }
         for event in StreamJSON.events(message) {
@@ -736,6 +824,7 @@ final class ClaudeAgent: AgentRun {
                 // The turn's result. Desk decides whether another round follows; the job ends when
                 // the process does.
                 result = (summary, failed)
+                dropMCP()
                 onEvent(.step(summary.split(separator: "\n").first.map(String.init) ?? "Finishing"))
                 // ponytail: nothing echoed at all means this Claude Code doesn't replay messages, so
                 // every result ends a turn, as before.
@@ -754,6 +843,21 @@ final class ClaudeAgent: AgentRun {
         guard !finished else { return }
         finished = true
         onEvent(event)
+    }
+
+    func answer(_ call: ToolCall, _ decision: ToolAnswer) {
+        guard let input = pending.removeValue(forKey: call.request) else { return }
+        answer(call.request, StreamJSON.answer(decision, tool: call.tool, input: input))
+    }
+
+    /// Claude Code's own mode follows the job's: plan, or its default mode, where every command and
+    /// edit comes to Oby.
+    func setMode(_ mode: PermissionMode) {
+        guard mode != self.mode else { return }
+        self.mode = mode
+        guard process.isRunning else { return }
+        send(["type": "control_request", "request_id": UUID().uuidString,
+              "request": ["subtype": "set_permission_mode", "mode": StreamJSON.claudeMode(mode)]])
     }
 
     private func answer(_ id: String, _ response: [String: Any]) {
@@ -812,6 +916,26 @@ nonisolated enum StreamJSON {
               let request = message["request"] as? [String: Any], request["subtype"] as? String == "can_use_tool",
               let tool = request["tool_name"] as? String else { return nil }
         return (id, tool, request["input"] as? [String: Any] ?? [:])
+    }
+
+    /// Claude Code's mode for the job's: its plan mode, or its default one. Never `bypassPermissions`
+    /// or `acceptEdits`: Oby answers every prompt, so its fixed rules hold.
+    static func claudeMode(_ mode: PermissionMode) -> String { mode == .plan ? "plan" : "default" }
+
+    /// The `control_response` for Oby's answer. An always is a plain allow: Claude Code gets no
+    /// rule of its own (`updatedPermissions`), since a session rule would let later calls through
+    /// without asking Oby, past the user's deny rules and a rule they forgot. Oby's saved rule
+    /// answers those prompts instead. Approving a plan (ExitPlanMode) leaves plan mode for the default one.
+    static func answer(_ answer: ToolAnswer, tool: String, input: [String: Any]) -> [String: Any] {
+        switch answer {
+        case .deny(let message):
+            return ["behavior": "deny", "message": message]
+        case .allow where tool == "ExitPlanMode", .always where tool == "ExitPlanMode":
+            return ["behavior": "allow", "updatedInput": input,
+                    "updatedPermissions": [["type": "setMode", "mode": "default", "destination": "session"]]]
+        case .allow, .always:
+            return ["behavior": "allow", "updatedInput": input]
+        }
     }
 
     static func events(_ message: [String: Any]) -> [AgentEvent] {
@@ -980,8 +1104,9 @@ nonisolated enum Limits {
     }
 }
 
-/// Oby's answers to an agent's permission prompts until F3 brings them to the notch: work
-/// inside the job's worktree is allowed, publishing is not (only Oby publishes).
+/// Oby's fixed answers to an agent's permission prompts, in every mode (Bypass too): work inside the
+/// job's worktree may go on, publishing never does (only Oby publishes). What passes, the job's
+/// mode and the user's rules decide (Engine/Permissions.swift).
 nonisolated enum Policy {
     // ponytail: a pattern deny-list is leaky on purpose-built commands; the real fences are that
     // the agent has no GitHub login and Oby's clone can't push. F3 asks the user instead.
@@ -1362,6 +1487,7 @@ nonisolated enum Prompts {
         }
         lines.append(foreground)
         if apple, let line = AppleCheck.agentLine(job) { lines.append(line) }
+        if job.mode == .plan { lines.append(planFirst) }
         lines.append("Finish with a short summary. Its first line is one sentence the user will see in the notch.")
         if job.issue != nil { lines.append(IssueSync.coverageInstruction) }
         lines.append(Inbox.howToAsk)
@@ -1391,6 +1517,8 @@ nonisolated enum Prompts {
         return "Other jobs are changing the same files right now, each on its own branch:\n\n" + named.joined(separator: "\n")
             + "\n\nKeep your change to what the task needs: don't move, rename or reformat code you don't have to. Whichever merges first, Oby rebases the other onto it, so expect a rebase."
     }
+    /// What an agent in Plan mode is told: this turn only reads, and ends with the plan.
+    static let planFirst = "Plan first: in this turn only read (no edits, no commits, no commands that change anything). When you know what you'd do, present your plan (with ExitPlanMode if you have it, otherwise as your summary, in Markdown) and stop: the user approves it, and picks how you go on, before you change anything."
 
     /// What an agent hears when it takes a job over from `previous` (like "Codex · Deskree"), whose
     /// account hit its limit mid-round: the task as the first agent heard it, what earlier rounds
@@ -1468,6 +1596,8 @@ nonisolated final class JobStore {
         // The inbox (Engine/Inbox.swift) and the conversation (Engine/Conversation.swift), the same way.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS conversation (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
+        // Settings › Permissions and the saved rules (Engine/Permissions.swift).
+        createPermissionTables()
     }
 
     deinit { sqlite3_close(db) }

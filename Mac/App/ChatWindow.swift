@@ -497,6 +497,9 @@ private struct JobPane: View {
                     publishing: JobView.Publishing(action: { Publish.action(for: job, base: job.base ?? "") },
                                                    publish: { _ in _ = try await desk.publish(job.id, approve: Publish.touchID) }),
                     onMessage: { try desk.message(job.id, $0) }, onDismiss: { try desk.dismiss(job.id) },
+                    extras: RunnerJobExtras(local: job),
+                    onMode: { try desk.changeMode(job.id, to: $0) },
+                    onPermission: { try desk.answerPermission(job.id, $0, message: $1) },
                     onStartNow: { try desk.startNow(job.id) })
         } else {
             JobView(job: job, place: feed.name, account: nil,

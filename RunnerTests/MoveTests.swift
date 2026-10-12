@@ -254,6 +254,21 @@ struct MoveJobTests {
         #expect(second.prompt.contains("The message that started this round:\n\n> finish the other half"))
     }
 
+    /// Moved while its agent waits for the user's OK (#134): the prompt goes with the agent it left,
+    /// and the new one runs with its clocks going.
+    @Test func aMoveDropsTheWaitingPermission() async throws {
+        desk.defaultMode = .ask
+        let first = try await running("asking")
+        first.onEvent(.session("thread-1"))
+        first.onEvent(.ask(ToolCall(request: "r1", tool: "Bash", command: "swift test")))
+        #expect(desk.job("asking")?.waitsForPermission == true && desk.inbox.contains { $0.job == "asking" && $0.isOpen })
+        let moved = try desk.move("asking", to: MoveTarget(agent: "claude"))
+        #expect(moved.permission == nil && desk.job("asking")?.permission == nil)
+        #expect(!desk.inbox.contains { $0.job == "asking" && $0.kind == .permission && $0.isOpen })
+        try await until { made.agents.count == 2 }
+        #expect(desk.job("asking")?.status == .running && desk.job("asking")?.step == "Moved to Claude Code · Personal")
+    }
+
     @Test func aQueuedJobStartsWhereItWasMoved() async throws {
         let gate = AsyncStream<Void>.makeStream()
         desk.prepare = { job in
@@ -310,7 +325,7 @@ struct MoveJobTests {
         let schema = try #require(JSONSerialization.jsonObject(with: Plan.schema(for: context)) as? [String: Any])
         let properties = try #require(schema["properties"] as? [String: Any])
         #expect(((properties["jobs"] as? [String: Any])?["items"] as? [String: Any])?["enum"] as? [String] == ["ab12cd34", "d0ne0000"])
-        #expect((properties["action"] as? [String: Any])?["enum"] as? [String] == ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore"])
+        #expect((properties["action"] as? [String: Any])?["enum"] as? [String] == ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore", "answer_permission", "set_mode"])
         #expect((schema["required"] as? [String])?.contains("move") == true)
         // Without the brain, rules move the only job there is.
         let rules = Rules.plan("move it to Fable", context: BrainContext(accounts: [:], repos: [], movable: ["ab12cd34"]))

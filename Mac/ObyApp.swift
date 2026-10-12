@@ -37,7 +37,7 @@ private struct SettingsTabs: View {
 
     var body: some View {
         TabView(selection: Binding { selection.tab } set: { selection.tab = $0 }) {
-            SettingsView().tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general)
+            SettingsView(desk: app.island.desk).tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general)
             RunnerSettingsView(feed: app.island.feed).tabItem { Label("Runner", systemImage: "server.rack") }.tag(SettingsTab.runner)
             AccountsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Accounts", systemImage: "person.2") }.tag(SettingsTab.accounts)
             ModelsSettingsView(feed: app.island.feed).tabItem { Label("Models", systemImage: "cpu") }.tag(SettingsTab.models)

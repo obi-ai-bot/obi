@@ -351,6 +351,7 @@ extension InboxItem {
         case "audit": "Issue audit"
         case "merge": "Not merged"
         case "failure": "Oby failure"
+        case "permission": "Permission"
         default: "Failed"
         }
         return "\(label) · \(title) · \(Elapsed.waiting(since: created, now: now))"

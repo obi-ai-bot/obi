@@ -15,11 +15,12 @@ struct JobView: View {
     let publishing: Publishing?
     let onMessage: (String) async throws -> Void
     let onDismiss: () async throws -> Void
-    /// What the runner says about its job that Engine's Job doesn't read yet; nil for this Mac's own.
+    /// Its mode, the permission it waits on and its question with the plan: what the runner says
+    /// about its job, or this Mac's own job's (`RunnerJobExtras(local:)`).
     var extras: RunnerJobExtras? = nil
-    /// Changes a runner job's mode; nil for this Mac's own jobs (#134 brings modes to them).
+    /// Changes the job's mode, here or on the runner.
     var onMode: ((RunnerMode) async throws -> Void)? = nil
-    /// Allow, Always allow or Deny, with words for a deny; nil for this Mac's own jobs.
+    /// Allow, Always allow or Deny, with words for a deny.
     var onPermission: ((RunnerPermission.Decision, String?) async throws -> Void)? = nil
     /// The job's alert's Publish opened this screen: it shows the sentence and asks for Touch ID now.
     var publishNow = false
@@ -153,7 +154,7 @@ struct JobView: View {
                 .id(permission.id)
                 .padding(14)
                 .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        } else if job.waitsForAnswer, let question = extras?.question ?? job.question.map({ Question(text: $0.text, options: $0.options) }) {
+        } else if job.waitsForAnswer, let question = extras?.question ?? job.question.map({ Question(text: $0.text, options: $0.options, recommended: $0.recommended, plan: $0.plan) }) {
             DecisionCard(title: question.text, plan: question.plan, options: question.cardOptions, busy: busy,
                          onChoose: { option in Task { await run { try await onMessage(option.answer) } } },
                          onWords: { words in Task { await run { try await onMessage(words) } } })
@@ -546,5 +547,19 @@ private struct StageRow: View {
             }
             Image(systemName: symbol).font(.system(size: 15)).foregroundStyle(color).accessibilityHidden(true)
         }
+    }
+}
+
+extension Desk {
+    /// The Mode menu of one of this Mac's own jobs (#134), as the runner's does for its jobs.
+    func changeMode(_ id: String, to mode: RunnerMode) throws {
+        guard let mode = PermissionMode(rawValue: mode.rawValue) else { return }
+        try setMode(id, mode)
+    }
+
+    /// Allow, Always allow or Deny on what one of this Mac's own jobs waits for; words go with a deny.
+    func answerPermission(_ id: String, _ decision: RunnerPermission.Decision, message: String?) throws {
+        guard let permission = job(id)?.permission, let decision = PermissionDecision(rawValue: decision.rawValue) else { return }
+        try answerPermission(id, permission.id, decision, message: message)
     }
 }

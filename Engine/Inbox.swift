@@ -25,6 +25,8 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         case merge
         /// A failure's post-mortem found an Oby bug or a repeat (Engine/Failures.swift): Fix it starts the fix job.
         case failure
+        /// The job's agent waits for the user's OK to run a command or edit a file (`Job.permission`, #134).
+        case permission
 
         /// The answers that change something on an item of this kind, besides Later and Done (#215).
         /// A question's are its own options, or the user's words; an audit's `Use <column> instead`
@@ -37,11 +39,12 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
             case .merge: [Inbox.oneMoreRound, Inbox.tryAgain, Inbox.dismiss]
             case .audit: [Inbox.addColumn, Inbox.tryAgain, Inbox.ignoreStatus]
             case .failure: [Failures.fixIt, Inbox.dismiss]
+            case .permission: [Inbox.allow, Inbox.alwaysAllow, Inbox.deny]
             }
         }
 
-        /// Any words answer it: a question.
-        var takesWords: Bool { self == .question }
+        /// Any words answer it: a question, or a permission (words of the user's own are its no, for the agent).
+        var takesWords: Bool { self == .question || self == .permission }
 
         /// Whether answering `option` on this kind changes something.
         func acts(on option: String) -> Bool {
@@ -112,6 +115,22 @@ nonisolated enum Inbox {
         answer.wholeMatch(of: /Use (.+) instead/).map { String($0.1) }
     }
 
+    /// What a permission's item offers; words of the user's own say no, and reach the agent.
+    static let allow = "Allow"
+    static let alwaysAllow = "Always allow"
+    static let deny = "Deny"
+
+    /// The decision a permission item's answer stands for, and the user's words for the agent:
+    /// any other answer is a no with those words.
+    static func decision(_ answer: String) -> (PermissionDecision, message: String?) {
+        switch answer.lowercased() {
+        case allow.lowercased(), "yes": (.allow, nil)
+        case alwaysAllow.lowercased(): (.always, nil)
+        case deny.lowercased(), "no": (.deny, nil)
+        default: (.deny, answer)
+        }
+    }
+
     /// The item `job` calls for now, or nil when it needs nothing from the user. `limited`: it
     /// failed because no account had room.
     static func need(of job: Job, limited: Bool = false) -> InboxItem? {
@@ -119,6 +138,9 @@ nonisolated enum Inbox {
         func item(_ kind: InboxItem.Kind, _ id: String, _ text: String, _ options: [String]) -> InboxItem {
             InboxItem(id: "\(job.id)-\(id)", kind: kind, job: job.id, title: job.shortTitle, text: text, options: options,
                       details: details(options), created: .now)
+        }
+        if let permission = job.permission, job.status != .stopped {
+            return item(.permission, "permission-\(permission.id)", permission.title, permission.always == nil ? [allow, deny] : [allow, alwaysAllow, deny])
         }
         if let question = job.question, job.status != .stopped {
             // One per question: what the user said so far tells them apart. The asker's own

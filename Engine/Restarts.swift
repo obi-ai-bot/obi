@@ -94,7 +94,7 @@ extension Desk {
     /// The runner started again, after any restart: every job that was queued or running when it
     /// went down carries on in its own session and worktree, hearing the restart notice, then the
     /// message it was about to get. One picked up twice in the last 30 minutes stays interrupted,
-    /// with one inbox item. Jobs waiting for an answer, or stopped, were never in `wentDown`. Then
+    /// with one inbox item. Jobs waiting for an answer or an OK, or stopped, were never in `wentDown`. Then
     /// reviews whose verdict didn't reach their author are applied (`resumeReviews`).
     func resumeAfterRestart() {
         guard let restarts else { return }

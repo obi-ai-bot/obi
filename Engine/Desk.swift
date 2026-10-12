@@ -96,7 +96,7 @@ final class Desk {
     private var updateWaiting: [String: (job: Job, prompt: String, resume: String?, notice: String?)] = [:]
     private var updatePreparing: Set<String> = []
     var updateIsIdle: Bool {
-        active.allSatisfy { $0.status == .queued || updateWaiting[$0.id] != nil || $0.question != nil } && updateIsBetweenSteps
+        active.allSatisfy { $0.status == .queued || updateWaiting[$0.id] != nil || $0.question != nil || $0.permission != nil } && updateIsBetweenSteps
     }
     /// No job is inside a step of its end of turn: counting its commits and publishing, a review's
     /// verdict reaching its author (its check run, then the round or the Mac check), merging. A
@@ -147,7 +147,7 @@ final class Desk {
         onInboxChange(item)
     }
 
-    private let store: JobStore
+    let store: JobStore
     /// The repositories the brain and the Lead may choose from; `refresh` reads them, tests set them.
     var repos: [String] = []
     /// The roadmap board as the Lead last read it (Engine/Lead.swift), for claims.
@@ -196,7 +196,10 @@ final class Desk {
     var runningCount: Int { jobs.filter(\.takesSlot).count + startingUp.count }
     /// The latest plans until they're dispatched: the runner's API dispatches them by job id.
     private var drafts: [Draft] = []
-    private var agents: [String: any AgentRun] = [:]
+    var agents: [String: any AgentRun] = [:]
+    /// Each job's permission prompts waiting for the user, oldest first (Engine/Permissions.swift):
+    /// the first is the job's `permission`, or its plan question.
+    var asks: [String: [Desk.Ask]] = [:]
     /// Agents told to stop whose own stop hasn't ended them yet (`Halt.grace`): quitting ends them too.
     private var stopping: [ObjectIdentifier: any AgentRun] = [:]
     /// Jobs whose one turn ended: their agent is finishing and takes no more words.
@@ -225,11 +228,14 @@ final class Desk {
     /// Each running job's round timer and job cap (case 3.1): one ending first holds the job. The
     /// round's clock stands still while its agent waits for an Apple check (`paceRound`, #203).
     private var roundTimers: [String: RoundTimer] = [:]
-    private var jobTimers: [String: Task<Void, Never>] = [:]
+    private var jobTimers: [String: RoundTimer] = [:]
+    /// Jobs waiting for the user's OK or answer (#134): both clocks stand still (`pauseClocks`),
+    /// and that time doesn't count.
+    private var waitingForUser: Set<String> = []
     /// The fingerprint of each looping job's last failing round (Engine/Guards.swift).
     private var failures: [String: String] = [:]
     /// How many actions in a row Oby denied each running job.
-    private var denials: [String: Int] = [:]
+    var denials: [String: Int] = [:]
     /// Each looping job's work after a turn (its check, then the round that follows): stopping the
     /// job cancels it, which ends a check still running.
     private var afterTurns: [String: Task<Void, Never>] = [:]
@@ -313,6 +319,12 @@ final class Desk {
     /// secret scan, and quotes it as a file for the author's next round. Tests put in their own.
     @ObservationIgnored var postReview: (_ author: Job, _ run: CheckRun) async throws -> URL = CheckRun.post
     @ObservationIgnored var quoteReview: (_ author: Job, _ file: String, _ text: String) throws -> Void = Review.quote
+    /// Answers a waiting permission, or changes the mode of jobs elsewhere (the runner's, on the Mac),
+    /// when the brain names one: nil once it went through, else why not.
+    @ObservationIgnored var answerElsewhere: (_ job: Job, _ decision: PermissionDecision, _ message: String?) async -> String? = { _, _, _ in
+        "Oby can't reach that job from here."
+    }
+    @ObservationIgnored var modeElsewhere: (_ job: Job, _ mode: PermissionMode) async -> String? = { _, _ in "Oby can't reach that job from here." }
     /// Merge checks on the user's Mac (Engine/Checks.swift): the commit a review job read, the
     /// results' check run, the secret scan of what a merge lands, and the merge. Tests put in their own.
     @ObservationIgnored var reviewedHead: (_ review: String) async -> String? = { id in
@@ -390,16 +402,18 @@ final class Desk {
             .union(down.map(\.id)).union(down.compactMap(\.reviewOf)).union(applying).subtracting(jobs.map(\.id))
         jobs += all.filter { wanted.contains($0.id) }
         // Running when Oby last quit (or crashed): it didn't finish. On the runner it carries on
-        // (`resumeAfterRestart`), unless it waits for the user's answer.
+        // (`resumeAfterRestart`), unless it waits for the user's answer or OK.
         for index in jobs.indices.reversed() where jobs[index].isActive {
             // One waiting for its `startWhen` asks only about that, and keeps waiting (#216).
-            if restarts != nil && (jobs[index].question == nil || jobs[index].waitsToStart) {
+            if restarts != nil && ((jobs[index].question == nil && jobs[index].permission == nil) || jobs[index].waitsToStart) {
                 wentDown.append(jobs[index].id)
                 continue
             }
             // One waiting for the user's answer keeps waiting, nothing running (#206): the answer
-            // picks its session up again (`message`).
-            if restarts != nil {
+            // picks its session up again (`message`). One waiting for their OK on a permission is
+            // interrupted, keeping it (#134): its agent's prompt went down with it, and the answer
+            // picks the session up again with what it asked and the answer.
+            if restarts != nil && jobs[index].permission == nil {
                 jobs[index].step = "Waiting for your answer"
                 store.save(jobs[index])
                 continue
@@ -443,7 +457,8 @@ final class Desk {
             moveAccounts[state.account.agent, default: []].append(state.account.name)
         }
         return BrainContext(accounts: choices, repos: repos, briefing: briefing.text, quoted: briefing.quoted, jobs: briefing.stoppable,
-                            movable: briefing.jobs.map(\.job.id), models: Moves.models, moveAccounts: moveAccounts)
+                            movable: briefing.jobs.map(\.job.id), models: Moves.models, moveAccounts: moveAccounts,
+                            permissions: briefing.permissions)
     }
 
     /// What the brain is told before the user's words (Engine/Conversation.swift).
@@ -819,6 +834,7 @@ final class Desk {
                         return .reply("Oby couldn't plan when that starts: \(error.localizedDescription)")
                     }
                 }
+                job.mode = dispatch.mode ?? defaultMode
                 let reply = plan.reply.isEmpty ? "\(job.agentName) will \(dispatch.kind.rawValue) in \(job.repoName)." : plan.reply
                 drafts.append(Draft(said: said, reply: reply, job: job, guessed: result.by == "rules",
                                     suggestedModel: dispatch.complexity == .complex ? AgentModels.stronger[account.agent] : nil, route: route))
@@ -876,6 +892,8 @@ final class Desk {
             let places = [Briefing.Place(name: "this Mac", jobs: jobs, inbox: [])] + elsewhere()
             if Briefing.working(places) > 0, Briefing.contradicts(plan.reply) { return .reply(Briefing.workingLine(places)) }
             return .reply(plan.reply)
+        case .answerPermission, .setMode:
+            return .reply(await act(on: plan))
         }
     }
 
@@ -897,6 +915,8 @@ final class Desk {
     func enqueue(_ job: Job, why: String? = nil) -> Job {
         if let why { handoffs[job.id, default: []].append(why) }
         var job = job
+        // Settings › Permissions' default, unless the plan or the user chose one.
+        job.mode = job.mode ?? defaultMode
         job.phase = .prepare
         job.step = "Getting \(job.repoName) ready"
         jobs.insert(job, at: 0)
@@ -1019,7 +1039,7 @@ final class Desk {
     /// `startWhen`, when the client sends it, replaces what the plan's job waits for (#216; an empty
     /// list starts it at once), and a condition on an account runs it on that account.
     func dispatch(_ id: String, branch: String, account: String, rounds: Int? = nil, check: String?? = nil, model: String?? = nil,
-                  files: [String]? = nil, startWhen: [StartCondition]? = nil) throws -> Job {
+                  files: [String]? = nil, startWhen: [StartCondition]? = nil, mode: PermissionMode? = nil) throws -> Job {
         guard var draft = drafts.first(where: { $0.job.id == id }) else {
             throw Shell.Failure(message: "Oby doesn't have that plan any more. Ask again.")
         }
@@ -1037,6 +1057,7 @@ final class Desk {
             }
             draft.job.model = model == nil ? nil : AgentModels.stronger[draft.job.agent]
         }
+        if let mode { draft.job.mode = mode }
         return dispatch(draft)
     }
 
@@ -1169,7 +1190,10 @@ final class Desk {
         let check = afterTurns.removeValue(forKey: id)
         check?.cancel()
         handoffs[id, default: []].append("Moved from \(from) to \(to) by you.")
+        // What the agent it left waited for goes with it: the new one asks again if it needs to.
+        dropAsks(id)
         moved.question = nil
+        moved.permission = nil
         moved.phase = .work
         moved.step = "Moving to \(to)"
         replace(moved)
@@ -1207,6 +1231,23 @@ final class Desk {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Tell the agent something of 1 to 2,000 characters.") }
         guard let job = job(id) else { throw Shell.Failure(message: "There's no job \(id).") }
+        // A waiting permission takes the words as its no (the agent hears nothing else until it's
+        // answered); a waiting plan takes them as its answer.
+        if let ask = asks[id]?.first, job.isActive {
+            if ask.call.plan != nil { return try answerPlan(id, text) }
+            return try answerPermission(id, ask.permission.id, .deny, message: text)
+        }
+        if job.question?.plan != nil { return try answerPlan(id, text) }
+        if !job.isActive, let permission = job.permission { return try answerPermission(id, permission.id, .deny, message: text) }
+        try tell(id, text)
+    }
+
+    /// The user's words reach the job's agent: a running one hears them now; a finished one picks
+    /// its session up again for one more round. `agentText` is what the agent hears, when it isn't
+    /// the words themselves (a plan approved, a permission answered after a restart).
+    func tell(_ id: String, _ text: String, agentText: String? = nil) throws {
+        guard let job = job(id) else { throw Shell.Failure(message: "There's no job \(id).") }
+        let heard = agentText ?? text
         // Waiting for its answer since the runner restarted: no agent hears it, so the answer
         // picks its session up again, in the same round (#206).
         let waiting = job.isActive && job.question != nil && agents[id] == nil && updateWaiting[id] == nil && handovers[id] == nil
@@ -1215,26 +1256,29 @@ final class Desk {
             guard let agent = agents[id], !ending.contains(id) else {
                 if let held {
                     // Its message waits for the update: the words join it, neither replaces the other.
-                    _ = try vault.forAgent(text)
+                    // What the agent is to hear (a plan approved, a permission answered), not the user's label for it.
+                    _ = try vault.forAgent(heard)
                     replace(Self.heard(job, text))
-                    restarts?.give(id, text, adding: true)
-                    updateWaiting[id]?.prompt = [held.prompt, text].filter { !$0.isEmpty }.joined(separator: "\n\n")
+                    restarts?.give(id, heard, adding: true)
+                    updateWaiting[id]?.prompt = [held.prompt, heard].filter { !$0.isEmpty }.joined(separator: "\n\n")
                     return
                 }
                 if handovers[id] != nil { throw Shell.Failure(message: "It's moving to \(job.agentName). Tell it again in a moment.") }
                 throw Shell.Failure(message: job.status == .queued ? "\(job.agentName) hasn't started yet. Tell it again in a moment."
                                     : "\(job.agentName) is wrapping up. Tell it again once it's done.")
             }
-            let said = try vault.forAgent(text)
+            let said = try vault.forAgent(heard)
             replace(Self.heard(job, text))
             let betweenTurns = roundTimers[id] == nil || job.question != nil
+            // The answer to a question or plan its turn ended on: the job's clock goes on from where it stopped.
+            if asks[id]?.isEmpty ?? true { resumeClocks(id) }
             // Words between turns (while the check runs) start a turn: it gets a round timer too.
-            if roundTimers[id] == nil { timeRound(id) }
-            restarts?.give(id, text, adding: true)
+            if roundTimers[id] == nil, !waitingForUser.contains(id) { timeRound(id) }
+            restarts?.give(id, heard, adding: true)
             if drainingForUpdate && betweenTurns {
                 agents.removeValue(forKey: id)?.kill()
                 roundTimers.removeValue(forKey: id)?.cancel()
-                updateWaiting[id] = (self.job(id) ?? job, text, job.session, nil)
+                updateWaiting[id] = (self.job(id) ?? job, heard, job.session, nil)
             } else { agent.send(said) }
         } else {
             // Moved since its last round: a new session on the new choice takes it over.
@@ -1249,7 +1293,7 @@ final class Desk {
             if !waiting { asked.insert(id) }
             roundMessage[id] = nil
             // One the runner kept going down with still has the message it was about to get: it comes first.
-            let prompt = [restarts?.message(id), text].compactMap { $0 }.joined(separator: "\n\n")
+            let prompt = [restarts?.message(id), heard].compactMap { $0 }.joined(separator: "\n\n")
             if let moved {
                 run(resumed, prompt: Prompts.moved(resumed, from: moved.from, why: moved.why, round: prompt, apple: offersAppleChecks))
             } else {
@@ -1275,8 +1319,10 @@ final class Desk {
         var job = job
         job.notes = (job.notes ?? []) + [text]
         job.step = "You: \(text)"
-        // An answer to its question, or words that take its place.
+        // An answer to its question, or words that take its place; a permission kept from before a
+        // restart is answered with them too.
         job.question = nil
+        job.permission = nil
         return job
     }
 
@@ -1358,16 +1404,19 @@ final class Desk {
             return finish(job.id, .failed, "\(job.agentName) didn't start: \(error.localizedDescription)")
         }
         let home = accounts.state(job.account)?.account.home.map { URL(filePath: $0) }
+        // A new agent: what the last one was waiting for is gone with it.
+        dropAsks(job.id)
         guard let agent = makeAgent(job, home, resume) else { return finish(job.id, .failed, "\(job.agentName) can't run jobs yet.") }
         agents[job.id] = agent
         ranHere[job.id] = (job.commits ?? 0, job.unpublished)
         (agent as? ClaudeAgent)?.maxTurns = limits.maxTurns
         // A new round, or one done over on another account: its own timer. The job's cap runs from
         // its first round until it ends.
-        timeRound(job.id)
         if jobTimers[job.id] == nil {
-            jobTimers[job.id] = after(limits.job) { [weak self] in self?.hold(job.id, "the job ran past \(JobLimits.span($0))") }
+            jobTimers[job.id] = RoundTimer(clock: RoundClock(limit: limits.job, started: .now))
+            paceJob(job.id)
         }
+        timeRound(job.id)
         do {
             // Only the job's current agent speaks for it: one that was stopped or ended may still report.
             try agent.start(prompt: said) { [weak self, weak agent] event in
@@ -1385,10 +1434,12 @@ final class Desk {
         case "claude":
             let claude = ClaudeAgent(worktree: Workspace.worktree(job.id), configDirectory: home, resume: resume)
             claude.model = job.model
+            claude.mode = job.currentMode
             return claude
         case "codex":
             let codex = CodexAgent(worktree: Workspace.worktree(job.id), home: home, resume: resume)
             codex.model = job.model
+            codex.mode = job.currentMode
             return codex
         default: return nil
         }
@@ -1410,10 +1461,9 @@ final class Desk {
             guard !ending.contains(id) else { return }
             moveOn(job, resets: resets)
         case .permission(let denied):
-            guard let denied else { denials[id] = nil; return }
-            let count = (denials[id] ?? 0) + 1
-            denials[id] = count
-            if count >= limits.denials { hold(id, "\(count) actions in a row were denied", "The last one: \(denied)") }
+            tally(id, denied: denied)
+        case .ask(let call):
+            ask(call, job: job)
         case .maxTurns:
             hold(id, "\(job.agentName) used its \(limits.maxTurns) turns in one round")
         case .tetrix(let seen):
@@ -1427,9 +1477,18 @@ final class Desk {
             job.tetrix?.endRound()
             // A question for the user (case I.1): the job waits for the answer, its agent idle, and
             // the inbox has it. The answer comes as its next message (`message`); others keep going.
+            // Waiting doesn't count toward the job's limit: its clock stops until the answer comes (`tell`).
             if !failed, let question = Inbox.question(in: summary) {
                 job.question = question
                 job.step = "Waiting for your answer"
+                pauseClocks(id)
+                return replace(job)
+            }
+            // A plan-only turn (Plan mode) ends with its plan, which waits for approval the same way.
+            if !failed, job.currentMode == .plan {
+                job.question = PermissionPolicy.planQuestion(summary)
+                job.step = "Waiting for your OK on the plan"
+                pauseClocks(id)
                 return replace(job)
             }
             replace(job)
@@ -1452,6 +1511,7 @@ final class Desk {
                 return finish(id, .failed, summary + again)
             }
             Logger.jobs.notice("job \(id, privacy: .public): \(summary, privacy: .public) Picking its session up again.")
+            job.permission = nil
             job.step = "Picking up where \(job.agentName) was cut off"
             replace(job)
             run(job, prompt: "", resume: session, notice: Self.cutOff)
@@ -1491,6 +1551,7 @@ final class Desk {
         // The stronger model is the tool's own.
         if moved.model != nil { moved.model = AgentModels.stronger[next.agent] }
         moved.step = "\(from) hit its limit; continuing on \(next.heading)"
+        moved.permission = nil
         replace(moved)
         pickedUp.remove(id)
         run(moved, prompt: Prompts.takeover(moved, from: from, round: roundMessage[id], apple: offersAppleChecks))
@@ -1616,11 +1677,11 @@ final class Desk {
     }
 
     /// Keeps job `id`'s round clock in step with its agent's Apple check (#203): it stands still
-    /// while the agent waits for a check it asked for (`MacCheck.agentWaits`), and runs again once
-    /// the check answers. Called whenever the job's Apple check changes.
+    /// while the agent waits for a check it asked for (`MacCheck.agentWaits`), or for the user's OK
+    /// (#134), and runs again once the check or the user answers. Called whenever either changes.
     func paceRound(_ id: String, now: Date = .now) {
         guard var timer = roundTimers[id] else { return }
-        if job(id)?.appleCheck?.agentWaits == true { timer.clock.pause(at: now) } else { timer.clock.resume(at: now) }
+        if job(id)?.appleCheck?.agentWaits == true || waitingForUser.contains(id) { timer.clock.pause(at: now) } else { timer.clock.resume(at: now) }
         guard timer.task == nil || timer.clock != roundTimers[id]?.clock else { return }
         timer.task?.cancel()
         timer.task = nil
@@ -1690,6 +1751,46 @@ final class Desk {
         [text, summary].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
 
+    /// Keeps job `id`'s own clock, its limit for the whole job, in step: it stands still while the
+    /// job waits for the user's OK or answer (#134), and runs again once they answer.
+    private func paceJob(_ id: String, now: Date = .now) {
+        guard var timer = jobTimers[id] else { return }
+        if waitingForUser.contains(id) { timer.clock.pause(at: now) } else { timer.clock.resume(at: now) }
+        guard timer.task == nil || timer.clock != jobTimers[id]?.clock else { return }
+        timer.task?.cancel()
+        timer.task = nil
+        if !timer.clock.standing {
+            let clock = timer.clock
+            timer.task = after(max(0, clock.left(at: now))) { [weak self] _ in
+                guard let self, self.jobTimers[id]?.clock == clock else { return }
+                self.hold(id, "the job ran past \(JobLimits.span(clock.limit))")
+            }
+        }
+        jobTimers[id] = timer
+    }
+
+    /// The job waits for the user's OK or answer: its round's and the job's clocks stand still, so
+    /// waiting doesn't count toward either limit.
+    func pauseClocks(_ id: String) {
+        guard waitingForUser.insert(id).inserted else { return }
+        paceRound(id)
+        paceJob(id)
+    }
+
+    /// The user answered: the clocks go on from where they stopped.
+    func resumeClocks(_ id: String) {
+        guard waitingForUser.remove(id) != nil else { return }
+        paceRound(id)
+        paceJob(id)
+    }
+
+    /// A new agent starts, or the job ends: what its last agent waited for is gone, and its clocks
+    /// don't stand still for it any more.
+    func dropAsks(_ id: String) {
+        asks[id] = nil
+        resumeClocks(id)
+    }
+
     /// Calls `then` with `seconds` once they've passed, unless the task is cancelled first.
     private func after(_ seconds: TimeInterval, _ then: @escaping (TimeInterval) -> Void) -> Task<Void, Never> {
         Task {
@@ -1712,6 +1813,15 @@ final class Desk {
         agent?.stop()
     }
 
+    /// Oby's own denial (a fixed rule, a saved deny rule, an edit in Plan), or nil for an allow:
+    /// enough in a row stop the job. The user's own no doesn't count.
+    func tally(_ id: String, denied: String?) {
+        guard let denied else { denials[id] = nil; return }
+        let count = (denials[id] ?? 0) + 1
+        denials[id] = count
+        if count >= limits.denials { hold(id, "\(count) actions in a row were denied", "The last one: \(denied)") }
+    }
+
     /// Ends the job. A job that's done counts its commits first, so one that should have committed
     /// and didn't ends as "nothing committed" rather than done. One that's done with commits its
     /// pull request doesn't have yet, made since its agent started in this run of Oby, publishes
@@ -1720,9 +1830,10 @@ final class Desk {
     /// the reason and Publish offered.
     func finish(_ id: String, _ status: Job.Status, _ summary: String) {
         guard var job = job(id), job.isActive else { return }
-        // Its agent ended while its question waits: the work isn't finished, so nothing is checked
-        // or published. It's interrupted, keeping its question; the answer picks its session up again.
-        if status == .done, job.question != nil { return end(id, .interrupted, summary) }
+        // Its agent ended while its question or a permission waits: the work isn't finished, so
+        // nothing is checked or published. It's interrupted, keeping them; the answer picks its
+        // session up again.
+        if status == .done, job.question != nil || job.permission != nil { return end(id, .interrupted, summary) }
         guard status == .done, let base = job.base else { return end(id, status, summary) }
         // Already finishing: the agent's process ending after its last turn changes nothing.
         guard finishing.insert(id).inserted else { return }
@@ -1818,6 +1929,9 @@ final class Desk {
         job.rebasedFrom = nil
         job.step = ""
         job.finished = .now
+        // Stopping (or a failure) drops a waiting permission; an interruption keeps it for the answer.
+        if job.status != .interrupted { job.permission = nil }
+        asks[id] = nil
         replace(job)
         // Its agent goes with it: one still finishing after its last turn (a check passed, a round
         // limit) ends with what it started, rather than outlive its job.
@@ -1832,6 +1946,7 @@ final class Desk {
         restarts?.forget(id)
         roundTimers.removeValue(forKey: id)?.cancel()
         jobTimers.removeValue(forKey: id)?.cancel()
+        waitingForUser.remove(id)
         afterTurns.removeValue(forKey: id)?.cancel()
         failures[id] = nil
         denials[id] = nil
@@ -2035,6 +2150,12 @@ final class Desk {
             case (.audit, _):
                 guard let column = Inbox.instead(text) else { throw Shell.Failure(message: "Answer \(item.options.joined(separator: " or ")).") }
                 try issueSync.decide(item.id, use: column)
+            case (.permission, _):
+                guard let permission = job(item.job)?.permission, item.id == "\(item.job)-permission-\(permission.id)" else {
+                    throw Shell.Failure(message: "That permission isn't waiting any more.")
+                }
+                let (decision, message) = Inbox.decision(text)
+                try answerPermission(item.job, permission.id, decision, message: message)
             case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss), (.merge, Inbox.dismiss): try dismiss(item.job)
             case (.failed, Inbox.oneMoreRound) where job(item.job)?.cloudNeedsYou == true: try oneMoreCloudRound(item.job)
             case (.failed, Inbox.askOby) where job(item.job)?.cloudNeedsYou == true: try askAboutCloud(item.job)
