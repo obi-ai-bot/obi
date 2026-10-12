@@ -9,6 +9,8 @@ struct SettingsView: View {
     /// runner's is in Settings › Runner.
     let desk: Desk
     @State private var mode = PermissionMode.bypass
+    /// The rules Always allow (or a deny) saved on this Mac, read when Settings opens.
+    @State private var rules: [PermissionRule] = []
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var problem: String?
     /// Oby reads its reply out loud when you talked to it (Mac/Speech.swift).
@@ -39,10 +41,26 @@ struct SettingsView: View {
                 if let help = RunnerMode(mode.rawValue)?.help {
                     Text(help).font(.footnote).foregroundStyle(.secondary)
                 }
+                if rules.isEmpty {
+                    Text("No saved rules").foregroundStyle(.secondary)
+                }
+                ForEach(rules) { rule in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(rule.rule).font(.body.monospaced())
+                            Text("\(rule.decision == .deny ? "Denied" : "Allowed") · \(rule.repo)")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Remove", role: .destructive) { forget(rule) }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Remove \(rule.rule)")
+                    }
+                }
             } header: {
                 Text("Permissions on this Mac")
             } footer: {
-                Text("How much the jobs this Mac runs itself ask. Each job's Mode menu changes it while it runs. The runner's jobs follow Settings › Runner.")
+                Text("How much the jobs this Mac runs itself ask. Each job's Mode menu changes it while it runs. Always allow saves a rule, so it doesn't ask again; remove the rule to be asked again. The runner's jobs follow Settings › Runner.")
             }
             VoiceSection(speaks: $speaks, footer: "When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer until you press fn or say “stop”. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
             NotificationsSection()
@@ -52,7 +70,18 @@ struct SettingsView: View {
         .onAppear {
             NSApp.activate()
             mode = desk.defaultMode
+            rules = desk.permissionRules
         }
+    }
+
+    private func forget(_ rule: PermissionRule) {
+        do {
+            try desk.forgetRule(rule.id)
+            problem = nil
+        } catch {
+            problem = error.localizedDescription
+        }
+        rules = desk.permissionRules
     }
 }
 

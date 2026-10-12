@@ -666,12 +666,28 @@ struct ConnectorTests {
         for account in [nil, URL(filePath: "/tmp/oby/accounts/personal")] {
             let launch = try ClaudeAgent.launch(worktree: worktree, configDirectory: account, model: "opus", resume: nil)
             #expect(launch.environment["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false")
-            // Still the account's own login and config, where its mcpServers live.
+            // Still the account's own login and config.
             #expect(launch.environment["CLAUDE_CONFIG_DIR"] == account?.path)
-            #expect(launch.arguments.contains("claude") && launch.arguments.contains("--setting-sources"))
-            // Nothing that would also drop the account's own servers.
-            for flag in ["--strict-mcp-config", "--mcp-config", "--bare"] { #expect(!launch.arguments.contains(flag), "\(flag)") }
+            // No settings file, the account's included (#134): its MCP servers come from the job's own file, and only they do.
+            let arguments = launch.arguments
+            let after = { (flag: String) in arguments.firstIndex(of: flag).map { arguments[arguments.index(after: $0)] } }
+            #expect(after("--setting-sources") == "" && arguments.contains("--strict-mcp-config") && !arguments.contains("--bare"))
+            #expect(after("--mcp-config") == ClaudeAgent.mcpFile(worktree: worktree).path)
         }
+    }
+
+    /// The account's own servers, from its `.claude.json`, and nothing else from it.
+    @Test func theJobGetsTheAccountsOwnMCPServers() throws {
+        let account = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: account) }
+        let claude = #"{"mcpServers": {"tetrix": {"type": "http", "url": "https://tetrix.example/mcp"}}, "projects": {"/x": {"allowedTools": ["Bash"]}}}"#
+        try Data(claude.utf8).write(to: account.appending(path: ".claude.json"))
+        let config = try #require(JSONSerialization.jsonObject(with: ClaudeAgent.mcpConfig(configDirectory: account)) as? [String: Any])
+        #expect(config.keys.sorted() == ["mcpServers"])
+        #expect(((config["mcpServers"] as? [String: Any])?["tetrix"] as? [String: Any])?["url"] as? String == "https://tetrix.example/mcp")
+        // An account without the file has none.
+        let none = try #require(JSONSerialization.jsonObject(with: ClaudeAgent.mcpConfig(configDirectory: account.appending(path: "missing"))) as? [String: Any])
+        #expect((none["mcpServers"] as? [String: Any])?.isEmpty == true)
     }
 
     @Test func aResumedSessionKeepsThemOffToo() throws {

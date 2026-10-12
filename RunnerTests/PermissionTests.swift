@@ -156,6 +156,13 @@ final class PermissionTests {
         #expect(PermissionPolicy.prefix(of: "cat Package.swift") == "cat")
         #expect(PermissionPolicy.prefix(of: "swift build && swift test") == nil)
         #expect(PermissionPolicy.prefix(of: "FOO=1 swift test") == nil)
+        // Never a rule for what runs whatever follows it: it would allow anything, so only once.
+        for command in ["bash -c 'rm -rf ~'", "sh -c ls", "python3 -c 'print(1)'", "/usr/bin/python3.12 x.py", "node -e 1", "env FOO=1 make",
+                        "sudo ls", "xargs rm", "uv run anything", "npm exec foo", "bundle exec rake"] {
+            #expect(PermissionPolicy.prefix(of: command) == nil, "\(command)")
+        }
+        let wrapped = PermissionPolicy.permission(for: bash("python3 -c 'import os'"), id: "p1", repo: "deskree-inc/oby", worktree: worktree)
+        #expect(wrapped.rule == nil && wrapped.always == nil && wrapped.title == "Run python3 -c 'import os'")
         let card = PermissionPolicy.permission(for: bash("swift test --filter SpeechTests"), id: "p1", repo: "deskree-inc/oby", worktree: worktree)
         #expect(card == Permission(id: "p1", tool: "Bash", title: "Run swift test", detail: "swift test --filter SpeechTests", rule: "Bash(swift test:*)",
                                    always: "Yes, and don't ask again for swift test in deskree-inc/oby"))
@@ -382,6 +389,17 @@ final class PermissionTests {
         #expect(agent.answers.last?.answer == .deny("use [vault: staging-api-key] instead"))
     }
 
+    /// "Approve, but…": the plan goes ahead, and the agent hears the rest of the user's words too.
+    @Test func anApprovalWithWordsKeepsThem() async throws {
+        let agent = Agent()
+        let desk = try await running(agent, mode: .plan)
+        agent.onEvent(.turnEnded(summary: "Here's the plan:\n1. Add modes", failed: false))
+        try desk.message("perm1", "Approve, but keep the old API")
+        #expect(desk.job("perm1")?.mode == .acceptEdits && desk.job("perm1")?.question == nil)
+        #expect(agent.sent == [PermissionPolicy.approved(.acceptEdits, caveat: "Approve, but keep the old API")])
+        #expect(agent.sent.first?.contains("keep the old API") == true)
+    }
+
     /// Codex, or an agent that ends its turn with the plan: the plan is the summary, and approving
     /// it sends the go-ahead for the next turn, in the mode picked.
     @Test func aPlanAsASummaryIsApprovedForTheNextTurn() async throws {
@@ -393,6 +411,9 @@ final class PermissionTests {
         try desk.setMode("perm1", .bypass)
         #expect(agent.modes == [.bypass] && agent.sent == [PermissionPolicy.approved(.bypass)])
         #expect(desk.job("perm1")?.mode == .bypass && desk.job("perm1")?.question == nil && desk.job("perm1")?.notes == ["Approve: Bypass"])
+        // An approval that says more keeps the user's words for the agent.
+        #expect(PermissionPolicy.caveat("Approve, but keep the old API") == "Approve, but keep the old API")
+        #expect(PermissionPolicy.caveat("Approve: Bypass") == nil && PermissionPolicy.caveat("yes") == nil && PermissionPolicy.caveat("Change it") == nil)
         #expect(PermissionPolicy.approval("Approve: Accept edits") == .acceptEdits && PermissionPolicy.approval("yes") == .acceptEdits)
         #expect(PermissionPolicy.approval("Approve: Bypass") == .bypass && PermissionPolicy.approval("Change it") == nil && PermissionPolicy.approval("no, smaller") == nil)
     }
@@ -487,7 +508,9 @@ final class PermissionTests {
         for mode in PermissionMode.allCases {
             let launch = try ClaudeAgent.launch(worktree: folder, configDirectory: nil, model: "opus", resume: nil, mode: mode)
             #expect(launch.arguments.contains("--permission-prompt-tool") && !launch.arguments.contains { $0.lowercased().contains("bypass") || $0.contains("skip-permissions") })
-            #expect(launch.arguments.contains("--permission-mode") == (mode == .plan))
+            // Its mode is always said, so no settings' defaultMode decides it.
+            let said = launch.arguments.firstIndex(of: "--permission-mode").map { launch.arguments[launch.arguments.index(after: $0)] }
+            #expect(said == (mode == .plan ? "plan" : "default"))
             #expect(Prompts.agent(fix("m", mode: mode)).contains(Prompts.planFirst) == (mode == .plan))
         }
     }

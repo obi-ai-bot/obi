@@ -630,18 +630,34 @@ final class ClaudeAgent: AgentRun {
         self.resume = resume
     }
 
+    /// Where a job's Claude Code reads its MCP servers from (`mcpConfig`): in the worktree's
+    /// `.oby`, which no commit takes.
+    nonisolated static func mcpFile(worktree: URL) -> URL { worktree.appending(path: ".oby/mcp.json") }
+
+    /// The account's own MCP servers (Tetrix), from its `.claude.json`, as `--mcp-config` reads
+    /// them: a job reads none of the account's settings files, which would drop them too.
+    nonisolated static func mcpConfig(configDirectory: URL?) -> Data {
+        let file = configDirectory?.appending(path: ".claude.json") ?? URL(filePath: "\(Agents.home)/.claude.json")
+        let account = (try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let servers = account?["mcpServers"] as? [String: Any] ?? [:]
+        return (try? JSONSerialization.data(withJSONObject: ["mcpServers": servers], options: [.sortedKeys])) ?? Data(#"{"mcpServers":{}}"#.utf8)
+    }
+
     /// The command line and environment Claude Code starts with.
     nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil,
                                    mode: PermissionMode = .bypass) throws -> (arguments: [String], environment: [String: String]) {
-        // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
-        // mcpServers (Tetrix) stay; only its claude.ai connectors are off.
+        // Never --bare: it skips the user's own login. No settings file at all, the account's
+        // included: its permission rules (an allow list, a defaultMode) would let commands through
+        // before Oby is asked (#134), and a repo's .claude/settings.json could too. The account's
+        // own mcpServers (Tetrix) come explicitly, and nothing else does: no claude.ai connectors.
+        // Its mode is always said: its plan mode, or its default one, which asks Oby about every
+        // command and edit.
         let arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                              "--verbose", "--replay-user-messages", "--permission-prompt-tool", "stdio",
-                             // Only the account's own settings: a repo's .claude/settings.json could allow tools past Oby.
-                             "--setting-sources", "user",
+                             "--setting-sources", "", "--strict-mcp-config", "--mcp-config", mcpFile(worktree: worktree).path,
+                             "--permission-mode", StreamJSON.claudeMode(mode),
                              "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
                             + (maxTurns.map { ["--max-turns", String($0)] } ?? [])
-                            + (mode == .plan ? ["--permission-mode", "plan"] : [])
                             + (resume.map { ["--resume", $0] } ?? []),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude")
         let environment = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 }
@@ -653,6 +669,9 @@ final class ClaudeAgent: AgentRun {
         self.onEvent = onEvent
         process.executableURL = URL(filePath: "/usr/bin/env")
         let launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mode: mode)
+        let mcp = Self.mcpFile(worktree: worktree)
+        try FileManager.default.createDirectory(at: mcp.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Self.mcpConfig(configDirectory: configDirectory).write(to: mcp, options: .atomic)
         process.arguments = launch.arguments
         process.environment = launch.environment
         process.currentDirectoryURL = worktree

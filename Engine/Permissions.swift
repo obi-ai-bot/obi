@@ -190,15 +190,32 @@ nonisolated enum PermissionPolicy {
         return file.hasPrefix(root) ? String(file.dropFirst(root.count)) : file
     }
 
+    /// Shells, interpreters and wrappers: what follows them is any program or code at all, so a rule
+    /// for them (`Bash(bash:*)`, `Bash(python3:*)`, `Bash(env:*)`) would allow anything. They're
+    /// allowed once at a time, never always.
+    static let runsAnything: Set<String> = ["sh", "bash", "zsh", "dash", "ksh", "fish", "pwsh", "powershell", "python", "python2", "python3",
+                                            "pypy", "pypy3", "node", "nodejs", "ruby", "perl", "php", "lua", "tclsh", "osascript", "awk", "gawk",
+                                            "env", "sudo", "doas", "su", "xargs", "nohup", "timeout", "nice", "ionice", "time", "exec", "eval",
+                                            "command", "builtin", "watch", "stdbuf", "caffeinate", "script", "ssh", "parallel", "find"]
+    /// The same, as a tool and its subcommand: `uv run`, `npm exec` run whatever follows.
+    static let runsAnythingAfter: Set<String> = ["uv run", "poetry run", "bundle exec", "npm exec", "pnpm exec", "pnpm dlx", "yarn dlx",
+                                                 "yarn exec", "bun x", "bun run", "deno run", "deno eval", "go run", "cargo run",
+                                                 "docker run", "docker exec", "xcrun swift"]
+
     /// The words a command's rule keeps: "swift test" for `swift test --filter X`, "ls" for
-    /// `ls -la`; nil for a chained command or one that starts by setting a variable.
+    /// `ls -la`; nil for a chained command, one that starts by setting a variable, or one that
+    /// runs whatever follows it (`runsAnything`).
     static func prefix(of command: String) -> String? {
         let command = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !command.isEmpty, !command.contains(chained) else { return nil }
         let words = command.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         guard let first = words.first, !first.contains("="), !first.contains("\""), !first.contains("'") else { return nil }
+        // By its name, wherever it's run from, and whichever version: /usr/bin/python3.12 is python3.
+        let program = URL(filePath: first).lastPathComponent
+        guard !runsAnything.contains(program), !runsAnything.contains(program.replacing(/[0-9.]+$/, with: "")) else { return nil }
         if subcommands.contains(first), words.count > 1, words[1].wholeMatch(of: /[a-z][a-z0-9:_-]*/) != nil {
-            return "\(first) \(words[1])"
+            let pair = "\(first) \(words[1])"
+            return runsAnythingAfter.contains(pair) ? nil : pair
         }
         return first
     }
@@ -271,9 +288,25 @@ nonisolated enum PermissionPolicy {
         return PermissionMode(named: named).flatMap { $0 == .plan ? nil : $0 } ?? .acceptEdits
     }
 
-    /// What the agent hears when its plan, presented as its summary, is approved.
-    static func approved(_ mode: PermissionMode) -> String {
+    /// What the agent hears when its plan, presented as its summary, is approved, with the user's
+    /// own words when they said more than yes (`caveat`).
+    static func approved(_ mode: PermissionMode, caveat: String? = nil) -> String {
         "The user approved your plan (mode: \(mode.title)). Carry it out now, then finish with a short summary as asked."
+            + (caveat.map { "\n\n" + said($0) } ?? "")
+    }
+
+    /// The user's words with an approval, for the agent.
+    static func said(_ caveat: String) -> String { "What the user said with the approval, which you follow too: \(caveat)" }
+
+    /// The user's words when an approval says more than yes ("Approve, but keep the old API"), so
+    /// the agent hears them; nil for a plain one ("yes", "Approve: Bypass", a card's option).
+    static func caveat(_ answer: String) -> String? {
+        let text = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard approval(text) != nil, !planOptions.contains(text) else { return nil }
+        let plain = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        if ["yes", "ok", "okay", "go", "go ahead", "approve", "approved", "approve it", "looks good"].contains(plain) { return nil }
+        let named = plain.dropFirst("approve".count).trimmingCharacters(in: CharacterSet(charactersIn: ": ").union(.whitespaces))
+        return named.isEmpty || PermissionMode(named: named) != nil ? nil : text
     }
 
     /// What the agent hears for Change it without words.
@@ -293,7 +326,7 @@ nonisolated enum PermissionPolicy {
 /// Settings › Permissions and the saved rules, in `oby.sqlite` next to the jobs: each machine's own,
 /// and none of the tests'.
 extension JobStore {
-    func createPermissionTables() {
+    nonisolated func createPermissionTables() {
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)", nil, nil, nil)
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS rules (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
     }
@@ -550,21 +583,25 @@ extension Desk {
     /// next message (or picks the session up again, after a restart).
     func approvePlan(_ id: String, _ mode: PermissionMode, said: String? = nil) throws {
         guard var job = job(id), job.question?.plan != nil else { throw Shell.Failure(message: "There's no plan waiting for approval.") }
+        let caveat = said.flatMap(PermissionPolicy.caveat)
         let said = said ?? "Approve: \(mode.title)"
         job.mode = mode
         if let ask = asks[id]?.first, ask.call.plan != nil, job.isActive, let agent = agents[id] {
+            // The user's words go with the approval, as any message: without the vault's secrets.
+            let words = try caveat.map { try vault.forAgent(PermissionPolicy.said($0)) }
             job.question = nil
             job.notes = (job.notes ?? []) + [said]
             replace(job)
             asks[id]?.removeFirst()
             agent.setMode(mode)
             agent.answer(ask.call, .allow)
+            if let words { agent.send(words) }
             reconsider(id)
             return show(id, step: "Plan approved: \(mode.title)")
         }
         replace(job)
         agents[id]?.setMode(mode)
-        try tell(id, said, agentText: PermissionPolicy.approved(mode))
+        try tell(id, said, agentText: PermissionPolicy.approved(mode, caveat: caveat))
     }
 
     /// What the brain's answer_permission and set_mode do, here or elsewhere, and what Oby says.

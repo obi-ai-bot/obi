@@ -1256,10 +1256,11 @@ final class Desk {
             guard let agent = agents[id], !ending.contains(id) else {
                 if let held {
                     // Its message waits for the update: the words join it, neither replaces the other.
-                    _ = try vault.forAgent(text)
+                    // What the agent is to hear (a plan approved, a permission answered), not the user's label for it.
+                    _ = try vault.forAgent(heard)
                     replace(Self.heard(job, text))
-                    restarts?.give(id, text, adding: true)
-                    updateWaiting[id]?.prompt = [held.prompt, text].filter { !$0.isEmpty }.joined(separator: "\n\n")
+                    restarts?.give(id, heard, adding: true)
+                    updateWaiting[id]?.prompt = [held.prompt, heard].filter { !$0.isEmpty }.joined(separator: "\n\n")
                     return
                 }
                 if handovers[id] != nil { throw Shell.Failure(message: "It's moving to \(job.agentName). Tell it again in a moment.") }
