@@ -189,7 +189,7 @@ final class Updates {
         // Try again (#215) tries the same commit again now; otherwise the next one is.
         desk.updateFailed(InboxItem(id: "runner-update-\(id)", kind: .failed, job: Desk.updateJob,
                                     title: "Runner update failed", text: "Runner update failed at \(step)\(head.map { " (\($0))" } ?? ""). The old binary is kept. \(head == nil ? "The next poll tries again." : "The next dev commit tries again.")",
-                                    options: [Inbox.tryAgain], created: now()))
+                                    options: [Inbox.tryAgain], details: ["Builds and tests this commit again now, and installs it if it passes."], created: now()))
     }
 
     /// Try again on a failed update's item: that commit is tried once more, now.

@@ -165,10 +165,13 @@ extension CardOption {
     /// Oby's own recommendation (`words`, #65) comes before the job question's, and its why goes
     /// under the option it recommends.
     static func inbox(_ options: [String], kind: String, question: Question? = nil, permission: RunnerPermission? = nil,
-                      words: InboxWords? = nil) -> [CardOption] {
+                      words: InboxWords? = nil, details: [String]? = nil) -> [CardOption] {
         let ours = words?.recommended.flatMap { options.indices.contains($0) ? $0 : nil }
         var list = ours.map { of(options, recommended: $0) } ?? of(options, recommending: kind == "question" ? question?.recommendedOption : nil)
+        // What each option does, under it (#215), as Claude Code describes its options.
+        let does = details.flatMap { $0.count == options.count ? Dictionary(zip(options, $0), uniquingKeysWith: { first, _ in first }) : nil } ?? [:]
         for index in list.indices {
+            if let line = InboxWords.plain(does[list[index].answer]) { list[index].detail = line }
             if kind == "permission", list[index].label == "Always allow" {
                 list[index].detail = permission?.always ?? permission?.rule.map { "Don't ask again for \($0)" }
             }
@@ -248,7 +251,15 @@ extension Question {
         recommended.flatMap { options.indices.contains($0) ? options[$0] : nil }
     }
 
-    nonisolated var cardOptions: [CardOption] { CardOption.of(options, recommended: recommended) }
+    /// Its options for a card, each with what it does under it when the asker said (#215).
+    nonisolated var cardOptions: [CardOption] {
+        var list = CardOption.of(options, recommended: recommended)
+        guard let details, details.count == options.count else { return list }
+        for index in list.indices {
+            if let at = options.firstIndex(of: list[index].answer) { list[index].detail = details[at] }
+        }
+        return list
+    }
 }
 
 /// A plan in markdown, split into what the card draws: headings, list items, code and paragraphs

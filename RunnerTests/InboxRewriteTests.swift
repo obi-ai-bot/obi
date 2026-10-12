@@ -211,6 +211,14 @@ final class InboxRewriteTests {
         bad = fine
         bad.happened = "It was deadbeef and decaffed."
         #expect(bad.problems(for: item, canary: "c4n4ry00").isEmpty)
+        // Oby's own recommendation stands: the model says why, and can't pick another.
+        var ours = item
+        ours.recommended = 1
+        #expect(!fine.problems(for: ours, canary: "c4n4ry00").isEmpty)
+        var agrees = fine
+        agrees.recommended = 1
+        #expect(agrees.problems(for: ours, canary: "c4n4ry00").isEmpty)
+        #expect(String(decoding: InboxRewrite.schema(for: ours), as: UTF8.self).contains(#""recommended":{"enum":[1],"type":"integer"}"#))
         let none = InboxItem(id: "audit", kind: .audit, job: "", title: "Daily issue audit", text: "Fixed.", options: [], created: .now)
         #expect(!fine.problems(for: none, canary: "c4n4ry00").isEmpty)
         #expect(InboxRewrite.sentences("One sentence, with v1.2 inside.") == 1 && InboxRewrite.sentences("No end") == 1)

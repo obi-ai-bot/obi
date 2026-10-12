@@ -1981,6 +1981,26 @@ final class Desk {
 
     func item(_ id: String) -> InboxItem? { inbox.first { $0.id == id } }
 
+    /// The user settles an inbox item, as `settle` does, first doing what takes GitHub: Add the
+    /// column on an audit's missing status adds it to the roadmap (#215). When that fails the item
+    /// still waits, and the error says why. The apps' answers come here.
+    @discardableResult
+    func answer(_ id: String, _ how: Settle) async throws -> InboxItem {
+        guard case .answer(let words) = how, let item = item(id), item.isOpen, item.kind == .audit,
+              words.trimmingCharacters(in: .whitespacesAndNewlines) == Inbox.addColumn, item.options.contains(Inbox.addColumn) else {
+            return try settle(id, how)
+        }
+        try await issueSync.addColumn(for: id)
+        // The column is there: the item is answered.
+        guard var settled = self.item(id), settled.isOpen, let index = inbox.firstIndex(where: { $0.id == id }) else { return self.item(id) ?? item }
+        settled.done = .now
+        settled.answer = Inbox.addColumn
+        inbox[index] = settled
+        store.save(settled)
+        onInboxChange(settled)
+        return settled
+    }
+
     /// The user settles an inbox item. An answer goes to its job: a question's answer as the
     /// agent's next message; Dismiss lets the job go; Try again (or their own words) runs it
     /// again; One more round hands the agent Oby's last review. Returns the item.
@@ -2002,6 +2022,7 @@ final class Desk {
             }
             switch (item.kind, text) {
             case (.failed, Inbox.tryAgain) where item.job == Self.updateJob: retryUpdate?()
+            case (.audit, Inbox.addColumn): throw Shell.Failure(message: "Adding a column takes GitHub: answer it with Desk.answer.")
             case (.audit, Inbox.tryAgain): issueSync.again()
             case (.audit, Inbox.ignoreStatus): try issueSync.decide(item.id, use: nil)
             case (.audit, _):

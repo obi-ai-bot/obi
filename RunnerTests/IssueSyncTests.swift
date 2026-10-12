@@ -20,6 +20,12 @@ struct IssueSyncTests {
         var repositoryFailure: String?
         var projectTitle = Lead.boardTitle
         var options = ["Todo", "In progress", "In review", "Blocked", "Needs test"]
+        /// Each option's id by its name; its name when it has none here.
+        var ids: [String: String] = [:]
+        /// `updateProjectV2Field` gives every option a new id, as it would without theirs.
+        var renumbers = false
+        var fieldUpdates: [[[String: Any]]] = []
+        func id(_ name: String) -> String { ids[name] ?? name }
         var number = 116
         var issueURL: String { "https://github.com/deskree-inc/oby/issues/\(number)" }
 
@@ -51,7 +57,24 @@ struct IssueSyncTests {
             case ["api", "user"]: return "well-prado"
             case ["project", "list"]: return try encode(["projects": [["title": projectTitle, "number": 20, "id": "PVT_20"]]])
             case ["project", "field-list"]:
-                return try encode(["fields": [["id": "FIELD", "name": "Status", "options": options.map { ["id": $0, "name": $0] }]]])
+                return try encode(["fields": [["id": "FIELD", "name": "Status", "options": options.map { ["id": id($0), "name": $0] }]]])
+            case ["api", "graphql"] where args.contains("--input"):
+                let file = args[args.firstIndex(of: "--input")! + 1]
+                let request = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(filePath: file))) as? [String: Any])
+                #expect((request["query"] as? String)?.contains("updateProjectV2Field") == true)
+                let input = try #require((request["variables"] as? [String: Any])?["input"] as? [String: Any])
+                #expect(input["fieldId"] as? String == "FIELD")
+                let sent = try #require(input["singleSelectOptions"] as? [[String: Any]])
+                fieldUpdates.append(sent)
+                options = sent.compactMap { $0["name"] as? String }
+                for option in sent {
+                    let name = option["name"] as? String ?? ""
+                    ids[name] = renumbers ? "X-\(name)" : option["id"] as? String ?? name
+                }
+                return try encode(["data": ["updateProjectV2Field": ["projectV2Field": ["id": "FIELD"]]]])
+            case ["api", "graphql"] where args.contains { $0.contains("ProjectV2SingleSelectField{options") }:
+                #expect(args.contains("id=FIELD"))
+                return try encode(["data": ["node": ["options": options.map { ["id": id($0), "name": $0, "color": $0 == "Done" ? "GREEN" : "GRAY", "description": "\($0) cards"] }]]])
             case ["api", "graphql"]:
                 let firstPage = laterPage && !args.contains("cursor=next")
                 let items: [[String: Any]] = firstPage || missingItem ? [] : [["id": "ITEM", "content": ["url": issueURL], "fieldValueByName": ["name": column]]] + extraItems
@@ -587,7 +610,11 @@ struct IssueSyncTests {
         // Nothing fixed, nothing failed: no report. The missing column asks the owner, with what it can do.
         let item = try #require(decision(desk))
         #expect(desk.inbox.count == 1 && item.kind == .audit && item.job == "" && item.isDecision)
-        #expect(item.options == ["Use In review instead", "Ignore this status"])
+        // As Claude Code asks: each answer says what it does, the recommended one first.
+        #expect(item.options == ["Add the column", "Use In review instead", "Ignore this status"] && item.recommended == 0)
+        #expect(item.details == ["Adds Needs test to the roadmap's Status field, every card keeping its column, and moves these issues there.",
+                                 "Moves these issues to In review, now and whenever they'd go to Needs test.",
+                                 "Leaves these issues where they are, and doesn't ask about Needs test again."])
         #expect(item.text == "The roadmap's Status field has no Needs test option. Issues that belong there stay where they are: deskree-inc/oby#116.")
         #expect(fake.column == "In progress" && fake.mutations.isEmpty)
         // Asked once: the next day's audit doesn't ask again while it waits, even put off.
@@ -642,6 +669,53 @@ struct IssueSyncTests {
         #expect(desk.item(item.id)?.done != nil && desk.item(item.id)?.answer == nil)
         #expect(fake.column == "Needs test" && desk.inbox.filter(\.isOpen).isEmpty)
         #expect(desk.issueSync.choice(for: "Needs test") == nil)
+    }
+
+    /// Add the column, as verified on project 20 (2026-10-12): every option goes back with its id
+    /// in its order, the new one with none after In review; the ids are read again, and the issue moves.
+    @Test func addTheColumnKeepsEveryOptionAndMovesTheIssues() async throws {
+        let (desk, fake, day) = try lackingNeedsTest()
+        fake.ids = ["Todo": "OPT-1", "In progress": "OPT-2", "In review": "OPT-3", "Blocked": "OPT-4", "Done": "OPT-5"]
+        var scanned: [String] = []
+        desk.issueSync.scan = { texts in scanned += texts.map(\.text) }
+        await desk.issueSync.audit(now: day)
+        let item = try #require(decision(desk))
+        // Only through what reaches GitHub: settling it in place is refused.
+        #expect(throws: (any Error).self) { try desk.settle(item.id, .answer(Inbox.addColumn)) }
+        let settled = try await desk.answer(item.id, .answer(Inbox.addColumn))
+        #expect(settled.done != nil && settled.answer == Inbox.addColumn)
+        let sent = try #require(fake.fieldUpdates.first)
+        #expect(fake.fieldUpdates.count == 1)
+        #expect(sent.map { $0["name"] as? String } == ["Todo", "In progress", "In review", "Needs test", "Blocked", "Done"])
+        #expect(sent.map { $0["id"] as? String } == ["OPT-1", "OPT-2", "OPT-3", nil, "OPT-4", "OPT-5"])
+        // Each option keeps its color and description; the new one is gray, with none.
+        #expect(sent[5]["color"] as? String == "GREEN" && sent[5]["description"] as? String == "Done cards")
+        #expect(sent[3]["color"] as? String == "GRAY" && sent[3]["description"] as? String == "")
+        // What went out was scanned first, and the options were read again after.
+        #expect(scanned.contains { $0.contains("updateProjectV2Field") && $0.contains("OPT-5") })
+        #expect(fake.calls.filter { $0.contains { $0.contains("ProjectV2SingleSelectField{options") } }.count == 2)
+        // The audit ran again: the issue is in Needs test, and nothing waits.
+        await desk.issueSync.drain()
+        #expect(fake.column == "Needs test" && desk.inbox.filter(\.isOpen).isEmpty)
+    }
+
+    /// Options that come back with other ids aren't the ones the cards were on: an error, and the
+    /// item waits. A scan that can't pass sends nothing.
+    @Test func addTheColumnRefusesChangedIdsAndUnscannedRequests() async throws {
+        let (desk, fake, day) = try lackingNeedsTest()
+        fake.renumbers = true
+        await desk.issueSync.audit(now: day)
+        let item = try #require(decision(desk))
+        let error = await #expect(throws: (any Error).self) { try await desk.answer(item.id, .answer(Inbox.addColumn)) }
+        #expect(error?.localizedDescription.contains("didn't come back as they were") == true)
+        #expect(desk.item(item.id)?.isOpen == true)
+
+        let (other, otherFake, otherDay) = try lackingNeedsTest()
+        await other.issueSync.audit(now: otherDay)
+        let waiting = try #require(decision(other))
+        other.issueSync.scan = { _ in throw Shell.Failure(message: "scanner unavailable") }
+        await #expect(throws: (any Error).self) { try await other.answer(waiting.id, .answer(Inbox.addColumn)) }
+        #expect(otherFake.fieldUpdates.isEmpty && other.item(waiting.id)?.isOpen == true)
     }
 
     /// No column to offer instead: only Ignore.

@@ -282,7 +282,7 @@ final class API {
 
     /// The user settles an inbox item: answers it (the answer goes to its job), marks it done, or
     /// puts it off until later.
-    func answer(_ id: String, _ answer: InboxAnswer) throws -> Response {
+    func answer(_ id: String, _ answer: InboxAnswer) async throws -> Response {
         guard let item = desk.item(id) else { throw APIError(.notFound, "There's no inbox item \(id).") }
         guard item.isOpen else { throw APIError(.conflict, "That's done already.") }
         let how: Desk.Settle
@@ -297,7 +297,7 @@ final class API {
         do {
             // Fix it, or Dismiss, on a failure's item (Engine/Failures.swift).
             if item.kind == .failure, case .answer(let words) = how { return Self.json(InboxJSON(item: try desk.failureLog.answer(id, words))) }
-            return Self.json(InboxJSON(item: try desk.settle(id, how)))
+            return Self.json(InboxJSON(item: try await desk.answer(id, how)))
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
@@ -870,7 +870,7 @@ struct AppleCheckAnswer: Encodable {
 struct InboxJSON: Encodable {
     var item: InboxItem
 
-    private enum Keys: String, CodingKey { case id, kind, job, title, text, options, created, done, later, answer, state, outgoing, headline, happened, recommended, why }
+    private enum Keys: String, CodingKey { case id, kind, job, title, text, options, details, created, done, later, answer, state, outgoing, headline, happened, recommended, why }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -880,6 +880,8 @@ struct InboxJSON: Encodable {
         try keys.encode(item.title, forKey: .title)
         try keys.encode(item.text, forKey: .text)
         try keys.encode(item.options, forKey: .options)
+        // What each option does, as many as `options`, or null.
+        try keys.encode(item.details, forKey: .details)
         try keys.encode(item.created, forKey: .created)
         try keys.encode(item.done, forKey: .done)
         try keys.encode(item.later, forKey: .later)

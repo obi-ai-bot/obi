@@ -88,6 +88,25 @@ final class InboxTests {
         #expect(Prompts.agent(fix).contains("QUESTION: <one question>"))
     }
 
+    /// Options as Claude Code asks them (#215): a short label, then what choosing it does after
+    /// ` — `, and `(Recommended)` after the one the agent recommends.
+    @Test func questionsSayWhatEachOptionDoes() throws {
+        let asked = "Done.\nQUESTION: Should Oby offer Add the column?\nOPTIONS: Offer it now (Recommended) — Oby adds the missing column itself | Keep two buttons — only Use … instead and Ignore"
+        let question = try #require(Inbox.question(in: asked))
+        #expect(question.options == ["Offer it now", "Keep two buttons"] && question.recommended == 0)
+        #expect(question.details == ["Oby adds the missing column itself", "only Use … instead and Ignore"])
+        // Without a description for every option, none are kept; a dash in a label stays.
+        let some = try #require(Inbox.question(in: "QUESTION: Which?\nOPTIONS: A — does a | B-side | C (recommended)"))
+        #expect(some.options == ["A", "B-side", "C"] && some.details == nil && some.recommended == 2)
+        // The inbox item carries them, and asks the rewriter to keep the recommendation.
+        var job = fix
+        job.question = question
+        let item = try #require(Inbox.need(of: job))
+        #expect(item.details == question.details && item.recommended == 0 && item.isDecision)
+        #expect(InboxRewriter.quoted(item).contains("0. Offer it now — Oby adds the missing column itself"))
+        #expect(Prompts.agent(fix).contains("(Recommended)") && Prompts.agent(fix).contains("what choosing it does"))
+    }
+
     @Test func aQuestionWaitsInTheInboxAndTheAnswerGoesBackToTheJob() async throws {
         let agent = Agent()
         let desk = try await running(agent)
@@ -452,8 +471,11 @@ final class InboxTests {
             #expect(item["id"] as? String == id && item["kind"] as? String == "failed" && item["job"] as? String == "failed")
             #expect(item["state"] as? String == "open" && item["options"] as? [String] == ["Try again", "Dismiss"])
             for key in ["done", "later", "answer", "headline", "happened", "recommended", "why"] { #expect(item[key] is NSNull, "\(key)") }
-            #expect(Set(item.keys) == ["id", "kind", "job", "title", "text", "options", "created", "done", "later", "answer", "state",
+            #expect(Set(item.keys) == ["id", "kind", "job", "title", "text", "options", "details", "created", "done", "later", "answer", "state",
                                        "headline", "happened", "recommended", "why"])
+            // What each answer does, under its button (#215).
+            #expect(item["details"] as? [String] == ["Runs it again: the job picks up in its session, or the merge or the Mac check goes again.",
+                                                     "Lets the job go. Its branch stays; nothing more happens."])
 
             #expect(try await answer("nowhere", #"{"done": true}"#).0 == .notFound)
             #expect(try await answer(id, #"{"answer": "x", "done": true}"#).0 == .unprocessableContent)

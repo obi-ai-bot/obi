@@ -75,7 +75,7 @@ struct IslandInbox: View {
             DecisionCard(title: words.title(item.text), happened: words.body, behindDetails: words.details(item.text),
                          detail: permission?.detail,
                          plan: kind == "question" ? extras?.question?.plan : nil,
-                         options: CardOption.inbox(item.options, kind: kind, question: extras?.question, permission: permission, words: words),
+                         options: CardOption.inbox(item.options, kind: kind, question: extras?.question, permission: permission, words: words, details: item.details),
                          busy: busy, wordsNote: kind == "permission" ? CardOption.denyWords : nil,
                          onChoose: { settle(entry, answer: $0.answer) },
                          onWords: answerWords)
@@ -142,7 +142,7 @@ struct IslandInbox: View {
             do {
                 if entry.local {
                     let how: Desk.Settle = if let answer { .answer(answer) } else if let later { .later(later) } else { .done }
-                    try desk.settle(entry.item.id, how)
+                    try await desk.answer(entry.item.id, how)
                 } else {
                     try await feed.settle(entry.item.id, answer: answer, done: done, later: later)
                 }

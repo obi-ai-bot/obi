@@ -1236,7 +1236,9 @@ final class Failures {
         let safe = (try? desk.vault.forAgent(text)) ?? "\(postMortem.cause.rawValue), seen \(seen) times this week."
         // No job: it's about Oby, and a job's own items settle as the job changes.
         desk.addIssueAudit(InboxItem(id: "failure-\(record.id)", kind: .failure, job: "", title: title, text: safe,
-                                     options: underway == nil ? [Self.fixIt, Inbox.dismiss] : [], created: now()))
+                                     options: underway == nil ? [Self.fixIt, Inbox.dismiss] : [],
+                                     details: underway == nil ? ["Starts a fix job in Oby's repository, with this post-mortem as its brief.", "Starts nothing; the failure stays recorded, with its issue."] : nil,
+                                     created: now()))
     }
 
     // MARK: Fix it
