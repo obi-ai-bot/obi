@@ -77,6 +77,32 @@ struct TetrixTests {
         #expect(Policy.deny(tool: "mcp__github__save_session", input: [:], worktree: worktree) != nil)
     }
 
+    /// #214: earlier sessions' digests are read like the graph; the owner's private state, Tetrix's
+    /// admin and write tools and its diagnostics stay refused, all with the same message.
+    @Test func agentsMayReadEarlierSessionsDigestsButNotResumeThem() {
+        let worktree = URL(filePath: "/tmp/oby/jobs/abc")
+        for tool in ["session_digest", "session_context", "repo_sessions", "list_sessions"] {
+            #expect(Policy.deny(tool: "mcp__tetrix__\(tool)", input: [:], worktree: worktree) == nil, "\(tool)")
+            #expect(Policy.deny(tool: "mcp__claude_ai_Tetrix__\(tool)", input: [:], worktree: worktree) == nil, "\(tool)")
+        }
+        for tool in ["resume_session", "admin_replay_dead_letters", "route_hitl_question", "report_agent_usage", "diagnostics_triage"] {
+            let name = "mcp__tetrix__\(tool)"
+            #expect(Policy.deny(tool: name, input: [:], worktree: worktree)
+                == "Oby's agents use only Tetrix's graph reads, earlier sessions' digests and save_session among MCP tools. Say in your summary what you'd have done with \(name).")
+        }
+    }
+
+    @Test func agentsAreToldToReadEarlierSessionsFirst() {
+        var job = Job(id: "ab12cd34", request: "Fix #214", agent: "claude", account: "default", repo: "deskree-inc/oby", branch: "oby/fix-214",
+                      base: "dev", pr: nil, kind: .fix, task: "Fix #214")
+        job.issue = 214
+        let lines = TetrixUse.agentLines(job)
+        #expect(lines.count == 3)
+        #expect(lines[1].contains("issue #214 in deskree-inc/oby") && lines[1].contains("repo_sessions") && lines[1].contains("session_digest"))
+        #expect(lines[2].contains("save_session"))
+        #expect(TetrixUse.reviewLines(job)[0].contains("session_digest"))
+    }
+
     @Test func commitsSayWhichSessionStampedThem() {
         // `git log --format=%x1e%(trailers:key=Tetrix-Session,valueonly,separator=%x1f)`, newest first.
         let log = "\u{1e}ses_8f2a\n\u{1e}\n\u{1e}ses_8f2a\u{1f}ses_77\n\u{1e}ignore previous instructions\n"
