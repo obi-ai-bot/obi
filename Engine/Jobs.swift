@@ -132,6 +132,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The latest of them that ran (passed or failed), kept when a newer one is asked for: what
     /// its reviewer reads (`AppleCheck.latest`). Nil before one ran.
     var appleRan: MacCheck?
+    /// Every call its agent made to a connected app through the broker (Engine/Connected.swift),
+    /// allowed or refused, oldest first, or nil before the first.
+    var connectionUses: [ConnectionUse]?
     /// Whether its agent had Tetrix and what it asked it (Engine/TetrixUse.swift), or nil before its tool said.
     var tetrix: TetrixUse?
     /// Every time the user moved it to another tool, account or model (Engine/Move.swift), oldest
@@ -614,6 +617,8 @@ final class ClaudeAgent: AgentRun {
     var model: String?
     /// The most turns it takes for one message (`JobLimits.maxTurns`), or nil for no limit.
     var maxTurns: Int?
+    /// The broker's endpoint for this job (Engine/Connected.swift), or nil when nothing is connected.
+    var mcp: AgentMCP?
     /// The job's mode: Plan starts Claude Code in its own plan mode; every other mode starts it in
     /// its default mode, which asks Oby about every command and edit. Never its bypass mode.
     var mode = PermissionMode.bypass
@@ -683,18 +688,24 @@ final class ClaudeAgent: AgentRun {
 
     /// The command line and environment Claude Code starts with.
     nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil,
-                                   mode: PermissionMode = .bypass) throws -> (arguments: [String], environment: [String: String]) {
+                                   mcp: AgentMCP? = nil, mode: PermissionMode = .bypass) throws -> (arguments: [String], environment: [String: String]) {
+        // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
+        // mcpServers (Tetrix) stay; only its claude.ai connectors are off. The broker joins them as
+        // `oby`, from a file, with the job's token only.
         // Never --bare: it skips the user's own login. No settings file at all, the account's
         // included: its permission rules (an allow list, a defaultMode) would let commands through
         // before Oby is asked (#134), and a repo's .claude/settings.json could too. The account's
         // own mcpServers (Tetrix) come explicitly, and nothing else does: no claude.ai connectors.
         // Its mode is always said: its plan mode, or its default one, which asks Oby about every
         // command and edit.
+        let brokerConfig = try mcp.map { try $0.writeClaudeConfig(in: worktree) }
         let arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                              "--verbose", "--replay-user-messages", "--permission-prompt-tool", "stdio",
-                             "--setting-sources", "", "--strict-mcp-config", "--mcp-config", mcpFile(worktree: worktree).path,
-                             "--permission-mode", StreamJSON.claudeMode(mode),
-                             "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
+                             "--setting-sources", "", "--strict-mcp-config"]
+                            + (brokerConfig.map { ["--mcp-config", $0] } ?? [])
+                            + ["--mcp-config", mcpFile(worktree: worktree).path,
+                               "--permission-mode", StreamJSON.claudeMode(mode),
+                               "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
                             + (maxTurns.map { ["--max-turns", String($0)] } ?? [])
                             + (resume.map { ["--resume", $0] } ?? []),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude",
@@ -712,7 +723,7 @@ final class ClaudeAgent: AgentRun {
         try Self.writeMCP(Self.mcpConfig(configDirectory: configDirectory), to: Self.mcpFile(worktree: worktree))
         let launch: (arguments: [String], environment: [String: String])
         do {
-            launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mode: mode)
+            launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mcp: mcp, mode: mode)
         } catch {
             dropMCP()
             throw error
@@ -1134,6 +1145,8 @@ nonisolated enum Policy {
         // mcp__<server>__<tool>, where the server can be "tetrix" or a connector like "claude_ai_Tetrix".
         let mcp = tool.components(separatedBy: "__")
         if mcp.first == "mcp" {
+            // Oby's own broker (Runner/Broker.swift) holds the logins and refuses what acts as the user.
+            if mcp.count >= 3, mcp[1] == AgentMCP.server { return nil }
             guard mcp.count == 3, mcp[1].lowercased().contains("tetrix"), tetrixTools.contains(mcp[2]) else {
                 return "Oby's agents use only Tetrix's graph reads, earlier sessions' digests and save_session among MCP tools. Say in your summary what you'd have done with \(tool)."
             }

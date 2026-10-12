@@ -253,6 +253,11 @@ final class Desk {
     /// Gets a job's worktree ready, and makes its agent (nil for a tool that can't run jobs yet). Tests put in their own.
     @ObservationIgnored var prepare: (Job) async throws -> Job = { try await Workspace.prepare($0) }
     @ObservationIgnored var makeAgent: (Job, _ home: URL?, _ resume: String?) -> (any AgentRun)? = Desk.agent
+    /// The broker's endpoint for a job's agent, with a token for that job only (Engine/Connected.swift),
+    /// or nil when nothing is connected; and the end of that token when the job ends. The runner's
+    /// broker sets them (Runner/Broker.swift).
+    @ObservationIgnored var openBroker: (Job) -> AgentMCP? = { _ in nil }
+    @ObservationIgnored var closeBroker: (_ id: String) -> Void = { _ in }
     /// How many commits the job's worktree has beyond `since`, or nil when git can't say. Tests put in their own.
     @ObservationIgnored var countCommits: (_ id: String, _ since: String) async -> Int? = { id, since in
         (try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-list", "--count", "\(since)..HEAD"])).flatMap { Int($0) }
@@ -1515,6 +1520,9 @@ final class Desk {
         agents[job.id] = agent
         ranHere[job.id] = (job.commits ?? 0, job.unpublished)
         (agent as? ClaudeAgent)?.maxTurns = limits.maxTurns
+        let mcp = openBroker(job)
+        (agent as? ClaudeAgent)?.mcp = mcp
+        (agent as? CodexAgent)?.mcp = mcp
         // A new round, or one done over on another account: its own timer. The job's cap runs from
         // its first round until it ends.
         if jobTimers[job.id] == nil {
@@ -2043,6 +2051,8 @@ final class Desk {
         // Its agent goes with it: one still finishing after its last turn (a check passed, a round
         // limit) ends with what it started, rather than outlive its job.
         agents.removeValue(forKey: id)?.kill()
+        // Its broker token stops working: nothing it left behind reaches a connected app.
+        closeBroker(id)
         ranHere[id] = nil
         pickedUp.remove(id)
         ending.remove(id)
