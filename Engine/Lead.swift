@@ -518,6 +518,9 @@ nonisolated struct ClaudeLead: LeadAdapter {
     /// Read-only checkouts the Lead may read besides its directory.
     var checkouts: [String] = []
     var vault = Vault.shared
+    /// Claude Code's `--max-turns` for one turn. The failure post-mortem shares this adapter and
+    /// reads evidence plus Oby's source (#221), which took 9 to 10 turns where 8 were allowed (#226).
+    var maxTurns = 24
 
     var name: String { "claude \(AgentModels.name(model))" }
 
@@ -530,18 +533,41 @@ nonisolated struct ClaudeLead: LeadAdapter {
 
     func turn(system: String, user: String, schema: Data, in directory: URL, timeout: TimeInterval) async throws -> Data {
         let (system, user, environment) = try request(system: system, user: user)
-        let argv = Agents.sandboxed(
+        let result = try await Shell.run(arguments(system: system, schema: schema, in: directory), in: directory,
+                                         input: Data(user.utf8), env: environment, timeout: timeout)
+        return try Self.plan(from: result)
+    }
+
+    /// The boxed `claude -p` a turn runs in `directory`, the prompt coming on stdin.
+    func arguments(system: String, schema: Data, in directory: URL) -> [String] {
+        Agents.sandboxed(
             ["claude", "-p", "--model", model, "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob",
-             "--strict-mcp-config", "--setting-sources", "", "--no-session-persistence", "--max-turns", "8",
+             "--strict-mcp-config", "--setting-sources", "", "--no-session-persistence", "--max-turns", String(maxTurns),
              "--output-format", "json", "--system-prompt", system, "--json-schema", String(decoding: schema, as: UTF8.self)],
             in: nil, own: home ?? "\(Agents.home)/.claude", reading: [directory.path] + checkouts)
-        let result = try await Shell.run(argv, in: directory, input: Data(user.utf8), env: environment, timeout: timeout)
-        // It can report success without structured_output, so the field is what counts.
-        guard let reply = try? JSONSerialization.jsonObject(with: result.out) as? [String: Any],
-              let plan = reply["structured_output"] as? [String: Any] else {
-            throw Shell.Failure(message: "claude returned no plan (exit \(result.status)): \(result.err.suffix(200))")
+    }
+
+    /// The plan in claude's reply. It can report success without structured_output, so the field
+    /// is what counts. Without it, the error says why claude stopped: the reply's `subtype`,
+    /// `errors` and `result` are on stdout, and stderr is often empty (#226).
+    static func plan(from result: Shell.Output) throws -> Data {
+        let reply = (try? JSONSerialization.jsonObject(with: result.out)) as? [String: Any]
+        if let plan = reply?["structured_output"] as? [String: Any] { return try JSONSerialization.data(withJSONObject: plan) }
+        var why = ["exit \(result.status)"]
+        if result.timedOut { why.append("timed out") }
+        let errors = (reply?["errors"] as? [Any] ?? []).map { $0 as? String ?? "\($0)" }.filter { !$0.isEmpty }
+        let subtype = (reply?["subtype"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        switch (subtype, errors.isEmpty) {
+        case let (subtype?, true): why.append(subtype)
+        case let (subtype?, false): why.append("\(subtype): \(errors.joined(separator: "; "))")
+        case (nil, false): why.append(errors.joined(separator: "; "))
+        case (nil, true): break
         }
-        return try JSONSerialization.data(withJSONObject: plan)
+        if let text = (reply?["result"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            why.append("result: " + (text.count > 200 ? String(text.prefix(199)) + "…" : text))
+        }
+        let err = result.err.trimmingCharacters(in: .whitespacesAndNewlines)
+        throw Shell.Failure(message: "claude returned no plan (\(why.joined(separator: ", ")))" + (err.isEmpty ? "" : ": \(err.suffix(200))"))
     }
 }
 
