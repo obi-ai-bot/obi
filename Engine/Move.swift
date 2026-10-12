@@ -93,6 +93,12 @@ nonisolated enum Moves {
             let roomy = accounts.filter { ($0.fiveHour ?? 0) < room && ($0.sevenDay ?? 0) < room }
             account = AccountStore.route(roomy, agent: tool, now: now)
         }
+        if account == nil, wanted != nil {
+            // The user named the tool ("put them on Codex"): that names its accounts too, however
+            // busy, the least busy first, as long as one isn't stopped at its limit (2026-10-12).
+            account = accounts.filter { $0.signedIn && $0.account.agent == tool && !$0.isFull(at: now) }
+                .min { ($0.fiveHour ?? 0) < ($1.fiveHour ?? 0) }?.account
+        }
         guard let account else {
             let name = Job.agentNames[tool] ?? tool
             throw Shell.Failure(message: "No \(name) account has room: each is signed out, stopped at its limit, or past 80% of its 5-hour or weekly limit. Name one to use it anyway.")
