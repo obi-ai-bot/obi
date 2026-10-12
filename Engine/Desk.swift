@@ -612,7 +612,7 @@ final class Desk {
     func plan(_ said: String, turns given: [Turn]? = nil, live: @escaping () -> Bool = { true }) async -> Talk {
         if repos.isEmpty { await refresh() }
         // The brain and the Lead think with the least busy Claude account too, so a busy one doesn't slow them.
-        let thinker = AccountStore.route(accounts.accounts, agent: "claude")
+        let thinker = AccountStore.thinker(accounts.accounts)
         if Lead.leads(said), let thinker { return await lead(said, account: thinker, live: live) }
         // Like Claude Code's loop: the brain picks one action, Oby does it and tells the brain what
         // happened, and the brain picks the next, until the user's request is done ("Deskree is
@@ -2171,7 +2171,7 @@ final class Desk {
         guard !rewriting.contains(key) else { return }
         rewriting.insert(key)
         // The brain's model, on the least busy Claude account, as the brain thinks.
-        let thinker = AccountStore.route(accounts.accounts, agent: "claude")
+        let thinker = AccountStore.thinker(accounts.accounts)
         let rewriter = InboxRewriter(adapters: makeBrain(thinker?.home, vault), timeout: rewritePatience)
         Task {
             let rewrite = await rewriter.rewrite(item)
