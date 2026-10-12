@@ -88,6 +88,45 @@ struct ParallelTests {
         #expect(made.agents.count == 8 && desk.runningCount == 7)
     }
 
+    /// A job that caught up gives its slot to an older job that started waiting meanwhile, and that
+    /// older job starts: a free slot never sits unused while jobs wait (review of #246).
+    @Test func aSlotGivenBackToAnOlderJobIsTaken() async throws {
+        desk.maxRunning = 1
+        let older = MoveJobTests.Gate()
+        let fetched = MoveJobTests.Gate()
+        desk.prepare = { job in
+            if job.id == "older" { await older.wait() }
+            var job = job
+            job.startCommit = ParallelTests.dev
+            return job
+        }
+        desk.fetchBase = { job, _ in
+            if job.id == "newer" { await fetched.wait() }
+            return ParallelTests.dev
+        }
+        desk.enqueue(job("first"))
+        try await until("the first runs") { desk.job("first")?.status == .running }
+        desk.enqueue(job("newer", age: 2))
+        try await until("the newer one waits") { desk.job("newer")?.step.hasPrefix("Waiting for a free slot") == true }
+        // Made earlier, in another repository, so its setup runs on its own and ends later.
+        var made = job("older", age: 1)
+        made.repo = "deskree-inc/other"
+        desk.enqueue(made)
+
+        // The first ends: the newer one takes the slot and catches up, and the older one gets ready meanwhile.
+        desk.stop("first")
+        try await until("the newer one catches up") { desk.job("newer")?.step.hasPrefix("Bringing") == true }
+        older.release()
+        try await until("the older one waits") { desk.job("older")?.step.hasPrefix("Waiting for a free slot") == true }
+        fetched.release()
+        try await until("the older one runs") { desk.job("older")?.status == .running }
+        #expect(desk.job("newer")?.status == .queued && desk.runningCount == 1)
+
+        // Its turn comes when the older one ends.
+        desk.stop("older")
+        try await until("the newer one runs") { desk.job("newer")?.status == .running }
+    }
+
     /// Reviews and rebase rounds take a slot like any running job; a job waiting for the user's
     /// answer takes none.
     @Test func whatTakesASlot() {

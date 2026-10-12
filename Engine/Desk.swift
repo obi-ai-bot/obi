@@ -867,6 +867,9 @@ final class Desk {
         job.step = JobSlots.waitLine(running: runningCount, of: maxRunning)
         replace(job)
         if !waiting.contains(where: { $0.id == job.id }) { waiting.append(job) }
+        // It waits behind an older job with a slot free (one it caught up for, given back): the
+        // oldest takes it, rather than leave it unused with nothing to wake them.
+        if runningCount < maxRunning { releaseWaiting() }
     }
 
     /// A slot freed up (a job stopped running, the cap went up, a runner update was called off): the
