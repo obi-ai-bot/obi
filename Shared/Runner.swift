@@ -947,7 +947,13 @@ nonisolated struct Runner: Sendable {
     func inboxWithWords(state: String = "open") async throws -> ([InboxItem], [String: InboxWords]) {
         do {
             let data = try await send("GET", state == "done" ? "v1/inbox?state=done&limit=1000" : "v1/inbox")
-            return (try Self.decoder.decode([InboxItem].self, from: data), InboxWords.of(data))
+            // A newer runner may add an inbox kind Engine doesn't know yet (permissions come
+            // through job extras). Keep the known items and their history readable.
+            struct Item: Decodable {
+                var value: InboxItem?
+                init(from decoder: any Decoder) throws { value = try? InboxItem(from: decoder) }
+            }
+            return (try Self.decoder.decode([Item].self, from: data).compactMap(\.value), InboxWords.of(data))
         } catch let error as RunnerError where error.status == 404 {
             return ([], [:])
         }

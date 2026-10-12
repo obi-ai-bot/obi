@@ -33,7 +33,7 @@ struct JobChip: View {
             }
         }
         .padding(OBYStyle.Space.md)
-        .background(OBYStyle.surface, in: RoundedRectangle(cornerRadius: OBYStyle.chip))
+        .background(hovering ? OBYStyle.assistantBubble : OBYStyle.surface, in: RoundedRectangle(cornerRadius: OBYStyle.chip))
         .onHover { hovering = $0 }
         .contextMenu {
             Button("Open job", action: onOpen)

@@ -173,9 +173,6 @@ struct DecisionCard: View {
                         .padding(.horizontal, 7).padding(.vertical, 2)
                         .background(Color.accentColor.opacity(0.18), in: Capsule())
                 }
-                #if os(macOS)
-                Text("\(index + 1)").font(Style.small).foregroundStyle(Style.secondary)
-                #endif
             }
             .padding(.horizontal, Style.optionPadding).padding(.vertical, Style.optionHeight)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -189,8 +186,6 @@ struct DecisionCard: View {
         }
         .buttonStyle(.plain)
         .accessibilityHint(Self.hint(option))
-        #if os(macOS)
-        #endif
         #endif
     }
 

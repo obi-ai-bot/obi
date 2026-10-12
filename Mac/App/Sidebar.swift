@@ -82,7 +82,7 @@ struct SidebarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             TextField("Search chats", text: $search)
-                .textFieldStyle(.plain).font(.system(size: 13))
+                .textFieldStyle(.plain).font(OBYStyle.small)
                 .padding(10).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
                 .padding(.horizontal, 14).padding(.top, 46).padding(.bottom, 12)
             ScrollView {
@@ -122,15 +122,15 @@ struct SidebarView: View {
     private var obyRow: some View {
         Button { selection = .oby } label: {
             HStack(spacing: 12) {
-                ObyFace(size: 40)
+                ObyFace(size: 40).background(OBYStyle.surface, in: Circle()).clipShape(Circle())
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Oby").font(OBYStyle.body.weight(.bold))
-                    Text(preview).lineLimit(1).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
+                    Text(preview).lineLimit(1).font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
                 }
                 Spacer(minLength: 0)
                 VStack(alignment: .trailing, spacing: 8) {
                     if let last = model.thread.last {
-                        Text(Date.now.timeIntervalSince(last.date) < 60 ? "now" : ConversationModel.clock(last.date)).font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
+                        Text(Date.now.timeIntervalSince(last.date) < 60 ? "now" : ConversationModel.clock(last.date)).font(OBYStyle.caption).foregroundStyle(OBYStyle.tertiary)
                     }
                     let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count + feed.permissionHistory.count { $0.waits(at: .now) }
                     if waiting > 0 {
@@ -153,9 +153,9 @@ struct SidebarView: View {
     private func section(_ title: String, trailing: String?, @ViewBuilder _ content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(title).font(.system(size: 11, weight: .semibold)).kerning(0.6).foregroundStyle(.white.opacity(0.45))
+                Text(title).font(OBYStyle.caption.weight(.medium)).foregroundStyle(.white.opacity(0.45))
                 Spacer()
-                if let trailing { Text(trailing).font(.system(size: 12)).foregroundStyle(.white.opacity(0.45)) }
+                if let trailing { Text(trailing).font(OBYStyle.caption).foregroundStyle(.white.opacity(0.45)) }
             }
             .padding(.horizontal, 10).padding(.bottom, 4)
             .accessibilityAddTraits(.isHeader)
@@ -165,7 +165,7 @@ struct SidebarView: View {
 
     private func emptyRow(_ text: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(text).font(.system(size: 13)).foregroundStyle(.white.opacity(0.4))
+            Text(text).font(OBYStyle.small).foregroundStyle(OBYStyle.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .background(.white.opacity(selected ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -194,7 +194,7 @@ struct SidebarView: View {
                 .frame(width: 40, height: 40).background(.white.opacity(0.12), in: Circle())
             VStack(alignment: .leading, spacing: 2) {
                 Text(name).font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                Text(payer).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+                Text(payer).font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary).lineLimit(1)
             }
         }
         .accessibilityElement(children: .combine)

@@ -108,8 +108,8 @@ struct DecisionTests {
         #expect(CardOption.inbox(["Try again", "Dismiss"], kind: "failed", question: question).map(\.label) == ["Try again", "Dismiss"])
         let permission = RunnerPermission(id: "p1", title: "Run swift test", always: "Yes, and don't ask again")
         let options = CardOption.inbox(["Allow", "Always allow", "Deny"], kind: "permission", permission: permission)
-        #expect(options[1].detail == "Yes, and don't ask again")
-        #expect(options[2].role == .destructive && options[0].role == .plain)
+        #expect(options.map(\.label) == ["Allow once", "Deny"])
+        #expect(options[1].role == .destructive && options[0].role == .plain)
     }
 
     /// Oby's plain words on an inbox item (#65): headline, what happened, the option it recommends and why.

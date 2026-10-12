@@ -71,6 +71,30 @@ struct ChatWindowTests {
         #expect(feed.inboxHistory.isEmpty)
     }
 
+    @Test func receiptsExistOnlyAfterConfirmation() {
+        var item = InboxItem(id: "d", kind: .question, job: "j", title: "Job", text: "Which?", options: ["A"], created: now)
+        #expect(InlineDecision.receipt(item) == nil)
+        item.answer = "A"
+        #expect(InlineDecision.receipt(item) == nil)
+        item.done = now + 10
+        #expect(InlineDecision.receipt(item)?.hasPrefix("You chose: A · ") == true)
+    }
+
+    @Test func waitingDecisionsCountAndChooseTheOldestTarget() {
+        let desk = Desk()
+        let feed = RunnerFeed()
+        let first = InboxItem(id: "first", kind: .question, job: "j", title: "Job", text: "Which?", options: ["A"], created: now)
+        var second = first
+        second.id = "second"
+        second.created = now + 60
+        feed.apply(second)
+        feed.apply(first)
+        #expect(IslandInbox.entries(desk: desk, feed: feed, now: now + 120).map(\.id) == ["runner/first", "runner/second"])
+        second.later = now + 3600
+        feed.apply(second)
+        #expect(IslandInbox.entries(desk: desk, feed: feed, now: now + 120).count == 1)
+    }
+
     @Test func returnNeverTakesADestructiveRecommendation() {
         for answer in ["Deny", "Dismiss", "Stop", "Stop job"] {
             #expect(CardOption.defaultOption([CardOption(label: answer, answer: answer, recommended: true)]) == nil)

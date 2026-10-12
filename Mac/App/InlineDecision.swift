@@ -12,6 +12,7 @@ struct InlineDecision: View {
     @State private var expanded = false
     @State private var busy = false
     @State private var problem: String?
+    @State private var questionSnapshot: Question?
 
     private var item: InboxItem { entry.item }
     private var settled: Bool { item.done != nil }
@@ -21,17 +22,24 @@ struct InlineDecision: View {
     }
     private var extras: RunnerJobExtras? { entry.local ? nil : feed.extras[item.job] }
 
-    private var question: Question? {
+    private var liveQuestion: Question? {
         extras?.question ?? desk.jobs.first { entry.local && $0.id == item.job }?.question.map {
             Question(text: $0.text, options: $0.options, details: $0.details, recommended: $0.recommended)
         }
+    }
+
+    private var question: Question? { liveQuestion ?? questionSnapshot }
+    static func receipt(_ item: InboxItem) -> String? {
+        guard let done = item.done else { return nil }
+        let choice = item.answer.map { "You chose: \($0)" } ?? "Settled"
+        return "\(choice) · \(ConversationModel.clock(done))"
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
             if settled {
                 Button { expanded.toggle() } label: {
-                    Label("You chose: \(item.answer ?? "Done") · \(ConversationModel.clock(item.done ?? item.created))",
+                    Label(Self.receipt(item) ?? "Settled",
                           systemImage: "checkmark.circle.fill")
                         .font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -57,7 +65,9 @@ struct InlineDecision: View {
         .padding(OBYStyle.Space.lg)
         .frame(maxWidth: OBYStyle.replyWidth, alignment: .leading)
         .background(OBYStyle.surface, in: RoundedRectangle(cornerRadius: OBYStyle.card))
-        .overlay { RoundedRectangle(cornerRadius: OBYStyle.card).strokeBorder(OBYStyle.separator) }
+        .onChange(of: liveQuestion, initial: true) {
+            if !settled, let liveQuestion { questionSnapshot = liveQuestion }
+        }
     }
 
     private func answer(_ value: String? = nil, later: Date? = nil) {

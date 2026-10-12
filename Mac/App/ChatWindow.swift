@@ -91,15 +91,13 @@ struct ChatView: View {
         HStack(spacing: 0) {
             SidebarView(model: model, selection: selection, onOpenSettings: onOpenSettings)
                 .frame(width: 272)
-            Divider().overlay(.white.opacity(0.08))
             middle.frame(maxWidth: .infinity, maxHeight: .infinity)
             if liveExpanded {
-                Divider().overlay(OBYStyle.separator)
                 LiveView(model: model, onOpen: { state.selection = .job(id: $0, local: $1) }).frame(width: 290)
             }
         }
         .foregroundStyle(.white)
-        .background(Color(white: 0.09))
+        .background(OBYStyle.window)
         .preferredColorScheme(.dark)
         .ignoresSafeArea()
     }
@@ -121,7 +119,7 @@ struct ChatView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title).font(.system(size: 20, weight: .semibold))
             Text(line).font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.7))
-            Text(detail).font(.system(size: 13)).foregroundStyle(.white.opacity(0.45)).frame(maxWidth: 480, alignment: .leading)
+            Text(detail).font(OBYStyle.small).foregroundStyle(OBYStyle.tertiary).frame(maxWidth: 480, alignment: .leading)
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -148,7 +146,7 @@ private struct ConversationColumn: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: OBYStyle.Space.md) {
-                ObyFace(size: 34)
+                ObyFace(size: 30).background(OBYStyle.surface, in: Circle()).clipShape(Circle())
                 Text("Oby").font(OBYStyle.title)
                 Spacer()
                 Button { liveExpanded.toggle() } label: {
@@ -217,16 +215,16 @@ private struct ConversationColumn: View {
                     LazyVStack(alignment: .leading, spacing: 6) {
                         if conversation.hasOlder {
                             Button(conversation.loading ? "Loading…" : "Earlier") { Task { await conversation.loadOlder() } }
-                                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.55))
+                                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(OBYStyle.secondary)
                                 .disabled(conversation.loading)
                                 .frame(maxWidth: .infinity)
                         }
                         if let problem = conversation.problem {
-                            Text("The runner's thread couldn't be read: \(problem)").font(.system(size: 12)).foregroundStyle(.orange)
+                            Text("The runner's thread couldn't be read: \(problem)").font(OBYStyle.caption).foregroundStyle(.orange)
                         }
                         if turns.isEmpty, !thinking {
                             Text("Ask Oby anything. Hold fn to talk.")
-                                .font(.system(size: 14)).foregroundStyle(.white.opacity(0.45)).padding(.top, 20)
+                                .font(.system(size: 14)).foregroundStyle(OBYStyle.tertiary).padding(.top, 20)
                         }
                         ForEach(entries.filter { anchors[$0.id] == .some(nil) }) { entry in
                             decision(entry, active: oldest == entry.id)
@@ -256,7 +254,7 @@ private struct ConversationColumn: View {
                         if thinking { pending }
                         cards
                         if model.speaker.speaking {
-                            Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
+                            Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(OBYStyle.tertiary)
                         }
                         Color.clear.frame(height: 1).id("end")
                     }
@@ -305,7 +303,7 @@ private struct ConversationColumn: View {
                          onChoose: { desk.answer($0.answer, said: said, question: question.text) },
                          onWords: { desk.answer($0, said: said, question: question.text) })
                 .padding(14)
-                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .background(OBYStyle.surface, in: RoundedRectangle(cornerRadius: OBYStyle.card, style: .continuous))
                 .frame(maxWidth: 720)
         default:
             EmptyView()
@@ -444,7 +442,7 @@ private struct JobPane: View {
                     if let job {
                         screen(job)
                     } else if let problem {
-                        Text(problem).font(.system(size: 13)).foregroundStyle(.red)
+                        Text(problem).font(OBYStyle.small).foregroundStyle(.red)
                     } else {
                         ProgressView().controlSize(.small).tint(.white)
                     }

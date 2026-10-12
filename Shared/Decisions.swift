@@ -210,14 +210,17 @@ extension CardOption {
         let does = details.flatMap { $0.count == options.count ? Dictionary(zip(options, $0), uniquingKeysWith: { first, _ in first }) : nil } ?? [:]
         for index in list.indices {
             if let line = InboxWords.plain(does[list[index].answer]) { list[index].detail = line }
-            if kind == "permission", list[index].label == "Always allow" {
-                list[index].detail = permission?.always ?? permission?.rule.map { "Don't ask again for \($0)" }
+            if kind == "permission", list[index].label == "Allow" { list[index].label = "Allow once" }
+            if kind == "permission", list[index].label == "Always allow", let rule = InboxWords.plain(permission?.rule) {
+                let friendly = permission?.always ?? "Always allow \(rule)"
+                list[index].detail = friendly.contains(rule) ? friendly : "\(friendly) · \(rule)"
             }
             if kind == "permission", list[index].label == "Deny" { list[index].role = .destructive }
             if list[index].recommended, let why = InboxWords.plain(words?.why) {
                 list[index].detail = [list[index].detail, why].compactMap(\.self).joined(separator: "\n")
             }
         }
+        if kind == "permission", InboxWords.plain(permission?.rule) == nil { list.removeAll { $0.label == "Always allow" } }
         return list
     }
 }
