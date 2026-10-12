@@ -282,6 +282,19 @@ final class Watch: NSObject {
         saveGlance()
     }
 
+    /// Moves a job to another tool, account or model; the runner picks what's left nil.
+    func move(_ id: String, agent: String? = nil, account: String? = nil, model: String? = nil) async throws {
+        if let link = direct {
+            apply(try await link.move(id, agent: agent, account: account, model: model))
+        } else {
+            var message: [String: Any] = [WatchWire.kind: WatchWire.Kind.move.rawValue, WatchWire.job: id]
+            message[WatchWire.agent] = agent
+            message[WatchWire.account] = account
+            message[WatchWire.model] = model
+            try apply(try await request(message))
+        }
+    }
+
     /// The exact sentence publishing this job would carry out.
     func publishAction(_ id: String) async throws -> String {
         if let link = direct { return try await link.publishAction(id) }

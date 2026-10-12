@@ -120,6 +120,21 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var appleRan: MacCheck?
     /// Whether its agent had Tetrix and what it asked it (Engine/TetrixUse.swift), or nil before its tool said.
     var tetrix: TetrixUse?
+    /// Every time the user moved it to another tool, account or model (Engine/Move.swift), oldest
+    /// first, or nil when it never moved.
+    var moves: [Move]?
+
+    /// One move: where the job was and where it went, as "Codex · Deskree" and "Claude Code ·
+    /// Personal · Fable 5.1" (the model only when the job has its own), and the user's reason.
+    struct Move: Codable, Equatable, Sendable {
+        var from: String
+        var to: String
+        var why: String?
+        var date: Date
+    }
+
+    /// "Moved from Codex · Deskree to Claude Code · Personal": its latest move, or nil.
+    var movedLine: String? { moves?.last.map { "Moved from \($0.from) to \($0.to)" } }
 
     var maxRounds: Int { rounds ?? 1 }
     /// How many times in a day Oby rebases a pull request that conflicts with its base by itself (#209).
@@ -281,6 +296,13 @@ protocol AgentRun: AnyObject {
     func stop()
     /// Ends it now: Oby is quitting.
     func kill()
+    /// Returns once its process has ended, or right away when it never started.
+    func ended() async
+}
+
+extension AgentRun {
+    /// One without a process of its own (a test's) has nothing to wait for.
+    func ended() async {}
 }
 
 /// Ending an agent with everything it started: SIGTERM to its process group, then SIGKILL.
@@ -342,6 +364,8 @@ nonisolated final class ProcessGroup: Sendable {
         var exited = false
         /// `end` sent SIGTERM, and its SIGKILL is to come.
         var ending = false
+        /// Who waits for it to end (`ended`).
+        var waiters: [CheckedContinuation<Void, Never>] = []
     }
     private let state = Mutex(State())
 
@@ -369,11 +393,54 @@ nonisolated final class ProcessGroup: Sendable {
     /// The process ended: SIGKILL to what's left of its group, unless `end`'s own SIGKILL is to come,
     /// after the grace it gave.
     private func exited() {
-        let target = state.withLock { state -> pid_t? in
+        let (target, waiters) = state.withLock { state -> (pid_t?, [CheckedContinuation<Void, Never>]) in
             state.exited = true
-            return state.ending ? nil : state.target
+            defer { state.waiters = [] }
+            return (state.ending ? nil : state.target, state.waiters)
         }
         if let target, target < 0 { _ = kill(target, SIGKILL) }
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Returns once the process and everything left in its group have ended. What it started may
+    /// outlive it for a while: `end`'s SIGKILL comes only after the grace it gave, and a child that
+    /// ignores SIGTERM runs until then. Checked every 50 ms, for at most `patience` seconds, which no
+    /// group outlasts unless it's stuck in the kernel, where it writes nothing either.
+    func ended(patience: TimeInterval = 30) async {
+        await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+            let done = state.withLock { state -> Bool in
+                if !state.exited { state.waiters.append(waiter) }
+                return state.exited
+            }
+            if done { waiter.resume() }
+        }
+        guard let target = state.withLock({ $0.target }), target < 0 else { return }
+        let deadline = ContinuousClock.now + .seconds(patience)
+        while Self.running(group: -target), ContinuousClock.now < deadline {
+            // Not Task.sleep: a cancelled task would spin here instead of waiting.
+            await withCheckedContinuation { (tick: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { tick.resume() }
+            }
+        }
+    }
+
+    /// Whether a process of group `pgid` is still running. A zombie isn't: it runs nothing, and the
+    /// group's leader stays one until Foundation reaps it (`run`).
+    static func running(group pgid: pid_t) -> Bool {
+        #if os(Linux)
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: "/proc") else { return kill(-pgid, 0) == 0 }
+        let group = "\(pgid)"
+        for entry in entries where entry.first?.isNumber == true {
+            // "pid (name) state ppid pgrp …": the name may hold spaces and parentheses, so the fields start after the last ")".
+            guard let stat = try? String(contentsOfFile: "/proc/\(entry)/stat", encoding: .utf8),
+                  let close = stat.lastIndex(of: ")") else { continue }
+            let fields = stat[stat.index(after: close)...].split(separator: " ", maxSplits: 3)
+            if fields.count > 2, fields[0] != "Z", fields[2] == group { return true }
+        }
+        return false
+        #else
+        return kill(-pgid, 0) == 0 || errno == EPERM
+        #endif
     }
 
     /// SIGTERM to the whole group now, SIGKILL `after` seconds later (`Halt`). Once: a second call,
@@ -527,6 +594,10 @@ final class ClaudeAgent: AgentRun {
 
     func kill() {
         group?.end(after: Halt.dropping)
+    }
+
+    func ended() async {
+        await group?.ended()
     }
 
     private func handle(_ line: Data) {
@@ -1178,9 +1249,26 @@ nonisolated enum Prompts {
     /// reported, what the user said along the way, and the message that started the round to do over
     /// (nil for the task itself).
     static func takeover(_ job: Job, from previous: String, round: String?, apple: Bool = false) -> String {
-        let quote = { (text: String) in text.split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n") }
-        var lines = [agent(job, apple: apple)]
-        lines.append("\(previous) was working on this job and hit its account's usage limit mid-round. You're taking over in the same worktree and branch: its commits are on the branch, and it may have left uncommitted changes. Check `git status` and `git log` before you go on, and do this round over from its start.")
+        handover(job, note: "\(previous) was working on this job and hit its account's usage limit mid-round. You're taking over in the same worktree and branch: its commits are on the branch, and it may have left uncommitted changes. Check `git status` and `git log` before you go on, and do this round over from its start.",
+                 round: round, apple: apple)
+    }
+
+    /// What an agent hears when the user moved the job to it from `previous` (Engine/Move.swift):
+    /// like `takeover`, with why the user moved it (their words, quoted) when they said.
+    static func moved(_ job: Job, from previous: String, why: String?, round: String?, apple: Bool = false) -> String {
+        var note = "The user moved this job to you from \(previous). You're taking over in the same worktree and branch: its commits are on the branch, and it may have left uncommitted changes. Check `git status` and `git log` before you go on, then do this round from its start."
+        if let why, !why.isEmpty { note += "\n\nWhat the user said when they moved it:\n\n" + quote(why) }
+        return handover(job, note: note, round: round, apple: apple)
+    }
+
+    private static func quote(_ text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n")
+    }
+
+    /// The task, `note` on how this agent takes the job over, what earlier rounds reported, what the
+    /// user said along the way, and the message that started the round (nil for the task itself).
+    private static func handover(_ job: Job, note: String, round: String?, apple: Bool) -> String {
+        var lines = [agent(job, apple: apple), note]
         if let summaries = job.summaries, !summaries.isEmpty {
             lines.append("What earlier rounds reported, oldest first:\n\n" + summaries.map(quote).joined(separator: "\n\n"))
         }

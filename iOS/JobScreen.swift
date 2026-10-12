@@ -15,6 +15,7 @@ struct JobScreen: View {
     @State private var requestExpanded = false
     /// Asked the runner for a job the list doesn't have (it keeps only the latest 50).
     @State private var looked = false
+    @State private var moving = false
 
     private var job: Job? { phone.jobs.first { $0.id == id } }
 
@@ -51,6 +52,10 @@ struct JobScreen: View {
                             }.padding(.top, 8)
                         }
                     }
+                    // Oby's own reviews pick their account themselves.
+                    if job.reviewOf == nil {
+                        Button("Move to…", systemImage: "arrow.left.arrow.right") { moving = true }.disabled(busy)
+                    }
                     if job.isActive {
                         Button("Stop job", role: .destructive) {
                             Task { await run { try await phone.stop(job.id) } }
@@ -67,7 +72,7 @@ struct JobScreen: View {
         }
         .background(Color(uiColor: .systemGroupedBackground))
         .safeAreaInset(edge: .bottom) {
-            if let job, job.status == .running || (!job.isActive && job.session != nil) {
+            if let job, job.status == .running || (!job.isActive && job.resumable) {
                 composer(job).padding(.horizontal).padding(.vertical, 10).background(.bar)
             }
         }
@@ -76,6 +81,9 @@ struct JobScreen: View {
             if let job, job.isActive, job.mode != nil {
                 modeMenu(job)
             }
+        }
+        .sheet(isPresented: $moving) {
+            if let job { MoveSheet(job: job) }
         }
         .onChange(of: publishAsked, initial: true) { publishFromNotification() }
         .task(id: id) {
@@ -97,6 +105,9 @@ struct JobScreen: View {
             }
             Text("\(job.agentName) · \(phone.accounts.first { $0.id == job.account }?.name ?? job.account)")
                 .font(.subheadline).foregroundStyle(.secondary)
+            if let moved = job.movedLine {
+                Label(moved, systemImage: "arrow.left.arrow.right").font(.footnote).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -299,6 +310,107 @@ struct JobScreen: View {
         defer { busy = false }
         do { try await work(); problem = nil }
         catch { problem = error.localizedDescription }
+    }
+}
+
+/// "Move to…": a tool, one of its accounts with its usage (or the least busy with room), and a
+/// model, then what the move will do, before it runs.
+private struct MoveSheet: View {
+    @Environment(Phone.self) private var phone
+    @Environment(\.dismiss) private var dismiss
+    let job: Job
+    @State private var agent: String
+    /// Nil: the runner keeps the job's own on the same tool, else picks the least busy with room.
+    @State private var account: String?
+    /// Nil: as it is (the job's own model on the same tool).
+    @State private var model: String?
+    @State private var options: ModelOptions?
+    @State private var busy = false
+    @State private var problem: String?
+
+    init(job: Job) {
+        self.job = job
+        _agent = State(initialValue: job.agent)
+    }
+
+    private var models: [(id: String, name: String)] {
+        if agent == "claude" { return MoveChoice.claudeModels.map { (id: $0, name: ModelChoice.name($0)) } }
+        let listed: [(id: String, name: String)] = options?.codex.models.map { (id: $0.id, name: $0.name) } ?? []
+        return listed.isEmpty ? [(id: MoveChoice.codexStrongest, name: ModelChoice.name(MoveChoice.codexStrongest))] : listed
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Tool") {
+                    Picker("Tool", selection: $agent) {
+                        ForEach(MoveChoice.tools, id: \.0) { Text($0.1).tag($0.0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: agent) { account = nil; model = nil }
+                }
+                Section {
+                    row(agent == job.agent ? "Keep its account" : "Least busy with room", detail: agent == job.agent ? nil : "Under 80% of its limits",
+                        selected: account == nil) { account = nil }
+                    ForEach(phone.accounts.filter { $0.agent == agent }) { item in
+                        row(item.name, detail: MoveChoice.usage(signedIn: item.signedIn, fiveHour: item.fiveHour, sevenDay: item.sevenDay),
+                            warn: MoveChoice.busy(fiveHour: item.fiveHour, sevenDay: item.sevenDay), selected: account == item.id) { account = item.id }
+                            .disabled(!item.signedIn)
+                    }
+                } header: {
+                    Text("Account")
+                } footer: {
+                    Text("Oby never picks an account past 80% of its 5-hour or weekly limit; one you pick takes the job anyway.")
+                }
+                Section("Model") {
+                    row("As it is", detail: job.model.map(ModelChoice.name), selected: model == nil) { model = nil }
+                    row("Settings default", detail: nil, selected: model == MoveChoice.toolDefault) { model = MoveChoice.toolDefault }
+                    ForEach(models, id: \.id) { choice in
+                        row(choice.name, detail: nil, selected: model == choice.id) { model = choice.id }
+                    }
+                }
+                Section {
+                    Text(MoveChoice.effect(active: job.isActive, running: job.status == .running)).font(.footnote)
+                    if let problem { Text(problem).font(.footnote).foregroundStyle(.red) }
+                }
+            }
+            .navigationTitle("Move \(job.heading)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(busy ? "Moving…" : "Move") { move() }.disabled(busy)
+                }
+            }
+            .task { options = try? await phone.runner.modelOptions() }
+        }
+    }
+
+    private func row(_ title: String, detail: String?, warn: Bool = false, selected: Bool, _ pick: @escaping () -> Void) -> some View {
+        Button(action: pick) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).foregroundStyle(.primary)
+                    if let detail { Text(detail).font(.caption).foregroundStyle(warn ? Color.orange : Color.secondary) }
+                }
+                Spacer()
+                if selected { Image(systemName: "checkmark").foregroundStyle(.tint) }
+            }
+        }
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func move() {
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                try await phone.move(job.id, agent: agent, account: account, model: model)
+                dismiss()
+            } catch {
+                problem = error.localizedDescription
+            }
+        }
     }
 }
 

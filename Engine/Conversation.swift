@@ -279,7 +279,8 @@ nonisolated struct Briefing: Equatable, Sendable {
         var parts = [job.id, line(job.heading, cap: 60)]
         let about = job.pr.map { ", PR #\($0)" } ?? job.issue.map { ", issue #\($0)" } ?? ""
         parts.append("\(job.repo)\(about)")
-        parts.append(job.agentName)
+        parts.append(job.agentName + (job.model.map { " (\(AgentModels.name($0)))" } ?? ""))
+        if let moved = job.movedLine { parts.append(moved.prefix(1).lowercased() + moved.dropFirst()) }
         let state = switch job.status {
         case .queued, .running: job.waitsForAnswer ? "waiting for the user's answer" : "\(job.status.rawValue) on \(place)"
         default: job.status.rawValue + (job.dismissed == nil ? "" : ", dismissed")

@@ -67,13 +67,26 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var mode: String?
     /// What its agent waits for the user's OK on, or nil. Older runners don't send it.
     var permission: RunnerPermission?
+    /// Every time the user moved it to another tool, account or model, oldest first (newer runners only).
+    var moves: [Move]?
+
+    /// One move, as the runner words it: "Codex · Deskree" to "Claude Code · Personal · Fable 5.1".
+    struct Move: Codable, Equatable, Sendable {
+        var from: String
+        var to: String
+        var why: String?
+        var date: Date
+    }
 
     private enum CodingKeys: String, CodingKey {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
-             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission
+             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves
         case stoppedMerge = "mergeNeedsYou"
     }
+
+    /// "Moved from Codex · Deskree to Claude Code · Personal": its latest move, or nil (as Engine's).
+    var movedLine: String? { moves?.last.map { "Moved from \($0.from) to \($0.to)" } }
 
     /// Its merge stopped: it couldn't merge, or the Mac check failed with no round left.
     var mergeNeedsYou: Bool { dismissed == nil && stoppedMerge == true }
@@ -534,6 +547,10 @@ extension Job {
     }
     #endif
 
+    /// A finished job can run again for the user's words: it has a session to pick up, or it was
+    /// moved since its last round and starts a new one where it went (docs/runner-api.md).
+    nonisolated var resumable: Bool { session != nil || (started != nil && !(moves ?? []).isEmpty) }
+
     /// Where the list puts the job (Shared/JobList.swift): what needs you first, then the ones
     /// working, then published ones whose pull request is still open, then everything else.
     nonisolated var group: JobGroup {
@@ -671,6 +688,12 @@ nonisolated struct Runner: Sendable {
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws -> InboxItem {
         struct Body: Encodable { var answer: String?; var done: Bool?; var later: Date? }
         return try await call("POST", "v1/inbox/\(id)/answer", body: Body(answer: answer, done: done, later: later))
+    }
+
+    /// Moves a job to another tool, account or model (each nil to keep it or let the runner pick):
+    /// the runner answers with the job, or why it couldn't.
+    func move(_ id: String, agent: String?, account: String?, model: String?, why: String? = nil) async throws -> Job {
+        try await call("POST", "v1/jobs/\(id)/move", body: MoveBody(agent: agent, account: account, model: model, why: why))
     }
 
     /// Tells the job's agent something. A finished job picks its session up again.
@@ -933,6 +956,43 @@ nonisolated struct PairedWatch: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var name: String
     var registered: Date
+}
+
+/// What `POST /v1/jobs/{id}/move` takes: nils are left out.
+nonisolated struct MoveBody: Encodable, Sendable {
+    var agent: String?
+    var account: String?
+    var model: String?
+    var why: String?
+}
+
+/// What the job screens' "Move to…" offers, on the iPhone, the Mac and the Watch (docs/runner-api.md,
+/// `POST /v1/jobs/{id}/move`).
+nonisolated enum MoveChoice {
+    static let tools = [("claude", "Claude Code"), ("codex", "Codex")]
+    /// Claude Code's models. Codex's come from the runner's options; its strongest when they don't.
+    static let claudeModels = ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+    static let codexStrongest = "gpt-6-astra"
+    /// The model that drops the job's own for the tool's from Settings › Models.
+    static let toolDefault = "default"
+    /// Past this share of either window, an account takes a moved job only when the user picks it.
+    static let room = 0.8
+
+    /// "5h 42% · week 61%", "No usage yet", or "Signed out".
+    static func usage(signedIn: Bool, fiveHour: Double?, sevenDay: Double?) -> String {
+        guard signedIn else { return "Signed out" }
+        let parts = [fiveHour.map { "5h \(Int(($0 * 100).rounded()))%" }, sevenDay.map { "week \(Int(($0 * 100).rounded()))%" }].compactMap { $0 }
+        return parts.isEmpty ? "No usage yet" : parts.joined(separator: " · ")
+    }
+
+    /// Past 80% of either window: Oby won't pick it by itself.
+    static func busy(fiveHour: Double?, sevenDay: Double?) -> Bool { max(fiveHour ?? 0, sevenDay ?? 0) >= room }
+
+    /// What a move does to a job in this state, said before it runs.
+    static func effect(active: Bool, running: Bool) -> String {
+        running ? "Its agent stops, and the round starts over there with the work so far."
+            : active ? "It starts there." : "Its next round runs there: tell it something, or Try again."
+    }
 }
 
 /// The job `POST /v1/jobs` sends back. Swift leaves nils out, but a missing check keeps the plan's,

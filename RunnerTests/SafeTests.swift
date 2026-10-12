@@ -380,6 +380,55 @@ struct HaltTests {
         #expect(getpgid(process.processIdentifier) != getpgrp())
     }
 
+    /// `ended` returns once the process has ended, and right away after that: a moved job's new agent
+    /// waits on it for the one it replaces (#118).
+    @Test(.timeLimit(.minutes(1)))
+    func endedWaitsForTheProcess() async throws {
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/sleep")
+        process.arguments = ["30"]
+        let group = try ProcessGroup.run(process)
+        let ended = Ended()
+        let waiting = Task {
+            await group.ended()
+            ended.mark()
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(ended.at == nil)
+        group.end(after: Halt.stopping)
+        await waiting.value
+        #expect(ended.at != nil)
+        await group.ended()
+    }
+
+    /// The process dies on SIGTERM, but a child that ignores it lives until `end`'s SIGKILL: `ended`
+    /// waits for that child too, or a moved job's new agent would work beside it.
+    @Test(.timeLimit(.minutes(1)))
+    func endedWaitsForWhatTheProcessLeftInItsGroup() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let child = folder.appending(path: "child.pid")
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/sh")
+        process.arguments = ["-c", "(trap '' TERM; sleep 30) & echo $! > '\(child.path)'; wait"]
+        let group = try ProcessGroup.run(process)
+        for _ in 0..<200 where (try? String(contentsOf: child, encoding: .utf8))?.isEmpty ?? true { try await Task.sleep(for: .milliseconds(10)) }
+        let sleeper = try #require(Int32((try String(contentsOf: child, encoding: .utf8)).trimmingCharacters(in: .whitespacesAndNewlines)))
+        defer { _ = kill(sleeper, SIGKILL) }
+
+        let start = ContinuousClock.now
+        group.end(after: 0.5)
+        await group.ended()
+        // The shell went at once; its child only with the SIGKILL, half a second later.
+        #expect(ContinuousClock.now - start >= .milliseconds(450))
+        #expect(!ProcessGroup.running(group: process.processIdentifier))
+        #if os(Linux)
+        let state = (try? String(contentsOfFile: "/proc/\(sleeper)/stat", encoding: .utf8))
+            .flatMap { $0.split(separator: ")").last?.split(separator: " ").first }
+        #expect(state == nil || state == "Z", "the child is still running: \(state ?? "")")
+        #endif
+    }
+
     /// Started from a Dispatch worker, which blocks nearly every signal, a process still blocks none:
     /// SIGTERM reaches it.
     @Test(.timeLimit(.minutes(1)))
