@@ -261,13 +261,17 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         return shown.dropLast().joined(separator: ", ") + " and " + last
     }
 
-    /// The files `git status --porcelain` names: a renamed file by its new path.
+    /// The files `git status --porcelain -z` names, from its untrimmed output: records `XY path`
+    /// ended by NUL, a renamed or copied file's by its new path, with the old one as the next field.
     static func changedFiles(porcelain: String) -> [String] {
-        porcelain.split(separator: "\n").compactMap { line in
-            guard line.count > 3 else { return nil }
-            let path = String(line.dropFirst(3))
-            return path.components(separatedBy: " -> ").last
+        var fields = porcelain.split(separator: "\0", omittingEmptySubsequences: true).makeIterator()
+        var paths: [String] = []
+        while let record = fields.next() {
+            guard record.count > 3 else { continue }
+            paths.append(String(record.dropFirst(3)))
+            if record.prefix(2).contains(where: { $0 == "R" || $0 == "C" }) { _ = fields.next() }
         }
+        return paths
     }
 
     /// Branch names come from Swift, never from the model.

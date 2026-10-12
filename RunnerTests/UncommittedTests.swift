@@ -134,9 +134,51 @@ struct UncommittedTests {
     }
 
     @Test func gitStatusNamesTheChangedFiles() {
-        let porcelain = " M Engine/Jobs.swift\n?? RunnerTests/New.swift\nR  Old.swift -> Engine/Desk.swift\n"
-        #expect(Job.changedFiles(porcelain: porcelain) == ["Engine/Jobs.swift", "RunnerTests/New.swift", "Engine/Desk.swift"])
+        let porcelain = " M Engine/Jobs.swift\0?? RunnerTests/New.swift\0R  Engine/Desk.swift\0Old.swift\0 M A\0"
+        #expect(Job.changedFiles(porcelain: porcelain) == ["Engine/Jobs.swift", "RunnerTests/New.swift", "Engine/Desk.swift", "A"])
         #expect(Job.changedFiles(porcelain: "").isEmpty)
+    }
+
+    /// On a real repository: an unstaged change's record starts with a space, which trimming the
+    /// output would eat, taking the first letter of its name (or all of `A`).
+    @Test func aRealWorktreeNamesItsUnstagedFilesWhole() async throws {
+        let repo = try temporaryFolder().appending(path: "repo")
+        try FileManager.default.createDirectory(at: repo.appending(path: "Engine"), withIntermediateDirectories: true)
+        let git = { (arguments: String...) async throws -> Shell.Output in
+            try await Shell.run(["git", "-C", repo.path, "-c", "user.name=Oby", "-c", "user.email=oby@example.com", "-c", "commit.gpgsign=false"] + arguments)
+        }
+        _ = try await git("init", "--quiet")
+        try "one".write(to: repo.appending(path: "A"), atomically: true, encoding: .utf8)
+        try "one".write(to: repo.appending(path: "Engine/Jobs.swift"), atomically: true, encoding: .utf8)
+        _ = try await git("add", ".")
+        _ = try await git("commit", "--quiet", "-m", "start")
+
+        try "two".write(to: repo.appending(path: "A"), atomically: true, encoding: .utf8)
+        let lone = try await git("status", "--porcelain", "-z")
+        #expect(Job.changedFiles(porcelain: String(decoding: lone.out, as: UTF8.self)) == ["A"])
+
+        try "two".write(to: repo.appending(path: "Engine/Jobs.swift"), atomically: true, encoding: .utf8)
+        try "new".write(to: repo.appending(path: "New file.swift"), atomically: true, encoding: .utf8)
+        let status = try await git("status", "--porcelain", "-z")
+        #expect(Job.changedFiles(porcelain: String(decoding: status.out, as: UTF8.self)).sorted() == ["A", "Engine/Jobs.swift", "New file.swift"])
+    }
+
+    @Test func wordsSentWhileGitLooksDecideEvenWhenNothingIsDirty() async throws {
+        final class Looking { var started = false }
+        let looking = Looking()
+        desk.changedFiles = { _ in
+            looking.started = true
+            try? await Task.sleep(for: .milliseconds(500))
+            return []
+        }
+        let agent = try await start("words")
+        agent.onEvent(.turnEnded(summary: "Done.", failed: false))
+        try await until { looking.started }
+        try desk.message("words", "Also rename the test.")
+        try await Task.sleep(for: .milliseconds(800))
+        // The turn the words started decides: the earlier one doesn't end the job.
+        let running = try #require(desk.job("words"))
+        #expect(running.status == .running && agent.sent == ["Also rename the test."])
     }
 
     @Test func agentsRunChecksInTheForeground() {

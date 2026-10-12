@@ -205,9 +205,11 @@ final class Desk {
         (try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "rev-list", "--count", "\(since)..HEAD"])).flatMap { Int($0) }
     }
     /// The files the job's worktree has changed but not committed; none when git can't say. Ignored
-    /// files (`.oby/`) aren't among them. Tests put in their own.
+    /// files (`.oby/`) aren't among them. Read untrimmed: a record's first column can be a space. Tests put in their own.
     @ObservationIgnored var changedFiles: (_ id: String) async -> [String] = { id in
-        Job.changedFiles(porcelain: (try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "status", "--porcelain"])) ?? "")
+        guard let status = try? await Shell.run(["git", "-C", Workspace.worktree(id).path, "status", "--porcelain", "-z"]),
+              status.status == 0 else { return [] }
+        return Job.changedFiles(porcelain: String(decoding: status.out, as: UTF8.self))
     }
     /// How many commits the job's worktree has beyond `since` that `pushed` (the commit Oby pushed
     /// last) doesn't: the new ones, or all of them after a rebase. Nil when git can't say. Tests put in their own.
@@ -1404,11 +1406,15 @@ final class Desk {
         guard (job.notes?.count ?? 0) == heard else { return }
         var next = Rounds.next(job, summary: summary, failed: failed, check: check, previous: failures[id])
         // Done with its work left uncommitted, and rounds left: one more round to commit it (#220).
-        if case .finish(.done, _) = next, let files = await uncommitted(job) {
+        if case .finish(.done, _) = next {
+            let files = await uncommitted(job)
+            // Superseded while git looked (the user's words, another agent): that turn decides, whatever git said.
             guard current(), let latest = self.job(id), latest.isActive, (latest.notes?.count ?? 0) == heard else { return }
             job = latest
-            committingRound.insert(id)
-            next = .again(Prompts.commitRound(job, files: files))
+            if let files {
+                committingRound.insert(id)
+                next = .again(Prompts.commitRound(job, files: files))
+            }
         }
         switch next {
         case let .finish(status, text):
