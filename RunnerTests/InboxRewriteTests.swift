@@ -176,14 +176,19 @@ final class InboxRewriteTests {
         #expect(settled.done != nil && settled.answer == nil)
         // Audits share one: a newer report settles the older.
         let day = Date(timeIntervalSince1970: 1_800_000_000)
-        desk.addIssueAudit(InboxItem(id: "audit-1", kind: .audit, job: "", title: "Daily issue audit", text: "Issue audit: couldn't read #1.", options: [], created: day))
-        desk.addIssueAudit(InboxItem(id: "audit-2", kind: .audit, job: "", title: "Daily issue audit", text: "Issue audit: couldn't read #2.", options: [], created: day + 86400))
+        desk.addIssueAudit(InboxItem(id: "audit-1", kind: .audit, job: "", title: "Daily issue audit", text: "Issue audit: couldn't read #1.", options: [Inbox.tryAgain], created: day))
+        desk.addIssueAudit(InboxItem(id: "audit-2", kind: .audit, job: "", title: "Daily issue audit", text: "Issue audit: couldn't read #2.", options: [Inbox.tryAgain], created: day + 86400))
         #expect(desk.item("audit-1")?.done != nil && desk.item("audit-1")?.answer == nil && desk.item("audit-2")?.isOpen == true)
         #expect(desk.inbox.filter(\.isOpen).count == 2)
         // A failure has no job either, but keeps its own rule (one open per signature): audits don't settle it.
         desk.addIssueAudit(InboxItem(id: "failure-1", kind: .failure, job: "", title: "Oby failure: a", text: "Oby bug.", options: ["Fix it", "Dismiss"], created: day))
-        desk.addIssueAudit(InboxItem(id: "audit-3", kind: .audit, job: "", title: "Daily issue audit", text: "Issue audit: couldn't read #3.", options: [], created: day + 2 * 86400))
+        desk.addIssueAudit(InboxItem(id: "audit-3", kind: .audit, job: "", title: "Daily issue audit", text: "Issue audit: couldn't read #3.", options: [Inbox.tryAgain], created: day + 2 * 86400))
         #expect(desk.item("failure-1")?.isOpen == true && desk.item("audit-2")?.done != nil && desk.inbox.filter(\.isOpen).count == 3)
+        // A missing status's decision has its own title (#215): the day's report doesn't settle it.
+        desk.addIssueAudit(InboxItem(id: "status-1", kind: .audit, job: "", title: IssueSync.statusTitle("Needs test"), text: "No Needs test column.",
+                                     options: [Inbox.useInstead("In review"), Inbox.ignoreStatus], created: day))
+        desk.addIssueAudit(InboxItem(id: "audit-4", kind: .audit, job: "", title: "Daily issue audit", text: "Issue audit: couldn't read #4.", options: [Inbox.tryAgain], created: day + 3 * 86400))
+        #expect(desk.item("status-1")?.isOpen == true && desk.item("audit-3")?.done != nil && desk.item("audit-4")?.isOpen == true)
     }
 
     @Test func rewritesAreCheckedInSwift() {
@@ -206,6 +211,14 @@ final class InboxRewriteTests {
         bad = fine
         bad.happened = "It was deadbeef and decaffed."
         #expect(bad.problems(for: item, canary: "c4n4ry00").isEmpty)
+        // Oby's own recommendation stands: the model says why, and can't pick another.
+        var ours = item
+        ours.recommended = 1
+        #expect(!fine.problems(for: ours, canary: "c4n4ry00").isEmpty)
+        var agrees = fine
+        agrees.recommended = 1
+        #expect(agrees.problems(for: ours, canary: "c4n4ry00").isEmpty)
+        #expect(String(decoding: InboxRewrite.schema(for: ours), as: UTF8.self).contains(#""recommended":{"enum":[1],"type":"integer"}"#))
         let none = InboxItem(id: "audit", kind: .audit, job: "", title: "Daily issue audit", text: "Fixed.", options: [], created: .now)
         #expect(!fine.problems(for: none, canary: "c4n4ry00").isEmpty)
         #expect(InboxRewrite.sentences("One sentence, with v1.2 inside.") == 1 && InboxRewrite.sentences("No end") == 1)

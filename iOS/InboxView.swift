@@ -47,7 +47,7 @@ struct InboxSection: View {
             DecisionCard(title: item.words.title(item.text), happened: item.words.body, behindDetails: item.words.details(item.text),
                          detail: permission?.detail,
                          plan: item.kind == "question" ? job?.question?.plan : nil,
-                         options: CardOption.inbox(item.options, kind: item.kind, question: job?.question, permission: permission, words: item.words),
+                         options: CardOption.inbox(item.options, kind: item.kind, question: job?.question, permission: permission, words: item.words, details: item.details),
                          busy: busy, wordsNote: item.kind == "permission" ? CardOption.denyWords : nil,
                          onChoose: { settle(item, answer: $0.answer) },
                          onWords: answerWords)

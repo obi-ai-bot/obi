@@ -10,7 +10,7 @@ import CSQLite
 /// limits, or a merge that stopped. Like email, it waits for the user, with no timeout: they answer it, mark it done, or
 /// put it off until later. Its job waits; the others keep going.
 nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
-    enum Kind: String, Codable, Sendable {
+    enum Kind: String, Codable, Sendable, CaseIterable {
         /// The job's agent asked something (`Job.question`) and waits for the answer.
         case question
         /// Oby's review stopped asking for changes: a blocker came back (`Job.reviewNeedsYou`).
@@ -19,12 +19,34 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         case failed
         /// The job's account hit its usage limit, and no other account had room.
         case limit
-        /// One line from the runner's daily issue and board reconciliation.
+        /// The runner's daily issue and board reconciliation: a status the roadmap lacks, or what failed.
         case audit
         /// Oby's merge stopped: it couldn't merge, or the Mac check failed with no round left (`Job.mergeNeedsYou`).
         case merge
         /// A failure's post-mortem found an Oby bug or a repeat (Engine/Failures.swift): Fix it starts the fix job.
         case failure
+
+        /// The answers that change something on an item of this kind, besides Later and Done (#215).
+        /// A question's are its own options, or the user's words; an audit's `Use <column> instead`
+        /// too (`Inbox.instead`). A new kind declares its own, or none of its items reach the inbox.
+        var actions: [String] {
+            switch self {
+            case .question: []
+            case .review: [Inbox.oneMoreRound, Inbox.dismiss]
+            case .failed, .limit: [Inbox.tryAgain, Inbox.oneMoreRound, Inbox.dismiss]
+            case .merge: [Inbox.oneMoreRound, Inbox.tryAgain, Inbox.dismiss]
+            case .audit: [Inbox.addColumn, Inbox.tryAgain, Inbox.ignoreStatus]
+            case .failure: [Failures.fixIt, Inbox.dismiss]
+            }
+        }
+
+        /// Any words answer it: a question.
+        var takesWords: Bool { self == .question }
+
+        /// Whether answering `option` on this kind changes something.
+        func acts(on option: String) -> Bool {
+            takesWords || actions.contains(option) || (self == .audit && Inbox.instead(option) != nil)
+        }
     }
 
     /// The job, what it needs and when it came: the same need never comes twice, even once it's done.
@@ -37,6 +59,9 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
     var text: String
     /// The answers it offers, as buttons and number keys. Words of the user's own are taken too.
     var options: [String]
+    /// What each option does, in one line, under its button (as Claude Code describes its
+    /// options): as many as `options`, or nil for older items and askers who gave none.
+    var details: [String]? = nil
     var created: Date
     /// When it was answered or let go, or nil while it waits.
     var done: Date?
@@ -56,6 +81,10 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
 
     var isOpen: Bool { done == nil }
 
+    /// It offers something to decide (#215): a question, or an option that changes something. One
+    /// that doesn't never waits in the inbox: it arrives done, kept with the reports.
+    var isDecision: Bool { kind.takesWords || options.contains(where: kind.acts) }
+
     /// Waiting for the user now: open, and not put off past `now`.
     func waiting(at now: Date = .now) -> Bool { done == nil && (later.map { $0 <= now } ?? true) }
 }
@@ -72,17 +101,32 @@ nonisolated enum Inbox {
     static let oneMoreRound = "One more round"
     /// What the agent hears for Try again.
     static let tryAgainMessage = "Try again, picking up where you left off. Finish with a short summary as asked."
+    /// What the audit offers for a status the roadmap has no column for (#215): add the column to
+    /// the roadmap, leave its issues where they are from now on, or move them to another column,
+    /// remembered for that status.
+    static let addColumn = "Add the column"
+    static let ignoreStatus = "Ignore this status"
+    static func useInstead(_ column: String) -> String { "Use \(column) instead" }
+    /// The column a `Use <column> instead` answer names, or nil.
+    static func instead(_ answer: String) -> String? {
+        answer.wholeMatch(of: /Use (.+) instead/).map { String($0.1) }
+    }
 
     /// The item `job` calls for now, or nil when it needs nothing from the user. `limited`: it
     /// failed because no account had room.
     static func need(of job: Job, limited: Bool = false) -> InboxItem? {
         guard job.dismissed == nil else { return nil }
         func item(_ kind: InboxItem.Kind, _ id: String, _ text: String, _ options: [String]) -> InboxItem {
-            InboxItem(id: "\(job.id)-\(id)", kind: kind, job: job.id, title: job.shortTitle, text: text, options: options, created: .now)
+            InboxItem(id: "\(job.id)-\(id)", kind: kind, job: job.id, title: job.shortTitle, text: text, options: options,
+                      details: details(options), created: .now)
         }
         if let question = job.question, job.status != .stopped {
-            // One per question: what the user said so far tells them apart.
-            return item(.question, "question-\(job.notes?.count ?? 0)", question.text, question.options)
+            // One per question: what the user said so far tells them apart. The asker's own
+            // descriptions and recommendation come with it.
+            var asked = item(.question, "question-\(job.notes?.count ?? 0)", question.text, question.options)
+            asked.details = question.details.flatMap { $0.count == question.options.count ? $0 : nil }
+            asked.recommended = question.recommended.flatMap { question.options.indices.contains($0) ? $0 : nil }
+            return asked
         }
         guard !job.isActive else { return nil }
         // Xcode Cloud still fails after Oby handed it back (#122): one item per head and round.
@@ -116,13 +160,29 @@ nonisolated enum Inbox {
         return item(limited ? .limit : .failed, "failed-\(job.currentRound)-\(ended)", line, options)
     }
 
+    /// What each of Oby's own answers on a job's item does, one line each, under its button (as
+    /// Claude Code describes its options); nil when one isn't Oby's.
+    static func details(_ options: [String]) -> [String]? {
+        let does = [
+            tryAgain: "Runs it again: the job picks up in its session, or the merge or the Mac check goes again.",
+            oneMoreRound: "Hands Oby's last word to the agent for one more round.",
+            dismiss: "Lets the job go. Its branch stays; nothing more happens.",
+        ]
+        let lines = options.compactMap { does[$0] }
+        return lines.count == options.count && !options.isEmpty ? lines : nil
+    }
+
     // MARK: Questions from agents
 
     /// What agents are told about asking (Prompts.agent).
-    static let howToAsk = "If you need a decision only the user can make, don't guess and don't bury it in your summary: end your summary with a line `QUESTION: <one question>` and, when it has set answers, a last line `OPTIONS: <first> | <second>`. Oby puts it in the user's inbox and your job waits; their answer comes back to you as your next message."
+    static let howToAsk = "If you need a decision only the user can make, don't guess and don't bury it in your summary: end your summary with a line `QUESTION: <one question>` and, when it has set answers, a last line `OPTIONS: <answer> — <what choosing it does> | <answer> — <what choosing it does>`, the way Claude Code asks: 2 or 3 answers, each a short label (1 to 5 words), then ` — ` and one plain sentence saying what happens if the user picks it; the one you recommend first, with `(Recommended)` after its label. Ask it so someone who hasn't read the code can answer. Oby puts it in the user's inbox and your job waits; their answer (a label, or their own words) comes back to you as your next message."
+
+    /// What marks the option the asker recommends, after its label.
+    static let recommendedMark = "(Recommended)"
 
     /// The question at the end of an agent's summary (`QUESTION: …`, then optionally `OPTIONS: a | b`),
-    /// or nil. Only the summary's last lines count: a question quoted mid-report isn't one.
+    /// or nil. Only the summary's last lines count: a question quoted mid-report isn't one. An option
+    /// may say what it does after ` — `, and `(Recommended)` after its label recommends it.
     static func question(in summary: String) -> Plan.Question? {
         let lines = summary.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         // Only the Markdown around the label goes (`**QUESTION:** …`, `` `QUESTION: …` ``): the
@@ -135,14 +195,29 @@ nonisolated enum Inbox {
             if !opening.isEmpty, text.hasSuffix(opening) { text = text.dropLast(opening.count).trimmingCharacters(in: .whitespaces) }
             return text
         }
-        var options: [String] = []
+        var options: [(label: String, detail: String?)] = []
+        var recommended: Int?
         var last = lines.count - 1
         if last >= 0, let listed = value(lines[last], "OPTIONS") {
-            options = listed.split(separator: "|").map { String($0.trimmingCharacters(in: .whitespaces).prefix(80)) }.filter { !$0.isEmpty }
+            for part in listed.split(separator: "|") {
+                let halves = part.split(separator: " — ", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                var label = halves.first ?? ""
+                if label.lowercased().hasSuffix(recommendedMark.lowercased()) {
+                    label = String(label.dropLast(recommendedMark.count)).trimmingCharacters(in: .whitespaces)
+                    if recommended == nil, !label.isEmpty { recommended = options.count }
+                }
+                guard !label.isEmpty else { continue }
+                let detail = halves.count > 1 && !halves[1].isEmpty ? String(halves[1].prefix(160)) : nil
+                options.append((String(label.prefix(80)), detail))
+            }
+            options = Array(options.prefix(6))
             last -= 1
         }
         guard last >= 0, let text = value(lines[last], "QUESTION"), !text.isEmpty else { return nil }
-        return Plan.Question(text: String(text.prefix(500)), options: Array(options.prefix(6)))
+        // Descriptions only when every option has one, as a card shows them.
+        let details = options.allSatisfy { $0.detail != nil } && !options.isEmpty ? options.compactMap(\.detail) : nil
+        return Plan.Question(text: String(text.prefix(500)), options: options.map(\.label), details: details,
+                             recommended: recommended.flatMap { options.indices.contains($0) ? $0 : nil })
     }
 }
 
@@ -176,6 +251,8 @@ nonisolated struct InboxRewrite: Codable, Equatable, Sendable {
         if let recommended, !item.options.indices.contains(recommended) {
             problems.append(item.options.isEmpty ? "recommended is null: the item has no options" : "recommended must be 0 to \(item.options.count - 1) or null")
         }
+        // Oby's own recommendation, or the asker's, stands: the model says why.
+        if let ours = item.recommended, recommended != ours { problems.append("recommended must be \(ours)") }
         if [headline, happened, why].contains(where: { $0.contains(canary) }) { problems.append("it repeats the canary") }
         return problems
     }
@@ -199,9 +276,13 @@ nonisolated struct InboxRewrite: Codable, Equatable, Sendable {
 
     /// The JSON schema the model fills for `item`.
     static func schema(for item: InboxItem) -> Data {
-        let recommended: [String: Any] = item.options.isEmpty
-            ? ["type": "null"]
-            : ["type": ["integer", "null"], "minimum": 0, "maximum": item.options.count - 1]
+        let recommended: [String: Any] = if let ours = item.recommended {
+            ["type": "integer", "enum": [ours]]
+        } else if item.options.isEmpty {
+            ["type": "null"]
+        } else {
+            ["type": ["integer", "null"], "minimum": 0, "maximum": item.options.count - 1]
+        }
         let schema: [String: Any] = [
             "type": "object", "additionalProperties": false, "required": ["headline", "happened", "recommended", "why"],
             "properties": [
@@ -263,7 +344,8 @@ nonisolated struct InboxRewriter: Sendable {
     /// What the model is told: only what Swift knows (the kind, how many options), never the item's words.
     static func prompt(for item: InboxItem) -> String {
         let options = item.options.isEmpty ? "It offers no options: recommended is null." : "It offers \(item.options.count) options, numbered 0 to \(item.options.count - 1) in the file."
-        return "Rewrite the inbox item quoted in \(ClaudeBrain.quotedFile) (a \(item.kind.rawValue) item). \(options)"
+        let ours = item.recommended.map { " Option \($0) is recommended already: recommended is \($0), and why says why." } ?? ""
+        return "Rewrite the inbox item quoted in \(ClaudeBrain.quotedFile) (a \(item.kind.rawValue) item). \(options)\(ours)"
     }
 
     /// The item as the model reads it, quoted.
@@ -273,7 +355,9 @@ nonisolated struct InboxRewriter: Sendable {
                      "## Job title", "", item.title.isEmpty ? "(None.)" : item.title, "",
                      "## What it says", "", item.text]
         if !item.options.isEmpty {
-            lines += ["", "## Options", ""] + item.options.enumerated().map { "\($0.offset). \($0.element)" }
+            lines += ["", "## Options", ""] + item.options.enumerated().map { option in
+                "\(option.offset). \(option.element)" + (item.details.flatMap { $0.indices.contains(option.offset) ? " — \($0[option.offset])" : nil } ?? "")
+            }
         }
         return lines.joined(separator: "\n") + "\n"
     }

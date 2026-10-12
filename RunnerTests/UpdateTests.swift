@@ -87,6 +87,27 @@ struct UpdateTests {
         #expect(fake.installs == 1)
     }
 
+    /// Each try that fails is its own item (#215): a retry that fails on the same commit offers Try
+    /// again again, and while one is open the commit adds no other.
+    @Test func aRetryThatFailsAgainOffersTryAgainAgain() async throws {
+        fake.failed = ["swift", "test"]
+        await updates.poll()
+        let first = try #require(desk.inbox.first)
+        #expect(first.id == "runner-update-\(fake.head)" && first.isOpen && first.options == [Inbox.tryAgain])
+        try desk.settle(first.id, .answer(Inbox.tryAgain))
+        for _ in 0..<500 where desk.inbox.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
+        let second = try #require(desk.inbox.last)
+        #expect(desk.inbox.count == 2 && second.id == "runner-update-\(fake.head)-try-2" && second.isOpen && second.options == [Inbox.tryAgain])
+        #expect(updates.state.failed == fake.head)
+        // Still open: the same commit failing again adds nothing.
+        await updates.retry().value
+        #expect(desk.inbox.count == 2)
+        // Read and done: the next failure is the third try's.
+        try desk.settle(second.id, .done)
+        await updates.retry().value
+        #expect(desk.inbox.count == 3 && desk.inbox.last?.id == "runner-update-\(fake.head)-try-3" && desk.inbox.last?.isOpen == true)
+    }
+
     @Test(arguments: [["swift", "build", "-c", "release"], ["swift", "test"]])
     func failureKeepsOldBinaryAndOneInboxItemThenNextCommitRetries(step: [String]) async throws {
         fake.failed = step

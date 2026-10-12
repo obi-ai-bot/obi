@@ -301,6 +301,8 @@ nonisolated struct Question: Codable, Equatable, Sendable {
     var text: String
     /// At most 3 (docs/runner-api.md); the user's own words answer too.
     var options: [String]
+    /// What each option does, one line each, or nil. Older runners don't send it.
+    var details: [String]? = nil
     /// The index of the option the asker recommends, or nil. Older runners don't send it.
     var recommended: Int? = nil
     /// The plan to approve, in markdown (Plan mode), or nil. Older runners don't send it.
@@ -318,6 +320,8 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
     var title: String
     var text: String
     var options: [String]
+    /// What each option does, one line each, from newer runners only (#215).
+    var details: [String]? = nil
     var created: Date
     var done: Date?
     var later: Date?

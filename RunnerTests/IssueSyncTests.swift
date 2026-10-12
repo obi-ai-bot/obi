@@ -19,6 +19,13 @@ struct IssueSyncTests {
         var extraItems: [[String: Any]] = []
         var repositoryFailure: String?
         var projectTitle = Lead.boardTitle
+        var options = ["Todo", "In progress", "In review", "Blocked", "Needs test"]
+        /// Each option's id by its name; its name when it has none here.
+        var ids: [String: String] = [:]
+        /// `updateProjectV2Field` gives every option a new id, as it would without theirs.
+        var renumbers = false
+        var fieldUpdates: [[[String: Any]]] = []
+        func id(_ name: String) -> String { ids[name] ?? name }
         var number = 116
         var issueURL: String { "https://github.com/deskree-inc/oby/issues/\(number)" }
 
@@ -50,7 +57,24 @@ struct IssueSyncTests {
             case ["api", "user"]: return "well-prado"
             case ["project", "list"]: return try encode(["projects": [["title": projectTitle, "number": 20, "id": "PVT_20"]]])
             case ["project", "field-list"]:
-                return try encode(["fields": [["id": "FIELD", "name": "Status", "options": ["Todo", "In progress", "In review", "Blocked", "Needs test"].map { ["id": $0, "name": $0] }]]])
+                return try encode(["fields": [["id": "FIELD", "name": "Status", "options": options.map { ["id": id($0), "name": $0] }]]])
+            case ["api", "graphql"] where args.contains("--input"):
+                let file = args[args.firstIndex(of: "--input")! + 1]
+                let request = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(filePath: file))) as? [String: Any])
+                #expect((request["query"] as? String)?.contains("updateProjectV2Field") == true)
+                let input = try #require((request["variables"] as? [String: Any])?["input"] as? [String: Any])
+                #expect(input["fieldId"] as? String == "FIELD")
+                let sent = try #require(input["singleSelectOptions"] as? [[String: Any]])
+                fieldUpdates.append(sent)
+                options = sent.compactMap { $0["name"] as? String }
+                for option in sent {
+                    let name = option["name"] as? String ?? ""
+                    ids[name] = renumbers ? "X-\(name)" : option["id"] as? String ?? name
+                }
+                return try encode(["data": ["updateProjectV2Field": ["projectV2Field": ["id": "FIELD"]]]])
+            case ["api", "graphql"] where args.contains { $0.contains("ProjectV2SingleSelectField{options") }:
+                #expect(args.contains("id=FIELD"))
+                return try encode(["data": ["node": ["options": options.map { ["id": id($0), "name": $0, "color": $0 == "Done" ? "GREEN" : "GRAY", "description": "\($0) cards"] }]]])
             case ["api", "graphql"]:
                 let firstPage = laterPage && !args.contains("cursor=next")
                 let items: [[String: Any]] = firstPage || missingItem ? [] : [["id": "ITEM", "content": ["url": issueURL], "fieldValueByName": ["name": column]]] + extraItems
@@ -212,8 +236,9 @@ struct IssueSyncTests {
         #expect(fake.labels == ["feature"] && fake.column == "In progress")
         #expect(fake.notes.isEmpty && !fake.calls.contains { $0.prefix(2) == ["issue", "comment"] })
         #expect(desk.inbox.count == 1 && desk.inbox.first?.text == "Issue audit: fixed drift on 1 issue(s).")
-        // It fixed the drift by itself and nothing failed: the report arrives done.
-        #expect(desk.inbox.first?.done == day)
+        // It fixed the drift by itself and nothing failed: the report arrives done, with nothing to decide (#215).
+        #expect(desk.inbox.first?.done == day && desk.inbox.first?.options == [])
+        #expect(desk.inbox.filter(\.isOpen).isEmpty)
         #expect(desk.issueJobs.first(where: { $0.id == original.id })?.outgoing?.count == 1)
         let count = fake.calls.count
         await desk.issueSync.audit(now: day)
@@ -560,5 +585,165 @@ struct IssueSyncTests {
         macJob.status = .done
         await send(macJob, to: mac)
         #expect(!fake.labels.contains("status:in-progress"))
+    }
+
+    // MARK: A status the roadmap lacks is a decision (#215)
+
+    /// A merged slice whose Build list is done belongs in Needs test, on a roadmap with no such column.
+    func lackingNeedsTest() throws -> (Desk, FakeGH, Date) {
+        let (desk, fake, original) = try fixture()
+        var merged = original
+        merged.status = .done
+        merged.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now)
+        desk.issueSync.store.save(merged)
+        fake.body = "## Build\n- [x] First slice\n\n## Test it when it's done\n- [ ] Test on a Mac"
+        fake.column = "In progress"
+        fake.options = ["Todo", "In progress", "In review", "Blocked", "Done"]
+        return (desk, fake, Date(timeIntervalSince1970: 1_800_000_000))
+    }
+
+    func decision(_ desk: Desk) -> InboxItem? { desk.inbox.first { $0.isOpen && $0.title == IssueSync.statusTitle("Needs test") } }
+
+    @Test func aMissingStatusIsADecisionNotAReport() async throws {
+        let (desk, fake, day) = try lackingNeedsTest()
+        await desk.issueSync.audit(now: day)
+        // Nothing fixed, nothing failed: no report. The missing column asks the owner, with what it can do.
+        let item = try #require(decision(desk))
+        #expect(desk.inbox.count == 1 && item.kind == .audit && item.job == "" && item.isDecision)
+        // As Claude Code asks: each answer says what it does, the recommended one first.
+        #expect(item.options == ["Add the column", "Use In review instead", "Ignore this status"] && item.recommended == 0)
+        #expect(item.details == ["Adds Needs test to the roadmap's Status field, every card keeping its column, and moves these issues there.",
+                                 "Moves these issues to In review, now and whenever they'd go to Needs test.",
+                                 "Leaves these issues where they are, and doesn't ask about Needs test again."])
+        #expect(item.text == "The roadmap's Status field has no Needs test option. Issues that belong there stay where they are: deskree-inc/oby#116.")
+        #expect(fake.column == "In progress" && fake.mutations.isEmpty)
+        // Asked once: the next day's audit doesn't ask again while it waits, even put off.
+        try desk.settle(item.id, .later(day.addingTimeInterval(3600)))
+        await desk.issueSync.audit(now: day.addingTimeInterval(86400))
+        #expect(desk.inbox.filter { $0.title == item.title }.count == 1)
+        // Only what it offers: other words change nothing.
+        #expect(throws: (any Error).self) { try desk.settle(item.id, .answer("Make one up")) }
+        #expect(desk.item(item.id)?.isOpen == true)
+    }
+
+    @Test func useInsteadMovesTheIssuesAndIsRemembered() async throws {
+        let (desk, fake, day) = try lackingNeedsTest()
+        await desk.issueSync.audit(now: day)
+        let item = try #require(decision(desk))
+        let settled = try desk.settle(item.id, .answer("Use In review instead"))
+        #expect(settled.done != nil && settled.answer == "Use In review instead")
+        // It moves them now, and remembers it for that status.
+        await desk.issueSync.drain()
+        #expect(fake.column == "In review")
+        #expect(desk.issueSync.choice(for: "Needs test") == IssueSync.Choice(use: "In review"))
+        // The next audit, and a job's own step, use it: no item, no move back.
+        fake.column = "In progress"
+        await desk.issueSync.audit(now: day.addingTimeInterval(2 * 86400))
+        #expect(fake.column == "In review" && desk.inbox.filter(\.isOpen).isEmpty)
+        // After a restart too.
+        let restarted = IssueSync(desk: desk, store: desk.issueSync.store)
+        restarted.auditURL = desk.issueSync.auditURL
+        #expect(restarted.choice(for: "needs test")?.use == "In review")
+    }
+
+    @Test func ignoreThisStatusLeavesItsIssuesAloneAndIsRemembered() async throws {
+        let (desk, fake, day) = try lackingNeedsTest()
+        await desk.issueSync.audit(now: day)
+        let item = try #require(decision(desk))
+        try desk.settle(item.id, .answer(Inbox.ignoreStatus))
+        await desk.issueSync.drain()
+        #expect(desk.issueSync.choice(for: "Needs test") == IssueSync.Choice(use: nil))
+        let calls = fake.calls.count
+        await desk.issueSync.audit(now: day.addingTimeInterval(86400))
+        #expect(fake.calls.count > calls)
+        #expect(fake.column == "In progress" && fake.mutations.isEmpty && desk.inbox.filter(\.isOpen).isEmpty)
+    }
+
+    /// Once the column exists, the decision is done by itself and the issue moves there.
+    @Test func theDecisionGoesOnceTheColumnExists() async throws {
+        let (desk, fake, day) = try lackingNeedsTest()
+        await desk.issueSync.audit(now: day)
+        let item = try #require(decision(desk))
+        fake.options.append("Needs test")
+        await desk.issueSync.audit(now: day.addingTimeInterval(86400))
+        #expect(desk.item(item.id)?.done != nil && desk.item(item.id)?.answer == nil)
+        #expect(fake.column == "Needs test" && desk.inbox.filter(\.isOpen).isEmpty)
+        #expect(desk.issueSync.choice(for: "Needs test") == nil)
+    }
+
+    /// Add the column: every option goes back with its id in its order, the new one with none after
+    /// In review; the ids are read back to check they were kept, and the issue moves.
+    @Test func addTheColumnKeepsEveryOptionAndMovesTheIssues() async throws {
+        let (desk, fake, day) = try lackingNeedsTest()
+        fake.ids = ["Todo": "OPT-1", "In progress": "OPT-2", "In review": "OPT-3", "Blocked": "OPT-4", "Done": "OPT-5"]
+        var scanned: [String] = []
+        desk.issueSync.scan = { texts in scanned += texts.map(\.text) }
+        await desk.issueSync.audit(now: day)
+        let item = try #require(decision(desk))
+        // Only through what reaches GitHub: settling it in place is refused.
+        #expect(throws: (any Error).self) { try desk.settle(item.id, .answer(Inbox.addColumn)) }
+        let settled = try await desk.answer(item.id, .answer(Inbox.addColumn))
+        #expect(settled.done != nil && settled.answer == Inbox.addColumn)
+        let sent = try #require(fake.fieldUpdates.first)
+        #expect(fake.fieldUpdates.count == 1)
+        #expect(sent.map { $0["name"] as? String } == ["Todo", "In progress", "In review", "Needs test", "Blocked", "Done"])
+        #expect(sent.map { $0["id"] as? String } == ["OPT-1", "OPT-2", "OPT-3", nil, "OPT-4", "OPT-5"])
+        // Each option keeps its color and description; the new one is gray, with none.
+        #expect(sent[5]["color"] as? String == "GREEN" && sent[5]["description"] as? String == "Done cards")
+        #expect(sent[3]["color"] as? String == "GRAY" && sent[3]["description"] as? String == "")
+        // What went out was scanned first, and the options were read again after.
+        #expect(scanned.contains { $0.contains("updateProjectV2Field") && $0.contains("OPT-5") })
+        #expect(fake.calls.filter { $0.contains { $0.contains("ProjectV2SingleSelectField{options") } }.count == 2)
+        // The audit ran again: the issue is in Needs test, and nothing waits.
+        await desk.issueSync.drain()
+        #expect(fake.column == "Needs test" && desk.inbox.filter(\.isOpen).isEmpty)
+    }
+
+    /// Options that come back with other ids aren't the ones the cards were on: an error, and the
+    /// item waits. A scan that can't pass sends nothing.
+    @Test func addTheColumnRefusesChangedIdsAndUnscannedRequests() async throws {
+        let (desk, fake, day) = try lackingNeedsTest()
+        fake.renumbers = true
+        await desk.issueSync.audit(now: day)
+        let item = try #require(decision(desk))
+        let error = await #expect(throws: (any Error).self) { try await desk.answer(item.id, .answer(Inbox.addColumn)) }
+        #expect(error?.localizedDescription.contains("didn't come back as they were") == true)
+        #expect(desk.item(item.id)?.isOpen == true)
+
+        let (other, otherFake, otherDay) = try lackingNeedsTest()
+        await other.issueSync.audit(now: otherDay)
+        let waiting = try #require(decision(other))
+        other.issueSync.scan = { _ in throw Shell.Failure(message: "scanner unavailable") }
+        await #expect(throws: (any Error).self) { try await other.answer(waiting.id, .answer(Inbox.addColumn)) }
+        #expect(otherFake.fieldUpdates.isEmpty && other.item(waiting.id)?.isOpen == true)
+    }
+
+    /// No column to offer instead: only Ignore.
+    @Test func closestColumnIsTheStepBefore() {
+        #expect(IssueSync.closest(to: "Needs test", in: ["Todo", "In progress", "in review"]) == "in review")
+        #expect(IssueSync.closest(to: "Needs test", in: ["Todo", "In progress"]) == "In progress")
+        #expect(IssueSync.closest(to: "Needs test", in: ["Todo", "Done"]) == nil)
+        #expect(IssueSync.closest(to: "In progress", in: ["Todo", "In review"]) == nil)
+    }
+
+    /// What failed waits with Try again, which runs the audit again now.
+    @Test func aFailedAuditCanBeTriedAgain() async throws {
+        let (desk, fake, original) = try fixture()
+        var job = original
+        job.status = .done
+        desk.issueSync.store.save(job)
+        fake.repositoryFailure = "Resource not accessible"
+        fake.labels = ["status:in-progress", "feature"]
+        fake.body = IssueSync.claimed(fake.body, by: original.id)
+        let day = Date(timeIntervalSince1970: 1_800_000_000)
+        await desk.issueSync.audit(now: day)
+        let report = try #require(desk.inbox.first { $0.isOpen })
+        #expect(report.title == IssueSync.reportTitle && report.options == [Inbox.tryAgain] && report.text.contains("Resource not accessible"))
+        fake.repositoryFailure = nil
+        try desk.settle(report.id, .answer(Inbox.tryAgain))
+        await desk.issueSync.drain()
+        #expect(fake.labels == ["feature"])
+        // The second run's report is its own item, done: it fixed the drift by itself.
+        #expect(desk.inbox.count == 2 && desk.inbox.filter(\.isOpen).isEmpty && desk.inbox.last?.id != report.id)
     }
 }

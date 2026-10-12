@@ -460,6 +460,30 @@ final class Failures {
         if !job.isActive { checks[job.id] = nil }
         if added { study() }
         if let pr = Self.mergedFix(job, now: now()) { close(job, pr) }
+        // A job in Oby's repository that starts or opens its pull request may be a failure's fix.
+        if job.repo == Self.repo, job.reviewOf == nil {
+            let stage = job.isActive ? "active" : job.published != nil ? "published" : "idle"
+            if fixStages[job.id] != stage {
+                fixStages[job.id] = stage
+                if stage != "idle" { reconcile() }
+            }
+        }
+    }
+
+    /// Each Oby job's last stage `reconcile` looked at, so it runs when one changes, not every step.
+    private var fixStages: [String: String] = [:]
+    private var reconciledSinceStart = false
+
+    /// Failure items still open while their fix is under way (#215): a job on their cause queued or
+    /// running, or its pull request open. They're done by themselves, as Fix it would be refused.
+    /// When a fix job starts or opens its pull request, and once after a restart.
+    func reconcile() {
+        guard enabled, let desk, desk.inbox.contains(where: { $0.isOpen && $0.kind == .failure }) else { return }
+        for item in desk.inbox where item.isOpen && item.kind == .failure {
+            guard let record = store.failure(String(item.id.dropFirst("failure-".count))), let why = fixing(record) else { continue }
+            Logger.jobs.notice("failure item \(item.id, privacy: .public) is done: \(why, privacy: .public)")
+            _ = try? desk.settle(item.id, .done)
+        }
     }
 
     private func record(_ found: Found, job: Job) {
@@ -549,6 +573,10 @@ final class Failures {
     /// rules), and studies what's left to study.
     func sweep() {
         guard enabled, let desk else { return }
+        if !reconciledSinceStart {
+            reconciledSinceStart = true
+            reconcile()
+        }
         let now = now()
         for job in desk.jobs { observe(job) }
         for job in desk.jobs where job.isActive {
@@ -970,6 +998,16 @@ final class Failures {
     /// a fix merged into dev in the last 7 days, on its issue or an alias's. Nil when there's none.
     func underway(_ record: FailureRecord) -> String? {
         guard let postMortem = record.postMortem else { return nil }
+        if let why = fixing(record) { return why }
+        let signature = Self.canonical(postMortem.signature, store.failureAliases())
+        guard let url = (fix(of: record) ?? fixedBy(signature))?.url else { return nil }
+        return "Fixed by #\(URL(string: url)?.lastPathComponent ?? url) on \(MacCheck.into)."
+    }
+
+    /// Why `record`'s cause is being fixed now: a job on it queued or running, or its pull request
+    /// open. Nil when there's none.
+    private func fixing(_ record: FailureRecord) -> String? {
+        guard let postMortem = record.postMortem else { return nil }
         let signature = Self.canonical(postMortem.signature, store.failureAliases())
         let records = records(of: signature) + [record]
         var issues = Set(records.compactMap { Self.issueNumber($0.issue) })
@@ -978,8 +1016,7 @@ final class Failures {
         if let job = related.first(where: \.isActive) { return "Already being fixed by job \(job.id)." }
         let open = related.first { $0.published != nil && $0.dismissed == nil && ($0.pullRequest == nil || $0.pullRequest?.state == .open) }
         if let open, let number = Review.pullRequest(of: open) { return "Already being fixed by #\(number), its pull request open." }
-        guard let url = (fix(of: record) ?? fixedBy(signature))?.url else { return nil }
-        return "Fixed by #\(URL(string: url)?.lastPathComponent ?? url) on \(MacCheck.into)."
+        return nil
     }
 
     // MARK: Closing on merge into dev
@@ -1113,6 +1150,12 @@ final class Failures {
         var latest = store.failure(record.id) ?? record
         (latest.issue, latest.issueError) = (record.issue, record.issueError)
         store.save(latest)
+        // A fix queued, running or in review already (#215): the issue counts it with its evidence,
+        // and its item, with nothing to decide, arrives done.
+        if let why = fixing(latest) {
+            Logger.jobs.notice("failure \(record.id, privacy: .public): \(signature, privacy: .public): \(why, privacy: .public)")
+            return offer(latest, postMortem, signature: signature, seen: seen, underway: why)
+        }
         offer(latest, postMortem, signature: signature, seen: seen)
     }
 
@@ -1207,17 +1250,23 @@ final class Failures {
         return lines.joined(separator: "\n")
     }
 
-    /// The inbox item offering Fix it: one open per signature.
-    private func offer(_ record: FailureRecord, _ postMortem: PostMortem, signature: String, seen: Int) {
+    /// The inbox item offering Fix it: one open per signature. While its fix is `underway`, it
+    /// offers nothing and arrives done, saying so, and the signature's open items are done too.
+    private func offer(_ record: FailureRecord, _ postMortem: PostMortem, signature: String, seen: Int, underway: String? = nil) {
         guard let desk else { return }
         let title = "Oby failure: \(signature)"
+        if underway != nil {
+            for item in desk.inbox where item.isOpen && item.kind == .failure && item.title == title { _ = try? desk.settle(item.id, .done) }
+        }
         guard !desk.inbox.contains(where: { $0.isOpen && $0.kind == .failure && $0.title == title }) else { return }
         let happened = postMortem.happened.replacing(/\s*\n+\s*/, with: " ")
-        let text = "\(postMortem.cause.rawValue), seen \(seen) time\(seen == 1 ? "" : "s") this week: \(happened.count > 200 ? happened.prefix(199) + "…" : happened)"
+        let text = (underway.map { $0 + " " } ?? "") + "\(postMortem.cause.rawValue), seen \(seen) time\(seen == 1 ? "" : "s") this week: \(happened.count > 200 ? happened.prefix(199) + "…" : happened)"
         let safe = (try? desk.vault.forAgent(text)) ?? "\(postMortem.cause.rawValue), seen \(seen) times this week."
         // No job: it's about Oby, and a job's own items settle as the job changes.
         desk.addIssueAudit(InboxItem(id: "failure-\(record.id)", kind: .failure, job: "", title: title, text: safe,
-                                     options: [Self.fixIt, Inbox.dismiss], created: now()))
+                                     options: underway == nil ? [Self.fixIt, Inbox.dismiss] : [],
+                                     details: underway == nil ? ["Starts a fix job in Oby's repository, with this post-mortem as its brief.", "Starts nothing; the failure stays recorded, with its issue."] : nil,
+                                     created: now()))
     }
 
     // MARK: Fix it

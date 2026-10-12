@@ -41,6 +41,11 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
     struct Question: Codable, Equatable, Sendable {
         var text: String
         var options: [String]
+        /// What each option does, one line each, as Claude Code describes its options; nil when
+        /// the asker gave none. Older runners don't send it.
+        var details: [String]? = nil
+        /// The index of the option the asker recommends, or nil: it comes first.
+        var recommended: Int? = nil
     }
 
     /// Where move_job moves its job: a tool ("claude", "codex"), an account by name and a model by

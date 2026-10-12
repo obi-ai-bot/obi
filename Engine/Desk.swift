@@ -134,7 +134,13 @@ final class Desk {
     /// Jobs that were queued or running when the runner went down, oldest first, for `resumeAfterRestart`.
     @ObservationIgnored var wentDown: [String] = []
 
-    func updateFailed(_ item: InboxItem) {
+    /// The runner's own update's items name this job (Runner/Updates.swift).
+    nonisolated static let updateJob = "runner-update"
+    /// Try again on a failed update's item: the runner tries that commit again now. Nil on the Mac.
+    @ObservationIgnored var retryUpdate: (() -> Void)?
+
+    func updateFailed(_ new: InboxItem) {
+        let item = Self.decided(new)
         guard !inbox.contains(where: { $0.id == item.id }) else { return }
         inbox.append(item)
         store.save(item)
@@ -358,7 +364,14 @@ final class Desk {
         // ponytail: every job is read to find the outstanding ones; a column to query when there are many thousands.
         let all = store.recent(-1)
         jobs = Array(all.prefix(Self.listed))
-        inbox = store.inbox()
+        var saved = store.inbox()
+        // Items saved before #215 that offer nothing to decide (like the 2026-10-12 audit report)
+        // are done now, with the reports: once, since they're saved done.
+        for index in saved.indices where saved[index].isOpen && !saved[index].isDecision {
+            saved[index].done = .now
+            store.save(saved[index])
+        }
+        inbox = saved
         turns = store.conversation()
         let byID = Dictionary(all.map { ($0.id, $0) }) { first, _ in first }
         // Every job that still needs something, however old (#223): its pull request is followed,
@@ -1915,12 +1928,22 @@ final class Desk {
 
     func addIssueAudit(_ item: InboxItem) { add(item) }
 
+    /// An item with nothing to decide (#215) arrives done: it's kept with the reports, never waits in the inbox.
+    private static func decided(_ item: InboxItem) -> InboxItem {
+        guard !item.isDecision, item.done == nil else { return item }
+        var report = item
+        report.done = item.created
+        return report
+    }
+
     /// A new item: one open item per job, so a newer one settles the older, with no answer. Of the
-    /// items with no job, audits share one; failures keep one open per signature (Engine/Failures.swift).
-    /// Then it's rewritten in plain words, without waiting for it.
-    private func add(_ item: InboxItem) {
+    /// items with no job, audits share one per title (the day's report, a status's decision);
+    /// failures keep one open per signature (Engine/Failures.swift). Then it's rewritten in plain
+    /// words, without waiting for it.
+    private func add(_ new: InboxItem) {
+        let item = Self.decided(new)
         let shares = { (other: InboxItem) in
-            other.job == item.job && (!item.job.isEmpty || (item.kind == .audit && other.kind == .audit))
+            other.job == item.job && (!item.job.isEmpty || (item.kind == .audit && other.kind == .audit && other.title == item.title))
         }
         for index in inbox.indices where shares(inbox[index]) && inbox[index].isOpen && inbox[index].id != item.id {
             inbox[index].done = .now
@@ -1965,6 +1988,26 @@ final class Desk {
 
     func item(_ id: String) -> InboxItem? { inbox.first { $0.id == id } }
 
+    /// The user settles an inbox item, as `settle` does, first doing what takes GitHub: Add the
+    /// column on an audit's missing status adds it to the roadmap (#215). When that fails the item
+    /// still waits, and the error says why. The apps' answers come here.
+    @discardableResult
+    func answer(_ id: String, _ how: Settle) async throws -> InboxItem {
+        guard case .answer(let words) = how, let item = item(id), item.isOpen, item.kind == .audit,
+              words.trimmingCharacters(in: .whitespacesAndNewlines) == Inbox.addColumn, item.options.contains(Inbox.addColumn) else {
+            return try settle(id, how)
+        }
+        try await issueSync.addColumn(for: id)
+        // The column is there: the item is answered.
+        guard var settled = self.item(id), settled.isOpen, let index = inbox.firstIndex(where: { $0.id == id }) else { return self.item(id) ?? item }
+        settled.done = .now
+        settled.answer = Inbox.addColumn
+        inbox[index] = settled
+        store.save(settled)
+        onInboxChange(settled)
+        return settled
+    }
+
     /// The user settles an inbox item. An answer goes to its job: a question's answer as the
     /// agent's next message; Dismiss lets the job go; Try again (or their own words) runs it
     /// again; One more round hands the agent Oby's last review. Returns the item.
@@ -1980,7 +2023,18 @@ final class Desk {
         case .answer(let words):
             let text = words.trimmingCharacters(in: .whitespacesAndNewlines)
             guard (1...2000).contains(text.count) else { throw Shell.Failure(message: "Answer with 1 to 2,000 characters.") }
+            // Items about Oby, not a job, take only what they offer.
+            if item.kind == .audit || item.job == Self.updateJob {
+                guard item.options.contains(text) else { throw Shell.Failure(message: "Answer \(item.options.joined(separator: " or ")).") }
+            }
             switch (item.kind, text) {
+            case (.failed, Inbox.tryAgain) where item.job == Self.updateJob: retryUpdate?()
+            case (.audit, Inbox.addColumn): throw Shell.Failure(message: "Adding a column takes GitHub: answer it with Desk.answer.")
+            case (.audit, Inbox.tryAgain): issueSync.again()
+            case (.audit, Inbox.ignoreStatus): try issueSync.decide(item.id, use: nil)
+            case (.audit, _):
+                guard let column = Inbox.instead(text) else { throw Shell.Failure(message: "Answer \(item.options.joined(separator: " or ")).") }
+                try issueSync.decide(item.id, use: column)
             case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss), (.merge, Inbox.dismiss): try dismiss(item.job)
             case (.failed, Inbox.oneMoreRound) where job(item.job)?.cloudNeedsYou == true: try oneMoreCloudRound(item.job)
             case (.failed, Inbox.askOby) where job(item.job)?.cloudNeedsYou == true: try askAboutCloud(item.job)

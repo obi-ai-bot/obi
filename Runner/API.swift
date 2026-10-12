@@ -78,7 +78,10 @@ final class API {
             try await self.publish(context.parameters.require("id"), try await Self.decode(Approval.self, from: request))
         }
         router.post("v1/clear") { _, _ in try await self.clear() }
-        router.get("v1/inbox") { _, _ in await self.inbox() }
+        router.get("v1/inbox") { request, _ in
+            try await self.inbox(state: request.uri.queryParameters.get("state").map { String($0) },
+                                 limit: request.uri.queryParameters.get("limit", as: Int.self))
+        }
         router.post("v1/inbox/:id/answer") { request, context in
             try await self.answer(context.parameters.require("id"), try await Self.decode(InboxAnswer.self, from: request))
         }
@@ -276,13 +279,21 @@ final class API {
 
     /// What only the user can answer and hasn't settled, the longest-waiting first. Items put off
     /// until later are in it too, saying so.
-    func inbox() -> Response {
-        Self.json(desk.inbox.filter(\.isOpen).map { InboxJSON(item: $0) })
+    /// With `state` `done`, the history instead (#215): settled items and the reports that arrived
+    /// done (an audit's repairs, a failure whose fix was under way), the latest settled first, at most `limit`.
+    func inbox(state: String? = nil, limit: Int? = nil) throws -> Response {
+        switch state ?? "open" {
+        case "open": return Self.json(desk.inbox.filter(\.isOpen).map { InboxJSON(item: $0) })
+        case "done":
+            let done = desk.inbox.filter { !$0.isOpen }.sorted { ($0.done ?? $0.created) > ($1.done ?? $1.created) }
+            return Self.json(done.prefix(min(max(limit ?? 50, 0), 1000)).map { InboxJSON(item: $0) })
+        default: throw APIError(.unprocessableContent, "state is open or done.")
+        }
     }
 
     /// The user settles an inbox item: answers it (the answer goes to its job), marks it done, or
     /// puts it off until later.
-    func answer(_ id: String, _ answer: InboxAnswer) throws -> Response {
+    func answer(_ id: String, _ answer: InboxAnswer) async throws -> Response {
         guard let item = desk.item(id) else { throw APIError(.notFound, "There's no inbox item \(id).") }
         guard item.isOpen else { throw APIError(.conflict, "That's done already.") }
         let how: Desk.Settle
@@ -297,7 +308,7 @@ final class API {
         do {
             // Fix it, or Dismiss, on a failure's item (Engine/Failures.swift).
             if item.kind == .failure, case .answer(let words) = how { return Self.json(InboxJSON(item: try desk.failureLog.answer(id, words))) }
-            return Self.json(InboxJSON(item: try desk.settle(id, how)))
+            return Self.json(InboxJSON(item: try await desk.answer(id, how)))
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
@@ -870,7 +881,7 @@ struct AppleCheckAnswer: Encodable {
 struct InboxJSON: Encodable {
     var item: InboxItem
 
-    private enum Keys: String, CodingKey { case id, kind, job, title, text, options, created, done, later, answer, state, outgoing, headline, happened, recommended, why }
+    private enum Keys: String, CodingKey { case id, kind, job, title, text, options, details, created, done, later, answer, state, outgoing, headline, happened, recommended, why }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -880,6 +891,8 @@ struct InboxJSON: Encodable {
         try keys.encode(item.title, forKey: .title)
         try keys.encode(item.text, forKey: .text)
         try keys.encode(item.options, forKey: .options)
+        // What each option does, as many as `options`, or null.
+        try keys.encode(item.details, forKey: .details)
         try keys.encode(item.created, forKey: .created)
         try keys.encode(item.done, forKey: .done)
         try keys.encode(item.later, forKey: .later)
