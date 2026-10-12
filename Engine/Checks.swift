@@ -1225,16 +1225,17 @@ extension Desk {
         jobs.first { $0.id != job.id && $0.created < job.created && $0.awaitsMerge && !Self.overlap(job, $0).isEmpty }
     }
 
-    /// The check, Apple or merge, that Mac `mac` took and has had no result for within its lease,
-    /// handed back to it with `started` now (#227). A Mac runs one check at a time and asks only
-    /// when it's free (Mac/MacChecks.swift), so asking while it holds one means it lost it: Oby on
-    /// it quit or relaunched mid-check. Its job must still wait for it, as when it was taken. None
-    /// for Macs without a name: they can't be told apart.
+    /// The check, Apple or merge, that Mac `mac` took and has had no result for, handed back to it
+    /// with `started` now (#227). A Mac runs one check at a time and asks only when it's free
+    /// (Mac/MacChecks.swift), so asking while it holds one means it lost it: Oby on it quit or
+    /// relaunched mid-check. Past the lease too: it's still that Mac's until another Mac takes it
+    /// (`MacCheck.lease`). Its job must still wait for it, as when it was taken. None for Macs
+    /// without a name: they can't be told apart.
     func lostCheck(mac: String, kinds: Set<MacCheck.Kind>, now: Date = .now) -> MacCheck? {
         guard mac != MacCheck.unnamedMac else { return nil }
         func held(_ check: MacCheck?) -> Bool {
-            guard let check, check.state == .running, check.mac == mac else { return false }
-            return now.timeIntervalSince(check.started ?? now) <= MacCheck.lease
+            guard let check else { return false }
+            return check.state == .running && check.mac == mac
         }
         for var job in jobs {
             if kinds.contains(.apple), job.isActive, held(job.appleCheck), var check = job.appleCheck {

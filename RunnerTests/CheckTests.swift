@@ -181,6 +181,33 @@ struct CheckTests {
         #expect(desk.nextMacCheck(mac: "Studio", now: relaunched + MacCheck.lease + 2) == nil)
     }
 
+    @Test func aMacThatLostItsCheckGetsItBackFirstEvenPastTheLease() async throws {
+        let check = try await approved()
+        let now = Date.now
+        #expect(try #require(desk.nextMacCheck(mac: "Studio", now: now)).id == check.id)
+        // Another pull request's check, queued before it.
+        var other = author
+        other.id = "older"
+        other.issue = 79
+        other.branch = "oby/fix-79"
+        desk.dispatch(Desk.Draft(said: "fix oby #79", reply: "", job: other, guessed: false))
+        try await until("the other job runs") { desk.job("older")?.status == .running }
+        desk.stop("older")
+        try await until("the other job ended") { desk.job("older")?.isActive == false }
+        other = try #require(desk.job("older"))
+        other.outgoing = [Outgoing(action: .push, repo: other.repo, id: Self.next, branch: other.branch)]
+        var queued = MacCheck(id: "0ld0ld00", job: "older", repo: other.repo, pr: 79, branch: other.branch, base: "dev", head: Self.next, round: 1)
+        queued.created = check.created - 600
+        other.macCheck = queued
+        desk.replace(other)
+        // Oby on Studio comes back after the lease ran out: its own check first, not the older one.
+        let late = now + MacCheck.lease + 60
+        let back = try #require(desk.nextMacCheck(mac: "Studio", now: late))
+        #expect(back.id == check.id && back.mac == "Studio" && back.started == late)
+        // Another Mac gets the queued one, not Studio's.
+        #expect(desk.nextMacCheck(mac: "Laptop", now: late)?.id == "0ld0ld00")
+    }
+
     @Test func noCheckForACommitTheReviewDidNotReadOrABranchOtherThanDev() async throws {
         desk.reviewedHead = { _ in CheckTests.next }
         try await publishAndApprove()
