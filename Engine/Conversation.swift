@@ -192,7 +192,7 @@ nonisolated struct Briefing: Equatable, Sendable {
                 group = Group(job)
                 lines.append("### \(Group(job).rawValue)")
             }
-            lines.append("- " + Self.describe(job, place: place, now: now))
+            lines.append("- " + Self.describe(job, place: place, now: now, accounts: (places.first { $0.name == place }?.accounts ?? []) + accounts))
         }
         lines += ["", "## Inbox: what only the user can answer, longest-waiting first", ""]
         let waiting = self.waiting
@@ -288,11 +288,14 @@ nonisolated struct Briefing: Equatable, Sendable {
     /// "ab12cd34 · Vault secrets · deskree-inc/oby, issue #60 · Claude Code · running on this Mac ·
     /// Stage 2 of 5, Work: Round 1 of 1 · started 12 min ago · asked: work on oby #60". What Swift
     /// knows: a stage's detail from an agent (its step, its result as the reason) stays out.
-    static func describe(_ job: Job, place: String, now: Date) -> String {
+    /// `accounts` name the job's account ("Claude Code · Personal"), so the brain knows what's on
+    /// which: "move Deskree's jobs" needs it.
+    static func describe(_ job: Job, place: String, now: Date, accounts: [AccountState] = []) -> String {
         var parts = [job.id, line(job.heading, cap: 60)]
         let about = job.pr.map { ", PR #\($0)" } ?? job.issue.map { ", issue #\($0)" } ?? ""
         parts.append("\(job.repo)\(about)")
-        parts.append(job.agentName + (job.model.map { " (\(AgentModels.name($0)))" } ?? ""))
+        let heading = accounts.first { $0.account.id == job.account }?.account.heading ?? job.agentName
+        parts.append(heading + (job.model.map { " (\(AgentModels.name($0)))" } ?? ""))
         if let moved = job.movedLine { parts.append(moved.prefix(1).lowercased() + moved.dropFirst()) }
         let state = switch job.status {
         // Waiting for its `startWhen` (#216): its step says what for, in Oby's words.
