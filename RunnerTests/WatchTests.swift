@@ -443,7 +443,7 @@ final class WatchAPITests {
 
     @Test func thePhonePairsListsAndRemovesAWatch() async throws {
         let api = try watchAPI(push: true)
-        FileManager.default.createFile(atPath: devices.pairing.path, contents: nil)
+        try devices.openPairing()
         let phone = try devices.register(name: "Test iPhone", publicKey: phoneKey.publicKey.x963Representation.base64EncodedString())
         let router = api.api.router(owner: "well@example.com")
         api.pairing(on: router)

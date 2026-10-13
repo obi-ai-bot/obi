@@ -106,6 +106,8 @@ final class RunnerFeed {
     let checks = MacChecks()
     /// This Mac's Touch ID key, registered on every connection: with it, the runner's jobs publish from here.
     let device = MacDevice()
+    /// The one-time pairing payload currently shown in Settings.
+    private(set) var pairingQR: PairingQR?
     /// The runner's conversation, read in pages and followed over `turn` events, for the window's
     /// thread (Shared/ConversationModel.swift): one thread for every device (#11).
     let conversation = ConversationModel()
@@ -296,19 +298,28 @@ final class RunnerFeed {
     /// Registers this Mac's publishing key, as the iPhone does on each connection. A runner whose
     /// pairing is closed answers 403: Settings › Runner shows its line, with Try again. The runner
     /// on this Mac keeps its files under this user, so Oby opens its pairing itself first
-    /// (`touch $OBY_HOME/pairing`, Runner/Devices.swift).
+    /// (the owner opens pairing in the Mac app, Runner/Devices.swift).
     func register(_ runner: Runner? = nil) {
         guard let runner = runner ?? self.runner else { return }
-        if local {
-            let pairing = LocalRunner.home.appending(path: "pairing")
-            try? FileManager.default.createDirectory(at: LocalRunner.home, withIntermediateDirectories: true)
-            if !FileManager.default.createFile(atPath: pairing.path, contents: Data()) {
-                try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: pairing.path)
-            }
-        }
         Task {
             do { try await device.register(with: runner) } catch {
                 Logger.feed.error("registering this Mac failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// Opens pairing on the local runner and prepares the QR payload without persisting the
+    /// one-time secret in the linked-device record.
+    func openPairing() {
+        guard let runner = self.runner else { return }
+        Task {
+            do {
+                let opened = try await runner.openPairing()
+                let hostname = UserDefaults.standard.string(forKey: "remote.hostname") ?? runner.base.host() ?? ""
+                pairingQR = PairingQR(name: Host.current().localizedName ?? "Mac", hostname: hostname,
+                                      secret: opened.secret, gatewayPublicKey: opened.publicKey)
+            } catch {
+                Logger.feed.error("opening pairing failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

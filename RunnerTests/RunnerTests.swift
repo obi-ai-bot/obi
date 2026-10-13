@@ -59,7 +59,8 @@ final class DevicesTests {
     }
 
     func openPairing(at date: Date = .now) {
-        FileManager.default.createFile(atPath: devices.pairing.path, contents: nil, attributes: [.modificationDate: date])
+        try? devices.openPairing()
+        try? FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: devices.pairing.path)
     }
 
     /// What the phone sends: the runner's sentence for the job, signed at `signedAt`.
@@ -125,7 +126,7 @@ final class DevicesTests {
         #expect(try register(other) != first)
     }
 
-    /// Agents reach the API as the owner, so a new key needs the owner's `touch pairing` from the last
+    /// Agents reach the API as the owner, so a new key needs the owner's pairing window from the last
     /// 10 minutes, and uses it up. A known key needs nothing.
     @Test func newPhonesNeedPairing() throws {
         let mine = key.publicKey.x963Representation.base64EncodedString()

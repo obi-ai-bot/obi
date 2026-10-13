@@ -138,7 +138,7 @@ struct ConnectionTests {
         broker = Broker(desk: desk, connections: ConnectionStore(file: folder.appending(path: "connections.json")),
                         uses: UseLog(file: folder.appending(path: "vault/uses.jsonl")), base: "http://127.0.0.1:7777")
         devices = Devices(file: folder.appending(path: "devices.json"))
-        FileManager.default.createFile(atPath: devices.pairing.path, contents: nil)
+        try devices.openPairing()
         phoneID = try devices.register(name: "Test iPhone", publicKey: phone.publicKey.x963Representation.base64EncodedString())
         let opened = desk.openBroker
         desk.openBroker = { [made] job in

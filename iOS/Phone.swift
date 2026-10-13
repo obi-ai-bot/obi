@@ -556,10 +556,7 @@ final class Phone {
         guard DeviceKey.isAvailable else { throw RunnerError(message: "Publishing needs Face ID on your iPhone.") }
         let connection = runner
         let id = try await connection.register(name: "iPhone", publicKey: try DeviceKey.publicKey())
-        if let link, let publicKey = try? await connection.e2ePublicKey() {
-            self.link = MacLink(name: link.name, hostname: link.hostname, deviceID: id, publicKey: publicKey,
-                                pairingSecret: link.pairingSecret)
-        }
+        if let link { self.link = MacLink(name: link.name, hostname: link.hostname, deviceID: id, publicKey: link.publicKey) }
         UserDefaults.standard.set(id, forKey: deviceKey)
         return id
     }
@@ -567,11 +564,25 @@ final class Phone {
     /// Completes a typed or scanned Mac link before any ordinary device request is sent. The
     /// pairing endpoint is the only gateway route that is intentionally cleartext; it requires the
     /// runner's pairing window and a P-256 possession proof, and returns the pinned gateway key.
+    func pair(_ qr: PairingQR) async throws {
+        guard let hostname = MacLink.hostname(from: qr.hostname), qr.secret.isEmpty == false,
+              qr.gatewayPublicKey.count == 32 else { throw RunnerError(message: "That pairing QR is invalid.") }
+        let base = URL(string: "https://\(hostname)")!
+        let answer = try await Runner(base: base).pair(name: "iPhone", publicKey: try DeviceKey.publicKey(), pairingSecret: qr.secret)
+        guard answer.publicKey == qr.gatewayPublicKey else {
+            throw RunnerError(message: "The Mac's gateway key changed. Scan its pairing QR again.")
+        }
+        link = MacLink(name: qr.name, hostname: hostname, deviceID: answer.id, publicKey: qr.gatewayPublicKey)
+    }
+
+    /// Temporary typed pairing for Macs whose QR is not available yet. QR pairing supplies the
+    /// expected key through the overload above; this path still pins the key returned by the
+    /// authenticated bootstrap response and never fetches it through the tunnel afterward.
     func pair(name: String, hostname: String, pairingSecret: String) async throws {
-        let provisional = MacLink(name: name, hostname: hostname, pairingSecret: pairingSecret)
-        let base = provisional.tunnelURL
-        let answer = try await Runner(base: base).pair(name: "iPhone", publicKey: try DeviceKey.publicKey(), pairingSecret: pairingSecret)
-        link = MacLink(name: name, hostname: hostname, deviceID: answer.id, publicKey: answer.publicKey, pairingSecret: pairingSecret)
+        guard let hostname = MacLink.hostname(from: hostname) else { throw RunnerError(message: "That hostname is invalid.") }
+        let answer = try await Runner(base: URL(string: "https://\(hostname)")!).pair(
+            name: "iPhone", publicKey: try DeviceKey.publicKey(), pairingSecret: pairingSecret)
+        link = MacLink(name: name, hostname: hostname, deviceID: answer.id, publicKey: answer.publicKey)
     }
 }
 

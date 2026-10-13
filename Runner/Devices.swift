@@ -44,9 +44,9 @@ final class Devices {
 
     /// Adds a phone's publishing key and returns its id. A key it already knows keeps its id, so the
     /// app can register every time it connects and always holds an id this runner knows.
-    /// A new key needs pairing open: `pairing` touched in the last 10 minutes, and that key uses it up.
+    /// A new key needs a pairing window opened by the owner in the last 10 minutes, and that key uses it up.
     /// The tailnet header can't be the gate: agents share the runner's machine, so through its tailnet
-    /// address they arrive as the owner. They can't touch `pairing`: OBY_HOME is empty in their bubblewrap.
+    /// address they arrive as the owner. They can't open pairing: OBY_HOME is empty in their bubblewrap.
     // ponytail: only as strong as that bubblewrap, so Linux only; a runner on a Mac needs its agents boxed too.
     func register(name: String, publicKey: String, e2ePublicKey: String? = nil, e2eProof: String? = nil, now: Date = .now) throws -> String {
         guard Self.key(publicKey) != nil else {
@@ -62,9 +62,8 @@ final class Devices {
         }
         if let index = saved.devices.firstIndex(where: { $0.publicKey == publicKey }) {
             if let e2ePublicKey, let existing = saved.devices[index].e2ePublicKey, existing != e2ePublicKey {
-                let opened = (try? FileManager.default.attributesOfItem(atPath: pairing.path))?[.modificationDate] as? Date
-                guard let opened, now.timeIntervalSince(opened) < 600 else {
-                    throw APIError(.forbidden, "Changing this device's E2E key needs the pairing window: touch \(pairing.path), then try again within 10 minutes.")
+                guard pairingIsOpen(now: now) else {
+                    throw APIError(.forbidden, "Changing this device's E2E key needs the owner to open pairing, then try again within 10 minutes.")
                 }
                 saved.devices[index].e2ePublicKey = e2ePublicKey
                 try save()
@@ -75,9 +74,8 @@ final class Devices {
             }
             return saved.devices[index].id
         }
-        let opened = (try? FileManager.default.attributesOfItem(atPath: pairing.path))?[.modificationDate] as? Date
-        guard let opened, now.timeIntervalSince(opened) < 600 else {
-            throw APIError(.forbidden, "To add this phone, run `touch \(pairing.path)` on the runner, then try again within 10 minutes.")
+        guard pairingIsOpen(now: now) else {
+            throw APIError(.forbidden, "To add this phone, the owner must open pairing, then try again within 10 minutes.")
         }
         let device = Device(id: UUID().uuidString.lowercased(), name: name, publicKey: publicKey, e2ePublicKey: e2ePublicKey, registered: now)
         saved.devices.append(device)
@@ -97,6 +95,29 @@ final class Devices {
         guard !secret.isEmpty, let data = try? Data(contentsOf: pairing),
               let saved = String(data: data, encoding: .utf8) else { return false }
         return saved.trimmingCharacters(in: .whitespacesAndNewlines) == secret
+    }
+
+    /// Opens pairing for exactly one device. The secret is generated here, beside the device
+    /// records, so a stale or user-created marker can never authorize a new device.
+    func openPairing() throws -> String {
+        var bytes = Data(count: 32)
+        bytes.withUnsafeMutableBytes { buffer in
+            for index in 0..<buffer.count { buffer[index] = UInt8.random(in: .min ... .max) }
+        }
+        let secret = bytes.base64EncodedString()
+        try FileManager.default.createDirectory(at: pairing.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try secret.data(using: .utf8)!.write(to: pairing, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: pairing.path)
+        return secret
+    }
+
+    private func pairingIsOpen(now: Date) -> Bool {
+        guard let data = try? Data(contentsOf: pairing),
+              let secret = String(data: data, encoding: .utf8),
+              !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let opened = (try? FileManager.default.attributesOfItem(atPath: pairing.path))?[.modificationDate] as? Date
+        else { return false }
+        return now.timeIntervalSince(opened) >= 0 && now.timeIntervalSince(opened) < 600
     }
 
     /// Lets an approval through once: from a registered phone, signed by its key, for exactly the

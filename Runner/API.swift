@@ -151,6 +151,7 @@ final class API {
             try await self.checkResult(context.parameters.require("id"), try await Self.decode(MacCheck.Report.self, from: request))
         }
         router.post("v1/devices") { request, _ in try await self.register(try await Self.decode(NewDevice.self, from: request)) }
+        router.post("v1/pairing/open") { _, _ in try await self.openPairing() }
         router.post("v1/pairing") { request, _ in try await self.pair(try await Self.decode(NewDevice.self, from: request)) }
         router.get("v1/e2e") { _, _ in Self.json(["publicKey": await self.gatewayPublicKey()]) }
         router.post("v1/activities") { request, _ in try await self.activity(try await Self.decode(Push.Token.self, from: request)) }
@@ -631,6 +632,12 @@ final class API {
         }
         let answer = try register(device)
         return answer
+    }
+
+    func openPairing() async throws -> Response {
+        guard gateway != nil else { throw APIError(.serviceUnavailable, "This runner has no device gateway.") }
+        let secret = try devices.openPairing()
+        return Self.json(["secret": secret, "publicKey": gatewayPublicKey()])
     }
 
     func gatewayPublicKey() -> String { gateway?.publicKey.base64EncodedString() ?? "" }

@@ -108,4 +108,20 @@ struct E2ETests {
                                     metadata: responseMetadata, authenticatedBy: mac.privateKey)
         #expect(try client.open(response, metadata: responseMetadata) == Data("private response".utf8))
     }
+
+    @Test func aResponseCannotBeReplayedForANewerRequest() throws {
+        let client = try E2E.Client(device: "phone", keys: phone, gatewayPublicKey: mac.publicKey,
+                                    counterKey: "oby-test-response-replay-\(UUID().uuidString)")
+        let first = try client.seal(Data("first".utf8), method: "GET", route: "/v1/jobs")
+        let oldMetadata = E2E.Metadata(method: "GET", route: "/v1/jobs", device: "phone",
+                                       counter: first.metadata.counter, direction: .response)
+        let oldResponse = try E2E.seal(Data("old response".utf8), to: phone.publicKey,
+                                       metadata: oldMetadata, authenticatedBy: mac.privateKey)
+        let second = try client.seal(Data("second".utf8), method: "GET", route: "/v1/jobs")
+        let newerMetadata = E2E.Metadata(method: "GET", route: "/v1/jobs", device: "phone",
+                                         counter: second.metadata.counter, direction: .response)
+        #expect(throws: E2E.Failure.invalidMessage) {
+            try client.open(oldResponse, metadata: newerMetadata)
+        }
+    }
 }

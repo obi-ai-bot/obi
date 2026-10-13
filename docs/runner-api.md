@@ -29,7 +29,9 @@ as HPKE additional data, so a request envelope cannot be reused as a response. C
 allowlisted route or counter makes the body fail authentication. The gateway records a counter
 only after authentication, persists replay state, and refuses requests without the E2E headers;
 legacy plaintext links therefore cannot use the gateway. Plaintext is never passed to a gateway
-log. `GET /v1/e2e` returns the gateway public key, and the encrypted gateway listens on
+log. The owner opens pairing with `POST /v1/pairing/open`; the runner creates a random one-time
+secret in `OBY_HOME/pairing` and returns it with the gateway key. The Mac shows both in a QR. The
+encrypted gateway listens on
 `127.0.0.1:8810` by default (`OBY_GATEWAY_PORT` changes it).
 
 ## Objects
@@ -876,13 +878,20 @@ For `oby-check apple` in an agent's sandbox, with `Authorization: Bearer <its jo
 
 `oby-check apple [--wait SECONDS]` asks, prints `line` when it changes, polls every 5 seconds, and prints `report`. `--wait` (1 to 3,000; 110 by default, under a 2-minute command timeout, or `OBY_CHECK_WAIT` in a job's check) bounds the whole wait, the requests to the runner included: a request still unanswered at the deadline is dropped. It notes uncommitted changes, which aren't in the check. Exit status: `0` passed (or, with `OBY_CHECK_SKIP=1`, didn't ask for the build), `1` failed, `2` couldn't run (no Mac, the Mac's problem, no runner), `3` still running (run it again: it picks up the same check), `64` a wrong command line. Jobs whose Lead brief names `iOS/`, `Watch/`, `Mac/` or `Shared/`, or, without a brief, in a repository that has them, are told about it in their prompt.
 
+### `POST /v1/pairing/open`
+
+The owner-only route opens pairing. It returns `{"secret":"…","publicKey":"…"}`. The secret is
+stored in `OBY_HOME/pairing` and is deleted after the next successful registration. An empty or
+user-created `pairing` file cannot open pairing.
+
 ### `POST /v1/pairing`
 
 The gateway's one cleartext bootstrap route. It is usable only while the owner has opened the
-pairing window with `touch $OBY_HOME/pairing`. The device sends the same P-256 publishing key and
+pairing window with `POST /v1/pairing/open`. The device sends the same P-256 publishing key and
 its X25519 key as registration, plus `e2eProof`: an ECDSA signature over
 `oby-e2e-register\n<publicKey>\n<e2ePublicKey>`. The response contains the device id and the gateway's
-X25519 public key. The client stores both in its pairing record and encrypts every later call.
+X25519 public key. The QR carries the secret and gateway key; the client refuses a response whose
+key differs from the QR and stores neither the one-time secret nor a fetched gateway key.
 
 ### `POST /v1/devices`
 
@@ -895,8 +904,8 @@ Registers a device's publishing key, once per device: the iPhone's (named "iPhon
 `publicKey` is the P-256 public key, X9.63 (65 bytes, uncompressed), base64. `e2ePublicKey` is the device's X25519 public key, 32 bytes, base64. `e2eProof` is required when setting a first or replacement X25519 key and proves possession of the P-256 private key. The response includes the registered id and the gateway's public key. Only the runner's owner can register (the tailnet header); the runner lists devices in its log.
 
 - A key the runner knows returns its id right away, so the app registers every time it connects.
-- A new key needs pairing open: the owner runs `touch $OBY_HOME/pairing` on the runner's machine, and the device registers within 10 minutes. That key uses it up, so the iPhone and the Mac each need it opened once. Otherwise `403` with that one line to show: the Mac shows it in Settings › Runner, with Try again.
-- Why: agents run on the runner's machine, so through its tailnet address they arrive with the owner's header. They can't touch `pairing`, because `OBY_HOME` is empty inside their bubblewrap.
+- A new key needs pairing open: the owner opens pairing in the Mac app, scans its QR, and the device registers within 10 minutes. The random secret uses it up, so each device needs a new QR. Otherwise `403` with that one line to show.
+- Why: agents run on the runner's machine, so through its tailnet address they arrive with the owner's header. They cannot open pairing because `OBY_HOME` is empty inside their bubblewrap.
 
 ### `POST /v1/activities`
 

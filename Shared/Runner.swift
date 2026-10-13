@@ -956,6 +956,15 @@ nonisolated struct Runner: Sendable {
         }
         return (answer.id, gateway)
     }
+
+    func openPairing() async throws -> (secret: String, publicKey: Data) {
+        struct Answer: Decodable { var secret: String; var publicKey: String }
+        let answer: Answer = try await call("POST", "v1/pairing/open")
+        guard let key = Data(base64Encoded: answer.publicKey), key.count == 32 else {
+            throw RunnerError(message: "The runner returned no valid E2E gateway key.")
+        }
+        return (answer.secret, key)
+    }
     #endif
 
     /// The gateway key used to complete a Mac pairing. This is public key material, but it is
@@ -1021,7 +1030,7 @@ nonisolated struct Runner: Sendable {
                     var parser = EventParser()
                     var line = Data()
                     var framed = Data()
-                    var sequence: UInt64 = 1
+                    let requestCounter = sealedCounter(request)
                     // Split on newlines only: summaries may hold U+2028, which `lines` would break at.
                     for try await byte in bytes {
                         guard let e2e else {
@@ -1038,8 +1047,7 @@ nonisolated struct Runner: Sendable {
                             let envelope = framed.subdata(in: 4..<(4 + Int(length)))
                             framed.removeSubrange(0..<(4 + Int(length)))
                             let metadata = E2E.Metadata(method: "GET", route: "/v1/events", device: e2e.device,
-                                                        counter: sequence, direction: .response)
-                            sequence += 1
+                                                        counter: requestCounter, direction: .response)
                             for clear in try e2e.open(envelope, metadata: metadata) {
                                 guard clear == 0x0A else { line.append(clear); continue }
                                 if let event = parser.feed(String(decoding: line, as: UTF8.self)) { stream.yield(event) }
@@ -1106,11 +1114,13 @@ nonisolated struct Runner: Sendable {
         var request = URLRequest(url: URL(string: path, relativeTo: base.appending(path: "/"))!)
         request.httpMethod = method
         request.timeoutInterval = timeout
+        var requestCounter: UInt64?
         if let e2e {
             let clear = try body.map { try Self.encoder.encode($0) } ?? Data()
             let route = Self.encodedRoute(request.url, fallback: "/\(path)")
             let sealed = try e2e.seal(clear, method: method, route: route)
             request.httpBody = sealed.body
+            requestCounter = sealed.metadata.counter
             request.setValue(E2E.version, forHTTPHeaderField: "Oby-E2E-Version")
             request.setValue(e2e.device, forHTTPHeaderField: "Oby-E2E-Device")
             request.setValue(String(sealed.metadata.counter), forHTTPHeaderField: "Oby-E2E-Counter")
@@ -1124,9 +1134,13 @@ nonisolated struct Runner: Sendable {
         guard let e2e else { return data }
         let route = Self.encodedRoute(request.url, fallback: "/\(path)")
         let metadata = E2E.Metadata(method: method, route: route, device: e2e.device,
-                                    counter: 1,
+                                    counter: requestCounter ?? 0,
                                     direction: .response)
         return try e2e.open(try E2E.unframe(data), metadata: metadata)
+    }
+
+    private func sealedCounter(_ request: URLRequest) -> UInt64 {
+        UInt64(request.value(forHTTPHeaderField: "Oby-E2E-Counter") ?? "0") ?? 0
     }
 
     #if os(macOS)

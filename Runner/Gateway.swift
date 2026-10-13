@@ -71,12 +71,6 @@ final class Gateway: @unchecked Sendable {
     }
 }
 
-private final class E2ESequence: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: UInt64 = 0
-    func next() -> UInt64 { lock.lock(); defer { lock.unlock() }; value += 1; return value }
-}
-
 /// The remote-device boundary. Every request body is authenticated before API sees it and every
 /// response body is encrypted before it leaves the runner. Pairing and the owner-only API remain
 /// on the ordinary runner port; this middleware is installed on the device gateway port.
@@ -114,11 +108,9 @@ struct E2EGate<Context: RequestContext>: RouterMiddleware {
             guard let publicKey = gateway.devicePublicKey(device) else { throw E2E.Failure.invalidKey }
             response.headers[.obyE2EVersion] = E2E.version
             response.headers[.contentType] = "application/octet-stream"
-            let sequence = E2ESequence()
             response.body = response.body.map { buffer in
-                let number = sequence.next()
                 let responseMetadata = E2E.Metadata(method: metadata.method, route: metadata.route,
-                                                    device: device, counter: number, direction: .response)
+                                                    device: device, counter: metadata.counter, direction: .response)
                 let sealed = try gateway.seal(Data(buffer.readableBytesView), to: publicKey, metadata: responseMetadata)
                 return ByteBuffer(bytes: E2E.frame(sealed))
             }

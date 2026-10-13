@@ -1,4 +1,6 @@
 import AppKit
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import ServiceManagement
 import SwiftUI
 
@@ -165,6 +167,14 @@ struct RunnerSettingsView: View {
             }
             Section {
                 LabeledContent("Publishing key", value: feed.runner == nil ? "Off" : feed.device.status)
+                if feed.runner != nil {
+                    Button("Show pairing QR") { feed.openPairing() }
+                    if let pairing = feed.pairingQR, let data = try? pairing.encoded() {
+                        PairingQRImage(data: data)
+                        Text("Scan this once on the iPhone. The secret expires after one pairing.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 // The runner's own line (pairing is closed: how to open it), then Try again.
                 if feed.runner != nil, let problem = feed.device.problem {
                     Text(problem).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
@@ -205,6 +215,24 @@ struct RunnerSettingsView: View {
                 watchProblem = error.localizedDescription
             }
         }
+    }
+}
+
+private struct PairingQRImage: View {
+    let data: Data
+
+    var body: some View {
+        if let image = Self.image(data) {
+            Image(nsImage: image).interpolation(.none).resizable().scaledToFit().frame(width: 220, height: 220)
+        }
+    }
+
+    private static func image(_ data: Data) -> NSImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = data
+        guard let output = filter.outputImage,
+              let cg = CIContext().createCGImage(output.transformed(by: CGAffineTransform(scaleX: 8, y: 8)), from: output.extent) else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
 }
 

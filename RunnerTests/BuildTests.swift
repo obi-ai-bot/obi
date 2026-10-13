@@ -6,6 +6,7 @@ struct BuildTests {
     @Test func agentsYieldAndCapSwiftBuilds() {
         let adjustment = max(0, Agents.processPriority - Agents.currentPriority)
         #expect(Agents.niced(["swift", "build"]) == ["nice", "-n", String(adjustment), "swift", "build"])
+        #expect(Agents.nicedForCurrentProcess(["swift", "test"], inheritedPriority: 19) == ["nice", "-n", "0", "swift", "test"])
         #expect(Agents.buildEnvironment(processorCount: 16)["OBY_SWIFT_BUILD_JOBS"] == "8")
         #expect(Agents.buildEnvironment(processorCount: 1)["OBY_SWIFT_BUILD_JOBS"] == "1")
     }
@@ -129,7 +130,7 @@ struct BuildTests {
     @Test func checksRunAtTheRunnerPriority() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
-        let expected = try await Shell.ok(Agents.niced(["sh", "-c", "ps -o ni= -p $$"]), in: folder)
+        let expected = try await Shell.ok(Agents.nicedForCurrentProcess(["sh", "-c", "ps -o ni= -p $$"]), in: folder)
         let result = await Rounds.run("ps -o ni= -p $$", in: folder, timeout: 5, env: [:], boxed: false)
         #expect(result.passed)
         #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == expected.trimmingCharacters(in: .whitespacesAndNewlines))
