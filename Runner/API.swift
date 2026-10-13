@@ -14,6 +14,8 @@ final class API {
     var updates: Updates?
     let speech: Speech
     let devices: Devices
+    /// The gateway's pairing invitation under way (Runner/Pairing.swift): made here, redeemed there.
+    let pairing: Pairing
     /// Push to the iPhone (Live Activity and alerts), or nil when this runner has none.
     let push: Push?
     /// When Clear done was last pressed, on any app (Runner/Cleared.swift).
@@ -29,10 +31,12 @@ final class API {
 
     /// Without `cleared` (the tests), the clear time lives in memory only; without `broker`, so do
     /// the connections and their use log.
-    init(desk: Desk, devices: Devices, push: Push? = nil, cleared: Cleared? = nil, speech: Speech = Speech(), broker: Broker? = nil) {
+    init(desk: Desk, devices: Devices, push: Push? = nil, cleared: Cleared? = nil, speech: Speech = Speech(), broker: Broker? = nil,
+         pairing: Pairing? = nil) {
         self.speech = speech
         self.desk = desk
         self.devices = devices
+        self.pairing = pairing ?? Pairing()
         self.push = push
         self.cleared = cleared ?? Cleared(file: nil)
         self.broker = broker ?? Broker(desk: desk, connections: ConnectionStore(file: nil), uses: UseLog(file: nil), base: "http://127.0.0.1:7777")
@@ -156,7 +160,37 @@ final class API {
         router.put("v1/settings/permissions") { request, _ in try await self.changePermissions(try await Self.decode(ModeJSON.self, from: request)) }
         router.get("v1/permissions/rules") { _, _ in await self.rules() }
         router.delete("v1/permissions/rules/:id") { _, context in try await self.forget(context.parameters.require("id")) }
+        // Pairing a device for the gateway (#284, Runner/Gateway.swift), on a Mac only: the app
+        // makes the invitation here, with the runner's token, so nothing reaching the gateway can
+        // mint one, and a paired phone can't list or revoke the others.
+        if case .local = access {
+            router.post("v1/pairing/invite") { request, _ in try await self.invite(try await Self.decode(InviteRequest.self, from: request)) }
+            router.get("v1/pairing/devices") { _, _ in await self.pairedDevices() }
+            router.delete("v1/pairing/devices/:id") { _, context in try await self.revokeDevice(context.parameters.require("id")) }
+        }
         return router
+    }
+
+    // MARK: Pairing
+
+    /// A new invitation for the gateway's QR code and its six-digit fallback, replacing the one before.
+    func invite(_ request: InviteRequest) throws -> Response {
+        guard let url = URL(string: request.url), ["http", "https"].contains(url.scheme) else {
+            throw APIError(.badRequest, "url must be an HTTP or HTTPS URL.")
+        }
+        return Self.json(pairing.makeInvitation(url: url, name: request.name ?? Host.current().localizedName ?? "Mac", hostname: request.hostname))
+    }
+
+    /// The devices paired with the gateway: never a token or its digest.
+    func pairedDevices() -> Response {
+        Self.json(devices.gatewayTokens().map { PairedDeviceJSON(id: $0.token.id, name: $0.token.name, created: $0.token.created, expiresAt: $0.token.expiresAt) })
+    }
+
+    func revokeDevice(_ id: String) throws -> Response {
+        guard try devices.revokeGatewayToken(id) else {
+            throw APIError(.notFound, "That paired device was not found.")
+        }
+        return Response(status: .noContent)
     }
 
     // MARK: Endpoints
@@ -1398,4 +1432,20 @@ struct MoveRequest: Decodable {
 
 struct NewMessage: Decodable {
     var text: String
+}
+
+/// What `POST /v1/pairing/invite` takes: where the phone reaches this Mac away from home (its
+/// tunnel), and the Mac's name and tunnel hostname for the link the QR code and the answer carry.
+struct InviteRequest: Decodable {
+    var url: String
+    var name: String?
+    var hostname: String?
+}
+
+/// A device paired with the gateway, as `GET /v1/pairing/devices` lists it.
+struct PairedDeviceJSON: Encodable {
+    var id: String
+    var name: String
+    var created: Date
+    var expiresAt: Date
 }

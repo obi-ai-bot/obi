@@ -9,6 +9,8 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Oby looks for your Mac on the local network, to reach it directly when you're home.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Oby uses the camera to scan your Mac's pairing QR code.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

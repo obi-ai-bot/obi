@@ -90,6 +90,7 @@ struct SettingsView: View {
 struct RunnerSettingsView: View {
     let feed: RunnerFeed
     let availability: MacAvailability
+    let remote: RemoteAccess
     /// The always-on runner whose jobs the island lists and RunnerFeed follows; empty turns that off.
     @AppStorage("runnerURL") private var runnerURL = ""
     /// "This Mac" (#283): the runner is Oby's login item on this Mac, and Oby follows it on 127.0.0.1.
@@ -183,6 +184,7 @@ struct RunnerSettingsView: View {
             } footer: {
                 Text("Oby opens a pull request by itself once a job's check passes and the secret scan is clean. When that failed, publish by hand here or on your iPhone: this Mac's key, like the iPhone's, signs only after Touch ID, and the runner learns it once, while pairing is open on it. Oby merges only into dev, once its review approves and your Mac's checks pass.")
             }
+            PairingView(feed: feed, remote: remote)
         }
         .formStyle(.grouped)
         .frame(width: 460)

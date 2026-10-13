@@ -48,6 +48,8 @@ if let owner = environment["OBY_OWNER"], !owner.isEmpty {
 let owner: String = if case .tailnet(let login) = access { login } else { "Oby on this Mac" }
 // The Watch API's own port, which a Cloudflare Tunnel publishes (Runner/WatchAPI.swift).
 let watchPort = environment["OBY_WATCH_PORT"].flatMap { Int($0) } ?? 7778
+// The LAN gateway is the only non-loopback listener. It owns pairing and device-token access.
+let gatewayPort = environment["OBY_GATEWAY_PORT"].flatMap { Int($0) } ?? GatewayRoutes.port
 // A pipe to an agent that just exited must not take the runner down with it.
 signal(SIGPIPE, SIG_IGN)
 try FileManager.default.createDirectory(at: Workspace.root, withIntermediateDirectories: true)
@@ -242,8 +244,23 @@ let app = Application(router: router,
 // Always up, so writing watch.json is enough; without it, it answers 503 to everything.
 let watchApp = Application(router: watchAPI.router(),
                            configuration: .init(address: .hostname("127.0.0.1", port: watchPort), serverName: "oby-runner"))
+// The LAN gateway (#284), on a Mac only: the one listener on every interface, for paired phones
+// on the local network, forwarding to the loopback API with the runner's own token and
+// advertised over Bonjour. A tailnet runner has `tailscale serve` instead and binds nothing else.
+let gateway: Gateway? = if case .local(let token) = access {
+    Gateway(devices: api.devices, pairing: api.pairing, upstream: URL(string: "http://127.0.0.1:\(port)")!, owner: owner, upstreamToken: token,
+            homes: { [desk.accounts.homes.path] + desk.accounts.accounts.compactMap(\.account.home) })
+} else {
+    nil
+}
+let gatewayApp = gateway.map {
+    Application(router: $0.router(), configuration: .init(address: .hostname("0.0.0.0", port: gatewayPort), serverName: "oby-gateway"))
+}
+let bonjour = Bonjour()
+if gatewayApp != nil { bonjour.start(port: gatewayPort) }
 Logger.runner.notice("Oby's runner \(API.version, privacy: .public) in \(Workspace.root.path, privacy: .public), for \(owner, privacy: .public)")
 try await withThrowingDiscardingTaskGroup { group in
     group.addTask { try await app.runService(gracefulShutdownSignals: []) }
     group.addTask { try await watchApp.runService(gracefulShutdownSignals: []) }
+    if let gatewayApp { group.addTask { try await gatewayApp.runService(gracefulShutdownSignals: []) } }
 }

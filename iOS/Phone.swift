@@ -1,5 +1,7 @@
 import Foundation
 import OSLog
+import Security
+import UIKit
 
 /// The app's tabs (#11): Home is the glance, Chat the thread with Oby, Settings the runner and its accounts.
 nonisolated enum PhoneTab: String, Hashable, Sendable { case home, chat, settings }
@@ -105,6 +107,7 @@ final class Phone {
                 UserDefaults.standard.set(data, forKey: "mac.link")
             } else {
                 UserDefaults.standard.removeObject(forKey: "mac.link")
+                GatewayTokenStore.remove()
             }
             restoreQueuedMessages(for: offlineQueueTarget)
             if loop != nil { finder.find(named: link?.name) { [weak self] url in self?.lan = url } }
@@ -192,7 +195,18 @@ final class Phone {
     /// The thread Chat shows: the runner's turns and this iPhone's words still on their way, by time.
     var thread: [Turn] { conversation.thread(with: ChatThread.pending(echoes, runner: conversation.runnerTurns)) }
 
-    var runner: Runner { Runner(base: base) }
+    var runner: Runner { Runner(base: base, token: GatewayTokenStore.read()) }
+
+    /// Pairs with a Mac's gateway (#284): the invitation's QR secret or its six-digit code buys this
+    /// iPhone's device token, kept in the keychain, and the Mac becomes the linked one. The QR code
+    /// carries the Mac's link; a typed code learns it from the answer.
+    func pairGateway(url: URL, credential: String, link: MacLink? = nil) async throws {
+        let answer = try await GatewayPairing.redeem(at: url, credential: credential, name: UIDevice.current.name)
+        guard let link = link ?? answer.link else {
+            throw RunnerError(message: "The Mac didn't say how to reach it away from home. Pair with its QR code instead.")
+        }
+        self.link = link
+    }
     var active: [Job] { jobs.filter(\.isActive) }
     var signedIn: [Account] { accounts.filter(\.signedIn) }
 
@@ -667,4 +681,67 @@ final class Phone {
 
 extension Logger {
     nonisolated static let phone = Logger(subsystem: "com.deskree.oby", category: "phone")
+}
+
+/// Redeeming a pairing invitation at a Mac's gateway (`POST /v1/pairing`, docs/runner-api.md):
+/// the credential is the QR code's secret or the six digits the Mac shows, and the answer's token
+/// goes to the keychain (GatewayTokenStore) and nowhere else. Tests give their own transport.
+enum GatewayPairing {
+    struct Answer: Decodable, Equatable {
+        var token: String
+        /// The Mac's name and tunnel hostname, so a typed code links the Mac as the QR code would.
+        var link: MacLink?
+    }
+
+    typealias Transport = (URLRequest) async throws -> (Data, URLResponse)
+
+    static func redeem(at url: URL, credential: String, name: String,
+                       transport: Transport = { try await URLSession.shared.data(for: $0) }) async throws -> Answer {
+        struct Body: Encodable { var credential: String; var name: String }
+        var request = URLRequest(url: url.appending(path: "v1/pairing"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try Runner.encoder.encode(Body(credential: credential, name: name))
+        let (data, response) = try await transport(request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let said = (try? JSONDecoder().decode([String: String].self, from: data))?["error"]
+            throw RunnerError(message: said ?? "The Mac refused this pairing invitation.", status: (response as? HTTPURLResponse)?.statusCode)
+        }
+        let answer = try Runner.decoder.decode(Answer.self, from: data)
+        try GatewayTokenStore.save(answer.token)
+        return answer
+    }
+}
+
+/// This iPhone's device token for the linked Mac's gateway, in the keychain only.
+enum GatewayTokenStore {
+    private static let service = "com.deskree.oby.gateway"
+    private static let account = "device-token"
+
+    static func read() -> String? {
+        var result: AnyObject?
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service, kSecAttrAccount as String: account,
+                                    kSecReturnData as String: true]
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func save(_ token: String) throws {
+        let data = Data(token.utf8)
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service, kSecAttrAccount as String: account]
+        let attributes: [String: Any] = [kSecValueData as String: data, kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw RunnerError(message: "The iPhone couldn't keep the Mac's device token.") }
+        if status == errSecItemNotFound { SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil) }
+    }
+
+    static func remove() {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service, kSecAttrAccount as String: account]
+        SecItemDelete(query as CFDictionary)
+    }
 }
