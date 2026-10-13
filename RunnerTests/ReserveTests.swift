@@ -88,6 +88,27 @@ final class ReserveTests {
         #expect(AccountStore.route([week, hour, full, state("fine", sevenDay: 0.85, lifted: resets)], agent: nil, now: now)?.id == "fine")
     }
 
+    @Test func aPlanNameSharedByToolsPicksTheAccountWithRoom() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let accounts = AccountStore(root: folder)
+        let claude = try accounts.add(agent: "claude", name: "Deskree", payer: "Deskree")
+        let codex = try accounts.add(agent: "codex", name: "Deskree", payer: "Deskree")
+        accounts.setLabel("Max", for: claude.id)
+        accounts.setLabel("Plus", for: codex.id)
+        accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.99, sevenDayResets: resets), for: codex.id)
+        let desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        desk.repos = ["deskree-inc/oby"]
+        desk.prepare = { $0 }
+        desk.makeAgent = { _, _, _ in ConversationTests.IdleAgent() }
+        let dispatch = Plan.Dispatch(agent: "auto", account: "Deskree", repo: "deskree-inc/oby", baseBranch: nil,
+                                     pr: nil, issue: nil, epic: nil, kind: .fix, title: nil, task: "Fix it", inputs: [],
+                                     rounds: 1, check: nil, complexity: .routine)
+        let result = Planner.Result(plan: Plan(action: .dispatch, reply: "", dispatches: [dispatch], question: nil), by: "claude")
+        _ = await desk.card(for: result, said: "fix it on Deskree")
+        #expect(desk.jobs.first?.account == claude.id && desk.jobs.first?.agent == "claude")
+    }
+
     // MARK: Waiting for room
 
     final class Made { var agents: [Job] = [] }
