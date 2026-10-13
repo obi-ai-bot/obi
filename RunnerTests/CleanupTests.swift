@@ -35,10 +35,15 @@ struct CleanupTests {
         let cleanup = WorktreeCleanup(root: URL(filePath: "/tmp/oby-cleanup-test"), clock: { self.now })
         var removed: [String] = []
         cleanup.remove = { removed.append($0.id); return true }
-        var review = candidate("review")
-        review.reviewOf = "author"
-        review.review = Review(verdict: .approved, job: review.id, agent: "codex", account: "default", round: 1)
-        await cleanup.run(jobs: [review, candidate("busy")]) { $0 == "busy" }
-        #expect(removed == ["review"])
+        var author = candidate("author")
+        author.pullRequest?.state = .open
+        let account = Account(id: "work", agent: "codex", name: "Work", payer: "Deskree", home: nil)
+        let review = Review.make(for: author, pr: 80, account: account)
+        await cleanup.run(jobs: [author, review, candidate("busy")]) { $0 == "busy" }
+        #expect(removed.isEmpty)
+        var decided = author
+        decided.review = Review(verdict: .approved, job: review.id, agent: review.agent, account: account.name, round: 1)
+        await cleanup.run(jobs: [decided, review, candidate("busy")]) { $0 == "busy" }
+        #expect(removed == [review.id])
     }
 }

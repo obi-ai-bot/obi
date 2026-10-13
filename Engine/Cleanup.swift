@@ -32,12 +32,13 @@ final class WorktreeCleanup {
 
     func run(jobs: [Job], inUse: (String) -> Bool) async {
         let now = clock()
-        for job in jobs where shouldRemove(job, now: now) && !inUse(job.id) { _ = await remove(job) }
+        let byID = Dictionary(jobs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for job in jobs where shouldRemove(job, authors: byID, now: now) && !inUse(job.id) { _ = await remove(job) }
         status = Status(lastRun: now, bytes: Self.size(of: URL(filePath: status.path)), path: status.path)
     }
 
-    private func shouldRemove(_ job: Job, now: Date) -> Bool {
-        if job.reviewOf != nil, job.review != nil { return true }
+    private func shouldRemove(_ job: Job, authors: [String: Job], now: Date) -> Bool {
+        if let authorID = job.reviewOf, authors[authorID]?.review?.job == job.id { return true }
         guard let finished = job.finished, finished <= now.addingTimeInterval(-Self.age), !job.isActive, !job.needsYou,
               job.dismissed != nil || job.status == .stopped || settledPullRequest(job) else { return false }
         return true
