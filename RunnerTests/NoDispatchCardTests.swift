@@ -71,12 +71,38 @@ struct NoDispatchCardTests {
     /// take network time) starts nothing and asks nothing: `live` is checked again right before.
     @Test func aCancelledOrLateTurnStartsNothing() async throws {
         final class Gate: @unchecked Sendable {
-            var reading = false
-            var open = false
+            private let lock = NSLock()
+            private var state = (reading: false, open: false)
+
+            var reading: Bool {
+                lock.lock(); defer { lock.unlock() }
+                return state.reading
+            }
+
+            var open: Bool {
+                get {
+                    lock.lock(); defer { lock.unlock() }
+                    return state.open
+                }
+                set {
+                    lock.lock(); defer { lock.unlock() }
+                    state.open = newValue
+                }
+            }
+
+            func markReading() {
+                lock.lock(); defer { lock.unlock() }
+                state.reading = true
+            }
+
+            func markNotReading() {
+                lock.lock(); defer { lock.unlock() }
+                state.reading = false
+            }
         }
         let gate = Gate()
         desk.issueFiles = { [gate] _, _ in
-            gate.reading = true
+            gate.markReading()
             while !gate.open { try? await Task.sleep(for: .milliseconds(10)) }
             return ["iOS/Home.swift"]
         }
@@ -90,7 +116,7 @@ struct NoDispatchCardTests {
 
         // Past its time while the files are still being read: the turn ends with "didn't answer
         // in time", and the plan, when the files come, starts nothing.
-        gate.reading = false
+        gate.markNotReading()
         gate.open = false
         // Leave enough time for the plan to reach the blocked read before the timeout: under load
         // (the whole suite, a Mac check) it took over 3 seconds, the turn gave up first, and the
