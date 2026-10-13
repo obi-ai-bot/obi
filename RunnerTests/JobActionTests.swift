@@ -161,7 +161,7 @@ struct JobActionTests {
     @Test func anItemTakesTheUsersOwnWordsAndRefusesWhatIsntOpen() async throws {
         let desk = makeDesk([ended("fa11ed00", "Notch three screens", issue: 281)])
         let item = try #require(desk.inbox.first { $0.job == "fa11ed00" })
-        brain.plans = [Self.answer(item.id, words: "try again")]
+        brain.plans = [Self.answer(item.id, words: "try again"), ConversationTests.reply("")]
         // "try again" is the item's own option, whatever its case.
         let talk = await desk.converse("answer the notch item: try again")
         #expect(talk == .reply("Answered Notch three screens's item: Try again."))
@@ -169,6 +169,20 @@ struct JobActionTests {
         // Done already: the brain can't name it any more, and the desk says so when it's asked anyway.
         let late = Planner.Result(plan: try Plan.decode(Data(Self.answer(item.id, option: 1).utf8)), by: "fake")
         #expect(await desk.card(for: late, said: "again") == .reply("Couldn't answer Notch three screens: it's done already."))
+    }
+
+    /// A brain that repeats an answer already given gets nothing more done: the item isn't in the
+    /// briefing any more, Swift refuses the repeat, and the rules that stand in for the brain never
+    /// start work on a later step of a turn.
+    @Test func aRepeatedAnswerDoesNothingMore() async throws {
+        let desk = makeDesk([ended("fa11ed00", "Notch three screens", issue: 281)])
+        let item = try #require(desk.inbox.first { $0.job == "fa11ed00" })
+        brain.plans = [Self.answer(item.id, words: "try again")]
+        let talk = await desk.converse("answer the notch item: try again")
+        #expect(talk == .reply("Answered Notch three screens's item: Try again."))
+        #expect(desk.jobs.map(\.id) == ["fa11ed00"])
+        #expect(desk.item(item.id)?.answer == Inbox.tryAgain)
+        #expect(brain.prompts.count >= 2 && brain.prompts.dropFirst().allSatisfy { $0.contains("Answered Notch three screens's item") })
     }
 
     // MARK: Start now
