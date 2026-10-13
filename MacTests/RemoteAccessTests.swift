@@ -11,14 +11,14 @@ struct RemoteAccessTests {
         #expect(binary.path.hasSuffix("/Contents/MacOS/cloudflared"))
         #expect(FileManager.default.isExecutableFile(atPath: binary.path))
         let verified = try run("/usr/bin/codesign", ["--verify", "--strict", "--verbose=2", binary.path])
-        #expect(verified.status == 0, "codesign --verify: \(verified.err)")
+        #expect(verified.status == 0, Comment(rawValue: "codesign --verify: \(verified.err)"))
         let details = try run("/usr/bin/codesign", ["-d", "-vv", binary.path])
         let directory = details.err.split(separator: "\n").first { $0.hasPrefix("CodeDirectory") } ?? ""
-        #expect(directory.contains("runtime"), "no hardened runtime: \(details.err)")
+        #expect(directory.contains("runtime"), Comment(rawValue: "no hardened runtime: \(details.err)"))
         let slices = try run("/usr/bin/lipo", ["-archs", binary.path])
-        #expect(slices.out.contains("arm64") && slices.out.contains("x86_64"), slices.out)
+        #expect(slices.out.contains("arm64") && slices.out.contains("x86_64"), Comment(rawValue: slices.out))
         let version = try run(binary.path, ["--version"])
-        #expect(version.out.contains("cloudflared version 2026.10.0"), version.out)
+        #expect(version.out.contains("cloudflared version 2026.10.0"), Comment(rawValue: version.out))
     }
 
     /// Turning on registers this Mac, keeps the credential and the tunnel's token in the keychain
