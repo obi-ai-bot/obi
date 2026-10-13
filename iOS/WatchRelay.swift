@@ -235,6 +235,9 @@ final class WatchRelay: NSObject {
                                                       model: message[WatchWire.model] as? String)
                 _ = await refresh()
                 return [WatchWire.job: try Runner.encoder.encode(job)]
+            case .stopTurn:
+                try await phone.runner.stopConversation()
+                return [WatchWire.ok: true]
             case .publishAction:
                 guard let id = message[WatchWire.job] as? String else { return bad }
                 return [WatchWire.action: try await phone.runner.publishAction(id)]
@@ -242,7 +245,7 @@ final class WatchRelay: NSObject {
                 guard let id = message[WatchWire.job] as? String, let action = message[WatchWire.action] as? String else { return bad }
                 Task { await self.inBackground("publish") { await self.publish(id, action: action) } }
                 return [WatchWire.ok: true]
-            case .transcript, .planned, .published, .pairKey, .paired, .unpaired:
+            case .transcript, .planned, .step, .published, .pairKey, .paired, .unpaired:
                 return bad
             }
         } catch {
@@ -263,6 +266,9 @@ final class WatchRelay: NSObject {
     private func plan(_ said: String, answer: (question: String, option: String)?, request: String) async {
         guard let phone else { return }
         var message: [String: Any] = [WatchWire.kind: WatchWire.Kind.planned.rawValue, WatchWire.request: request, WatchWire.said: said]
+        // The steps of Oby's turn reach the watch as they happen (#304), until the plan is back.
+        let following = Task { await follow(steps: request) }
+        defer { following.cancel() }
         do {
             message[WatchWire.plan] = try Runner.encoder.encode(RelayedPlan(try await phone.runner.plan(said, answer: answer)))
         } catch {
@@ -270,6 +276,19 @@ final class WatchRelay: NSObject {
         }
         guard !Task.isCancelled else { return }
         send(message)
+    }
+
+    /// Passes the runner's `step` events on to the watch while its plan `request` waits. A runner
+    /// without steps sends none; the stream ending or failing just ends this.
+    private func follow(steps request: String) async {
+        guard let phone, let session, session.isReachable else { return }
+        do {
+            for try await event in phone.runner.events() {
+                guard case .step(let step) = event, let data = try? Runner.encoder.encode(step) else { continue }
+                session.sendMessage([WatchWire.kind: WatchWire.Kind.step.rawValue, WatchWire.request: request, WatchWire.step: data],
+                                    replyHandler: nil, errorHandler: nil)
+            }
+        } catch {}
     }
 
     /// Signs the publish with this phone's Face ID key, as the app does, and tells the watch how

@@ -252,6 +252,7 @@ final class RunnerFeed {
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     case .turn(let turn): conversation.apply(turn)
+                    case .step(let step): conversation.apply(step)
                     }
                 }
             } catch {
@@ -358,6 +359,27 @@ final class RunnerFeed {
     func apply(_ job: Job) {
         if let index = jobs.firstIndex(where: { $0.id == job.id }) { jobs[index] = job } else { jobs.insert(job, at: 0) }
         noticeChanges()
+    }
+
+    /// Why Stop didn't go through, shown by the Stop button; nil once it did.
+    private(set) var stopProblem: String?
+
+    /// Stop: the runner ends the turn Oby is working on (`POST /v1/conversation/stop`, #304), and
+    /// the steps that ran show as ended.
+    func stopTurn() async {
+        guard let runner else {
+            stopProblem = "Set the runner's URL in Settings first."
+            return
+        }
+        do {
+            try await runner.stopConversation()
+            stopProblem = nil
+            conversation.settleSteps()
+        } catch let error as RunnerError where error.status == 404 {
+            stopProblem = "This runner can't stop a turn yet."
+        } catch {
+            stopProblem = error.localizedDescription
+        }
     }
 
     /// Asks the runner something about its job `id` (stop, dismiss, a message, a move): when it

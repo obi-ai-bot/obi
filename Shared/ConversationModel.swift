@@ -21,6 +21,11 @@ final class ConversationModel {
     /// One page before the turn `before` names (nil for the latest), at most `limit` turns, oldest
     /// first: the runner's `GET /v1/conversation`. The feed sets it; tests put in their own.
     @ObservationIgnored var page: @MainActor (_ before: String?, _ limit: Int) async throws -> [Turn]
+    /// The steps of Oby's turns, by the user's turn id (#304), in order. Live only: the runner
+    /// sends them as a turn goes, and a reload keeps just the ones that ended.
+    private(set) var steps: [String: [TurnStep]] = [:]
+    /// The turn the latest step belongs to.
+    private(set) var latestStepTurn: String?
     /// Counts reloads and forgets: a page from before the last one is dropped.
     private var generation = 0
 
@@ -41,6 +46,8 @@ final class ConversationModel {
             runnerTurns = Self.ordered(latest)
             hasOlder = latest.count >= Self.pageSize
             problem = nil
+            // A connection that dropped may have missed the end of a step: none stays running.
+            steps = Self.settled(steps)
         } catch {
             guard mine == generation else { return }
             problem = error.localizedDescription
@@ -71,9 +78,31 @@ final class ConversationModel {
         runnerTurns = Self.placed(turn, in: runnerTurns)
     }
 
+    /// A `step` event: the step with that turn and index changes, or is added in its place.
+    func apply(_ step: TurnStep) {
+        steps[step.turn] = Self.placed(step, in: steps[step.turn] ?? [])
+        latestStepTurn = step.turn
+    }
+
+    /// Stop was pressed: what still runs ended.
+    func settleSteps() {
+        steps = Self.settled(steps)
+    }
+
+    /// The answer to the turn came: what its last steps still show as running is done.
+    func settleLatestSteps() {
+        guard let latestStepTurn, let list = steps[latestStepTurn] else { return }
+        steps[latestStepTurn] = Self.settled(list, as: .done)
+    }
+
+    /// Whether a step of any turn still runs: Oby is working, and Stop shows.
+    var working: Bool { steps.values.contains { $0.contains { $0.state == .running } } }
+
     /// Another runner, or none: nothing the last one said holds.
     func forget() {
         generation += 1
+        steps = [:]
+        latestStepTurn = nil
         runnerTurns = []
         hasOlder = false
         loading = false
@@ -107,6 +136,49 @@ final class ConversationModel {
         }
         list.insert(turn, at: list.firstIndex { $0.date > turn.date } ?? list.count)
         return list
+    }
+
+    // MARK: Steps
+
+    /// `step` in the turn's list: in place of the one with its index, else where its index puts it.
+    nonisolated static func placed(_ step: TurnStep, in list: [TurnStep]) -> [TurnStep] {
+        var list = list
+        if let at = list.firstIndex(where: { $0.index == step.index }) {
+            list[at] = step
+        } else {
+            list.insert(step, at: list.firstIndex { $0.index > step.index } ?? list.count)
+        }
+        return list
+    }
+
+    /// Every step that still runs, ended as failed: it won't be heard of again.
+    nonisolated static func settled(_ steps: [String: [TurnStep]]) -> [String: [TurnStep]] {
+        steps.mapValues { settled($0) }
+    }
+
+    /// `state` is what a step that still runs ends as: failed when it was stopped or lost, done
+    /// when the turn's answer came without its end.
+    nonisolated static func settled(_ list: [TurnStep], as state: TurnStep.State = .failed) -> [TurnStep] {
+        list.map { step in
+            var step = step
+            if step.state == .running { step.state = state }
+            return step
+        }
+    }
+
+    /// The steps to show under `turn`: its own. The user's turn the runner hasn't listed yet (the
+    /// phone's echo of it) has none by its id, so the last user turn takes the steps of a turn
+    /// the thread doesn't have.
+    nonisolated static func steps(under turn: Turn, among steps: [String: [TurnStep]], latest: String?, thread: [Turn]) -> [TurnStep] {
+        if let own = steps[turn.id] { return own }
+        guard turn.who == .user, let latest, !thread.contains(where: { $0.id == latest }),
+              thread.last(where: { $0.who == .user })?.id == turn.id else { return [] }
+        return steps[latest] ?? []
+    }
+
+    /// The steps to show under `turn` of the thread.
+    func steps(under turn: Turn, in thread: [Turn]) -> [TurnStep] {
+        Self.steps(under: turn, among: steps, latest: latestStepTurn, thread: thread)
     }
 
     // MARK: Days

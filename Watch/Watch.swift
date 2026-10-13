@@ -41,6 +41,13 @@ final class Watch: NSObject {
     @ObservationIgnored private var isOnScreen = false
     @ObservationIgnored private var following: Task<Void, Never>?
     var talk: Talk = .none
+    /// The steps of Oby's turn for the ask under way, kept after its answer arrives: short lines
+    /// under Oby (#304). Empty from a runner without steps.
+    private(set) var steps: [TurnStep] = []
+    /// The runner's turn the steps belong to: the first one that arrives for the ask.
+    @ObservationIgnored private var stepTurn: String?
+    /// Why Stop didn't go through, or nil.
+    private(set) var stopProblem: String?
     /// What this time listening has said so far; the draft's earlier words are `earlier`.
     private(set) var words = ""
     private(set) var level = 0.0
@@ -185,6 +192,7 @@ final class Watch: NSObject {
                             apply(job)
                             saveGlance()
                         case .accounts(let accounts): self.accounts = accounts
+                        case .step(let step): take(step)
                         case .cleared, .inbox, .turn: break
                         }
                     }
@@ -560,6 +568,7 @@ final class Watch: NSObject {
         level = 0
         notice = nil
         talk = .none
+        forgetSteps()
         if let id {
             for transfer in WCSession.default.outstandingUserInfoTransfers
                 where transfer.userInfo[WatchWire.request] as? String == id {
@@ -574,6 +583,7 @@ final class Watch: NSObject {
     private func plan(_ said: String, answer: (question: String, option: String)?) {
         let request = UUID().uuidString
         asking = request
+        forgetSteps()
         var message: [String: Any] = [WatchWire.kind: WatchWire.Kind.plan.rawValue, WatchWire.said: said, WatchWire.request: request]
         if let answer {
             message[WatchWire.question] = answer.question
@@ -608,6 +618,40 @@ final class Watch: NSObject {
         }
     }
 
+    private func forgetSteps() {
+        steps = []
+        stepTurn = nil
+        stopProblem = nil
+    }
+
+    /// A step of the turn the ask under way started, from the runner's events or the phone: only
+    /// the first turn that shows up while the watch waits, not another device's.
+    private func take(_ step: TurnStep) {
+        if stepTurn == nil {
+            guard case .thinking = talk else { return }
+        } else if stepTurn != step.turn {
+            return
+        }
+        stepTurn = step.turn
+        steps = ConversationModel.placed(step, in: steps)
+    }
+
+    /// Stop: the runner ends the turn Oby is working on (#304), straight from the watch or through
+    /// the phone, and what ran shows as ended.
+    func stopTurn() async {
+        do {
+            if let link = direct {
+                try await link.stopConversation()
+            } else {
+                _ = try await request([WatchWire.kind: WatchWire.Kind.stopTurn.rawValue])
+            }
+            stopProblem = nil
+            steps = ConversationModel.settled(steps)
+        } catch {
+            stopProblem = error.localizedDescription
+        }
+    }
+
     /// A message from the phone: the plan for the current ask, or how a publish went.
     private func take(_ message: [String: Any]) {
         guard let kind = (message[WatchWire.kind] as? String).flatMap(WatchWire.Kind.init(rawValue:)) else { return }
@@ -617,6 +661,10 @@ final class Watch: NSObject {
                   talk == .recording || talk == .sending,
                   let text = message[WatchWire.text] as? String else { return }
             words = text
+        case .step:
+            guard let id = message[WatchWire.request] as? String, id == asking || stepTurn != nil,
+                  let data = message[WatchWire.step] as? Data, let step = try? Runner.decoder.decode(TurnStep.self, from: data) else { return }
+            take(step)
         case .planned:
             guard let request = message[WatchWire.request] as? String, request == asking else { return }
             asking = nil
@@ -636,6 +684,8 @@ final class Watch: NSObject {
     }
 
     private func show(_ plan: RelayedPlan) {
+        // The answer is here: a step whose end was missed is done.
+        steps = ConversationModel.settled(steps, as: .done)
         if !plan.drafts.isEmpty { talk = .plan(plan.drafts) }
         else if let question = plan.question { talk = .question(said: plan.questionSaid ?? "", question) }
         else if let reply = plan.reply { talk = .reply(reply) }

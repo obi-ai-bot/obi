@@ -58,6 +58,7 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 ///   "deny") and, with a deny, `text` for the agent; answered with `job`.
 /// - `move`: `job` (its id), with any of `agent`, `account` and `model` (docs/runner-api.md,
 ///   `POST /v1/jobs/{id}/move`); answered with `job`.
+/// - `stopTurn`: nothing; the runner ends the turn Oby is working on (`POST /v1/conversation/stop`, #304); answered with `ok`.
 /// - `publishAction`: `job` (its id); answered with `action`.
 /// - `publish`: `job` (its id) and `action`; answered with `ok`, then a `published` message.
 ///
@@ -65,6 +66,8 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 /// - `transcript`: `request`, `text` (the whole current transcript, replacing the last one).
 ///   Ephemeral: never queued for delivery after listening stops.
 /// - `planned`: `request` and `said`, with `plan` (a RelayedPlan) or `error`.
+/// - `step`: `request` and `step` (a TurnStep as JSON): one step of Oby's turn for the plan the watch
+///   awaits (#304). Ephemeral, like `transcript`: never queued, and absent from runners without steps.
 /// - `published`: `job` (its id), with `url`, `pending` (Face ID waits on the phone) or `error`.
 ///
 /// From the phone, answered in the reply (iOS/WatchPairing.swift):
@@ -75,7 +78,7 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 ///
 /// Any reply may carry `error` instead of what was asked for.
 nonisolated enum WatchWire {
-    enum Kind: String { case refresh, voice, voiceStart, voiceChunk, voiceEnd, voiceCancel, transcript, plan, dispatch, tell, stop, dismiss, start, permission, move, publishAction, publish, planned, published, pairKey, paired, unpaired }
+    enum Kind: String { case refresh, voice, voiceStart, voiceChunk, voiceEnd, voiceCancel, transcript, plan, dispatch, tell, stop, dismiss, start, permission, move, publishAction, publish, planned, step, stopTurn, published, pairKey, paired, unpaired }
 
     static let kind = "kind"
     static let ok = "ok"
@@ -97,6 +100,7 @@ nonisolated enum WatchWire {
     static let url = "url"
     static let pending = "pending"
     static let plan = "plan"
+    static let step = "step"
     static let publicKey = "publicKey"
     static let name = "name"
     static let watch = "watch"
