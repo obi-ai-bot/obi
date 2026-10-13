@@ -395,7 +395,10 @@ extension Plan {
                 "model": ["type": ["string", "null"]],
                 "effort": ["type": ["string", "null"]],
                 "max_running": ["type": ["integer", "null"], "minimum": 1, "maximum": 20],
-                "account": nullable(["enum": context.settingAccounts]),
+                // Two accounts can share a name (a Claude Code and a Codex "Deskree"): a JSON Schema enum
+                // must not repeat an item, and an empty one is invalid, so the brain call would fail.
+                "account": context.settingAccounts.isEmpty ? ["type": "null"]
+                    : nullable(["enum": context.settingAccounts.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }]),
                 "lift": ["type": ["boolean", "null"]],
             ],
         ]
