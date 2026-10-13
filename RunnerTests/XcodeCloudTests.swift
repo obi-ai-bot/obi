@@ -221,16 +221,54 @@ struct XcodeCloudTests {
         #expect(desk.inbox.filter(\.isOpen).isEmpty)
     }
 
+    @Test func aNoOpRebaseStillReportedAsAConflictStopsInsteadOfLooping() async throws {
+        let onto = String(repeating: "d", count: 40)
+        var rebases = 0
+        var publishes = 0
+        desk.fetchBase = { _, _ in onto }
+        desk.cloudRebase = { _, _ in rebases += 1; return head }
+        desk.runCheck = { _, command, _, _ in Rounds.Check(command: command, passed: true, output: "") }
+        desk.publishOnItsOwn = { author, _, hooks in
+            publishes += 1
+            hooks.sent(Outgoing(action: .push, repo: author.repo, id: head, branch: author.branch))
+            return URL(string: author.published!)!
+        }
+        await observe(result(conflict: true))
+        try await waitFor { publishes == 1 }
+        await observe(result(conflict: true))
+        let author = try #require(desk.job("cloud"))
+        #expect(rebases == 1 && publishes == 1)
+        #expect(author.cloudNeedsYou && author.xcodeCloud?.problem?.contains("already") == true)
+        #expect(desk.inbox.filter(\.isOpen).count == 1)
+    }
+
+    @Test func aCloudRebaseWhoseSwiftTestFailsIsNotPublished() async throws {
+        desk.fetchBase = { _, _ in String(repeating: "d", count: 40) }
+        desk.cloudRebase = { _, _ in next }
+        desk.runCheck = { _, command, _, _ in Rounds.Check(command: command, passed: false, output: "test failed") }
+        desk.publishOnItsOwn = { _, _, _ in Issue.record("Failed swift test must not publish"); return URL(string: "https://example.com")! }
+        await observe(result(conflict: true))
+        let author = try #require(desk.job("cloud"))
+        #expect(author.cloudNeedsYou && author.xcodeCloud?.problem?.contains("swift test failed") == true)
+        #expect(desk.inbox.first { $0.isOpen }?.text.contains("swift test failed") == true)
+    }
+
     @Test func aConflictingCloudRebaseNamesFilesForTheAuthor() async throws {
-        desk.makeAgent = { _, _, _ in Issue.record("No agent should start"); return nil }
+        let agent = Agent()
+        var quoted = ""
+        desk.quoteReview = { _, _, text in quoted = text }
+        desk.makeAgent = { author, _, session in
+            #expect(author.id == "cloud" && session == "author-session")
+            return agent
+        }
         desk.fetchBase = { _, _ in String(repeating: "d", count: 40) }
         desk.cloudRebase = { _, _ in throw CloudRebaseConflict(files: ["Engine/Desk.swift", "Shared/Runner.swift"]) }
         await observe(result(conflict: true))
         let author = try #require(desk.job("cloud"))
-        #expect(author.cloudNeedsYou)
-        #expect(author.xcodeCloud?.problem?.contains("Engine/Desk.swift") == true)
-        #expect(author.xcodeCloud?.problem?.contains("Shared/Runner.swift") == true)
-        #expect(desk.inbox.first { $0.isOpen }?.text.contains("Engine/Desk.swift") == true)
+        #expect(author.status == .running && author.step == "Resolving Xcode Cloud rebase conflicts")
+        #expect(agent.prompt.contains("Engine/Desk.swift") && agent.prompt.contains("Shared/Runner.swift"))
+        #expect(quoted.contains("Engine/Desk.swift") && quoted.contains("Shared/Runner.swift"))
+        #expect(author.xcodeCloud?.rounds == 0 && desk.inbox.filter(\.isOpen).isEmpty)
     }
 
     /// The rebase can't start (dev couldn't be fetched): it needs you, saying why.
