@@ -90,6 +90,8 @@ final class RunnerFeed {
     private(set) var defaultMode: RunnerMode?
     /// The name the runner reports in /v1/status, like "tetrix-lab".
     private(set) var host: String?
+    /// The runner version shown in quick Settings.
+    private(set) var version: String?
     /// When Clear done was last pressed, here or on the iPhone (the runner's clock), or nil: the
     /// island hides the jobs that finished by then, the runner's and this Mac's alike.
     private(set) var clearedAt: Date?
@@ -190,6 +192,7 @@ final class RunnerFeed {
         permissionHistory = []
         defaultMode = nil
         host = nil
+        version = nil
         clearedAt = nil
         notified = nil
         conversation.forget()
@@ -216,6 +219,7 @@ final class RunnerFeed {
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
                         host = status.runner.host
+                        version = status.runner.version
                         clearedAt = status.clearedAt
                         accounts = status.accounts
                         models = status.models
