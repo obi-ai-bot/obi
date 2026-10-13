@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import Oby
 
+@MainActor
 struct OfflineTests {
     @Test func queueReplacesAnswersAndRemovesDiscardedMessages() {
         let message = OfflineMessage(id: "m1", said: "build it", question: nil, option: nil, voice: false)
