@@ -1004,7 +1004,7 @@ nonisolated struct Runner: Sendable {
                 do {
                     var request = URLRequest(url: base.appending(path: "v1/events"))
                     if let e2e {
-                        let route = request.url?.percentEncodedPath ?? "/v1/events"
+                        let route = Self.encodedRoute(request.url, fallback: "/v1/events")
                         let sealed = try e2e.seal(Data(), method: "GET", route: route)
                         request.httpBody = sealed.body
                         request.setValue(E2E.version, forHTTPHeaderField: "Oby-E2E-Version")
@@ -1092,6 +1092,14 @@ nonisolated struct Runner: Sendable {
         try Self.decoder.decode(Answer.self, from: try await send(method, path, body: body, timeout: timeout))
     }
 
+    /// The gateway authenticates the URL exactly as it appeared on the wire. URL itself does not
+    /// expose the encoded components on every Apple SDK, while URLComponents does.
+    private static func encodedRoute(_ url: URL?, fallback: String) -> String {
+        guard let url, let components = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return fallback }
+        let path = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
+        return path + (components.percentEncodedQuery.map { "?\($0)" } ?? "")
+    }
+
     /// The answer's body, unread: for a call whose answer says nothing the app needs.
     @discardableResult
     private func send(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Data {
@@ -1100,7 +1108,7 @@ nonisolated struct Runner: Sendable {
         request.timeoutInterval = timeout
         if let e2e {
             let clear = try body.map { try Self.encoder.encode($0) } ?? Data()
-            let route = request.url.map { $0.percentEncodedPath + ($0.percentEncodedQuery.map { "?\($0)" } ?? "") } ?? "/\(path)"
+            let route = Self.encodedRoute(request.url, fallback: "/\(path)")
             let sealed = try e2e.seal(clear, method: method, route: route)
             request.httpBody = sealed.body
             request.setValue(E2E.version, forHTTPHeaderField: "Oby-E2E-Version")
@@ -1114,7 +1122,7 @@ nonisolated struct Runner: Sendable {
         let (data, response) = try await URLSession.shared.data(for: signed(request))
         try Self.check(response, data)
         guard let e2e else { return data }
-        let route = request.url.map { $0.percentEncodedPath + ($0.percentEncodedQuery.map { "?\($0)" } ?? "") } ?? "/\(path)"
+        let route = Self.encodedRoute(request.url, fallback: "/\(path)")
         let metadata = E2E.Metadata(method: method, route: route, device: e2e.device,
                                     counter: 1,
                                     direction: .response)
