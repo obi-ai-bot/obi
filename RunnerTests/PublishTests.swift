@@ -9,9 +9,12 @@ struct PublishOnItsOwnTests {
     /// An agent whose events the test sends.
     final class Agent: AgentRun {
         var onEvent: (AgentEvent) -> Void = { _ in }
-        var onSend: (String) -> Void = { _ in }
-        func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws { self.onEvent = onEvent }
-        func send(_ text: String) { onSend(text) }
+        var onStart: (String) -> Void = { _ in }
+        func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
+            self.onEvent = onEvent
+            self.onStart(prompt)
+        }
+        func send(_ text: String) {}
         func end() {}
         func stop() {}
         func kill() {}
@@ -78,9 +81,15 @@ struct PublishOnItsOwnTests {
     }
 
     @Test func aPossibleSecretGetsAnAgentFixRound() async throws {
-        var sends = 0
-        agent.onSend = { [agent] _ in
-            sends += 1
+        var prompts: [String] = []
+        var resumes: [String?] = []
+        desk.makeAgent = { [agent] _, _, resume in
+            resumes.append(resume)
+            return agent
+        }
+        agent.onStart = { [agent] prompt in
+            prompts.append(prompt)
+            guard prompts.count == 2 else { return }
             agent.onEvent(.session("e6a24229-fix"))
             agent.onEvent(.turnEnded(summary: "fix(test): remove the secret-like fixture", failed: false))
             agent.onEvent(.finished(summary: "fix(test): remove the secret-like fixture", failed: false))
@@ -93,7 +102,9 @@ struct PublishOnItsOwnTests {
             }
             return URL(string: "https://github.com/deskree-inc/oby/pull/82")!
         }
-        #expect(sends == 1 && publishes == 2)
+        #expect(prompts.count == 2 && prompts.last?.contains("RunnerTests/GatewayTests.swift:129") == true)
+        #expect(resumes == [nil, "e6a24229"])
+        #expect(publishes == 2)
         #expect(ended.status == .done && ended.published == "https://github.com/deskree-inc/oby/pull/82")
         #expect(ended.summaries == ["fix(engine): open the PR by itself", "fix(test): remove the secret-like fixture"])
     }

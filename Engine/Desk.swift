@@ -2287,8 +2287,7 @@ final class Desk {
         job.step = "Round \(job.currentRound) of \(job.maxRounds)"
         replace(job)
         let prompt = Prompts.publishFix(findings)
-        run(job, prompt: prompt)
-        agents[id]?.send(prompt)
+        run(job, prompt: prompt, resume: job.session)
         return true
     }
 
