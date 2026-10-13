@@ -279,13 +279,16 @@ struct FailureTests {
         log.now = { .now.addingTimeInterval(3600) }
         log.sweep()
         #expect(test.triggers(of: "waiting").isEmpty)
-        // Once the check ended, the step's clock starts over.
-        waiting.appleCheck?.state = .error
-        desk.replace(waiting)
+        // A Mac that went quiet on it: the sweep ends it, and that's no failure of Oby's to study.
+        log.now = { .now.addingTimeInterval(3000 + AppleCheck.lease + 1) }
         log.sweep()
-        log.now = { .now.addingTimeInterval(7200) }
+        let ended = try #require(desk.job("waiting")?.appleCheck)
+        #expect(ended.state == .error && ended.problem == AppleCheck.quietLine && test.triggers(of: "waiting").isEmpty)
+        // The step's clock starts over.
         log.sweep()
-        #expect(test.triggers(of: "waiting").contains(.stuck))
+        log.now = { .now.addingTimeInterval(3000 + AppleCheck.lease + 3600) }
+        log.sweep()
+        #expect(test.triggers(of: "waiting") == [.stuck])
 
         desk.record(BrainTurn(said: "build the vault on the runner", by: "rules", plan: Plan(action: .ignore, reply: "", dispatches: [], question: nil),
                               refused: ["claude haiku failed: claude exited 15"]))

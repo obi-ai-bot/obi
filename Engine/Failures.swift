@@ -425,7 +425,8 @@ final class Failures {
         for check in checks {
             let kind = check.isApple ? "Apple" : "merge"
             // An Apple check no Mac took (#157): the agent carries on without it, and a Mac that comes back takes it late.
-            if check.state == .error, !check.unclaimed { add(.checkError, check.id, "The Mac couldn't run its \(kind) check.", at: check.finished ?? check.created) }
+            // One a Mac took and went quiet on (`AppleCheck.quietLine`) is the same: its agent carries on without it.
+            if check.state == .error, !check.unclaimed, check.problem != AppleCheck.quietLine { add(.checkError, check.id, "The Mac couldn't run its \(kind) check.", at: check.finished ?? check.created) }
             // A build error names no test, but the compiler named the file and line: the agent fixes it in its next round (#271).
             let built = (check.steps ?? []).contains { !($0.buildErrors ?? []).isEmpty }
             if check.state == .failed, (check.failures ?? []).isEmpty, !built { add(.unnamedFailure, check.id, "Its \(kind) check failed without naming a test.", at: check.finished ?? check.created) }
@@ -618,6 +619,8 @@ final class Failures {
         }
         for job in desk.jobs {
             for check in [job.macCheck, job.appleCheck].compactMap({ $0 }) {
+                // An Apple check a Mac went quiet on ends here if its agent doesn't ask: it's not a failure.
+                if check.isApple, check.state == .running, now.timeIntervalSince(check.started ?? now) > check.leaseLimit, desk.appleCheck(job.id, now: now)?.state == .error { continue }
                 let waited = check.state == .queued ? now.timeIntervalSince(check.created) > Self.queuedCheck
                     : check.state == .running && now.timeIntervalSince(check.started ?? check.created) > check.leaseLimit
                 guard waited else { continue }
