@@ -260,6 +260,12 @@ final class Desk {
     private var afterTurns: [String: Task<Void, Never>] = [:]
     /// Jobs failing now because every account hit its limit: their inbox item says so.
     private var limited: Set<String> = []
+    /// Jobs waiting for room after their account hit its limit (#306), by the account they left:
+    /// the agent that starts for one hears it's taking over (`start`).
+    private var takeovers: [String: String] = [:]
+    /// How far off a reset can be for a job to wait for it instead of failing: a 5-hour window's,
+    /// not a weekly one's.
+    static let limitWaitCap: TimeInterval = 6 * 3600
     /// Setting up worktrees in the same clone one at a time keeps git's locks out of the way.
     private var setups: [String: Task<Void, Never>] = [:]
     /// The files an issue claims (`Claims`), for a plan's job about it, or nil: none named, or it
@@ -1606,6 +1612,9 @@ final class Desk {
         replace(job)
         // The jobs in flight on the same files, for its agent to know about (#237).
         let alongside = jobs.filter { $0.id != job.id && $0.holdsClaim && !Self.overlap(job, $0).isEmpty }
+        if let from = takeovers.removeValue(forKey: job.id) {
+            return run(job, prompt: Prompts.takeover(job, from: from, round: roundMessage[job.id], apple: offersAppleChecks))
+        }
         run(job, prompt: Prompts.agent(job, apple: offersAppleChecks, alongside: alongside))
     }
 
@@ -1753,7 +1762,8 @@ final class Desk {
     /// The job's account hit its usage limit mid-round: the account is full until `resets` (an
     /// hour when the tool named no time), and the job does the round over on the next account with
     /// room, the same tool first, in the same worktree and branch with a new session. With no
-    /// account to go to, it fails, saying when the first one resets.
+    /// account to go to, it waits for the first reset when that's within `limitWaitCap` (#306),
+    /// else it fails, saying when the first one resets.
     private func moveOn(_ job: Job, resets: Date?) {
         let id = job.id
         let from = accounts.state(job.account)?.account.heading ?? job.agentName
@@ -1765,6 +1775,23 @@ final class Desk {
         agent?.kill()
         guard let route = AccountStore.next(accounts.accounts, agent: job.agent) else {
             let first = accounts.accounts.filter(\.signedIn).compactMap(\.fullUntil).min()
+            // A reset the tool named, not far off (#306): the job waits for room, as a job started
+            // for it does, and goes on in its worktree and branch once an account has some. An hour
+            // we only assumed isn't a reset: that fails, so it doesn't wait round after round.
+            if resets != nil, let soon = accounts.accounts.filter(\.signedIn).compactMap(\.fullUntil).filter({ $0 > .now }).min(),
+               soon.timeIntervalSinceNow <= Self.limitWaitCap {
+                Logger.jobs.notice("job \(id, privacy: .public): \(from, privacy: .public) hit its limit\(when, privacy: .public), and no account has room; waiting for one")
+                handoffs[id, default: []].append("\(from) hit its limit\(when); the job waited for an account with room.")
+                takeovers[id] = from
+                roundTimers.removeValue(forKey: id)?.cancel()
+                jobTimers.removeValue(forKey: id)?.cancel()
+                var parked = job
+                parked.status = .queued
+                parked.startWhen = [.room(agent: nil)]
+                parked.session = nil
+                parked.permission = nil
+                return startOrWait(parked)
+            }
             let soonest = first.map { " The first resets at \(Limits.clock($0))." } ?? ""
             // Only reserves in the way (#278): lifting one and trying again goes on there.
             let held = AccountStore.reserveWait(accounts.accounts, agent: nil).map { " " + $0 } ?? ""
@@ -2184,6 +2211,7 @@ final class Desk {
         failures[id] = nil
         denials[id] = nil
         limited.remove(id)
+        takeovers[id] = nil
         waiting.removeAll { $0.id == id }
         // Oby reviews what was just published (or, after a rebase that changed nothing else, checks
         // it on a Mac), and a review that ended reaches its author (Engine/Review.swift).

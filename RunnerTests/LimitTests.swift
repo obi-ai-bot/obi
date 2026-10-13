@@ -148,7 +148,8 @@ struct LimitRetryTests {
     }
 
     /// Starts a fix job on the Codex account and lets its agent hit the limit.
-    func hitLimit(_ id: String, rounds: Int? = nil) async throws -> Agent {
+    func hitLimit(_ id: String, rounds: Int? = nil, resets resets: Date? = nil) async throws -> Agent {
+        let resets = resets ?? self.resets
         var fix = job
         fix.id = id
         fix.kind = .fix
@@ -196,9 +197,42 @@ struct LimitRetryTests {
         #expect(ended.doneLine == "fix(engine): dismiss")
     }
 
-    @Test func withNoRoomAnywhereTheJobFailsSayingWhenTheFirstResets() async throws {
-        // Only the Codex account is signed in.
-        let first = try await hitLimit("stuck")
+    /// With only one account, a reset a few hours off (#306): the job waits for it, in its worktree.
+    @Test func withNoRoomAnywhereANearResetMakesTheJobWaitThenGoOn() async throws {
+        let first = try await hitLimit("waits")
+        #expect(first.killed == 1 && made.agents.count == 1)
+        let parked = try #require(desk.job("waits"))
+        #expect(parked.status == .queued && parked.isWaiting && parked.waiting?.kind == .limit)
+        #expect(parked.step.hasPrefix("Waiting for an account with room"))
+        #expect(!parked.needsYou)
+        // The account is back: the job goes on, told it's taking over.
+        desk.accounts.markFull(codex.id, until: .now.addingTimeInterval(-1))
+        await desk.checkStartWhen()
+        for _ in 0..<500 where made.agents.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(made.agents.count == 2)
+        let (second, moved, _, _) = try #require(made.agents.last)
+        #expect(moved.id == "waits" && moved.branch == "oby/fix-75" && moved.account == codex.id)
+        #expect(second.prompt.contains("Codex · Deskree was working on this job and hit its account's usage limit mid-round."))
+        #expect(desk.job("waits")?.status == .running && desk.job("waits")?.startWhen == nil)
+    }
+
+    /// No reset named and no other account: the assumed hour isn't a reset to wait for.
+    @Test func withNoRoomAnywhereAndNoResetNamedTheJobFails() async throws {
+        var fix = job
+        fix.id = "unnamed"
+        fix.account = codex.id
+        fix.agent = "codex"
+        desk.dispatch(fix)
+        for _ in 0..<500 where desk.job("unnamed")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
+        made.agents.first?.agent.onEvent(.limit(resets: nil))
+        let ended = try #require(desk.job("unnamed"))
+        #expect(ended.status == .failed && ended.needsYou && made.agents.count == 1)
+    }
+
+    @Test func withNoRoomAnywhereAFarResetFailsTheJobSayingWhenTheFirstResets() async throws {
+        // Only the Codex account is signed in; its weekly limit is days away.
+        let resets = Date.now.addingTimeInterval(3 * 24 * 3600)
+        let first = try await hitLimit("stuck", resets: resets)
         #expect(first.killed == 1 && made.agents.count == 1)
         let ended = try #require(desk.job("stuck"))
         #expect(ended.status == .failed && ended.needsYou)
