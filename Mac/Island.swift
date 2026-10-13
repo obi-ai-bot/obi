@@ -5,9 +5,19 @@ import WebKit
 
 nonisolated enum IslandState { case compact, peek, open, listening }
 
+/// The three surfaces available in the open notch.
+nonisolated enum IslandTab: Int, CaseIterable, Sendable {
+    case home, chat, settings
+
+    var title: String { ["Home", "Chat", "Settings"][rawValue] }
+    var symbol: String { ["house", "bubble.left.and.bubble.right", "gearshape"][rawValue] }
+    var shortcut: Character { Character(String(rawValue + 1)) }
+}
+
 /// The island's state and its geometry, measured from the screen Oby lives on.
 @Observable
 final class IslandModel {
+    static let tabKey = "island.lastTab"
     let desk: Desk
     let feed: RunnerFeed
     /// The update waiting to be installed, if any (Mac/Updater.swift): the open island's pill.
@@ -33,12 +43,23 @@ final class IslandModel {
     var focus: String?
     /// The runner's job whose alert's Publish was clicked: its screen starts publishing, once.
     var publishing: String?
+    /// The last open-island surface. Home takes precedence when something needs attention.
+    var tab: IslandTab
 
     init(desk: Desk, feed: RunnerFeed, updater: Updater = Updater()) {
         self.desk = desk
         self.feed = feed
         self.updater = updater
+        tab = IslandTab(rawValue: UserDefaults.standard.integer(forKey: Self.tabKey)) ?? .home
     }
+
+    func select(_ tab: IslandTab) {
+        self.tab = tab
+        UserDefaults.standard.set(tab.rawValue, forKey: Self.tabKey)
+    }
+
+    var needsYou: Bool { IslandInbox.waits(desk: desk, feed: feed) || desk.jobs.contains { $0.question != nil || $0.permission != nil } || feed.jobs.contains { $0.question != nil || $0.permission != nil } }
+    var openingTab: IslandTab { needsYou ? .home : tab }
 
     /// Both chat surfaces read and send through this model.
     var thread: [Turn] { feed.conversation.thread(with: desk.turns) }
@@ -237,8 +258,11 @@ final class IslandController {
         open()
     }
 
-    func open() {
+    func open(tab: IslandTab? = nil) {
         model.notice = nil
+        if model.focus != nil { model.select(.home) }
+        else if let tab { model.select(tab) }
+        else { model.select(model.openingTab) }
         set(.open)
         // Typing needs the keyboard; the panel takes it without activating Oby.
         panel.makeKey()
@@ -317,7 +341,7 @@ final class IslandController {
             stopListening()
             notify(problem ?? "Oby didn't catch that", happy: false)
         } else {
-            open()
+            open(tab: .chat)
             // Not in the voice's queue: the alert waits for you, and talking mustn't.
             if key == .fn { Task { GlobeKey.guideOnce() } }
         }
@@ -567,6 +591,7 @@ private struct OpenIsland: View {
     var onOpenWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
     @State private var text = ""
     @FocusState private var typing: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The job open in place of the list (a Row's id), or nil for the list.
     @State private var selected: String?
     /// Why the last Clear done didn't go through, until the next one does.
@@ -627,17 +652,28 @@ private struct OpenIsland: View {
             }
             .frame(minHeight: 92, alignment: .top)
 
+            tabBar
+
             if feed.down { RunnerOfflineNotice(name: feed.name) }
             if let problem { Text(problem).font(OBYStyle.caption).foregroundStyle(.red).textSelection(.enabled) }
             if let row = selectedRow {
                 scrolling { screen(row).id(row.id) }
-            } else if !groups.isEmpty {
-                scrolling { list }
+            } else {
+                Group {
+                    switch model.tab {
+                    case .home:
+                        scrolling { home }
+                    case .chat:
+                        chat
+                    case .settings:
+                        IslandSettings(model: model)
+                    }
+                }
+                .id(model.tab)
+                .transition(reduceMotion ? .opacity : .asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: model.tab)
             }
-            if selected == nil {
-                compactChat
-                field
-            } else if thinking {
+            if selected != nil && thinking {
                 // Over a job's screen, Oby's thinking and its Cancel stay in sight.
                 thinkingRow
             }
@@ -645,8 +681,12 @@ private struct OpenIsland: View {
         .padding(insets)
         // Escape cancels the turn Oby is thinking about first, then leaves a job's screen, then closes the island.
         .onExitCommand { exit() }
-        .onAppear { typing = true; model.markChatRead() }
-        .onChange(of: model.thread.last?.id) { if selected == nil { model.markChatRead() } }
+        .onAppear { if model.tab == .chat { typing = true; model.markChatRead() } }
+        .onChange(of: model.tab) { _, tab in
+            typing = tab == .chat
+            if tab == .chat { model.markChatRead() }
+        }
+        .onChange(of: model.thread.last?.id) { if selected == nil && model.tab == .chat { model.markChatRead() } }
         // A notification opened the island on a runner's job: its screen opens.
         .onChange(of: model.focus, initial: true) { if let focus = model.focus { selected = Row.id(focus, local: false) } }
         // A runner's job open here stays across new lists; one older than the latest 50 (an inbox
@@ -696,7 +736,9 @@ private struct OpenIsland: View {
     private var rows: [Row] { allRows.filter { model.lists($0.job) } }
 
     /// The list in the iPhone's groups: working, waiting, needs you, in review, done.
-    private var groups: [JobList.Section<Row>] { JobList.groups(rows) { $0.job.group } }
+    private var groups: [JobList.Section<Row>] {
+        JobList.groups(rows.filter { $0.job.group != .needsYou }) { $0.job.group }
+    }
 
     /// The job open now, even one that's cleared (a notification opened it).
     private var selectedRow: Row? { selected.flatMap { id in allRows.first { $0.id == id } } }
@@ -733,6 +775,58 @@ private struct OpenIsland: View {
                 }
             }
         }
+    }
+
+    /// Home is the job glance surface. Conversation turns belong exclusively to Chat.
+    private var home: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            needsYou
+            if !groups.isEmpty { list }
+            else if !IslandInbox.waits(desk: desk, feed: feed) {
+                Text("Nothing needs your attention.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.45))
+                    .padding(.horizontal, 4)
+            }
+        }
+    }
+
+    private var needsYou: some View {
+        let entries = IslandInbox.entries(desk: desk, feed: feed, now: .now)
+        let permissions = feed.chatPermissions.filter { $0.waits(at: .now) }
+        return Group {
+            if !entries.isEmpty || !permissions.isEmpty {
+                Text("Needs you").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.5))
+                    .padding(.leading, 4).accessibilityAddTraits(.isHeader)
+                ForEach(entries) { entry in
+                    InlineDecision(entry: entry, desk: desk, feed: feed, keyboardEnabled: true,
+                                   onOpen: { selected = Row.id($0, local: $1) })
+                }
+                ForEach(permissions) { record in InlinePermission(record: record, feed: feed, keyboardEnabled: true) }
+            }
+        }
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 4) {
+            ForEach(IslandTab.allCases, id: \.self) { tab in
+                Button { select(tab) } label: {
+                    Label(tab.title, systemImage: tab.symbol)
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(maxWidth: .infinity).frame(height: 30)
+                        .background(model.tab == tab ? .white.opacity(0.16) : .clear, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(KeyEquivalent(tab.shortcut), modifiers: .command)
+                .accessibilityAddTraits(model.tab == tab ? .isSelected : [])
+            }
+        }
+        .padding(4)
+        .background(.white.opacity(0.06), in: Capsule())
+        .accessibilityElement(children: .contain)
+    }
+
+    private func select(_ tab: IslandTab) {
+        selected = nil
+        model.select(tab)
     }
 
     /// The job's screen, with the same stages as the iPhone's. Both kinds publish here after Touch
@@ -843,25 +937,20 @@ private struct OpenIsland: View {
             .background(.white.opacity(0.12), in: Capsule())
     }
 
+    private var chat: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            compactChat
+            field
+        }
+    }
+
     private var compactChat: some View {
-        let turns = model.recentTurns
-        let decisions = IslandInbox.entries(desk: desk, feed: feed, now: .now)
-        let permissions = feed.chatPermissions.filter { $0.waits(at: .now) }
         return ScrollView {
             VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
-                ForEach(decisions.filter { ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns) == nil }) { entry in
-                    InlineDecision(entry: entry, desk: desk, feed: feed, onOpen: { selected = Row.id($0, local: $1) })
-                }
                 ForEach(Array(model.recentTurns.enumerated()), id: \.element.id) { index, turn in
                     TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? model.recentTurns[index - 1] : nil),
                             jobs: [], account: { _, _ in "" }, isLocal: { _ in false },
                             onOpenJob: { onOpenWindow((id: $0, local: $1)) }, showTime: false)
-                    ForEach(decisions.filter { ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns) == turn.id }) { entry in
-                        InlineDecision(entry: entry, desk: desk, feed: feed, onOpen: { selected = Row.id($0, local: $1) })
-                    }
-                }
-                ForEach(permissions) { record in
-                    InlinePermission(record: record, feed: feed)
                 }
                 switch desk.talk {
                 case .plan(let drafts) where drafts.count == 1:
@@ -888,7 +977,7 @@ private struct OpenIsland: View {
             }
         }
         .defaultScrollAnchor(.bottom)
-        .frame(height: model.recentTurns.isEmpty && decisions.isEmpty && permissions.isEmpty && !thinking ? 0 : 190)
+        .frame(height: model.recentTurns.isEmpty && !thinking ? 0 : 190)
         .accessibilityLabel("Recent conversation with Oby")
     }
 
