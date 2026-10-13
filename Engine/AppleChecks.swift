@@ -39,9 +39,15 @@ nonisolated enum AppleCheck {
     static let unclaimed: TimeInterval = 60
     /// A check no Mac took in an hour, busy or not, didn't run either.
     static let stale: TimeInterval = 3600
+    /// A Mac that took an agent's Apple check and said nothing for this long went quiet: its agent
+    /// waits with the round's clock stopped (`Desk.paceRound`), so it can't wait for the merge
+    /// check's `MacCheck.lease`. Twice the slowest normal run (a cold build, 10 minutes) and
+    /// the checkout.
+    static let lease: TimeInterval = 25 * 60
     /// How many Apple checks one job may ask for: each holds the Mac for minutes.
     static let maxPerJob = 20
     static let noMacLine = "No Mac took the Apple check within a minute: Oby on the user's Mac has to be open and following the runner, with Settings › Runner › \"Build and test agents' work on this Mac\" on. Carry on without it, and say in your summary that the Apple apps weren't built."
+    static let quietLine = "The Mac that took the Apple check went quiet. Carry on without it, and say in your summary that the Apple apps weren't built."
     static let staleLine = "No Mac took the Apple check within an hour. Carry on without it, and say in your summary that the Apple apps weren't built."
     /// A job's final check (`Desk.afterTurn`) waits for a Mac up to its time limit instead (#68):
     /// `oby-check apple` stops waiting this long before the check is ended, and the runner gives up
@@ -322,6 +328,17 @@ extension Desk {
     /// `AppleCheck.finalWait` of the check's time limit.
     func appleCheck(_ id: String, now: Date = .now) -> MacCheck? {
         guard var job = job(id), var check = job.appleCheck else { return nil }
+        if check.state == .running, now.timeIntervalSince(check.started ?? now) > check.leaseLimit {
+            // The Mac took it and went quiet, and no other Mac took it from there: it ends, and the agent carries on.
+            check.state = .error
+            check.finished = now
+            check.problem = AppleCheck.quietLine
+            job.appleCheck = check
+            replace(job)
+            paceRound(id)
+            onCheckChange(check)
+            return check
+        }
         guard check.state == .queued else { return check }
         let waited = now.timeIntervalSince(check.created)
         if let asked = check.finalCheck {
@@ -370,7 +387,7 @@ extension Desk {
     /// A check a Mac is running now, Apple or merge, or nil.
     func busyMac(now: Date = .now) -> MacCheck? {
         jobs.flatMap { [$0.appleCheck, $0.macCheck] }.compactMap { $0 }
-            .first { $0.state == .running && now.timeIntervalSince($0.started ?? now) <= MacCheck.lease }
+            .first { $0.state == .running && now.timeIntervalSince($0.started ?? now) <= $0.leaseLimit }
     }
 
     /// The oldest queued Apple check whose agent still runs, or one a Mac took and went quiet on:
@@ -382,7 +399,7 @@ extension Desk {
         let ready = jobs.filter { job in
             guard job.isActive, let check = job.appleCheck else { return false }
             if late { return check.unclaimed && check.finalCheck == nil && now.timeIntervalSince(check.created) <= AppleCheck.stale }
-            return check.state == .queued || check.state == .running && now.timeIntervalSince(check.started ?? now) > MacCheck.lease
+            return check.state == .queued || check.state == .running && now.timeIntervalSince(check.started ?? now) > check.leaseLimit
         }
         guard var job = ready.min(by: { ($0.appleCheck?.created ?? now) < ($1.appleCheck?.created ?? now) }), var check = job.appleCheck else { return nil }
         check.state = .running
