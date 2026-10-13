@@ -375,7 +375,7 @@ final class Desk {
     }
     @ObservationIgnored var integrity: (Job) async -> Integrity.Report = { job in
         guard let ref = Integrity.ref(job) else { return Integrity.Report() }
-        return await Integrity.check(worktree: Workspace.worktree(job.id), against: ref)
+        return await Integrity.check(worktree: Workspace.worktree(job.id), against: ref, base: job.base)
     }
     /// Publishes a job that ended done with commits, with no one to approve it: the check passed
     /// and the secret scan gates it (case 4.1). Tests put in their own.
@@ -3213,7 +3213,8 @@ nonisolated enum Rounds {
             if check.succeeded { return .finish(.done, summary + "\n\n" + checked(check)) }
             if let previous, Fingerprint.of(check) == previous { return .hold("the same failure twice in a row", summary) }
             if last {
-                return .hold(check.passed ? "the tests are still weakened after \(rounds)" : "`\(check.command)` still fails after \(rounds)", summary)
+                let findings = check.problems.isEmpty ? "" : "\n\nTest integrity findings:\n" + check.problems.map { "- " + $0 }.joined(separator: "\n")
+                return .hold(check.passed ? "the tests are still weakened after \(rounds)" : "`\(check.command)` still fails after \(rounds)", summary + findings)
             }
             var parts: [String] = []
             if !check.passed {

@@ -418,6 +418,7 @@ struct GuardTests {
         agent.onEvent(.turnEnded(summary: "Green now.", failed: false))
         try await until { desk.job("weaklast")?.isActive == false }
         try expectHeld("weaklast", "the tests are still weakened after 1 round", agent: agent)
+        #expect(desk.job("weaklast")?.summary.contains("Test integrity findings:\n- adds a skip marker in RunnerTests/StopTests.swift: @Test(.disabled())") == true)
     }
 
     @Test func theDiffFindsWhatWeakensTheTests() {
@@ -730,6 +731,26 @@ struct IntegrityRepositoryTests {
         #expect(await Integrity.check(worktree: repo, against: "dev") == Integrity.Report())
         #expect(await Integrity.check(worktree: repo, against: start) == weakened)
         #expect(await Integrity.check(worktree: repo, against: "main") == Integrity.Report(problems: ["Oby couldn't compare the tests with main"]))
+    }
+
+    @Test func rebasingOntoDevDoesNotCountDevsTestChangesAsTheJobsWork() async throws {
+        let (repo, git, start) = try await repository()
+
+        // The job has its own commit, then dev deletes a test file before the job is rebased.
+        try "let a = 2\n".write(to: repo.appending(path: "Cart.swift"), atomically: true, encoding: .utf8)
+        _ = try await git("add", ".")
+        _ = try await git("commit", "-q", "-m", "job work")
+        _ = try await git("checkout", "-q", "dev")
+
+        try FileManager.default.removeItem(at: repo.appending(path: "Tests/CartTests.swift"))
+        try "@Test func devReplacement() {}\n".write(to: repo.appending(path: "Tests/DevTests.swift"), atomically: true, encoding: .utf8)
+        _ = try await git("add", "-A")
+        _ = try await git("commit", "-q", "-m", "dev updates tests")
+        _ = try await git("update-ref", "refs/remotes/origin/dev", "dev")
+        _ = try await git("checkout", "-q", "oby/fix-64")
+        _ = try await git("rebase", "dev")
+
+        #expect(await Integrity.check(worktree: repo, against: start, base: "dev") == Integrity.Report())
     }
 
     @Test func agentAttributesCantHideTheDiff() async throws {

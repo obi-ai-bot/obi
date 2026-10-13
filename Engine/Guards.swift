@@ -145,12 +145,20 @@ nonisolated enum Integrity {
 
     /// What the worktree's work (committed or not) does to the tests since it left `ref`. Fails
     /// closed: when git can't say, that's the problem.
-    static func check(worktree: URL, against ref: String) async -> Report {
+    static func check(worktree: URL, against ref: String, base branch: String? = nil) async -> Report {
         let git = ["git", "-c", "core.quotePath=false", "-C", worktree.path]
-        // A commit recorded when the work started is compared with as it is: a merge base moves
-        // when the agent moves HEAD. A ref (older jobs) is compared from where the branch left it.
+        // A fixed start commit avoids refs the agent can move, but after rebasing onto a newer
+        // base it also includes that base's test changes. In that case the current merge base
+        // isolates the job's patch. Fall back to the recorded start if the base ref is unavailable.
         let fixed = ref.contains(/^[0-9a-f]{40}$/)
-        guard let base = fixed ? ref : try? await Shell.ok(git + ["merge-base", ref, "HEAD"]) else {
+        var comparison: String?
+        if let branch {
+            comparison = try? await Shell.ok(git + ["merge-base", "HEAD", "refs/remotes/origin/\(branch)"])
+        }
+        if comparison == nil {
+            comparison = fixed ? ref : try? await Shell.ok(git + ["merge-base", ref, "HEAD"])
+        }
+        guard let base = comparison else {
             return Report(problems: ["Oby couldn't compare the tests with \(ref)"])
         }
         // Nothing the agent wrote gets a say in what the diff shows: no replacement objects or
