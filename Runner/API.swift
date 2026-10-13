@@ -747,19 +747,24 @@ final class API {
     }
 
     nonisolated static func change(_ models: Models) throws -> Response {
+        let claudeComplexEffort = models.claude.complexEffort ?? AgentModels.value("claude", "complexEffort")
+        let codexComplexEffort = models.codex.complexEffort ?? AgentModels.value("codex", "complexEffort")
         guard AgentModels.claude.contains(where: { $0.0 == models.claude.model }),
-              AgentModels.claudeEfforts.contains(models.claude.effort) else {
-            throw APIError(.unprocessableContent, "Claude Code has no model \(models.claude.model) with effort \(models.claude.effort).")
+              AgentModels.claudeEfforts.contains(models.claude.effort),
+              AgentModels.claudeEfforts.contains(claudeComplexEffort) else {
+            throw APIError(.unprocessableContent, "Claude Code has no model \(models.claude.model) with effort \(models.claude.effort) or complex effort \(claudeComplexEffort).")
         }
         // ponytail: Codex's choices are only checked for shape (they go to Codex as JSON, never as
         // arguments); check them against its model list if a wrong one ever gets through.
-        guard [models.codex.model, models.codex.effort].allSatisfy({ $0.wholeMatch(of: /[A-Za-z0-9._-]*/) != nil }) else {
+        guard [models.codex.model, models.codex.effort, codexComplexEffort].allSatisfy({ $0.wholeMatch(of: /[A-Za-z0-9._-]*/) != nil }) else {
             throw APIError(.unprocessableContent, "That isn't a Codex model and effort.")
         }
         for (agent, choice) in [("claude", models.claude), ("codex", models.codex)] {
             UserDefaults.standard.set(choice.model, forKey: "\(agent).model")
             UserDefaults.standard.set(choice.effort, forKey: "\(agent).effort")
         }
+        UserDefaults.standard.set(claudeComplexEffort, forKey: "claude.complexEffort")
+        UserDefaults.standard.set(codexComplexEffort, forKey: "codex.complexEffort")
         // Foundation on Linux writes them (to ~/.config/oby-runner.plist) only when asked.
         _ = UserDefaults.standard.synchronize()
         return json(Models.current)
@@ -768,7 +773,9 @@ final class API {
     static func options() async -> Response {
         let claude = AgentModels.claude.map { Options.Model(id: $0.0, name: $0.1) }
         let codex = ((try? await CodexAgent.models(home: nil)) ?? []).map { Options.Model(id: $0.id, name: $0.name, efforts: $0.efforts) }
-        return json(Options(claude: .init(models: claude, efforts: AgentModels.claudeEfforts), codex: .init(models: codex)))
+        let codexEfforts = Array(Set(codex.flatMap { $0.efforts ?? [] })).sorted()
+        return json(Options(claude: .init(models: claude, efforts: AgentModels.claudeEfforts, complexEfforts: AgentModels.claudeEfforts),
+                            codex: .init(models: codex, efforts: codexEfforts, complexEfforts: codexEfforts)))
     }
 }
 
@@ -953,14 +960,15 @@ struct Models: Codable {
     struct Choice: Codable {
         var model: String
         var effort: String
+        var complexEffort: String? = nil
     }
 
     var claude: Choice
     var codex: Choice
 
     static var current: Models {
-        Models(claude: Choice(model: AgentModels.value("claude", "model"), effort: AgentModels.value("claude", "effort")),
-               codex: Choice(model: AgentModels.value("codex", "model"), effort: AgentModels.value("codex", "effort")))
+        Models(claude: Choice(model: AgentModels.value("claude", "model"), effort: AgentModels.value("claude", "effort"), complexEffort: AgentModels.value("claude", "complexEffort")),
+               codex: Choice(model: AgentModels.value("codex", "model"), effort: AgentModels.value("codex", "effort"), complexEffort: AgentModels.value("codex", "complexEffort")))
     }
 }
 
@@ -974,6 +982,7 @@ struct Options: Encodable {
     struct Tool: Encodable {
         var models: [Model]
         var efforts: [String]?
+        var complexEfforts: [String]?
     }
 
     var claude: Tool
@@ -990,7 +999,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, fromPR, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, firstSwiftBuildSeconds, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting, mode, permission, connectionUses }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, fromPR, rounds, round, check, model, effort, complexity, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, firstSwiftBuildSeconds, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting, mode, permission, connectionUses }
 
     private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou }
 
@@ -1024,6 +1033,8 @@ struct JobJSON: Encodable {
         try nulls.encode(job.currentRound, forKey: .round)
         if job.check == nil { try nulls.encodeNil(forKey: .check) }
         if job.model == nil { try nulls.encodeNil(forKey: .model) }
+        if job.effort == nil { try nulls.encodeNil(forKey: .effort) }
+        if job.complexity == nil { try nulls.encodeNil(forKey: .complexity) }
         if job.notes == nil { try nulls.encodeNil(forKey: .notes) }
         if job.pullRequest == nil { try nulls.encodeNil(forKey: .pullRequest) }
         if job.pullRequestError == nil { try nulls.encodeNil(forKey: .pullRequestError) }

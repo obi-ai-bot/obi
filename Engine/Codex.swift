@@ -23,6 +23,7 @@ final class CodexAgent: AgentRun {
     private var result: (summary: String, failed: Bool)?
     /// This job's model, or nil for Settings › Models.
     var model: String?
+    var effort: String?
     /// The broker's endpoint for this job (Engine/Connected.swift), or nil when nothing is connected.
     var mcp: AgentMCP?
     /// The job's mode: the thread starts with its sandbox and approvals, and a turn after a change
@@ -72,7 +73,7 @@ final class CodexAgent: AgentRun {
                 Task { if let on = (try? await server.call("mcpServerStatus/list", [:])).flatMap(TetrixUse.codexStatus) { onEvent(.tetrix(.connected(on))) } }
                 let turn = try await server.call("turn/start", CodexRPC.turnStart(thread: thread, prompt: prompt,
                                                                                  model: model ?? AgentModels.value("codex", "model"),
-                                                                                 effort: AgentModels.value("codex", "effort")))
+                                                                                 effort: effort ?? AgentModels.value("codex", "effort")))
                 self.turn = (turn["turn"] as? [String: Any])?["id"] as? String
             } catch {
                 finish(summary: "Codex couldn't start: \(error.localizedDescription)", failed: true)
@@ -89,7 +90,7 @@ final class CodexAgent: AgentRun {
         Task {
             if let turn, (try? await server.call("turn/steer", CodexRPC.steer(thread: thread, turn: turn, text: text))) != nil { return }
             var params = CodexRPC.turnStart(thread: thread, prompt: text, model: model ?? AgentModels.value("codex", "model"),
-                                            effort: AgentModels.value("codex", "effort"))
+                                            effort: effort ?? AgentModels.value("codex", "effort"))
             // The mode changed since the thread started (a plan approved): this turn runs with the new one.
             if mode != started { params.merge(CodexRPC.turnOverrides(mode: mode, git: git)) { $1 } }
             let turn = try? await server.call("turn/start", params)

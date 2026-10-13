@@ -385,6 +385,7 @@ nonisolated enum PlanResult: Decodable, Equatable, Sendable {
 nonisolated struct ModelChoice: Codable, Equatable, Sendable {
     var model: String
     var effort: String
+    var complexEffort: String? = nil
 }
 
 extension ModelChoice {
@@ -418,6 +419,7 @@ nonisolated struct ModelOptions: Codable, Equatable, Sendable {
     struct Tool: Codable, Equatable, Sendable {
         var models: [Model]
         var efforts: [String]?
+        var complexEfforts: [String]?
     }
     var claude: Tool
     var codex: Tool

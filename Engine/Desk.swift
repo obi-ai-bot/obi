@@ -1192,6 +1192,8 @@ final class Desk {
         job.issue = dispatch.issue
         job.fromPR = from
         job.title = dispatch.title
+        job.complexity = dispatch.complexity
+        job.effort = AgentModels.effort(job.agent, complex: dispatch.complexity == .complex)
         job.rounds = dispatch.rounds > 1 ? dispatch.rounds : nil
         job.check = dispatch.check
         job.files = files
@@ -1565,6 +1567,7 @@ final class Desk {
         moved.account = account.id
         moved.agent = account.agent
         moved.model = model
+        moved.effort = AgentModels.effort(moved.agent, complex: moved.complexity == .complex)
         let to = Moves.place(moved, accounts: accounts.accounts)
         moved.moves = (job.moves ?? []) + [Job.Move(from: from, to: to, why: reason, date: .now)]
         // Waiting on the room of an account it left: it runs where it went (#216). A new model alone keeps its wait.
@@ -1726,6 +1729,7 @@ final class Desk {
         var job = heard(job, text)
         job.status = .running
         job.phase = .work
+        job.effort = job.effort ?? AgentModels.effort(job.agent, complex: job.complexity == .complex)
         job.publishStep = nil
         job.finished = nil
         job.dismissed = nil
@@ -1763,6 +1767,7 @@ final class Desk {
         var job = prepared
         job.status = .running
         job.phase = .work
+        job.effort = job.effort ?? AgentModels.effort(job.agent, complex: job.complexity == .complex)
         job.started = .now
         job.step = "Starting \(job.agentName)"
         replace(job)
@@ -1828,11 +1833,13 @@ final class Desk {
         case "claude":
             let claude = ClaudeAgent(worktree: Workspace.worktree(job.id), configDirectory: home, resume: resume)
             claude.model = job.model
+            claude.effort = job.effort
             claude.mode = job.currentMode
             return claude
         case "codex":
             let codex = CodexAgent(worktree: Workspace.worktree(job.id), home: home, resume: resume)
             codex.model = job.model
+            codex.effort = job.effort
             codex.mode = job.currentMode
             return codex
         default: return nil
@@ -1964,6 +1971,7 @@ final class Desk {
         moved.session = nil
         // The stronger model is the tool's own.
         if moved.model != nil { moved.model = AgentModels.stronger[next.agent] }
+        moved.effort = AgentModels.effort(next.agent, complex: moved.complexity == .complex)
         moved.step = "\(from) hit its limit; continuing on \(next.heading)"
         moved.permission = nil
         replace(moved)
@@ -2352,7 +2360,10 @@ final class Desk {
             return
         }
         let reported = job.firstSwiftBuildSeconds.map { "First swift build: \(MacCheck.duration($0)).\n\n" + summary } ?? summary
-        (job.status, job.summary) = Job.ending(job, status, reported, made: made, asked: asked.contains(id), dirty: dirty)
+        let withEffort = job.reviewOf == nil && job.complexity == .complex
+            ? reported + "\n\nReasoning effort: \(AgentModels.effortName(job.effort ?? AgentModels.effort(job.agent, complex: job.complexity == .complex)))."
+            : reported
+        (job.status, job.summary) = Job.ending(job, status, withEffort, made: made, asked: asked.contains(id), dirty: dirty)
         if job.status == .failed && status == .done { job.phase = .work }
         // Why it went to its account, and how it moved between accounts, for the report.
         if let moves = handoffs[id], !moves.isEmpty { job.summary += "\n\n" + moves.joined(separator: "\n") }

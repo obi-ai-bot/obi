@@ -51,6 +51,8 @@ This document is the contract between the runner and its clients. Change it in t
   "round": 1,
   "check": null,
   "model": null,
+  "complexity": "complex",
+  "effort": "high",
   "notes": null,
   "pullRequest": null,
   "pullRequestError": null,
@@ -132,6 +134,7 @@ This document is the contract between the runner and its clients. Change it in t
 - `startCommit`: the commit the work started from (the base on origin, or the pull request's head), recorded when the worktree is set up, or null before then and on older jobs. Test integrity compares with it: an agent can move a branch or a ref, not this. Older runners don't send this key.
 - `firstSwiftBuildSeconds`: how long the job's first `swift build` check took, in whole seconds, or null when the job has not run one. The runner includes `First swift build: …` in the finished job's summary. Older runners don't send this key.
 - `model`: a model the user chose for this job (the stronger one on the plan's card, or one it was moved to), or null for the one in Settings › Models.
+- `complexity`: the brain's `routine` or `complex` classification, or null on older and internal jobs. `effort` is the reasoning effort this job's turns use; complex dispatches use that tool's `complexEffort`, routine dispatches and review/verdict jobs use `effort`. A move selects the destination tool's effort for the saved complexity. Complex job reports name the effort; this field records it for every job.
 - `moves`: every time the user moved the job to another tool, account or model (`POST /v1/jobs/{id}/move`), oldest first. Always a list, empty when it never moved. Each is `{"from": "Codex · Deskree", "to": "Claude Code · Personal", "why": "Codex keeps looping", "date": "2026-10-11T14:02:10Z"}`: `from` and `to` are the tool and the account, with the model after another ` · ` when the job ran one of its own (`"Claude Code · Personal · Fable 5.1"`); `why` is what the user said when they moved it, or null. The job screens show the latest as "Moved from Codex · Deskree to Claude Code · Personal".
 - `connectionUses`: every call the job's agent made to a connected app through the broker (Connected apps, below), oldest first. Always a list, empty before the first. Each records the job, connection, tool, `read` or `write`, whether it was allowed, the vault secret's name, host and date; it never records a value or request or response body.
 - `notes`: what the user told the agent along the way (`POST /v1/jobs/{id}/messages`), oldest first, or null.
@@ -373,7 +376,7 @@ There's no draft to confirm any more: the work the brain plans starts as it's pl
 ```json
 {"runner": {"version": "0.2.0", "host": "tetrix-lab"},
  "accounts": [ …Account ],
- "models": {"claude": {"model": "claude-opus-5-5", "effort": "xhigh"}, "codex": {"model": "gpt-6-sol", "effort": "high"}},
+ "models": {"claude": {"model": "claude-opus-5-5", "effort": "xhigh", "complexEffort": "xhigh"}, "codex": {"model": "gpt-6-sol", "effort": "high", "complexEffort": "high"}},
  "maxRunning": 6, "running": 4,
  "clearedAt": "2026-10-10T08:12:00Z",
  "github": "app", "checks": "ok", "permissions": {"mode": "bypass"},
@@ -919,13 +922,13 @@ The saved rules, oldest first:
 
 ### `GET /v1/settings/models` and `PUT /v1/settings/models`
 
-Each tool's model and effort, as in `status.models`. `GET /v1/settings/models/options` lists the choices: Claude Code's models and efforts, and the models the signed-in Codex account offers (from its own `model/list`) with the efforts each takes.
+Each tool's model, routine effort and complex-job effort, as in `status.models`. `GET /v1/settings/models/options` lists the choices: Claude Code's models and efforts, and the models the signed-in Codex account offers (from its own `model/list`) with the efforts each takes. Defaults are Claude Code `xhigh` and Codex `high` for `complexEffort`; older clients that omit it keep the current value.
 
-The chat's set_setting action uses those same choices. It changes one tool's model and/or effort, maxRunning (1 through 20), or an account's weekly reserve (lift true or false). Swift checks every value against the briefing before the runner applies it; a rejected model or effort includes the available choices. Each action reply names the old and new value. A request that changes two tools is planned as two actions so the brain receives a fresh briefing between them.
+The chat's set_setting action uses those same choices. It changes one tool's model, routine effort or `complexEffort`, maxRunning (1 through 20), or an account's weekly reserve (lift true or false). For example, "complex jobs on Codex at xhigh" sets Codex's `complexEffort`. Swift checks every value against the briefing before the runner applies it; a rejected model or effort includes the available choices. Each action reply names the old and new value. A request that changes two tools is planned as two actions so the brain receives a fresh briefing between them.
 
 ```json
-{"claude": {"models": [{"id": "claude-opus-5-5", "name": "Opus 5.5"}], "efforts": ["low", "medium", "high", "xhigh", "max"]},
- "codex": {"models": [{"id": "gpt-6-sol", "name": "GPT-6-Sol", "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]}]}}
+{"claude": {"models": [{"id": "claude-opus-5-5", "name": "Opus 5.5"}], "efforts": ["low", "medium", "high", "xhigh", "max"], "complexEfforts": ["low", "medium", "high", "xhigh", "max"]},
+ "codex": {"models": [{"id": "gpt-6-sol", "name": "GPT-6-Sol", "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]}], "complexEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"]}}
 ```
 
 ### `GET /v1/settings/jobs` and `PUT /v1/settings/jobs`

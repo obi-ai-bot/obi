@@ -91,6 +91,7 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
         var agent: String? = nil
         var model: String? = nil
         var effort: String? = nil
+        var complexEffort: String? = nil
         var maxRunning: Int? = nil
         var account: String? = nil
         var lift: Bool? = nil
@@ -234,7 +235,7 @@ extension Plan {
 
     nonisolated private static func problems(of setting: Setting, in context: BrainContext) -> [String] {
         var problems: [String] = []
-        let modelChange = setting.agent != nil || setting.model != nil || setting.effort != nil
+        let modelChange = setting.agent != nil || setting.model != nil || setting.effort != nil || setting.complexEffort != nil
         let maxChange = setting.maxRunning != nil
         let reserveChange = setting.account != nil || setting.lift != nil
         guard [modelChange, maxChange, reserveChange].filter({ $0 }).count == 1 else {
@@ -248,11 +249,17 @@ extension Plan {
             if let effort = setting.effort, !(context.settingEfforts[agent] ?? []).contains(effort) {
                 problems.append("unknown effort; choices: " + (context.settingEfforts[agent] ?? []).joined(separator: ", "))
             }
+            if let effort = setting.complexEffort, !(context.settingEfforts[agent] ?? []).contains(effort) {
+                problems.append("unknown complex effort; choices: " + (context.settingEfforts[agent] ?? []).joined(separator: ", "))
+            }
             let model = setting.model ?? AgentModels.value(agent, "model")
             if let effort = setting.effort, let choices = context.settingModelEfforts[agent]?[model], !choices.contains(effort) {
                 problems.append("unknown effort for \(model); choices: " + choices.joined(separator: ", "))
             }
-            if setting.model == nil && setting.effort == nil { problems.append("setting needs a model or effort") }
+            if let effort = setting.complexEffort, let choices = context.settingModelEfforts[agent]?[model], !choices.contains(effort) {
+                problems.append("unknown complex effort for \(model); choices: " + choices.joined(separator: ", "))
+            }
+            if setting.model == nil && setting.effort == nil && setting.complexEffort == nil { problems.append("setting needs a model or effort") }
         } else if let max = setting.maxRunning, !JobSlots.range.contains(max) {
             problems.append("maxRunning goes from \(JobSlots.range.lowerBound) to \(JobSlots.range.upperBound)")
         } else if reserveChange {
@@ -401,11 +408,12 @@ extension Plan {
         ]
         let setting: [String: Any] = [
             "type": "object", "additionalProperties": false,
-            "required": ["agent", "model", "effort", "max_running", "account", "lift"],
+            "required": ["agent", "model", "effort", "complex_effort", "max_running", "account", "lift"],
             "properties": [
                 "agent": nullable(["enum": ["claude", "codex"]]),
                 "model": ["type": ["string", "null"]],
                 "effort": ["type": ["string", "null"]],
+                "complex_effort": ["type": ["string", "null"]],
                 "max_running": ["type": ["integer", "null"], "minimum": 1, "maximum": 20],
                 // Two accounts can share a name (a Claude Code and a Codex "Deskree"): a JSON Schema enum
                 // must not repeat an item, and an empty one is invalid, so the brain call would fail.
@@ -698,7 +706,7 @@ nonisolated struct Planner: Sendable {
         return """
         You are Oby's brain, inside a Mac app that hands coding work (reviews, fixes, builds, tests, investigations) to a coding agent working in its own copy of a repository, and that talks with the user about that work. Turn what the user says now into one plan that matches the JSON schema.
 
-        Settings can be changed by asking: set_setting changes one tool's listed model or effort, the 1-to-20 maxRunning cap, or an account's weekly reserve. Plan separate set_setting actions for separate tools, and use the choices in the briefing.
+        Settings can be changed by asking: set_setting changes one tool's listed model, effort or complexEffort, the 1-to-20 maxRunning cap, or an account's weekly reserve. For example, "complex jobs on Codex at xhigh" changes Codex's complexEffort. Plan separate set_setting actions for separate tools, and use the choices in the briefing.
 
         You work like Claude Code: the user tells you what they want in plain words, and you make it happen, one action at a time. Each plan is one action. When it changes something (stop_agent, move_job, answer_permission, set_mode), Oby does it and asks you again, with the user's words followed by what it already did this turn and a fresh briefing; then plan the next action the request still needs, until all of it is done, and finish with reply_only and an empty reply (Oby tells the user what it did). Never plan an action Oby already did this turn. One request can take several steps: "Deskree's limit is full, move its jobs to Personal and Codex" is a move_job of some of the jobs on Deskree to Personal, then a move_job of the rest to Codex.
 
