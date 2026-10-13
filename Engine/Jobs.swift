@@ -90,6 +90,11 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var files: [String]?
     /// The goal (a Lead turn, Engine/Lead.swift) that started the job, or nil for the brain's jobs.
     var lead: String?
+    /// Jobs started by one chat turn or one Lead goal share a build batch. Older and direct jobs
+    /// fall back to their own id.
+    var batch: String?
+    /// The Xcode Cloud tag published for this batch, or the reason no tag was needed.
+    var build: String?
     /// How Oby claimed the job's issue when it started (assigned, labeled, moved on the board),
     /// or why it couldn't; nil until then, and on jobs the Lead didn't start.
     var claim: String?

@@ -615,6 +615,15 @@ struct GuardTests {
         #expect(Integrity.report([more]) == Integrity.Report())
     }
 
+    @Test func schemeWordsInEngineMessagesAreNotTestSettings() {
+        let word = ["Skip", "ped"].joined()
+        let source = "noteBuild(inRepo, \"\(word) Xcode Cloud build: "
+            + #"\(candidate.reason ?? "no eligible changes").")"#
+        let change = Integrity.Change(old: "Engine/Desk.swift", new: "Engine/Desk.swift",
+                                      added: [source])
+        #expect(Integrity.report([change]) == Integrity.Report())
+    }
+
     @Test func aCheckForAnEarlierTurnEndsWhenTheNextTurnEnds() async throws {
         var ends: [Date] = []
         desk.runCheck = { [folder] _, command, _, _ in

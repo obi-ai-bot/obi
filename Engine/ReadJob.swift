@@ -75,6 +75,7 @@ nonisolated struct JobReads: Sendable {
     /// nothing, so the brain doesn't guess.
     static func section(_ job: Job, failures: [FailureRecord] = []) -> String {
         var lines = ["## Read: job \(job.id) (\(Briefing.line(job.heading, cap: 60)))", ""]
+        if let batch = job.batch { lines.append("Build batch: \(Briefing.line(batch, cap: 80))") }
         lines.append("Status: \(job.status.rawValue)" + (job.step.isEmpty ? "" : ", step: " + Briefing.line(job.step, cap: 200)))
         if let limit = job.limit { lines.append("Stopped at a limit: " + Briefing.line(limit, cap: 200)) }
         lines += ["", "### Report", job.summary.isEmpty ? "(none yet)" : String(job.summary.prefix(3000))]

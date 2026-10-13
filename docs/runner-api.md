@@ -227,6 +227,8 @@ Oby reviews a pull request up to 6 times (`Review.maxRounds`; 2 until 2026-10-13
 
 GitHub Actions doesn't run for deskree-inc/oby, so the user's Mac checks a pull request before the runner merges it (#66). Only the runner queues checks: on the Mac's own Oby, an approved job's Merged stage reads `Ready to merge`, for a person. When Oby's review approves a job's pull request, the runner queues a check of the commit the reviewer read, when that's still the commit the runner last pushed to the pull request. A Mac running Oby that follows the runner, with Settings › Runner › "Run merge checks on this Mac" on (the default), takes it, runs it and reports the result.
 
+Jobs started by one chat message share a build batch; jobs started by one Lead goal share its goal id. A job started alone is its own batch. When every job in a batch is merged into `dev`, stopped or dismissed, the runner compares `dev` with the last `oby-build/*` tag. If a file under `iOS/`, `iOSTests/`, `Shared/`, `Watch/`, `LiveActivity/`, `Character/`, `Icon/` or `Oby.xcodeproj` changed, it creates `oby-build/<yyyy-MM-dd>.<n>` at `dev`'s head. Configure Xcode Cloud's TestFlight workflow to start on tag changes matching `oby-build/`, and turn off its pull request workflow in App Store Connect. Runner-only batches are recorded in each job's report without a tag. A pull request without Xcode Cloud checks still waits only for Oby's review and the user's Mac check; no Cloud result is required to merge.
+
 ```json
 {"id": "c0ffee12", "job": "9f08fd10", "repo": "deskree-inc/oby", "pr": 80, "branch": "oby/fix-75", "base": "dev",
  "head": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", "round": 1, "state": "failed",

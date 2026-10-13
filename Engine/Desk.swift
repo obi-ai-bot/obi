@@ -384,6 +384,13 @@ final class Desk {
     @ObservationIgnored var postCheck: (_ author: Job, _ run: CheckRun) async throws -> URL = CheckRun.post
     @ObservationIgnored var scanForMerge: (_ job: Job, _ head: String) async throws -> [Publish.Finding] = MacCheck.scan
     @ObservationIgnored var mergePullRequest: (_ job: Job, _ check: MacCheck) async throws -> Void = MacCheck.merge
+    /// The Xcode Cloud build selected when a batch settles, and the tag created for it. Tests replace these.
+    @ObservationIgnored var xcodeBuildCandidate: (_ repo: String) async throws -> (tag: String?, head: String, reason: String?) = { repo in
+        try await XcodeBuild.candidate(repo: repo, clone: Workspace.clone(repo))
+    }
+    @ObservationIgnored var createXcodeBuildTag: (_ repo: String, _ tag: String, _ head: String) async throws -> Void = { repo, tag, head in
+        try await XcodeBuild.create(repo: repo, tag: tag, head: head)
+    }
     /// Called with every Mac check that's queued, taken or ends, for the runner's event stream.
     var onCheckChange: (MacCheck) -> Void = { _ in }
     /// Jobs whose Xcode Cloud failure is being handed to their author (`recoverCloud`), once at a time.
@@ -1163,6 +1170,7 @@ final class Desk {
         job.rounds = dispatch.rounds > 1 ? dispatch.rounds : nil
         job.check = dispatch.check
         job.files = files
+        job.batch = conversationTurn ?? id
         job.attachments = attachments.isEmpty ? nil : attachments
         // The mode the user named ("plan first", #134), or Settings › Permissions' default when it queues.
         job.mode = dispatch.mode
@@ -1509,6 +1517,7 @@ final class Desk {
         }
         job.dismissed = .now
         replace(job)
+        Task { await settleBuildBatch(id) }
     }
 
     /// The user moves a job to another tool, account or model (`Moves.choose` picks and checks
@@ -2344,6 +2353,7 @@ final class Desk {
         if job.status != .interrupted { job.permission = nil }
         asks[id] = nil
         replace(job)
+        Task { await settleBuildBatch(id) }
         // Its agent goes with it: one still finishing after its last turn (a check passed, a round
         // limit) ends with what it started, rather than outlive its job.
         agents.removeValue(forKey: id)?.kill()
@@ -2406,10 +2416,56 @@ final class Desk {
     /// Apply only the observation to the latest job: it may have resumed while gh was running.
     func followed(_ id: String, published: String, pushed: Int?, status: PullRequestStatus?, error: String?) {
         guard var latest = job(id), latest.published == published, latest.pushed == pushed else { return }
+        let wasMerged = latest.pullRequest?.state == .merged
         if let status { latest.pullRequest = status }
         latest.pullRequestError = error
         if lists(id) { replace(latest) }
         else { store.save(latest); onJobChange(latest); issueSync.observe(latest) }
+        if !wasMerged, status?.state == .merged { Task { await settleBuildBatch(id) } }
+    }
+
+    /// When every job from one chat turn or Lead goal has merged or been let go, tag dev once if
+    /// Apple-facing files changed. The tag is sent through the runner's normal GitHub identity.
+    func settleBuildBatch(_ id: String) async {
+        guard let finished = job(id), let batch = finished.batch else { return }
+        let members = store.recent(-1).filter { ($0.batch ?? $0.id) == batch }
+        guard !members.isEmpty, members.allSatisfy(buildBatchSettled),
+              members.allSatisfy({ $0.build == nil }) else { return }
+        for repo in Set(members.map(\.repo)) {
+            let inRepo = members.filter { $0.repo == repo }
+            do {
+                let candidate = try await xcodeBuildCandidate(repo)
+                guard let tag = candidate.tag else {
+                    noteBuild(inRepo, "No Xcode Cloud build: \(candidate.reason ?? "no eligible changes").")
+                    continue
+                }
+                try await createXcodeBuildTag(repo, tag, candidate.head)
+                noteBuild(inRepo, "Started Xcode Cloud build with tag `\(tag)` for batch pull requests: \(inRepo.compactMap(\.published).joined(separator: ", ")).")
+            } catch {
+                noteBuild(inRepo, "Couldn't start the Xcode Cloud build: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func buildBatchSettled(_ job: Job) -> Bool {
+        if job.dismissed != nil { return true }
+        switch job.pullRequest?.state {
+        case .merged, .closed: return true
+        case .open: return false
+        case nil: break
+        }
+        // A published URL without an observation may still be an open pull request.
+        guard job.published == nil else { return false }
+        return [.done, .failed, .stopped, .interrupted].contains(job.status)
+    }
+
+    private func noteBuild(_ members: [Job], _ note: String) {
+        for member in members {
+            guard var latest = job(member.id), latest.build == nil else { continue }
+            latest.build = note
+            latest.summary += (latest.summary.isEmpty ? "" : "\n\n") + note
+            replace(latest)
+        }
     }
 
     func replace(_ job: Job, save: Bool = true) {

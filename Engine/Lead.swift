@@ -174,6 +174,7 @@ nonisolated enum Lead {
         job.rounds = rounds
         job.files = brief.files
         job.lead = goal
+        job.batch = goal
         return job
     }
 
