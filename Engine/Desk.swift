@@ -391,6 +391,11 @@ final class Desk {
     @ObservationIgnored var createXcodeBuildTag: (_ repo: String, _ tag: String, _ head: String) async throws -> Void = { repo, tag, head in
         try await XcodeBuild.create(repo: repo, tag: tag, head: head)
     }
+    /// Settled batches wait together so nearby batches share one Xcode Cloud tag.
+    @ObservationIgnored var xcodeBuildInterval = XcodeBuild.interval
+    @ObservationIgnored var pendingXcodeBuildTask: Task<Void, Never>?
+    /// Ids of settled batches waiting for that window to end.
+    @ObservationIgnored var pendingXcodeBuildBatches: Set<String> = []
     /// Called with every Mac check that's queued, taken or ends, for the runner's event stream.
     var onCheckChange: (MacCheck) -> Void = { _ in }
     /// Jobs whose Xcode Cloud failure is being handed to their author (`recoverCloud`), once at a time.
@@ -2424,25 +2429,41 @@ final class Desk {
         if !wasMerged, status?.state == .merged { Task { await settleBuildBatch(id) } }
     }
 
-    /// When every job from one chat turn or Lead goal has merged or been let go, tag dev once if
-    /// Apple-facing files changed. The tag is sent through the runner's normal GitHub identity.
+    /// Once a batch settles, start the shared coalescing window. At its end all settled, untagged
+    /// batches are considered together, so a tag covers the current dev head once.
     func settleBuildBatch(_ id: String) async {
-        guard let finished = job(id), let batch = finished.batch else { return }
+        guard let finished = job(id) else { return }
+        let batch = finished.batch ?? finished.id
         let members = store.recent(-1).filter { ($0.batch ?? $0.id) == batch }
         guard !members.isEmpty, members.allSatisfy(buildBatchSettled),
               members.allSatisfy({ $0.build == nil }) else { return }
-        for repo in Set(members.map(\.repo)) {
-            let inRepo = members.filter { $0.repo == repo }
+        pendingXcodeBuildBatches.insert(batch)
+        guard pendingXcodeBuildTask == nil else { return }
+        pendingXcodeBuildTask = Task {
+            try? await Task.sleep(for: self.xcodeBuildInterval)
+            await self.settlePendingXcodeBuildBatches()
+        }
+    }
+
+    private func settlePendingXcodeBuildBatches() async {
+        pendingXcodeBuildTask = nil
+        let waiting = pendingXcodeBuildBatches
+        pendingXcodeBuildBatches = []
+        // Only whole batches count: a settled job whose batch still has a running job waits.
+        let batches = Dictionary(grouping: store.recent(-1).filter { waiting.contains($0.batch ?? $0.id) }) { $0.batch ?? $0.id }.values
+        let settled = batches.filter { $0.allSatisfy(buildBatchSettled) && $0.allSatisfy { $0.build == nil } }
+        let batchesByRepo = Dictionary(grouping: settled.flatMap { $0 }, by: \.repo)
+        for (repo, jobs) in batchesByRepo {
             do {
                 let candidate = try await xcodeBuildCandidate(repo)
                 guard let tag = candidate.tag else {
-                    noteBuild(inRepo, "No Xcode Cloud build: \(candidate.reason ?? "no eligible changes").")
+                    noteBuild(jobs, "No Xcode Cloud build: \(candidate.reason ?? "no eligible changes").")
                     continue
                 }
                 try await createXcodeBuildTag(repo, tag, candidate.head)
-                noteBuild(inRepo, "Started Xcode Cloud build with tag `\(tag)` for batch pull requests: \(inRepo.compactMap(\.published).joined(separator: ", ")).")
+                noteBuild(jobs, "Started Xcode Cloud build with tag `\(tag)` for batch pull requests: \(jobs.compactMap(\.published).joined(separator: ", ")).")
             } catch {
-                noteBuild(inRepo, "Couldn't start the Xcode Cloud build: \(error.localizedDescription)")
+                noteBuild(jobs, "Couldn't start the Xcode Cloud build: \(error.localizedDescription)")
             }
         }
     }

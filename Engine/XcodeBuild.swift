@@ -4,6 +4,7 @@ import Foundation
 /// `oby-build/` tags. Oby creates those tags as part of its normal, secret-scanned publish path.
 nonisolated enum XcodeBuild {
     static let prefix = "oby-build/"
+    static let interval: Duration = .seconds(2 * 60 * 60)
     static let paths = ["iOS/", "iOSTests/", "Shared/", "Watch/", "LiveActivity/", "Character/", "Icon/", "Oby.xcodeproj"]
 
     static func includes(_ path: String) -> Bool {

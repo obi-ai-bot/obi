@@ -48,6 +48,7 @@ import Testing
         }
 
         let desk = Desk(accounts: AccountStore(root: folder), store: store)
+        desk.xcodeBuildInterval = .milliseconds(10)
         desk.scanForMerge = { _, _ in [] }
         desk.mergePullRequest = { _, _ in }
         var candidates = 0
@@ -65,5 +66,69 @@ import Testing
         #expect(candidates == 1)
         #expect(tags.map { "\($0.0) \($0.1) \($0.2)" } == ["\(repo) oby-build/2026-10-13.1 \(head)"])
         #expect(desk.job("failed")?.build != nil && desk.job("interrupted")?.build != nil && desk.job("answer")?.build != nil)
+    }
+
+    @Test @MainActor func batchesSettlingWithinTheCoalescingWindowShareOneTag() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = JobStore(url: folder.appending(path: "oby.sqlite"))
+        for (id, batch) in [("first", "chat-one"), ("second", "chat-two")] {
+            var job = Job(id: id, request: "", agent: "claude", account: "default", repo: "deskree-inc/oby",
+                          branch: "oby/\(id)", base: "dev", kind: .fix, task: "A merged batch")
+            job.status = .done
+            job.batch = batch
+            job.pullRequest = PullRequestStatus(state: .merged, base: "dev", checkedAt: .now)
+            store.save(job)
+        }
+
+        let desk = Desk(accounts: AccountStore(root: folder), store: store)
+        desk.xcodeBuildInterval = .milliseconds(100)
+        var candidates = 0
+        var tags = 0
+        desk.xcodeBuildCandidate = { _ in
+            candidates += 1
+            return ("oby-build/2026-10-13.1", String(repeating: "a", count: 40), nil)
+        }
+        desk.createXcodeBuildTag = { _, _, _ in tags += 1 }
+
+        await desk.settleBuildBatch("first")
+        try await Task.sleep(for: .milliseconds(20))
+        await desk.settleBuildBatch("second")
+        for _ in 0..<100 where tags == 0 { try await Task.sleep(for: .milliseconds(10)) }
+
+        #expect(candidates == 1)
+        #expect(tags == 1)
+        #expect(desk.job("first")?.build != nil && desk.job("second")?.build != nil)
+    }
+
+    @Test @MainActor func aBatchWithARunningJobIsNotTaggedWhenAnotherBatchEndsTheWindow() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = JobStore(url: folder.appending(path: "oby.sqlite"))
+        for (id, batch, state) in [("merged", "chat-one", PullRequestStatus.State.merged), ("open", "chat-two", .open),
+                                   ("alone", "chat-two", .merged)] {
+            var job = Job(id: id, request: "", agent: "claude", account: "default", repo: "deskree-inc/oby",
+                          branch: "oby/\(id)", base: "dev", kind: .fix, task: "A batch member")
+            job.status = .done
+            job.batch = batch
+            job.published = "https://github.com/deskree-inc/oby/pull/\(id.count)"
+            job.pullRequest = PullRequestStatus(state: state, base: "dev", checkedAt: .now)
+            store.save(job)
+        }
+
+        let desk = Desk(accounts: AccountStore(root: folder), store: store)
+        desk.xcodeBuildInterval = .milliseconds(10)
+        var tags = 0
+        desk.xcodeBuildCandidate = { _ in ("oby-build/2026-10-13.1", String(repeating: "a", count: 40), nil) }
+        desk.createXcodeBuildTag = { _, _, _ in tags += 1 }
+
+        await desk.settleBuildBatch("merged")
+        await desk.settleBuildBatch("alone")
+        for _ in 0..<100 where tags == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(tags == 1)
+        #expect(desk.job("merged")?.build != nil)
+        #expect(desk.job("alone")?.build == nil && desk.job("open")?.build == nil)
     }
 }
