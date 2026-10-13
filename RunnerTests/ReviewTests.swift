@@ -558,6 +558,40 @@ struct ReviewTests {
         #expect(!merged.needsYou && Push.notice(for: merged) == nil)
     }
 
+    /// The failure of 2026-10-13 (#318): four blockers, the round fixed three and the review began the last with
+    /// "Again:", beside new ones. That is progress: one more round, told what is still unmet. The next comeback stops.
+    @Test func aBlockerThatComesBackAfterProgressGetsOneMoreRound() async throws {
+        _ = try await publishAuthor()
+        let first = try await review("Four.\n\nBlocking:\n- Codex options are hardcoded\n- A lift doesn't wake jobs\n- Runner accounts can't change\n- The required tests are missing\n\nVERDICT: CHANGES REQUESTED")
+        #expect(first.review?.cameBack == nil)
+        try await roundPublishes(after: 1)
+        let second = try await review("Fixed three.\n\nBlocking:\n- Again: the required tests are still mostly missing\n- The refusal discards the first step\n\nVERDICT: CHANGES REQUESTED")
+        let came = try #require(second.review)
+        #expect(came.repeated == false && came.cameBack == true && !came.stopsHere && came.wantsFollowUp && !second.reviewNeedsYou)
+        try await roundPublishes(after: 2)
+        // The author was told what is unmet, and that it has no more rounds for it.
+        let prompt = try #require(made.agents.last?.agent.prompt)
+        #expect(prompt.contains("start with `Again:`") && prompt.contains("name every test you added"))
+        // The first round's prompt says nothing of it.
+        #expect(!(try #require(made.agents.dropFirst(2).first?.agent.prompt).contains("name every test you added")))
+        let third = try await review("Still.\n\nBlocking:\n- Again: the required tests are still missing\n- A new problem\n\nVERDICT: CHANGES REQUESTED")
+        #expect(third.review?.repeated == true && third.review?.stopsHere == true && third.reviewNeedsYou)
+    }
+
+    @Test func aBlockerThatComesBackWithNoProgressStopsAtOnce() {
+        var before = Review(verdict: .changesRequested, job: "r1", agent: "codex", account: "Work", round: 1)
+        before.blocking = ["A", "B"]
+        // Nothing was fixed: the same blockers, all of them `Again:`.
+        #expect(Review.stopsOnRepeat(["Again: A", "Again: B"], after: before))
+        // One was fixed, one came back, or a new one was found: progress.
+        #expect(!Review.stopsOnRepeat(["Again: A"], after: before))
+        #expect(!Review.stopsOnRepeat(["Again: A", "C"], after: before))
+        // Twice in a row stops, whatever else came with it.
+        var came = before
+        came.cameBack = true
+        #expect(Review.stopsOnRepeat(["Again: A"], after: came) && Review.stopsOnRepeat(["Again: A", "C"], after: came))
+    }
+
     /// New commits refused a review under the old cap of 2 (#274, #295 on 2026-10-12) wait for no
     /// one: the runner reviews them when it starts, and they go on to the Mac check and the merge.
     @Test func commitsRefusedUnderTheOldCapAreReviewedWhenTheRunnerStarts() async throws {

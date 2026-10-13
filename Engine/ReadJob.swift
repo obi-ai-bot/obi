@@ -129,7 +129,7 @@ nonisolated struct JobReads: Sendable {
         guard let review = job.review else {
             return [job.reviewError.map { "No verdict: " + Briefing.line($0, cap: 300) } ?? "(no verdict yet)"]
         }
-        var lines = ["\(review.label), round \(review.round), by \(review.agentName) · \(review.account)" + (review.repeated == true ? ", a blocker that came back" : "")]
+        var lines = ["\(review.label), round \(review.round), by \(review.agentName) · \(review.account)" + (review.repeated == true || review.cameBack == true ? ", a blocker that came back" : "")]
         let blocking = review.blocking ?? []
         lines += blocking.isEmpty ? ["Blocking: none."] : ["Blocking:"] + blocking.prefix(10).map { "- " + Briefing.line($0, cap: 400) }
         let later = review.followUps ?? []
