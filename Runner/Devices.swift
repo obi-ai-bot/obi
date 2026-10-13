@@ -93,6 +93,12 @@ final class Devices {
         }
     }
 
+    func pairingSecretMatches(_ secret: String) -> Bool {
+        guard !secret.isEmpty, let data = try? Data(contentsOf: pairing),
+              let saved = String(data: data, encoding: .utf8) else { return false }
+        return saved.trimmingCharacters(in: .whitespacesAndNewlines) == secret
+    }
+
     /// Lets an approval through once: from a registered phone, signed by its key, for exactly the
     /// runner's own `action`, signed within two minutes, and never used before.
     func check(_ approval: Approval, job: String, action: String, now: Date = .now) throws {

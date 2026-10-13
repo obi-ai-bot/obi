@@ -9,6 +9,7 @@ struct ConnectScreen: View {
     @Environment(Phone.self) private var phone
     @State private var name = ""
     @State private var hostname = ""
+    @State private var pairingSecret = ""
     @State private var problem: String?
 
     var body: some View {
@@ -36,6 +37,7 @@ struct ConnectScreen: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .onSubmit(link)
+                SecureField("Pairing secret", text: $pairingSecret)
                 Button("Link") { link() }
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || hostname.trimmingCharacters(in: .whitespaces).isEmpty)
                 if let problem { Text(problem).foregroundStyle(.red) }
@@ -65,7 +67,7 @@ struct ConnectScreen: View {
         }
         problem = nil
         Task { @MainActor in
-            do { try await phone.pair(name: name, hostname: host) }
+            do { try await phone.pair(name: name, hostname: host, pairingSecret: pairingSecret) }
             catch { problem = error.localizedDescription }
         }
     }

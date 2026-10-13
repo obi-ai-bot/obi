@@ -4,6 +4,9 @@ import CryptoKit
 import Crypto
 #endif
 import Foundation
+#if canImport(Security)
+import Security
+#endif
 
 /// The wire format for device-to-Mac traffic.  The method, route and counter are deliberately
 /// outside the ciphertext so the gateway can apply its allowlist; they are authenticated as AAD.
@@ -12,6 +15,18 @@ import Foundation
 public enum E2E {
     public static let version = "oby-e2e-1"
     public static let suite = HPKE.Ciphersuite.Curve25519_SHA256_ChachaPoly
+
+    public static func frame(_ envelope: Data) -> Data {
+        var length = UInt32(envelope.count).bigEndian
+        return Data(bytes: &length, count: 4) + envelope
+    }
+
+    public static func unframe(_ data: Data) throws -> Data {
+        guard data.count >= 4 else { throw Failure.invalidMessage }
+        let length = data.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        guard data.count == 4 + Int(length) else { throw Failure.invalidMessage }
+        return data.dropFirst(4)
+    }
 
     public struct KeyPair: Sendable {
         public let privateKey: Curve25519.KeyAgreement.PrivateKey
@@ -66,10 +81,32 @@ public enum E2E {
 
         public func seal(_ body: Data, method: String, route: String) throws -> (body: Data, metadata: Metadata) {
             lock.lock(); defer { lock.unlock() }
-            let next = UserDefaults.standard.integer(forKey: counterKey) + 1
-            UserDefaults.standard.set(next, forKey: counterKey)
-            let metadata = Metadata(method: method, route: route, device: device, counter: UInt64(next))
+            let next = Self.nextCounter(for: counterKey)
+            let metadata = Metadata(method: method, route: route, device: device, counter: next)
             return (try E2E.seal(body, to: gatewayPublicKey, metadata: metadata, authenticatedBy: keys.privateKey), metadata)
+        }
+
+        private static func nextCounter(for key: String) -> UInt64 {
+            #if canImport(Security)
+            let account = "e2e-counter-\(key)"
+            var query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                         kSecAttrService as String: "com.deskree.oby",
+                                         kSecAttrAccount as String: account,
+                                         kSecReturnData as String: true]
+            var found: CFTypeRef?
+            let old = SecItemCopyMatching(query as CFDictionary, &found) == errSecSuccess
+                ? (found as? Data).flatMap { UInt64(String(decoding: $0, as: UTF8.self)) } ?? 0 : 0
+            let next = old + 1
+            let data = Data(String(next).utf8)
+            query.removeValue(forKey: kSecReturnData as String)
+            if old == 0 { query[kSecValueData as String] = data; _ = SecItemAdd(query as CFDictionary, nil) }
+            else { _ = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary) }
+            return next
+            #else
+            let next = UInt64(UserDefaults.standard.integer(forKey: key)) + 1
+            UserDefaults.standard.set(next, forKey: key)
+            return next
+            #endif
         }
 
         public func open(_ body: Data, metadata: Metadata) throws -> Data {

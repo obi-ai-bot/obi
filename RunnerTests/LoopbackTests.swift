@@ -3,6 +3,7 @@ import HTTPTypes
 import Hummingbird
 import HummingbirdTesting
 import Testing
+@testable import ObyShared
 @testable import ObyEngine
 @testable import oby_runner
 
@@ -103,6 +104,20 @@ struct LoopbackTests {
                         #expect(object(Data(response.body.readableBytesView))["error"] as? String == "This runner answers only Oby on this Mac.")
                     }
                 }
+            }
+        }
+    }
+
+    @Test func aVersionHeaderAloneCannotEnterTheGateway() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
+        let gateway = Gateway()
+        let app = Application(router: api.router(access: .gateway, e2eAllowed: true, gateway: gateway))
+        try await app.test(.router) { client in
+            try await client.execute(uri: "/v1/jobs", method: .get, headers: [.obyE2EVersion: E2E.version]) { response in
+                #expect(response.status == .unauthorized)
             }
         }
     }

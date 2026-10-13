@@ -935,29 +935,21 @@ nonisolated struct Runner: Sendable {
     #endif
 
     func register(name: String, publicKey: Data) async throws -> String {
-        struct Body: Encodable { var name: String; var publicKey: String; var e2ePublicKey: String?; var e2eProof: String? }
+        struct Body: Encodable { var name: String; var publicKey: String }
         struct Answer: Decodable { var id: String; var publicKey: String? }
-        #if os(iOS) || os(macOS)
-        let e2eData = try? DeviceKey.e2ePublicKey()
-        let e2e = e2eData?.base64EncodedString()
-        // Registration is repeated on every connection. The biometric-gated proof is sent by
-        // pairing when the E2E key is first established, rather than prompting on every refresh.
-        let proof: String? = nil
-        #else
-        let e2e: String? = nil
-        let proof: String? = nil
-        #endif
-        let answer: Answer = try await call("POST", "v1/devices", body: Body(name: name, publicKey: publicKey.base64EncodedString(), e2ePublicKey: e2e, e2eProof: proof))
+        // Registration is repeated on every connection. E2E identity is established by pairing,
+        // so this routine never sends a new key without its one-time proof.
+        let answer: Answer = try await call("POST", "v1/devices", body: Body(name: name, publicKey: publicKey.base64EncodedString()))
         return answer.id
     }
 
     #if os(iOS) || os(macOS)
-    func pair(name: String, publicKey: Data) async throws -> (id: String, publicKey: Data) {
-        struct Body: Encodable { var name: String; var publicKey: String; var e2ePublicKey: String; var e2eProof: String }
+    func pair(name: String, publicKey: Data, pairingSecret: String) async throws -> (id: String, publicKey: Data) {
+        struct Body: Encodable { var name: String; var publicKey: String; var e2ePublicKey: String; var e2eProof: String; var pairingSecret: String }
         struct Answer: Decodable { var id: String; var publicKey: String }
         let e2e = try DeviceKey.e2ePublicKey()
         let body = Body(name: name, publicKey: publicKey.base64EncodedString(), e2ePublicKey: e2e.base64EncodedString(),
-                        e2eProof: try DeviceKey.e2eRegistrationProof(publicKey: publicKey, e2ePublicKey: e2e))
+                        e2eProof: try DeviceKey.e2eRegistrationProof(publicKey: publicKey, e2ePublicKey: e2e), pairingSecret: pairingSecret)
         let answer: Answer = try await call("POST", "v1/pairing", body: body)
         guard let gateway = Data(base64Encoded: answer.publicKey), gateway.count == 32 else {
             throw RunnerError(message: "The runner returned no valid E2E gateway key.")
@@ -1011,6 +1003,15 @@ nonisolated struct Runner: Sendable {
             let task = Task {
                 do {
                     var request = URLRequest(url: base.appending(path: "v1/events"))
+                    if let e2e {
+                        let route = request.url?.percentEncodedPath ?? "/v1/events"
+                        let sealed = try e2e.seal(Data(), method: "GET", route: route)
+                        request.httpBody = sealed.body
+                        request.setValue(E2E.version, forHTTPHeaderField: "Oby-E2E-Version")
+                        request.setValue(e2e.device, forHTTPHeaderField: "Oby-E2E-Device")
+                        request.setValue(String(sealed.metadata.counter), forHTTPHeaderField: "Oby-E2E-Counter")
+                        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+                    }
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     request.timeoutInterval = 60
                     let (bytes, response) = try await URLSession.shared.bytes(for: signed(request))
@@ -1019,11 +1020,32 @@ nonisolated struct Runner: Sendable {
                     stream.yield(.connected)
                     var parser = EventParser()
                     var line = Data()
+                    var framed = Data()
+                    var sequence: UInt64 = 1
                     // Split on newlines only: summaries may hold U+2028, which `lines` would break at.
                     for try await byte in bytes {
-                        guard byte == 0x0A else { line.append(byte); continue }
-                        if let event = parser.feed(String(decoding: line, as: UTF8.self)) { stream.yield(event) }
-                        line.removeAll(keepingCapacity: true)
+                        guard let e2e else {
+                            guard byte == 0x0A else { line.append(byte); continue }
+                            if let event = parser.feed(String(decoding: line, as: UTF8.self)) { stream.yield(event) }
+                            line.removeAll(keepingCapacity: true)
+                            continue
+                        }
+                        framed.append(byte)
+                        while framed.count >= 4 {
+                            let prefix = framed.prefix(4)
+                            let length = prefix.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+                            guard framed.count >= 4 + Int(length) else { break }
+                            let envelope = framed.subdata(in: 4..<(4 + Int(length)))
+                            framed.removeSubrange(0..<(4 + Int(length)))
+                            let metadata = E2E.Metadata(method: "GET", route: "/v1/events", device: e2e.device,
+                                                        counter: sequence, direction: .response)
+                            sequence += 1
+                            for clear in try e2e.open(envelope, metadata: metadata) {
+                                guard clear == 0x0A else { line.append(clear); continue }
+                                if let event = parser.feed(String(decoding: line, as: UTF8.self)) { stream.yield(event) }
+                                line.removeAll(keepingCapacity: true)
+                            }
+                        }
                     }
                     stream.finish()
                 } catch {
@@ -1078,7 +1100,7 @@ nonisolated struct Runner: Sendable {
         request.timeoutInterval = timeout
         if let e2e {
             let clear = try body.map { try Self.encoder.encode($0) } ?? Data()
-            let route = request.url.map { $0.path + ($0.query.map { "?\($0)" } ?? "") } ?? "/\(path)"
+            let route = request.url.map { $0.percentEncodedPath + ($0.percentEncodedQuery.map { "?\($0)" } ?? "") } ?? "/\(path)"
             let sealed = try e2e.seal(clear, method: method, route: route)
             request.httpBody = sealed.body
             request.setValue(E2E.version, forHTTPHeaderField: "Oby-E2E-Version")
@@ -1092,11 +1114,11 @@ nonisolated struct Runner: Sendable {
         let (data, response) = try await URLSession.shared.data(for: signed(request))
         try Self.check(response, data)
         guard let e2e else { return data }
-        let route = request.url.map { $0.path + ($0.query.map { "?\($0)" } ?? "") } ?? "/\(path)"
+        let route = request.url.map { $0.percentEncodedPath + ($0.percentEncodedQuery.map { "?\($0)" } ?? "") } ?? "/\(path)"
         let metadata = E2E.Metadata(method: method, route: route, device: e2e.device,
-                                    counter: UInt64(request.value(forHTTPHeaderField: "Oby-E2E-Counter") ?? "0") ?? 0,
+                                    counter: 1,
                                     direction: .response)
-        return try e2e.open(data, metadata: metadata)
+        return try e2e.open(try E2E.unframe(data), metadata: metadata)
     }
 
     #if os(macOS)

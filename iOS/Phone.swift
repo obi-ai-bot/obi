@@ -557,7 +557,8 @@ final class Phone {
         let connection = runner
         let id = try await connection.register(name: "iPhone", publicKey: try DeviceKey.publicKey())
         if let link, let publicKey = try? await connection.e2ePublicKey() {
-            self.link = MacLink(name: link.name, hostname: link.hostname, deviceID: id, publicKey: publicKey)
+            self.link = MacLink(name: link.name, hostname: link.hostname, deviceID: id, publicKey: publicKey,
+                                pairingSecret: link.pairingSecret)
         }
         UserDefaults.standard.set(id, forKey: deviceKey)
         return id
@@ -566,11 +567,11 @@ final class Phone {
     /// Completes a typed or scanned Mac link before any ordinary device request is sent. The
     /// pairing endpoint is the only gateway route that is intentionally cleartext; it requires the
     /// runner's pairing window and a P-256 possession proof, and returns the pinned gateway key.
-    func pair(name: String, hostname: String) async throws {
-        let provisional = MacLink(name: name, hostname: hostname)
+    func pair(name: String, hostname: String, pairingSecret: String) async throws {
+        let provisional = MacLink(name: name, hostname: hostname, pairingSecret: pairingSecret)
         let base = provisional.tunnelURL
-        let answer = try await Runner(base: base).pair(name: "iPhone", publicKey: try DeviceKey.publicKey())
-        link = MacLink(name: name, hostname: hostname, deviceID: answer.id, publicKey: answer.publicKey)
+        let answer = try await Runner(base: base).pair(name: "iPhone", publicKey: try DeviceKey.publicKey(), pairingSecret: pairingSecret)
+        link = MacLink(name: name, hostname: hostname, deviceID: answer.id, publicKey: answer.publicKey, pairingSecret: pairingSecret)
     }
 }
 

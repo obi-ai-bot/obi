@@ -64,8 +64,9 @@ final class API {
     }
 
     /// Every endpoint, behind `Gate`.
-    nonisolated func router(access: Access, e2eAllowed: Bool = false) -> Router<BasicRequestContext> {
+    nonisolated func router(access: Access, e2eAllowed: Bool = false, gateway: Gateway? = nil) -> Router<BasicRequestContext> {
         let router = Router()
+        if let gateway { router.add(middleware: E2EGate(gateway: gateway)) }
         router.add(middleware: Gate(access: access, e2eAllowed: e2eAllowed))
         router.post("v1/speech") { request, _ in
             try await Self.json(self.speech.handle(request, repos: self.desk.repos))
@@ -625,6 +626,9 @@ final class API {
     }
 
     func pair(_ device: NewDevice) throws -> Response {
+        guard let secret = device.pairingSecret, devices.pairingSecretMatches(secret) else {
+            throw APIError(.unauthorized, "That pairing secret is invalid or has already been used.")
+        }
         let answer = try register(device)
         return answer
     }
@@ -809,6 +813,8 @@ enum Access: Sendable {
     /// On a Mac (#283): the Oby app on the same Mac, with the runner's own token
     /// (Engine/LocalRunner.swift), on `127.0.0.1` only.
     case local(token: String)
+    /// The device gateway. E2EGate must be installed before Gate and authenticates every request.
+    case gateway
 }
 
 /// Lets in only the owner (`Access`), and sends every error as `{"error": …}`.
@@ -828,8 +834,14 @@ struct Gate<Context: RequestContext>: RouterMiddleware {
     @concurrent func handle(_ request: Request, context: Context,
                             next: @concurrent (Request, Context) async throws -> Response) async throws -> Response {
         do {
-            let pairing = e2eAllowed && request.uri.path == "/v1/pairing"
-            if !pairing && !(e2eAllowed && request.headers[.obyE2EVersion] == E2E.version) {
+            let isGateway: Bool
+            if case .gateway = access { isGateway = true } else { isGateway = false }
+            let pairing = isGateway && request.uri.path == "/v1/pairing"
+            if case .gateway = access {
+                guard pairing || request.headers[.obyE2EVersion] == E2E.version else {
+                    throw APIError(.unauthorized, "This gateway requires an encrypted device envelope.")
+                }
+            } else if !pairing {
                 try Self.admit(request, access: access)
             }
             return try await next(request, context)
@@ -860,6 +872,8 @@ struct Gate<Context: RequestContext>: RouterMiddleware {
             guard request.uri.path.hasPrefix("/v1/agent/") || Self.bearer(request.headers[.authorization]).map({ LocalRunner.same($0, as: token) }) == true else {
                 throw APIError(.unauthorized, "This runner answers only Oby on this Mac.")
             }
+        case .gateway:
+            break
         }
     }
 
@@ -1405,6 +1419,7 @@ struct NewDevice: Decodable {
     var publicKey: String
     var e2ePublicKey: String?
     var e2eProof: String?
+    var pairingSecret: String?
 }
 
 struct NotificationToken: Decodable {

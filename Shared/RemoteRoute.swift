@@ -14,6 +14,8 @@ nonisolated struct MacLink: Codable, Equatable, Sendable {
     /// The Mac gateway's pinned X25519 public key, carried by pairing. Nil only for links created
     /// before E2E was introduced; a gateway that has paired keys refuses those legacy links.
     var publicKey: Data? = nil
+    /// One-time secret carried by the Mac's pairing QR and consumed by `/v1/pairing`.
+    var pairingSecret: String? = nil
 
     /// Where the tunnel answers.
     var tunnelURL: URL { URL(string: "https://\(hostname)")! }
@@ -43,6 +45,7 @@ nonisolated struct MacLink: Codable, Equatable, Sendable {
         if let publicKey = link.publicKey, publicKey.count != 32 {
             throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: [], debugDescription: "The Mac's E2E public key isn't X25519."))
         }
+        if let secret = link.pairingSecret, secret.isEmpty { throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: [], debugDescription: "The pairing secret is empty.")) }
         return link
     }
 

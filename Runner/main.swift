@@ -249,14 +249,10 @@ let app = Application(router: router,
 // Always up, so writing watch.json is enough; without it, it answers 503 to everything.
 let watchApp = Application(router: watchAPI.router(),
                            configuration: .init(address: .hostname("127.0.0.1", port: watchPort), serverName: "oby-runner"))
-let gatewayRouter = api.router(owner: owner, e2eAllowed: true)
-if let gateway {
-    gatewayRouter.add(middleware: E2EGate(gateway: gateway))
-}
-let gatewayApp = gateway.map { _ in
-    Application(router: gatewayRouter,
+let gatewayApp: Application? = if let gateway {
+    Application(router: api.router(access: .gateway, e2eAllowed: true, gateway: gateway),
                 configuration: .init(address: .hostname("127.0.0.1", port: gatewayPort), serverName: "oby-runner"))
-}
+} else { nil }
 Logger.runner.notice("Oby's runner \(API.version, privacy: .public) in \(Workspace.root.path, privacy: .public), for \(owner, privacy: .public)")
 try await withThrowingDiscardingTaskGroup { group in
     group.addTask { try await app.runService(gracefulShutdownSignals: []) }

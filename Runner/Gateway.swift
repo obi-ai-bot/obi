@@ -71,6 +71,12 @@ final class Gateway: @unchecked Sendable {
     }
 }
 
+private final class E2ESequence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt64 = 0
+    func next() -> UInt64 { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+}
+
 /// The remote-device boundary. Every request body is authenticated before API sees it and every
 /// response body is encrypted before it leaves the runner. Pairing and the owner-only API remain
 /// on the ordinary runner port; this middleware is installed on the device gateway port.
@@ -95,14 +101,26 @@ struct E2EGate<Context: RequestContext>: RouterMiddleware {
             let wire = try await request.collectBody(upTo: bodyLimit)
             let clear = try gateway.open(Data(wire.readableBytesView), metadata: metadata)
             request.body = .init(buffer: ByteBuffer(bytes: clear))
-            var response = try await next(request, context)
+            var response: Response
+            do {
+                response = try await next(request, context)
+            } catch let error as APIError {
+                response = error.response
+            } catch let error as HTTPError {
+                response = APIError(error.status, error.body ?? error.status.reasonPhrase).response
+            } catch {
+                response = APIError(.internalServerError, error.localizedDescription).response
+            }
             guard let publicKey = gateway.devicePublicKey(device) else { throw E2E.Failure.invalidKey }
-            let responseMetadata = E2E.Metadata(method: metadata.method, route: metadata.route,
-                                                device: device, counter: counter, direction: .response)
             response.headers[.obyE2EVersion] = E2E.version
             response.headers[.contentType] = "application/octet-stream"
+            let sequence = E2ESequence()
             response.body = response.body.map { buffer in
-                ByteBuffer(bytes: try gateway.seal(Data(buffer.readableBytesView), to: publicKey, metadata: responseMetadata))
+                let number = sequence.next()
+                let responseMetadata = E2E.Metadata(method: metadata.method, route: metadata.route,
+                                                    device: device, counter: number, direction: .response)
+                let sealed = try gateway.seal(Data(buffer.readableBytesView), to: publicKey, metadata: responseMetadata)
+                return ByteBuffer(bytes: E2E.frame(sealed))
             }
             return response
         } catch let error as E2E.Failure {
