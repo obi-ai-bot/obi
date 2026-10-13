@@ -5,7 +5,10 @@ import Testing
 struct OfflineTests {
     @Test func queueReplacesAnswersAndRemovesDiscardedMessages() {
         let message = OfflineMessage(id: "m1", said: "build it", question: nil, option: nil, voice: false)
-        var queue = OfflineQueue()
+        let suiteName = "com.deskree.oby.offline-(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var queue = OfflineQueue(defaults: defaults)
         queue.queue(message)
         queue.queue(message)
         queue.removeMessage("m1")
@@ -13,10 +16,15 @@ struct OfflineTests {
         queue.queue(OfflineInboxAnswer(id: "i1", answer: "Deny", done: nil, later: nil))
         #expect(queue.messages.isEmpty)
         #expect(queue.answers == [OfflineInboxAnswer(id: "i1", answer: "Deny", done: nil, later: nil)])
+        let restored = OfflineQueue(defaults: defaults)
+        #expect(restored.messages.isEmpty && restored.answers == queue.answers)
     }
 
     @Test func flushKeepsLaterAnswersAfterFailureAndDropsAlreadySettled() async {
-        var queue = OfflineQueue()
+        let suiteName = "com.deskree.oby.offline-(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var queue = OfflineQueue(defaults: defaults)
         queue.answers = [
             OfflineInboxAnswer(id: "settled", answer: "Allow", done: nil, later: nil),
             OfflineInboxAnswer(id: "fails", answer: "Deny", done: nil, later: nil),

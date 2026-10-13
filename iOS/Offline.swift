@@ -15,27 +15,42 @@ struct OfflineMessage: Codable, Equatable, Sendable {
     var voice: Bool
 }
 
-struct OfflineQueue: Sendable {
+final class OfflineQueue: @unchecked Sendable {
     enum FlushError: Error { case alreadySettled }
 
     var messages: [OfflineMessage] = []
     var answers: [OfflineInboxAnswer] = []
+    private let defaults: UserDefaults
 
-    mutating func queue(_ message: OfflineMessage) {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        messages = (try? JSONDecoder().decode([OfflineMessage].self, from: defaults.data(forKey: "phone.outbox") ?? Data())) ?? []
+        answers = (try? JSONDecoder().decode([OfflineInboxAnswer].self, from: defaults.data(forKey: "phone.inboxOutbox") ?? Data())) ?? []
+    }
+
+    func save() {
+        defaults.set(try? JSONEncoder().encode(messages), forKey: "phone.outbox")
+        defaults.set(try? JSONEncoder().encode(answers), forKey: "phone.inboxOutbox")
+    }
+
+    func queue(_ message: OfflineMessage) {
         messages.removeAll { $0.id == message.id }
         messages.append(message)
+        save()
     }
 
-    mutating func removeMessage(_ id: String) {
+    func removeMessage(_ id: String) {
         messages.removeAll { $0.id == id }
+        save()
     }
 
-    mutating func queue(_ answer: OfflineInboxAnswer) {
+    func queue(_ answer: OfflineInboxAnswer) {
         answers.removeAll { $0.id == answer.id }
         answers.append(answer)
+        save()
     }
 
-    mutating func flushAnswers(_ send: (OfflineInboxAnswer) async throws -> Void) async {
+    func flushAnswers(_ send: (OfflineInboxAnswer) async throws -> Void) async {
         let waiting = answers
         answers.removeAll()
         for (index, answer) in waiting.enumerated() {
@@ -48,5 +63,6 @@ struct OfflineQueue: Sendable {
                 break
             }
         }
+        save()
     }
 }
