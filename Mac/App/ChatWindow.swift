@@ -329,14 +329,6 @@ private struct ConversationColumn: View {
     /// The plan before anything runs, or the brain's question, under the thread, as the island shows them.
     @ViewBuilder private var cards: some View {
         switch desk.talk {
-        case .plan(let drafts) where drafts.count == 1:
-            PlanCard(draft: drafts[0], accounts: model.planAccounts,
-                     onDispatch: { desk.dispatch(model.tray.attach($0)); model.tray.clear() },
-                     onEdit: { desk.cancel() }, onCancel: { desk.cancel() })
-        case .plan(let drafts):
-            PlansCard(drafts: drafts, accounts: model.planAccounts,
-                      onDispatch: { for draft in $0 { desk.dispatch(model.tray.attach(draft)) }; model.tray.clear() },
-                      onEdit: { desk.cancel() }, onCancel: { desk.cancel() })
         case .question(let said, let question):
             DecisionCard(title: question.text, options: question.cardOptions, keyboardEnabled: true, onLater: { desk.cancel() },
                          onChoose: { desk.answer($0.answer, said: said, question: question.text) },

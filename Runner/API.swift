@@ -183,7 +183,7 @@ final class API {
         guard !words.isEmpty else { return Self.json(PlanAnswer(.none)) }
         let turns = try request.turns.map(Self.turns)
         let said = request.answer.map { Desk.answered(words, question: $0.question, option: $0.option) } ?? words
-        let (talk, started) = await desk.exchange(said, shown: request.answer?.option, turns: turns)
+        let (talk, started) = await desk.exchange(said, shown: request.answer?.option, turns: turns, attachments: request.attachments ?? [])
         return Self.json(PlanAnswer(talk, started: started))
     }
 
@@ -230,15 +230,10 @@ final class API {
                 new.mode = try request.job.mode.map { try Self.mode($0) }
                 return Self.json(JobJSON(job: try await desk.dispatch(new)), status: .created)
             }
-            guard let id = request.job.id, let branch = request.job.branch, let account = request.job.account else {
-                throw APIError(.unprocessableContent, "A job needs repo, kind and task.")
+            if request.job.id != nil {
+                throw APIError(.gone, "Oby starts planned work by itself now: POST /v1/plans starts it and answers the jobs. POST /v1/jobs takes a whole job (repo, kind, task).")
             }
-            let mode = try request.job.mode.map { try Self.mode($0) }
-            let job = try desk.dispatch(id, branch: branch, account: account, rounds: request.job.rounds,
-                                        check: request.job.check.map { .some($0) }, model: request.job.model.map { .some($0) },
-                                        files: request.job.files, attachments: request.job.attachments,
-                                        startWhen: request.job.startWhen, mode: mode)
-            return Self.json(JobJSON(job: job), status: .created)
+            throw APIError(.unprocessableContent, "A job needs repo, kind and task.")
         } catch {
             if let error = error as? APIError { throw error }
             throw APIError(.unprocessableContent, error.localizedDescription)
@@ -1305,6 +1300,7 @@ struct PlanRequest: Decodable {
     var answer: Answer?
     /// The conversation so far, oldest first, or nil for the runner's own.
     var turns: [Turn]?
+    var attachments: [String]?
 }
 
 /// A whole job for `POST /v1/jobs` (#269): the work (`repo`, `kind`, `task`), what it's about

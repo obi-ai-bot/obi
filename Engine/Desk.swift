@@ -78,7 +78,7 @@ final class Desk {
     @ObservationIgnored var planElsewhere: (_ said: String, _ answer: (question: String, option: String)?) async throws -> Talk = { _, _ in
         throw Shell.Failure(message: "The runner isn't set up.")
     }
-    @ObservationIgnored var dispatchElsewhere: (Draft) async throws -> Job = { _ in
+    @ObservationIgnored var planElsewhereWithAttachments: (_ said: String, _ answer: (question: String, option: String)?, _ attachments: [String]) async throws -> Talk = { _, _, _ in
         throw Shell.Failure(message: "The runner isn't set up.")
     }
     @ObservationIgnored var cancelElsewhere: () async -> Void = {}
@@ -549,10 +549,13 @@ final class Desk {
                 replacing?.cancel()
                 _ = await replacing?.result
                 var result: Talk
-                do { result = try await planElsewhere(said, nil) }
+                do {
+                    result = attachments.isEmpty
+                        ? try await planElsewhere(said, nil)
+                        : try await planElsewhereWithAttachments(said, nil, attachments)
+                }
                 catch { result = .reply(error.localizedDescription) }
                 guard asking == mine else { return }
-                if case .plan(let list) = result, list.isEmpty { result = .none }
                 talk = result
                 if let reply = Self.reply(in: result) { onReply(reply, spoken) }
             }
@@ -620,12 +623,12 @@ final class Desk {
     }
 
     /// `converse`, with the jobs Oby's answer started (#269): `POST /v1/plans` answers them.
-    func exchange(_ said: String, shown: String? = nil, turns given: [Turn]? = nil) async -> (talk: Talk, started: [Job]) {
+    func exchange(_ said: String, shown: String? = nil, turns given: [Turn]? = nil, attachments: [String] = []) async -> (talk: Talk, started: [Job]) {
         if Conversation.cancels(said) { stopConversation(); return (.none, []) }
         let turn = Turn(who: .user, text: shown ?? said)
         conversationTurn = turn.id
         stopRequested = false
-        let talk = await plan(said, turns: given) { !Task.isCancelled && !self.stopRequested }
+        let talk = await plan(said, turns: given, attachments: attachments) { !Task.isCancelled && !self.stopRequested }
         conversationTurn = nil
         stopRequested = false
         add(turn)
@@ -1187,40 +1190,6 @@ final class Desk {
     }
 
     // MARK: Jobs
-
-    @discardableResult
-    func dispatch(_ draft: Draft) -> Job {
-        talk = .none
-        drafts.removeAll { $0.job.id == draft.job.id }
-        if plansElsewhere() {
-            Task {
-                do { _ = try await dispatchElsewhere(draft) }
-                catch { talk = .reply("Oby couldn't start it on the runner: \(error.localizedDescription)") }
-            }
-            return draft.job
-        }
-        let job = enqueue(draft.job, why: draft.route.flatMap { $0.id == draft.job.account ? $0.why : nil })
-        link(job.id)
-        return job
-    }
-
-    func dispatch(_ id: String, branch: String, account: String, rounds: Int? = nil, check: String?? = nil,
-                  model: String?? = nil, files: [String]? = nil, attachments: [String]? = nil,
-                  startWhen: [StartCondition]? = nil, mode: PermissionMode? = nil) throws -> Job {
-        guard var draft = drafts.first(where: { $0.job.id == id }) else {
-            throw Shell.Failure(message: "Oby doesn't have that plan any more. Ask again.")
-        }
-        if let startWhen {
-            draft.job.startWhen = startWhen.isEmpty ? nil : try StartWhen.checked(startWhen, job: id, jobs: startWhenLookup.job, accounts: accounts.accounts)
-        }
-        let selected = draft.job.startWhen?.compactMap(\.account).first ?? account
-        draft.job = try Self.edit(draft.job, branch: branch, account: accounts.state(selected), rounds: rounds, check: check)
-        if let files { draft.job.files = try Claims.validated(files) }
-        if let attachments { draft.job.attachments = attachments }
-        if let model { draft.job.model = model }
-        if let mode { draft.job.mode = mode }
-        return dispatch(draft)
-    }
 
     /// Queues a job that's ready to run, with why routing chose its account for its report (#269):
     /// a plan's jobs, a guessed plan's on Start, and the runner's `POST /v1/jobs`.

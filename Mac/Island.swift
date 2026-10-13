@@ -226,11 +226,11 @@ final class IslandController {
             guard let self else { throw RunnerError(message: "Oby is closing.") }
             return try await feed.plan(said, answer: answer)
         }
-        desk.cancelElsewhere = { [weak self] in await self?.feed.cancelPlan() }
-        desk.dispatchElsewhere = { [weak self] draft in
+        desk.planElsewhereWithAttachments = { [weak self] said, answer, attachments in
             guard let self else { throw RunnerError(message: "Oby is closing.") }
-            return try await feed.dispatch(draft)
+            return try await feed.plan(said, answer: answer, attachments: attachments)
         }
+        desk.cancelElsewhere = { [weak self] in await self?.feed.cancelPlan() }
         feed.onFollow = { [weak self] local in self?.desk.issueSync.enabled = !local }
         feed.start()
         Task { await desk.refresh() }
@@ -977,14 +977,6 @@ private struct OpenIsland: View {
                             onOpenJob: { onOpenWindow((id: $0, local: $1)) }, showTime: false)
                 }
                 switch desk.talk {
-                case .plan(let drafts) where drafts.count == 1:
-                    PlanCard(draft: drafts[0], accounts: model.planAccounts,
-                             onDispatch: { desk.dispatch(model.tray.attach($0)); model.tray.clear() },
-                             onEdit: { desk.cancel() }, onCancel: { desk.cancel() })
-                case .plan(let drafts):
-                    PlansCard(drafts: drafts, accounts: model.planAccounts,
-                              onDispatch: { for draft in $0 { desk.dispatch(model.tray.attach(draft)) }; model.tray.clear() },
-                              onEdit: { desk.cancel() }, onCancel: { desk.cancel() })
                 case .question(let said, let question):
                     DecisionCard(title: question.text, options: question.cardOptions,
                                  keyboardEnabled: true, onLater: { desk.cancel() },

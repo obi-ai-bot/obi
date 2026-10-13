@@ -317,17 +317,15 @@ final class RunnerFeed {
 
     /// The runner's brain's answer to the user's words, as the island's and the window's cards
     /// show it (`Desk.planElsewhere`): the drafts are its, and Dispatch sends them back to it.
-    func plan(_ said: String, answer: (question: String, option: String)?) async throws -> Desk.Talk {
+    func plan(_ said: String, answer: (question: String, option: String)?, attachments: [String] = []) async throws -> Desk.Talk {
         guard let runner else { throw RunnerError(message: "The runner on this Mac isn't running yet.") }
-        switch try await runner.plan(said, answer: answer) {
-        case .plan(let drafts):
-            return .plan(drafts.map {
-                Desk.Draft(said: $0.said, reply: $0.reply, job: $0.job, guessed: $0.guessed, suggestedModel: $0.suggestedModel)
-            })
+        switch try await runner.plan(said, answer: answer, attachments: attachments) {
         case .question(let said, let question):
             return .question(said: said, Plan.Question(text: question.text, options: question.options, details: question.details,
                                                        recommended: question.recommended, plan: question.plan))
-        case .reply(let text): return .reply(text)
+        case .reply(let text, let started):
+            for job in started { apply(job) }
+            return .reply(text)
         case .none: return .none
         }
     }

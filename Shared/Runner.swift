@@ -831,10 +831,10 @@ nonisolated struct Runner: Sendable {
     /// How long a plan's request waits: a turn that moves jobs and answers takes longer than the brain alone (#304).
     static let planTimeout: TimeInterval = 120
 
-    func plan(_ said: String, answer: (question: String, option: String)? = nil) async throws -> PlanResult {
+    func plan(_ said: String, answer: (question: String, option: String)? = nil, attachments: [String] = []) async throws -> PlanResult {
         struct Answer: Encodable { var question: String; var option: String }
-        struct Body: Encodable { var said: String; var answer: Answer? }
-        return try await call("POST", "v1/plans", body: Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }), timeout: Self.planTimeout)
+        struct Body: Encodable { var said: String; var answer: Answer?; var attachments: [String] }
+        return try await call("POST", "v1/plans", body: Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }, attachments: attachments), timeout: Self.planTimeout)
     }
 
     /// Stop: the turn Oby is working on ends where it is (`POST /v1/conversation/stop`, #304). A
