@@ -642,8 +642,10 @@ final class Desk {
         var done: [String] = []
         var taken: Set<String> = []
         var request = said
+        var reads = JobReads()
         for step in 0..<Self.mostSteps {
-            let context = brainContext(turns: given ?? turns.filter { $0.id != pending })
+            var context = brainContext(turns: given ?? turns.filter { $0.id != pending })
+            context.quoted = reads.quoted(adding: context.quoted)
             var result = await Planner(adapters: makeBrain(thinker?.home, vault)).plan(request, context: context)
             guard live() else {
                 result.refused.append("the turn was cancelled before the plan came: nothing done")
@@ -653,6 +655,13 @@ final class Desk {
             record(BrainTurn(said: request, by: result.by, plan: result.plan, refused: result.refused))
             // Rules only stand in for the brain on the user's own words: a later step they planned is a guess.
             if step > 0, result.by == "rules" { break }
+            // The chat reads before it answers (#302): what's read is in the next step's quoted file.
+            if result.plan.action == .readJob {
+                _ = reads.read(result.plan, lookup: readJob)
+                guard ContinuousClock.now < deadline else { break }
+                request = reads.continued(done.isEmpty ? said : Self.continued(said, done: done))
+                continue
+            }
             let acting = Self.acting.contains(result.plan.action)
             // The same action twice in one turn: it's done; the brain only repeated itself.
             if acting, !taken.insert(Self.signature(result.plan)).inserted { break }
@@ -666,7 +675,7 @@ final class Desk {
                 done.append("That's as far as Oby got in one go: say “continue” for the rest.")
                 break
             }
-            request = Self.continued(said, done: done)
+            request = reads.continued(Self.continued(said, done: done))
         }
         return done.isEmpty ? .none : .reply(done.joined(separator: " "))
     }
@@ -982,6 +991,9 @@ final class Desk {
             return .reply(plan.reply)
         case .answerPermission, .setMode:
             return .reply(await act(on: plan))
+        case .readJob:
+            // Read in the loop (`plan`); a read that gets here changes nothing and says nothing.
+            return .none
         }
     }
 
