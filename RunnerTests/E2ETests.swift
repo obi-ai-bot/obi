@@ -6,6 +6,7 @@ import Testing
 
 struct E2ETests {
     let mac = E2E.KeyPair()
+    let phone = E2E.KeyPair()
 
     @Test func roundTripUsesHPKEAndAuthenticatesMetadata() throws {
         let metadata = E2E.Metadata(method: "POST", route: "/v1/plans", device: "phone", counter: 1)
@@ -31,6 +32,7 @@ struct E2ETests {
     @Test func replayGuardRejectsRepeatedAndOlderRequestsPerDevice() throws {
         let guardrail = E2E.ReplayGuard()
         try guardrail.accept(E2E.Metadata(method: "GET", route: "/v1/status", device: "phone", counter: 1))
+        try guardrail.record(E2E.Metadata(method: "GET", route: "/v1/status", device: "phone", counter: 1))
         #expect(throws: E2E.Failure.replay) {
             try guardrail.accept(E2E.Metadata(method: "GET", route: "/v1/status", device: "phone", counter: 1))
         }
@@ -41,9 +43,24 @@ struct E2ETests {
     }
 
     @Test func gatewayDecryptsOnlyAfterReplayChecks() throws {
-        let gateway = Gateway(keys: mac)
+        let gateway = Gateway(keys: mac, devices: ["phone": phone.publicKey])
         let metadata = E2E.Metadata(method: "POST", route: "/v1/plans", device: "phone", counter: 1)
-        let wire = try E2E.seal(Data("private".utf8), to: gateway.publicKey, metadata: metadata)
+        let wire = try E2E.seal(Data("private".utf8), to: gateway.publicKey, metadata: metadata, authenticatedBy: phone.privateKey)
         #expect(try gateway.open(wire, metadata: metadata) == Data("private".utf8))
+        #expect(throws: E2E.Failure.replay) { try gateway.open(wire, metadata: metadata) }
+    }
+
+    @Test func unauthenticatedCounterCannotLockOutADeviceAndReplaySurvivesRestart() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "oby-e2e-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let replay = folder.appending(path: "replay.json")
+        let metadata = E2E.Metadata(method: "POST", route: "/v1/plans", device: "phone", counter: UInt64.max)
+        let gateway = Gateway(keys: mac, replayFile: replay, devices: ["phone": phone.publicKey])
+        let junk = try E2E.seal(Data("junk".utf8), to: gateway.publicKey, metadata: metadata)
+        #expect(throws: E2E.Failure.invalidMessage) { try gateway.open(junk, metadata: metadata) }
+        let valid = try E2E.seal(Data("valid".utf8), to: gateway.publicKey, metadata: metadata, authenticatedBy: phone.privateKey)
+        #expect(try gateway.open(valid, metadata: metadata) == Data("valid".utf8))
+        let restarted = Gateway(keys: mac, replayFile: replay, devices: ["phone": phone.publicKey])
+        #expect(throws: E2E.Failure.replay) { try restarted.open(valid, metadata: metadata) }
     }
 }

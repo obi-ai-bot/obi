@@ -48,6 +48,7 @@ if let owner = environment["OBY_OWNER"], !owner.isEmpty {
 let owner: String = if case .tailnet(let login) = access { login } else { "Oby on this Mac" }
 // The Watch API's own port, which a Cloudflare Tunnel publishes (Runner/WatchAPI.swift).
 let watchPort = environment["OBY_WATCH_PORT"].flatMap { Int($0) } ?? 7778
+let gatewayPort = environment["OBY_GATEWAY_PORT"].flatMap { Int($0) } ?? 8810
 // A pipe to an agent that just exited must not take the runner down with it.
 signal(SIGPIPE, SIG_IGN)
 try FileManager.default.createDirectory(at: Workspace.root, withIntermediateDirectories: true)
@@ -136,9 +137,15 @@ do {
 // Connected apps: agents call them through the broker, in this process, which holds the logins (Runner/Broker.swift).
 let broker = Broker(desk: desk, connections: ConnectionStore(file: Workspace.root.appending(path: "connections.json")),
                     uses: UseLog(file: Vault.folder.appending(path: "uses.jsonl")), base: "http://127.0.0.1:\(port)")
-let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: "devices.json")),
+let devices = Devices(file: Workspace.root.appending(path: "devices.json"))
+let api = API(desk: desk, devices: devices,
               push: Push(desk: desk, folder: Workspace.root.appending(path: "apns")),
               cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")), speech: speech, broker: broker)
+// The gateway key is stable across launches and lives in the vault (Keychain on macOS, the
+// runner-only vault file on Linux). Its replay state is durable beside the runner state.
+let gateway = try? Gateway.persisted(replayFile: Workspace.root.appending(path: "e2e-replay.json"), devices: devices.e2eKeys())
+if gateway == nil { Logger.runner.error("E2E gateway key could not be loaded; remote device traffic is disabled.") }
+api.gateway = gateway
 
 #if os(Linux)
 // The runner deploys itself after merges into dev (Runner/Updates.swift). Not on a Mac: there it's
@@ -242,8 +249,17 @@ let app = Application(router: router,
 // Always up, so writing watch.json is enough; without it, it answers 503 to everything.
 let watchApp = Application(router: watchAPI.router(),
                            configuration: .init(address: .hostname("127.0.0.1", port: watchPort), serverName: "oby-runner"))
+let gatewayRouter = api.router(owner: owner, e2eAllowed: true)
+if let gateway {
+    gatewayRouter.add(middleware: E2EGate(gateway: gateway))
+}
+let gatewayApp = gateway.map { _ in
+    Application(router: gatewayRouter,
+                configuration: .init(address: .hostname("127.0.0.1", port: gatewayPort), serverName: "oby-runner"))
+}
 Logger.runner.notice("Oby's runner \(API.version, privacy: .public) in \(Workspace.root.path, privacy: .public), for \(owner, privacy: .public)")
 try await withThrowingDiscardingTaskGroup { group in
     group.addTask { try await app.runService(gracefulShutdownSignals: []) }
     group.addTask { try await watchApp.runService(gracefulShutdownSignals: []) }
+    if let gatewayApp { group.addTask { try await gatewayApp.runService(gracefulShutdownSignals: []) } }
 }

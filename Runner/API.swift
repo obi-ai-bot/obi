@@ -2,6 +2,7 @@ import Foundation
 import HTTPTypes
 import Hummingbird
 import Observation
+import ObyShared
 @testable import ObyEngine
 
 /// The runner's HTTP API, exactly as `docs/runner-api.md` describes it. The desk lives on the main
@@ -14,6 +15,7 @@ final class API {
     var updates: Updates?
     let speech: Speech
     let devices: Devices
+    var gateway: Gateway?
     /// Push to the iPhone (Live Activity and alerts), or nil when this runner has none.
     let push: Push?
     /// When Clear done was last pressed, on any app (Runner/Cleared.swift).
@@ -33,6 +35,7 @@ final class API {
         self.speech = speech
         self.desk = desk
         self.devices = devices
+        self.gateway = nil
         self.push = push
         self.cleared = cleared ?? Cleared(file: nil)
         self.broker = broker ?? Broker(desk: desk, connections: ConnectionStore(file: nil), uses: UseLog(file: nil), base: "http://127.0.0.1:7777")
@@ -145,6 +148,7 @@ final class API {
             try await self.checkResult(context.parameters.require("id"), try await Self.decode(MacCheck.Report.self, from: request))
         }
         router.post("v1/devices") { request, _ in try await self.register(try await Self.decode(NewDevice.self, from: request)) }
+        router.get("v1/e2e") { _, _ in Self.json(["publicKey": await self.gatewayPublicKey()]) }
         router.post("v1/activities") { request, _ in try await self.activity(try await Self.decode(Push.Token.self, from: request)) }
         router.post("v1/notifications") { request, _ in try await self.notifications(try await Self.decode(NotificationToken.self, from: request)) }
         router.get("v1/settings/models") { _, _ in Self.json(Models.current) }
@@ -612,8 +616,12 @@ final class API {
     }
 
     func register(_ device: NewDevice) throws -> Response {
-        Self.json(["id": try devices.register(name: device.name, publicKey: device.publicKey)])
+        let id = try devices.register(name: device.name, publicKey: device.publicKey, e2ePublicKey: device.e2ePublicKey)
+        if let e2ePublicKey = device.e2ePublicKey, let gateway { try gateway.register(device: id, publicKey: e2ePublicKey) }
+        return Self.json(["id": id, "publicKey": gateway?.publicKey.base64EncodedString() ?? ""])
     }
+
+    func gatewayPublicKey() -> String { gateway?.publicKey.base64EncodedString() ?? "" }
 
     /// A Live Activity push token from the phone. `push` says whether the runner will push.
     func activity(_ token: Push.Token) throws -> Response {
@@ -847,6 +855,9 @@ struct Gate<Context: RequestContext>: RouterMiddleware {
 
 extension HTTPField.Name {
     static let tailscaleUserLogin = Self("Tailscale-User-Login")!
+    static let obyE2EVersion = Self("Oby-E2E-Version")!
+    static let obyE2EDevice = Self("Oby-E2E-Device")!
+    static let obyE2ECounter = Self("Oby-E2E-Counter")!
 }
 
 /// An answer that isn't what was asked for: a status, and one line a person can read.
@@ -1374,6 +1385,7 @@ struct Approval: Decodable {
 struct NewDevice: Decodable {
     var name: String
     var publicKey: String
+    var e2ePublicKey: String?
 }
 
 struct NotificationToken: Decodable {

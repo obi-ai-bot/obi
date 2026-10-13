@@ -13,6 +13,8 @@ final class Devices {
         var name: String
         /// P-256, X9.63 (65 bytes, uncompressed), base64.
         var publicKey: String
+        /// X25519 static key used to authenticate E2E request envelopes, base64.
+        var e2ePublicKey: String?
         var registered: Date
     }
 
@@ -46,21 +48,36 @@ final class Devices {
     /// The tailnet header can't be the gate: agents share the runner's machine, so through its tailnet
     /// address they arrive as the owner. They can't touch `pairing`: OBY_HOME is empty in their bubblewrap.
     // ponytail: only as strong as that bubblewrap, so Linux only; a runner on a Mac needs its agents boxed too.
-    func register(name: String, publicKey: String, now: Date = .now) throws -> String {
+    func register(name: String, publicKey: String, e2ePublicKey: String? = nil, now: Date = .now) throws -> String {
         guard Self.key(publicKey) != nil else {
             throw APIError(.unprocessableContent, "publicKey isn't a P-256 public key (X9.63, base64).")
         }
-        if let known = saved.devices.first(where: { $0.publicKey == publicKey }) { return known.id }
+        if let e2ePublicKey, Self.e2eKey(e2ePublicKey) == nil {
+            throw APIError(.unprocessableContent, "e2ePublicKey isn't an X25519 public key (base64).")
+        }
+        if let index = saved.devices.firstIndex(where: { $0.publicKey == publicKey }) {
+            if let e2ePublicKey, saved.devices[index].e2ePublicKey != e2ePublicKey {
+                saved.devices[index].e2ePublicKey = e2ePublicKey
+                try save()
+            }
+            return saved.devices[index].id
+        }
         let opened = (try? FileManager.default.attributesOfItem(atPath: pairing.path))?[.modificationDate] as? Date
         guard let opened, now.timeIntervalSince(opened) < 600 else {
             throw APIError(.forbidden, "To add this phone, run `touch \(pairing.path)` on the runner, then try again within 10 minutes.")
         }
-        let device = Device(id: UUID().uuidString.lowercased(), name: name, publicKey: publicKey, registered: now)
+        let device = Device(id: UUID().uuidString.lowercased(), name: name, publicKey: publicKey, e2ePublicKey: e2ePublicKey, registered: now)
         saved.devices.append(device)
         try save()
         try? FileManager.default.removeItem(at: pairing)
         Logger.runner.notice("registered device \(device.id, privacy: .public): \(device.name, privacy: .public)")
         return device.id
+    }
+
+    func e2eKeys() -> [String: Data] {
+        saved.devices.reduce(into: [:]) { result, device in
+            if let key = device.e2ePublicKey, Self.e2eKey(key) != nil { result[device.id] = Data(base64Encoded: key) }
+        }
     }
 
     /// Lets an approval through once: from a registered phone, signed by its key, for exactly the
@@ -123,6 +140,10 @@ final class Devices {
 
     private static func key(_ base64: String) -> P256.Signing.PublicKey? {
         Data(base64Encoded: base64).flatMap { try? P256.Signing.PublicKey(x963Representation: $0) }
+    }
+
+    private static func e2eKey(_ base64: String) -> Curve25519.KeyAgreement.PublicKey? {
+        Data(base64Encoded: base64).flatMap { try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: $0) }
     }
 
     private func save() throws {

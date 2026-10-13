@@ -7,7 +7,7 @@ This document is the contract between the runner and its clients. Change it in t
 ## Reaching it
 
 - **Base URL:** `https://tetrix-lab.tail8de49b.ts.net:8443` (the app lets you change it), or `http://127.0.0.1:7777` for the runner on the Mac itself (below). Everything is under `/v1`.
-- The runner listens on `127.0.0.1:7777` only. `tailscale serve --https=8443` publishes it on the tailnet with a real HTTPS certificate, so iOS needs no exceptions, and nothing is reachable from the internet. Port 443 on tetrix-lab belongs to the Tetrix stack's own proxy, so Oby uses 8443, one of the ports Tailscale serves HTTPS on.
+- The owner API listens on `127.0.0.1:7777`; encrypted device traffic uses the separate gateway listener on `127.0.0.1:8810` (`OBY_GATEWAY_PORT` can change it). `tailscale serve --https=8443` publishes the owner API with a real HTTPS certificate, while the control-plane tunnel routes only to the gateway. Port 443 on tetrix-lab belongs to the Tetrix stack's own proxy, so Oby uses 8443, one of the ports Tailscale serves HTTPS on.
 - **Who you are:** `tailscale serve` adds `Tailscale-User-Login` to every request. The runner answers only its owner's login (set when it's installed) and returns `401` to anyone else. The app sends no token and stores no secret for this. The one exception is `/v1/agent/…`, which agents call from their sandbox on the runner itself (`oby-check apple`, Apple check below): those requests carry their job's token instead, `Authorization: Bearer <token>`, and answer nothing else.
 - **On a Mac** (#283): the same runner runs on the user's own Mac, as the Oby app's login item (`Contents/Helpers/oby-runner` in Oby.app, registered from `Contents/Library/LaunchAgents/com.deskree.oby.runner.plist`; Settings › Runner › "This Mac"). It's a Mac runner when `OBY_OWNER` is unset (on Linux that's an error), and then nothing publishes it: the base URL is `http://127.0.0.1:7777`, and there's no login header to read.
   - **The local token.** The first time it starts, the runner makes a token of its own, 64 hex characters, and keeps it in the macOS keychain; `OBY_HOME` defaults to `~/Library/Application Support/Oby/Runner` on a Mac, inside the app's own folder but never the same (each has its own `oby.sqlite`, clones and worktrees). The Oby app on the same Mac reads that keychain item and sends the token on every request, `Authorization: Bearer <token>`. Anything else is `401` (`This runner answers only Oby on this Mac.`). `/v1/agent/…` carries its job's token, as above. The token never leaves the Mac: it's not in any answer, event or log.
@@ -878,10 +878,10 @@ For `oby-check apple` in an agent's sandbox, with `Authorization: Bearer <its jo
 Registers a device's publishing key, once per device: the iPhone's (named "iPhone") or a Mac's (named after the Mac, `Host.current().localizedName`):
 
 ```json
-{"name": "Wellington's MacBook Air", "publicKey": "BJ3x…"}
+{"name": "Wellington's MacBook Air", "publicKey": "BJ3x…", "e2ePublicKey": "X25519…"}
 ```
 
-`publicKey` is the P-256 public key, X9.63 (65 bytes, uncompressed), base64. It returns `{"id": "d7c1…"}`. Only the runner's owner can register (the tailnet header); the runner lists devices in its log.
+`publicKey` is the P-256 public key, X9.63 (65 bytes, uncompressed), base64. `e2ePublicKey` is the device's X25519 public key, 32 bytes, base64. The response includes the registered id and the gateway's public key. Only the runner's owner can register (the tailnet header); the runner lists devices in its log.
 
 - A key the runner knows returns its id right away, so the app registers every time it connects.
 - A new key needs pairing open: the owner runs `touch $OBY_HOME/pairing` on the runner's machine, and the device registers within 10 minutes. That key uses it up, so the iPhone and the Mac each need it opened once. Otherwise `403` with that one line to show: the Mac shows it in Settings › Runner, with Try again.
