@@ -415,7 +415,8 @@ struct MoveJobTests {
         let schema = try #require(JSONSerialization.jsonObject(with: Plan.schema(for: context)) as? [String: Any])
         let properties = try #require(schema["properties"] as? [String: Any])
         #expect(((properties["jobs"] as? [String: Any])?["items"] as? [String: Any])?["enum"] as? [String] == ["ab12cd34", "d0ne0000"])
-        #expect((properties["action"] as? [String: Any])?["enum"] as? [String] == ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore", "answer_permission", "set_mode", "read_job", "set_setting"])
+        // New actions are appended after these (#300): the first ten keep their order.
+        #expect(((properties["action"] as? [String: Any])?["enum"] as? [String])?.prefix(10) == ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore", "answer_permission", "set_mode", "read_job", "set_setting"])
         #expect((schema["required"] as? [String])?.contains("move") == true)
         // Without the brain, rules move the only job there is.
         let rules = Rules.plan("move it to Fable", context: BrainContext(accounts: [:], repos: [], movable: ["ab12cd34"]))

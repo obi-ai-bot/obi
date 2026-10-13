@@ -378,6 +378,8 @@ final class Desk {
         "Oby can't reach that job from here."
     }
     @ObservationIgnored var modeElsewhere: (_ job: Job, _ mode: PermissionMode) async -> String? = { _, _ in "Oby can't reach that job from here." }
+    /// What retry_job, dismiss_job, answer_inbox and start_now ask of a job or an inbox item elsewhere (Engine/JobActions.swift).
+    @ObservationIgnored var actElsewhere: (Remote) async throws -> Void = { _ in throw Shell.Failure(message: "Oby can't reach that job from here.") }
     /// Merge checks on the user's Mac (Engine/Checks.swift): the commit a review job read, the
     /// results' check run, the secret scan of what a merge lands, and the merge. Tests put in their own.
     @ObservationIgnored var reviewedHead: (_ review: String) async -> String? = { id in
@@ -560,7 +562,8 @@ final class Desk {
                             movable: briefing.jobs.map(\.job.id), models: Moves.models, moveAccounts: moveAccounts,
                             settingModels: settingModels, settingEfforts: settingEfforts,
                             settingModelEfforts: settingModelEfforts,
-                            settingAccounts: moveAccounts.values.flatMap { $0 }, permissions: briefing.permissions)
+                            settingAccounts: moveAccounts.values.flatMap { $0 }, permissions: briefing.permissions,
+                            inbox: briefing.waiting.map(\.item.id))
     }
 
     /// What the brain is told before the user's words (Engine/Conversation.swift).
@@ -782,7 +785,7 @@ final class Desk {
             context.turnStep = step
             context.turnLength = said.count
             let codex = AccountStore.route(accounts.accounts, agent: "codex", for: .review)
-            var result = await Planner(adapters: makeBrain(thinker?.home, codex?.home, vault)).plan(request, context: context)
+            var result = await Planner(adapters: makeBrain(thinker?.home, codex?.home, vault), fallsBackToRules: step == 0).plan(request, context: context)
             guard live() else {
                 result.refused.append("the turn was cancelled before the plan came: nothing done")
                 record(BrainTurn(said: request, by: result.by, plan: result.plan, refused: result.refused))
@@ -826,7 +829,7 @@ final class Desk {
     }
 
     /// The actions that change something, after which the brain plans the next step.
-    nonisolated static let acting: Set<Plan.Action> = [.stopAgent, .moveJob, .answerPermission, .setMode, .setSetting]
+    nonisolated static let acting: Set<Plan.Action> = [.stopAgent, .moveJob, .answerPermission, .setMode, .setSetting, .retryJob, .dismissJob, .answerInbox, .startNow]
     /// The most actions one turn takes.
     nonisolated static let mostSteps = 6
 
@@ -834,7 +837,7 @@ final class Desk {
     nonisolated static func signature(_ plan: Plan) -> String {
         [plan.action.rawValue, (plan.jobs ?? []).sorted().joined(separator: ","), plan.all == true ? "all" : "",
          plan.move.map { "\($0.agent)/\($0.account)/\($0.model)" } ?? "", plan.mode?.rawValue ?? "", plan.decision?.rawValue ?? "",
-         plan.setting.map { "\($0.agent ?? "")/\($0.model ?? "")/\($0.effort ?? "")/\($0.maxRunning.map(String.init) ?? "")/\($0.account ?? "")/\($0.lift.map(String.init) ?? "")" } ?? ""]
+         plan.setting.map { "\($0.agent ?? "")/\($0.model ?? "")/\($0.effort ?? "")/\($0.maxRunning.map(String.init) ?? "")/\($0.account ?? "")/\($0.lift.map(String.init) ?? "")" } ?? "", plan.actSignature]
             .joined(separator: "|")
     }
 
@@ -1143,6 +1146,8 @@ final class Desk {
             return .none
         case .setSetting:
             return .reply(await applySetting(plan.setting))
+        case .retryJob, .dismissJob, .answerInbox, .startNow:
+            return .reply(await actOnJobs(plan))
         }
         }
     }

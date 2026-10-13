@@ -40,6 +40,15 @@ extension Desk {
         case .answerPermission: return "Answering a permission request"
         case .setMode: return "Changing permission mode"
         case .dispatch, .askUser, .replyOnly, .ignore, .readJob, .setSetting: return plan.action.rawValue
+        case .retryJob, .dismissJob, .startNow:
+            let names = (plan.jobs ?? []).compactMap { job($0)?.heading }
+            let what = names.isEmpty ? "the selected jobs" : names.joined(separator: ", ")
+            switch plan.action {
+            case .retryJob: return "Trying \(what) again"
+            case .dismissJob: return "Letting \(what) go"
+            default: return "Starting \(what) now"
+            }
+        case .answerInbox: return "Answering an inbox item"
         }
     }
 }
