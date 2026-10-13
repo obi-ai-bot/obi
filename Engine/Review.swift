@@ -56,16 +56,21 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     var applying: Bool?
 
     /// How many times Oby reviews one job's pull request when no review asked for the round it
-    /// reviews: the first, then one follow-up of a round the user or a Mac check started. A round
-    /// that answers changes requested is always reviewed (`wantsFollowUp`), however many came
-    /// before. Each review costs an account's weekly limit.
-    static let maxRounds = 2
+    /// reviews (a round the user, a Mac check, a conflict or Xcode Cloud started). A round that
+    /// answers changes requested is always reviewed (`wantsFollowUp`), however many came before.
+    /// It was 2 until 2026-10-13, and every fix that came after a second review (a failed Mac
+    /// check, a conflict with dev, a review's findings) waited forever for one that never came:
+    /// the pipeline stalled on its own rule. A blocker that keeps coming back still stops the job
+    /// (`stopsHere`). Each review costs an account's weekly limit.
+    static let maxRounds = 6
 
     var label: String { verdict == .approved ? "Approved" : "Changes requested" }
     var agentName: String { Job.agentNames[agent] ?? agent }
     /// Changes requested on a blocker that came back: the job stops here and needs the user. One
     /// from before #224 stopped at its second.
-    var stopsHere: Bool { verdict == .changesRequested && (repeated ?? (round >= Self.maxRounds)) }
+    var stopsHere: Bool { verdict == .changesRequested && (repeated ?? (round >= Self.legacyCap)) }
+    /// Where a review from before #224 (which doesn't say whether its blocker came back) stopped.
+    static let legacyCap = 2
     /// Changes requested, and the job goes on: the author's round answers them, and its commits get
     /// the next review.
     var wantsFollowUp: Bool { verdict == .changesRequested && !stopsHere }
@@ -670,6 +675,11 @@ extension Desk {
     /// Not while the author runs again (it publishes again, and is reviewed then). One whose pull
     /// request was merged or closed waits no more.
     func startWaitingReviews() {
+        // New commits refused a review under an earlier, lower cap (2 before 2026-10-13): they get it now.
+        for job in jobs where !job.isActive && job.reviewing == nil && job.dismissed == nil
+            && job.reviewError?.hasPrefix("Oby reviewed it") == true && (job.review?.round ?? 0) < job.reviewCap {
+            reviewPublished(job)
+        }
         for job in jobs where job.waitsForReviewer && !job.isActive {
             guard job.reviewsWhenRoom else {
                 var settled = job
