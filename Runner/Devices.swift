@@ -57,8 +57,13 @@ final class Devices {
         }
         if let index = saved.devices.firstIndex(where: { $0.publicKey == publicKey }) {
             if let e2ePublicKey, saved.devices[index].e2ePublicKey != e2ePublicKey {
+                let opened = (try? FileManager.default.attributesOfItem(atPath: pairing.path))?[.modificationDate] as? Date
+                guard let opened, now.timeIntervalSince(opened) < 600 else {
+                    throw APIError(.forbidden, "Changing this device's E2E key needs the pairing window: touch (pairing.path), then try again within 10 minutes.")
+                }
                 saved.devices[index].e2ePublicKey = e2ePublicKey
                 try save()
+                try? FileManager.default.removeItem(at: pairing)
             }
             return saved.devices[index].id
         }

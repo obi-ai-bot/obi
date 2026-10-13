@@ -28,6 +28,10 @@ nonisolated enum DeviceKey {
         try key(context: nil).publicKey.x963Representation
     }
 
+    /// The static X25519 identity used by the device gateway. It is separate from the Secure
+    /// Enclave signing key: HPKE needs a key-agreement key and the runner pins both at pairing.
+    static func e2ePublicKey() throws -> Data { try e2eKey().publicKey }
+
     /// Signs one publish. This is what asks for Face ID, with the exact action as the reason.
     /// It blocks until the user answers, so call it off the main actor.
     static func approve(job: String, action: String, device: String) throws -> Approval {
@@ -89,6 +93,10 @@ nonisolated enum DeviceKey {
                                               kSecAttrService as String: "com.deskree.oby",
                                               kSecAttrAccount as String: "publish-key"]
 
+    private static let e2eItem: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                                 kSecAttrService as String: "com.deskree.oby",
+                                                 kSecAttrAccount as String: "e2e-key"]
+
     private static func read() -> Data? {
         var query = item
         query[kSecReturnData as String] = true
@@ -102,6 +110,22 @@ nonisolated enum DeviceKey {
         add[kSecAttrAccessible as String] = protection
         let status = SecItemAdd(add as CFDictionary, nil)
         guard status == errSecSuccess else { throw RunnerError(message: "Couldn't keep the \(biometry) key (\(status)).") }
+    }
+
+    private static func e2eKey() throws -> E2E.KeyPair {
+        var query = e2eItem
+        query[kSecReturnData as String] = true
+        var found: CFTypeRef?
+        if SecItemCopyMatching(query as CFDictionary, &found) == errSecSuccess,
+           let data = found as? Data { return try E2E.KeyPair(rawPrivateKey: data) }
+        let pair = E2E.KeyPair()
+        var add = e2eItem
+        add[kSecValueData as String] = pair.privateKeyData
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess else {
+            throw RunnerError(message: "Couldn't keep the device's E2E key.")
+        }
+        return pair
     }
 }
 #endif

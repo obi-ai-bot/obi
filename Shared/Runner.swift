@@ -928,9 +928,14 @@ nonisolated struct Runner: Sendable {
     #endif
 
     func register(name: String, publicKey: Data) async throws -> String {
-        struct Body: Encodable { var name: String; var publicKey: String }
-        struct Answer: Decodable { var id: String }
-        let answer: Answer = try await call("POST", "v1/devices", body: Body(name: name, publicKey: publicKey.base64EncodedString()))
+        struct Body: Encodable { var name: String; var publicKey: String; var e2ePublicKey: String? }
+        struct Answer: Decodable { var id: String; var publicKey: String? }
+        #if os(iOS) || os(macOS)
+        let e2e = try? DeviceKey.e2ePublicKey().base64EncodedString()
+        #else
+        let e2e: String? = nil
+        #endif
+        let answer: Answer = try await call("POST", "v1/devices", body: Body(name: name, publicKey: publicKey.base64EncodedString(), e2ePublicKey: e2e))
         return answer.id
     }
 

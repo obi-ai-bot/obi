@@ -20,14 +20,17 @@ This document is the contract between the runner and its clients. Change it in t
 ### Device encryption
 
 When a Mac is paired with a device, the pairing record includes the Mac's 32-byte X25519 public
-key. Requests and responses across the gateway use the `oby-e2e-1` envelope from `Shared/E2E.swift`:
-HPKE base mode with RFC 9180 X25519, HKDF-SHA256 and ChaCha20-Poly1305. The HTTP method, route,
-device id and strictly increasing request counter remain visible for routing and replay checks; all
-other bytes are ciphertext. Those four values are authenticated as HPKE additional data, so changing
-an allowlisted route or counter makes the body fail authentication. The Mac's `Gateway` rejects a
-counter that is not newer than the last one for that device, and plaintext is never passed to a
-gateway log. A link without a key is a legacy link and cannot be used after that Mac has paired an
-E2E device.
+key, and device registration includes the device's 32-byte X25519 public key as `e2ePublicKey`.
+Requests and responses across the gateway use the `oby-e2e-1` envelope from `Shared/E2E.swift`:
+HPKE authenticated mode with RFC 9180 X25519, HKDF-SHA256 and ChaCha20-Poly1305. The HTTP method,
+route, device id and strictly increasing request counter remain visible for routing and replay
+checks; all other bytes are ciphertext. The request or response direction is also authenticated
+as HPKE additional data, so a request envelope cannot be reused as a response. Changing an
+allowlisted route or counter makes the body fail authentication. The gateway records a counter
+only after authentication, persists replay state, and refuses requests without the E2E headers;
+legacy plaintext links therefore cannot use the gateway. Plaintext is never passed to a gateway
+log. `GET /v1/e2e` returns the gateway public key, and the encrypted gateway listens on
+`127.0.0.1:8810` by default (`OBY_GATEWAY_PORT` changes it).
 
 ## Objects
 

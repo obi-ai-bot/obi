@@ -62,8 +62,7 @@ final class Gateway: @unchecked Sendable {
         lock.unlock()
         guard let device else { throw E2E.Failure.invalidKey }
         let clear = try E2E.open(body, with: keys.privateKey, metadata: metadata, authenticatedBy: device)
-        try replay.accept(metadata)
-        try replay.record(metadata)
+        try replay.acceptAndRecord(metadata)
         return clear
     }
 

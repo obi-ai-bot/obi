@@ -114,5 +114,23 @@ public enum E2E {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try JSONEncoder().encode(last).write(to: file, options: .atomic)
         }
+
+        /// Atomically verifies and records an authenticated message. Call this only after the
+        /// envelope has been authenticated; keeping the check and write under one lock prevents
+        /// two concurrent copies of one valid request from both reaching the API.
+        public func acceptAndRecord(_ metadata: Metadata) throws {
+            guard metadata.counter > 0 else { throw Failure.replay }
+            lock.lock(); defer { lock.unlock() }
+            guard metadata.counter > (last[metadata.device] ?? 0) else { throw Failure.replay }
+            last[metadata.device] = metadata.counter
+            if last.count > capacity {
+                let keep = last.sorted { $0.value > $1.value }.prefix(capacity)
+                last = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
+            }
+            guard let file else { return }
+            let folder = file.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try JSONEncoder().encode(last).write(to: file, options: .atomic)
+        }
     }
 }

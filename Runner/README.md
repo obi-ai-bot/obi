@@ -57,6 +57,7 @@ Put the owner's Tailscale login in place of `you@example.com` (`tailscale status
 | `OBY_HOME` | Where the runner keeps everything: `oby.sqlite` (jobs, and the brain's latest 200 turns), `accounts.json`, `devices.json` (the phones that may approve publishing; to add one, `touch $OBY_HOME/pairing` and open the app within 10 minutes), `cleared.json` (when Clear done was last pressed, on any app), `apns/` (the APNs key and the phones' Live Activity tokens), `vault/` (the secrets Oby uses but never shows), `watch.json` and `watches.json` (the Watch API's Cloudflare Access settings and the paired Apple Watches), `repos/` and `jobs/`. The service uses `/srv/nvme/oby`. |
 | `OBY_PORT` | The port on `127.0.0.1`. 7777 by default. |
 | `OBY_WATCH_PORT` | The Watch API's port on `127.0.0.1`, for the Cloudflare Tunnel. 7778 by default. |
+| `OBY_GATEWAY_PORT` | The encrypted device gateway's port on `127.0.0.1`, for the Cloudflare Tunnel. 8810 by default. |
 | `OBY_GITHUB_APP_ID` | The GitHub app's App ID (or Client ID), for the runner's own GitHub calls ([The GitHub app](#the-github-app)). Unset: every call goes with the owner's `gh` login. |
 | `OBY_GITHUB_APP_KEY` | Where the app's private key is. `~/.config/oby/github-app.pem` by default. |
 
