@@ -226,7 +226,7 @@ nonisolated enum Integrity {
             if let config = [change.old, change.new].compactMap({ $0 }).first(where: isConfig) {
                 report.problems.append("changes test or CI config: \(config)")
             }
-            if let file = change.new ?? change.old, let problem = settings(change, in: file) { report.problems.append(problem) }
+            if let file = change.new ?? change.old, isBuildFile(file), let problem = settings(change, in: file) { report.problems.append(problem) }
             let wasTest = change.old.map(isTest) ?? false, isTest = change.new.map(isTest) ?? false
             guard wasTest || isTest else { continue }
             if let old = change.old, wasTest {

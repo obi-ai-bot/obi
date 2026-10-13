@@ -1476,6 +1476,8 @@ extension Desk {
         merged.mergeError = nil
         // Replacing it closes the `oby-failure` issues it fixes (`Failures.observe`): GitHub won't, on dev.
         replace(merged)
+        // Unlike a merge seen by the follower, this path already set the merged state itself.
+        Task { await settleBuildBatch(id) }
     }
 
     /// The pull request conflicts with its base: the author's agent rebases its branch onto the base

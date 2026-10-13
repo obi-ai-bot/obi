@@ -17,6 +17,7 @@ nonisolated struct Outgoing: Codable, Equatable, Sendable {
         static let comment = Action(rawValue: "comment")
         static let checkRun = Action(rawValue: "checkRun")
         static let merge = Action(rawValue: "merge")
+        static let buildTag = Action(rawValue: "buildTag")
     }
 
     var action: Action

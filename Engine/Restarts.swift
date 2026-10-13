@@ -97,6 +97,7 @@ extension Desk {
     /// with one inbox item. Jobs waiting for an answer or an OK, or stopped, were never in `wentDown`. Then
     /// reviews whose verdict didn't reach their author are applied (`resumeReviews`).
     func resumeAfterRestart() {
+        resumeXcodeBuilds()
         guard let restarts else { return }
         let ids = wentDown
         wentDown = []
