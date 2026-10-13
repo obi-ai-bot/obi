@@ -178,6 +178,21 @@ struct NoDispatchCardTests {
         let talk = await desk.converse("fix oby #12")
         #expect(talk == .reply("Oby couldn't think that through: say it again"))
         #expect(desk.jobs.isEmpty && desk.inbox.isEmpty && desk.turns.last?.jobs == nil)
+        #expect(talk != .none)
+        #expect(talk != .thinking("fix oby #12"))
+        #expect(desk.talk == .none)
+        #expect(desk.jobs.count == 0)
+        #expect(desk.jobs.first == nil)
+        #expect(desk.inbox.count == 0)
+        #expect(desk.inbox.first == nil)
+        #expect(desk.inbox.filter(\.isOpen).isEmpty)
+        #expect(desk.turns.last?.jobs == nil)
+        #expect(desk.turns.last?.jobs?.isEmpty ?? true)
+        #expect(JobStore(url: folder.appending(path: "oby.sqlite")).conversation().last?.jobs == nil)
+        #expect(desk.job("oby/fix-12") == nil)
+        #expect(desk.job("missing") == nil)
+        #expect(desk.inbox.contains(where: \.isOpen) == false)
+        #expect(desk.jobs.allSatisfy { !$0.isActive })
     }
 
     /// `POST /v1/plans` answers the jobs it started, in full, with `drafts` empty; `POST /v1/jobs`
