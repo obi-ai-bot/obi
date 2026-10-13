@@ -116,7 +116,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// A Mac that took a check and said nothing for this long went away: the next Mac to ask gets it.
     /// Longer than the longest check can take: every step to its timeout, each xcodebuild step twice
     /// (the Mac's own trouble runs it again, `step`), and half an hour for the checkout, the resets
-    /// and the result bundles. 3 hours 20 minutes today.
+    /// and the result bundles. 2 hours 20 minutes today.
     static let lease: TimeInterval = commands(cache: URL(filePath: "/")).reduce(30 * 60) { $0 + $1.timeout * ($1.xcodebuild ? 2 : 1) }
     static let stopLine = "The Mac check failed \(maxRounds) times. Take it from here."
     /// A failed check whose round for the author ended without a new commit to check.
@@ -238,6 +238,26 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             report.problem = "The Mac reported a failure without saying what failed."
         }
         return report
+    }
+
+    /// A merge check can reuse a complete Apple check of the same commit when its runner tests
+    /// passed but the Mac's later Apple steps only hit environmental trouble. The code was already
+    /// tested by that Apple check; keeping the result lets a transient Xcode or simulator problem
+    /// finish the merge without turning it into a user intervention.
+    static func recovered(_ report: Report, apple: MacCheck?, head: String) -> Report? {
+        guard report.problem != nil, report.failures.isEmpty,
+              let apple, apple.head == head, apple.state == .passed,
+              let appleSteps = apple.steps,
+              Self.appleSteps.allSatisfy({ name in appleSteps.contains { $0.name == name && $0.passed } }),
+              let runnerName = requiredSteps.first,
+              let runner = report.steps.first(where: { $0.name == runnerName }), runner.passed,
+              requiredSteps.allSatisfy({ name in report.steps.contains { $0.name == name } }),
+              report.steps.filter({ $0.name != runnerName }).allSatisfy({ Self.appleSteps.contains($0.name) }) else { return nil }
+        let steps = requiredSteps.compactMap { name in
+            name == runnerName ? runner : appleSteps.first { $0.name == name }
+        }
+        guard steps.count == requiredSteps.count else { return nil }
+        return Report(passed: true, steps: steps, failures: [], log: nil)
     }
 
     private static func one(_ text: String, _ limit: Int) -> String {
@@ -618,10 +638,10 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
                     timeout: 30 * 60),
             Command(name: "Mac app and MacTests", arguments: ["xcodebuild", "-project", "Oby.xcodeproj", "-scheme", "Oby",
                                                                "-destination", "platform=macOS"] + derived + signing + ["test"],
-                    timeout: 30 * 60),
+                    timeout: 20 * 60),
             Command(name: "iPhone app with Watch, and iOSTests", arguments: ["xcodebuild", "-project", "Oby.xcodeproj", "-scheme", "ObyPhone",
                                                                              "-destination", iPhone] + derived + signing + ["test"],
-                    timeout: 40 * 60),
+                    timeout: 20 * 60),
         ]
     }
 
@@ -1288,7 +1308,10 @@ extension Desk {
         guard check.state == .running else {
             throw Shell.Failure(message: check.state == .queued ? "No Mac has taken that check." : "That check has its result already.")
         }
-        let report = MacCheck.validated(report)
+        var report = MacCheck.validated(report)
+        if !check.isApple {
+            report = MacCheck.recovered(report, apple: author.appleRan ?? author.appleCheck, head: check.head) ?? report
+        }
         check.state = report.problem != nil ? .error : report.passed ? .passed : .failed
         check.finished = now
         check.steps = report.steps
