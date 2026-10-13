@@ -176,7 +176,7 @@ final class Desk {
     /// Jobs ready to run that wait for a free slot (`maxRunning`) or for a runner update to end.
     private var waiting: [Job] = []
     /// At most this many jobs run at once (#237): a new job, or Oby's review, waits, queued, for a
-    /// slot, and they start oldest first as slots free up. A round of a job that started already
+    /// slot, and they start as slots free up, Oby's reviews first, then oldest first (`goesFirst`). A round of a job that started already
     /// (a review's changes, a rebase, a failed Mac check, the user's words) takes a slot too, but
     /// never waits for one. Raising it starts waiting jobs at once.
     @ObservationIgnored var maxRunning = JobSlots.saved {
@@ -1202,7 +1202,7 @@ final class Desk {
             prepared = job(prepared.id) ?? prepared
         }
         if drainingForUpdate { return start(prepared) }
-        let older = waiting.contains { $0.id != prepared.id && $0.created < prepared.created }
+        let older = waiting.contains { $0.id != prepared.id && Self.goesFirst($0, prepared) }
         if runningCount < maxRunning && !older { return catchUp ? startCaughtUp(prepared) : start(prepared) }
         var job = prepared
         job.step = JobSlots.waitLine(running: runningCount, of: maxRunning)
@@ -1219,12 +1219,20 @@ final class Desk {
     func releaseWaiting() {
         guard !drainingForUpdate else { return }
         waiting.removeAll { job($0.id)?.status != .queued }
-        for waiter in waiting.sorted(by: { $0.created < $1.created }) {
+        for waiter in waiting.sorted(by: Self.goesFirst) {
             guard runningCount < maxRunning else { return }
             guard let latest = job(waiter.id) else { continue }
             waiting.removeAll { $0.id == waiter.id }
             startCaughtUp(latest)
         }
+    }
+
+    /// Which of two waiting jobs takes the next slot: Oby's reviews first, then oldest first. A review
+    /// finishes work that's nearly done and unblocks its merge; a new job starts more. With every
+    /// slot busy, six reviews waited behind four new jobs (2026-10-13) and nothing merged.
+    nonisolated static func goesFirst(_ a: Job, _ b: Job) -> Bool {
+        let (ra, rb) = (a.reviewOf != nil, b.reviewOf != nil)
+        return ra != rb ? ra : a.created < b.created
     }
 
     /// Queued while the runner drains for an update: it starts once the update is done or cancelled.
