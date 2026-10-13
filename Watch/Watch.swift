@@ -636,9 +636,6 @@ final class Watch: NSObject {
         steps = ConversationModel.placed(step, in: steps)
     }
 
-    /// Whether a step runs: Stop shows.
-    var working: Bool { steps.contains { $0.state == .running } }
-
     /// Stop: the runner ends the turn Oby is working on (#304), straight from the watch or through
     /// the phone, and what ran shows as ended.
     func stopTurn() async {

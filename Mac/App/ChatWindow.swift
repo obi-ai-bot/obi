@@ -249,12 +249,12 @@ private struct ConversationColumn: View {
                         ForEach(days) { day in
                             ForEach(Array(day.turns.enumerated()), id: \.element.id) { index, turn in
                                 TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? day.turns[index - 1] : nil), jobs: ConversationModel.jobs(of: turn, among: desk.jobs + feed.jobs),
-                                        steps: conversation.steps(under: turn, in: turns),
                                         account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
                                         isLocal: { id in desk.jobs.contains { $0.id == id } },
                                         onOpenJob: onOpenJob,
                                         onStopJob: { model.stopChatJob($0, local: $1) },
-                                        showTime: ConversationModel.showsTime(turn, after: index > 0 ? day.turns[index - 1] : nil))
+                                        showTime: ConversationModel.showsTime(turn, after: index > 0 ? day.turns[index - 1] : nil),
+                                        steps: conversation.steps(under: turn, in: turns))
                                     .task(id: turn.jobs ?? []) {
                                         // A runner's job older than its list: fetched, so its card shows.
                                         for id in ConversationModel.missing(of: turn, among: desk.jobs + feed.jobs) { try? await feed.fetch(id) }
