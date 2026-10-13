@@ -557,7 +557,7 @@ final class Desk {
 
     /// `converse`, with the jobs Oby's answer started (#269): `POST /v1/plans` answers them.
     func exchange(_ said: String, shown: String? = nil, turns given: [Turn]? = nil) async -> (talk: Talk, started: [Job]) {
-        if Conversation.cancels(said) { stopConversation(); return .none }
+        if Conversation.cancels(said) { stopConversation(); return (.none, []) }
         let turn = Turn(who: .user, text: shown ?? said)
         conversationTurn = turn.id
         stopRequested = false

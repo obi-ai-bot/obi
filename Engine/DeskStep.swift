@@ -39,7 +39,7 @@ extension Desk {
         case .stopAgent: return plan.all == true ? "Stopping all running work" : "Stopping the selected work"
         case .answerPermission: return "Answering a permission request"
         case .setMode: return "Changing permission mode"
-        case .dispatch, .askUser, .replyOnly, .ignore: return plan.action.rawValue
+        case .dispatch, .askUser, .replyOnly, .ignore, .readJob: return plan.action.rawValue
         }
     }
 }
