@@ -19,6 +19,7 @@ struct CleanupTests {
         let cleanup = WorktreeCleanup(root: URL(filePath: "/tmp/oby-cleanup-test"), clock: { self.now })
         var removed: [String] = []
         cleanup.remove = { removed.append($0.id); return true }
+        cleanup.removeBranch = { _ in }
         var recent = candidate("recent", finished: -23 * 60 * 60)
         recent.pullRequest?.state = .open
         var open = candidate("open")
@@ -34,7 +35,9 @@ struct CleanupTests {
     @Test func reviewWorktreeGoesWhenVerdictArrivesAndInUseWins() async {
         let cleanup = WorktreeCleanup(root: URL(filePath: "/tmp/oby-cleanup-test"), clock: { self.now })
         var removed: [String] = []
+        var removedBranches: [String] = []
         cleanup.remove = { removed.append($0.id); return true }
+        cleanup.removeBranch = { removedBranches.append($0.id) }
         var author = candidate("author")
         author.pullRequest?.state = .open
         let account = Account(id: "work", agent: "codex", name: "Work", payer: "Deskree", home: nil)
@@ -45,5 +48,10 @@ struct CleanupTests {
         decided.review = Review(verdict: .approved, job: review.id, agent: review.agent, account: account.name, round: 1)
         await cleanup.run(jobs: [decided, review, candidate("busy")]) { $0 == "busy" }
         #expect(removed == [review.id])
+        #expect(removedBranches.isEmpty)
+
+        decided.pullRequest?.state = .merged
+        await cleanup.run(jobs: [decided, review, candidate("busy")]) { $0 == "busy" }
+        #expect(removedBranches == [author.id, review.id])
     }
 }

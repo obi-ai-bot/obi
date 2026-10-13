@@ -13,6 +13,7 @@ final class WorktreeCleanup {
 
     let clock: () -> Date
     var remove: (Job) async -> Bool
+    var removeBranch: (Job) async -> Void
     private(set) var status: Status
 
     init(root: URL = Workspace.root, clock: @escaping () -> Date = { Date.now }) {
@@ -25,15 +26,21 @@ final class WorktreeCleanup {
             guard FileManager.default.fileExists(atPath: worktree.path),
                   FileManager.default.fileExists(atPath: clone.appending(path: ".git").path) else { return false }
             guard (try? await Shell.ok(["git", "-C", clone.path, "worktree", "remove", "--force", worktree.path])) != nil else { return false }
-            _ = try? await Shell.run(["git", "-C", clone.path, "branch", "-D", "--", job.branch])
             return true
+        }
+        self.removeBranch = { job in
+            let clone = Workspace.clone(job.repo)
+            _ = try? await Shell.run(["git", "-C", clone.path, "branch", "-D", "--", job.branch])
         }
     }
 
     func run(jobs: [Job], inUse: (String) -> Bool) async {
         let now = clock()
         let byID = Dictionary(jobs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        for job in jobs where shouldRemove(job, authors: byID, now: now) && !inUse(job.id) { _ = await remove(job) }
+        for job in jobs where shouldRemove(job, authors: byID, now: now) && !inUse(job.id) {
+            guard await remove(job) else { continue }
+            if shouldRemoveBranch(job, authors: byID) { await removeBranch(job) }
+        }
         status = Status(lastRun: now, bytes: Self.size(of: URL(filePath: status.path)), path: status.path)
     }
 
@@ -47,6 +54,12 @@ final class WorktreeCleanup {
     private func settledPullRequest(_ job: Job) -> Bool {
         guard let state = job.pullRequest?.state else { return false }
         return state == .merged || state == .closed
+    }
+
+    private func shouldRemoveBranch(_ job: Job, authors: [String: Job]) -> Bool {
+        guard let authorID = job.reviewOf else { return true }
+        guard let author = authors[authorID] else { return false }
+        return settledPullRequest(author)
     }
 
     private static func size(of url: URL) -> Int64 {
