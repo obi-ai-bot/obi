@@ -77,9 +77,13 @@ nonisolated enum JobList {
     /// waiting for its checks or an account, about to merge), and, for a review job, not while the
     /// job it reviews isn't settled (`author`, nil when it's no review or its author isn't listed).
     /// So it's settled once its pull request was merged or closed, or it ended with nothing to publish.
+    ///
+    /// Changed 2026-10-13: a done job whose pull request is still open (in review, checking, about
+    /// to merge) clears too, and its review with it. Oby carries it to the merge by itself, and the
+    /// moment it needs you it isn't settled any more and comes back. Keeping them made Clear done
+    /// look broken: it took nothing while every finished job waited on a review or a check.
     static func settled(active: Bool, needsYou: Bool, letGo: Bool, openPullRequest: Bool, author: Bool? = nil) -> Bool {
-        if active || needsYou { return false }
-        return letGo || !openPullRequest && (author ?? true)
+        !(active || needsYou)
     }
 
     /// Whether a job stays in the list after Clear done: it isn't `settled`, or `shows` keeps it

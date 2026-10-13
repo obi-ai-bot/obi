@@ -151,9 +151,8 @@ final class ClearTests {
                                author: author.map { settled($0) })
     }
 
-    /// Clear done takes only settled jobs (#280): a published job whose pull request is still open
-    /// (in review, checking, about to merge) stays, and goes once it merges; so does a review of
-    /// it. A dismissed or stopped job goes, and so does one that ended with nothing to publish.
+    /// Clear done takes settled jobs (#280): everything not working, waiting or needing you. Since
+    /// 2026-10-13 that includes a published job whose pull request is still open, and its review. A dismissed or stopped job goes, and so does one that ended with nothing to publish.
     @Test func clearDoneKeepsWhatIsStillInFlight() {
         var done = Job(id: "a", request: "fix oby", agent: "claude", account: "default", repo: "deskree-inc/oby",
                        branch: "oby/fix-a", base: "dev", kind: .fix, task: "fix oby")
@@ -170,11 +169,13 @@ final class ClearTests {
         review.id = "rev1"
         review.reviewOf = inReview.id
         review.commits = 0
-        #expect(!inReview.needsYou && !Self.settled(inReview) && lists(inReview, []))
-        #expect(!Self.settled(review, among: [inReview]) && lists(review, [inReview]))
+        // Since 2026-10-13 an open pull request clears too, with its review: Oby takes it to the
+        // merge, and once it needs you it isn't settled and comes back.
+        #expect(!inReview.needsYou && Self.settled(inReview) && !lists(inReview, []))
+        #expect(Self.settled(review, among: [inReview]) && !lists(review, [inReview]))
         var checking = inReview
         checking.pullRequest = PullRequestStatus(state: .open, reviewDecision: .approved, base: "dev", checkedAt: now - 30)
-        #expect(!checking.needsYou && lists(checking, []))
+        #expect(!checking.needsYou && !lists(checking, []))
         var waiting = done
         waiting.status = .queued
         waiting.finished = now - 60
@@ -212,8 +213,9 @@ final class ClearTests {
         #expect(Self.settled(nothing) && !lists(nothing, []))
 
         // Clear done isn't offered while nothing listed is settled.
-        let listed = [inReview, review, checking, waiting, failed]
+        let listed = [waiting, failed]
         #expect(!listed.contains { JobList.clears(settled: Self.settled($0, among: listed)) })
+        #expect([inReview, waiting].contains { JobList.clears(settled: Self.settled($0, among: [inReview, waiting])) })
         #expect(([merged] + listed).contains { JobList.clears(settled: Self.settled($0, among: [merged] + listed)) })
     }
 
