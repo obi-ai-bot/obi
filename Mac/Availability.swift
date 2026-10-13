@@ -37,7 +37,7 @@ final class MacAvailability {
         update()
     }
 
-    deinit { if preventingSleep { releaseAssertion(assertion) } }
+    isolated deinit { if preventingSleep { releaseAssertion(assertion) } }
     func setKeepAvailable(_ value: Bool) { keepAvailable = value; defaults.set(value, forKey: Self.setting); update() }
     func setPowerConnected(_ value: Bool) { powerConnected = value; update() }
     func setRunningJobs(_ value: Bool) {

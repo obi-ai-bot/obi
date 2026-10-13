@@ -22,10 +22,10 @@ struct IslandTabsTests {
         defer { try? FileManager.default.removeItem(at: folder) }
 
         let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
-        let model = IslandModel(desk: desk, feed: RunnerFeed())
+        let model = IslandModel(desk: desk, feed: RunnerFeed(), availability: MacAvailability())
         model.select(.settings)
         #expect(model.openingTab == .settings)
-        #expect(IslandModel(desk: desk, feed: RunnerFeed()).tab == .settings)
+        #expect(IslandModel(desk: desk, feed: RunnerFeed(), availability: MacAvailability()).tab == .settings)
         desk.cancel()
     }
 }

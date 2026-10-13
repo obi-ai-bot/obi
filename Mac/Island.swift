@@ -47,7 +47,7 @@ final class IslandModel {
     /// The last open-island surface. Home takes precedence when something needs attention.
     var tab: IslandTab
 
-    init(desk: Desk, feed: RunnerFeed, updater: Updater = Updater(), availability: MacAvailability = MacAvailability()) {
+    @MainActor init(desk: Desk, feed: RunnerFeed, updater: Updater = Updater(), availability: MacAvailability) {
         self.desk = desk
         self.feed = feed
         self.availability = availability

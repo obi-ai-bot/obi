@@ -33,7 +33,7 @@ struct OfflineTests {
         ]
         await queue.flushAnswers { item in
             if item.id == "settled" { throw OfflineQueue.FlushError.alreadySettled }
-            if item.id == "fails" { throw URLError(.notConnected) }
+            if item.id == "fails" { throw URLError(.notConnectedToInternet) }
         }
         #expect(queue.answers.map(\.id) == ["fails", "later"])
     }

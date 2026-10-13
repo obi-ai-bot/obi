@@ -6,6 +6,7 @@ import Testing
 
 /// No words beside or under the camera (#150): on a notched screen, every text frame stays clear of
 /// the cutout, and on any screen it fits inside the island.
+@MainActor
 struct IslandLayoutTests {
     struct Screen: CustomStringConvertible {
         var width: CGFloat
@@ -41,7 +42,7 @@ struct IslandLayoutTests {
         let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
         desk.makeBrain = { (_: String?, _: String?, _: Vault) in [] }
         let feed = RunnerFeed()
-        let model = IslandModel(desk: desk, feed: feed)
+        let model = IslandModel(desk: desk, feed: feed, availability: MacAvailability())
         let reply = Turn(id: "remote", who: .oby, text: "Hello from the runner")
         feed.conversation.apply(reply)
         #expect(model.recentTurns.last == reply && model.unreadReply)
