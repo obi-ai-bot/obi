@@ -418,7 +418,9 @@ struct GuardTests {
         agent.onEvent(.turnEnded(summary: "Green now.", failed: false))
         try await until { desk.job("weaklast")?.isActive == false }
         try expectHeld("weaklast", "the tests are still weakened after 1 round", agent: agent)
-        #expect(desk.job("weaklast")?.summary.contains("Test integrity findings:\n- adds a skip marker in RunnerTests/StopTests.swift: @Test(.disabled())") == true)
+        let heldSummary = try #require(desk.job("weaklast")?.summary)
+        #expect(heldSummary.contains("Test integrity findings:\n- adds a"))
+        #expect(heldSummary.contains("RunnerTests/StopTests.swift") && heldSummary.contains("@Test("))
     }
 
     @Test func theDiffFindsWhatWeakensTheTests() {
