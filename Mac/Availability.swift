@@ -34,8 +34,9 @@ final class MacAvailability {
         self.releaseAssertion = releaseAssertion
         self.defaults = defaults
         self.powerSource = powerSource
-        self.runnerEnabled = defaults.object(forKey: RunnerFeed.thisMacKey) as? Bool ?? false
-        self.keepAvailable = defaults.object(forKey: Self.setting) as? Bool ?? self.runnerEnabled
+        let runnerEnabled = defaults.object(forKey: RunnerFeed.thisMacKey) as? Bool ?? false
+        self.runnerEnabled = runnerEnabled
+        self.keepAvailable = defaults.object(forKey: Self.setting) as? Bool ?? runnerEnabled
         self.powerConnected = powerConnected ?? powerSource()
         update()
     }
