@@ -10,7 +10,10 @@ struct MacStepsTests {
         var parser = EventParser()
         let wire = #"{"turn":"u1","index":1,"action":"move_job","text":"Moving Vault secrets to Codex · Deskree","state":"running","at":"2026-10-11T09:12:04Z"}"#
         for line in ["event: step", "data: \(wire)"] { #expect(parser.feed(line) == nil) }
-        guard case .step(let step)? = parser.feed("") else { return Issue.record("the step event wasn't read") }
+        guard case .step(let step)? = parser.feed("") else {
+            Issue.record("the step event wasn't read")
+            return
+        }
         let model = ConversationModel()
         model.apply(step)
         model.apply(TurnStep(turn: "u1", index: 1, action: "move_job", text: step.text, state: .done))

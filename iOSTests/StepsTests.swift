@@ -36,7 +36,10 @@ struct StepsTests {
         // Missing: the other events read as before, and a stream with no step ends with no steps.
         var parser = EventParser()
         for line in ["event: turn", #"data: {"id":"a","who":"user","text":"hi","at":"2026-10-11T09:12:04Z","jobs":[]}"#] { _ = parser.feed(line) }
-        guard case .turn(let turn)? = parser.feed("") else { return Issue.record("the turn event wasn't read") }
+        guard case .turn(let turn)? = parser.feed("") else {
+            Issue.record("the turn event wasn't read")
+            return
+        }
         let model = ConversationModel()
         model.apply(turn)
         #expect(model.steps.isEmpty && !model.working && model.steps(under: turn, in: [turn]).isEmpty)
