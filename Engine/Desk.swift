@@ -540,6 +540,7 @@ final class Desk {
     /// ignored. Work the plan started already goes on: stop it by name.
     func cancel() {
         asking += 1
+        stopRequested = false
         if let pending {
             remove(pending)
             self.pending = nil
