@@ -12,12 +12,12 @@ struct ReviewFindingsTests {
         #expect(findings.blocking.isEmpty && findings.later == ["Add coverage"])
         #expect(Review.decide(summary) == .approved)
         // Parentheses around a real finding must still block, even after a none item.
-        #expect(Review.decide("Blocking:\n- \(none)\n- (None of the new paths are tested)\n\nVERDICT: APPROVED") == .changesRequested)
+        #expect(Review.decide("Blocking:\n- \(none)\n- (None of the new paths are tested). Evidence: the failing probe prints this finding.\n\nVERDICT: APPROVED") == .changesRequested)
     }
 
     @Test func aNoteAfterTheVerdictLineDoesNotHideTheVerdict() {
         let note = "I haven't called `save_session` yet; say if you want it saved before you post this."
-        let review = "Blocking:\n- A race drops a plan.\n\nVERDICT: CHANGES REQUESTED\n\n\(note)"
+        let review = "Blocking:\n- A race drops a plan. Evidence: probe with two queued plans loses one.\n\nVERDICT: CHANGES REQUESTED\n\n\(note)"
         #expect(Review.verdict(review) == .changesRequested && Review.decide(review) == .changesRequested)
         #expect(Review.verdict("Fine.\n\n**APPROVED**\n\nTetrix showed nothing.\n\(note)") == .approved)
         // Any other line after the verdict still hides it.
@@ -34,9 +34,9 @@ struct ReviewFindingsTests {
         #expect(Review.findings(later)?.blocking == [] && Review.findings(later)?.later == ["Rename `next` to `nextRound`", "Document the empty case"])
 
         // Something blocking: changes requested, even when the last line approves.
-        let blocking = "One bug.\n\nBlocking:\n- `Rounds.next` drops the last round\n\nWorth doing later:\n- Rename it\n\nVERDICT: APPROVED"
+        let blocking = "One bug.\n\nBlocking:\n- `Rounds.next` drops the last round. Evidence: test `nextAtLimit` fails with expected 4, got 3.\n\nWorth doing later:\n- Rename it\n\nVERDICT: APPROVED"
         #expect(Review.decide(blocking) == .changesRequested)
-        #expect(Review.findings(blocking)?.blocking == ["`Rounds.next` drops the last round"] && Review.findings(blocking)?.later == ["Rename it"])
+        #expect(Review.evidenced(Review.findings(blocking))?.blocking == ["`Rounds.next` drops the last round. Evidence: test `nextAtLimit` fails with expected 4, got 3."] && Review.evidenced(Review.findings(blocking))?.later == ["Rename it"])
         #expect(Review.decide(blocking.replacing("VERDICT: APPROVED", with: "VERDICT: CHANGES REQUESTED")) == .changesRequested)
 
         // "None" isn't a finding.
@@ -64,11 +64,11 @@ struct ReviewFindingsTests {
         let unsure = "Hmm.\n\nBlocking: none.\n- The crash on empty input must be fixed\n\nVERDICT: CHANGES REQUESTED"
         #expect(Review.findings(unsure)?.unsorted == ["The crash on empty input must be fixed"] && Review.decide(unsure) == .changesRequested)
         // A "- None" item is just an item: a real one after it still blocks.
-        let item = "Bug.\n\nBlocking:\n- None\n- It crashes on an empty list\n\nVERDICT: APPROVED"
-        #expect(Review.findings(item)?.blocking == ["It crashes on an empty list"] && Review.decide(item) == .changesRequested)
+        let item = "Bug.\n\nBlocking:\n- None\n- It crashes on an empty list. Evidence: `swift test --filter EmptyList` traps at Review.swift:1.\n\nVERDICT: APPROVED"
+        #expect(Review.evidenced(Review.findings(item))?.blocking == ["It crashes on an empty list. Evidence: `swift test --filter EmptyList` traps at Review.swift:1."] && Review.decide(item) == .changesRequested)
         // A heading after it is read again: a real blocking finding still requests changes, whatever the last line says.
-        let after = "Bug.\n\nBlocking: none.\n- Checked the cap\n\nBlocking issues:\n- It crashes on an empty list\n\nVERDICT: APPROVED"
-        #expect(Review.findings(after)?.blocking == ["It crashes on an empty list"] && Review.decide(after) == .changesRequested)
+        let after = "Bug.\n\nBlocking: none.\n- Checked the cap\n\nBlocking issues:\n- It crashes on an empty list. Evidence: `swift test --filter EmptyList` traps at Review.swift:1.\n\nVERDICT: APPROVED"
+        #expect(Review.evidenced(Review.findings(after))?.blocking == ["It crashes on an empty list. Evidence: `swift test --filter EmptyList` traps at Review.swift:1."] && Review.decide(after) == .changesRequested)
 
         // A review that doesn't sort its findings keeps its last line's verdict; none still means none.
         #expect(Review.findings("Two things.\n\n- Fix the off-by-one\n\nVERDICT: CHANGES REQUESTED") == nil)
@@ -77,15 +77,25 @@ struct ReviewFindingsTests {
         #expect(Review.decide("Blocking:\n- It crashes\n\nI read it all.") == nil)
     }
 
+    @Test func anUnverifiedBlockingCandidateBecomesFollowUp() throws {
+        let candidate = "Possible crash.\n\nBlocking:\n- Empty input crashes\n\nVERDICT: CHANGES REQUESTED"
+        #expect(Review.decide(candidate) == .approved)
+        let findings = try #require(Review.evidenced(Review.findings(candidate)))
+        #expect(findings.blocking.isEmpty && findings.later == ["Empty input crashes"])
+
+        let verified = candidate.replacing("Empty input crashes", with: "Empty input crashes. Evidence: `swift test --filter EmptyInput` prints ‘fatal error’.")
+        #expect(Review.decide(verified) == .changesRequested)
+        #expect(Review.evidenced(Review.findings(verified))?.blocking.count == 1)
+    }
+
     @Test func findingsAreReadUnderMarkdownHeadingsOrLabelledOneByOne() throws {
         let headed = """
             It crashes on an empty list.
 
             ## Blocking (1)
 
-            1. **Crash** in `Rounds.next` when
-               the list is empty
-            2. The test `emptyList` fails
+            1. **Crash** in `Rounds.next` when the list is empty. Evidence: `swift test --filter emptyList` traps.
+            2. The test `emptyList` fails. Evidence: `swift test --filter emptyList` traps.
 
             ## Worth doing later
 
@@ -95,25 +105,25 @@ struct ReviewFindingsTests {
 
             **VERDICT: CHANGES REQUESTED**
             """
-        let found = try #require(Review.findings(headed))
-        #expect(found.blocking == ["**Crash** in `Rounds.next` when the list is empty", "The test `emptyList` fails"])
+        let found = try #require(Review.evidenced(Review.findings(headed)))
+        #expect(found.blocking == ["**Crash** in `Rounds.next` when the list is empty. Evidence: `swift test --filter emptyList` traps.", "The test `emptyList` fails. Evidence: `swift test --filter emptyList` traps."])
         // The closing paragraph isn't a finding.
         #expect(found.later == ["Rename `x`"])
         #expect(Review.decide(headed) == .changesRequested)
 
-        let labelled = "Two notes.\n\n- Blocking: the token is logged in plain text\n- Worth doing later: a comment on `keep`\n\nVERDICT: CHANGES REQUESTED"
-        #expect(Review.findings(labelled)?.blocking == ["the token is logged in plain text"] && Review.findings(labelled)?.later == ["a comment on `keep`"])
+        let labelled = "Two notes.\n\n- Blocking: the token is logged in plain text. Evidence: exact changed line writes the token to the log.\n- Worth doing later: a comment on `keep`\n\nVERDICT: CHANGES REQUESTED"
+        #expect(Review.evidenced(Review.findings(labelled))?.blocking == ["the token is logged in plain text. Evidence: exact changed line writes the token to the log."] && Review.evidenced(Review.findings(labelled))?.later == ["a comment on `keep`"])
         #expect(Review.decide(labelled) == .changesRequested)
         #expect(Review.decide("Fine.\n\n- Worth doing later: a comment on `keep`\n\nVERDICT: CHANGES REQUESTED") == .approved)
     }
 
     @Test func aHeadingCountsByHowItStarts() throws {
         // "Blocking issues" is blocking: the bug under it requests changes.
-        let issues = "One bug.\n\nBlocking issues:\n- `Rounds.next` drops the last round\n\nWorth doing later (2):\n- Rename it\n- Document it\n\nVERDICT: CHANGES REQUESTED"
-        let found = try #require(Review.findings(issues))
-        #expect(found.blocking == ["`Rounds.next` drops the last round"] && found.later == ["Rename it", "Document it"] && found.unsorted.isEmpty)
+        let issues = "One bug.\n\nBlocking issues:\n- `Rounds.next` drops the last round. Evidence: `swift test --filter NextAtLimit` fails with 3 != 4.\n\nWorth doing later (2):\n- Rename it\n- Document it\n\nVERDICT: CHANGES REQUESTED"
+        let found = try #require(Review.evidenced(Review.findings(issues)))
+        #expect(found.blocking == ["`Rounds.next` drops the last round. Evidence: `swift test --filter NextAtLimit` fails with 3 != 4."] && found.later == ["Rename it", "Document it"] && found.unsorted.isEmpty)
         #expect(Review.decide(issues) == .changesRequested)
-        #expect(Review.decide("Bugs.\n\n**Blockers found:**\n- It crashes\n\nVERDICT: CHANGES REQUESTED") == .changesRequested)
+        #expect(Review.decide("Bugs.\n\n**Blockers found:**\n- It crashes. Evidence: the probe traps on an empty value.\n\nVERDICT: CHANGES REQUESTED") == .changesRequested)
         // A sentence that starts the same way is a finding, not a heading.
         let sentence = try #require(Review.findings("Fine.\n\nWorth doing later:\n- Blocking the main thread drops frames: move it off\n\nVERDICT: APPROVED"))
         #expect(sentence.blocking.isEmpty && sentence.later == ["Blocking the main thread drops frames: move it off"])

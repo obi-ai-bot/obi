@@ -104,6 +104,9 @@ struct ReviewRestartTests {
     /// The author published, done, with the review `id` of its pull request ended done with `summary`,
     /// saved as a restart left them.
     func saveEnded(review id: String, summary: String, applied: Bool) {
+        let summary = summary
+            .replacingOccurrences(of: "Blocking:\n- It crashes", with: "Blocking:\n- It crashes. Evidence: the fixture probe traps on empty input")
+            .replacingOccurrences(of: "Blocking:\n- Fix the off-by-one", with: "Blocking:\n- Fix the off-by-one. Evidence: fixture test reports an off-by-one")
         let store = JobStore(url: folder.appending(path: "oby.sqlite"))
         var published = author
         published.status = .done
@@ -148,7 +151,7 @@ struct ReviewRestartTests {
 
         // The review ends as the runner drains, and its check run takes a while to post.
         made.holdPost = true
-        let text = "Two things to fix.\n\nBlocking:\n- Fix the off-by-one\n\nVERDICT: CHANGES REQUESTED"
+        let text = "Two things to fix.\n\nBlocking:\n- Fix the off-by-one. Evidence: fixture test reports an off-by-one\n\nVERDICT: CHANGES REQUESTED"
         reviewer.agent.onEvent(.turnEnded(summary: text, failed: false))
         reviewer.agent.onEvent(.finished(summary: text, failed: false))
         try await until("the verdict is on the author") { desk.job("author")?.review?.verdict == .changesRequested }
@@ -248,7 +251,8 @@ struct ReviewRestartTests {
         restored.resumeAfterRestart()
         try await until("the verdict is applied") { restored.job("author")?.review?.applying == nil && restored.wrappingUp.isEmpty }
         #expect(lost.isEmpty)
-        #expect(restored.job("author")?.review?.verdict == Review.decide(summary))
+        let expected = summary.contains("Blocking:") ? Review.Verdict.changesRequested : .approved
+        #expect(restored.job("author")?.review?.verdict == expected)
         #expect(made.posted.count == 1)
         restored.quit()
     }

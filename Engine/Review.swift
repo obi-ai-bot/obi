@@ -54,6 +54,8 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// What this review and the earlier ones found worth doing later, oldest first, or nil: the
     /// job's report lists them as follow-ups.
     var followUps: [String]?
+    /// The one GitHub issue Oby filed for these follow-ups after the pull request merged, or nil.
+    var followUpIssue: String?
     /// Its verdict is on the author's job, but its check run and what follows (the changes' round
     /// for the author's agent, or the approval's Mac check) are still to come: a restart that cut
     /// them short leaves it set, and the runner does them when it starts again (`Desk.resumeReviews`).
@@ -189,7 +191,10 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             ownText,
             "What the user asked that agent for: \(job.task)",
             userAnswers(job),
-            "Judge whether the changes do what the user asked, correctly and completely, and whether they're safe and follow the repository's own guidance (AGENTS.md, CLAUDE.md, README). Read the diff and the code around it; run the repository's tests or checks when that tells you more. Raise only what matters: bugs, missing pieces, risks, and what a person must know before merging.",
+            "Review the change through these four lenses, in order, in this one review: (1) check every acceptance criterion and each ‘Test it when it's done’ item from the issue; (2) find bugs in changed code and the code it calls; (3) check the repository rules and proven facts in AGENTS.md; (4) verify end-to-end behavior on every platform the change touches. Gather all findings across the four lenses before finishing; do not stop after the first issue.",
+            "Judge whether the changes do what the user asked, correctly and completely, and whether they're safe and follow the repository's own guidance.",
+            "Verify every candidate blocker before labeling it blocking. Run a failing test or a throwaway probe and include the relevant command and output, or cite the exact changed lines that demonstrate the bug for an input. Include `Evidence:` in every blocking finding. If you cannot verify a candidate, put it under ‘Worth doing later’ instead.",
+            "List no more than 10 blockers, ranked from most severe to least severe. Do not block on pre-existing problems, style, naming, wording, more tests in general, or anything a linter would catch.",
             "If a build or test still fails after Oby's clean retry, report it as Oby's problem: say Oby couldn't build the PR for review and include the error. Do not say you couldn't run the tests, and do not approve or request changes based on reading alone; return no verdict.",
             blocking,
             AppleCheck.reviewLine(job),
@@ -215,7 +220,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             "This is a follow-up, not a fresh review. Check only " + (input == nil ? "" : "that each blocking finding in that file is fixed, and ")
                 + "that the new commits don't break anything. Don't review the rest of the pull request again, and don't raise what the last review didn't: it was judged then. Read the new changes and the code around them; run the repository's tests or checks when that tells you more.",
             "If a build or test still fails after Oby's clean retry, report it as Oby's problem: say Oby couldn't build the PR for review and include the error. Do not say you couldn't run the tests, and do not approve or request changes based on reading alone; return no verdict.",
-            "Blocking means a finding the last review blocked on that isn't fixed, or something the new commits broke: a bug, a security or data-loss problem, or a requirement or test they broke. Anything else you notice in the new commits is worth doing later.",
+            "Blocking means a finding the last review blocked on that isn't fixed, or something the new commits broke: a bug, a security or data-loss problem, or a requirement or test they broke. Verify each candidate blocker with a failing test or throwaway probe and its command/output, or cite exact lines that demonstrate the bug for an input. Every blocker must include `Evidence:`. Anything you cannot confirm, or anything else you notice in the new commits, is worth doing later.",
         ]
         if input != nil { lines.append(again) }
         if let apple = AppleCheck.reviewLine(job) { lines.append(apple) }
@@ -256,7 +261,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     static let ownText = "Oby writes the pull request's description itself around the agent's summaries: its check, secret scan, `Closes #N` and \"by Oby\" lines are Oby's, and the agent can't change them from its branch. Oby's squash merge writes its own commit message from the commits, with any closing keyword in them as \"Part of\", so nothing in the description lands in \(MacCheck.into) or closes an issue. Never block on the description."
 
     /// What every reviewer is told counts as blocking.
-    static let blocking = "Label each finding blocking or not. Blocking means a bug, a security or data-loss problem, or a requirement the user asked for that isn't met or a test that's broken: only blocking findings request changes. Everything else (style, naming, refactors, more tests, docs, ideas) is worth doing later, and doesn't."
+    static let blocking = "Label each finding blocking or not. Blocking means a bug, a security or data-loss problem, or a requirement the user asked for that isn't met or a test that's broken. Every blocking finding must include an `Evidence:` part with the probe/test command and relevant output, or the exact lines that demonstrate the bug for an input; without it, it is worth doing later and cannot request changes. Everything else (pre-existing problems, style, naming, refactors, more tests in general, docs, ideas) is worth doing later, and doesn't."
 
     /// How every review ends, so `findings` and `decide` can read it.
     static let finish = "Finish with your review. Its first line is one sentence the user will see in the notch. Then list your findings, one line each, under two headings: `Blocking:` and `Worth doing later:`. Leave out a heading with nothing under it: never write `Blocking: none`, and don't list what you checked and found fine under either heading. End with a last line that is exactly `VERDICT: APPROVED` or `VERDICT: CHANGES REQUESTED`: approved when nothing is blocking, changes requested when something is."
@@ -345,8 +350,23 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     static func decide(_ summary: String) -> Verdict? {
         guard let said = verdict(summary) else { return nil }
         guard let findings = findings(summary) else { return said }
-        if !findings.blocking.isEmpty { return .changesRequested }
+        if findings.blocking.contains(where: hasEvidence) { return .changesRequested }
         return findings.unsorted.isEmpty ? .approved : said
+    }
+
+    /// A blocking label alone is only a candidate. The reviewer must attach evidence before it
+    /// can request changes; unverified candidates are handled as follow-ups by `evidenced`.
+    private static func hasEvidence(_ finding: String) -> Bool {
+        finding.range(of: #"\bEvidence\s*:"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    /// Findings safe to apply to the review record. A purported blocker without evidence becomes
+    /// a follow-up so it cannot request changes or disappear from the report.
+    static func evidenced(_ findings: (blocking: [String], later: [String], unsorted: [String])?) -> (blocking: [String], later: [String], unsorted: [String])? {
+        guard let findings else { return nil }
+        let verified = findings.blocking.filter(hasEvidence)
+        let candidates = findings.blocking.filter { !hasEvidence($0) }
+        return (verified, findings.later + candidates, findings.unsorted)
     }
 
     /// The review's findings under the headings the prompt asks for, `Blocking:` and `Worth doing
@@ -640,7 +660,7 @@ extension Desk {
         }
         let account = accounts.state(review.account)?.account.name ?? review.account
         var result = Review(verdict: verdict, job: review.id, agent: review.agent, account: account, round: (author.review?.round ?? 0) + 1)
-        let findings = Review.findings(review.summary)
+        let findings = Review.evidenced(Review.findings(review.summary))
         result.branch = review.branch
         result.blocking = findings.flatMap { $0.blocking.isEmpty ? nil : $0.blocking }
         let before = (author.review?.blockedBefore ?? []) + (author.review?.blocking ?? [])
