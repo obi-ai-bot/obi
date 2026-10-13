@@ -1,15 +1,26 @@
+import AVFoundation
 import Network
 import Observation
 import SwiftUI
+import UIKit
 
-/// Settings › Your Mac (#285): how this iPhone reaches the Mac, at home over the local network
-/// and away through the Mac's tunnel (Shared/RemoteRoute.swift). Until pairing (#284) hands the
-/// hostname over in a QR code, it's typed here from the Mac's Settings › Remote access.
+/// Settings › Your Mac (#285, #284): how this iPhone reaches the Mac, at home over the local
+/// network and away through the Mac's tunnel (Shared/RemoteRoute.swift), and how it pairs: the QR
+/// code the Mac's Settings › Runner shows, or its six-digit code typed here with the Mac picked
+/// from those Bonjour finds on this network. Either buys the device token every gateway request
+/// carries (iOS/Phone.swift, GatewayTokenStore). Linking by hand, without pairing, is for the tunnel only.
 struct ConnectScreen: View {
     @Environment(Phone.self) private var phone
     @State private var name = ""
     @State private var hostname = ""
     @State private var problem: String?
+    @State private var scanning = false
+    @State private var enteringCode = false
+    @State private var code = ""
+    @State private var chosenMac = ""
+    @State private var pairing = false
+    @State private var paired: String?
+    @State private var browser = MacBrowser()
 
     var body: some View {
         Form {
@@ -19,6 +30,7 @@ struct ConnectScreen: View {
                     LabeledContent("Hostname", value: link.hostname)
                     LabeledContent("Reached", value: phone.route?.label ?? "Not yet")
                     LabeledContent("Status", value: phone.connection.status(host: phone.host))
+                    LabeledContent("Device token", value: GatewayTokenStore.read() == nil ? "None: pair below" : "In the keychain")
                     Button("Unlink", role: .destructive) { phone.link = nil }
                 } else {
                     Text("No Mac linked yet: Oby talks to the runner at the address in Settings.")
@@ -30,6 +42,30 @@ struct ConnectScreen: View {
                 Text("At home, Oby finds your Mac on the local network and talks to it directly. Away, it goes through the Mac's own Cloudflare Tunnel, at the hostname the Mac's Settings › Remote access shows. Nothing to open on your router.")
             }
             Section {
+                Button("Scan QR code") { scanning = true }
+                Button(enteringCode ? "Hide code entry" : "Enter code") { enteringCode.toggle() }
+                if enteringCode {
+                    TextField("Six-digit code", text: $code, prompt: Text("123456"))
+                        .keyboardType(.numberPad)
+                        .font(.title3.monospacedDigit())
+                    if browser.names.isEmpty {
+                        LabeledContent("Mac", value: "Looking on this network…")
+                    } else {
+                        Picker("Mac", selection: $chosenMac) {
+                            ForEach(browser.names, id: \.self) { Text($0).tag($0) }
+                        }
+                    }
+                    Button(pairing ? "Pairing…" : "Pair") { Task { await pairWithCode() } }
+                        .disabled(pairing || PairingCode.normalized(code) == nil || chosenMac.isEmpty)
+                }
+                if let paired { Text(paired).foregroundStyle(.secondary) }
+                if let problem { Text(problem).foregroundStyle(.red) }
+            } header: {
+                Text("Pair with your Mac")
+            } footer: {
+                Text("On the Mac, Settings › Runner › Pair a device shows a QR code and a six-digit code, good for two minutes and once. On the local network, pairing is plain HTTP plus the device token this iPhone keeps in its keychain; away from home, the Mac's tunnel carries it.")
+            }
+            Section {
                 TextField("Mac's name", text: $name, prompt: Text("As Sharing settings name it"))
                 TextField("Hostname", text: $hostname, prompt: Text("oby-….tetrix.pro"))
                     .keyboardType(.URL)
@@ -38,11 +74,10 @@ struct ConnectScreen: View {
                     .onSubmit(link)
                 Button("Link") { link() }
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || hostname.trimmingCharacters(in: .whitespaces).isEmpty)
-                if let problem { Text(problem).foregroundStyle(.red) }
             } header: {
                 Text("Link by hand")
             } footer: {
-                Text("Pairing by QR code comes with the Mac's gateway. Until then, type what the Mac's Settings › Remote access shows.")
+                Text("Without pairing, type what the Mac's Settings › Remote access shows. The tunnel is reached that way; the local network still needs the device token pairing gives.")
             }
         }
         .navigationTitle("Your Mac")
@@ -50,6 +85,20 @@ struct ConnectScreen: View {
         .onAppear {
             name = phone.link?.name ?? ""
             hostname = phone.link?.hostname ?? ""
+            chosenMac = phone.link?.name ?? ""
+        }
+        .onChange(of: enteringCode) { _, entering in
+            if entering { browser.start() } else { browser.stop() }
+        }
+        .onChange(of: browser.names) { _, names in
+            if chosenMac.isEmpty || !names.contains(chosenMac) { chosenMac = names.first ?? "" }
+        }
+        .onDisappear { browser.stop() }
+        .sheet(isPresented: $scanning) {
+            QRScanner { value in
+                scanning = false
+                Task { await pair(value) }
+            }
         }
     }
 
@@ -65,6 +114,120 @@ struct ConnectScreen: View {
         }
         problem = nil
         phone.link = MacLink(name: name, hostname: host)
+    }
+
+    /// What the QR code said: the gateway's URL, the Mac's link and the one-time secret.
+    private func pair(_ value: String) async {
+        do {
+            let envelope = try GatewayEnvelope.decode(value)
+            try await phone.pairGateway(url: envelope.url, credential: envelope.secret, link: envelope.link)
+            linked(envelope.link.name)
+        } catch { problem = error.localizedDescription }
+    }
+
+    /// The six digits typed, redeemed at the chosen Mac's gateway, found over Bonjour.
+    private func pairWithCode() async {
+        pairing = true
+        defer { pairing = false }
+        do {
+            guard let digits = PairingCode.normalized(code) else {
+                problem = "The code is the six digits the Mac shows."
+                return
+            }
+            let mac = chosenMac
+            guard !mac.isEmpty else {
+                problem = "Pick the Mac on this network."
+                return
+            }
+            guard let url = await MacFinder.resolve(named: mac) else {
+                throw RunnerError(message: "\(mac) wasn't found on this network. Make sure the Mac is awake and on the same Wi-Fi, then try again.")
+            }
+            try await phone.pairGateway(url: url, credential: digits)
+            code = ""
+            enteringCode = false
+            linked(mac)
+        } catch { problem = error.localizedDescription }
+    }
+
+    private func linked(_ mac: String) {
+        name = phone.link?.name ?? mac
+        hostname = phone.link?.hostname ?? ""
+        problem = nil
+        paired = "Paired with \(mac). The device token is in this iPhone's keychain."
+    }
+}
+
+/// What the Mac's pairing QR code carries (Mac/PairingView.swift): the gateway's URL, the Mac's
+/// link (its name and tunnel hostname) and the one-time secret.
+struct GatewayEnvelope: Decodable, Equatable {
+    var url: URL
+    var link: MacLink
+    var secret: String
+
+    static func decode(_ text: String) throws -> GatewayEnvelope {
+        do {
+            return try JSONDecoder().decode(GatewayEnvelope.self, from: Data(text.utf8))
+        } catch {
+            throw RunnerError(message: "That isn't Oby's pairing QR code. Scan the one the Mac's Settings › Runner shows.")
+        }
+    }
+}
+
+/// The six-digit fallback the Mac shows beside its QR code, as typed: spaces and dashes between
+/// the digits are fine, anything else isn't.
+enum PairingCode {
+    static func normalized(_ text: String) -> String? {
+        let digits = text.filter { $0.isASCII && $0.isNumber }
+        guard digits.count == 6, text.allSatisfy({ $0.isASCII && $0.isNumber || $0 == " " || $0 == "-" }) else { return nil }
+        return digits
+    }
+}
+
+private struct QRScanner: UIViewControllerRepresentable {
+    var found: (String) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(found: found) }
+
+    func makeUIViewController(context: Context) -> ScannerController {
+        ScannerController(delegate: context.coordinator)
+    }
+
+    func updateUIViewController(_ controller: ScannerController, context: Context) {}
+
+    final class Coordinator: NSObject, AVCaptureMetadataOutputObjectsDelegate {
+        let found: (String) -> Void
+        init(found: @escaping (String) -> Void) { self.found = found }
+        func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput objects: [AVMetadataObject], from connection: AVCaptureConnection) {
+            guard let value = (objects.first as? AVMetadataMachineReadableCodeObject)?.stringValue else { return }
+            found(value)
+        }
+    }
+}
+
+/// Every Mac advertising a gateway (`_oby._tcp`) on this network, by name, for Enter code.
+@Observable
+final class MacBrowser {
+    private(set) var names: [String] = []
+    @ObservationIgnored private var browser: NWBrowser?
+
+    func start() {
+        guard browser == nil else { return }
+        let browser = NWBrowser(for: .bonjour(type: "_oby._tcp", domain: nil), using: .tcp)
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
+            let names = results.compactMap { result -> String? in
+                if case .service(let name, _, _, _) = result.endpoint { return name }
+                return nil
+            }.sorted()
+            Task { @MainActor in self?.names = names }
+        }
+        self.browser = browser
+        browser.start(queue: .main)
+    }
+
+    func stop() {
+        browser?.cancel()
+        browser = nil
+        names = []
     }
 }
 
@@ -101,6 +264,29 @@ final class MacFinder {
         browser = nil
         resolving?.cancel()
         resolving = nil
+    }
+
+    /// The gateway URL of the Mac named `name` on this network, once: nil when it isn't seen
+    /// within `seconds`.
+    static func resolve(named name: String, within seconds: Double = 10) async -> URL? {
+        let finder = MacFinder()
+        defer { finder.stop() }
+        let urls = AsyncStream<URL?> { continuation in
+            finder.find(named: name) { continuation.yield($0) }
+        }
+        return await withTaskGroup(of: URL?.self) { group in
+            group.addTask {
+                for await url in urls where url != nil { return url }
+                return nil
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(seconds))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
     }
 
     private func seen(_ results: Set<NWBrowser.Result>, name: String) {

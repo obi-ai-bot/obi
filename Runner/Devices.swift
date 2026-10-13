@@ -16,10 +16,90 @@ final class Devices {
         var registered: Date
     }
 
+    struct GatewayToken: Codable, Equatable, Sendable {
+        var id: String
+        var name: String
+        var created: Date
+        var expiresAt: Date
+
+        init(id: String, name: String, created: Date, expiresAt: Date) {
+            self.id = id
+            self.name = name
+            self.created = created
+            self.expiresAt = expiresAt
+        }
+
+        init(id: String, name: String, created: Date) {
+            self.init(id: id, name: name, created: created, expiresAt: created.addingTimeInterval(Self.lifetime))
+        }
+
+        private enum CodingKeys: String, CodingKey { case id, name, created, expiresAt }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            let created = try values.decode(Date.self, forKey: .created)
+            self.init(id: try values.decode(String.self, forKey: .id), name: try values.decode(String.self, forKey: .name),
+                      created: created, expiresAt: try values.decodeIfPresent(Date.self, forKey: .expiresAt) ?? created.addingTimeInterval(Self.lifetime))
+        }
+
+        static let lifetime: TimeInterval = 30 * 24 * 60 * 60
+    }
+
     private struct Saved: Codable {
         var devices: [Device] = []
+        /// SHA-256 digests of gateway bearer tokens. The bearer itself never touches disk.
+        var gatewayTokens: [String: GatewayToken] = [:]
         /// SHA-256 of each approval used, with when it was signed.
         var used: [String: Date] = [:]
+
+        init(devices: [Device] = [], gatewayTokens: [String: GatewayToken] = [:], used: [String: Date] = [:]) {
+            self.devices = devices
+            self.gatewayTokens = gatewayTokens
+            self.used = used
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            devices = try values.decodeIfPresent([Device].self, forKey: .devices) ?? []
+            if let tokens = try? values.decodeIfPresent([String: GatewayToken].self, forKey: .gatewayTokens) {
+                gatewayTokens = tokens
+            } else {
+                let old = try values.decodeIfPresent([String: Date].self, forKey: .gatewayTokens) ?? [:]
+                gatewayTokens = old.mapValues { GatewayToken(id: UUID().uuidString.lowercased(), name: "Unknown device", created: $0) }
+            }
+            used = try values.decodeIfPresent([String: Date].self, forKey: .used) ?? [:]
+        }
+    }
+
+    /// Records a gateway token after pairing. Only its digest is persisted.
+    @discardableResult
+    func addGatewayToken(digest: String, name: String = "iPhone", now: Date = .now) throws -> GatewayToken {
+        guard digest.count == 64, digest.allSatisfy({ $0.isHexDigit }) else {
+            throw APIError(.unprocessableContent, "That gateway token digest is invalid.")
+        }
+        let token = GatewayToken(id: UUID().uuidString.lowercased(), name: name, created: now)
+        saved.gatewayTokens[digest] = token
+        try save()
+        return token
+    }
+
+    func acceptsGatewayToken(_ token: String, now: Date = .now) -> Bool {
+        let digest = Pairing.digest(token)
+        guard let record = saved.gatewayTokens[digest] else { return false }
+        return record.expiresAt > now
+    }
+
+    func gatewayTokens() -> [(digest: String, token: GatewayToken)] {
+        saved.gatewayTokens.map { ($0.key, $0.value) }.sorted { $0.token.created < $1.token.created }
+    }
+
+    @discardableResult
+    func revokeGatewayToken(_ id: String) throws -> Bool {
+        let before = saved.gatewayTokens.count
+        saved.gatewayTokens = saved.gatewayTokens.filter { $0.value.id != id }
+        guard saved.gatewayTokens.count != before else { return false }
+        try save()
+        return true
     }
 
     private let file: URL
