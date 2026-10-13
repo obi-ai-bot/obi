@@ -940,7 +940,9 @@ nonisolated struct Runner: Sendable {
         #if os(iOS) || os(macOS)
         let e2eData = try? DeviceKey.e2ePublicKey()
         let e2e = e2eData?.base64EncodedString()
-        let proof = e2eData.flatMap { try? DeviceKey.e2eRegistrationProof(publicKey: publicKey, e2ePublicKey: $0) }
+        // Registration is repeated on every connection. The biometric-gated proof is sent by
+        // pairing when the E2E key is first established, rather than prompting on every refresh.
+        let proof: String? = nil
         #else
         let e2e: String? = nil
         let proof: String? = nil
@@ -949,6 +951,7 @@ nonisolated struct Runner: Sendable {
         return answer.id
     }
 
+    #if os(iOS) || os(macOS)
     func pair(name: String, publicKey: Data) async throws -> (id: String, publicKey: Data) {
         struct Body: Encodable { var name: String; var publicKey: String; var e2ePublicKey: String; var e2eProof: String }
         struct Answer: Decodable { var id: String; var publicKey: String }
@@ -961,6 +964,7 @@ nonisolated struct Runner: Sendable {
         }
         return (answer.id, gateway)
     }
+    #endif
 
     /// The gateway key used to complete a Mac pairing. This is public key material, but it is
     /// pinned in the link so a later route cannot silently switch gateways.
