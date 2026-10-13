@@ -37,9 +37,7 @@ lipo -create -output "$dest" "$cache/cloudflared-arm64" "$cache/cloudflared-amd6
 
 # Signed like the app: the hardened runtime for notarization, and a secure timestamp on release
 # builds (it needs the network). Xcode seals the app, with this inside, after this phase.
-if [[ "${CODE_SIGNING_ALLOWED:-NO}" == YES ]]; then
-  identity="${EXPANDED_CODE_SIGN_IDENTITY:--}"
-  timestamp=--timestamp=none
-  if [[ "$identity" != "-" && "${CONFIGURATION:-Debug}" == Release ]]; then timestamp=--timestamp; fi
-  codesign --force --options runtime "$timestamp" --sign "$identity" "$dest"
-fi
+identity="${EXPANDED_CODE_SIGN_IDENTITY:--}"
+timestamp=--timestamp=none
+if [[ "$identity" != "-" && "${CONFIGURATION:-Debug}" == Release ]]; then timestamp=--timestamp; fi
+codesign --force --options runtime "$timestamp" --sign "$identity" "$dest"
