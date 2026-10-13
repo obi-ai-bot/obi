@@ -148,7 +148,7 @@ struct DismissTests {
             for await _ in held {}
             return job
         }
-        desk.dispatch(Desk.Draft(said: "Review oby PR #33", reply: "", job: job, guessed: false))
+        desk.dispatch(job)
         let error = #expect(throws: Shell.Failure.self) { try desk.dismiss(job.id) }
         #expect(error?.message == "It's still running: stop it instead.")
     }
@@ -241,7 +241,7 @@ struct UsersRoundTests {
         fix.pr = nil
         fix.base = "dev"
         fix.branch = "oby/fix-75"
-        desk.dispatch(Desk.Draft(said: "work on oby #75", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         for _ in 0..<500 where desk.job("reset")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         agent.onEvent(.session("e6a24229"))
         agent.onEvent(.turnEnded(summary: "fix(engine): dismiss", failed: false))
@@ -264,7 +264,7 @@ struct UsersRoundTests {
         // A fresh job that commits nothing is still nothing committed.
         var empty = fix
         empty.id = "empty"
-        desk.dispatch(Desk.Draft(said: "work on oby #75", reply: "", job: empty, guessed: false))
+        desk.dispatch(empty)
         for _ in 0..<500 where desk.job("empty")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         agent.onEvent(.turnEnded(summary: "Couldn't commit.", failed: false))
         agent.onEvent(.finished(summary: "Couldn't commit.", failed: false))

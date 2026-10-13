@@ -215,7 +215,7 @@ struct HomeView: View {
         Binding {
             guard phone.tab == .home else { return false }
             switch phone.talk {
-            case .plan, .question: return true
+            case .question: return true
             default: return false
             }
         } set: { shown in
@@ -225,14 +225,6 @@ struct HomeView: View {
 
     @ViewBuilder private var sheet: some View {
         switch phone.talk {
-        case .plan(let drafts) where drafts.count == 1:
-            ScrollView { PlanCard(draft: drafts[0], onEdit: edit) }
-                .background(Color(uiColor: .systemGroupedBackground))
-                .presentationDetents([.large])
-        case .plan(let drafts):
-            ScrollView { PlansCard(drafts: drafts, onEdit: edit) }
-                .background(Color(uiColor: .systemGroupedBackground))
-                .presentationDetents([.large])
         case .question(let said, let question):
             QuestionSheet(said: said, question: question)
                 .presentationDetents([.medium])
@@ -368,6 +360,7 @@ struct JobRow: View {
     }
 }
 
+/*
 /// The plan, before anything runs: agent, account, repository, branch, how it loops, and the
 /// stronger model when the work looks complex.
 struct PlanCard: View {
@@ -687,6 +680,8 @@ private func pill(_ title: String, action: @escaping () -> Void) -> some View {
     }
     .buttonStyle(.plain)
 }
+
+*/
 
 /// The brain needs one more thing: pick an option, the recommended one first, or say your own.
 struct QuestionSheet: View {

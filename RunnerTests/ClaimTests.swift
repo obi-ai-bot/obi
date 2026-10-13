@@ -87,10 +87,16 @@ struct ClaimTests {
         #expect(condition(), Comment(rawValue: what))
     }
 
-    func drafts() async throws -> [Desk.Draft] {
-        let talk = await desk.plan("fix oby #176 and #198")
-        guard case .plan(let drafts) = talk else { Issue.record("not a plan: \(talk)"); return [] }
-        return drafts
+    /// A plan for one issue in deskree-inc/oby.
+    static func oneIssue(_ issue: Int) -> String {
+        #"{"action":"dispatch","reply":"","question":null,"jobs":[],"dispatches":[{"agent":"auto","account":"auto","repo":"deskree-inc/oby","base_branch":null,"pr":null,"issue":\#(issue),"epic":null,"kind":"fix","title":"Fix \#(issue)","task":"Fix oby #\#(issue)","inputs":[],"rounds":1,"check":null,"complexity":"routine"}]}"#
+    }
+
+    /// The jobs the words start as the plan is made (#269: nothing to dispatch), by issue, #176 first.
+    func started(_ words: String = "fix oby #176 and #198") async throws -> [Job] {
+        let talk = await desk.plan(words)
+        guard case .reply = talk else { Issue.record("not a reply: \(talk)"); return [] }
+        return desk.jobs.filter { $0.request == words }.sorted { ($0.issue ?? 0) < ($1.issue ?? 0) }
     }
 
     /// The agent of the job on `issue` ends its round done: it publishes, its pull request opens.
@@ -144,10 +150,10 @@ struct ClaimTests {
     /// worktree was set up on dev before #176 ended, so it moves first and doesn't edit stale code.
     @Test func aJobThatWaitedForASlotStartsOnTheLatestDev() async throws {
         desk.maxRunning = 1
-        let drafts = try await drafts()
-        #expect(drafts.map(\.job.files) == [["Engine/Accounts.swift", "Engine/Review.swift", "RunnerTests/"], ["Engine/Review.swift", "Engine/CheckRuns.swift"]])
-        let first = desk.dispatch(drafts[0])
-        let second = desk.dispatch(drafts[1])
+        let planned = try await started()
+        #expect(planned.map(\.files) == [["Engine/Accounts.swift", "Engine/Review.swift", "RunnerTests/"], ["Engine/Review.swift", "Engine/CheckRuns.swift"]])
+        try #require(planned.count == 2)
+        let (first, second) = (planned[0], planned[1])
         try await until("#176 runs") { desk.job(first.id)?.status == .running }
         try await until("#198 waits") { desk.job(second.id)?.step.hasPrefix("Waiting for") == true }
         let waiting = try #require(desk.job(second.id))
@@ -169,9 +175,9 @@ struct ClaimTests {
     /// #198's agent is told about #176's branch, and #176's claim holds through its review until
     /// its pull request is merged.
     @Test func plansForIssuesOnTheSameFileRunSideBySide() async throws {
-        let drafts = try await drafts()
-        let first = desk.dispatch(drafts[0])
-        let second = desk.dispatch(drafts[1])
+        let planned = try await started()
+        try #require(planned.count == 2)
+        let (first, second) = (planned[0], planned[1])
         try await until("#176 and #198 run") { desk.job(first.id)?.status == .running && desk.job(second.id)?.status == .running }
         let running = try #require(desk.job(second.id))
         #expect(running.status == .running && running.step == "Starting Claude Code")
@@ -194,8 +200,8 @@ struct ClaimTests {
     /// Dismissing the job whose pull request holds the claim lets go of it: a job that starts after
     /// isn't told about it any more.
     @Test func dismissingTheClaimingJobLetsGoOfItsClaim() async throws {
-        let drafts = try await drafts()
-        let first = desk.dispatch(drafts[0])
+        brain.plans = [Self.oneIssue(176), Self.oneIssue(198)]
+        let first = try #require(try await started("fix oby #176").first)
         try await until("#176 runs") { desk.job(first.id)?.status == .running }
         try await endDone(176)
         // Its pull request needs a person (the review stopped): the user lets it go.
@@ -205,7 +211,7 @@ struct ClaimTests {
         #expect(desk.job(first.id)?.holdsClaim == true)
         try desk.dismiss(first.id)
         #expect(desk.job(first.id)?.holdsClaim == false)
-        let second = desk.dispatch(drafts[1])
+        let second = try #require(try await started("fix oby #198").first)
         try await until("#198 runs") { desk.job(second.id)?.status == .running }
         #expect(made.agents.last?.agent.prompt.contains("Other jobs are changing the same files") == false)
     }
@@ -213,9 +219,9 @@ struct ClaimTests {
     /// A waiting job that can't be brought up to date fails, saying why, rather than start on stale code.
     @Test func aWaitingJobThatCantCatchUpFails() async throws {
         desk.maxRunning = 1
-        let drafts = try await drafts()
-        let first = desk.dispatch(drafts[0])
-        let second = desk.dispatch(drafts[1])
+        let planned = try await started()
+        try #require(planned.count == 2)
+        let (first, second) = (planned[0], planned[1])
         try await until("#198 waits") { desk.job(second.id)?.step.hasPrefix("Waiting for") == true }
         made.fetchError = Shell.Failure(message: "github.com unreachable")
         desk.stop(first.id)
@@ -233,9 +239,9 @@ struct ClaimTests {
             await gate.wait()
             return made.dev
         }
-        let drafts = try await drafts()
-        let first = desk.dispatch(drafts[0])
-        let second = desk.dispatch(drafts[1])
+        let planned = try await started()
+        try #require(planned.count == 2)
+        let (first, second) = (planned[0], planned[1])
         try await until("#198 waits") { desk.job(second.id)?.step.hasPrefix("Waiting for") == true }
         // An account to move it to, signed in after both were routed.
         let codex = try desk.accounts.add(agent: "codex", name: "Deskree", payer: "Deskree")
@@ -321,8 +327,9 @@ struct ClaimTests {
         #expect(Claims.files(title: "", body: "Files: " + paths.map { "`\($0)`" }.joined(separator: ", ")) == paths)
     }
 
-    /// `POST /v1/plans` answers drafts with their `files`; `POST /v1/jobs` may replace them, and
-    /// refuses a path outside the repository.
+    /// `POST /v1/plans` starts the jobs with their issues' `files` (#269); a whole job sent to
+    /// `POST /v1/jobs` may claim its own, or its issue's when it names none, and a path outside
+    /// the repository is refused.
     @Test func aClientMayClaimFilesAtDispatch() async throws {
         let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
         let app = Application(router: api.router(owner: "well@example.com"))
@@ -330,25 +337,25 @@ struct ClaimTests {
             let plan = try await client.execute(uri: "/v1/plans", method: .post, headers: owner, body: ByteBuffer(string: #"{"said": "fix oby #176 and #198"}"#)) { response in
                 object(Data(response.body.readableBytesView))
             }
-            let drafts = try #require(plan["drafts"] as? [[String: Any]])
-            let jobs = drafts.compactMap { $0["job"] as? [String: Any] }
+            #expect(plan["kind"] as? String == "reply" && (plan["drafts"] as? [Any])?.isEmpty == true)
+            let jobs = try #require(plan["jobs"] as? [[String: Any]])
             #expect(jobs.map { $0["files"] as? [String] } == [["Engine/Accounts.swift", "Engine/Review.swift", "RunnerTests/"], ["Engine/Review.swift", "Engine/CheckRuns.swift"]])
-            func dispatch(_ job: [String: Any], files: Any?) async throws -> (HTTPResponse.Status, [String: Any]) {
-                var body: [String: Any] = ["id": job["id"] ?? "", "branch": job["branch"] ?? "", "account": job["account"] ?? ""]
+            func dispatch(_ issue: Int, files: Any?) async throws -> (HTTPResponse.Status, [String: Any]) {
+                var body: [String: Any] = ["repo": "deskree-inc/oby", "kind": "fix", "task": "Fix #\(issue)", "issue": issue]
                 if let files { body["files"] = files }
                 let data = try JSONSerialization.data(withJSONObject: ["job": body])
                 return try await client.execute(uri: "/v1/jobs", method: .post, headers: owner, body: ByteBuffer(bytes: data)) { response in
                     (response.status, object(Data(response.body.readableBytesView)))
                 }
             }
-            let (refused, error) = try await dispatch(jobs[0], files: ["/etc/passwd"])
+            let (refused, error) = try await dispatch(176, files: ["/etc/passwd"])
             #expect(refused == .unprocessableContent && (error["error"] as? String)?.contains("isn't a path inside the repository") == true)
-            let (status, started) = try await dispatch(jobs[0], files: ["./Engine/Review.swift", "docs/"])
+            let (status, started) = try await dispatch(176, files: ["./Engine/Review.swift", "docs/"])
             #expect(status == .created && started["files"] as? [String] == ["Engine/Review.swift", "docs/"])
-            // Left out, the plan's stay.
-            let (_, kept) = try await dispatch(jobs[1], files: nil)
+            // Left out, the issue's.
+            let (_, kept) = try await dispatch(198, files: nil)
             #expect(kept["files"] as? [String] == ["Engine/Review.swift", "Engine/CheckRuns.swift"])
         }
-        try await until("#176 and #198 run side by side") { desk.jobs.filter { $0.status == .running }.count == 2 }
+        try await until("all four run side by side") { desk.jobs.filter { $0.status == .running }.count == 4 }
     }
 }

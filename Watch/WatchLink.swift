@@ -90,11 +90,6 @@ nonisolated struct WatchLink: Sendable {
         }
     }
 
-    func dispatch(_ job: Job) async throws -> Job {
-        struct Body: Encodable { var job: DispatchedJob }
-        return try await call("POST", "v1/jobs", body: Body(job: DispatchedJob(job: job)))
-    }
-
     func tell(_ id: String, _ text: String) async throws -> Job {
         struct Body: Encodable { var text: String }
         return try await call("POST", "v1/jobs/\(id)/messages", body: Body(text: text))

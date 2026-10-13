@@ -72,7 +72,7 @@ final class InboxRewriteTests {
         fix.base = "dev"
         fix.branch = "oby/fix-62"
         fix.title = "Nothing committed status"
-        desk.dispatch(Desk.Draft(said: "work on oby #62", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         try await until("running") { desk.job("ask62")?.status == .running }
         agent.onEvent(.session("e6a24229"))
         agent.onEvent(.turnEnded(summary: Self.asked, failed: false))

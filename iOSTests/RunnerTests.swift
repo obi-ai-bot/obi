@@ -18,51 +18,48 @@ struct RunnerTests {
     }
 
     @Test func planResults() throws {
-        let plan = #"{"kind": "plan", "draft": {"said": "Review oby PR #33", "reply": "Oby will review PR #33 in oby.", "guessed": false, "job": \#(job)}}"#
-        // An older runner: only `draft`, and a job without rounds, check or model.
-        guard case .plan(let drafts) = try Runner.decoder.decode(PlanResult.self, from: Data(plan.utf8)) else { Issue.record("not a plan"); return }
-        #expect(drafts.count == 1)
-        #expect(drafts.first?.job.branch == "oby/review-33")
-        #expect(drafts.first?.suggestedModel == nil)
-        #expect(drafts.first?.job.extras == "")
+        // A reply with the job it started (#269), as the runner answers `POST /v1/plans`.
+        let started = #"{"kind": "reply", "text": "On it. Claude Code is reviewing oby PR #33 on Personal.", "jobs": [\#(job)], "drafts": []}"#
+        guard case .reply(let text, let jobs) = try Runner.decoder.decode(PlanResult.self, from: Data(started.utf8)) else { Issue.record("not a reply"); return }
+        #expect(text == "On it. Claude Code is reviewing oby PR #33 on Personal.")
+        #expect(jobs.count == 1)
+        #expect(jobs.first?.branch == "oby/review-33")
+        #expect(jobs.first?.extras == "")
+        #expect(jobs.first?.heading == "Review oby #33")
+        #expect(jobs.first?.isActive == true)
+        // A reply that started nothing, and one from a runner without `jobs`.
+        #expect(try Runner.decoder.decode(PlanResult.self, from: Data(#"{"kind": "reply", "text": "Fine.", "jobs": [], "drafts": []}"#.utf8)) == .reply("Fine.", started: []))
+        // An older runner's plan, with its drafts: a reply that started nothing here.
+        let old = #"{"kind": "plan", "drafts": [], "draft": {"said": "Review oby PR #33", "reply": "Oby will review PR #33 in oby.", "guessed": false, "job": \#(job)}}"#
+        #expect(try Runner.decoder.decode(PlanResult.self, from: Data(old.utf8)) == .reply("", started: []))
+        #expect(try Runner.decoder.decode(PlanResult.self, from: Data(#"{"kind": "plan"}"#.utf8)) == .reply("", started: []))
 
         let question = #"{"kind": "question", "said": "Review PR 12", "question": {"text": "Which repository?", "options": ["deskree-inc/oby"]}}"#
         #expect(try Runner.decoder.decode(PlanResult.self, from: Data(question.utf8))
                 == .question(said: "Review PR 12", Question(text: "Which repository?", options: ["deskree-inc/oby"])))
-        #expect(try Runner.decoder.decode(PlanResult.self, from: Data(#"{"kind": "reply", "text": "Oby can't merge."}"#.utf8)) == .reply("Oby can't merge."))
+        #expect(try Runner.decoder.decode(PlanResult.self, from: Data(#"{"kind": "reply", "text": "Oby can't merge."}"#.utf8)) == .reply("Oby can't merge.", started: []))
         #expect(try Runner.decoder.decode(PlanResult.self, from: Data(#"{"kind": "none"}"#.utf8)) == .none)
     }
 
-    /// Many jobs from one message, the stronger model, and what `POST /v1/jobs` sends back.
-    @Test func plansWithManyDrafts() throws {
-        func draft(_ issue: Int, _ suggested: String) -> String {
-            let job = #"{"id": "j\#(issue)", "request": "work on oby #12 and #15", "agent": "claude", "account": "default", "repo": "deskree-inc/oby", "branch": "oby/fix-\#(issue)", "base": null, "pr": null, "kind": "fix", "task": "Fix it", "status": "queued", "step": "", "summary": "", "session": null, "created": "2026-10-09T21:42:53Z", "started": null, "finished": null, "commits": null, "published": null, "issue": \#(issue), "rounds": 3, "round": 1, "check": "swift test", "model": null}"#
-            return #"{"said": "work on oby #12 and #15", "reply": "Two fixes.", "guessed": false, "job": \#(job), "suggestedModel": \#(suggested)}"#
+    /// Many jobs from one message, and a job's extras with a model of its own.
+    @Test func repliesWithManyJobs() throws {
+        func started(_ issue: Int) -> String {
+            #"{"id": "j\#(issue)", "request": "work on oby #12 and #15", "agent": "claude", "account": "default", "repo": "deskree-inc/oby", "branch": "oby/fix-\#(issue)", "base": null, "pr": null, "kind": "fix", "task": "Fix it", "status": "queued", "step": "", "summary": "", "session": null, "created": "2026-10-09T21:42:53Z", "started": null, "finished": null, "commits": null, "published": null, "issue": \#(issue), "rounds": 3, "round": 1, "check": "swift test", "model": null}"#
         }
-        let plan = #"{"kind": "plan", "drafts": [\#(draft(12, #""claude-fable-5-1""#)), \#(draft(15, "null"))], "draft": \#(draft(12, #""claude-fable-5-1""#))}"#
-        guard case .plan(let drafts) = try Runner.decoder.decode(PlanResult.self, from: Data(plan.utf8)) else { Issue.record("not a plan"); return }
-        #expect(drafts.map(\.job.heading) == ["Fix oby #12", "Fix oby #15"])
-        #expect(drafts[0].job.extras == "Round 1 of 3")
-        #expect(drafts[0].strongerModel(for: "claude") == "claude-fable-5-1")
-        // Another account's tool runs that tool's stronger model.
-        #expect(drafts[0].strongerModel(for: "codex") == "gpt-6-astra")
-        #expect(drafts[1].strongerModel(for: "claude") == nil)
+        let reply = #"{"kind": "reply", "text": "On it.", "jobs": [\#(started(12)), \#(started(15))], "drafts": []}"#
+        guard case .reply(_, let jobs) = try Runner.decoder.decode(PlanResult.self, from: Data(reply.utf8)) else { Issue.record("not a reply"); return }
+        #expect(jobs.count == 2)
+        #expect(jobs.map(\.heading) == ["Fix oby #12", "Fix oby #15"])
+        #expect(jobs.map(\.issue) == [12, 15])
+        #expect(jobs.map(\.branch) == ["oby/fix-12", "oby/fix-15"])
+        #expect(jobs[0].extras == "Round 1 of 3")
+        #expect(jobs[1].extras == "Round 1 of 3")
+        #expect(jobs[0].check == "swift test" && jobs[0].rounds == 3)
+        #expect(jobs[1].model == nil)
         #expect(ModelChoice.name("gpt-6-astra") == "GPT-6-Astra")
+        #expect(ModelChoice.name("claude-fable-5-1") == "Fable 5.1")
 
-        // A cleared check and the usual model go as null: left out, the runner keeps the plan's check.
-        var job = drafts[1].job
-        job.check = nil
-        let body = try JSONSerialization.jsonObject(with: Runner.encoder.encode(DispatchedJob(job: job))) as? [String: Any]
-        #expect(body?["check"] is NSNull)
-        #expect(body?["model"] is NSNull)
-        #expect(body?["rounds"] as? Int == 3)
-        job.model = "claude-fable-5-1"
-        job.check = "swift test"
-        let chosen = try JSONSerialization.jsonObject(with: Runner.encoder.encode(DispatchedJob(job: job))) as? [String: Any]
-        #expect(chosen?["model"] as? String == "claude-fable-5-1")
-        #expect(chosen?["check"] as? String == "swift test")
-
-        var running = drafts[0].job
+        var running = jobs[0]
         running.model = "claude-fable-5-1"
         running.round = 2
         #expect(running.extras == "Round 2 of 3 · Fable 5.1")

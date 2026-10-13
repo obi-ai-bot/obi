@@ -136,7 +136,7 @@ struct CheckTests {
     /// Dispatches the author, publishes it, and has Oby's review approve it, until the approval
     /// queues a check or says why it couldn't.
     func publishAndApprove() async throws {
-        desk.dispatch(Desk.Draft(said: "fix oby #75", reply: "", job: author, guessed: false))
+        desk.dispatch(author)
         try await until("the author runs") { desk.job("author")?.status == .running }
         try await endRound(try #require(made.agents.last?.agent))
         try await approve()
@@ -190,7 +190,7 @@ struct CheckTests {
         other.id = "older"
         other.issue = 79
         other.branch = "oby/fix-79"
-        desk.dispatch(Desk.Draft(said: "fix oby #79", reply: "", job: other, guessed: false))
+        desk.dispatch(other)
         try await until("the other job runs") { desk.job("older")?.status == .running }
         desk.stop("older")
         try await until("the other job ended") { desk.job("older")?.isActive == false }
@@ -228,7 +228,7 @@ struct CheckTests {
     // MARK: Passed
 
     @Test func aFollowUpWithParenthesizedNoneApprovesAtTheReviewCapAndMerges() async throws {
-        desk.dispatch(Desk.Draft(said: "fix oby #75", reply: "", job: author, guessed: false))
+        desk.dispatch(author)
         try await until("the author runs") { desk.job("author")?.status == .running }
         try await endRound(try #require(made.agents.last?.agent))
         try await approve("One bug.\n\nBlocking:\n- Fix the off-by-one\n\nVERDICT: CHANGES REQUESTED")
@@ -548,7 +548,7 @@ struct CheckTests {
 
     @Test func theMacsOwnDeskQueuesNoChecksAndLeavesItReadyToMerge() async throws {
         desk.queuesMacChecks = false
-        desk.dispatch(Desk.Draft(said: "fix oby #75", reply: "", job: author, guessed: false))
+        desk.dispatch(author)
         try await until("the author runs") { desk.job("author")?.status == .running }
         try await endRound(try #require(made.agents.last?.agent))
         try await approve()

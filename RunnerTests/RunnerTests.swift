@@ -198,11 +198,15 @@ final class APITests {
         }
     }
 
-    @Test func dispatchTakesOnlyPlansItMade() async throws {
+    @Test func dispatchTakesOnlyWholeJobs() async throws {
         let app = Application(router: api.router(owner: "well@example.com"))
         try await app.test(.router) { [owner] client in
-            let unknown = #"{"job": {"id": "9f08fd10", "branch": "oby/review-33", "account": "default"}}"#
-            try await client.execute(uri: "/v1/jobs", method: .post, headers: owner, body: ByteBuffer(string: unknown)) { response in
+            // A plan's draft, from before Oby started planned work by itself (#269): gone.
+            let draft = #"{"job": {"id": "9f08fd10", "branch": "oby/review-33", "account": "default"}}"#
+            try await client.execute(uri: "/v1/jobs", method: .post, headers: owner, body: ByteBuffer(string: draft)) { response in
+                #expect(response.status == .gone)
+            }
+            try await client.execute(uri: "/v1/jobs", method: .post, headers: owner, body: ByteBuffer(string: #"{"job": {"branch": "oby/review-33"}}"#)) { response in
                 #expect(response.status == .unprocessableContent)
             }
             try await client.execute(uri: "/v1/jobs", method: .post, headers: owner, body: ByteBuffer(string: "{")) { response in
@@ -227,39 +231,39 @@ final class APITests {
         #expect(throws: Shell.Failure.self) { try Desk.edit(job, branch: "oby/review-33", account: signedOut) }
     }
 
-    /// An older app sends the job back without rounds or check: the plan's values stay. A newer
-    /// one may change them, and `"check": null` clears the check.
-    @Test func dispatchBodiesMayLeaveTheLoopOut() throws {
+    /// `POST /v1/jobs` takes a whole job (#269): repo, kind and task make one, with what the client
+    /// sets; a draft's id alone is from before, and makes none.
+    @Test func dispatchBodiesAreWholeJobs() throws {
         let decode = { (json: String) in try JSONDecoder().decode(DispatchRequest.self, from: Data(json.utf8)).job }
         let old = try decode(#"{"job": {"id": "a", "branch": "oby/fix-42", "account": "default"}}"#)
-        #expect(old.rounds == nil && old.check == nil)
-        let cleared = try decode(#"{"job": {"id": "a", "branch": "oby/fix-42", "account": "default", "rounds": 3, "check": null}}"#)
-        #expect(cleared.rounds == 3 && cleared.check == .some(nil))
-        let set = try decode(#"{"job": {"id": "a", "branch": "oby/fix-42", "account": "default", "check": "swift test", "model": "claude-fable-5-1"}}"#)
-        #expect(set.check == .some("swift test") && set.model == .some("claude-fable-5-1") && old.model == nil)
+        #expect(old.id == "a" && old.new == nil)
+        let whole = try decode(#"{"job": {"repo": "deskree-inc/oby", "kind": "fix", "task": "Fix #42", "issue": 42, "account": "default", "rounds": 3, "check": "swift test", "model": "claude-fable-5-1", "startWhen": []}}"#)
+        let new = try #require(whole.new)
+        #expect(new.repo == "deskree-inc/oby" && new.kind == "fix" && new.task == "Fix #42" && new.issue == 42 && new.pr == nil)
+        #expect(new.account == "default" && new.rounds == 3 && new.check == "swift test" && new.model == "claude-fable-5-1")
+        // An empty startWhen is none; files left out are nil, not none.
+        #expect(new.startWhen == nil && new.files == nil && new.branch == nil)
+        #expect(try decode(#"{"job": {"repo": "deskree-inc/oby", "kind": "fix"}}"#).new == nil)
     }
 
     @Test func plansMapToTheirKinds() throws {
-        let draft = Desk.Draft(said: "Review oby PR #33", reply: "Oby will review PR #33 in oby.", job: job, guessed: true)
-        let plan = object(try API.encode(PlanAnswer(.plan([draft]))))
-        #expect(plan["kind"] as? String == "plan")
-        // Every job in `drafts`, and the first again in `draft` for apps that know only one.
-        #expect((plan["drafts"] as? [[String: Any]])?.count == 1)
-        let body = try #require(plan["draft"] as? [String: Any])
-        #expect(body["suggestedModel"] is NSNull)
-        #expect(body["said"] as? String == "Review oby PR #33" && body["reply"] as? String == "Oby will review PR #33 in oby.")
-        #expect(body["guessed"] as? Bool == true)
-        #expect((body["job"] as? [String: Any])?["status"] as? String == "queued")
+        // A reply carries the jobs the turn started (#269), and `drafts` stays empty for older clients.
+        let started = object(try API.encode(PlanAnswer(.reply("On it. Claude Code is reviewing oby PR #33 on Default."), started: [job])))
+        #expect(started["kind"] as? String == "reply" && started["text"] as? String == "On it. Claude Code is reviewing oby PR #33 on Default.")
+        let jobs = try #require(started["jobs"] as? [[String: Any]])
+        #expect(jobs.count == 1 && jobs.first?["id"] as? String == job.id && jobs.first?["status"] as? String == "queued")
+        #expect((started["drafts"] as? [Any])?.isEmpty == true)
 
         let question = Plan.Question(text: "Which repository is PR #12 in?", options: ["deskree-inc/oby", "deskree-inc/blok"])
         let asked = object(try API.encode(PlanAnswer(.question(said: "Review PR 12", question))))
         #expect(asked["kind"] as? String == "question" && asked["said"] as? String == "Review PR 12")
         #expect((asked["question"] as? [String: Any])?["text"] as? String == question.text)
         #expect((asked["question"] as? [String: Any])?["options"] as? [String] == question.options)
+        #expect((asked["jobs"] as? [Any])?.isEmpty == true)
 
         #expect(String(decoding: try API.encode(PlanAnswer(.reply("Oby can't merge pull requests."))), as: UTF8.self)
-                == #"{"kind":"reply","text":"Oby can't merge pull requests."}"#)
-        #expect(String(decoding: try API.encode(PlanAnswer(.none)), as: UTF8.self) == #"{"kind":"none"}"#)
+                == #"{"drafts":[],"jobs":[],"kind":"reply","text":"Oby can't merge pull requests."}"#)
+        #expect(String(decoding: try API.encode(PlanAnswer(.none)), as: UTF8.self) == #"{"drafts":[],"jobs":[],"kind":"none"}"#)
         #expect(Desk.answered("Review PR 12", question: question.text, option: "deskree-inc/oby")
                 == "Review PR 12\n\n(Oby asked: Which repository is PR #12 in? The user answered: deskree-inc/oby)")
     }

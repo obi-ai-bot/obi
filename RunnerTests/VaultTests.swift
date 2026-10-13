@@ -757,7 +757,7 @@ final class VaultClosedDeskTests {
         work.branch = "oby/fix-7-\(id)"
         work.task = "Run the staging tests with \(value)."
         work.check = check
-        desk.dispatch(Desk.Draft(said: "work on oby #7", reply: "", job: work, guessed: false))
+        desk.dispatch(work)
         for _ in 0..<500 where desk.job(id)?.status == .queued { try await Task.sleep(for: .milliseconds(10)) }
     }
 

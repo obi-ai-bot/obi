@@ -174,7 +174,7 @@ final class StopAllTests {
         work.issue = 7
         work.base = "dev"
         work.branch = "oby/fix-7-\(id)"
-        desk.dispatch(Desk.Draft(said: "work on oby #7", reply: "", job: work, guessed: false))
+        desk.dispatch(work)
         for _ in 0..<500 where desk.job(id)?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         agent.onEvent(.session("s-\(id)"))
     }

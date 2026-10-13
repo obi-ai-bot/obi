@@ -466,7 +466,7 @@ struct ConversationTests {
         try await until("the question comes") { if case .question = desk.talk { true } else { false } }
         #expect(desk.turns.map(\.text) == ["review PR 12", "Which repository?"])
         desk.answer("deskree-inc/oby", said: "review PR 12", question: "Which repository?")
-        try await until("the plan comes") { if case .plan = desk.talk { true } else { false } }
+        try await until("the reply comes") { desk.talk == .reply("Oby will review PR #12 in oby.") }
         #expect(desk.turns.map(\.text) == ["review PR 12", "Which repository?", "deskree-inc/oby", "Oby will review PR #12 in oby."])
         #expect(brain.prompts.last?.hasSuffix("The user says now:\n" + Desk.answered("review PR 12", question: "Which repository?", option: "deskree-inc/oby")) == true)
         // The brain saw the thread without the words it was answering.
@@ -498,8 +498,8 @@ struct ConversationTests {
 
     // MARK: One thread for every device (#11)
 
-    /// `GET /v1/conversation` pages the runner's thread, oldest first, by a turn's id; a dispatch
-    /// links its job to the turn that proposed it; and a `turn` event follows every turn added or changed.
+    /// `GET /v1/conversation` pages the runner's thread, oldest first, by a turn's id; a plan's job
+    /// is in the turn that started it (#269); and a `turn` event follows every turn added or changed.
     @Test func theConversationEndpointPagesTheThreadAndItsEventFollowsIt() async throws {
         let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
         final class Heard: @unchecked Sendable { var events: [String] = [] }
@@ -510,18 +510,17 @@ struct ConversationTests {
         brain.plans = [Self.reply("One."), Self.reply("Two."), Self.reply("Three."),
                        #"{"action":"dispatch","reply":"Oby will review PR #12 in oby.","question":null,"jobs":[],"dispatches":[{"agent":"auto","account":"auto","repo":"deskree-inc/oby","base_branch":null,"pr":12,"issue":null,"epic":null,"kind":"review","task":"Review PR #12","inputs":[],"rounds":1,"check":null,"complexity":"routine"}]}"#]
         for words in ["first?", "second?", "third?"] { _ = await desk.converse(words) }
-        let talk = await desk.converse("review PR 12")
-        guard case .plan(let drafts) = talk, let draft = drafts.first else { return #expect(Bool(false), "no plan: \(talk)") }
-        // Dispatched: the job joins Oby's turn, which is saved again and sent again.
-        let job = try desk.dispatch(draft.job.id, branch: draft.job.branch, account: draft.job.account)
+        let (talk, started) = await desk.exchange("review PR 12")
+        guard case .reply = talk, let job = started.first else { return #expect(Bool(false), "no reply: \(talk)") }
+        // Started as it was planned (#269): the job is in Oby's turn from the start, saved and sent with it.
         #expect(desk.turns.last?.who == .oby && desk.turns.last?.jobs == [job.id])
         #expect(desk.turns.count == 8 && desk.turns.dropLast().allSatisfy { $0.jobs == nil })
         #expect(store().conversation().last?.jobs == [job.id])
-        try await until("the turn events come") { heard.events.filter { $0.hasPrefix("event: turn\n") }.count == 9 }
+        try await until("the turn events come") { heard.events.filter { $0.hasPrefix("event: turn\n") }.count == 8 }
         let turnEvents = heard.events.filter { $0.hasPrefix("event: turn\n") }
         let first = object(Data(String(turnEvents[0].dropFirst("event: turn\ndata: ".count)).utf8))
         #expect(first["who"] as? String == "user" && first["text"] as? String == "first?" && first["jobs"] as? [String] == [] && first["at"] is String)
-        let linked = object(Data(String(turnEvents[8].dropFirst("event: turn\ndata: ".count)).utf8))
+        let linked = object(Data(String(turnEvents[7].dropFirst("event: turn\ndata: ".count)).utf8))
         #expect(linked["id"] as? String == desk.turns.last?.id && linked["jobs"] as? [String] == [job.id] && linked["text"] as? String == "Oby will review PR #12 in oby.")
 
         let app = Application(router: api.router(owner: "well@example.com"))

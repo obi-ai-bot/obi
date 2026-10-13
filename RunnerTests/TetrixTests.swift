@@ -184,7 +184,7 @@ struct TetrixTests {
     @Test func theReportSaysWhatTheAgentAskedAndSavedAndTheReviewerHearsIt() async throws {
         let (desk, made, codex) = try makeDesk()
         made.stamps = TetrixUse.Stamps(commits: 2, stamped: 2, sessions: ["ses_8f2a"])
-        desk.dispatch(Desk.Draft(said: "fix oby #130", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         try await until("the job runs") { desk.job("tetrix1")?.status == .running }
         let agent = try #require(made.agents.first?.agent)
         say(agent, Self.claudeInit)
@@ -223,7 +223,7 @@ struct TetrixTests {
         let (desk, made, _) = try makeDesk()
         var looping = fix
         looping.rounds = 3
-        desk.dispatch(Desk.Draft(said: "fix oby #130", reply: "", job: looping, guessed: false))
+        desk.dispatch(looping)
         try await until("the job runs") { desk.job("tetrix1")?.status == .running }
         let agent = try #require(made.agents.first?.agent)
         say(agent, Self.claudeInit)
@@ -246,7 +246,7 @@ struct TetrixTests {
         let (desk, made, _) = try makeDesk()
         var looping = fix
         looping.rounds = 2
-        desk.dispatch(Desk.Draft(said: "fix oby #130", reply: "", job: looping, guessed: false))
+        desk.dispatch(looping)
         try await until("the job runs") { desk.job("tetrix1")?.status == .running }
         let agent = try #require(made.agents.first?.agent)
         say(agent, Self.claudeInit)
@@ -258,7 +258,7 @@ struct TetrixTests {
 
     @Test func anAgentWithoutTetrixSaysSoInTheReport() async throws {
         let (desk, made, _) = try makeDesk()
-        desk.dispatch(Desk.Draft(said: "fix oby #130", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         try await until("the job runs") { desk.job("tetrix1")?.status == .running }
         let agent = try #require(made.agents.first?.agent)
         say(agent, Self.claudeInitNoTetrix)

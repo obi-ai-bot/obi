@@ -16,17 +16,16 @@ nonisolated struct WatchContext: Codable, Equatable, Sendable {
 }
 
 /// The brain's answer as the phone relays it. PlanResult only decodes, so this is its mirror.
+/// The jobs a reply started (#269) aren't in it: they reach the watch with the jobs.
 nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
-    var drafts: [Draft] = []
     var question: Question?
     var questionSaid: String?
     var reply: String?
 
     init(_ result: PlanResult) {
         switch result {
-        case .plan(let drafts): self.drafts = drafts
         case .question(let said, let question): questionSaid = said; self.question = question
-        case .reply(let text): reply = text
+        case .reply(let text, _): reply = text
         case .none: break
         }
     }
@@ -48,8 +47,8 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 ///   the words as a draft, and sends them as a `plan` when the user taps Send.
 /// - `voiceCancel`: `request`; drops live audio or a pending plan, answered with `ok`.
 /// - `plan`: `said` and `request`, with `question` and `option` to answer the brain; answered
-///   with `ok`, then the plan arrives as a `planned` message.
-/// - `dispatch`: `draft`; answered with `job`.
+///   with `ok`, then the answer arrives as a `planned` message. The work it plans starts by
+///   itself (#269): the jobs follow in the context.
 /// - `tell`: `job` (its id) and `text`; answered with `job`.
 /// - `stop`: `job` (its id); answered with `job`.
 /// - `dismiss`: `job` (its id); answered with `job`.
@@ -78,7 +77,7 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 ///
 /// Any reply may carry `error` instead of what was asked for.
 nonisolated enum WatchWire {
-    enum Kind: String { case refresh, voice, voiceStart, voiceChunk, voiceEnd, voiceCancel, transcript, plan, dispatch, tell, stop, dismiss, start, permission, move, publishAction, publish, planned, step, stopTurn, published, pairKey, paired, unpaired }
+    enum Kind: String { case refresh, voice, voiceStart, voiceChunk, voiceEnd, voiceCancel, transcript, plan, tell, stop, dismiss, start, permission, move, publishAction, publish, planned, step, stopTurn, published, pairKey, paired, unpaired }
 
     static let kind = "kind"
     static let ok = "ok"
@@ -92,7 +91,6 @@ nonisolated enum WatchWire {
     static let said = "said"
     static let question = "question"
     static let option = "option"
-    static let draft = "draft"
     static let job = "job"
     static let permission = "permission"
     static let decision = "decision"

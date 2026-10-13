@@ -164,7 +164,7 @@ struct MoveJobTests {
         fix.agent = "codex"
         fix.rounds = rounds
         fix.check = check
-        desk.dispatch(Desk.Draft(said: "work on oby #75", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         try await until { desk.job(id)?.status == .running }
         return try #require(made.agents.last?.agent)
     }
@@ -281,7 +281,7 @@ struct MoveJobTests {
         fix.id = "queued"
         fix.account = codex.id
         fix.agent = "codex"
-        desk.dispatch(Desk.Draft(said: "review", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         let moved = try desk.move("queued", to: MoveTarget(account: "Personal"))
         #expect(moved.status == .queued && moved.agent == "claude")
         gate.continuation.yield()
@@ -329,7 +329,7 @@ struct MoveJobTests {
         other.title = "Watch home"
         other.account = codex.id
         other.agent = "codex"
-        desk.dispatch(Desk.Draft(said: "work on oby #76", reply: "", job: other, guessed: false))
+        desk.dispatch(other)
         try await until { desk.job("bbbb2222")?.status == .running }
         let second = try #require(made.agents.last?.agent)
         second.onEvent(.session("thread-2"))
@@ -364,6 +364,26 @@ struct MoveJobTests {
         // A move that can't happen ends the turn with why.
         #expect(await desk.converse("move it to Personal") == .reply("Couldn't move it: It's on Claude Code · Personal already."))
         #expect(brain.prompts.count == 3)
+    }
+
+    @Test func cancellingABatchMoveStopsBeforeTheNextJob() async throws {
+        var first = job
+        first.id = "aaaa1111"
+        first.status = .done
+        var second = first
+        second.id = "bbbb2222"
+        desk.elsewhere = { [Briefing.Place(name: "tetrix-lab", jobs: [first, second], inbox: [])] }
+        var live = true
+        var moved: [String] = []
+        desk.moveElsewhere = { id, _, _ in
+            moved.append(id)
+            live = false
+            return first
+        }
+
+        let result = Planner.Result(plan: try Plan.decode(Data(Self.move([first.id, second.id], agent: "claude").utf8)), by: "fake")
+        #expect(await desk.card(for: result, said: "move both jobs", live: { live }) == .none)
+        #expect(moved == [first.id])
     }
 
     @Test func movePlansAreChecked() throws {

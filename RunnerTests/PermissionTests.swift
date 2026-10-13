@@ -62,7 +62,7 @@ final class PermissionTests {
         desk.makeAgent = { _, _, _ in agent }
         desk.prepare = { $0 }
         desk.countCommits = { _, _ in 0 }
-        desk.dispatch(Desk.Draft(said: "work on oby #134", reply: "", job: fix(id, mode: mode), guessed: false))
+        desk.dispatch(fix(id, mode: mode))
         for _ in 0..<500 where desk.job(id)?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         agent.onEvent(.session("s134"))
         return desk

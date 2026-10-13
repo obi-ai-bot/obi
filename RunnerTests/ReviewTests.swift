@@ -89,7 +89,7 @@ struct ReviewTests {
 
     /// Dispatches the author and runs it to its end: it ends done with commits and publishes.
     func publishAuthor() async throws -> Job {
-        desk.dispatch(Desk.Draft(said: "fix oby #75", reply: "", job: author, guessed: false))
+        desk.dispatch(author)
         try await until("the author runs") { desk.job("author")?.status == .running }
         let agent = try #require(made.agents.last?.agent)
         agent.onEvent(.session("e6a24229"))
@@ -218,7 +218,7 @@ struct ReviewTests {
         other.base = nil
         other.agent = "codex"
         other.account = work.id
-        desk.dispatch(Desk.Draft(said: "fix oby", reply: "", job: other, guessed: false))
+        desk.dispatch(other)
         try await until("the other job runs") { desk.job("other")?.status == .running }
         try await Task.sleep(for: .milliseconds(50))
         #expect(desk.job("author")?.waitsForReviewer == true && made.agents.count == 2)

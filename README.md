@@ -37,13 +37,13 @@ Hold the **fn** key, say what you need, let go. I listen on your Mac, only while
   <img src="docs/images/notch-open.webp" width="820" alt="The notch opened, with two agents working and a place to type">
 </p>
 
-## You see the plan before anything starts
+## I start as soon as you've said it
 
 <p align="center">
-  <img src="docs/images/notch-plan.webp" width="820" alt="Oby's plan: Cursor will build the empty state in tetrix-front-end, with the account, repository and branch">
+  <img src="docs/images/notch-plan.webp" width="820" alt="Oby's reply: Cursor is building the empty state in tetrix-front-end, with the job's card under it">
 </p>
 
-Which agent, which account, which repository, which branch. Tap any of them to change it, then **Dispatch**. Every job gets its own branch, so your working copy stays exactly how you left it.
+Say the word and the work starts, like Claude Code or Codex: no card to confirm. I tell you which agent, which account, which repository and which branch, under my reply, with **Stop** on the job. Change any of it after: move the job to another tool, account or model, or tell its agent something. Every job gets its own branch, so your working copy stays exactly how you left it. Only when my brain can't answer and I had to guess do I ask first.
 
 ## Then I get out of your way
 

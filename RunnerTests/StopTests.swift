@@ -18,10 +18,10 @@ struct StopEverythingTests {
 
     let stop = Planner.Result(plan: Plan(action: .stopAgent, reply: "Oby will stop all running work.", dispatches: [], question: nil, all: true), by: "claude")
 
-    func draft(_ id: String) -> Desk.Draft {
+    func review(_ id: String) -> Job {
         var job = job
         job.id = id
-        return Desk.Draft(said: "Review oby PR #33", reply: "Oby will review PR #33 in oby.", job: job, guessed: false)
+        return job
     }
 
     @Test func stopAgentStopsRunningAndQueuedJobs() async throws {
@@ -37,9 +37,9 @@ struct StopEverythingTests {
             return job
         }
 
-        desk.dispatch(draft("running"))
+        desk.dispatch(review("running"))
         for _ in 0..<500 where desk.job("running")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
-        desk.dispatch(draft("queued"))
+        desk.dispatch(review("queued"))
         #expect(desk.job("running")?.status == .running && agent.started == 1)
         #expect(desk.job("queued")?.status == .queued)
 
@@ -92,7 +92,7 @@ struct StopEverythingTests {
         defer { _ = kill(agent.process.processIdentifier, SIGKILL) }
         desk.makeAgent = { _, _, _ in agent }
         desk.prepare = { $0 }
-        desk.dispatch(draft("stopped"))
+        desk.dispatch(review("stopped"))
         for _ in 0..<500 where desk.job("stopped")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         #expect(agent.process.isRunning)
 
@@ -117,7 +117,7 @@ struct StopEverythingTests {
             for await _ in held {}
             return job
         }
-        desk.dispatch(draft("queued"))
+        desk.dispatch(review("queued"))
         #expect(await desk.card(for: stop, said: "stop it") == .reply("Stopped 1 job."))
     }
 }

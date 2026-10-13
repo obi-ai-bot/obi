@@ -201,6 +201,7 @@ nonisolated struct Briefing: Equatable, Sendable {
             let what = switch item.kind {
             // What the agent asked, and its options, are its own words: in the quoted file.
             case .question: "the question and its options are quoted in \(ClaudeBrain.quotedFile)"
+            case .review, .merge, .audit, .start: "\(Self.line(item.text, cap: 160)) Options: \(item.options.joined(separator: " | "))."
             // What it asks to run or edit is the agent's own: in the quoted file.
             case .permission: "what it asks to do is quoted in \(ClaudeBrain.quotedFile). Options: \(item.options.joined(separator: " | "))."
             case .review, .merge, .audit: "\(Self.line(item.text, cap: 160)) Options: \(item.options.joined(separator: " | "))."
@@ -367,6 +368,7 @@ nonisolated struct Briefing: Equatable, Sendable {
         case .merge: "Merge stopped"
         case .audit: "Issue audit"
         case .failure: "Oby failure"
+        case .start: "Guessed plan, not started"
         case .permission: "Permission"
         }
     }

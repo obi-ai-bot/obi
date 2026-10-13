@@ -60,7 +60,11 @@ struct WatchRelayTests {
         let again = try Runner.decoder.decode(RelayedPlan.self, from: Runner.encoder.encode(asked))
         #expect(again.question == question)
         #expect(again.questionSaid == "Review PR 12")
-        #expect(RelayedPlan(.reply("Oby can't merge.")).reply == "Oby can't merge.")
+        #expect(RelayedPlan(.reply("Oby can't merge.", started: [])).reply == "Oby can't merge.")
+        // The jobs a reply started (#269) reach the watch with the jobs, not in the plan.
+        let started = RelayedPlan(.reply("On it.", started: [job("started", status: .queued)]))
+        #expect(started.reply == "On it." && started.question == nil)
+        #expect(try Runner.decoder.decode(RelayedPlan.self, from: Runner.encoder.encode(started)) == started)
         #expect(RelayedPlan(.none) == RelayedPlan(.none))
     }
 }

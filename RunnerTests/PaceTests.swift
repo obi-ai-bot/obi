@@ -210,25 +210,33 @@ struct PaceTests {
         accounts.setLabel("Max", for: "default")
         accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.85), for: "default")
         let desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        desk.prepare = { $0 }
+        desk.makeAgent = { _, _, _ in ConversationTests.IdleAgent() }
         func plan(account: String) -> Planner.Result {
             let dispatch = Plan.Dispatch(agent: "claude", account: account, repo: "deskree-inc/oby", baseBranch: nil, pr: nil, issue: nil,
                                          epic: nil, kind: .fix, title: nil, task: "Fix it", inputs: [], rounds: 1, check: nil, complexity: .routine)
             return Planner.Result(plan: Plan(action: .dispatch, reply: "", dispatches: [dispatch], question: nil), by: "claude")
         }
-        // Only its reserve keeps it from the job: it waits for room (#278, RunnerTests/ReserveTests.swift).
-        func waits(_ talk: Desk.Talk) -> [[StartCondition]?]? { if case .plan(let drafts) = talk { drafts.map(\.job.startWhen) } else { nil } }
-        #expect(waits(await desk.card(for: plan(account: "auto"), said: "fix it")) == [[.room(agent: "claude")]])
-        guard case .plan(let drafts) = await desk.card(for: plan(account: "Default"), said: "fix it on Default") else {
-            Issue.record("expected a plan")
+        // Only its reserve keeps it from the job: it starts, waiting for room on it (#278,
+        // RunnerTests/ReserveTests.swift), and the reply says so.
+        guard case .reply(let held) = await desk.card(for: plan(account: "auto"), said: "fix it") else {
+            Issue.record("expected a reply")
             return
         }
-        #expect(drafts.map(\.job.account) == ["default"])
+        #expect(held == "On it. Claude Code will fix oby on Default once what it waits for has happened. "
+                + "Waiting: Default is in its weekly reserve. Use it anyway to start it now; otherwise it starts when an account has room.")
+        #expect(desk.jobs.map(\.startWhen) == [[.room(agent: "claude")]] && desk.jobs.map(\.account) == ["default"])
+        // Named, it starts there (#269), and the reply says so.
+        #expect(await desk.card(for: plan(account: "Default"), said: "fix it on Default") == .reply("On it. Claude Code is fixing oby on Default."))
+        #expect(desk.jobs.map(\.account) == ["default", "default"] && desk.jobs.first?.startWhen == nil)
 
         // The backup planner, when the brain fails, leaves the account to routing too.
         let context = BrainContext(accounts: ["auto": ["auto", "Default"], "claude": ["auto", "Default"]], repos: ["deskree-inc/oby"])
         let rules = Rules.plan("fix oby #12", context: context)
         #expect(rules.dispatches.map { "\($0.agent)/\($0.account)" } == ["auto/auto"] && rules.problems(in: context, canary: "7f3a9c").isEmpty)
-        #expect(waits(await desk.card(for: Planner.Result(plan: rules, by: "rules"), said: "fix oby #12")) == [[.room(agent: nil)]])
+        // A guess starts nothing (#269): the job it proposes in the inbox waits for room the same way.
+        _ = await desk.card(for: Planner.Result(plan: rules, by: "rules"), said: "fix oby #12")
+        #expect(desk.inbox.compactMap(\.proposed).map(\.startWhen) == [[.room(agent: nil)]])
         // At 95% of its week lifting its reserve wouldn't help: no account has room, and nothing waits.
         accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.96), for: "default")
         #expect(await desk.card(for: plan(account: "auto"), said: "fix it")

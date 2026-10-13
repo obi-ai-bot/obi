@@ -184,7 +184,7 @@ struct UpdateTests {
         work.id = id
         work.rounds = rounds
         let before = fake.agents.count
-        desk.dispatch(Desk.Draft(said: "review", reply: "", job: work, guessed: false))
+        desk.dispatch(work)
         for _ in 0..<500 where fake.agents.count == before { try await Task.sleep(for: .milliseconds(10)) }
         let agent = try #require(fake.agents.last)
         agent.onEvent(.session("\(id)-session"))
@@ -198,7 +198,7 @@ struct UpdateTests {
         #expect(fake.installs == 0 && desk.drainingForUpdate)
         var review = job
         review.id = "queued-review"
-        desk.dispatch(Desk.Draft(said: "review", reply: "", job: review, guessed: false))
+        desk.dispatch(review)
         for _ in 0..<20 { await Task.yield() }
         #expect(fake.agents.count == 1 && desk.job(review.id)?.status == .queued)
         fake.agents[0].onEvent(.finished(summary: "Reviewed", failed: false))

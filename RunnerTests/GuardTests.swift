@@ -56,7 +56,7 @@ struct GuardTests {
         fix.branch = "oby/fix-64"
         fix.check = check
         fix.rounds = rounds
-        desk.dispatch(Desk.Draft(said: "work on oby #64", reply: "", job: fix, guessed: false))
+        desk.dispatch(fix)
         try await until { desk.job(id)?.status == .running }
         let agent = try #require(made.agents.last)
         agent.onEvent(.session("s-\(id)"))

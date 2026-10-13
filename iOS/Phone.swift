@@ -8,10 +8,11 @@ nonisolated enum PhoneTab: String, Hashable, Sendable { case home, chat, setting
 /// the conversation that turns words into a plan.
 @Observable
 final class Phone {
+    /// What Oby answered: a reply (the work it started shows as job cards under its turn, #269),
+    /// or a question.
     enum Talk: Equatable {
         case none
         case thinking(String)
-        case plan([Draft])
         case question(said: String, Question)
         case reply(String)
     }
@@ -337,11 +338,11 @@ final class Phone {
         pending = echo.id
         planning = Task {
             let result: Talk
+            var started: [Job] = []
             do {
                 switch try await runner.plan(said, answer: answer) {
-                case .plan(let drafts): result = .plan(drafts)
                 case .question(let said, let question): result = .question(said: said, question)
-                case .reply(let text): result = .reply(text)
+                case .reply(let text, let jobs): result = .reply(text); started = jobs
                 case .none: result = .none
                 }
             } catch {
@@ -357,11 +358,14 @@ final class Phone {
             if pending == echo.id { pending = nil }
             conversation.settleLatestSteps()
             talk = result
+            // The work Oby started (#269) shows at once, before its events come, and the phone
+            // asks to notify the first time something starts from it.
+            for job in started { apply(.job(job)) }
+            if !started.isEmpty { Notifications.ask() }
             if spoken, speakReplies {
                 switch result {
                 case .reply(let text): speaker.say(text)
                 case .question(_, let question): speaker.say(question.text)
-                case .plan(let drafts): speaker.say(drafts.map(\.reply).joined(separator: " "))
                 default: break
                 }
             }
@@ -375,23 +379,6 @@ final class Phone {
         tab = .home
         opening = id
         publishing = publish ? id : nil
-    }
-
-    func dispatch(_ draft: Draft) async throws {
-        let job = try await runner.dispatch(draft.job)
-        talk = .none
-        apply(.job(job))
-        Notifications.ask()
-    }
-
-    /// Dispatch all: one `POST /v1/jobs` per draft, in order, then the card closes. A draft whose
-    /// job is already here was sent before, so after a failure this sends only the rest.
-    func dispatch(all drafts: [Draft]) async throws {
-        for draft in drafts where !jobs.contains(where: { $0.id == draft.job.id }) {
-            apply(.job(try await runner.dispatch(draft.job)))
-        }
-        talk = .none
-        Notifications.ask()
     }
 
     func stop(_ id: String) async throws {

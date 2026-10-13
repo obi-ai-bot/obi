@@ -70,21 +70,24 @@ struct FinishFromPRTests {
         let accounts = AccountStore(root: folder)
         accounts.setLabel("Max", for: "default")
         let desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
-        guard case .plan(let drafts) = await desk.card(for: Planner.Result(plan: plan([dispatch(.fix)]), by: "claude"),
-                                                         said: "finish oby #19 from PR #124") else {
-            Issue.record("expected a plan")
+        desk.prepare = { $0 }
+        desk.makeAgent = { _, _, _ in ConversationTests.IdleAgent() }
+        // The plan starts the job (#269): it's the newest on the desk.
+        guard case .reply = await desk.card(for: Planner.Result(plan: plan([dispatch(.fix)]), by: "claude"),
+                                            said: "finish oby #19 from PR #124") else {
+            Issue.record("expected a reply")
             return
         }
-        let job = try #require(drafts.first?.job)
+        let job = try #require(desk.jobs.first)
         #expect(job.issue == 19 && job.fromPR == 124 && job.pr == nil && job.base == nil)
         #expect(job.branch == "oby/fix-19" && job.heading == "Finish the stale work")
         // On a pull request alone, it's still that pull request's job.
-        guard case .plan(let alone) = await desk.card(for: Planner.Result(plan: plan([dispatch(.review, issue: nil)]), by: "claude"),
-                                                        said: "review oby PR #124") else {
-            Issue.record("expected a plan")
+        guard case .reply = await desk.card(for: Planner.Result(plan: plan([dispatch(.review, issue: nil)]), by: "claude"),
+                                            said: "review oby PR #124") else {
+            Issue.record("expected a reply")
             return
         }
-        #expect(alone.first.map { "\($0.job.pr ?? 0) \($0.job.fromPR == nil) \($0.job.branch)" } == "124 true oby/review-124")
+        #expect(desk.jobs.first.map { "\($0.pr ?? 0) \($0.fromPR == nil) \($0.branch)" } == "124 true oby/review-124")
     }
 
     @Test func itsBaseStaysDevAndThePullRequestIsQuoted() throws {

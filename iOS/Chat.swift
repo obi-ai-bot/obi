@@ -178,14 +178,11 @@ struct ChatScreen: View {
         }
     }
 
-    /// The plan before anything runs, or the brain's question, in the thread: the cards Home
-    /// shows as sheets. A plan's and a question's words arrive as Oby's turn too, above them.
+    /// The brain's question, in the thread: the card Home shows as a sheet. Its words arrive as
+    /// Oby's turn too, above it. Planned work starts by itself (#269): its jobs are the cards
+    /// under Oby's turn, each with Stop.
     @ViewBuilder private var cards: some View {
         switch phone.talk {
-        case .plan(let drafts) where drafts.count == 1:
-            card { PlanCard(draft: drafts[0], onEdit: edit) }
-        case .plan(let drafts):
-            card { PlansCard(drafts: drafts, onEdit: edit) }
         case .question(let said, let question):
             card {
                 DecisionCard(title: question.text, plan: question.plan, options: question.cardOptions,
@@ -216,13 +213,6 @@ struct ChatScreen: View {
         phone.ask(text, spoken: spoken)
         text = ""
         typing = false
-    }
-
-    /// Edit on a plan card: its words go back in the field.
-    private func edit(_ said: String) {
-        text = said
-        phone.cancel()
-        typing = true
     }
 }
 
