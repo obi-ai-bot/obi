@@ -35,8 +35,8 @@ struct NoDispatchCardTests {
         desk.makeBrain = { [brain] _, _ in [brain] }
     }
 
-    func until(_ what: String, _ condition: () -> Bool) async throws {
-        for _ in 0..<500 where !condition() { try await Task.sleep(for: .milliseconds(10)) }
+    func until(_ what: String, tries: Int = 500, _ condition: () -> Bool) async throws {
+        for _ in 0..<tries where !condition() { try await Task.sleep(for: .milliseconds(10)) }
         #expect(condition(), Comment(rawValue: what))
     }
 
@@ -90,13 +90,14 @@ struct NoDispatchCardTests {
         // in time", and the plan, when the files come, starts nothing.
         gate.reading = false
         gate.open = false
-        // Leave enough time for the test host to observe the blocked read before the timeout;
-        // the Mac check can schedule this actor for longer than a one-second window.
-        desk.patience = .seconds(3)
+        // Leave enough time for the plan to reach the blocked read before the timeout: under load
+        // (the whole suite, a Mac check) it took over 3 seconds, the turn gave up first, and the
+        // read never came.
+        desk.patience = .seconds(8)
         desk.ask("fix oby #12")
         try await until("the files are being read again") { gate.reading }
         #expect(desk.talk == .thinking("fix oby #12"))
-        try await until("the turn gives up") { desk.talk == .reply(Conversation.timedOut) }
+        try await until("the turn gives up", tries: 1200) { desk.talk == .reply(Conversation.timedOut) }
         gate.open = true
         try await Task.sleep(for: .milliseconds(100))
         #expect(desk.jobs.isEmpty && desk.inbox.isEmpty && desk.turns.count == 2 && desk.turns.last?.jobs == nil)
@@ -106,7 +107,7 @@ struct NoDispatchCardTests {
         gate.open = false
         desk.ask("fix oby #12")
         try await until("the files are being read for the guess") { gate.reading }
-        try await until("the turn gives up again") { desk.turns.count == 4 && desk.talk == .reply(Conversation.timedOut) }
+        try await until("the turn gives up again", tries: 1200) { desk.turns.count == 4 && desk.talk == .reply(Conversation.timedOut) }
         gate.open = true
         try await Task.sleep(for: .milliseconds(100))
         #expect(desk.jobs.isEmpty && desk.inbox.isEmpty)
