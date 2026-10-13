@@ -43,7 +43,7 @@ final class Tray {
     private(set) var capturing = false
 
     /// Where attachments wait for their jobs: Workspace.prepare copies them into the job's worktree.
-    static let folder = Workspace.root.appending(path: "attachments")
+    static let folder = LocalRunner.attachments
 
     init() {
         // ponytail: a job copies its attachments when its worktree is ready, so they're kept a day

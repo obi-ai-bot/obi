@@ -738,11 +738,22 @@ nonisolated struct RunnerError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// The runner on the tailnet. `tailscale serve` vouches for who's asking, so there's no token.
+/// The runner on the tailnet: `tailscale serve` vouches for who's asking, so there's no token. Or
+/// the runner on this Mac (#283), on 127.0.0.1, with its own `token` (Engine/LocalRunner.swift)
+/// sent as `Authorization: Bearer` on every request.
 nonisolated struct Runner: Sendable {
     var base: URL
+    var token: String? = nil
 
     static let defaultURL = URL(string: "https://tetrix-lab.tail8de49b.ts.net:8443")!
+
+    /// `request` with the token, when there is one.
+    private func signed(_ request: URLRequest) -> URLRequest {
+        guard let token else { return request }
+        var request = request
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
 
     static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
@@ -820,16 +831,33 @@ nonisolated struct Runner: Sendable {
     /// How long a plan's request waits: a turn that moves jobs and answers takes longer than the brain alone (#304).
     static let planTimeout: TimeInterval = 120
 
-    func plan(_ said: String, answer: (question: String, option: String)? = nil) async throws -> PlanResult {
+    func plan(_ said: String, answer: (question: String, option: String)? = nil, attachments: [String] = []) async throws -> PlanResult {
         struct Answer: Encodable { var question: String; var option: String }
-        struct Body: Encodable { var said: String; var answer: Answer? }
-        return try await call("POST", "v1/plans", body: Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }), timeout: Self.planTimeout)
+        struct Body: Encodable { var said: String; var answer: Answer?; var attachments: [String] }
+        return try await call("POST", "v1/plans", body: Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }, attachments: attachments), timeout: Self.planTimeout)
     }
 
     /// Stop: the turn Oby is working on ends where it is (`POST /v1/conversation/stop`, #304). A
     /// runner from before it answers 404.
     func stopConversation() async throws {
         try await send("POST", "v1/conversation/stop")
+    }
+
+    func cancelPlan() async {
+        _ = try? await send("POST", "v1/plans/cancel")
+    }
+
+    func dispatch(_ job: Job) async throws -> Job {
+        struct Body: Encodable { var job: DispatchedJob; var mode: String? }
+        return try await call("POST", "v1/jobs", body: Body(job: DispatchedJob(job: job), mode: Self.mode(of: job)))
+    }
+
+    static func mode(of job: Job) -> String? {
+        #if os(macOS)
+        return nil
+        #else
+        return job.mode
+        #endif
     }
 
     // MARK: Permissions (#134)
@@ -919,7 +947,7 @@ nonisolated struct Runner: Sendable {
     func bundle(_ id: String) async throws -> Data {
         var request = URLRequest(url: base.appending(path: "v1/checks/\(id)/bundle"))
         request.timeoutInterval = 120
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: signed(request))
         try Self.check(response, data)
         return data
     }
@@ -940,7 +968,7 @@ nonisolated struct Runner: Sendable {
                     var request = URLRequest(url: base.appending(path: "v1/events"))
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     request.timeoutInterval = 60
-                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    let (bytes, response) = try await URLSession.shared.bytes(for: signed(request))
                     try Self.check(response, nil)
                     // The runner answers once it follows this connection: from here, every change arrives.
                     stream.yield(.connected)
@@ -1007,7 +1035,7 @@ nonisolated struct Runner: Sendable {
             request.httpBody = try Self.encoder.encode(body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: signed(request))
         try Self.check(response, data)
         return data
     }
@@ -1056,6 +1084,21 @@ nonisolated struct Runner: Sendable {
         if let data, let problem = try? JSONDecoder().decode(Problem.self, from: data) { throw RunnerError(message: problem.error, status: http.statusCode) }
         throw RunnerError(message: http.statusCode == 401 ? "The runner only answers its owner's Tailscale login." : "The runner answered \(http.statusCode).",
                           status: http.statusCode)
+    }
+}
+
+/// The job `POST /v1/jobs` sends back. Swift leaves nils out, but a missing check keeps the plan's,
+/// so no check and the usual model go as null.
+nonisolated struct DispatchedJob: Encodable {
+    var job: Job
+
+    private enum Nulls: String, CodingKey { case check, model }
+
+    func encode(to encoder: any Encoder) throws {
+        try job.encode(to: encoder)
+        var nulls = encoder.container(keyedBy: Nulls.self)
+        if job.check == nil { try nulls.encodeNil(forKey: .check) }
+        if job.model == nil { try nulls.encodeNil(forKey: .model) }
     }
 }
 

@@ -48,15 +48,19 @@ final class API {
         watchAccounts()
     }
 
-    /// Every endpoint, behind the owner check.
-    nonisolated func router(owner: String) -> Router<BasicRequestContext> {
+    /// Every endpoint, behind the owner check: the owner's tailnet login.
+    nonisolated func router(owner: String) -> Router<BasicRequestContext> { router(access: .tailnet(owner: owner)) }
+
+    /// Every endpoint, behind `Gate`.
+    nonisolated func router(access: Access) -> Router<BasicRequestContext> {
         let router = Router()
-        router.add(middleware: Gate(owner: owner))
+        router.add(middleware: Gate(access: access))
         router.post("v1/speech") { request, _ in
             try await Self.json(self.speech.handle(request, repos: self.desk.repos))
         }
         router.get("v1/status") { _, _ in await self.status() }
         router.post("v1/plans") { request, _ in try await self.plan(try await Self.decode(PlanRequest.self, from: request)) }
+        router.post("v1/plans/cancel") { _, _ in await self.cancelPlan() }
         router.post("v1/conversation/stop") { _, _ in await self.stopConversation() }
         router.get("v1/conversation") { request, _ in
             try await self.conversation(before: request.uri.queryParameters.get("before").map { String($0) },
@@ -179,7 +183,7 @@ final class API {
         guard !words.isEmpty else { return Self.json(PlanAnswer(.none)) }
         let turns = try request.turns.map(Self.turns)
         let said = request.answer.map { Desk.answered(words, question: $0.question, option: $0.option) } ?? words
-        let (talk, started) = await desk.exchange(said, shown: request.answer?.option, turns: turns)
+        let (talk, started) = await desk.exchange(said, shown: request.answer?.option, turns: turns, attachments: request.attachments ?? [])
         return Self.json(PlanAnswer(talk, started: started))
     }
 
@@ -187,6 +191,11 @@ final class API {
     func stopConversation() -> Response {
         desk.stopConversation()
         return Self.json(["stopped": true])
+    }
+
+    func cancelPlan() -> Response {
+        desk.cancel()
+        return Self.json(["cancelled": true])
     }
 
     /// One page of the conversation, oldest first: the latest `limit` turns (50 unless asked,
@@ -216,16 +225,17 @@ final class API {
     /// `POST /v1/jobs`: a whole job to start (#269). A body with a draft's id and no work of its
     /// own is from before Oby started planned work by itself: `410`, with where it went.
     func dispatch(_ request: DispatchRequest) async throws -> Response {
-        guard var new = request.job.new else {
+        do {
+            if var new = request.job.new {
+                new.mode = try request.job.mode.map { try Self.mode($0) }
+                return Self.json(JobJSON(job: try await desk.dispatch(new)), status: .created)
+            }
             if request.job.id != nil {
                 throw APIError(.gone, "Oby starts planned work by itself now: POST /v1/plans starts it and answers the jobs. POST /v1/jobs takes a whole job (repo, kind, task).")
             }
             throw APIError(.unprocessableContent, "A job needs repo, kind and task.")
-        }
-        new.mode = try request.job.mode.map { try Self.mode($0) }
-        do {
-            return Self.json(JobJSON(job: try await desk.dispatch(new)), status: .created)
         } catch {
+            if let error = error as? APIError { throw error }
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
     }
@@ -762,18 +772,26 @@ final class API {
     }
 }
 
-/// Lets in only the owner, whose login `tailscale serve` puts in every request, and sends every
-/// error as `{"error": …}`.
+/// Who the runner answers (docs/runner-api.md, "Reaching it").
+enum Access: Sendable {
+    /// On the tailnet: the owner, whose login `tailscale serve` puts in every request.
+    case tailnet(owner: String)
+    /// On a Mac (#283): the Oby app on the same Mac, with the runner's own token
+    /// (Engine/LocalRunner.swift), on `127.0.0.1` only.
+    case local(token: String)
+}
+
+/// Lets in only the owner (`Access`), and sends every error as `{"error": …}`.
 struct Gate<Context: RequestContext>: RouterMiddleware {
-    let owner: String
+    let access: Access
+
+    init(access: Access) { self.access = access }
+    init(owner: String) { access = .tailnet(owner: owner) }
 
     @concurrent func handle(_ request: Request, context: Context,
                             next: @concurrent (Request, Context) async throws -> Response) async throws -> Response {
         do {
-            // An agent's own requests (`API.appleCheck`) carry its job's token instead.
-            guard request.uri.path.hasPrefix("/v1/agent/") || request.headers[values: .tailscaleUserLogin] == [owner] else {
-                throw APIError(.unauthorized, "This runner answers only its owner.")
-            }
+            try Self.admit(request, access: access)
             return try await next(request, context)
         } catch let error as APIError {
             return error.response
@@ -782,6 +800,34 @@ struct Gate<Context: RequestContext>: RouterMiddleware {
         } catch {
             return APIError(.internalServerError, error.localizedDescription).response
         }
+    }
+
+    /// Throws the refusal, or lets the request through. On a Mac, every request's `Host` (the
+    /// request's authority: HTTP/1 puts the header there) must be a loopback name, before anything
+    /// else is read: a browser reaching 127.0.0.1 through another name is refused with `403`. An
+    /// agent's own requests (`API.appleCheck`) carry its job's token instead of the owner's login
+    /// or the runner's token.
+    nonisolated static func admit(_ request: Request, access: Access) throws {
+        switch access {
+        case .tailnet(let owner):
+            guard request.uri.path.hasPrefix("/v1/agent/") || request.headers[values: .tailscaleUserLogin] == [owner] else {
+                throw APIError(.unauthorized, "This runner answers only its owner.")
+            }
+        case .local(let token):
+            guard LocalRunner.isLoopback(host: request.head.authority) else {
+                throw APIError(.forbidden, "This runner answers only on 127.0.0.1.")
+            }
+            guard request.uri.path.hasPrefix("/v1/agent/") || Self.bearer(request.headers[.authorization]).map({ LocalRunner.same($0, as: token) }) == true else {
+                throw APIError(.unauthorized, "This runner answers only Oby on this Mac.")
+            }
+        }
+    }
+
+    /// The token in `Authorization: Bearer <token>`, or nil.
+    nonisolated static func bearer(_ header: String?) -> String? {
+        guard let header, header.hasPrefix("Bearer ") else { return nil }
+        let token = header.dropFirst("Bearer ".count).trimmingCharacters(in: .whitespaces)
+        return token.isEmpty ? nil : token
     }
 }
 
@@ -1254,6 +1300,7 @@ struct PlanRequest: Decodable {
     var answer: Answer?
     /// The conversation so far, oldest first, or nil for the runner's own.
     var turns: [Turn]?
+    var attachments: [String]?
 }
 
 /// A whole job for `POST /v1/jobs` (#269): the work (`repo`, `kind`, `task`), what it's about
@@ -1277,6 +1324,8 @@ struct DispatchRequest: Decodable {
         var model: String?
         /// The files the job claims (#209); an empty list claims none, left out its issue's.
         var files: [String]?
+        /// Files attached by the Mac user, copied into the runner's worktree.
+        var attachments: [String]?
         /// What the job waits for before it starts (#216); left out or empty, it starts at once.
         var startWhen: [StartCondition]?
         var request: String?

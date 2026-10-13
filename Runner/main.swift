@@ -3,7 +3,18 @@ import Hummingbird
 @testable import ObyEngine
 
 // The runner: Oby's engine as a service on an always-on machine, answering only its owner,
-// on 127.0.0.1, where `tailscale serve` publishes it to the tailnet.
+// on 127.0.0.1, where `tailscale serve` publishes it to the tailnet. Or on the user's own Mac
+// (#283), as the Oby app's login item, answering only that app with a token of its own
+// (Engine/LocalRunner.swift): then nothing publishes it, and remote devices come through the gateway.
+
+#if !os(Linux)
+// On a Mac, the runner's job files live next to the app's, never in the same folder: the app runs
+// its own engine there (Workspace.root). Accounts are shared because Settings signs them in there.
+// Before anything reads OBY_HOME.
+if ProcessInfo.processInfo.environment["OBY_HOME"]?.isEmpty ?? true {
+    setenv("OBY_HOME", LocalRunner.home.path, 1)
+}
+#endif
 
 // `oby-runner vault …`: the vault from a terminal, then out (Runner/VaultCommand.swift).
 if CommandLine.arguments.dropFirst().first == "vault" {
@@ -15,11 +26,26 @@ if CommandLine.arguments.dropFirst().first == "check" {
 }
 
 let environment = ProcessInfo.processInfo.environment
-guard let owner = environment["OBY_OWNER"], !owner.isEmpty else {
+let port = environment["OBY_PORT"].flatMap { Int($0) } ?? LocalRunner.port
+// Who it answers: the owner's Tailscale login (OBY_OWNER), which `tailscale serve` vouches for. On
+// a Mac without one, the Oby app on the same Mac, with the runner's own token.
+let access: Access
+if let owner = environment["OBY_OWNER"], !owner.isEmpty {
+    access = .tailnet(owner: owner)
+} else {
+    #if os(Linux)
     Logger.runner.error("OBY_OWNER isn't set: it's the owner's Tailscale login, and the runner answers no one else.")
     exit(1)
+    #else
+    do {
+        access = .local(token: try LocalRunner.makeToken())
+    } catch {
+        Logger.runner.error("\(error.localizedDescription, privacy: .public) The runner can't let Oby in without it.")
+        exit(1)
+    }
+    #endif
 }
-let port = environment["OBY_PORT"].flatMap { Int($0) } ?? 7777
+let owner: String = if case .tailnet(let login) = access { login } else { "Oby on this Mac" }
 // The Watch API's own port, which a Cloudflare Tunnel publishes (Runner/WatchAPI.swift).
 let watchPort = environment["OBY_WATCH_PORT"].flatMap { Int($0) } ?? 7778
 // A pipe to an agent that just exited must not take the runner down with it.
@@ -67,7 +93,9 @@ Task {
     }
 }
 // Jobs that were queued or running when the runner went down carry on (Engine/Restarts.swift).
-let desk = Desk(restarts: Restarts(file: Workspace.root.appending(path: "restarts.json")))
+// The runner for this Mac's app answers with the app's accounts (LocalRunner.accounts).
+let isLocal: Bool = if case .local = access { true } else { false }
+let desk = Desk(accounts: LocalRunner.accounts(local: isLocal), restarts: Restarts(file: Workspace.root.appending(path: "restarts.json")))
 desk.issueSync.enabled = true
 // Every failure is recorded, studied and acted on (Engine/Failures.swift).
 desk.failureLog.enabled = true
@@ -105,7 +133,9 @@ let api = API(desk: desk, devices: Devices(file: Workspace.root.appending(path: 
               push: Push(desk: desk, folder: Workspace.root.appending(path: "apns")),
               cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")), speech: speech, broker: broker)
 
-// The runner deploys itself after merges into dev (Runner/Updates.swift).
+#if os(Linux)
+// The runner deploys itself after merges into dev (Runner/Updates.swift). Not on a Mac: there it's
+// part of the app, which Sparkle updates (#282).
 let updates = Updates(desk: desk)
 api.updates = updates
 Task {
@@ -122,8 +152,9 @@ Task {
         updates.deployIfReady()
     }
 }
+#endif
 
-// systemd stops the runner with SIGTERM: agents end now, and their jobs carry on when it starts again.
+// systemd (launchd on a Mac) stops the runner with SIGTERM: agents end now, and their jobs carry on when it starts again.
 // The sources live as long as the runner.
 let stops = [SIGTERM, SIGINT].map { number in
     signal(number, SIG_IGN)
@@ -166,6 +197,16 @@ Task {
     }
 }
 
+// Accounts the user adds or removes in the app's Settings reach a runner that shares them within seconds.
+if isLocal {
+    Task {
+        while true {
+            try? await Task.sleep(for: .seconds(10))
+            if desk.accounts.reloadSaved() { await desk.accounts.refresh() }
+        }
+    }
+}
+
 // Who is signed in, and the repositories the brain may pick: now, then every five minutes. After the
 // first, jobs the runner went down with carry on: their agents commit as the owner, on known accounts.
 Task {
@@ -185,8 +226,10 @@ Task {
 
 let watchAPI = WatchAPI(api: api, watches: Watches(file: Workspace.root.appending(path: "watches.json")),
                         access: AccessFile(file: Workspace.root.appending(path: "watch.json")))
-let router = api.router(owner: owner)
+let router = api.router(access: access)
 watchAPI.pairing(on: router)
+// 127.0.0.1 only, on either machine: the tailnet reaches it through `tailscale serve`, and a Mac's
+// other devices through the gateway, never the runner itself.
 let app = Application(router: router,
                       configuration: .init(address: .hostname("127.0.0.1", port: port), serverName: "oby-runner"))
 // Always up, so writing watch.json is enough; without it, it answers 503 to everything.

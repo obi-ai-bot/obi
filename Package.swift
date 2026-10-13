@@ -38,7 +38,8 @@ let package = Package(
                 .product(name: "_CryptoExtras", package: "swift-crypto"),
             ],
             path: "Runner",
-            exclude: ["CSQLite", "README.md", "oby-runner.service"],
+            // The launchd plist is the Mac app's (Oby.xcodeproj bundles it with the executable, #283).
+            exclude: ["CSQLite", "README.md", "oby-runner.service", "com.deskree.oby.runner.plist"],
             swiftSettings: features
         ),
         // Oby's runner as an MCP server over stdio, for Claude Code and other assistants (docs/mcp.md).

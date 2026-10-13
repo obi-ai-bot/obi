@@ -147,6 +147,21 @@ final class AccountStore {
             }
     }
 
+    /// Reads `accounts.json` again when another program (the Oby app, for a runner that shares its
+    /// accounts) changed it: new accounts appear signed out until `refresh`, removed ones go, and
+    /// the ones that stay keep what Oby knows of them. Returns whether the list changed.
+    @discardableResult
+    func reloadSaved() -> Bool {
+        guard let saved = (try? Data(contentsOf: file)).flatMap({ try? JSONDecoder().decode([Account].self, from: $0) }),
+              saved != accounts.map(\.account) else { return false }
+        accounts = saved.map { account in
+            var state = accounts.first { $0.account.id == account.id } ?? AccountState(account: account)
+            state.account = account
+            return state
+        }
+        return true
+    }
+
     /// Adds an account with a fresh, empty home. It's signed out until the user signs in.
     @discardableResult
     func add(agent: String, name: String, payer: String) throws -> Account {

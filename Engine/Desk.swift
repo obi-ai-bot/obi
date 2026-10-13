@@ -74,6 +74,14 @@ final class Desk {
     @ObservationIgnored var moveElsewhere: (_ id: String, _ target: MoveTarget, _ why: String?) async throws -> Job = { _, _, _ in
         throw Shell.Failure(message: "That job isn't here.")
     }
+    @ObservationIgnored var plansElsewhere: () -> Bool = { false }
+    @ObservationIgnored var planElsewhere: (_ said: String, _ answer: (question: String, option: String)?) async throws -> Talk = { _, _ in
+        throw Shell.Failure(message: "The runner isn't set up.")
+    }
+    @ObservationIgnored var planElsewhereWithAttachments: (_ said: String, _ answer: (question: String, option: String)?, _ attachments: [String]) async throws -> Talk = { _, _, _ in
+        throw Shell.Failure(message: "The runner isn't set up.")
+    }
+    @ObservationIgnored var cancelElsewhere: () async -> Void = {}
     /// The brain's adapters, on the Claude account whose home is given. Tests put in their own.
     @ObservationIgnored var makeBrain: (_ home: String?, Vault) -> [any BrainAdapter] = { [ClaudeBrain(home: $0, vault: $1)] }
     /// How long `ask` waits for an answer before the turn ends with `Conversation.timedOut`, so
@@ -528,9 +536,31 @@ final class Desk {
         let said = words.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !said.isEmpty else { return }
         if Conversation.cancels(said) { return cancel() }
-        cancel()
+        let replacing = plansElsewhere() ? planning : nil
+        drop()
         asking += 1
         let mine = asking
+        if plansElsewhere() {
+            talk = .thinking(said)
+            planning = Task {
+                // Invalidate the runner before cancelling the old request. Otherwise the old
+                // request can finish on the runner and start work before its cancellation arrives.
+                if replacing != nil { await cancelElsewhere() }
+                replacing?.cancel()
+                _ = await replacing?.result
+                var result: Talk
+                do {
+                    result = attachments.isEmpty
+                        ? try await planElsewhere(said, nil)
+                        : try await planElsewhereWithAttachments(said, nil, attachments)
+                }
+                catch { result = .reply(error.localizedDescription) }
+                guard asking == mine else { return }
+                talk = result
+                if let reply = Self.reply(in: result) { onReply(reply, spoken) }
+            }
+            return
+        }
         let turn = Turn(who: .user, text: shown ?? said, voice: spoken ? true : nil)
         pending = turn.id
         add(turn)
@@ -559,6 +589,22 @@ final class Desk {
     /// Drops the turn under way: its words leave the thread, and its answer, when it comes, is
     /// ignored. Work the plan started already goes on: stop it by name.
     func cancel() {
+        drop()
+        guard plansElsewhere() else { return }
+        // Its request to the runner stops, and the runner is told, so its plan starts and stops nothing.
+        let planning = planning
+        self.planning = Task {
+            await cancelElsewhere()
+            planning?.cancel()
+            _ = await planning?.result
+        }
+    }
+
+    /// The plan under way on the runner (`ask`, when planning elsewhere), until it ends or is cancelled.
+    @ObservationIgnored private var planning: Task<Void, Never>?
+
+    /// Forgets the turn under way, whoever is planning it.
+    private func drop() {
         asking += 1
         stopRequested = false
         if let pending {
@@ -577,12 +623,12 @@ final class Desk {
     }
 
     /// `converse`, with the jobs Oby's answer started (#269): `POST /v1/plans` answers them.
-    func exchange(_ said: String, shown: String? = nil, turns given: [Turn]? = nil) async -> (talk: Talk, started: [Job]) {
+    func exchange(_ said: String, shown: String? = nil, turns given: [Turn]? = nil, attachments: [String] = []) async -> (talk: Talk, started: [Job]) {
         if Conversation.cancels(said) { stopConversation(); return (.none, []) }
         let turn = Turn(who: .user, text: shown ?? said)
         conversationTurn = turn.id
         stopRequested = false
-        let talk = await plan(said, turns: given) { !Task.isCancelled && !self.stopRequested }
+        let talk = await plan(said, turns: given, attachments: attachments) { !Task.isCancelled && !self.stopRequested }
         conversationTurn = nil
         stopRequested = false
         add(turn)

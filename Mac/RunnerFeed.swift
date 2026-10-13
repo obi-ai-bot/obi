@@ -114,6 +114,13 @@ final class RunnerFeed {
 
     /// The URL followed now, or nil before `start`.
     @ObservationIgnored private var url: String?
+    /// Settings › Runner says "This Mac" (#283): the runner is the login item on this Mac, at
+    /// `LocalRunner.url`, with its own token; this Mac's desk then plans and runs nothing itself.
+    private(set) var local = false
+    /// The local runner's token, read from its keychain item once it has started (Engine/LocalRunner.swift).
+    @ObservationIgnored private var token: String?
+    /// Settings › Runner changed which runner is followed, with whether it's the one on this Mac.
+    @ObservationIgnored var onFollow: (_ local: Bool) -> Void = { _ in }
     @ObservationIgnored private var loop: Task<Void, Never>?
     /// What each job's alert last said, or nil until the first list arrives: what the jobs already
     /// need when Oby starts isn't news.
@@ -125,16 +132,24 @@ final class RunnerFeed {
     /// other runner's, and is dropped.
     @ObservationIgnored private var runnerChanges = 0
 
-    var runner: Runner? { Self.runner(url ?? "") }
+    /// The runner followed, or nil: none is set, or the one on this Mac hasn't made its token yet.
+    var runner: Runner? { Self.runner(url ?? "", token: local ? token : nil, local: local) }
     var active: [Job] { jobs.filter(\.isActive) }
 
     /// "tetrix-lab": what the runner calls itself, or its URL's first name before it has answered.
+    /// The runner on this Mac is "This Mac".
     var name: String {
-        host ?? runner?.base.host()?.split(separator: ".").first.map(String.init) ?? "The runner"
+        if local { return "This Mac" }
+        return host ?? runner?.base.host()?.split(separator: ".").first.map(String.init) ?? "The runner"
     }
 
-    static func runner(_ url: String) -> Runner? {
-        URL(string: url.trimmingCharacters(in: .whitespaces)).flatMap { $0.host() == nil ? nil : Runner(base: $0) }
+    /// Settings › Runner's choice: true for the runner on this Mac (#283), false for a remote one at `runnerURL`.
+    static let thisMacKey = "runnerOnThisMac"
+
+    /// A runner at `url`; one on this Mac (`local`) only with its `token`, which every request carries.
+    static func runner(_ url: String, token: String? = nil, local: Bool = false) -> Runner? {
+        if local, token == nil { return nil }
+        return URL(string: url.trimmingCharacters(in: .whitespaces)).flatMap { $0.host() == nil ? nil : Runner(base: $0, token: token) }
     }
 
     init() {
@@ -165,18 +180,23 @@ final class RunnerFeed {
     }
 
     private func follow(again: Bool = false) {
-        let url = UserDefaults.standard.string(forKey: "runnerURL") ?? ""
-        guard again || url != self.url else { return }
+        let local = UserDefaults.standard.bool(forKey: Self.thisMacKey)
+        let url = local ? LocalRunner.url.absoluteString : UserDefaults.standard.string(forKey: "runnerURL") ?? ""
+        guard again || url != self.url || local != self.local else { return }
         let first = self.url == nil
-        if url != self.url { forget() }
+        let changed = url != self.url || local != self.local
+        if changed { forget() }
         self.url = url
+        self.local = local
+        token = nil
+        if changed { onFollow(local) }
         connection = .connecting
         loop?.cancel()
         loop = nil
-        guard let runner = Self.runner(url) else { return }
+        guard local || Self.runner(url) != nil else { return }
         loop = Task {
             if !first { try? await Task.sleep(for: .seconds(1)) }
-            await run(runner)
+            await run()
         }
     }
 
@@ -201,11 +221,17 @@ final class RunnerFeed {
     }
 
     /// Follows the runner's events and, once it's following, fetches the jobs and the inbox; after
-    /// any drop it tries again, waiting a little longer each time, up to half a minute.
-    private func run(_ runner: Runner) async {
+    /// any drop it tries again, waiting a little longer each time, up to half a minute. The runner
+    /// on this Mac is followed once its keychain token exists (it writes it when it first starts):
+    /// until then the line says so, and the next try reads it again.
+    private func run() async {
         var wait = 1.0
         while !Task.isCancelled {
             do {
+                if local, token == nil { token = LocalRunner.token() }
+                guard let runner else {
+                    throw RunnerError(message: "The runner on this Mac hasn't started yet: Oby follows it once it has (Settings › Runner).")
+                }
                 // Following first, then fetching: what changes in between waits in the stream and
                 // applies over what was fetched.
                 for try await event in runner.events() {
@@ -268,14 +294,45 @@ final class RunnerFeed {
     }
 
     /// Registers this Mac's publishing key, as the iPhone does on each connection. A runner whose
-    /// pairing is closed answers 403: Settings › Runner shows its line, with Try again.
+    /// pairing is closed answers 403: Settings › Runner shows its line, with Try again. The runner
+    /// on this Mac keeps its files under this user, so Oby opens its pairing itself first
+    /// (`touch $OBY_HOME/pairing`, Runner/Devices.swift).
     func register(_ runner: Runner? = nil) {
         guard let runner = runner ?? self.runner else { return }
+        if local {
+            let pairing = LocalRunner.home.appending(path: "pairing")
+            try? FileManager.default.createDirectory(at: LocalRunner.home, withIntermediateDirectories: true)
+            if !FileManager.default.createFile(atPath: pairing.path, contents: Data()) {
+                try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: pairing.path)
+            }
+        }
         Task {
             do { try await device.register(with: runner) } catch {
                 Logger.feed.error("registering this Mac failed: \(error.localizedDescription, privacy: .public)")
             }
         }
+    }
+
+    // MARK: Planning through the runner on this Mac (#283)
+
+    /// The runner's brain's answer to the user's words, as the island's and the window's cards
+    /// show it (`Desk.planElsewhere`): the drafts are its, and Dispatch sends them back to it.
+    func plan(_ said: String, answer: (question: String, option: String)?, attachments: [String] = []) async throws -> Desk.Talk {
+        guard let runner else { throw RunnerError(message: "The runner on this Mac isn't running yet.") }
+        switch try await runner.plan(said, answer: answer, attachments: attachments) {
+        case .question(let said, let question):
+            return .question(said: said, Plan.Question(text: question.text, options: question.options, details: question.details,
+                                                       recommended: question.recommended, plan: question.plan))
+        case .reply(let text, let started):
+            for job in started { apply(job) }
+            return .reply(text)
+        case .none: return .none
+        }
+    }
+
+    /// Cancels a plan still running on the local runner.
+    func cancelPlan() async {
+        await runner?.cancelPlan()
     }
 
     /// The runner's exact sentence for publishing a job: Publish shows it, and Touch ID approves it.

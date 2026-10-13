@@ -1047,6 +1047,20 @@ nonisolated enum Attachments {
         return copied.isEmpty ? nil : copied
     }
 
+    /// The paths a dispatch may attach: files in the app's attachments folder (`LocalRunner.attachments`),
+    /// where the tray keeps them. The runner's API takes paths on its machine, so any other (a key,
+    /// a login file) is refused: the agent would read it.
+    static func validated(_ paths: [String], in folder: URL = LocalRunner.attachments) throws -> [String] {
+        let root = folder.resolvingSymlinksInPath().standardizedFileURL.path
+        for path in paths {
+            let file = URL(filePath: path).resolvingSymlinksInPath().standardizedFileURL.path
+            guard file.hasPrefix(root + "/") else {
+                throw Shell.Failure(message: "\(URL(filePath: path).lastPathComponent) isn't one of the files the Oby app attached, so it isn't handed to the agent.")
+            }
+        }
+        return paths
+    }
+
     /// Where the agent finds them, like ".oby/inputs/screenshot-1a2b3c.png".
     static func inputs(_ job: Job) -> [String] {
         (job.attachments ?? []).map { ".oby/inputs/" + URL(filePath: $0).lastPathComponent }

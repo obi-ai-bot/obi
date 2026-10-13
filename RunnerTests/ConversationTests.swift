@@ -429,6 +429,30 @@ struct ConversationTests {
         #expect(store().conversation().map(\.text) == ["quick one", "Quick."])
     }
 
+    @Test func replacingARunnerPlanCancelsTheRunnerBeforeTheOldRequest() async throws {
+        final class Events { var values: [String] = [] }
+        let events = Events()
+        desk.plansElsewhere = { true }
+        desk.cancelElsewhere = { events.values.append("cancel") }
+        desk.planElsewhere = { said, _ in
+            if said == "first" {
+                events.values.append("first started")
+                try? await Task.sleep(for: .seconds(1))
+                events.values.append("first finished")
+            } else {
+                events.values.append("second planned")
+            }
+            return .reply("done")
+        }
+
+        desk.ask("first")
+        try await until("the first runner request starts") { desk.talk == .thinking("first") && !events.values.isEmpty }
+        desk.ask("second")
+        try await until("the replacement finishes") { events.values.contains("second planned") }
+
+        #expect(events.values == ["first started", "cancel", "first finished", "second planned"])
+    }
+
     @Test func neverMindAndStopEndTheTurnAndStopNoJob() async throws {
         brain.slow = { $0.contains("slow one") ? .milliseconds(300) : .zero }
         desk.ask("slow one")
