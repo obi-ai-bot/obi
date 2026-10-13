@@ -90,7 +90,9 @@ struct NoDispatchCardTests {
         // in time", and the plan, when the files come, starts nothing.
         gate.reading = false
         gate.open = false
-        desk.patience = .seconds(1)
+        // Leave enough time for the test host to observe the blocked read before the timeout;
+        // the Mac check can schedule this actor for longer than a one-second window.
+        desk.patience = .seconds(3)
         desk.ask("fix oby #12")
         try await until("the files are being read again") { gate.reading }
         #expect(desk.talk == .thinking("fix oby #12"))
