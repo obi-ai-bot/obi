@@ -612,9 +612,9 @@ struct SandboxTests {
         #expect(!argv.contains { $0.hasPrefix("\(root)/apns") || $0.hasPrefix("\(root)/accounts/other") })
         // Commits work; what Oby's own git reads later doesn't change.
         #expect(at("--ro-bind", "\(worktree.path)/.git", "\(worktree.path)/.git", in: argv) != nil)
-        let copy = try #require(at("--overlay-src", common, "--tmp-overlay", common, in: argv))
-        for kept in ["objects", "refs", "logs", "packed-refs"] {
-            #expect(try #require(at("--bind-try", "\(common)/\(kept)", "\(common)/\(kept)", in: argv)) > copy)
+        let shared = try #require(at("--ro-bind", common, common, in: argv))
+        for kept in ["objects", "refs", "logs"] {
+            #expect(try #require(at("--bind-try", "\(common)/\(kept)", "\(common)/\(kept)", in: argv)) > shared)
         }
         #expect(at("--bind", admin, admin, in: argv) != nil && at("--ro-bind", "\(admin)/commondir", "\(admin)/commondir", in: argv) != nil)
     }

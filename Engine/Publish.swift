@@ -81,8 +81,15 @@ nonisolated enum Publish {
         let defaultBranch = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).map { String($0.dropFirst("origin/".count)) }
         if let refusal = refusal(job, base: base, defaultBranch: defaultBranch) { throw Shell.Failure(message: refusal) }
         // One commit from here on, so nothing added after the scan gets pushed.
-        guard let head = await git(["rev-parse", "--verify", "HEAD^{commit}"]) else {
+        let branchRef = "refs/heads/\(job.branch)"
+        guard let head = await git(["rev-parse", "--verify", "\(branchRef)^{commit}"]) else {
             throw Shell.Failure(message: "Not published: can't read \(job.branch) in the job's worktree.")
+        }
+        guard let ancestry = await git(["rev-list", "--parents", "-n", "1", head]) else {
+            throw Shell.Failure(message: "Not published: can't read the history of \(job.branch).")
+        }
+        if ancestry.split(whereSeparator: \.isWhitespace).count == 1 {
+            throw Shell.Failure(message: "Not published: the head commit on \(job.branch) has no parent.")
         }
         if await git(["rev-list", "--count", "refs/remotes/origin/\(base)..\(head)"]) == "0" {
             throw Shell.Failure(message: "Nothing to publish: \(job.branch) has no commits that aren't on \(base).")
@@ -644,7 +651,7 @@ nonisolated enum Publish {
     static func fetch(_ base: String, of job: Job, into worktree: URL, from remote: String? = nil) async throws {
         let result = try await fetching(into: worktree) {
             try await Shell.run(
-                toGitHub + ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no",
+                toGitHub + ["-c", "gc.auto=0", "fetch", "--quiet", "--no-tags", "--recurse-submodules=no",
                             remote ?? github(job), "+refs/heads/\(base):refs/remotes/origin/\(base)"],
                 in: worktree, env: ["GIT_TERMINAL_PROMPT": "0"], timeout: 120)
         }
@@ -676,7 +683,7 @@ nonisolated enum Publish {
     /// `git fetch` with `arguments` into `clone` (or a worktree of it), through `fetching`. Throws
     /// with the last thing git said when it fails.
     static func gitFetch(_ arguments: [String], into clone: URL) async throws {
-        let result = try await fetching(into: clone) { try await Shell.run(["git", "-C", clone.path, "fetch"] + arguments) }
+        let result = try await fetching(into: clone) { try await Shell.run(["git", "-C", clone.path, "-c", "gc.auto=0", "fetch"] + arguments) }
         guard result.status == 0 else {
             throw Shell.Failure(message: "git fetch: \(result.err.split(separator: "\n").last.map(String.init) ?? "exit \(result.status)")")
         }
