@@ -151,9 +151,12 @@ final class API {
             try await self.checkResult(context.parameters.require("id"), try await Self.decode(MacCheck.Report.self, from: request))
         }
         router.post("v1/devices") { request, _ in try await self.register(try await Self.decode(NewDevice.self, from: request)) }
-        router.post("v1/pairing/open") { _, _ in try await self.openPairing() }
+        // Pairing is opened only by Oby on this Mac, through its local runner token. The
+        // tailnet owner header is also available to agents on Linux and is not sufficient.
+        if case .local = access {
+            router.post("v1/pairing/open") { _, _ in try await self.openPairing() }
+        }
         router.post("v1/pairing") { request, _ in try await self.pair(try await Self.decode(NewDevice.self, from: request)) }
-        router.get("v1/e2e") { _, _ in Self.json(["publicKey": await self.gatewayPublicKey()]) }
         router.post("v1/activities") { request, _ in try await self.activity(try await Self.decode(Push.Token.self, from: request)) }
         router.post("v1/notifications") { request, _ in try await self.notifications(try await Self.decode(NotificationToken.self, from: request)) }
         router.get("v1/settings/models") { _, _ in Self.json(Models.current) }

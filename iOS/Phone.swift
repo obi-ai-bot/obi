@@ -575,15 +575,6 @@ final class Phone {
         link = MacLink(name: qr.name, hostname: hostname, deviceID: answer.id, publicKey: qr.gatewayPublicKey)
     }
 
-    /// Temporary typed pairing for Macs whose QR is not available yet. QR pairing supplies the
-    /// expected key through the overload above; this path still pins the key returned by the
-    /// authenticated bootstrap response and never fetches it through the tunnel afterward.
-    func pair(name: String, hostname: String, pairingSecret: String) async throws {
-        guard let hostname = MacLink.hostname(from: hostname) else { throw RunnerError(message: "That hostname is invalid.") }
-        let answer = try await Runner(base: URL(string: "https://\(hostname)")!).pair(
-            name: "iPhone", publicKey: try DeviceKey.publicKey(), pairingSecret: pairingSecret)
-        link = MacLink(name: name, hostname: hostname, deviceID: answer.id, publicKey: answer.publicKey)
-    }
 }
 
 extension Logger {

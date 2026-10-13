@@ -302,7 +302,10 @@ final class RunnerFeed {
     func register(_ runner: Runner? = nil) {
         guard let runner = runner ?? self.runner else { return }
         Task {
-            do { try await device.register(with: runner) } catch {
+            do {
+                if local { _ = try await runner.openPairing() }
+                try await device.register(with: runner)
+            } catch {
                 Logger.feed.error("registering this Mac failed: \(error.localizedDescription, privacy: .public)")
             }
         }

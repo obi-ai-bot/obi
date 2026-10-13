@@ -967,17 +967,6 @@ nonisolated struct Runner: Sendable {
     }
     #endif
 
-    /// The gateway key used to complete a Mac pairing. This is public key material, but it is
-    /// pinned in the link so a later route cannot silently switch gateways.
-    func e2ePublicKey() async throws -> Data {
-        struct Answer: Decodable { var publicKey: String }
-        let answer: Answer = try await call("GET", "v1/e2e")
-        guard let key = Data(base64Encoded: answer.publicKey), key.count == 32 else {
-            throw RunnerError(message: "The runner returned no valid E2E gateway key.")
-        }
-        return key
-    }
-
     #if os(macOS)
     /// The next check for this Mac to run, now this Mac's, or nil when none waits: merge checks,
     /// Apple checks agents asked for (Engine/AppleChecks.swift), or both.

@@ -212,6 +212,28 @@ final class APITests {
         }
     }
 
+    @Test func pairingOpeningIsLocalOnly() async throws {
+        api.gateway = Gateway()
+        let tailnet = Application(router: api.router(owner: "well@example.com"))
+        try await tailnet.test(.router) { [owner] client in
+            try await client.execute(uri: "/v1/pairing/open", method: .post, headers: owner) { response in
+                #expect(response.status == .notFound)
+            }
+        }
+
+        let local = Application(router: api.router(access: .local(token: "local-token")))
+        try await local.test(.router) { client in
+            try await client.execute(uri: "/v1/pairing/open", method: .post) { response in
+                #expect(response.status == .unauthorized)
+            }
+            try await client.execute(uri: "/v1/pairing/open", method: .post,
+                                     headers: [.authorization: "Bearer local-token"]) { response in
+                #expect(response.status == .ok)
+                #expect(!Data(response.body.readableBytesView).isEmpty)
+            }
+        }
+    }
+
     @Test func statusAnswersTheOwner() async throws {
         let app = Application(router: api.router(owner: "well@example.com"))
         try await app.test(.router) { [owner] client in

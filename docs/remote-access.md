@@ -73,7 +73,7 @@ Every answer is JSON; an error is `{"error": "one line to show"}` with its statu
 
 ## On the iPhone
 
-Settings › Your Mac (`iOS/ConnectScreen.swift`) links the Mac: its name (as Sharing settings call it) and its hostname. Pairing by QR code comes with the gateway (#284) and carries the same two fields (`MacLink`'s JSON, `{"name", "hostname"}`); until then they're typed. Linked, the iPhone talks to the Mac instead of the runner's address:
+Settings › Your Mac (`iOS/ConnectScreen.swift`) links the Mac by scanning the pairing QR from the Mac. It carries the name, hostname, one-time pairing secret and pinned gateway key. Linked, the iPhone talks to the Mac instead of the runner's address:
 
 - **At home,** it looks for the Mac's gateway with Bonjour (`_oby._tcp`, the service named after the Mac), resolves its address and talks to it on the local network. `iOS/Info.plist` declares the service and the local-network use.
 - **Away,** it goes through the tunnel, `https://<hostname>`.

@@ -1,16 +1,15 @@
 import Network
 import Observation
 import SwiftUI
+import VisionKit
 
 /// Settings › Your Mac (#285): how this iPhone reaches the Mac, at home over the local network
 /// and away through the Mac's tunnel (Shared/RemoteRoute.swift). Until pairing (#284) hands the
-/// hostname over in a QR code, it's typed here from the Mac's Settings › Remote access.
+/// hostname, one-time secret and gateway key over the Mac's pairing QR code.
 struct ConnectScreen: View {
     @Environment(Phone.self) private var phone
-    @State private var name = ""
-    @State private var hostname = ""
-    @State private var pairingSecret = ""
     @State private var problem: String?
+    @State private var scanning = false
 
     var body: some View {
         Form {
@@ -24,51 +23,67 @@ struct ConnectScreen: View {
                 } else {
                     Text("No Mac linked yet: Oby talks to the runner at the address in Settings.")
                         .foregroundStyle(.secondary)
+                    Button("Scan Mac pairing QR") { scanning = true }
+                    if let problem { Text(problem).foregroundStyle(.red) }
                 }
             } header: {
                 Text("Your Mac")
             } footer: {
                 Text("At home, Oby finds your Mac on the local network and talks to it directly. Away, it goes through the Mac's own Cloudflare Tunnel, at the hostname the Mac's Settings › Remote access shows. Nothing to open on your router.")
             }
-            Section {
-                TextField("Mac's name", text: $name, prompt: Text("As Sharing settings name it"))
-                TextField("Hostname", text: $hostname, prompt: Text("oby-….tetrix.pro"))
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .onSubmit(link)
-                SecureField("Pairing secret", text: $pairingSecret)
-                Button("Link") { link() }
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || hostname.trimmingCharacters(in: .whitespaces).isEmpty)
-                if let problem { Text(problem).foregroundStyle(.red) }
-            } header: {
-                Text("Link by hand")
-            } footer: {
-                Text("Pairing by QR code comes with the Mac's gateway. Until then, type what the Mac's Settings › Remote access shows.")
-            }
         }
         .navigationTitle("Your Mac")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear {
-            name = phone.link?.name ?? ""
-            hostname = phone.link?.hostname ?? ""
-        }
+        .sheet(isPresented: $scanning) { PairingQRScanner { text in scan(text) } }
     }
 
-    private func link() {
-        guard let host = MacLink.hostname(from: hostname) else {
-            problem = "The hostname looks like oby-….tetrix.pro, as the Mac's Settings › Remote access shows it."
-            return
-        }
-        let name = name.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else {
-            problem = "The Mac's name is what its Sharing settings call it."
-            return
-        }
-        problem = nil
+    private func scan(_ text: String) {
+        scanning = false
         Task { @MainActor in
-            do { try await phone.pair(name: name, hostname: host, pairingSecret: pairingSecret) }
+            do {
+                let qr = try JSONDecoder().decode(PairingQR.self, from: Data(text.utf8))
+                try await phone.pair(qr)
+                problem = nil
+            }
             catch { problem = error.localizedDescription }
+        }
+    }
+}
+
+/// The Mac QR contains the hostname, one-time secret and the gateway key. Decode it on the
+/// phone and let Phone.pair pin the key before saving the link.
+private struct PairingQRScanner: UIViewControllerRepresentable {
+    let found: (String) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(found: found) }
+
+    func makeUIViewController(context: Context) -> DataScannerViewController {
+        let scanner = DataScannerViewController(recognizedDataTypes: [.barcode(symbologies: [.qr])],
+                                                qualityLevel: .accurate,
+                                                recognizesMultipleItems: false,
+                                                isHighFrameRateTrackingEnabled: false,
+                                                isPinchToZoomEnabled: true,
+                                                isGuidanceEnabled: true,
+                                                isHighlightingEnabled: true)
+        scanner.delegate = context.coordinator
+        try? scanner.startScanning()
+        return scanner
+    }
+
+    func updateUIViewController(_ scanner: DataScannerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, DataScannerViewControllerDelegate {
+        let found: (String) -> Void
+        private var didFind = false
+
+        init(found: @escaping (String) -> Void) { self.found = found }
+
+        func dataScanner(_ dataScanner: DataScannerViewController, didTapOn item: RecognizedItem) {
+            guard !didFind, case .barcode(let barcode) = item,
+                  let text = barcode.payloadStringValue else { return }
+            didFind = true
+            dataScanner.stopScanning()
+            found(text)
         }
     }
 }

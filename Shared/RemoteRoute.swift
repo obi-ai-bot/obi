@@ -2,8 +2,7 @@ import Foundation
 
 /// How the iPhone reaches its Mac (#285): straight to the gateway (#284) on the home network,
 /// where Bonjour finds it, and through the Mac's Cloudflare Tunnel from anywhere else. The
-/// hostname comes with pairing (the QR code of #284 carries this link's JSON); until pairing
-/// exists, Settings takes it typed.
+/// hostname comes with pairing (the QR code of #284 carries this link's JSON).
 nonisolated struct MacLink: Codable, Equatable, Sendable {
     /// What the Mac calls itself, as its Bonjour service is named.
     var name: String

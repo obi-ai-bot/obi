@@ -880,13 +880,15 @@ For `oby-check apple` in an agent's sandbox, with `Authorization: Bearer <its jo
 
 ### `POST /v1/pairing/open`
 
-The owner-only route opens pairing. It returns `{"secret":"…","publicKey":"…"}`. The secret is
+The Mac app's local runner route opens pairing. It returns `{"secret":"…","publicKey":"…"}`.
+The route is available only with the Mac runner's local bearer token; the tailnet owner header is
+not accepted because agents on Linux can send it to the runner's loopback port. The secret is
 stored in `OBY_HOME/pairing` and is deleted after the next successful registration. An empty or
 user-created `pairing` file cannot open pairing.
 
 ### `POST /v1/pairing`
 
-The gateway's one cleartext bootstrap route. It is usable only while the owner has opened the
+The gateway's one cleartext bootstrap route. It is usable only while the Mac app has opened the
 pairing window with `POST /v1/pairing/open`. The device sends the same P-256 publishing key and
 its X25519 key as registration, plus `e2eProof`: an ECDSA signature over
 `oby-e2e-register\n<publicKey>\n<e2ePublicKey>`. The response contains the device id and the gateway's
