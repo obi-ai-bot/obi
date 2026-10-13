@@ -9,7 +9,11 @@ struct PublishOnItsOwnTests {
     /// An agent whose events the test sends.
     final class Agent: AgentRun {
         var onEvent: (AgentEvent) -> Void = { _ in }
-        func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws { self.onEvent = onEvent }
+        var onStart: (String) -> Void = { _ in }
+        func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
+            self.onEvent = onEvent
+            self.onStart(prompt)
+        }
         func send(_ text: String) {}
         func end() {}
         func stop() {}
@@ -32,7 +36,7 @@ struct PublishOnItsOwnTests {
 
     /// Runs a fix job on issue 75 to its end: the agent says `summary`, the worktree has `commits`,
     /// and publishing does `publish`.
-    func run(_ id: String, commits: Int?, failed: Bool = false, summary: String = "fix(engine): open the PR by itself",
+    func run(_ id: String, commits: Int?, rounds: Int? = nil, failed: Bool = false, summary: String = "fix(engine): open the PR by itself",
              publish: @escaping (Job) async throws -> URL) async throws -> Job {
         desk.countCommits = { _, _ in commits }
         desk.publishOnItsOwn = { [published] job, _, _ in
@@ -46,6 +50,7 @@ struct PublishOnItsOwnTests {
         job.issue = 75
         job.base = "dev"
         job.branch = "oby/fix-75"
+        job.rounds = rounds
         desk.dispatch(job)
         for _ in 0..<500 where desk.job(id)?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
         agent.onEvent(.session("e6a24229"))
@@ -73,6 +78,35 @@ struct PublishOnItsOwnTests {
         #expect(Push.notice(for: ended) == .failed)
         #expect(ended.phase == .publish)
         #expect(ended.pipeline.stages.first { $0.id == .publish }?.state == .failed)
+    }
+
+    @Test func aPossibleSecretGetsAnAgentFixRound() async throws {
+        var prompts: [String] = []
+        var resumes: [String?] = []
+        desk.makeAgent = { [agent] _, _, resume in
+            resumes.append(resume)
+            return agent
+        }
+        agent.onStart = { [agent] prompt in
+            prompts.append(prompt)
+            guard prompts.count == 2 else { return }
+            agent.onEvent(.session("e6a24229-fix"))
+            agent.onEvent(.turnEnded(summary: "fix(test): remove the secret-like fixture", failed: false))
+            agent.onEvent(.finished(summary: "fix(test): remove the secret-like fixture", failed: false))
+        }
+        var publishes = 0
+        let ended = try await run("secret-fix", commits: 2, rounds: 2) { _ in
+            publishes += 1
+            if publishes == 1 {
+                throw Publish.Blocked(findings: [Publish.Finding(file: "RunnerTests/GatewayTests.swift", line: 129, rule: "password or secret")])
+            }
+            return URL(string: "https://github.com/deskree-inc/oby/pull/82")!
+        }
+        #expect(prompts.count == 2 && prompts.last?.contains("RunnerTests/GatewayTests.swift:129") == true)
+        #expect(resumes == [nil, "e6a24229"])
+        #expect(publishes == 2)
+        #expect(ended.status == .done && ended.published == "https://github.com/deskree-inc/oby/pull/82")
+        #expect(ended.summaries == ["fix(engine): open the PR by itself", "fix(test): remove the secret-like fixture"])
     }
 
     @Test func anyOtherFailureLeavesPublishByHand() async throws {
