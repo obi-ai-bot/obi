@@ -474,7 +474,7 @@ struct ThinkingLine: View {
                 ForEach(0..<3) { _ in Circle().fill(OBYStyle.tertiary).frame(width: 4, height: 4) }
             }.accessibilityHidden(true)
             Text(working ? "Working" : "Thinking").font(OBYStyle.small).foregroundStyle(OBYStyle.tertiary)
-            Button("Stop", action: onStop).buttonStyle(.plain).font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
+            StopButton(action: onStop)
             if let problem {
                 Text(problem).font(OBYStyle.caption).foregroundStyle(.orange)
             }

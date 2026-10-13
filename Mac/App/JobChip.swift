@@ -1,5 +1,27 @@
 import SwiftUI
 
+struct StopButton: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "stop.fill")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(hovering ? OBYStyle.primary : OBYStyle.secondary)
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(hovering ? OBYStyle.primary : OBYStyle.secondary, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help("Stop")
+        .accessibilityLabel("Stop job")
+        .onHover { hovering = $0 }
+    }
+}
+
 /// One compact job component in the transcript, Live and notch.
 struct JobChip: View {
     let job: Job
@@ -26,7 +48,7 @@ struct JobChip: View {
             }
             .buttonStyle(.plain)
             if hovering {
-                if job.isActive, let onStop { Button("Stop", action: onStop).buttonStyle(.plain) }
+                if job.isActive, let onStop { StopButton(action: onStop) }
                 else if let pr = job.pr, let url = URL(string: "https://github.com/\(job.repo)/pull/\(pr)") {
                     Button("Open PR") { openURL(url) }.buttonStyle(.plain)
                 }
