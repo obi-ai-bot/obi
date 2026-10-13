@@ -179,7 +179,7 @@ struct ConnectionTests {
         // Whether a text holds a vault secret, plain or encoded.
         let known = try vault.leaks()
         let leaks: @Sendable (String) -> Bool = { !known.hits(in: $0).isEmpty }
-        let drafts = ["mailjob1", "mailjob2"].map { Desk.Draft(said: "summarize my mail", reply: "", job: work($0), guessed: false) }
+        let jobs = ["mailjob1", "mailjob2"].map(work)
 
         try await fake.test(.live) { server in
             let port = try #require(server.port)
@@ -226,7 +226,7 @@ struct ConnectionTests {
                 #expect(!(leaks(listed.text)) && listed.text.contains(#""lastUsed":null"#))
 
                 // MARK: Two jobs, each with a token of its own.
-                await MainActor.run { for draft in drafts { desk.dispatch(draft) } }
+                await MainActor.run { for job in jobs { desk.dispatch(job) } }
                 try await until("both jobs run") { desk.job("mailjob1")?.status == .running && desk.job("mailjob2")?.status == .running }
                 let first = try #require(await MainActor.run { made.mcp["mailjob1"] })
                 let second = try #require(await MainActor.run { made.mcp["mailjob2"] })
