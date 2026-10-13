@@ -35,7 +35,9 @@ struct NoDispatchCardTests {
         desk.makeBrain = { [brain] _, _ in [brain] }
     }
 
-    func until(_ what: String, tries: Int = 500, _ condition: () -> Bool) async throws {
+    func until(_ what: String, tries: Int = 2000, _ condition: () -> Bool) async throws {
+        // MacTests can run alongside the runner suite; allow its main actor to observe the
+        // deliberately blocked read even when the host is busy.
         for _ in 0..<tries where !condition() { try await Task.sleep(for: .milliseconds(10)) }
         #expect(condition(), Comment(rawValue: what))
     }
@@ -94,6 +96,7 @@ struct NoDispatchCardTests {
         // (the whole suite, a Mac check) it took over 3 seconds, the turn gave up first, and the
         // read never came.
         desk.patience = .seconds(8)
+        brain.plans = [Self.fix12]
         desk.ask("fix oby #12")
         try await until("the files are being read again") { gate.reading }
         #expect(desk.talk == .thinking("fix oby #12"))
@@ -101,13 +104,10 @@ struct NoDispatchCardTests {
         gate.open = true
         try await Task.sleep(for: .milliseconds(100))
         #expect(desk.jobs.isEmpty && desk.inbox.isEmpty && desk.turns.count == 2 && desk.turns.last?.jobs == nil)
-        // A guess that comes late asks nothing either.
+        // A rules-only acting guess is refused before it can start anything.
         brain.plans = ["not a plan"]
-        gate.reading = false
-        gate.open = false
         desk.ask("fix oby #12")
-        try await until("the files are being read for the guess") { gate.reading }
-        try await until("the turn gives up again", tries: 1200) { desk.turns.count == 4 && desk.talk == .reply(Conversation.timedOut) }
+        try await until("the rules guess is refused") { desk.talk == .reply("Oby couldn't think that through: say it again") }
         gate.open = true
         try await Task.sleep(for: .milliseconds(100))
         #expect(desk.jobs.isEmpty && desk.inbox.isEmpty)
@@ -138,39 +138,13 @@ struct NoDispatchCardTests {
         }
     }
 
-    /// When no brain answers, rules guess: the reply says so, nothing starts, and each guessed job
-    /// waits in the inbox with Start (recommended) and Cancel. Start queues it as planned and adds
-    /// Oby's turn with its card; Cancel drops it; other words are refused.
+    /// When no brain answers, rules cannot guess an acting plan: the reply refuses it and nothing
+    /// starts or waits in the inbox.
     @Test func aRulesGuessAsksBeforeAnythingStarts() async throws {
         brain.plans = ["not a plan"]
         let talk = await desk.converse("fix oby #12")
-        #expect(talk == .reply("Oby's brain didn't answer, so this is a guess: Fix oby #12 on Claude Code · Default. Start it from your inbox, or say it another way."))
-        #expect(desk.jobs.isEmpty && desk.turns.last?.jobs == nil)
-        let item = try #require(desk.inbox.first)
-        #expect(item.kind == .start && item.isOpen && item.isDecision && item.options == ["Start", "Cancel"] && item.recommended == 0)
-        #expect(item.text == "Oby's brain didn't answer, so this plan is a guess. Start Fix oby #12 on Claude Code · Default?")
-        #expect(item.title == "Fix oby #12" && item.job == item.proposed?.id && item.proposed?.issue == 12 && item.proposed?.files == ["iOS/Home.swift"])
-        #expect(item.details?.count == 2 && item.id == "\(item.job)-start")
-        // Kept with the job, so Start works after a restart.
-        #expect(JobStore(url: folder.appending(path: "oby.sqlite")).inbox().first?.proposed?.id == item.job)
-
-        // Cancel: done, nothing started.
-        try desk.settle(item.id, .answer(Inbox.cancelStart))
-        #expect(desk.inbox.first?.isOpen == false && desk.inbox.first?.answer == "Cancel" && desk.jobs.isEmpty)
-
-        // Asked again: a new proposal. Only Start or Cancel answer it.
-        _ = await desk.converse("fix oby #12")
-        let open = desk.inbox.filter(\.isOpen)
-        let again = try #require(open.last)
-        #expect(again.id != item.id)
-        #expect(throws: Shell.Failure.self) { try desk.settle(again.id, .answer("Yes")) }
-        #expect(desk.jobs.isEmpty)
-        try desk.settle(again.id, .answer(Inbox.start))
-        let job = try #require(desk.jobs.first)
-        #expect(job.id == again.proposed?.id && job.issue == 12 && job.account == "default")
-        #expect(desk.inbox.last?.isOpen == false && desk.inbox.last?.answer == "Start")
-        #expect(desk.turns.last?.who == .oby && desk.turns.last?.jobs == [job.id] && desk.turns.last?.text == "On it. Claude Code is fixing oby #12 on Default.")
-        try await until("it runs") { desk.job(job.id)?.status == .running }
+        #expect(talk == .reply("Oby couldn't think that through: say it again"))
+        #expect(desk.jobs.isEmpty && desk.inbox.isEmpty && desk.turns.last?.jobs == nil)
     }
 
     /// `POST /v1/plans` answers the jobs it started, in full, with `drafts` empty; `POST /v1/jobs`

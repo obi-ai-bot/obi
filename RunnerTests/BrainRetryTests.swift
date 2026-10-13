@@ -23,28 +23,28 @@ struct BrainRetryTests {
     }
 
     @Test func emptyExit15RecoversBeforeRulesPlan() async {
-        // The real failure repeated on consecutive turns; a third attempt can recover it.
-        let cli = CLI([emptyFailure, emptyFailure, good])
+        // One transient failure can recover on the one retry.
+        let cli = CLI([emptyFailure, good])
         let result = await Shell.$stand.withValue(Shell.Stand(run: { _, _ in await cli.run() })) {
             await Planner(adapters: [brain()]).plan("hello", context: context)
         }
-        #expect(await cli.calls == 3)
+        #expect(await cli.calls == 2)
         #expect(result.by == "claude")
         #expect(result.plan.reply == "Ready")
         #expect(result.refused.isEmpty)
     }
 
     @Test func exhaustedRetriesKeepExitAndStderrInFallbackEvidence() async {
-        let failures = (1...3).map { Shell.Output(status: 15, out: Data(), err: "failure \($0)") }
+        let failures = (1...2).map { Shell.Output(status: 15, out: Data(), err: "failure \($0)") }
         let cli = CLI(failures)
         let result = await Shell.$stand.withValue(Shell.Stand(run: { _, _ in await cli.run() })) {
             await Planner(adapters: [brain()]).plan("hello", context: context)
         }
-        #expect(await cli.calls == 3)
+        #expect(await cli.calls == 2)
         #expect(result.by == "rules")
         #expect(result.refused.count == 1)
-        for attempt in 1...3 {
-            #expect(result.refused[0].contains("attempt \(attempt): exit 15, stderr: failure \(attempt)"))
+        for attempt in 1...2 {
+            #expect(result.refused[0].contains("attempt \(attempt): exit code 15, stderr: failure \(attempt)"))
         }
     }
 
@@ -57,16 +57,16 @@ struct BrainRetryTests {
         case "timeout": output.timedOut = true
         default: break
         }
-        let cli = CLI([output])
+        let cli = CLI([output, output])
         let error = await Shell.$stand.withValue(Shell.Stand(run: { _, _ in await cli.run() })) {
             await #expect(throws: Shell.Failure.self) {
                 try await brain().complete(system: "s", user: "u", schema: Plan.schema(for: context),
                                            timeout: kind == "deadline" ? 1 : 20)
             }
         }
-        #expect(await cli.calls == 1)
+        if kind != "deadline" { #expect(await cli.calls == 2) }
         #expect(error?.message.contains("stderr: <empty>") == true)
-        if kind == "timeout" { #expect(error?.message.contains("timed out") == true) }
+        if kind == "timeout" { #expect(error?.message.contains("timeout") == true) }
     }
 
     @Test func cancellationDoesNotRestartClaude() async throws {

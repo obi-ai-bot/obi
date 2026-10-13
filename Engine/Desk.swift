@@ -684,6 +684,8 @@ final class Desk {
             // A runner stop is checked before asking the brain for another action. Mac turns use
             // `live` to discard a late plan, but still let that plan finish so its answer is logged.
             if stopRequested { return done.isEmpty ? .none : .reply(done.joined(separator: " ")) }
+            context.turnStep = step
+            context.turnLength = said.count
             var result = await Planner(adapters: makeBrain(thinker?.home, vault)).plan(request, context: context)
             guard live() else {
                 result.refused.append("the turn was cancelled before the plan came: nothing done")
@@ -691,6 +693,7 @@ final class Desk {
                 return done.isEmpty ? .none : .reply(done.joined(separator: " "))
             }
             record(BrainTurn(said: request, by: result.by, plan: result.plan, refused: result.refused))
+            if let refusal = BrainSafety.rulesActingRefusal(for: result, step: step) { return .reply(refusal) }
             // Rules only stand in for the brain on the user's own words: a later step they planned is a guess.
             if step > 0, result.by == "rules" { break }
             // The chat reads before it answers (#302): what's read is in the next step's quoted file.
