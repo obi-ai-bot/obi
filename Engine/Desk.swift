@@ -130,6 +130,7 @@ final class Desk {
     private var orchestratorEvents: [OrchestratorEvent] = []
     private var orchestratorWake: Task<Void, Never>?
     private var orchestratorRunning = false
+    private var orchestratorPreempted = false
     private var orchestratorHour: Date?
     private var orchestratorTurnsThisHour = 0
     private var orchestratorActions: [String: [Date]] = [:]
@@ -609,6 +610,7 @@ final class Desk {
         let said = words.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !said.isEmpty else { return }
         if Conversation.cancels(said) { return cancel() }
+        if orchestratorRunning { orchestratorPreempted = true }
         let replacing = plansElsewhere() ? planning : nil
         drop()
         asking += 1
@@ -698,6 +700,7 @@ final class Desk {
         orchestratorEvents.removeAll()
         orchestratorTurnsThisHour += 1
         orchestratorRunning = true
+        orchestratorPreempted = false
         orchestrating = true
         orchestratorJobIDs = Set(events.map(\.job).filter { !$0.isEmpty })
         currentOrchestratorEvents = events
@@ -714,10 +717,18 @@ final class Desk {
                 let summary = batch.map { event in
                     "- \(event.kind): job=\(event.job.isEmpty ? "none" : event.job), item=\(event.item ?? "none"), evidence=\(event.evidence.joined(separator: ", ")). Summary: \(event.summary)"
                 }.joined(separator: "\n")
-                let talk = await self.plan("", orchestratorContext: "\(policy)\n\nEvents:\n\(summary)", live: {
-                    self.conversationTurn == eventTurn && self.pending == nil && !self.stopRequested
-                })
+                let eventPlanIsLive = {
+                    self.conversationTurn == eventTurn && self.pending == nil && !self.stopRequested && !self.orchestratorPreempted
+                }
+                let talk = await self.plan("", orchestratorContext: "\(policy)\n\nEvents:\n\(summary)", live: eventPlanIsLive)
                 if let reply = Self.reply(in: talk), !reply.isEmpty { replies.append(reply) }
+                guard eventPlanIsLive() else {
+                    // `ask` and `stopConversation` can cancel a Mac event plan without changing
+                    // conversationTurn. Retain its batch even when no newer events arrived.
+                    self.orchestratorEvents.insert(contentsOf: batch, at: 0)
+                    batch = []
+                    break
+                }
                 if self.conversationTurn == eventTurn {
                     batch = self.orchestratorEvents
                     self.orchestratorEvents.removeAll()
@@ -729,12 +740,16 @@ final class Desk {
                 self.orchestratorEvents.insert(contentsOf: batch, at: 0)
             }
             if !replies.isEmpty { addReply(replies.joined(separator: " ")) }
-            if conversationTurn == eventTurn { conversationTurn = nil }
+            if conversationTurn == eventTurn {
+                conversationTurn = nil
+                if pending == nil { stopRequested = false }
+            }
             orchestrating = false
             orchestratorTurnID = nil
             orchestratorJobIDs.removeAll()
             currentOrchestratorEvents = []
             orchestratorRunning = false
+            orchestratorPreempted = false
             if !orchestratorEvents.isEmpty, orchestratorWake == nil {
                 orchestratorWake = Task { [weak self] in
                     try? await Task.sleep(for: .seconds(30))
@@ -767,6 +782,7 @@ final class Desk {
     /// Drops the turn under way: its words leave the thread, and its answer, when it comes, is
     /// ignored. Work the plan started already goes on: stop it by name.
     func cancel() {
+        if orchestratorRunning { orchestratorPreempted = true }
         drop()
         guard plansElsewhere() else { return }
         // Its request to the runner stops, and the runner is told, so its plan starts and stops nothing.
@@ -818,6 +834,7 @@ final class Desk {
     /// Ends the current conversation after its action finishes.
     func stopConversation() {
         guard conversationTurn != nil else { return }
+        if orchestratorRunning { orchestratorPreempted = true }
         stopRequested = true
     }
 
