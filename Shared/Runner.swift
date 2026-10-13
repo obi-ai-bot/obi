@@ -467,6 +467,13 @@ nonisolated struct RunnerStatus: Decodable, Equatable, Sendable {
     var clearedAt: Date?
     /// The default mode new jobs get, or nil from older runners.
     var permissions: Permissions?
+    var cleanup: Cleanup?
+
+    struct Cleanup: Codable, Equatable, Sendable {
+        var path: String
+        var bytes: Int64
+        var lastRun: Date?
+    }
 
     struct Permissions: Codable, Equatable, Sendable {
         var mode: String?

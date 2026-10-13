@@ -101,6 +101,7 @@ final class RunnerFeed {
     var down: Bool { if case .offline = connection { true } else { false } }
     /// The model and effort the runner's jobs use, as it last said (Settings › Models).
     private(set) var models: ModelSettings?
+    private(set) var cleanup: RunnerStatus.Cleanup?
     /// Merge checks this Mac runs for the runner (Settings › Runner, on by default).
     let checks = MacChecks()
     /// This Mac's Touch ID key, registered on every connection: with it, the runner's jobs publish from here.
@@ -223,6 +224,7 @@ final class RunnerFeed {
                         clearedAt = status.clearedAt
                         accounts = status.accounts
                         models = status.models
+                        cleanup = status.cleanup
                         defaultMode = RunnerMode(status.permissions?.mode)
                         self.extras = extras
                         await take(list, from: runner)

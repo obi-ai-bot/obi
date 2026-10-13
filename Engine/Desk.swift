@@ -219,6 +219,7 @@ final class Desk {
     /// Start queues it: its report then says so.
     private var routes: [String: String] = [:]
     var agents: [String: any AgentRun] = [:]
+    @ObservationIgnored let cleanup: WorktreeCleanup
     /// Each job's permission prompts waiting for the user, oldest first (Engine/Permissions.swift):
     /// the first is the job's `permission`, or its plan question.
     var asks: [String: [Desk.Ask]] = [:]
@@ -405,6 +406,7 @@ final class Desk {
     init(accounts: AccountStore = AccountStore(), store: JobStore = JobStore(url: Workspace.root.appending(path: "oby.sqlite")), restarts: Restarts? = nil) {
         self.accounts = accounts
         self.store = store
+        self.cleanup = WorktreeCleanup()
         self.restarts = restarts
         // ponytail: every job is read to find the outstanding ones; a column to query when there are many thousands.
         let all = store.recent(-1)
@@ -460,6 +462,18 @@ final class Desk {
         for job in jobs where job.reviewOf != nil && job.status == .interrupted { reviewEnded(job) }
         // What the jobs need now, the interrupted ones too.
         for job in jobs { syncInbox(job) }
+    }
+
+    var cleanupStatus: WorktreeCleanup.Status { cleanup.status }
+
+    func cleanWorktrees() async {
+        await cleanup.run(jobs: store.recent(-1)) { [weak self] id in
+            guard let self, let job = self.store.job(id) else { return true }
+            return job.isActive || self.agents[id] != nil || self.ending.contains(id) || self.finishing.contains(id)
+                || self.finishingChecks.contains(id) || self.cloudRecovering.contains(id) || self.setups[id] != nil
+                || self.afterTurns[id] != nil || self.committingRound.contains(id) || !self.wrappingUp.isEmpty
+                || [job.macCheck?.state, job.appleCheck?.state].contains(where: { $0 == .queued || $0 == .running })
+        }
     }
 
     var active: [Job] { jobs.filter(\.isActive) }

@@ -104,6 +104,10 @@ struct RunnerSettingsView: View {
             Section {
                 TextField("URL", text: $runnerURL, prompt: Text(Runner.defaultURL.absoluteString))
                 LabeledContent("Status", value: feed.runner == nil ? "Off" : feed.connection.status(host: feed.name))
+                if let cleanup = feed.cleanup {
+                    LabeledContent("Job worktrees", value: ByteCountFormatter.string(fromByteCount: cleanup.bytes, countStyle: .file))
+                    LabeledContent("Last cleanup", value: cleanup.lastRun.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never")
+                }
             } header: {
                 Text("Runner")
             } footer: {

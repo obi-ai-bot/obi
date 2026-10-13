@@ -74,6 +74,14 @@ desk.failureLog.enabled = true
 // Macs that follow the runner take its merge checks (Engine/Checks.swift), and the Apple checks
 // agents ask for with `oby-check apple` (Engine/AppleChecks.swift), which runs this executable.
 desk.queuesMacChecks = true
+Task {
+    await desk.cleanWorktrees()
+    while !Task.isCancelled {
+        do { try await Task.sleep(for: .seconds(3 * 60 * 60)) }
+        catch { return }
+        await desk.cleanWorktrees()
+    }
+}
 // A plan's job about an issue claims the files the issue names (case 2.1, #209), so jobs on the
 // same code know about each other and merge oldest first (#237).
 desk.issueFiles = { repo, issue in
