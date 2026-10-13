@@ -1047,8 +1047,13 @@ final class Desk {
         let waitsOn = dispatch.startWhen?.compactMap(\.account).first
         let wanted = waitsOn ?? dispatch.account
         let matches = { (state: AccountState, name: String?) in state.signedIn && (state.account.name == name || state.account.id == name) }
-        let named = states.first { matches($0, wanted) && (agent == nil || $0.account.agent == agent) }
-            ?? states.first { matches($0, waitsOn) }
+        let matching = states.filter { matches($0, wanted) && (agent == nil || $0.account.agent == agent) }
+        let named: AccountState?
+        if matching.count > 1, let chosen = AccountStore.choose(matching, agent: agent)?.account {
+            named = matching.first { $0.account.id == chosen.id }
+        } else {
+            named = matching.first ?? states.first { matches($0, waitsOn) }
+        }
         if wanted != "auto", named == nil {
             throw Shell.Failure(message: "\(wanted) isn't signed in. Sign in from Settings › Accounts.")
         }

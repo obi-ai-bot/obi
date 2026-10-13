@@ -12,9 +12,10 @@ struct MoveChoiceTests {
     let now = Date(timeIntervalSince1970: 1_791_582_173)
 
     func state(_ id: String, _ agent: String, fiveHour: Double? = nil, sevenDay: Double? = nil, signedIn: Bool = true,
-               fullUntil: Date? = nil) -> AccountState {
+               fullUntil: Date? = nil, lifted: Date? = nil) -> AccountState {
         AccountState(account: Account(id: id, agent: agent, name: id.capitalized, payer: "", home: nil), label: signedIn ? "Max" : nil,
-                     fiveHour: fiveHour, sevenDay: sevenDay, sevenDayResets: now.addingTimeInterval(86_400), fullUntil: fullUntil)
+                     fiveHour: fiveHour, sevenDay: sevenDay, sevenDayResets: now.addingTimeInterval(86_400), fullUntil: fullUntil,
+                     reserveLifted: lifted)
     }
 
     var codexJob: Job {
@@ -42,9 +43,9 @@ struct MoveChoiceTests {
         let accounts = [state("deskree", "codex"), state("work", "claude", fiveHour: 0.85), state("weekly", "claude", sevenDay: 0.81),
                         state("personal", "claude", fiveHour: 0.5, sevenDay: 0.6), state("spare", "claude", fiveHour: 0.2, sevenDay: 0.2)]
         #expect(try choose(MoveTarget(agent: "claude"), accounts).account == "spare")
-        // Past 80% of either window: naming the tool takes its least busy account (2026-10-12),
-        // and no tool, account or model of its own named leaves Oby nothing to pick.
-        #expect(try choose(MoveTarget(agent: "claude"), Array(accounts.prefix(3))).account == "weekly")
+        // A move without an account uses the same under-95% rule as new work; the tool fallback
+        // below still applies when every account is reserved or otherwise unavailable.
+        #expect(try choose(MoveTarget(agent: "claude"), Array(accounts.prefix(3))).account == "work")
         #expect(refusal(MoveTarget(agent: "claude"), [state("full", "claude", fullUntil: now + 3600)])?.contains("Name one to use it anyway") == true)
         #expect(try choose(MoveTarget(account: "Work"), accounts).account == "work")
         #expect(try choose(MoveTarget(agent: "claude", account: "weekly"), accounts).account == "weekly")
@@ -55,6 +56,15 @@ struct MoveChoiceTests {
         #expect(refusal(MoveTarget(agent: "codex", account: "personal"), accounts) == "Personal is a Claude Code account, not Codex's.")
         #expect(refusal(MoveTarget(agent: "gemini"), accounts) == "gemini can't run jobs.")
         #expect(refusal(MoveTarget(agent: "auto", account: " ", model: nil), accounts) == "Say where to move it: a tool, an account or a model.")
+    }
+
+    @Test func aMoveWithoutAnAccountUsesTheSharedNearlyFullRule() throws {
+        let lifted = state("current", "claude", fiveHour: 0.1, sevenDay: 0.99, lifted: now + 86_400)
+        let spare = state("spare", "claude", fiveHour: 0.1, sevenDay: 0.2)
+        var job = codexJob
+        job.agent = "claude"
+        job.account = lifted.account.id
+        #expect(try choose(MoveTarget(agent: "claude"), [lifted, spare], job: job) == ("spare", nil))
     }
 
     @Test func aModelNamesItsToolAndStaysOnTheJobsAccountWhenItCan() throws {

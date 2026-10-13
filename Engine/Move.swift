@@ -18,10 +18,6 @@ nonisolated struct MoveTarget: Codable, Equatable, Sendable {
 /// Moving a job to another tool, account or model (issue #118). Swift decides where it goes:
 /// the brain and the apps only say what the user asked for.
 nonisolated enum Moves {
-    /// Without an account named, a job moves only to one under this share of both its 5-hour and
-    /// its weekly window (past it, the week too while its reserve is lifted: #278). One the user
-    /// names takes it however busy it is.
-    static let room = 0.8
     /// The model `MoveTarget.model` names to drop the job's own and run the tool's from Settings › Models.
     static let toolDefault = "default"
     /// The tools that run jobs.
@@ -86,14 +82,17 @@ nonisolated enum Moves {
             account = state.account
         }
         let tool = account?.agent ?? wanted ?? chosenModel.map(agent(ofModel:)) ?? job.agent
-        if account == nil, tool == job.agent, let own = accounts.first(where: { $0.account.id == job.account }), own.signedIn, !own.isFull(at: now) {
-            account = own.account
+        if account == nil {
+            if tool == job.agent, let own = accounts.first(where: { $0.account.id == job.account }),
+               (model != nil && own.signedIn && !own.isFull(at: now) && !own.weekNearlyFull(at: now))
+                   || AccountStore.choose([own], agent: tool, now: now) != nil {
+                account = own.account
+            }
         }
         if account == nil {
-            // Oby's own pick, as for any job (`AccountStore.choose`), among those with room in both
-            // windows; past 80% of its week too while the user lifted its reserve (#278).
-            let roomy = accounts.filter { ($0.fiveHour ?? 0) < room && (($0.sevenDay ?? 0) < room || $0.reserveLiftedUntil(at: now) != nil) }
-            account = AccountStore.route(roomy, agent: tool, now: now)
+            // A move without an account follows the same routing rule as new work, including the
+            // 95% ceiling that still applies when a weekly reserve was lifted (#323).
+            account = AccountStore.route(accounts, agent: tool, now: now)
         }
         if account == nil, wanted != nil {
             // The user named the tool ("put them on Codex"): that names its accounts too, however
