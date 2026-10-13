@@ -4,7 +4,8 @@ import Testing
 
 struct BuildTests {
     @Test func agentsYieldAndCapSwiftBuilds() {
-        #expect(Agents.niced(["swift", "build"]) == ["nice", "-n", "10", "swift", "build"])
+        let adjustment = max(0, Agents.processPriority - Agents.currentPriority)
+        #expect(Agents.niced(["swift", "build"]) == ["nice", "-n", String(adjustment), "swift", "build"])
         #expect(Agents.buildEnvironment(processorCount: 16)["OBY_SWIFT_BUILD_JOBS"] == "8")
         #expect(Agents.buildEnvironment(processorCount: 1)["OBY_SWIFT_BUILD_JOBS"] == "1")
     }
