@@ -172,7 +172,7 @@ struct CheckTests {
         #expect(desk.job("author")?.macCheck == back && made.events.last == back)
         // The lease outlasts the longest check: every step to its timeout, each xcodebuild step twice.
         let longest = MacCheck.commands(cache: URL(filePath: "/")).reduce(0) { $0 + $1.timeout * ($1.xcodebuild ? 2 : 1) }
-        #expect(MacCheck.lease > longest && longest == 110 * 60)
+        #expect(MacCheck.lease == 140 * 60 && longest == 110 * 60)
         #expect(desk.nextMacCheck(mac: "Laptop", now: relaunched + longest) == nil)
         #expect(desk.nextMacCheck(mac: MacCheck.unnamedMac, now: relaunched + longest) == nil)
         // A Mac that went quiet past the lease: the next one to ask gets it, and it's no longer Studio's.

@@ -116,7 +116,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// A Mac that took a check and said nothing for this long went away: the next Mac to ask gets it.
     /// Longer than the longest check can take: every step to its timeout, each xcodebuild step twice
     /// (the Mac's own trouble runs it again, `step`), and half an hour for the checkout, the resets
-    /// and the result bundles. 1 hour 50 minutes today.
+    /// and the result bundles. 2 hours 20 minutes today.
     static let lease: TimeInterval = commands(cache: URL(filePath: "/")).reduce(30 * 60) { $0 + $1.timeout * ($1.xcodebuild ? 2 : 1) }
     static let stopLine = "The Mac check failed \(maxRounds) times. Take it from here."
     /// A failed check whose round for the author ended without a new commit to check.
