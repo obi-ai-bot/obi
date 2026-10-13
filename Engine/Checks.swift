@@ -1461,7 +1461,7 @@ extension Desk {
               check.state == .failed, !(check.failures ?? []).isEmpty, job.checkStop == MacCheck.reviewsUsedLine else {
             throw Shell.Failure(message: "There's no failed check to hand on.")
         }
-        job.extraReviews = max(0, (job.review?.round ?? 0) + 1 - Review.maxRounds)
+        job.extraReviews = max(0, (job.review?.round ?? 0) + 1 - Review.escalationRound)
         replace(job)
         Task { await finishCheck(id, log: nil) }
     }
@@ -1592,7 +1592,7 @@ extension Desk {
         latest.rebasedFrom = latest.pushedHead
         latest.rebases = today + [.now]
         latest.mergeError = nil
-        latest.extraReviews = max(latest.extraReviews ?? 0, (latest.review?.round ?? 0) + 1 - Review.maxRounds)
+        latest.extraReviews = max(latest.extraReviews ?? 0, (latest.review?.round ?? 0) + 1 - Review.escalationRound)
         var again = Review.round(latest)
         again.step = step ?? "Rebasing onto \(base)"
         replace(again)
@@ -1632,7 +1632,7 @@ extension Desk {
             return replace(author)
         }
         if check.fixableFailure, check.round == 1 {
-            author.extraReviews = max(author.extraReviews ?? 0, (author.review?.round ?? 0) + 1 - Review.maxRounds)
+            author.extraReviews = max(author.extraReviews ?? 0, (author.review?.round ?? 0) + 1 - Review.escalationRound)
         }
         let file = "mac-check-\(check.round).md"
         do {

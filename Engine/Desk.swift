@@ -3072,12 +3072,18 @@ final class Desk {
                 let (decision, message) = Inbox.decision(text)
                 try answerPermission(item.job, permission.id, decision, message: message)
             case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss), (.merge, Inbox.dismiss): try dismiss(item.job)
+            case (.review, Inbox.openPR): break
             case (.failed, Inbox.oneMoreRound) where job(item.job)?.cloudNeedsYou == true: try oneMoreCloudRound(item.job)
             case (.failed, Inbox.askOby) where job(item.job)?.cloudNeedsYou == true: try askAboutCloud(item.job)
             case (.merge, Inbox.tryAgain): try retryMerge(item.job)
             case (.merge, Inbox.oneMoreRound): try oneMoreMergeRound(item.job)
             case (.failed, Inbox.tryAgain), (.limit, Inbox.tryAgain), (.failed, Inbox.oneMoreRound): try message(item.job, Inbox.tryAgainMessage)
-            case (.review, Inbox.oneMoreRound): try message(item.job, reviewAgain(item.job))
+            case (.review, Inbox.oneMoreRound):
+                if var author = job(item.job) {
+                    author.extraReviews = max(author.extraReviews ?? 0, (author.review?.round ?? 0) + 1 - Review.escalationRound)
+                    replace(author)
+                }
+                try message(item.job, reviewAgain(item.job))
             case (.review, Inbox.retryReview):
                 guard let author = job(item.job) else { throw Shell.Failure(message: "That review's job isn't here any more.") }
                 reviewPublished(author)

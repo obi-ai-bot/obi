@@ -256,7 +256,7 @@ extension Desk {
         author.xcodeCloud?.rounds += 1
         author.mergeError = nil
         // The fix is reviewed like any other change: one more review is allowed for it.
-        author.extraReviews = max(author.extraReviews ?? 0, (author.review?.round ?? 0) + 1 - Review.maxRounds)
+        author.extraReviews = max(author.extraReviews ?? 0, (author.review?.round ?? 0) + 1 - Review.escalationRound)
         var round = Review.round(author)
         round.step = "Working on Xcode Cloud"
         replace(round)
@@ -356,7 +356,7 @@ extension Desk {
         latest.rebasedOnto = onto
         latest.xcodeCloud?.handedOff = true
         latest.xcodeCloud?.problem = nil
-        latest.extraReviews = max(latest.extraReviews ?? 0, (latest.review?.round ?? 0) + 1 - Review.maxRounds)
+        latest.extraReviews = max(latest.extraReviews ?? 0, (latest.review?.round ?? 0) + 1 - Review.escalationRound)
         var round = Review.round(latest)
         round.step = "Resolving Xcode Cloud rebase conflicts"
         replace(round)

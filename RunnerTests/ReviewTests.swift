@@ -136,6 +136,21 @@ struct ReviewTests {
 
     // MARK: Starting the review
 
+    @Test func followUpBlockersOutsideAddedDiffLinesAreDemoted() throws {
+        let changed = Review.changedLines("""
+            diff --git a/Sources/Thing.swift b/Sources/Thing.swift
+            --- a/Sources/Thing.swift
+            +++ b/Sources/Thing.swift
+            @@ -10,2 +10,3 @@
+            """)
+        let findings: (blocking: [String], later: [String], unsorted: [String])? = (
+            ["Sources/Thing.swift:10: the new code fails Evidence: reproduced.",
+             "Sources/Thing.swift:40: an old bug Evidence: reproduced."], [], [])
+        let result = try #require(Review.demoteUnchangedBlockers(findings, changed: changed))
+        #expect(result.blocking == ["Sources/Thing.swift:10: the new code fails Evidence: reproduced."])
+        #expect(result.later == ["Sources/Thing.swift:40: an old bug Evidence: reproduced."])
+    }
+
     @Test func reviewGetsTheAuthorsAnswersAndTreatsThemAsSettledDecisions() {
         var answered = author
         answered.notes = ["Keep the command enabled.", "Use the existing default."]
@@ -557,14 +572,19 @@ struct ReviewTests {
         let quoted = try String(contentsOfFile: input, encoding: .utf8)
         #expect(quoted.contains("---\n\n> - SIGKILL never reaches the process group Evidence: fixture probe confirms this finding.\n\nEarlier reviews blocked on these, and later rounds fixed them:\n\n> - The wait returns before the child exits Evidence: fixture probe confirms this finding."))
         // The same blocker again: the job stops and asks you.
-        let stopped = try await review("Not fixed.\n\nBlocking:\n- **Again:** SIGKILL still never reaches the process group\n\nVERDICT: CHANGES REQUESTED")
+        let third = try await review("Not fixed.\n\nBlocking:\n- **Again:** SIGKILL still never reaches the process group\n\nVERDICT: CHANGES REQUESTED")
         try await Task.sleep(for: .milliseconds(50))
-        let verdict = try #require(stopped.review)
-        #expect(verdict.round == 3 && verdict.repeated == true && verdict.stopsHere && verdict.stopReason == Review.stopLine)
-        #expect(stopped.status == .done && stopped.reviewing == nil && stopped.needsYou && stopped.reviewNeedsYou && Push.notice(for: stopped) == .review)
-        #expect(object(try API.encode(JobJSON(job: stopped)))["reviewNeedsYou"] as? Bool == true)
+        let verdict = try #require(third.review)
+        #expect(verdict.round == 3 && verdict.repeated == true && !verdict.stopsHere && !third.reviewNeedsYou)
+        try await roundPublishes(after: 3)
+        let escalated = try await review("Final blockers for the person.\n\nBlocking:\n- **Again:** SIGKILL still never reaches the process group\n\nVERDICT: CHANGES REQUESTED")
+        #expect(escalated.review?.round == Review.escalationRound && escalated.review?.stopsHere == true && escalated.reviewNeedsYou)
+        #expect(made.agents.last?.job.model == AgentModels.stronger[work.agent])
+        #expect(escalated.status == .done && escalated.reviewing == nil && escalated.needsYou && escalated.reviewNeedsYou && Push.notice(for: escalated) == .review)
+        #expect(object(try API.encode(JobJSON(job: escalated)))["reviewNeedsYou"] as? Bool == true)
         // The author, three reviews, and a round after each of the first two.
-        #expect(made.quoted.count == 2 && made.agents.count == 1 + 3 + 2 && made.published.count == 3)
+        #expect(made.quoted.count == 3 && made.agents.count == 1 + 4 + 3 && made.published.count == 4)
+        let stopped = escalated
         let stage = stopped.pipeline.stages.first { $0.id == .review }
         #expect(stage?.state == .failed && stage?.reason == "Oby's review found a blocker it asked to fix before. Take it from here.")
         let alert = object(try Push.notification(.review, for: stopped))
@@ -572,19 +592,19 @@ struct ReviewTests {
                 == ["title": "Changes requested: Fix oby #75", "body": Review.stopLine])
         try await until("the inbox asks the user") { desk.inbox.contains { $0.job == "author" && $0.kind == .review && $0.isOpen } }
         let asked = try #require(desk.inbox.first { $0.job == "author" && $0.kind == .review && $0.isOpen })
-        #expect(asked.text == Review.stopLine && asked.options == [Inbox.oneMoreRound, Inbox.dismiss])
+        #expect(asked.text == "Oby's reviews are done: review #80 yourself" && asked.options == [Inbox.openPR, Inbox.oneMoreRound, Inbox.dismiss])
 
         // The user takes it from here: another round publishes, and Oby reviews it too, under its
         // cap: a fix after a stop never waits for a review that won't come (2026-10-13).
-        try desk.message("author", "Signal the whole group.")
+        _ = try desk.settle(asked.id, .answer(Inbox.oneMoreRound))
         try await until("the author runs for the user") { desk.job("author")?.status == .running }
         let last = try #require(made.agents.last)
         desk.countCommits = { _, _ in 9 }
         last.agent.onEvent(.turnEnded(summary: "fix: signal the group", failed: false))
         last.agent.onEvent(.finished(summary: "fix: signal the group", failed: false))
-        try await until("the author publishes") { made.published.count == 4 }
+        try await until("the author publishes") { made.published.count == 5 }
         try await Task.sleep(for: .milliseconds(50))
-        try await until("Oby reviews the user's round") { desk.jobs.filter { $0.reviewOf == "author" }.count == 4 }
+        try await until("Oby reviews the user's round") { desk.jobs.filter { $0.reviewOf == "author" }.count == 5 }
         let final = try #require(desk.job("author"))
         #expect(final.reviewError == nil && final.reviewing != nil)
         // Merged by a person: nothing needs you any more.
@@ -610,7 +630,10 @@ struct ReviewTests {
         // The first round's prompt says nothing of it.
         #expect(!made.agents[2].agent.prompt.contains("name every test you added"))
         let third = try await review("Still.\n\nBlocking:\n- Again: the required tests are still missing\n- A new problem\n\nVERDICT: CHANGES REQUESTED")
-        #expect(third.review?.repeated == true && third.review?.stopsHere == true && third.reviewNeedsYou)
+        #expect(third.review?.repeated == true && third.review?.stopsHere == false && !third.reviewNeedsYou)
+        try await roundPublishes(after: 3)
+        let escalation = try await review("The final blockers remain.\n\nBlocking:\n- Again: the required tests are still missing\n\nVERDICT: CHANGES REQUESTED")
+        #expect(escalation.review?.round == Review.escalationRound && escalation.review?.stopsHere == true && escalation.reviewNeedsYou)
     }
 
     /// There is nothing to come back to in the first review: its `Again:` is just a blocker.
@@ -670,19 +693,19 @@ struct ReviewTests {
     }
 
     @Test func roundsThatEachFixTheLastBlockerAreReviewedPastTheCap() async throws {
-        #expect(Review.maxRounds == 6)
+        #expect(Review.maxRounds == 3 && Review.escalationRound == 4)
         _ = try await publishAuthor()
         // Six reviews, each finding the last blocker fixed and a new one: no stop, and no person needed.
-        for round in 1...6 {
+        for round in 1...3 {
             let reviewed = try await review("Something else.\n\nBlocking:\n- Problem \(round)\n\nVERDICT: CHANGES REQUESTED")
             #expect(reviewed.review?.round == round && reviewed.review?.repeated == false && reviewed.review?.wantsFollowUp == true)
             #expect(!reviewed.reviewNeedsYou && reviewed.reviewError == nil)
             try await roundPublishes(after: round)
         }
         let approved = try await review("All fixed.\n\nVERDICT: APPROVED")
-        #expect(approved.review?.round == 7 && approved.review?.verdict == .approved && approved.reviewError == nil && !approved.needsYou)
-        #expect(approved.review?.blockedBefore == (1...6).map { "Problem \($0) Evidence: fixture probe confirms this finding." })
-        #expect(made.quoted.count == 6 && made.agents.count == 1 + 7 + 6 && made.published.count == 7)
+        #expect(approved.review?.round == Review.escalationRound && approved.review?.verdict == .approved && approved.reviewError == nil && !approved.needsYou)
+        #expect(approved.review?.blockedBefore == (1...3).map { "Problem \($0) Evidence: fixture probe confirms this finding." })
+        #expect(made.quoted.count == 3 && made.agents.count == 1 + 4 + 3 && made.published.count == 4)
         #expect(!desk.inbox.contains { $0.job == "author" && $0.kind == .review && $0.isOpen })
     }
 

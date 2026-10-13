@@ -7,6 +7,7 @@ import SwiftUI
 /// a runner's job publishes too. Every kind the iPhone settles settles here, the same way. Once it's
 /// settled, the next one opens. Answered on the iPhone, it goes from here too.
 struct IslandInbox: View {
+    @Environment(\.openURL) private var openURL
     let desk: Desk
     let feed: RunnerFeed
     /// Opens the item's job: its id, and whether it's this Mac's own.
@@ -77,7 +78,12 @@ struct IslandInbox: View {
                          plan: kind == "question" ? extras?.question?.plan : nil,
                          options: CardOption.inbox(item.options, kind: kind, question: extras?.question, permission: permission, words: words, details: item.details),
                          busy: busy, wordsNote: kind == "permission" ? CardOption.denyWords : nil,
-                         onChoose: { settle(entry, answer: $0.answer) },
+                         onChoose: { option in
+                             if option.answer == "Open the PR",
+                                let published = (entry.local ? desk.jobs : feed.jobs).first(where: { $0.id == entry.item.job })?.published,
+                                let url = URL(string: published) { openURL(url) }
+                             else { settle(entry, answer: option.answer) }
+                         },
                          onWords: answerWords)
                 .id(entry.id)
             HStack(spacing: 14) {
