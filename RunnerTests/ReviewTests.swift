@@ -539,7 +539,8 @@ struct ReviewTests {
         let asked = try #require(desk.inbox.first { $0.job == "author" && $0.kind == .review && $0.isOpen })
         #expect(asked.text == Review.stopLine && asked.options == [Inbox.oneMoreRound, Inbox.dismiss])
 
-        // The user takes it from here: another round publishes, and Oby reviews no more.
+        // The user takes it from here: another round publishes, and Oby reviews it too, under its
+        // cap: a fix after a stop never waits for a review that won't come (2026-10-13).
         try desk.message("author", "Signal the whole group.")
         try await until("the author runs for the user") { desk.job("author")?.status == .running }
         let last = try #require(made.agents.last)
@@ -548,13 +549,28 @@ struct ReviewTests {
         last.agent.onEvent(.finished(summary: "fix: signal the group", failed: false))
         try await until("the author publishes") { made.published.count == 4 }
         try await Task.sleep(for: .milliseconds(50))
+        try await until("Oby reviews the user's round") { desk.jobs.filter { $0.reviewOf == "author" }.count == 4 }
         let final = try #require(desk.job("author"))
-        #expect(final.reviewing == nil && final.reviewError == "Oby reviewed it 3 times already: a person reviews it from here.")
-        #expect(desk.jobs.filter { $0.reviewOf == "author" }.count == 3)
+        #expect(final.reviewError == nil && final.reviewing != nil)
         // Merged by a person: nothing needs you any more.
         var merged = final
         merged.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now)
         #expect(!merged.needsYou && Push.notice(for: merged) == nil)
+    }
+
+    /// New commits refused a review under the old cap of 2 (#274, #295 on 2026-10-12) wait for no
+    /// one: the runner reviews them when it starts, and they go on to the Mac check and the merge.
+    @Test func commitsRefusedUnderTheOldCapAreReviewedWhenTheRunnerStarts() async throws {
+        let approved = try await publishAuthor()
+        var stuck = approved
+        stuck.review = Review(verdict: .approved, job: "rev2", agent: "codex", account: "Work", round: 2)
+        stuck.reviewing = nil
+        stuck.reviewError = "Oby reviewed it 2 times already: a person reviews it from here."
+        desk.replace(stuck)
+        let before = desk.jobs.filter { $0.reviewOf == "author" }.count
+        desk.startWaitingReviews()
+        try await until("Oby reviews the new commits") { desk.jobs.filter { $0.reviewOf == "author" }.count == before + 1 }
+        #expect(desk.job("author")?.reviewError == nil && desk.job("author")?.reviewing != nil)
     }
 
     @Test func aBlockerIsOnlyRepeatedWhenTheFollowUpSaysAgain() {
@@ -574,7 +590,7 @@ struct ReviewTests {
     }
 
     @Test func roundsThatEachFixTheLastBlockerAreReviewedPastTheCap() async throws {
-        #expect(Review.maxRounds == 2)
+        #expect(Review.maxRounds == 6)
         _ = try await publishAuthor()
         // Six reviews, each finding the last blocker fixed and a new one: no stop, and no person needed.
         for round in 1...6 {
