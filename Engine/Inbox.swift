@@ -37,7 +37,7 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         var actions: [String] {
             switch self {
             case .question: []
-            case .review: [Inbox.oneMoreRound, Inbox.dismiss]
+            case .review: [Inbox.retryReview, Inbox.oneMoreRound, Inbox.dismiss]
             case .failed, .limit: [Inbox.tryAgain, Inbox.oneMoreRound, Inbox.dismiss]
             case .merge: [Inbox.oneMoreRound, Inbox.tryAgain, Inbox.dismiss]
             case .audit: [Inbox.addColumn, Inbox.tryAgain, Inbox.ignoreStatus]
@@ -100,6 +100,7 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
 }
 
 nonisolated enum Inbox {
+    static let retryReview = "Ask Oby to review again"
     /// What a failed job's item offers: run it again from where it was, or let it go.
     static let tryAgain = "Try again"
     /// What an Xcode Cloud item offers besides One more round and Dismiss: the author's agent

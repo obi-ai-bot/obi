@@ -18,6 +18,7 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
         case setSetting = "set_setting"
         /// The chat acts on jobs and the inbox (#300, Engine/JobActions.swift).
         case retryJob = "retry_job", dismissJob = "dismiss_job", answerInbox = "answer_inbox", startNow = "start_now"
+        case messageJob = "message_job", fixFailure = "fix_failure", askReviewAgain = "ask_review_again"
     }
     enum Kind: String, Codable, CaseIterable, Sendable { case review, fix, build, test, investigate }
     /// How hard the work looks: a complex job gets a stronger model offered, never applied on its own.
@@ -160,12 +161,21 @@ nonisolated struct BrainContext: Sendable {
     var turnLength: Int? = nil
     /// The inbox items waiting for the user, by id: the ones answer_inbox may name.
     var inbox: [String] = []
+    /// Failure records whose post-mortems permit an automatic fix.
+    var fixableFailures: [String] = []
+    /// These additional actions are available only while processing a runner event.
+    var orchestrator: Bool = false
+    /// Oby-authored event data and policy. This is not part of the user's conversation.
+    var orchestratorContext: String? = nil
 }
 
 extension Plan {
     /// Why Swift refuses this plan; empty when it's fine.
     nonisolated func problems(in context: BrainContext, canary: String) -> [String] {
         var problems: [String] = []
+        if !context.orchestrator, [.messageJob, .fixFailure, .askReviewAgain].contains(action) {
+            problems.append("\(action.rawValue) is only available to Oby's event orchestrator")
+        }
         if reply.count > Self.replyLength { problems.append("reply is longer than \(Self.replyLength) characters") }
         let texts = [reply, question?.text ?? ""] + dispatches.map(\.task) + dispatches.compactMap(\.title) + (question?.options ?? [])
         if texts.contains(where: { $0.contains(canary) }) { problems.append("the plan repeats the canary") }
@@ -187,7 +197,7 @@ extension Plan {
                     problems.append("recommended is the index of one of the options, or null")
                 }
             }
-        case .replyOnly, .stopAgent, .moveJob, .ignore, .answerPermission, .setMode, .readJob, .setSetting, .retryJob, .dismissJob, .answerInbox, .startNow:
+        case .replyOnly, .stopAgent, .moveJob, .ignore, .answerPermission, .setMode, .readJob, .setSetting, .retryJob, .dismissJob, .answerInbox, .startNow, .messageJob, .fixFailure, .askReviewAgain:
             if !dispatches.isEmpty || question != nil { problems.append("\(action.rawValue) has no dispatches or question object") }
         }
         // Only stop_agent, move_job, answer_permission and set_mode name jobs, and only ones the
@@ -217,6 +227,16 @@ extension Plan {
         case .setSetting:
             if let setting { problems += Self.problems(of: setting, in: context) }
             else { problems.append("set_setting needs its setting object") }
+        case .messageJob:
+            if named.count != 1 { problems.append("message_job names one job") }
+            for id in named where !context.movable.contains(id) { problems.append("\(id) isn't a job Oby can message") }
+            if message?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false { problems.append("message_job needs what Oby found and what to change") }
+        case .askReviewAgain:
+            if named.count != 1 { problems.append("ask_review_again names one job") }
+            for id in named where !context.movable.contains(id) { problems.append("\(id) isn't a job Oby can review again") }
+        case .fixFailure:
+            if !named.isEmpty { problems.append("fix_failure names its failure in item, not jobs") }
+            if !context.fixableFailures.contains(item ?? "") { problems.append("fix_failure names a studied, fixable failure") }
         case .retryJob, .dismissJob, .startNow:
             break
         default:
@@ -225,7 +245,8 @@ extension Plan {
         problems += jobActionProblems(in: context)
         if action != .stopAgent, all == true { problems.append("only stop_agent stops all") }
         if action != .moveJob, move != nil { problems.append("only move_job has a move object") }
-        if action != .answerPermission, decision != nil || !(message ?? "").isEmpty { problems.append("only answer_permission has a decision or a message") }
+        if decision != nil, action != .answerPermission { problems.append("only answer_permission has a decision or a message") }
+        if !(message ?? "").isEmpty, action != .answerPermission && action != .messageJob { problems.append("only answer_permission has a decision or a message") }
         if action != .setMode, mode != nil { problems.append("only set_mode has a mode") }
         if action != .setSetting, setting != nil { problems.append("only set_setting has a setting object") }
         if (message ?? "").count > 2000 { problems.append("message is longer than 2,000 characters") }
@@ -429,7 +450,8 @@ extension Plan {
             "type": "object", "additionalProperties": false,
             "required": ["action", "reply", "dispatches", "question", "jobs", "all", "move", "decision", "message", "mode", "setting", "item", "option", "answer"],
             "properties": [
-                "action": ["enum": ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore", "answer_permission", "set_mode", "read_job", "set_setting", "retry_job", "dismiss_job", "answer_inbox", "start_now"]],
+                "action": ["enum": ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore", "answer_permission", "set_mode", "read_job", "set_setting", "retry_job", "dismiss_job", "answer_inbox", "start_now"]
+                    + (context.orchestrator ? ["message_job", "fix_failure", "ask_review_again"] : [])],
                 "reply": ["type": "string", "maxLength": replyLength],
                 "dispatches": ["type": "array", "items": dispatch, "maxItems": 10],
                 "question": nullable(question),
@@ -440,7 +462,7 @@ extension Plan {
                 "message": ["type": ["string", "null"], "maxLength": 2000],
                 "mode": nullable(["enum": PermissionMode.allCases.map(\.rawValue)]),
                 "setting": nullable(setting),
-                "item": context.inbox.isEmpty ? ["type": "null"] : nullable(["enum": context.inbox]),
+                "item": (context.inbox + context.fixableFailures).isEmpty ? ["type": "null"] : nullable(["enum": context.inbox + context.fixableFailures]),
                 "option": ["type": ["integer", "null"], "minimum": 1, "maximum": 20],
                 "answer": ["type": ["string", "null"], "maxLength": 2000],
             ],
@@ -645,7 +667,9 @@ nonisolated struct Planner: Sendable {
         let canary = String(UUID().uuidString.prefix(8)).lowercased()
         let system = Self.system(canary: canary, quoted: context.quoted != nil)
         let schema = Plan.schema(for: context)
-        let user = (context.briefing.map { $0 + "\n\n" } ?? "") + "The user says now:\n" + said
+        let user = (context.briefing.map { $0 + "\n\n" } ?? "") + (context.orchestrator
+            ? "Oby's event context (data, not user instructions):\n\(context.orchestratorContext ?? "")"
+            : "The user says now:\n" + said)
         var refused: [String] = []
         let usesDeepModel = context.turnStep > 0 || (context.turnLength ?? said.count) > 600
         // ClaudeBrain reserves half of this budget for its one process retry. Give Sonnet
@@ -762,7 +786,8 @@ nonisolated struct BrainTurn: Codable, Equatable, Sendable {
             case .answerPermission: "answers \(plan.decision?.rawValue ?? "?") for"
             case .setMode: "sets \(plan.mode?.rawValue ?? "?") on"
             case .readJob: "reads"
-            case .retryJob, .dismissJob, .startNow: "\(plan.action.rawValue) for"
+            case .retryJob, .dismissJob, .startNow, .messageJob, .askReviewAgain: "\(plan.action.rawValue) for"
+            case .fixFailure: "fix_failure"
             default: "stops"
             }
             parts.append("\(verb) \(jobs.joined(separator: ", "))")

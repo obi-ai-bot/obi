@@ -1171,6 +1171,10 @@ final class Failures {
         let signature = Self.canonical(postMortem.signature, store.failureAliases())
         if fix(of: record) == nil, let fix = fixedBy(signature) { (record.fixedBy, record.fixedAt) = fix }
         store.save(record)
+        desk.orchestrate(OrchestratorEvent(kind: "failure_studied", job: record.job ?? "",
+            item: record.id,
+            summary: "Oby studied failure \(record.id) (\(postMortem.cause.rawValue)); \(postMortem.obyCouldHandle ? "it may be fixable by Oby" : "it needs owner review"). Read the related job before deciding.",
+            evidence: ["failures/\(record.id)"] + (record.job.map { ["jobs/\($0)/report"] } ?? [])))
         if let id = record.job { report(id, postMortem) }
         if let fix = fix(of: record)?.url {
             Logger.jobs.notice("failure \(record.id, privacy: .public): \(signature, privacy: .public) is fixed on \(MacCheck.into, privacy: .public) by \(fix, privacy: .public)")

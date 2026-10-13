@@ -39,8 +39,8 @@ extension Desk {
         case .stopAgent: return plan.all == true ? "Stopping all running work" : "Stopping the selected work"
         case .answerPermission: return "Answering a permission request"
         case .setMode: return "Changing permission mode"
-        case .dispatch, .askUser, .replyOnly, .ignore, .readJob, .setSetting: return plan.action.rawValue
-        case .retryJob, .dismissJob, .startNow:
+        case .dispatch, .askUser, .replyOnly, .ignore, .readJob, .setSetting, .fixFailure: return plan.action.rawValue
+        case .retryJob, .dismissJob, .startNow, .messageJob, .askReviewAgain:
             let names = (plan.jobs ?? []).compactMap { job($0)?.heading }
             let what = names.isEmpty ? "the selected jobs" : names.joined(separator: ", ")
             switch plan.action {

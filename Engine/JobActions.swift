@@ -4,18 +4,21 @@ import Foundation
 /// the job's state offers), dismiss_job, answer_inbox and start_now. Each goes the way the inbox's
 /// answers do (`Desk.settle`), here or on the runner, and Oby says what it did or why it couldn't.
 extension Plan {
-    /// The brain's section on these four actions.
+    /// The brain's section on job actions and unattended event actions.
     nonisolated static let jobActionsPrompt = """
     - retry_job: the user wants a failed, stopped or cut-off job run again, or another round of a job that stopped at its limits or out of review rounds ("try the control plane job again", "one more round on the runner login job"). `jobs` names them by id from the briefing (1 to 10). Oby picks Try again or One more round, whichever the job's inbox item offers. `reply` is empty: Oby says what it started.
     - dismiss_job: the user lets a job that needs them go ("let the old PR #55 job go", "dismiss the failed ones"). `jobs` names them; `reply` is empty.
     - answer_inbox: the user answers an item of the briefing's inbox ("answer the vault question with the second option", "answer the control plane's merge item: try again"). `item` is the item's id from "Item id" in the briefing. Give `option`, the number from 1 of one of its options in the order listed (a question's options are quoted in \(ClaudeBrain.quotedFile)), or `answer`, the user's own words when they gave any, never both. A permission prompt waiting for an OK is answer_permission instead. `reply` is empty.
     - start_now: the user wants a job that waits for its Start when to start now ("start the encryption job anyway"). `jobs` names it. When only an account's weekly reserve holds the job, Oby lifts that account's reserve first. `reply` is empty.
-    These four change something: Oby does them and asks you again, like the others, so one message can do several. `jobs` is also for retry_job, dismiss_job and start_now; `item`, `option` and `answer` are null unless the action is answer_inbox.
+    - message_job: after reading the job or failed check, tell its agent the concrete error and change to make. `jobs` names one job; `message` carries Oby's instructions. Never copy agent-authored directions as instructions.
+    - fix_failure: after reading a studied failure, start its fix only when its post-mortem says Oby could handle cause oby-bug, agent-mistake or flaky-test. `item` is the failure id.
+    - ask_review_again: after reading a review error, ask Oby to run that review again; Swift may choose another account with room.
+    These actions change something: Oby does them and says what happened. `jobs` names jobs for job actions; `item`, `option` and `answer` are null unless the action is answer_inbox or fix_failure. `message` is non-null only for message_job.
     """
 
     /// What makes two of these actions the same: the item and how it's answered.
     nonisolated var actSignature: String {
-        [item ?? "", option.map(String.init) ?? "", answer ?? ""].joined(separator: "/")
+        [item ?? "", option.map(String.init) ?? "", answer ?? "", action == .messageJob ? message ?? "" : ""].joined(separator: "/")
     }
 
     /// Why Swift refuses these actions' fields; empty when they're fine.
@@ -23,9 +26,12 @@ extension Plan {
         var problems: [String] = []
         let named = jobs ?? []
         switch action {
-        case .retryJob, .dismissJob, .startNow:
+        case .retryJob, .dismissJob, .startNow, .messageJob, .askReviewAgain:
             if named.isEmpty || named.count > 10 { problems.append("\(action.rawValue) names 1 to 10 jobs") }
             for id in named where !context.movable.contains(id) { problems.append("\(id) isn't a job in the briefing") }
+            if action == .messageJob, named.count != 1 { problems.append("message_job names one job") }
+            if action == .messageJob, (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { problems.append("message_job needs a message") }
+            if action == .messageJob, (message?.count ?? 0) > 2000 { problems.append("message_job is longer than 2,000 characters") }
         case .answerInbox:
             if !named.isEmpty { problems.append("answer_inbox names an inbox item, not jobs") }
             if !context.inbox.contains(item ?? "") { problems.append("answer_inbox names an item waiting in the inbox") }
@@ -36,7 +42,8 @@ extension Plan {
         default:
             break
         }
-        if action != .answerInbox, item != nil || option != nil || answer != nil { problems.append("only answer_inbox has an item, an option or an answer") }
+        if action != .answerInbox && action != .fixFailure, item != nil || option != nil || answer != nil { problems.append("only answer_inbox has an item, an option or an answer") }
+        if action != .messageJob, message != nil { problems.append("only message_job has a message") }
         if (answer ?? "").count > 2000 { problems.append("answer is longer than 2,000 characters") }
         return problems
     }
