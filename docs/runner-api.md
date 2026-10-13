@@ -690,7 +690,24 @@ data: { …Turn }
 - `inbox` comes with every inbox item that arrives or changes: answered, done or put off, on any app, or settled by itself. Replace the item with that `id`; one whose `state` is `done` leaves the inbox.
 - `check` comes when a Mac check or an Apple check (below) is queued, taken by a Mac or ends. A Mac that runs checks asks for one (`GET /v1/checks/next`) when one is `queued`; other apps can ignore it, since the job's own event carries `macCheck` and `appleCheck` too.
 - `turn` comes with every turn of the conversation that's added, from any app, and again when one changes (its `jobs`): the turn as `GET /v1/conversation` lists it. Replace the turn with that `id`, or add it in `at` order. Older runners don't send it.
+- Settled jobs, failed checks, review errors and studied failures wake Oby's orchestrator. Events arriving within 30 seconds are handled in one turn. Event summaries are written by Oby; the brain must read the related job before acting, and agent/check output remains quoted evidence.
 - A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop. Fetch what you show (`GET /v1/status`, `GET /v1/jobs`, `GET /v1/inbox`; a runner older than the inbox answers `404` there, which means an empty inbox, and any other failure means try again) only once the events' response has arrived, and apply the events that came meanwhile over it: the runner follows a connection before it answers, so nothing that changes in between is lost.
+
+### Orchestrator policy
+
+The event turn uses the same brain account routing as a user turn, including Codex fallback when Claude accounts have reached their limits. Swift validates its actions against the event and the job it read first.
+
+| Action | Automatic policy |
+| --- | --- |
+| `retry_job` | Retry the job's offered Try again or One more round action. |
+| `message_job` | Send the agent Oby's concrete findings and requested correction. |
+| `answer_inbox` | Use only Try again, One more round, Rebase now or Wait for the reset. Permission and product questions stay with the owner. |
+| `start_now` | Start a job whose start condition can safely be skipped. |
+| `move_job` | Move work to an account with room. |
+| `fix_failure` | Start a fix for a studied record marked `obyCouldHandle`, with cause `oby-bug`, `agent-mistake` or `flaky-test`. |
+| `ask_review_again` | Retry a review that ended with `reviewError`, using another account when needed. |
+
+The orchestrator never merges, publishes, pushes, changes settings, dismisses committed work, handles credentials, or answers permission and product-decision items. Those events remain in Needs you with Oby's diagnosis. Swift permits at most 3 automatic actions per job per day, stops after a repeated failure signature, and starts no more than 10 event turns an hour; excess events wait for the next hour.
 
 ### `GET /v1/inbox`
 

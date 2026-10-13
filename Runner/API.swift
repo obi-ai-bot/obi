@@ -42,7 +42,14 @@ final class API {
             self?.push?.changed()
         }
         desk.onInboxChange = { [weak self] item in self?.send("inbox", InboxJSON(item: item)) }
-        desk.onCheckChange = { [weak self] check in self?.send("check", MacCheckJSON(check: check)) }
+        desk.onCheckChange = { [weak self, weak desk] check in
+            self?.send("check", MacCheckJSON(check: check))
+            guard check.state == .failed || check.state == .error else { return }
+            let issue = check.state == .error ? "couldn't run" : "failed"
+            desk?.orchestrate(OrchestratorEvent(kind: "check_\(check.state.rawValue)", job: check.job,
+                summary: "The Mac \(check.kind?.rawValue ?? "build") check \(issue) for job \(check.job). Read the job and check details before deciding.",
+                evidence: ["jobs/\(check.job)/report", "checks/\(check.id)/steps-and-errors"]))
+        }
         desk.onTurnChange = { [weak self] turn in self?.send("turn", TurnJSON(turn: turn)) }
         desk.onStepChange = { [weak self] step in self?.send("step", step) }
         watchAccounts()
