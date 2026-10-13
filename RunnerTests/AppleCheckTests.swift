@@ -14,14 +14,16 @@ struct AppleCheckTests {
         var onEvent: (AgentEvent) -> Void = { _ in }
         var prompt = ""
         var sent: [String] = []
+        var endCount = 0
+        var killCount = 0
         func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
             self.prompt = prompt
             self.onEvent = onEvent
         }
         func send(_ text: String) { sent.append(text) }
-        func end() {}
+        func end() { endCount += 1 }
         func stop() {}
-        func kill() {}
+        func kill() { killCount += 1 }
     }
 
     /// What the desk did, and the commit the job's worktree is on.
@@ -173,13 +175,39 @@ struct AppleCheckTests {
         _ = try desk.macCheckEnded(taken.id, MacCheck.Report(passed: false, steps: [buildStep, steps[1]], failures: [],
                                                               log: "Mac/Thing.swift:8: error: invalid actor isolation"))
 
-        try await until("the failed build returns to its author") { desk.job("apple118")?.isActive == true && desk.job("apple118")?.step == "Working on the Apple check" }
+        try await until("the failed build returns to its author") {
+            desk.job("apple118")?.isActive == true && desk.job("apple118")?.step == "Working on the Apple check" && !desk.isEnding("apple118")
+        }
         let round = try #require(desk.job("apple118"))
         #expect(round.appleCheck?.handedOff == true && round.status == .running)
         #expect(made.published.isEmpty && made.agents.count == 2)
+        #expect(made.agents[0].agent.endCount == 1 && desk.isEnding("apple118") == false)
         #expect(made.quoted.last?.file == "apple-check-1.md")
         #expect(made.quoted.last?.text.contains("> Mac/Thing.swift:8: error: invalid actor isolation") == true)
         #expect(made.agents.last?.agent.prompt.contains("apple-check-1.md") == true)
+    }
+
+    @Test func aFailedPrePublishAppleCheckWithoutASessionEndsTheJobWithBuildErrors() async throws {
+        desk.appleTool = { [tool] in tool }
+        try await running()
+
+        desk.finish("apple118", .done, "Finished.")
+        try await until("the pre-publish Apple check is queued") { desk.job("apple118")?.appleCheck?.finalCheck != nil }
+        let taken = try #require(desk.nextMacCheck(mac: "Studio", kinds: [.apple]))
+        var buildStep = steps[0]
+        buildStep.passed = false
+        buildStep.buildErrors = ["Mac/Thing.swift:8: error: invalid actor isolation"]
+        _ = try desk.macCheckEnded(taken.id, MacCheck.Report(passed: false, steps: [buildStep, steps[1]], failures: [],
+                                                              log: "Mac/Thing.swift:8: error: invalid actor isolation"))
+
+        try await until("the job ends after its failed Apple check") {
+            desk.job("apple118")?.status == .failed && !desk.isEnding("apple118")
+        }
+        let failed = try #require(desk.job("apple118"))
+        #expect(failed.summary.contains("The Apple check failed, but the job has no session to pick up."))
+        #expect(failed.summary.contains("Mac/Thing.swift:8: error: invalid actor isolation"))
+        #expect(made.agents.count == 1 && made.agents[0].agent.killCount == 1)
+        #expect(made.published.isEmpty)
     }
 
     @Test func aReplacedPrePublishCheckEndsTheJobAndClearsItsEndingState() async throws {

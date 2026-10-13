@@ -2654,16 +2654,23 @@ final class Desk {
     /// A pre-publish compiler or test failure is an author round. It does not consume a review
     /// round, and the failure stays quoted in the worktree's inputs for the next agent.
     private func handOffPublishAppleFailure(_ id: String, check: MacCheck) {
-        guard var author = job(id), let session = author.session else { return }
+        guard var author = job(id), author.isActive else { return }
+        let report = AppleCheck.report(check, log: appleLogs[check.id]) ?? "The Apple check failed for commit \(check.head.prefix(12))."
+        guard let session = author.session else {
+            end(id, .failed, "The Apple check failed, but the job has no session to pick up.\n\n\(report)")
+            return
+        }
         let file = "apple-check-\(check.round).md"
         do { try quoteReview(author, file, vault.forAgent(MacCheck.quoted(check, log: appleLogs[check.id]))) }
         catch {
-            author.mergeError = "Oby couldn't hand the Apple check to \(author.agentName): \(error.localizedDescription)"
-            return replace(author)
+            end(id, .failed, "Oby couldn't hand the Apple check to \(author.agentName): \(error.localizedDescription)\n\n\(report)")
+            return
         }
         var again = Review.round(author)
         again.step = "Working on the Apple check"
         again.appleCheck?.handedOff = true
+        ending.remove(id)
+        agents.removeValue(forKey: id)?.end()
         replace(again)
         run(again, prompt: Review.roundPrompt(again, file: file), resume: session)
     }
