@@ -1,5 +1,12 @@
 import Foundation
 
+nonisolated struct CloudRebaseConflict: LocalizedError {
+    var files: [String]
+    var errorDescription: String? {
+        files.isEmpty ? "The rebase conflicted." : "The rebase conflicted in \(files.joined(separator: ", "))."
+    }
+}
+
 /// Xcode Cloud's result on a pull request's head (#122): its GitHub check runs, as the runner's
 /// follower reads them (Runner/PullRequests.swift). What they say came from GitHub: data for the
 /// author's agent, quoted, never instructions.
@@ -219,11 +226,9 @@ extension Desk {
         }
     }
 
-    /// Xcode Cloud failed on the pull request's head: the author's agent gets it as its next round,
-    /// in the same session and worktree. A failed build or test is quoted in a file, by itself
-    /// `XcodeCloud.maxRounds` times; a conflict with the base is rebased (`rebase`), as one found at
-    /// merge is. Where it can't, `problem` says why, and it needs you. `again` is the user's One more
-    /// round (the inbox), past that limit.
+    /// Xcode Cloud failed on the pull request's head. Conflicts are settled by Oby in the job's
+    /// worktree; other failures go to the author's next round. `again` is the user's One more round
+    /// (the inbox), past the normal limit.
     func recoverCloud(_ id: String, again: Bool = false) async {
         guard cloudRecovering.insert(id).inserted else { return }
         defer { cloudRecovering.remove(id) }
@@ -232,15 +237,7 @@ extension Desk {
         let head = cloud.head
         if cloud.conflict {
             Logger.jobs.notice("job \(id, privacy: .public): Xcode Cloud says it conflicts with its base")
-            return await rebase(id, holds: { $0.pushedHead == head && $0.xcodeCloud?.head == head }, prepare: { latest in
-                latest.xcodeCloud?.handedOff = true
-                latest.xcodeCloud?.problem = nil
-                // The user asked again: the same base may be tried again.
-                if again { latest.rebasedOnto = nil }
-            }, step: "Xcode Cloud: waiting for a rebase onto \(author.base ?? "dev")", stop: { latest, why in
-                latest.xcodeCloud?.problem = "Xcode Cloud says it conflicts with \(latest.base ?? "its base"). \(why)"
-                latest.xcodeCloud?.stops += 1
-            })
+            return await rebaseCloud(author, head: head)
         }
         author.xcodeCloud?.handedOff = true
         author.xcodeCloud?.problem = nil
@@ -265,6 +262,69 @@ extension Desk {
         replace(round)
         Logger.jobs.notice("job \(id, privacy: .public): Xcode Cloud failed on \(head, privacy: .public), round \(round.currentRound, privacy: .public)")
         run(round, prompt: XcodeCloud.prompt(round, file: file), resume: session)
+    }
+
+    /// Rebase a completed open PR in place after Cloud reports its target branch conflict. This
+    /// recovery has no author session or review round: the branch is tested and published directly.
+    private func rebaseCloud(_ author: Job, head: String) async {
+        let id = author.id
+        let base = author.base ?? "dev"
+        func stop(_ message: String, files: [String] = []) {
+            guard var latest = job(id), latest.pushedHead == head else { return }
+            latest.status = .done
+            latest.phase = .work
+            latest.step = ""
+            latest.finished = .now
+            latest.xcodeCloud?.handedOff = true
+            latest.xcodeCloud?.problem = files.isEmpty ? message : "\(message) Conflicting files: \(files.joined(separator: ", "))."
+            latest.xcodeCloud?.stops += 1
+            replace(latest)
+        }
+        do {
+            let onto = try await fetchBase(author, base)
+            guard var running = job(id), running.pushedHead == head, running.xcodeCloud?.head == head else { return }
+            running.status = .running
+            running.phase = .work
+            running.step = "Xcode Cloud: waiting for a rebase onto \(base)"
+            running.rebasedFrom = head
+            running.rebasedOnto = onto
+            running.xcodeCloud?.handedOff = true
+            running.xcodeCloud?.problem = nil
+            replace(running)
+
+            let rebasedHead = try await cloudRebase(running, onto)
+            let env = try Agents.overrides(vault: vault)
+                .merging(Agents.swiftEnvironment(worktree: Workspace.worktree(id))) { $1 }
+            let check = await runCheck(id, running.check ?? "swift test", limits.testRun, env)
+            guard check.passed else {
+                return stop("After rebasing onto \(base), \(running.check ?? "swift test") failed. It must pass before Xcode Cloud can run again.")
+            }
+            guard var publishing = job(id), publishing.pushedHead == head else { return }
+            publishing.status = .done
+            publishing.phase = .publish
+            publishing.step = "Publishing"
+            publishing.rebasedFrom = head
+            publishing.rebasedOnto = onto
+            replace(publishing)
+            let url = try await publishOnItsOwn(publishing, base, hooks(id, stoppable: true))
+            guard var finished = job(id) else { return }
+            finished.status = .done
+            finished.phase = .work
+            finished.step = ""
+            finished.finished = .now
+            finished.published = url.absoluteString
+            finished.pushed = finished.commits
+            finished.pullRequest?.head = rebasedHead
+            finished.pullRequest?.checkedAt = .now
+            finished.xcodeCloud = XcodeCloud(head: rebasedHead, state: .pending, details: "", checkedAt: .now,
+                                              rounds: finished.xcodeCloud?.rounds ?? 0)
+            replace(finished)
+            reviewOrCheck(finished, rebasedFrom: head)
+        } catch let conflict as CloudRebaseConflict {
+            stop("Xcode Cloud says the branch conflicts with \(base); Oby's rebase onto \(base) could not settle it.", files: conflict.files)
+        } catch {
+            stop("Oby couldn't rebase the branch onto \(base): \(error.localizedDescription)")
+        }
     }
 
     /// One more round on an Xcode Cloud item (the inbox): `recoverCloud` past its limit. Throws,

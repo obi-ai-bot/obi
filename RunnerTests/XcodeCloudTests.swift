@@ -181,13 +181,13 @@ struct XcodeCloudTests {
         #expect(item.text == "Xcode Cloud still fails, and the round on it brought nothing new. Take it from here.")
     }
 
-    /// Xcode Cloud says the pull request conflicts with dev: its own agent rebases it onto dev as Oby
-    /// fetched it, as a conflict at merge is (#159), with nothing in the inbox. The same conflict on
-    /// the same dev again needs you.
-    @Test func aConflictIsRebasedOntoDevByItsOwnAgent() async throws {
+    /// Xcode Cloud conflicts are rebased, tested and pushed by Oby without an author round.
+    @Test func aConflictIsRebasedTestedAndPushedByOby() async throws {
         let onto = String(repeating: "d", count: 40)
         var agents: [Agent] = []
         var fetched = 0
+        var checked = 0
+        var published = false
         desk.quoteReview = { _, _, _ in }
         desk.makeAgent = { _, _, _ in let agent = Agent(); agents.append(agent); return agent }
         desk.fetchBase = { author, base in
@@ -195,26 +195,42 @@ struct XcodeCloudTests {
             fetched += 1
             return onto
         }
+        desk.cloudRebase = { job, base in
+            #expect(job.status == .running && job.step == "Xcode Cloud: waiting for a rebase onto dev")
+            #expect(base == onto)
+            return next
+        }
+        desk.runCheck = { id, command, _, _ in
+            checked += 1
+            #expect(id == "cloud" && command == "swift test")
+            return Rounds.Check(command: command, passed: true, output: "")
+        }
+        desk.publishOnItsOwn = { author, base, hooks in
+            #expect(author.status == .done && base == "dev" && author.rebasedFrom == head && author.rebasedOnto == onto)
+            hooks.sent(Outgoing(action: .push, repo: author.repo, id: next, branch: author.branch))
+            published = true
+            return URL(string: author.published!)!
+        }
         await observe(result(conflict: true))
         var author = try #require(desk.job("cloud"))
-        #expect(agents.count == 1 && fetched == 1 && author.status == .running && author.step == "Xcode Cloud: waiting for a rebase onto dev")
-        #expect(author.pipeline.stages.first { $0.id == .cloud }?.detail == "Xcode Cloud: waiting for a rebase onto dev")
-        #expect(author.rebasedOnto == onto && author.rebasedFrom == head && author.xcodeCloud?.rounds == 0)
-        #expect(agents[0].prompt.contains("`git rebase \(onto)`") && agents[0].prompt.contains("Never merge dev into this branch."))
-        #expect(desk.inbox.filter(\.isOpen).isEmpty)
-
-        // The rebase brought nothing new, and Xcode Cloud still says it conflicts.
-        agents[0].events(.finished(summary: "Nothing to rebase", failed: false))
-        try await waitFor { desk.job("cloud")?.status == .done }
-        await observe(result(conflict: true))
+        try await waitFor { published }
         author = try #require(desk.job("cloud"))
-        #expect(agents.count == 1 && author.cloudNeedsYou)
-        #expect(desk.inbox.first { $0.isOpen }?.text == "Xcode Cloud says it conflicts with the base, and the round on it brought nothing new. Take it from here.")
+        #expect(agents.isEmpty && fetched == 1 && checked == 1 && author.status == .done)
+        #expect(author.pushedHead == next && author.rebasedOnto == onto && author.rebasedFrom == head)
+        #expect(author.xcodeCloud?.rounds == 0 && author.xcodeCloud?.state == .pending)
+        #expect(desk.inbox.filter(\.isOpen).isEmpty)
+    }
 
-        // One more round fetches dev and rebases again, even onto the same commit.
-        try desk.settle(try #require(desk.inbox.first { $0.isOpen }).id, .answer(Inbox.oneMoreRound))
-        try await waitFor { agents.count == 2 }
-        #expect(fetched == 2 && desk.job("cloud")?.step == "Xcode Cloud: waiting for a rebase onto dev")
+    @Test func aConflictingCloudRebaseNamesFilesForTheAuthor() async throws {
+        desk.makeAgent = { _, _, _ in Issue.record("No agent should start"); return nil }
+        desk.fetchBase = { _, _ in String(repeating: "d", count: 40) }
+        desk.cloudRebase = { _, _ in throw CloudRebaseConflict(files: ["Engine/Desk.swift", "Shared/Runner.swift"]) }
+        await observe(result(conflict: true))
+        let author = try #require(desk.job("cloud"))
+        #expect(author.cloudNeedsYou)
+        #expect(author.xcodeCloud?.problem?.contains("Engine/Desk.swift") == true)
+        #expect(author.xcodeCloud?.problem?.contains("Shared/Runner.swift") == true)
+        #expect(desk.inbox.first { $0.isOpen }?.text.contains("Engine/Desk.swift") == true)
     }
 
     /// The rebase can't start (dev couldn't be fetched): it needs you, saying why.
@@ -223,7 +239,7 @@ struct XcodeCloudTests {
         desk.fetchBase = { _, _ in throw Shell.Failure(message: "the network is down") }
         await observe(result(conflict: true))
         let author = try #require(desk.job("cloud"))
-        #expect(author.cloudNeedsYou && author.xcodeCloud?.problem == "Xcode Cloud says it conflicts with dev. Oby couldn't fetch dev to rebase onto: the network is down")
+        #expect(author.cloudNeedsYou && author.xcodeCloud?.problem == "Oby couldn't rebase the branch onto dev: the network is down")
         #expect(desk.inbox.first { $0.isOpen }?.text == author.xcodeCloud?.problem)
     }
 
