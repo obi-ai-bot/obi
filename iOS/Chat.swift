@@ -41,6 +41,8 @@ struct ChatScreen: View {
     @State private var path: [String] = []
 
     private var thinking: Bool { if case .thinking = phone.talk { true } else { false } }
+    /// A step of Oby's turn runs, started from here or from another device (#304).
+    private var working: Bool { phone.conversation.working }
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -105,6 +107,7 @@ struct ChatScreen: View {
                             DaySeparator(title: day.title)
                             ForEach(day.turns) { turn in
                                 TurnRow(turn: turn, jobs: ConversationModel.jobs(of: turn, among: phone.jobs), account: account,
+                                        steps: phone.conversation.steps(under: turn, in: turns),
                                         failure: phone.failures[turn.id],
                                         onRetry: { phone.retry(echo: turn.id) },
                                         onEdit: { text = turn.text; phone.discard(echo: turn.id); typing = true })
@@ -115,7 +118,7 @@ struct ChatScreen: View {
                                     }
                             }
                         }
-                        if thinking { pending }
+                        if thinking || working { pending }
                         cards
                         InboxSection()
                         Color.clear.frame(height: 1).id("end")
@@ -128,6 +131,7 @@ struct ChatScreen: View {
                 // keeps the reading position (Earlier scrolls to the turn that was at the top).
                 .onChange(of: turns.last?.id) { withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
                 .onChange(of: phone.talk) { proxy.scrollTo("end", anchor: .bottom) }
+                .onChange(of: phone.conversation.steps) { proxy.scrollTo("end", anchor: .bottom) }
                 .onChange(of: typing) { if typing { proxy.scrollTo("end", anchor: .bottom) } }
             }
         }
@@ -144,24 +148,34 @@ struct ChatScreen: View {
         .padding(.top, 24)
     }
 
-    /// Oby's bubble while it thinks: never left there, with a way out in sight.
+    /// Oby's bubble while it works: never left there, with a way out in sight. Stop ends the turn
+    /// on the runner (#304); the cross, only while this phone waits for the plan, stops waiting.
     private var pending: some View {
-        HStack(alignment: .top, spacing: 10) {
-            ObyFace(size: 28)
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text("Thinking…").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
-                Button { phone.cancel() } label: {
-                    Image(systemName: "xmark").font(.caption.weight(.bold))
-                        .frame(width: 24, height: 24).background(Color.primary.opacity(0.12), in: Circle())
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top, spacing: 10) {
+                ObyFace(size: 28)
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text(working ? "Working…" : "Thinking…").font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
+                    Button("Stop") { Task { await phone.stopTurn() } }
+                        .font(.footnote.weight(.semibold))
+                        .accessibilityHint("Ends what Oby is doing")
+                    if thinking {
+                        Button { phone.cancel() } label: {
+                            Image(systemName: "xmark").font(.caption.weight(.bold))
+                                .frame(width: 24, height: 24).background(Color.primary.opacity(0.12), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Cancel waiting")
+                    }
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Cancel waiting")
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            if let problem = phone.stopProblem {
+                Text(problem).font(.footnote).foregroundStyle(.orange).padding(.leading, 38)
+            }
         }
-        .accessibilityElement(children: .combine)
     }
 
     /// The plan before anything runs, or the brain's question, in the thread: the cards Home
@@ -234,6 +248,8 @@ private struct TurnRow: View {
     let turn: Turn
     let jobs: [Job]
     let account: (Job) -> String
+    /// What Oby does for these words, a step at a time (#304): under them, before its answer.
+    var steps: [TurnStep] = []
     /// Why the words didn't reach the runner, on an echo whose request failed (Phone.failures).
     var failure: String? = nil
     var onRetry: () -> Void = {}
@@ -244,29 +260,35 @@ private struct TurnRow: View {
     }
 
     private var yours: some View {
-        HStack(alignment: .top) {
-            Spacer(minLength: 40)
-            VStack(alignment: .trailing, spacing: 4) {
-                Text("\(turn.voice == true ? "You, by voice" : "You") · \(ConversationModel.clock(turn.date))")
-                    .font(.caption).foregroundStyle(.secondary)
-                ReadingText(turn.text, color: Color(uiColor: .systemBackground))
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(Color.primary, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                if let failure {
-                    Text("Didn't reach Oby: \(failure)")
-                        .font(.footnote).foregroundStyle(.red).multilineTextAlignment(.trailing)
-                    HStack(spacing: 16) {
-                        Button("Try again", action: onRetry)
-                        Button("Edit", action: onEdit)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top) {
+                Spacer(minLength: 40)
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text("\(turn.voice == true ? "You, by voice" : "You") · \(ConversationModel.clock(turn.date))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ReadingText(turn.text, color: Color(uiColor: .systemBackground))
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .background(Color.primary, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    if let failure {
+                        Text("Didn't reach Oby: \(failure)")
+                            .font(.footnote).foregroundStyle(.red).multilineTextAlignment(.trailing)
+                        HStack(spacing: 16) {
+                            Button("Try again", action: onRetry)
+                            Button("Edit", action: onEdit)
+                        }
+                        .font(.footnote.weight(.semibold))
                     }
-                    .font(.footnote.weight(.semibold))
                 }
             }
+            .accessibilityElement(children: failure == nil ? .combine : .contain)
+            .accessibilityLabel(failure.map { "You, \(ConversationModel.clock(turn.date)): \(turn.text). Didn't reach Oby: \($0)" }
+                                ?? "You, \(ConversationModel.clock(turn.date)): \(turn.text)")
+            // What Oby does for these words, before its answer (#304).
+            if !steps.isEmpty {
+                StepList(steps: steps).padding(.leading, 4)
+            }
         }
-        .accessibilityElement(children: failure == nil ? .combine : .contain)
-        .accessibilityLabel(failure.map { "You, \(ConversationModel.clock(turn.date)): \(turn.text). Didn't reach Oby: \($0)" }
-                            ?? "You, \(ConversationModel.clock(turn.date)): \(turn.text)")
     }
 
     private var obys: some View {

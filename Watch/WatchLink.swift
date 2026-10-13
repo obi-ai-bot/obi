@@ -76,7 +76,18 @@ nonisolated struct WatchLink: Sendable {
     func plan(_ said: String, answer: (question: String, option: String)? = nil) async throws -> PlanResult {
         struct Answer: Encodable { var question: String; var option: String }
         struct Body: Encodable { var said: String; var answer: Answer? }
-        return try await call("POST", "v1/plans", body: Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }))
+        return try await call("POST", "v1/plans", body: Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }), timeout: Runner.planTimeout)
+    }
+
+    /// Stop: the turn Oby is working on ends (#304). A Watch API without it answers 404: that
+    /// waits for the iPhone.
+    func stopConversation() async throws {
+        let (data, response) = try await URLSession.shared.data(for: try signed("POST", "v1/conversation/stop", body: Data()))
+        do {
+            try Runner.check(response, data)
+        } catch let error as RunnerError where error.status == 404 {
+            throw RunnerError(message: "Stopping needs your iPhone in reach.", status: 404)
+        }
     }
 
     func dispatch(_ job: Job) async throws -> Job {
@@ -184,9 +195,10 @@ nonisolated struct WatchLink: Sendable {
         }
     }
 
-    private func call<Answer: Decodable>(_ method: String, _ target: String, body: (any Encodable)? = nil) async throws -> Answer {
+    private func call<Answer: Decodable>(_ method: String, _ target: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Answer {
         let data = try body.map { try Runner.encoder.encode($0) } ?? Data()
         var request = try signed(method, target, body: data)
+        request.timeoutInterval = timeout
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (answer, response) = try await URLSession.shared.data(for: request)
         try Runner.check(response, answer)

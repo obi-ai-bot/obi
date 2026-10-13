@@ -98,10 +98,13 @@ struct TalkView: View {
                         ReadingText(said)
                         Button("Dismiss") { watch.cancel() }
                     case .plan(let drafts):
+                        steps
                         PlanCard(drafts: drafts)
                     case .question(let said, let question):
+                        steps
                         QuestionCard(said: said, question: question)
                     case .reply(let text):
+                        steps
                         ReadingText(text).frame(maxWidth: .infinity, alignment: .leading)
                         Button("Done") { watch.cancel() }
                     }
@@ -122,9 +125,25 @@ struct TalkView: View {
 
     private func waiting(_ said: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            ProgressView().frame(maxWidth: .infinity)
             ReadingText(said)
+            if watch.steps.isEmpty {
+                ProgressView().frame(maxWidth: .infinity)
+            } else {
+                steps
+            }
+            if let problem = watch.stopProblem {
+                Text(problem).font(.caption2).foregroundStyle(.orange)
+            }
+            // Stop ends the turn on the runner while steps run (#304); Cancel stops waiting for the answer.
+            Button("Stop", role: .destructive) { Task { await watch.stopTurn() } }
             Button("Cancel") { watch.cancel() }
+        }
+    }
+
+    /// Oby's steps, as short lines under it (#304).
+    @ViewBuilder private var steps: some View {
+        if !watch.steps.isEmpty {
+            StepList(steps: watch.steps, compact: true)
         }
     }
 }

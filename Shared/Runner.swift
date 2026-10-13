@@ -530,6 +530,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     /// A turn of the conversation was added, from any app, or changed (a job dispatched from it):
     /// the Mac window's and the iPhone's thread replace it by id, or add it by time (#11).
     case turn(Turn)
+    /// One step of Oby's turn began, went on or ended (#304). Runners from before the step event never send it.
+    case step(TurnStep)
 }
 
 #if os(iOS) || os(watchOS)
@@ -570,6 +572,49 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
 
     var turn: Turn {
         Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text, jobs: (jobs ?? []).isEmpty ? nil : jobs)
+    }
+}
+
+/// One step of Oby's turn as the `step` event sends it (docs/runner-api.md, #304): "Moving Vault
+/// secrets to Codex · Deskree", running, then done or failed. The apps list a turn's steps under
+/// the user's message, then Oby's answer. A step comes again with each change of its `state`, by
+/// the same `turn` and `index`.
+nonisolated struct TurnStep: Codable, Identifiable, Equatable, Sendable {
+    enum State: String, Codable, Sendable { case running, done, failed }
+
+    /// The user's turn this step belongs to.
+    var turn: String
+    /// Where it stands in the turn, from 1.
+    var index: Int
+    /// What kind of step, like `move_job`; nil when the runner doesn't say.
+    var action: String?
+    var text: String
+    var state: State
+    var at: Date?
+
+    var id: String { "\(turn)#\(index)" }
+
+    init(turn: String, index: Int, action: String? = nil, text: String, state: State, at: Date? = nil) {
+        self.turn = turn
+        self.index = index
+        self.action = action
+        self.text = text
+        self.state = state
+        self.at = at
+    }
+
+    private enum CodingKeys: String, CodingKey { case turn, index, action, text, state, at }
+
+    /// Tolerant of what a newer runner adds: a state this app doesn't know reads as done, and a
+    /// time that doesn't parse is left out, so the step still shows.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        turn = try c.decode(String.self, forKey: .turn)
+        index = try c.decode(Int.self, forKey: .index)
+        action = try? c.decodeIfPresent(String.self, forKey: .action)
+        text = try c.decode(String.self, forKey: .text)
+        state = (try? c.decode(String.self, forKey: .state)).flatMap(State.init(rawValue:)) ?? .done
+        at = try? c.decodeIfPresent(Date.self, forKey: .at)
     }
 }
 
@@ -783,10 +828,19 @@ nonisolated struct Runner: Sendable {
         try await call("PUT", "v1/settings/models", body: models)
     }
 
+    /// How long a plan's request waits: a turn that moves jobs and answers takes longer than the brain alone (#304).
+    static let planTimeout: TimeInterval = 120
+
     func plan(_ said: String, answer: (question: String, option: String)? = nil) async throws -> PlanResult {
         struct Answer: Encodable { var question: String; var option: String }
         struct Body: Encodable { var said: String; var answer: Answer? }
-        return try await call("POST", "v1/plans", body: Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }))
+        return try await call("POST", "v1/plans", body: Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }), timeout: Self.planTimeout)
+    }
+
+    /// Stop: the turn Oby is working on ends where it is (`POST /v1/conversation/stop`, #304). A
+    /// runner from before it answers 404.
+    func stopConversation() async throws {
+        try await send("POST", "v1/conversation/stop")
     }
 
     func dispatch(_ job: Job) async throws -> Job {
@@ -965,17 +1019,16 @@ nonisolated struct Runner: Sendable {
     private static func hex(_ token: Data) -> String { token.map { String(format: "%02x", $0) }.joined() }
     #endif
 
-    private func call<Answer: Decodable>(_ method: String, _ path: String, body: (any Encodable)? = nil) async throws -> Answer {
-        try Self.decoder.decode(Answer.self, from: try await send(method, path, body: body))
+    private func call<Answer: Decodable>(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Answer {
+        try Self.decoder.decode(Answer.self, from: try await send(method, path, body: body, timeout: timeout))
     }
 
     /// The answer's body, unread: for a call whose answer says nothing the app needs.
     @discardableResult
-    private func send(_ method: String, _ path: String, body: (any Encodable)? = nil) async throws -> Data {
+    private func send(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Data {
         var request = URLRequest(url: URL(string: path, relativeTo: base.appending(path: "/"))!)
         request.httpMethod = method
-        // Planning waits for the brain, which can take up to about 20 seconds.
-        request.timeoutInterval = 45
+        request.timeoutInterval = timeout
         if let body {
             request.httpBody = try Self.encoder.encode(body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1118,6 +1171,7 @@ nonisolated struct EventParser {
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
             #endif
             case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn) }
+            case "step": return (try? Runner.decoder.decode(TurnStep.self, from: json)).map(RunnerEvent.step)
             default: return nil
             }
         }

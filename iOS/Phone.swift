@@ -243,6 +243,8 @@ final class Phone {
             conversation.apply(turn)
             // The runner listed what this iPhone said: its echo has done its job.
             settleEchoes()
+        case .step(let step):
+            conversation.apply(step)
         }
     }
 
@@ -274,6 +276,23 @@ final class Phone {
     /// The user picked one of the brain's options.
     func answer(_ option: String, said: String, question: Question) {
         plan(said, answer: (question.text, option))
+    }
+
+    /// Why Stop didn't go through, under the steps; nil once it did or a new turn began.
+    private(set) var stopProblem: String?
+
+    /// Stop: the runner ends the turn Oby is working on (`POST /v1/conversation/stop`), and what
+    /// ran meanwhile shows as ended. The request for the plan stays: the runner answers it.
+    func stopTurn() async {
+        do {
+            try await runner.stopConversation()
+            stopProblem = nil
+            conversation.settleSteps()
+        } catch let error as RunnerError where error.status == 404 {
+            stopProblem = "This runner can't stop a turn yet."
+        } catch {
+            stopProblem = error.localizedDescription
+        }
     }
 
     func cancel() {
@@ -309,6 +328,7 @@ final class Phone {
         planning?.cancel()
         speaker.stop()
         dropPending()
+        stopProblem = nil
         talk = .thinking(said)
         // The thread shows the words as the runner will list them: an answer is its option.
         let echo = Turn(who: .user, text: answer?.option ?? said, voice: voice ? true : nil)
@@ -335,6 +355,7 @@ final class Phone {
             guard !Task.isCancelled else { return }
             // The request is over: its words are the runner's now, or stay with their failure.
             if pending == echo.id { pending = nil }
+            conversation.settleLatestSteps()
             talk = result
             if spoken, speakReplies {
                 switch result {

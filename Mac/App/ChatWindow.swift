@@ -249,6 +249,7 @@ private struct ConversationColumn: View {
                         ForEach(days) { day in
                             ForEach(Array(day.turns.enumerated()), id: \.element.id) { index, turn in
                                 TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? day.turns[index - 1] : nil), jobs: ConversationModel.jobs(of: turn, among: desk.jobs + feed.jobs),
+                                        steps: conversation.steps(under: turn, in: turns),
                                         account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
                                         isLocal: { id in desk.jobs.contains { $0.id == id } },
                                         onOpenJob: onOpenJob,
@@ -266,7 +267,7 @@ private struct ConversationColumn: View {
                                 }
                             }
                         }
-                        if thinking { pending }
+                        if thinking || conversation.working { pending }
                         cards
                         if model.speaker.speaking {
                             Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(OBYStyle.tertiary)
@@ -280,6 +281,7 @@ private struct ConversationColumn: View {
                 .defaultScrollAnchor(.bottom)
                 .onChange(of: turns.count) { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("end", anchor: .bottom) } }
                 .onChange(of: desk.talk) { proxy.scrollTo("end", anchor: .bottom) }
+                .onChange(of: conversation.steps) { proxy.scrollTo("end", anchor: .bottom) }
                 }
             }
         }
@@ -315,8 +317,13 @@ private struct ConversationColumn: View {
                          })
     }
 
+    /// "Thinking" while the desk plans, "Working" while the runner's steps go; Stop ends the
+    /// runner's turn (#304) as well as the desk's.
     private var pending: some View {
-        ThinkingLine(onStop: { desk.cancel() })
+        ThinkingLine(working: conversation.working, problem: feed.stopProblem, onStop: {
+            if thinking { desk.cancel() }
+            if conversation.working { Task { await feed.stopTurn() } }
+        })
     }
 
     /// The plan before anything runs, or the brain's question, under the thread, as the island shows them.
@@ -417,6 +424,8 @@ struct TurnRow: View {
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
     var onStopJob: ((_ job: String, _ local: Bool) -> Void)? = nil
     var showTime = true
+    /// What Oby does for these words, a step at a time (#304): under the bubble, before its answer.
+    var steps: [TurnStep] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -431,6 +440,9 @@ struct TurnRow: View {
                     .padding(.horizontal, OBYStyle.Space.lg).padding(.vertical, 14)
                     .background(turn.who == .user ? OBYStyle.userBubble : OBYStyle.assistantBubble,
                                 in: RoundedRectangle(cornerRadius: OBYStyle.bubble, style: .continuous))
+            }
+            if !steps.isEmpty {
+                StepList(steps: steps).padding(.horizontal, OBYStyle.Space.sm)
             }
             ForEach(jobs) { job in
                 Text("Started \(job.heading)").font(OBYStyle.caption).foregroundStyle(OBYStyle.tertiary)
@@ -463,14 +475,21 @@ struct MessageBubbleLayout: Layout {
 }
 
 struct ThinkingLine: View {
+    /// Steps of the runner's turn run: "Working" instead of "Thinking" (#304).
+    var working = false
+    /// Why Stop didn't go through, or nil.
+    var problem: String? = nil
     let onStop: () -> Void
     var body: some View {
         HStack(spacing: OBYStyle.Space.sm) {
             HStack(spacing: OBYStyle.Space.xs) {
                 ForEach(0..<3) { _ in Circle().fill(OBYStyle.tertiary).frame(width: 4, height: 4) }
             }.accessibilityHidden(true)
-            Text("Thinking").font(OBYStyle.small).foregroundStyle(OBYStyle.tertiary)
+            Text(working ? "Working" : "Thinking").font(OBYStyle.small).foregroundStyle(OBYStyle.tertiary)
             Button("Stop", action: onStop).buttonStyle(.plain).font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
+            if let problem {
+                Text(problem).font(OBYStyle.caption).foregroundStyle(.orange)
+            }
             Spacer()
         }
         .padding(.vertical, OBYStyle.Space.sm)
