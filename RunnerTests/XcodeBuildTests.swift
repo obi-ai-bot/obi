@@ -147,6 +147,10 @@ import Testing
 
         let before = Desk(accounts: AccountStore(root: folder), store: store)
         before.xcodeBuildInterval = .seconds(3600)
+        before.xcodeBuildCandidate = { _ in
+            Issue.record("settled before the window ended")
+            return (nil, "", nil)
+        }
         before.createXcodeBuildTag = { _, _, _ in Issue.record("tagged before the window ended") }
         await before.settleBuildBatch("second")
         before.pendingXcodeBuildTask?.cancel()

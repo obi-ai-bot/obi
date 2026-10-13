@@ -2461,6 +2461,7 @@ final class Desk {
         guard pendingXcodeBuildTask == nil else { return }
         pendingXcodeBuildTask = Task {
             try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
             await self.settlePendingXcodeBuildBatches()
         }
     }
