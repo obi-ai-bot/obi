@@ -20,6 +20,7 @@ final class IslandModel {
     static let tabKey = "island.lastTab"
     let desk: Desk
     let feed: RunnerFeed
+    let availability: MacAvailability
     /// The update waiting to be installed, if any (Mac/Updater.swift): the open island's pill.
     let updater: Updater
     /// What you say while you hold fn.
@@ -46,9 +47,10 @@ final class IslandModel {
     /// The last open-island surface. Home takes precedence when something needs attention.
     var tab: IslandTab
 
-    init(desk: Desk, feed: RunnerFeed, updater: Updater = Updater()) {
+    init(desk: Desk, feed: RunnerFeed, updater: Updater = Updater(), availability: MacAvailability = MacAvailability()) {
         self.desk = desk
         self.feed = feed
+        self.availability = availability
         self.updater = updater
         tab = IslandTab(rawValue: UserDefaults.standard.integer(forKey: Self.tabKey)) ?? .home
     }
@@ -123,6 +125,7 @@ final class IslandController {
     let updater = Updater()
     /// Reach this Mac from anywhere (#285): Settings › Remote access and the tunnel it runs.
     let remote = RemoteAccess()
+    let availability = MacAvailability()
     let model: IslandModel
     let character = ObyCharacter()
     let talkKey = TalkKey()
@@ -143,12 +146,19 @@ final class IslandController {
 
     init() {
         desk.issueSync.enabled = true
-        model = IslandModel(desk: desk, feed: feed, updater: updater)
+        model = IslandModel(desk: desk, feed: feed, updater: updater, availability: availability)
         // A restart never interrupts a check this Mac runs for the runner.
         updater.busy = { [weak feed] in feed?.checks.current != nil }
     }
 
     func start() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                availability.setRunningJobs(!desk.active.isEmpty || !feed.active.isEmpty)
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
         panel.contentView = NSHostingView(rootView: IslandView(
             model: model, character: character,
             onOpen: { [weak self] in self?.open() },

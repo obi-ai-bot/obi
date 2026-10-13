@@ -48,7 +48,7 @@ private struct SettingsTabs: View {
     var body: some View {
         TabView(selection: Binding { selection.tab } set: { selection.tab = $0 }) {
             SettingsView(desk: app.island.desk).tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general)
-            RunnerSettingsView(feed: app.island.feed).tabItem { Label("Runner", systemImage: "server.rack") }.tag(SettingsTab.runner)
+            RunnerSettingsView(feed: app.island.feed, availability: app.island.availability).tabItem { Label("Runner", systemImage: "server.rack") }.tag(SettingsTab.runner)
             RemoteAccessSettingsView(remote: app.island.remote).tabItem { Label("Remote", systemImage: "antenna.radiowaves.left.and.right") }.tag(SettingsTab.remote)
             AccountsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Accounts", systemImage: "person.2") }.tag(SettingsTab.accounts)
             ModelsSettingsView(feed: app.island.feed).tabItem { Label("Models", systemImage: "cpu") }.tag(SettingsTab.models)

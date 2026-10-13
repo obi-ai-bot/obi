@@ -124,7 +124,7 @@ struct JobListScreen: View {
                 NavigationLink(value: HomeView.Screen.job(job.id)) { JobRow(job: job) }
             }
             if watch.shown.isEmpty {
-                Text(watch.loaded ? "Nothing needs you." : "Waiting for your iPhone…")
+                Text(watch.offline ? watch.offlineLine : watch.loaded ? "Nothing needs you." : "Waiting for your iPhone…")
                     .font(.footnote).foregroundStyle(.secondary)
                     .listRowBackground(Color.clear)
             }

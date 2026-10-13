@@ -13,6 +13,7 @@ final class Phone {
     enum Talk: Equatable {
         case none
         case thinking(String)
+        case queued(String)
         case question(said: String, Question)
         case reply(String)
     }
@@ -36,10 +37,23 @@ final class Phone {
     /// request answers, and then `echoes.last` is someone else.
     @ObservationIgnored private var pending: String?
 
-    private struct Request {
+    private struct Request: Sendable {
         var said: String
         var answer: (question: String, option: String)?
         var voice: Bool
+    }
+    private struct QueuedRequest: Codable {
+        var id: String
+        var said: String
+        var question: String?
+        var option: String?
+        var voice: Bool
+    }
+    private struct QueuedInbox: Codable {
+        var id: String
+        var answer: String?
+        var done: Bool?
+        var later: Date?
     }
     @ObservationIgnored private let speaker = PhoneSpeaker()
     @ObservationIgnored private var planning: Task<Void, Never>?
@@ -113,6 +127,7 @@ final class Phone {
     @ObservationIgnored private let finder = MacFinder()
     var talk: Talk = .none
     private(set) var connection: RunnerConnection = .connecting
+    private(set) var lastSeen: Date? = UserDefaults.standard.object(forKey: "runner.lastSeen") as? Date
     private(set) var host = ""
     /// The job list arrived at least once, so an empty list really is empty.
     private(set) var loaded = false
@@ -138,6 +153,8 @@ final class Phone {
     private(set) var accounts: [Account] = []
     /// What waits in the runner's inbox, put-off items too: answered on the Mac, it goes from here too.
     private(set) var inbox: [InboxItem] = []
+    private var queued: [QueuedRequest] = []
+    private var queuedInbox: [QueuedInbox] = []
     private(set) var models: ModelSettings?
     /// The mode new jobs get by default, as the runner last said, or nil from a runner without modes.
     private(set) var defaultMode: RunnerMode?
@@ -150,9 +167,22 @@ final class Phone {
     /// The job whose notification's Publish was tapped; its screen publishes once it's ready.
     var publishing: String?
 
+    var offlineLine: String {
+        guard connection != .live else { return "Connected to \(host)" }
+        let time = lastSeen.map { $0.formatted(date: .omitted, time: .shortened) } ?? "never"
+        return "Your Mac is asleep or offline. Last seen \(time)"
+    }
+
     init() {
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
         if let data = UserDefaults.standard.data(forKey: "mac.link") { link = try? MacLink.paired(data) }
+        queued = (try? JSONDecoder().decode([QueuedRequest].self, from: UserDefaults.standard.data(forKey: "phone.outbox") ?? Data())) ?? []
+        queuedInbox = (try? JSONDecoder().decode([QueuedInbox].self, from: UserDefaults.standard.data(forKey: "phone.inboxOutbox") ?? Data())) ?? []
+        for item in queued {
+            let request = Request(said: item.said, answer: item.question.flatMap { q in item.option.map { (q, $0) } }, voice: item.voice)
+            requests[item.id] = request
+            echoes.append(Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil))
+        }
         JobsActivity.watchTokens { [weak self] in self?.runner }
         conversation.page = { [weak self] before, limit in
             guard let self else { return [] }
@@ -235,8 +265,12 @@ final class Phone {
         // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
         await Notifications.clear(Set(jobs.filter { !$0.needsYou && !$0.waitsForAnswer }.map(\.id)))
         connection = .live
+        lastSeen = .now
+        UserDefaults.standard.set(lastSeen, forKey: "runner.lastSeen")
         // Jobs dispatched from the Mac or the runner API notify too, so ask on connecting.
         Notifications.ask()
+        await flushQueued()
+        await flushQueuedInbox()
         do { _ = try await registerDevice(again: true) } catch {
             Logger.phone.error("registering this iPhone failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -379,11 +413,58 @@ final class Phone {
         echoes.append(echo)
         requests[echo.id] = Request(said: said, answer: answer, voice: voice)
         pending = echo.id
+        if connection != .live {
+            queued.append(QueuedRequest(id: echo.id, said: said, question: answer?.question, option: answer?.option, voice: voice))
+            saveQueue()
+            talk = .queued(said)
+            pending = nil
+            return
+        }
+        send(Request(said: said, answer: answer, voice: voice), echo: echo)
+    }
+
+    private func saveQueue() {
+        UserDefaults.standard.set(try? JSONEncoder().encode(queued), forKey: "phone.outbox")
+    }
+
+    private func saveInboxQueue() {
+        UserDefaults.standard.set(try? JSONEncoder().encode(queuedInbox), forKey: "phone.inboxOutbox")
+    }
+
+    private func flushQueued() async {
+        guard !queued.isEmpty else { return }
+        let waiting = queued
+        queued.removeAll()
+        saveQueue()
+        for item in waiting {
+            guard let request = requests[item.id] else { continue }
+            let echo = echoes.first(where: { $0.id == item.id }) ?? Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil)
+            send(request, echo: echo)
+        }
+    }
+
+    private func flushQueuedInbox() async {
+        guard !queuedInbox.isEmpty else { return }
+        let waiting = queuedInbox
+        queuedInbox.removeAll()
+        saveInboxQueue()
+        for item in waiting {
+            do {
+                apply(.inbox(try await runner.settle(item.id, answer: item.answer, done: item.done, later: item.later)))
+            } catch {
+                queuedInbox.append(item)
+                saveInboxQueue()
+                break
+            }
+        }
+    }
+
+    private func send(_ request: Request, echo: Turn) {
         planning = Task {
             let result: Talk
             var started: [Job] = []
             do {
-                switch try await runner.plan(said, answer: answer) {
+                switch try await runner.plan(request.said, answer: request.answer) {
                 case .question(let said, let question): result = .question(said: said, question)
                 case .reply(let text, let jobs): result = .reply(text); started = jobs
                 case .none: result = .none
@@ -393,7 +474,13 @@ final class Phone {
                 // The request didn't go through (or the runner answered with an error): the words
                 // stay in the thread with why, to try again or edit. If the runner got them after
                 // all (a timeout), its turn settles the echo as usual.
-                if !Task.isCancelled { failures[echo.id] = error.localizedDescription }
+                if !Task.isCancelled {
+                    failures[echo.id] = error.localizedDescription
+                    if connection != .live {
+                        queued.append(QueuedRequest(id: echo.id, said: request.said, question: request.answer?.question, option: request.answer?.option, voice: request.voice))
+                        saveQueue()
+                    }
+                }
             }
             // Cancelled or replaced while the brain was thinking.
             guard !Task.isCancelled else { return }
@@ -405,7 +492,7 @@ final class Phone {
             // asks to notify the first time something starts from it.
             for job in started { apply(.job(job)) }
             if !started.isEmpty { Notifications.ask() }
-            if spoken, speakReplies {
+            if request.voice, speakReplies {
                 switch result {
                 case .reply(let text): speaker.say(text)
                 case .question(_, let question): speaker.say(question.text)
@@ -456,6 +543,11 @@ final class Phone {
 
     /// Settles an inbox item: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
+        guard connection == .live else {
+            queuedInbox.append(QueuedInbox(id: id, answer: answer, done: done, later: later))
+            saveInboxQueue()
+            return
+        }
         apply(.inbox(try await runner.settle(id, answer: answer, done: done, later: later)))
     }
 
