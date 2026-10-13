@@ -29,7 +29,7 @@ struct BriefingCountTests {
         accounts.setLabel("Max · well@example.com", for: "default")
         desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
         desk.repos = ["deskree-inc/oby"]
-        desk.makeBrain = { [brain] _, _ in [brain] }
+        desk.makeBrain = { [brain] (_: String?, _: String?, _: Vault) in [brain] }
     }
 
     func job(_ id: String, title: String, created: TimeInterval) -> Job {

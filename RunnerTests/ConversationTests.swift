@@ -68,7 +68,7 @@ struct ConversationTests {
         desk.prepare = { $0 }
         desk.makeAgent = { _, _, _ in IdleAgent() }
         brain = FakeBrain([Self.reply("Fine.")])
-        desk.makeBrain = { [brain] _, _ in [brain] }
+        desk.makeBrain = { [brain] (_: String?, _: String?, _: Vault) in [brain] }
     }
 
     func until(_ what: String, _ condition: () -> Bool) async throws {

@@ -49,7 +49,7 @@ final class InboxRewriteTests {
         folder = try temporaryFolder()
         desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
         model = FakeModel(Self.good)
-        desk.makeBrain = { [model] _, _ in [model] }
+        desk.makeBrain = { [model] (_: String?, _: String?, _: Vault) in [model] }
         desk.rewritesInbox = true
         desk.makeAgent = { [agent] _, _, _ in agent }
         desk.prepare = { $0 }
