@@ -44,11 +44,11 @@ struct StepsTests {
         model.apply(turn)
         #expect(model.steps.isEmpty && !model.working && model.steps(under: turn, in: [turn]).isEmpty)
         // Thin: no action and no time still shows the step; a state this app doesn't know reads as done.
-        let thin = try Runner.decoder.decode(TurnStep.self, from: Data(#"{"turn":"a","index":2,"text":"Checking","state":"skipped"}"#.utf8))
+        let thin = try Runner.decoder.decode(TurnStep.self, from: Data(#"{"turn":"a","index":2,"text":"Checking","state":"paused"}"#.utf8))
         #expect(thin.action == nil && thin.at == nil && thin.state == .done && thin.text == "Checking")
         let badTime = try Runner.decoder.decode(TurnStep.self, from: Data(#"{"turn":"a","index":2,"text":"Checking","state":"done","at":"yesterday"}"#.utf8))
         #expect(badTime.at == nil && badTime.state == .done)
-        // Without what identifies the step it isn't one, and the event is skipped.
+        // Without what identifies the step it isn't one, and the event is dropped.
         #expect(event(#"{"index":1,"text":"x","state":"done"}"#) == nil)
     }
 
