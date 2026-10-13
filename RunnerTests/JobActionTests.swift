@@ -53,7 +53,7 @@ struct JobActionTests {
             made.agents.append(agent)
             return agent
         }
-        desk.makeBrain = { [brain] _, _ in [brain] }
+        desk.makeBrain = { [brain] _, _, _ in [brain] }
         return desk
     }
 
