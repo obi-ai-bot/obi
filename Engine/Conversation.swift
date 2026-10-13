@@ -212,7 +212,7 @@ nonisolated struct Briefing: Equatable, Sendable {
             case .review, .merge, .audit: "\(Self.line(item.text, cap: 160)) Options: \(item.options.joined(separator: " | "))."
             case .failed, .limit, .failure: "why is quoted in \(ClaudeBrain.quotedFile). Options: \(item.options.joined(separator: " | "))."
             }
-            lines.append("- \(Self.kind(item.kind)) for job \(item.job) (\(Self.line(item.title, cap: 60)), \(place)), waiting \(Self.elapsed(since: item.created, now: now)): \(what)")
+            lines.append("- \(Self.kind(item.kind)) for job \(item.job) (\(Self.line(item.title, cap: 60)), \(place)), waiting \(Self.elapsed(since: item.created, now: now)): \(what)\(what.hasSuffix(".") ? "" : ".") Item id \(item.id).")
         }
         if !failures.isEmpty {
             lines += ["", "## Failures this week, newest first", ""] + failureLines
