@@ -42,7 +42,7 @@ final class IslandModel {
 
     /// Both chat surfaces read and send through this model.
     var thread: [Turn] { feed.conversation.thread(with: desk.turns) }
-    var recentTurns: [Turn] { Array(thread.suffix(4)) }
+    var recentTurns: [Turn] { Array(thread.suffix(3)) }
     var chatWindowVisible = false
     var readReply: String?
     var unreadReply: Bool { thread.last(where: { $0.who == .oby }).map { $0.id != readReply } ?? false }
@@ -52,6 +52,11 @@ final class IslandModel {
     func sendChat(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text, shown: text)
+    }
+
+    func stopChatJob(_ id: String, local: Bool) {
+        if local { desk.stop(id) }
+        else { Task { if let job = try? await feed.about(id, { try await $0.stop(id) }) { feed.apply(job) } } }
     }
 
     /// Agents working now, on this Mac and on the runner: not the jobs waiting their turn (#238).
@@ -543,6 +548,14 @@ private struct Waveform: View {
     }
 }
 
+/// Both the island and its native composer use the same Escape routing.
+nonisolated enum IslandEscape {
+    enum Action: Equatable { case stop, back, close }
+    static func action(thinking: Bool, showingJob: Bool) -> Action {
+        thinking ? .stop : showingJob ? .back : .close
+    }
+}
+
 /// The open island: needs-you cards and jobs above a compact view of the shared chat.
 private struct OpenIsland: View {
     let model: IslandModel
@@ -601,6 +614,7 @@ private struct OpenIsland: View {
                 }
                 Button { onOpenWindow(nil) } label: { topPill { Text("Open Chat") } }
                     .buttonStyle(.plain)
+                    .keyboardShortcut("o", modifiers: .command)
                     .help("The window: the whole conversation, every agent, and what's live")
                 Button(action: onClose) {
                     Image(systemName: "chevron.up")
@@ -613,47 +627,12 @@ private struct OpenIsland: View {
             }
             .frame(minHeight: 92, alignment: .top)
 
-            switch desk.talk {
-            case .plan(let drafts) where drafts.count == 1:
-                scrolling {
-                    PlanCard(draft: drafts[0], accounts: desk.accounts.accounts.filter(\.signedIn),
-                             onDispatch: { desk.dispatch(tray.attach($0)); tray.clear() },
-                             onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
-                             onCancel: { desk.cancel() })
-                }
-            case .plan(let drafts):
-                scrolling {
-                    PlansCard(drafts: drafts, accounts: desk.accounts.accounts.filter(\.signedIn),
-                              onDispatch: { for draft in $0 { desk.dispatch(tray.attach(draft)) }; tray.clear() },
-                              onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
-                              onCancel: { desk.cancel() })
-                }
-            case .question(let said, let question):
-                scrolling {
-                    DecisionCard(title: question.text, options: CardOption.of(question.options),
-                                 onChoose: { desk.answer($0.answer, said: said, question: question.text) },
-                                 onWords: { desk.answer($0, said: said, question: question.text) })
-                }
-            default:
-                if let row = selectedRow {
-                    scrolling { screen(row).id(row.id) }
-                } else {
-                    // The inbox first: what only you can answer, then the jobs.
-                    if !groups.isEmpty || IslandInbox.waits(desk: desk, feed: feed) {
-                        scrolling {
-                            VStack(alignment: .leading, spacing: 14) {
-                                IslandInbox(desk: desk, feed: feed, onOpen: { selected = Row.id($0, local: $1) })
-                                list
-                            }
-                        }
-                    }
-                    if let problem {
-                        Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(2)
-                    }
-                    if feed.down {
-                        Text("\(feed.name) isn't reachable").font(.system(size: 12)).foregroundStyle(.white.opacity(0.45))
-                    }
-                }
+            if feed.down { RunnerOfflineNotice(name: feed.name) }
+            if let problem { Text(problem).font(OBYStyle.caption).foregroundStyle(.red).textSelection(.enabled) }
+            if let row = selectedRow {
+                scrolling { screen(row).id(row.id) }
+            } else if !groups.isEmpty {
+                scrolling { list }
             }
             if selected == nil {
                 compactChat
@@ -665,9 +644,7 @@ private struct OpenIsland: View {
         }
         .padding(insets)
         // Escape cancels the turn Oby is thinking about first, then leaves a job's screen, then closes the island.
-        .onExitCommand {
-            if thinking { desk.cancel() } else if selected != nil { selected = nil } else { onClose() }
-        }
+        .onExitCommand { exit() }
         .onAppear { typing = true; model.markChatRead() }
         .onChange(of: model.thread.last?.id) { if selected == nil { model.markChatRead() } }
         // A notification opened the island on a runner's job: its screen opens.
@@ -686,6 +663,14 @@ private struct OpenIsland: View {
             }
         }
         .onDisappear { if let id = Row.runnerJob(selected) { feed.showing(id, false) } }
+    }
+
+    private func exit() {
+        switch IslandEscape.action(thinking: thinking, showingJob: selected != nil) {
+        case .stop: desk.cancel()
+        case .back: selected = nil
+        case .close: onClose()
+        }
     }
 
     /// A job in the list, and the runner it's on (nil: this Mac).
@@ -859,17 +844,42 @@ private struct OpenIsland: View {
     }
 
     private var compactChat: some View {
-        ScrollView {
-            VStack(spacing: 6) {
-                ForEach(model.recentTurns) { turn in
-                    HStack {
-                        if turn.who == .user { Spacer(minLength: 50) }
-                        Text(turn.text).font(.system(size: 13)).lineLimit(3)
-                            .padding(.horizontal, 12).padding(.vertical, 8)
-                            .background(turn.who == .user ? Color.accentColor : .white.opacity(0.08),
-                                        in: RoundedRectangle(cornerRadius: 13))
-                        if turn.who == .oby { Spacer(minLength: 50) }
+        let turns = model.recentTurns
+        let decisions = IslandInbox.entries(desk: desk, feed: feed, now: .now)
+        let permissions = feed.chatPermissions.filter { $0.waits(at: .now) }
+        return ScrollView {
+            VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
+                ForEach(decisions.filter { ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns) == nil }) { entry in
+                    InlineDecision(entry: entry, desk: desk, feed: feed, onOpen: { selected = Row.id($0, local: $1) })
+                }
+                ForEach(Array(model.recentTurns.enumerated()), id: \.element.id) { index, turn in
+                    TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? model.recentTurns[index - 1] : nil),
+                            jobs: [], account: { _, _ in "" }, isLocal: { _ in false },
+                            onOpenJob: { onOpenWindow((id: $0, local: $1)) }, showTime: false)
+                    ForEach(decisions.filter { ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns) == turn.id }) { entry in
+                        InlineDecision(entry: entry, desk: desk, feed: feed, onOpen: { selected = Row.id($0, local: $1) })
                     }
+                }
+                ForEach(permissions) { record in
+                    InlinePermission(record: record, feed: feed)
+                }
+                switch desk.talk {
+                case .plan(let drafts) where drafts.count == 1:
+                    PlanCard(draft: drafts[0], accounts: desk.accounts.accounts.filter(\.signedIn),
+                             onDispatch: { desk.dispatch(tray.attach($0)); tray.clear() },
+                             onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
+                             onCancel: { desk.cancel() })
+                case .plan(let drafts):
+                    PlansCard(drafts: drafts, accounts: desk.accounts.accounts.filter(\.signedIn),
+                              onDispatch: { for draft in $0 { desk.dispatch(tray.attach(draft)) }; tray.clear() },
+                              onEdit: { text = typed(drafts[0].said); desk.cancel(); typing = true },
+                              onCancel: { desk.cancel() })
+                case .question(let said, let question):
+                    DecisionCard(title: question.text, options: question.cardOptions,
+                                 keyboardEnabled: true, onLater: { desk.cancel() },
+                                 onChoose: { desk.answer($0.answer, said: said, question: question.text) },
+                                 onWords: { desk.answer($0, said: said, question: question.text) })
+                default: EmptyView()
                 }
                 if model.speaker.speaking {
                     Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
@@ -878,64 +888,19 @@ private struct OpenIsland: View {
             }
         }
         .defaultScrollAnchor(.bottom)
-        .frame(height: model.recentTurns.isEmpty && !thinking ? 0 : 150)
+        .frame(height: model.recentTurns.isEmpty && decisions.isEmpty && permissions.isEmpty && !thinking ? 0 : 190)
         .accessibilityLabel("Recent conversation with Oby")
     }
 
     /// Oby's bubble while it thinks: never left there, with a way out in sight.
     private var thinkingRow: some View {
-        HStack {
-            ProgressView().controlSize(.mini)
-            Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
-            Button("Cancel") { desk.cancel() }.buttonStyle(.plain).help("Cancel (Esc)")
-            Spacer()
-        }
+        ThinkingLine(onStop: { desk.cancel() })
     }
 
     private var field: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TrayRow(tray: tray)
-            fieldCapsule
-        }
-    }
-
-    private var fieldCapsule: some View {
-        HStack(spacing: 8) {
-            TextField("Type a task, like “Review oby PR #12”", text: $text)
-                .textFieldStyle(.plain)
-                .font(.system(size: 15))
-                .focused($typing)
-                .onSubmit(send)
-            Button(action: tray.pasteClipboard) {
-                Image(systemName: "doc.on.clipboard").font(.system(size: 14, weight: .semibold))
-                    .frame(width: 30, height: 30)
-            }
-            .buttonStyle(.plain)
-            .help("Attach what you copied")
-            .accessibilityLabel("Attach the clipboard")
-            Button(action: screenshot) {
-                Image(systemName: "camera").font(.system(size: 14, weight: .semibold))
-                    .frame(width: 30, height: 30)
-            }
-            .buttonStyle(.plain)
-            .disabled(tray.capturing)
-            .help("Show Oby your screen: drag over part of it, or click for all of it")
-            .accessibilityLabel("Attach a screenshot")
-            Button(action: send) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(.black)
-                    .frame(width: 34, height: 34)
-                    .background(.white.opacity(text.isEmpty ? 0.4 : 1), in: Circle())
-            }
-            .buttonStyle(.plain)
-            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .accessibilityLabel("Send")
-        }
-        .padding(.leading, 18)
-        .padding(.trailing, 7)
-        .frame(height: 48)
-        .background(.white.opacity(0.08), in: Capsule())
+        ChatComposer(text: $text, focused: Binding(get: { typing }, set: { typing = $0 }), tray: tray,
+                     maximumHeight: 190, onSend: send, onScreenshot: screenshot,
+                     onStop: { exit(); return true })
     }
 
     private func send() {
@@ -1235,53 +1200,15 @@ private struct JobRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 12) {
-                AgentMark(agent: job.agent).font(.system(size: 17, weight: .semibold)).frame(width: 22)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(job.heading).font(.system(size: 15, weight: .semibold)).lineLimit(2)
-                        Text(place).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.7))
-                            .padding(.horizontal, 7).frame(height: 18)
-                            .background(.white.opacity(0.12), in: Capsule())
-                    }
-                    Text(job.pipeline.label).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.55))
-                    if !job.line.isEmpty {
-                        Text(job.line).font(.system(size: 13)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
-                    }
-                    HStack(spacing: 8) {
-                        StatusBadge(job: job)
-                        if let verdict = job.verdictLine {
-                            Text(verdict).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
-                        }
-                    }
-                }
-                Spacer(minLength: 8)
-                if job.needsYou {
-                    Button(action: dismiss) {
-                        Text("Dismiss").font(.system(size: 12, weight: .semibold))
-                            .padding(.horizontal, 10).frame(height: 24)
-                            .background(.white.opacity(0.12), in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Let this job go: it stays in the list, and stops needing you")
-                }
-                if job.isActive {
-                    Button(action: onStop) {
-                        Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
-                            .frame(width: 24, height: 24).background(.white.opacity(0.1), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Stop")
-                }
+            JobChip(job: job, account: place, onOpen: onOpen, onStop: onStop)
+            if job.needsYou {
+                Button("Dismiss", action: dismiss).buttonStyle(.plain).font(OBYStyle.caption)
             }
             if let problem {
                 Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(2)
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 11)
-        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .onTapGesture(perform: onOpen)
+        .contentShape(Rectangle())
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("Opens the job")
     }

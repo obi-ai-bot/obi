@@ -304,7 +304,7 @@ private struct JobCard: View {
                     Text(ChatThread.cardLine(job, account: account)).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Spacer(minLength: 8)
-                StatusPill(job: job)
+                StatusPill(badge: job.badge)
             }
             .padding(.horizontal, 14).padding(.vertical, 11)
             .frame(maxWidth: .infinity, alignment: .leading)

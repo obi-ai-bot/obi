@@ -154,6 +154,21 @@ final class ConversationModel {
             && calendar.isDate(turn.date, inSameDayAs: previous.date)
     }
 
+    /// Attach a decision to the turn that launched its job; older/unlinked jobs attach by time.
+    /// No preceding turn means the decision stands alone at the start of the loaded transcript.
+    nonisolated static func decisionAnchor(job: String, created: Date, turns: [Turn]) -> String? {
+        let ordered = ordered(turns)
+        return ordered.last(where: { ($0.jobs ?? []).contains(job) })?.id
+            ?? ordered.last(where: { $0.date <= created })?.id
+    }
+
+    /// Time groups are independent of sender/bubble groups: a reply doesn't start a new time line.
+    nonisolated static func showsTime(_ turn: Turn, after previous: Turn?, calendar: Calendar = .current) -> Bool {
+        guard let previous else { return true }
+        return !calendar.isDate(turn.date, inSameDayAs: previous.date)
+            || turn.date.timeIntervalSince(previous.date) > 15 * 60
+    }
+
     // MARK: Jobs
 
     /// The jobs a turn started, among `jobs`, in the turn's order; ids not among them are left out

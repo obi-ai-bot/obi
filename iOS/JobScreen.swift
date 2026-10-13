@@ -118,8 +118,8 @@ struct JobScreen: View {
             Text(job.heading).font(.title2.weight(.semibold)).lineLimit(2)
                 .accessibilityAddTraits(.isHeader)
             ViewThatFits(in: .horizontal) {
-                HStack { StatusPill(job: job); elapsed(job) }
-                VStack(alignment: .leading, spacing: 8) { StatusPill(job: job); elapsed(job) }
+                HStack { StatusPill(badge: job.badge); elapsed(job) }
+                VStack(alignment: .leading, spacing: 8) { StatusPill(badge: job.badge); elapsed(job) }
             }
             Text("\(job.agentName) · \(phone.accounts.first { $0.id == job.account }?.name ?? job.account)")
                 .font(.subheadline).foregroundStyle(.secondary)

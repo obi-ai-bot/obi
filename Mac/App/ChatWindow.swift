@@ -70,9 +70,11 @@ final class ChatWindow: NSObject, NSWindowDelegate {
 @Observable
 final class ChatState {
     var selection = ChatSelection.oby
+    var composerFocusRequest = 0
 
     func open(job: (id: String, local: Bool)? = nil) {
         selection = job.map { .job(id: $0.id, local: $0.local) } ?? .oby
+        if job == nil { composerFocusRequest += 1 }
     }
 }
 
@@ -81,6 +83,7 @@ struct ChatView: View {
     let model: IslandModel
     let state: ChatState
     let onOpenSettings: (SettingsTab) -> Void
+    @AppStorage("ObyChatLiveExpanded") private var liveExpanded = false
 
     private var selection: Binding<ChatSelection> {
         Binding { state.selection } set: { state.selection = $0 }
@@ -90,11 +93,13 @@ struct ChatView: View {
         HStack(spacing: 0) {
             SidebarView(model: model, selection: selection, onOpenSettings: onOpenSettings)
                 .frame(width: 272)
-            Divider().overlay(.white.opacity(0.08))
             middle.frame(maxWidth: .infinity, maxHeight: .infinity)
+            if liveExpanded {
+                LiveView(model: model, onOpen: { state.selection = .job(id: $0, local: $1) }).frame(width: 290)
+            }
         }
         .foregroundStyle(.white)
-        .background(Color(white: 0.09))
+        .background(OBYStyle.window)
         .preferredColorScheme(.dark)
         .ignoresSafeArea()
     }
@@ -102,7 +107,7 @@ struct ChatView: View {
     @ViewBuilder private var middle: some View {
         switch state.selection {
         case .oby:
-            ConversationColumn(model: model, onOpenJob: { state.selection = .job(id: $0, local: $1) })
+            ConversationColumn(model: model, liveExpanded: $liveExpanded, composerFocusRequest: state.composerFocusRequest, onOpenJob: { state.selection = .job(id: $0, local: $1) })
         case .job(let id, let local):
             JobPane(model: model, id: id, local: local, onBack: { state.selection = .oby })
         case .channels:
@@ -116,7 +121,7 @@ struct ChatView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title).font(.system(size: 20, weight: .semibold))
             Text(line).font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.7))
-            Text(detail).font(.system(size: 13)).foregroundStyle(.white.opacity(0.45)).frame(maxWidth: 480, alignment: .leading)
+            Text(detail).font(OBYStyle.small).foregroundStyle(OBYStyle.tertiary).frame(maxWidth: 480, alignment: .leading)
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -127,10 +132,21 @@ struct ChatView: View {
 /// way, the plan or question card, the inbox's decision cards, and the composer.
 private struct ConversationColumn: View {
     let model: IslandModel
+    @Binding var liveExpanded: Bool
+    let composerFocusRequest: Int
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
     @State private var text = ""
-    @State private var liveExpanded = false
-    @FocusState private var typing: Bool
+    struct ReplyTarget {
+        var title: String
+        var send: @MainActor (String) async throws -> Void
+    }
+    @State private var replyTarget: ReplyTarget?
+    @State private var sendingAnswer = false
+    @State private var sendProblem: String?
+    @State private var decisionFocus = 0
+    @State private var columnHeight: CGFloat = 600
+    @State private var typing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
@@ -139,35 +155,34 @@ private struct ConversationColumn: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text("Oby").font(.system(size: 20, weight: .semibold))
-                Text(thinking ? "Thinking…" : "Your Oby").font(.system(size: 15)).foregroundStyle(.white.opacity(0.55))
+            HStack(spacing: OBYStyle.Space.md) {
+                ObyFace(size: 30).background(OBYStyle.surface, in: Circle()).clipShape(Circle())
+                Text("Oby").font(OBYStyle.title)
                 Spacer()
-                if feed.down {
-                    Text("\(feed.name) isn't reachable").font(.system(size: 12)).foregroundStyle(.orange)
+                Button { liveExpanded.toggle() } label: {
+                    Label("Live · \(model.working)", systemImage: "sidebar.right")
+                        .font(OBYStyle.small.weight(.medium))
+                        .padding(OBYStyle.Space.sm)
+                        .background(liveExpanded ? OBYStyle.surface : .clear, in: Capsule())
                 }
+                .buttonStyle(.plain).accessibilityValue(liveExpanded ? "Open" : "Closed")
+                Menu {
+                    Button("Accounts") { SettingsSelection.open(.accounts) }
+                    Button("Integrations") { SettingsSelection.open(.runner) }
+                    Button("Settings") { SettingsSelection.open(.general) }
+                } label: { Image(systemName: "ellipsis").font(OBYStyle.title) }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().accessibilityLabel("Chat menu")
             }
-            .padding(.horizontal, 28).padding(.top, 46).padding(.bottom, 14)
+            .padding(.horizontal, OBYStyle.Space.xl).padding(.top, 46).padding(.bottom, OBYStyle.Space.lg)
             .accessibilityAddTraits(.isHeader)
-            Divider().overlay(.white.opacity(0.08))
-            if model.working > 0 {
-                Button { withAnimation { liveExpanded.toggle() } } label: {
-                    Label("\(model.working) working", systemImage: liveExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(.white.opacity(0.07), in: Capsule())
-                }
-                .buttonStyle(.plain).padding(.horizontal, 28).padding(.top, 10)
-                if liveExpanded {
-                    LiveView(model: model, onOpen: onOpenJob).frame(height: 200)
-                }
-            }
             thread
             composer.padding(.horizontal, 28).padding(.vertical, 16)
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { columnHeight = $0 }
         // Escape cancels the turn Oby is thinking about.
         .onExitCommand { if thinking { desk.cancel() } }
         .onAppear { typing = true; model.markChatRead() }
+        .onChange(of: composerFocusRequest) { typing = true }
         .onChange(of: model.thread.last?.id) { if model.chatWindowVisible { model.markChatRead() } }
     }
 
@@ -178,83 +193,130 @@ private struct ConversationColumn: View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             let turns = conversation.thread(with: desk.turns)
             let days = ConversationModel.days(turns, now: context.date)
+            let entries = (desk.inbox.map { IslandInbox.Entry(item: $0, local: true) }
+                + (feed.inbox + feed.inboxHistory).map { IslandInbox.Entry(item: $0, local: false) })
+                .filter { $0.item.isDecision && ($0.item.later == nil || $0.item.later! <= context.date) }
+                .sorted { $0.item.created < $1.item.created }
+            let waiting = entries.filter { $0.item.isOpen }
+            let permissions = feed.chatPermissions.filter { $0.done != nil || $0.waits(at: context.date) }
+            let permissionWaits = permissions.filter { $0.waits(at: context.date) }
+            let oldest = (waiting.map { ($0.id, $0.item.created) } + permissionWaits.map { ($0.id, $0.created) })
+                .min { $0.1 < $1.1 }?.0
+            let waitingCount = waiting.count + permissionWaits.count
+            let anchors = Dictionary(uniqueKeysWithValues: entries.map {
+                ($0.id, ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns))
+            })
             ScrollViewReader { proxy in
+                VStack(spacing: 0) {
+                    if feed.down {
+                        RunnerOfflineNotice(name: feed.name)
+                    }
+                    if let oldest {
+                        Button { typing = false; decisionFocus += 1; proxy.scrollTo(oldest, anchor: .center) } label: {
+                            HStack {
+                                Image(systemName: "exclamationmark.bubble")
+                                Text("\(waitingCount) waiting for you")
+                                Spacer()
+                                Text("⌘J")
+                            }
+                            .font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
+                            .padding(.horizontal, OBYStyle.Space.xl).padding(.vertical, OBYStyle.Space.sm)
+                        }
+                        .buttonStyle(.plain).keyboardShortcut("j", modifiers: .command)
+                        .background(OBYStyle.sidebar)
+                    }
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 6) {
                         if conversation.hasOlder {
                             Button(conversation.loading ? "Loading…" : "Earlier") { Task { await conversation.loadOlder() } }
-                                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.55))
+                                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(OBYStyle.secondary)
                                 .disabled(conversation.loading)
                                 .frame(maxWidth: .infinity)
                         }
                         if let problem = conversation.problem {
-                            Text("The runner's thread couldn't be read: \(problem)").font(.system(size: 12)).foregroundStyle(.orange)
+                            Text("The runner's thread couldn't be read: \(problem)").font(OBYStyle.caption).foregroundStyle(.orange)
                         }
                         if turns.isEmpty, !thinking {
-                            Text("Ask about the work, or type a task. Hold fn to talk.")
-                                .font(.system(size: 14)).foregroundStyle(.white.opacity(0.45)).padding(.top, 20)
+                            Text("Ask Oby anything. Hold fn to talk.")
+                                .font(.system(size: 14)).foregroundStyle(OBYStyle.tertiary).padding(.top, 20)
+                        }
+                        ForEach(entries.filter { anchors[$0.id] == .some(nil) }) { entry in
+                            decision(entry, active: oldest == entry.id)
+                        }
+                        ForEach(permissions.filter { ConversationModel.decisionAnchor(job: $0.job, created: $0.created, turns: turns) == nil }) { record in
+                            permission(record, active: oldest == record.id).id(record.id)
                         }
                         ForEach(days) { day in
-                            daySeparator(day.title)
                             ForEach(Array(day.turns.enumerated()), id: \.element.id) { index, turn in
                                 TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? day.turns[index - 1] : nil), jobs: ConversationModel.jobs(of: turn, among: desk.jobs + feed.jobs),
                                         account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
                                         isLocal: { id in desk.jobs.contains { $0.id == id } },
-                                        onOpenJob: onOpenJob)
+                                        onOpenJob: onOpenJob,
+                                        onStopJob: { model.stopChatJob($0, local: $1) },
+                                        showTime: ConversationModel.showsTime(turn, after: index > 0 ? day.turns[index - 1] : nil))
                                     .task(id: turn.jobs ?? []) {
                                         // A runner's job older than its list: fetched, so its card shows.
                                         for id in ConversationModel.missing(of: turn, among: desk.jobs + feed.jobs) { try? await feed.fetch(id) }
                                     }
+                                ForEach(entries.filter { anchors[$0.id] == .some(turn.id) }) { entry in
+                                    decision(entry, active: oldest == entry.id)
+                                }
+                                ForEach(permissions.filter { ConversationModel.decisionAnchor(job: $0.job, created: $0.created, turns: turns) == turn.id }) { record in
+                                    permission(record, active: oldest == record.id).id(record.id)
+                                }
                             }
                         }
                         if thinking { pending }
                         cards
-                        if IslandInbox.waits(desk: desk, feed: feed, now: context.date) {
-                            IslandInbox(desk: desk, feed: feed, onOpen: onOpenJob)
-                        }
                         if model.speaker.speaking {
-                            Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
+                            Text("Speaking · press fn to stop").font(.system(size: 11)).foregroundStyle(OBYStyle.tertiary)
                         }
                         Color.clear.frame(height: 1).id("end")
                     }
-                    .padding(.horizontal, 28).padding(.vertical, 18)
+                    .frame(maxWidth: OBYStyle.threadWidth)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, OBYStyle.Space.xl).padding(.vertical, OBYStyle.Space.lg)
                 }
                 .defaultScrollAnchor(.bottom)
-                .onChange(of: turns.count) { withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
+                .onChange(of: turns.count) { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("end", anchor: .bottom) } }
                 .onChange(of: desk.talk) { proxy.scrollTo("end", anchor: .bottom) }
+                }
             }
         }
         .accessibilityLabel("Conversation")
     }
 
-    private func daySeparator(_ title: String) -> some View {
-        HStack(spacing: 10) {
-            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
-            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.45)).fixedSize()
-            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
-        }
-        .padding(.vertical, 4)
-        .accessibilityAddTraits(.isHeader)
+    private func decision(_ entry: IslandInbox.Entry, active: Bool) -> some View {
+        InlineDecision(entry: entry, desk: desk, feed: feed, keyboardEnabled: active, focusRequest: decisionFocus, onOpen: onOpenJob,
+                       onTell: {
+                           guard !sendingAnswer else { return }
+                           replyTarget = ReplyTarget(title: entry.item.title, send: { value in
+                               if entry.local { try await desk.answer(entry.item.id, .answer(value)) }
+                               else { try await feed.settle(entry.item.id, answer: value) }
+                           })
+                           sendProblem = nil
+                           typing = true
+                       })
+            .id(entry.id)
     }
 
-    /// Oby's bubble while it thinks: never left there, with a way out in sight.
+    private func permission(_ record: RunnerFeed.PermissionRecord, active: Bool) -> some View {
+        InlinePermission(record: record, feed: feed, keyboardEnabled: active, focusRequest: decisionFocus,
+                         onTell: {
+                             guard !sendingAnswer else { return }
+                             replyTarget = ReplyTarget(title: record.permission.title, send: { value in
+                                 guard feed.extras[record.job]?.permission?.id == record.permission.id else {
+                                     throw RunnerError(message: "This request has already been answered.")
+                                 }
+                                 try await feed.answer(record.job, .deny, message: value)
+                             })
+                             sendProblem = nil
+                             typing = true
+                         })
+    }
+
     private var pending: some View {
-        HStack(alignment: .top, spacing: 12) {
-            ObyFace(size: 30)
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small).tint(.white)
-                Text("Thinking…").font(.system(size: 14, weight: .medium)).foregroundStyle(.white.opacity(0.75))
-                Button { desk.cancel() } label: {
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
-                        .frame(width: 20, height: 20).background(.white.opacity(0.14), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .help("Cancel (Esc)")
-                .accessibilityLabel("Cancel")
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        }
+        ThinkingLine(onStop: { desk.cancel() })
     }
 
     /// The plan before anything runs, or the brain's question, under the thread, as the island shows them.
@@ -273,11 +335,11 @@ private struct ConversationColumn: View {
                       onCancel: { desk.cancel() })
                 .frame(maxWidth: 720)
         case .question(let said, let question):
-            DecisionCard(title: question.text, options: CardOption.of(question.options),
+            DecisionCard(title: question.text, options: question.cardOptions, keyboardEnabled: true, onLater: { desk.cancel() },
                          onChoose: { desk.answer($0.answer, said: said, question: question.text) },
                          onWords: { desk.answer($0, said: said, question: question.text) })
                 .padding(14)
-                .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .background(OBYStyle.surface, in: RoundedRectangle(cornerRadius: OBYStyle.card, style: .continuous))
                 .frame(maxWidth: 720)
         default:
             EmptyView()
@@ -287,57 +349,48 @@ private struct ConversationColumn: View {
     // MARK: The composer
 
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TrayRow(tray: model.tray)
-            HStack(spacing: 6) {
-                TextField("Message Oby", text: $text, axis: .vertical)
-                    .lineLimit(1...5)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 15))
-                    .focused($typing)
-                    .onKeyPress(.return, phases: .down) { press in
-                        if press.modifiers.contains(.shift) { return .ignored }
-                        send()
-                        return .handled
-                    }
-                Button(action: screenshot) {
-                    Image(systemName: "camera").font(.system(size: 14, weight: .semibold)).frame(width: 30, height: 30)
+        VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
+            if let replyTarget {
+                HStack {
+                    Text("Replying to \(replyTarget.title)").font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary).lineLimit(1)
+                    Spacer()
+                    Button { self.replyTarget = nil; sendProblem = nil } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).disabled(sendingAnswer).accessibilityLabel("Cancel reply")
                 }
-                .buttonStyle(.plain)
-                .disabled(model.tray.capturing)
-                .help("Show Oby your screen: drag over part of it, or click for all of it")
-                .accessibilityLabel("Attach a screenshot")
-                Button(action: model.tray.pasteClipboard) {
-                    Image(systemName: "doc.on.clipboard").font(.system(size: 14, weight: .semibold)).frame(width: 30, height: 30)
-                }
-                .buttonStyle(.plain)
-                .help("Attach what you copied")
-                .accessibilityLabel("Attach the clipboard")
-                // Oby listens only while you hold the talk key: the mic here says so, and never opens by itself.
-                Image(systemName: "mic").font(.system(size: 14, weight: .semibold)).frame(width: 30, height: 30)
-                    .foregroundStyle(.white.opacity(0.55))
-                    .help("Hold fn (or Control-Option) to talk. Oby listens only while you hold it.")
-                    .accessibilityLabel("Hold fn to talk")
-                Button(action: send) {
-                    Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold)).foregroundStyle(.black)
-                        .frame(width: 34, height: 34)
-                        .background(.white.opacity(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.4 : 1), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .accessibilityLabel("Send")
             }
-            .padding(.leading, 18).padding(.trailing, 7)
-            .frame(minHeight: 50)
-            .background(.white.opacity(0.08), in: Capsule())
+            if let sendProblem {
+                HStack {
+                    Text(sendProblem).font(OBYStyle.caption).foregroundStyle(.red)
+                    Button("Try again", action: send).buttonStyle(.plain).font(OBYStyle.caption)
+                }
+            }
+            if sendingAnswer { ProgressView().controlSize(.small).accessibilityLabel("Sending answer") }
+            ChatComposer(text: $text, focused: $typing, tray: model.tray,
+                         maximumHeight: columnHeight * 0.5, focusRequest: composerFocusRequest,
+                         onSend: send, onScreenshot: screenshot,
+                         onStop: { if thinking { desk.cancel(); return true }; return false })
+                .disabled(sendingAnswer)
         }
     }
 
     private func send() {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        // The chips stay until Dispatch, which hands them to the jobs. The thread shows your words alone.
-        model.sendChat(text)
-        text = ""
+        let value = text
+        guard !sendingAnswer, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard let target = replyTarget else {
+            model.sendChat(value)
+            text = ""
+            return
+        }
+        sendingAnswer = true
+        sendProblem = nil
+        Task {
+            defer { sendingAnswer = false }
+            do {
+                try await target.send(value)
+                if text == value { text = "" }
+                replyTarget = nil
+            } catch { sendProblem = error.localizedDescription }
+        }
     }
 
     /// Your words without the line about the chips, to edit them: it's added again when you send.
@@ -354,85 +407,73 @@ private struct ConversationColumn: View {
     }
 }
 
-/// One messenger turn: accent bubbles on the right, neutral replies on the left,
-/// small times below and compact job cards. Consecutive replies share an avatar.
-private struct TurnRow: View {
+/// Shared messenger bubbles: no per-message chrome, one centered timestamp above each group.
+struct TurnRow: View {
     let turn: Turn
     var grouped = false
     let jobs: [Job]
     let account: (_ job: Job, _ local: Bool) -> String
-    /// Whether a job is this Mac's own (else the runner's).
     let isLocal: (_ id: String) -> Bool
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
+    var onStopJob: ((_ job: String, _ local: Bool) -> Void)? = nil
+    var showTime = true
 
     var body: some View {
-        if turn.who == .user { yours } else { obys }
-    }
-
-    private var yours: some View {
-        HStack(alignment: .top) {
-            Spacer(minLength: 120)
-            VStack(alignment: .trailing, spacing: 6) {
-                ReadingText(turn.text)
+        VStack(alignment: .leading, spacing: 6) {
+            if showTime {
+                Text(ConversationModel.dayTitle(turn.date, now: .now, calendar: .current) + " " + ConversationModel.clock(turn.date))
+                    .font(OBYStyle.caption).foregroundStyle(OBYStyle.tertiary)
+                    .frame(maxWidth: .infinity).padding(.top, OBYStyle.Space.lg).padding(.bottom, OBYStyle.Space.sm)
+            }
+            MessageBubbleLayout(trailing: turn.who == .user) {
+                ReadingText(turn.text, color: turn.who == .user ? OBYStyle.userText : OBYStyle.primary)
                     .textSelection(.enabled)
-                    .padding(.horizontal, 16).padding(.vertical, 12)
-                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                Text((turn.voice == true ? "By voice · " : "") + ConversationModel.clock(turn.date))
-                    .font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
+                    .padding(.horizontal, OBYStyle.Space.lg).padding(.vertical, 14)
+                    .background(turn.who == .user ? OBYStyle.userBubble : OBYStyle.assistantBubble,
+                                in: RoundedRectangle(cornerRadius: OBYStyle.bubble, style: .continuous))
+            }
+            ForEach(jobs) { job in
+                Text("Started \(job.heading)").font(OBYStyle.caption).foregroundStyle(OBYStyle.tertiary)
+                    .frame(maxWidth: .infinity).padding(.vertical, OBYStyle.Space.sm)
+                let local = isLocal(job.id)
+                JobChip(job: job, account: account(job, local), onOpen: { onOpenJob(job.id, local) },
+                        onStop: onStopJob.map { stop in { stop(job.id, local) } })
             }
         }
-        .padding(.top, grouped ? 0 : 10)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("You, \(ConversationModel.clock(turn.date)): \(turn.text)")
-    }
-
-    private var obys: some View {
-        HStack(alignment: .top, spacing: 12) {
-            ObyFace(size: 30).opacity(grouped ? 0 : 1)
-            VStack(alignment: .leading, spacing: 6) {
-                ReadingText(turn.text).textSelection(.enabled)
-                    .padding(.horizontal, 16).padding(.vertical, 12)
-                    .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16))
-                Text(ConversationModel.clock(turn.date)).font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
-                ForEach(jobs) { job in
-                    let local = isLocal(job.id)
-                    JobCard(job: job, account: account(job, local), onOpen: { onOpenJob(job.id, local) })
-                }
-            }
-            Spacer(minLength: 60)
-        }
-        .padding(.top, grouped ? 0 : 10)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Oby, \(ConversationModel.clock(turn.date)): \(turn.text)")
+        .accessibilityLabel("\(turn.who == .user ? "You" : "Oby"), \(ConversationModel.clock(turn.date)): \(turn.text)")
     }
 }
 
-/// A job under Oby's words: its tool's mark, its title, "Claude Code · Deskree · its step", and
-/// the status pill. Click it for the job's screen.
-private struct JobCard: View {
-    let job: Job
-    let account: String
-    let onOpen: () -> Void
+/// The bubble hugs its text while its row fills the column; long text gets at most 75%.
+struct MessageBubbleLayout: Layout {
+    var trailing: Bool
+    private func content(_ width: CGFloat, subviews: Subviews) -> CGSize {
+        subviews[0].sizeThatFits(ProposedViewSize(width: min(width * 0.75, OBYStyle.threadWidth * 0.75), height: nil))
+    }
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? OBYStyle.threadWidth
+        return CGSize(width: width, height: content(width, subviews: subviews).height)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let size = content(bounds.width, subviews: subviews)
+        subviews[0].place(at: CGPoint(x: trailing ? bounds.maxX - size.width : bounds.minX, y: bounds.minY),
+                          proposal: ProposedViewSize(size))
+    }
+}
 
+struct ThinkingLine: View {
+    let onStop: () -> Void
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            AgentMark(agent: job.agent).font(.system(size: 17, weight: .semibold)).frame(width: 22)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(job.heading).font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                Text([job.agentName, account, job.line].filter { !$0.isEmpty }.joined(separator: " · "))
-                    .font(.system(size: 13)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
-            }
-            Spacer(minLength: 8)
-            StatusBadge(job: job)
+        HStack(spacing: OBYStyle.Space.sm) {
+            HStack(spacing: OBYStyle.Space.xs) {
+                ForEach(0..<3) { _ in Circle().fill(OBYStyle.tertiary).frame(width: 4, height: 4) }
+            }.accessibilityHidden(true)
+            Text("Thinking").font(OBYStyle.small).foregroundStyle(OBYStyle.tertiary)
+            Button("Stop", action: onStop).buttonStyle(.plain).font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
+            Spacer()
         }
-        .padding(.horizontal, 14).padding(.vertical, 11)
-        .frame(maxWidth: 560)
-        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .onTapGesture(perform: onOpen)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityHint("Opens the job")
+        .padding(.vertical, OBYStyle.Space.sm)
     }
 }
 
@@ -469,7 +510,7 @@ private struct JobPane: View {
                     if let job {
                         screen(job)
                     } else if let problem {
-                        Text(problem).font(.system(size: 13)).foregroundStyle(.red)
+                        Text(problem).font(OBYStyle.small).foregroundStyle(.red)
                     } else {
                         ProgressView().controlSize(.small).tint(.white)
                     }

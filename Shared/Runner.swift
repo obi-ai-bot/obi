@@ -633,20 +633,23 @@ extension Job {
     /// where its pull request is. A job you let go says Dismissed, however it ended.
     nonisolated var badge: JobBadge {
         if dismissed != nil { return JobBadge(text: "Dismissed", tone: .gray) }
+        if waitsForPermission { return JobBadge(text: "Awaiting approval", tone: .orange) }
+        if waitsForAnswer { return JobBadge(text: "Needs input", tone: .orange) }
+        if step == "Waiting for your OK", isActive { return JobBadge(text: "Awaiting approval", tone: .orange) }
         switch status {
         case .queued where waiting != nil: return .waiting
         case .queued: return JobBadge(text: "Starting", tone: .blue)
         case .running: return JobBadge(text: "Working", tone: .blue)
         case .done where canPublish: return JobBadge(text: "Ready to publish", tone: .orange)
+        case .done where reviewNeedsYou || mergeNeedsYou || cloudNeedsYou: return JobBadge(text: "Needs input", tone: .orange)
         case .done where pullRequestState == "MERGED": return JobBadge(text: "Merged", tone: .green)
         case .done where pullRequestState == "CLOSED": return JobBadge(text: "PR closed", tone: .gray)
-        case .done where reviewDecision == "CHANGES_REQUESTED": return JobBadge(text: "Changes requested", tone: .orange)
-        case .done where reviewDecision == "APPROVED": return JobBadge(text: "Approved", tone: .green)
-        case .done where published != nil: return JobBadge(text: "In review", tone: .blue)
-        case .done: return JobBadge(text: "Done", tone: .green)
+        case .done where reviewDecision == "CHANGES_REQUESTED": return JobBadge(text: "Needs input", tone: .orange)
+        case .done where published != nil || pullRequestState == "OPEN": return JobBadge(text: "In review", tone: .blue)
+        case .done: return JobBadge(text: "Ready", tone: .green)
         case .failed: return JobBadge(text: "Failed", tone: .red)
         case .stopped: return JobBadge(text: "Stopped", tone: .gray)
-        case .interrupted: return JobBadge(text: "Interrupted", tone: .gray)
+        case .interrupted: return JobBadge(text: "Blocked", tone: .gray)
         }
     }
 
@@ -984,10 +987,16 @@ nonisolated struct Runner: Sendable {
 
     #if os(macOS)
     /// What waits in the inbox, as `inbox()`, with Oby's plain words for each item, by item id.
-    func inboxWithWords() async throws -> ([InboxItem], [String: InboxWords]) {
+    func inboxWithWords(state: String = "open") async throws -> ([InboxItem], [String: InboxWords]) {
         do {
-            let data = try await send("GET", "v1/inbox")
-            return (try Self.decoder.decode([InboxItem].self, from: data), InboxWords.of(data))
+            let data = try await send("GET", state == "done" ? "v1/inbox?state=done&limit=1000" : "v1/inbox")
+            // A newer runner may add an inbox kind Engine doesn't know yet (permissions come
+            // through job extras). Keep the known items and their history readable.
+            struct Item: Decodable {
+                var value: InboxItem?
+                init(from decoder: any Decoder) throws { value = try? InboxItem(from: decoder) }
+            }
+            return (try Self.decoder.decode([Item].self, from: data).compactMap(\.value), InboxWords.of(data))
         } catch let error as RunnerError where error.status == 404 {
             return ([], [:])
         }

@@ -39,13 +39,53 @@ final class RunnerFeed {
     /// What waits in the runner's inbox, put-off items too, oldest first: answered on the iPhone,
     /// it goes from here too.
     private(set) var inbox: [InboxItem] = []
+    /// Confirmed decisions stay in the messenger even after leaving the attention inbox.
+    private(set) var inboxHistory: [InboxItem] = []
     /// Oby's plain words for each of those items (#65), which Engine's InboxItem doesn't read, by item id.
     private(set) var inboxWords: [String: InboxWords] = [:]
     /// The runner's accounts and their usage, as it last said: the brain tells them too.
     private(set) var accounts: [AccountState] = []
     /// What each job carries that Engine's Job doesn't read yet (its mode, the permission it waits
     /// on, its question's recommended option and plan), by job id.
-    private(set) var extras: [String: RunnerJobExtras] = [:]
+    private(set) var extras: [String: RunnerJobExtras] = [:] {
+        didSet { capturePermissions() }
+    }
+    struct PermissionRecord: Identifiable, Equatable {
+        var job: String
+        var permission: RunnerPermission
+        var created: Date
+        var done: Date?
+        var answer: String?
+        var later: Date?
+        var id: String { job + "/" + permission.id }
+        func waits(at date: Date) -> Bool { done == nil && (later == nil || later! <= date) }
+    }
+    private(set) var permissionHistory: [PermissionRecord] = []
+
+    /// #134 supplies canonical permission inbox records. Legacy runners only send job extras;
+    /// use their temporary records only when the same request is absent from the inbox/history.
+    var chatPermissions: [PermissionRecord] {
+        let canonical = Set((inbox + inboxHistory).filter { $0.kind == .permission }.map(\.id))
+        return permissionHistory.filter { !canonical.contains("\($0.job)-permission-\($0.permission.id)") }
+    }
+
+    private func capturePermissions() {
+        for (job, extra) in extras {
+            guard let permission = extra.permission else { continue }
+            if !permissionHistory.contains(where: { $0.job == job && $0.permission.id == permission.id }) {
+                permissionHistory.append(PermissionRecord(job: job, permission: permission, created: .now))
+            }
+        }
+        for index in permissionHistory.indices where permissionHistory[index].done == nil {
+            let record = permissionHistory[index]
+            if extras[record.job]?.permission?.id != record.permission.id { permissionHistory[index].done = .now }
+        }
+    }
+
+    func laterPermission(_ id: String) {
+        guard let index = permissionHistory.firstIndex(where: { $0.id == id && $0.done == nil }) else { return }
+        permissionHistory[index].later = .now.addingTimeInterval(3600)
+    }
     /// The mode the runner's new jobs get by default, or nil from a runner without modes.
     private(set) var defaultMode: RunnerMode?
     /// The name the runner reports in /v1/status, like "tetrix-lab".
@@ -142,10 +182,12 @@ final class RunnerFeed {
         runnerChanges += 1
         jobs = []
         inbox = []
+        inboxHistory = []
         inboxWords = [:]
         accounts = []
         models = nil
         extras = [:]
+        permissionHistory = []
         defaultMode = nil
         host = nil
         clearedAt = nil
@@ -169,6 +211,8 @@ final class RunnerFeed {
                         let status = try await runner.status()
                         let (list, extras) = try await runner.jobsWithExtras()
                         let (items, words) = try await runner.inboxWithWords()
+                        // History is an enhancement: an older runner or failed history request must not take chat offline.
+                        let history = try? await runner.inboxWithWords(state: "done")
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
                         host = status.runner.host
@@ -181,7 +225,10 @@ final class RunnerFeed {
                         // Settings › Runner changed while the open jobs were fetched again.
                         try Task.checkCancellation()
                         inbox = items
-                        inboxWords = words
+                        if let (past, pastWords) = history {
+                            inboxHistory = past.filter { !$0.isOpen }
+                            inboxWords = pastWords.merging(words, uniquingKeysWith: { _, fresh in fresh })
+                        } else { inboxWords.merge(words, uniquingKeysWith: { _, fresh in fresh }) }
                         // The thread's latest page every time too: what was said from the iPhone
                         // while the connection was down is in it.
                         await conversation.reload()
@@ -277,6 +324,10 @@ final class RunnerFeed {
         guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to answer it.") }
         guard let permission = extras[id]?.permission else { return }
         let job = try await runner.answer(id, permission: permission.id, decision, message: message)
+        if let index = permissionHistory.firstIndex(where: { $0.job == id && $0.permission.id == permission.id }) {
+            permissionHistory[index].done = .now
+            permissionHistory[index].answer = decision == .allow ? "Allowed once" : decision == .always ? "Always allowed" : "Denied"
+        }
         // The job's own event brings the next one, if any.
         if extras[id]?.permission?.id == permission.id { extras[id]?.permission = nil }
         apply(job)
@@ -292,7 +343,11 @@ final class RunnerFeed {
     /// An inbox item as the runner last said it: one that's done leaves the list.
     func apply(_ item: InboxItem) {
         inbox.removeAll { $0.id == item.id }
-        if item.isOpen { inbox.append(item) } else { inboxWords[item.id] = nil }
+        if item.isOpen { inbox.append(item) }
+        else {
+            inboxHistory.removeAll { $0.id == item.id }
+            inboxHistory.append(item)
+        }
     }
 
     /// The runner's answer to Stop or a message, or one of its events: the job with that id.

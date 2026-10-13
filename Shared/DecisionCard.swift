@@ -16,16 +16,21 @@ struct DecisionCard: View {
     var plan: String? = nil
     let options: [CardOption]
     var busy = false
+    var keyboardEnabled = false
+    var focusRequest = 0
+    var onLater: (() -> Void)? = nil
     /// What sending your own words does, when it isn't plain (a permission's: they go with a deny).
     var wordsNote: String? = nil
     let onChoose: (CardOption) -> Void
     /// Sends the user's own words as the answer; nil where words can't answer it.
     var onWords: ((String) -> Void)? = nil
 
+    @State private var chosen: String?
     @State private var typing = false
     @State private var showsDetails = false
     @State private var words = ""
     @FocusState private var focused: Bool
+    @FocusState private var cardFocused: Bool
     /// Dynamic Type's scale, for the plan's inline code.
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
 
@@ -33,7 +38,15 @@ struct DecisionCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Style.spacing) {
-            ReadingText(title, weight: .semibold)
+            HStack(alignment: .top) {
+                ReadingText(title, weight: .semibold)
+                Spacer(minLength: OBYStyle.Space.sm)
+                if let onLater {
+                    Button(action: onLater) { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).foregroundStyle(Style.secondary)
+                        .help("Later (Esc)").accessibilityLabel("Later")
+                }
+            }
             if let happened, !happened.isEmpty {
                 ReadingText(happened)
             }
@@ -52,6 +65,30 @@ struct DecisionCard: View {
             if let onWords { ownWords(onWords) }
         }
         .disabled(busy)
+        #if os(macOS)
+        .focusable().focusEffectDisabled().focused($cardFocused)
+        // Only an explicit jump/click gives a card the keyboard; arrival must never interrupt typing.
+        .onTapGesture { if keyboardEnabled && !focused { cardFocused = true } }
+        .onExitCommand { if keyboardEnabled && !busy { onLater?() } }
+        .onChange(of: focusRequest) { if keyboardEnabled { cardFocused = true } }
+        .onKeyPress(phases: .down) { press in
+            guard keyboardEnabled, cardFocused, !focused, press.modifiers.isEmpty else { return .ignored }
+            let key = press.key == .return ? "return" : press.key == .escape ? "escape" : press.characters
+            switch DecisionKey.action(key, options: options, words: words, busy: busy) {
+            case .option(let option): choose(option)
+            case .words(let text): onWords?(text)
+            case .later: onLater?()
+            case .none: return .ignored
+            }
+            return .handled
+        }
+        #endif
+    }
+
+    private func choose(_ option: CardOption) {
+        guard !busy else { return }
+        chosen = option.answer
+        onChoose(option)
     }
 
     // MARK: Details
@@ -105,7 +142,7 @@ struct DecisionCard: View {
 
     @ViewBuilder private func button(_ option: CardOption, index: Int) -> some View {
         #if os(watchOS)
-        Button { onChoose(option) } label: {
+        Button { choose(option) } label: {
             VStack(alignment: .leading, spacing: 1) {
                 if option.recommended { Text("Recommended").font(.caption2.weight(.semibold)).foregroundStyle(.secondary) }
                 ReadingText(option.label)
@@ -116,8 +153,11 @@ struct DecisionCard: View {
         .tint(Self.tint(option))
         .accessibilityHint(Self.hint(option))
         #else
-        Button { onChoose(option) } label: {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+        Button { choose(option) } label: {
+            HStack(alignment: .firstTextBaseline, spacing: OBYStyle.Space.sm) {
+                Text("\(index + 1)").font(Style.small.weight(.semibold))
+                    .foregroundStyle(Style.secondary).frame(width: 20)
+                if busy && chosen == option.answer { ProgressView().controlSize(.small) }
                 VStack(alignment: .leading, spacing: 2) {
                     if option.role == .destructive {
                         Text(option.label).font(Reading.current.prose).fontWeight(.medium).foregroundStyle(Color.red)
@@ -134,25 +174,19 @@ struct DecisionCard: View {
                         .padding(.horizontal, 7).padding(.vertical, 2)
                         .background(Color.accentColor.opacity(0.18), in: Capsule())
                 }
-                #if os(macOS)
-                Text("⌘\(index + 1)").font(Style.small).foregroundStyle(Style.secondary)
-                #endif
             }
             .padding(.horizontal, Style.optionPadding).padding(.vertical, Style.optionHeight)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Style.fill.opacity(option.recommended ? 1.6 : 1), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .background(Style.fill.opacity(option.recommended ? 1.6 : 1), in: RoundedRectangle(cornerRadius: OBYStyle.card, style: .continuous))
             .overlay {
                 if option.recommended {
-                    RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: OBYStyle.card, style: .continuous).strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 1)
                 }
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityHint(Self.hint(option))
-        #if os(macOS)
-        .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
-        #endif
         #endif
     }
 
@@ -176,8 +210,8 @@ struct DecisionCard: View {
     @ViewBuilder private func ownWords(_ send: @escaping (String) -> Void) -> some View {
         #if os(watchOS)
         // Tap, then dictate (or scribble): what comes back is the answer.
-        TextFieldLink(prompt: Text("Type your own…")) {
-            Label("Type your own…", systemImage: "mic")
+        TextFieldLink(prompt: Text("Type your own answer")) {
+            Label("Type your own answer", systemImage: "mic")
         } onSubmit: { text in
             let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard (1...2000).contains(text.count) else { return }
@@ -195,11 +229,11 @@ struct DecisionCard: View {
             if let wordsNote { Text(wordsNote).font(Style.small).foregroundStyle(Style.secondary) }
         } else {
             Button { typing = true } label: {
-                Label("Type your own…", systemImage: "keyboard")
+                Label("Type your own answer", systemImage: "keyboard")
                     .font(Style.option).foregroundStyle(Style.secondary)
                     .padding(.horizontal, Style.optionPadding).padding(.vertical, Style.optionHeight)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Style.fill.opacity(0.6), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    .background(Style.fill.opacity(0.6), in: RoundedRectangle(cornerRadius: OBYStyle.card, style: .continuous))
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -215,13 +249,20 @@ struct DecisionCard: View {
             send(typed)
         }
         return HStack(spacing: 8) {
-            TextField("Type your own…", text: $words, axis: .vertical)
+            TextField("Type your own answer", text: $words, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...4)
                 .readingText()
                 .focused($focused)
                 .submitLabel(.send)
                 .onSubmit(go)
+                #if os(macOS)
+                .onKeyPress(.return, phases: .down) { press in
+                    if press.modifiers.contains(.shift) { return .ignored }
+                    go()
+                    return .handled
+                }
+                #endif
             Button(action: go) {
                 Image(systemName: "arrow.up").font(Style.small.weight(.bold))
                     .foregroundStyle(Style.paper)
@@ -241,12 +282,12 @@ struct DecisionCard: View {
     /// Long text itself takes the reading style (Shared/ReadingText.swift).
     private enum Style {
         #if os(macOS)
-        static let ink = Color.white
+        static let ink = OBYStyle.primary
         static let paper = Color.black
-        static let secondary = Color.white.opacity(0.55)
-        static let fill = Color.white.opacity(0.09)
+        static let secondary = OBYStyle.secondary
+        static let fill = OBYStyle.surface
         static let option = Font.system(size: 13, weight: .medium)
-        static let small = Font.system(size: 11)
+        static let small = OBYStyle.caption
         static let planHeight: CGFloat = 220
         static let spacing: CGFloat = 8
         static let inset: CGFloat = 10

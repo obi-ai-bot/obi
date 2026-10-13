@@ -5,7 +5,7 @@ import SwiftUI
 
 /// A file the user attached to their next request: a screenshot, or what they copied.
 struct Attachment: Identifiable, Equatable {
-    enum Kind { case screenshot, clipboardImage, clipboardText }
+    enum Kind { case screenshot, clipboardImage, clipboardText, file }
     var kind: Kind
     var file: URL
     var id: URL { file }
@@ -15,13 +15,14 @@ struct Attachment: Identifiable, Equatable {
         case .screenshot: "Screenshot"
         case .clipboardImage: "Clipboard image"
         case .clipboardText: "Clipboard text"
+        case .file: file.lastPathComponent.split(separator: "-", maxSplits: 5).last.map(String.init) ?? "File"
         }
     }
 
     var icon: String {
         switch kind {
         case .screenshot: "camera.viewfinder"
-        case .clipboardImage, .clipboardText: "doc.on.clipboard"
+        case .clipboardImage, .clipboardText, .file: "doc.on.clipboard"
         }
     }
 }
@@ -122,6 +123,23 @@ final class Tray {
         } catch {
             problem = .other("Oby couldn't attach the clipboard: \(error.localizedDescription)")
         }
+    }
+
+    /// Files are read only after an explicit pick, copied beside the other job attachments.
+    func chooseFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        guard panel.runModal() == .OK else { return }
+        do {
+            try FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+            for source in panel.urls {
+                let target = Self.folder.appending(path: "\(UUID().uuidString)-\(source.lastPathComponent)")
+                try FileManager.default.copyItem(at: source, to: target)
+                items.append(Attachment(kind: .file, file: target))
+            }
+            problem = nil
+        } catch { problem = .other("Oby couldn't attach the file: \(error.localizedDescription)") }
     }
 
     private func add(_ kind: Attachment.Kind, png image: CGImage) throws {
