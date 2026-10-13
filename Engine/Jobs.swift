@@ -101,6 +101,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// The commit the work started from, recorded by Oby when it set the worktree up: what test
     /// integrity compares with (Engine/Guards.swift). Nil before then, and on older jobs.
     var startCommit: String?
+    /// The first `swift build` in a job's check, in seconds, for its report.
+    var firstSwiftBuildSeconds: Int?
     /// The limit Oby stopped the job at (case 3.1, Engine/Guards.swift), like "the same failure twice
     /// in a row", or nil. Such a job is `failed`, keeps its branch and pushed nothing; one more round
     /// is possible, by telling it something.
@@ -699,7 +701,7 @@ final class ClaudeAgent: AgentRun {
         // Its mode is always said: its plan mode, or its default one, which asks Oby about every
         // command and edit.
         let brokerConfig = try mcp.map { try $0.writeClaudeConfig(in: worktree) }
-        let arguments = Agents.sandboxed(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+        let arguments = Agents.sandboxed(Agents.niced(["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                              "--verbose", "--replay-user-messages", "--permission-prompt-tool", "stdio",
                              "--setting-sources", "", "--strict-mcp-config"]
                             + (brokerConfig.map { ["--mcp-config", $0] } ?? [])
@@ -707,12 +709,13 @@ final class ClaudeAgent: AgentRun {
                                "--permission-mode", StreamJSON.claudeMode(mode),
                                "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
                             + (maxTurns.map { ["--max-turns", String($0)] } ?? [])
-                            + (resume.map { ["--resume", $0] } ?? []),
+                            + (resume.map { ["--resume", $0] } ?? [])),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude",
                             // Oby's folder is hidden in the box: only the MCP config shows, read-only.
                             reading: [mcpFile(worktree: worktree).path])
         let environment = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 }
-            .merging(AppleCheck.environment(worktree: worktree)) { $1 })
+            .merging(AppleCheck.environment(worktree: worktree)) { $1 }
+            .merging(Agents.swiftEnvironment(worktree: worktree)) { $1 })
         return (arguments, environment)
     }
 
@@ -1179,10 +1182,36 @@ nonisolated enum Policy {
 /// login, so nothing an agent runs can publish as the user, and no variable that holds one of the
 /// vault's secrets. Throws when the vault can't be read: then no agent starts.
 nonisolated enum Agents {
+    static let processPriority = 10
+
+    static func niced(_ argv: [String], priority: Int = processPriority) -> [String] {
+        ["nice", "-n", String(priority)] + argv
+    }
+
+    /// SwiftPM reads this value when a build has no explicit `-j`. Keep half the machine's
+    /// threads available for the runner and the other jobs.
+    static func buildEnvironment(processorCount: Int = ProcessInfo.processInfo.activeProcessorCount) -> [String: String?] {
+        ["SWIFTPM_BUILD_JOBS": String(max(1, processorCount / 2))]
+    }
+
     static func environment(_ extra: [String: String?], vault: Vault = .shared, base: [String: String] = Shell.environment) throws -> [String: String] {
         var env = base
         for (key, value) in try overrides(vault: vault, base: base).merging(extra, uniquingKeysWith: { $1 }) { env[key] = value }
         return env
+    }
+
+    /// Puts the job's private Swift wrapper first on PATH. It records only the first explicit
+    /// `swift build`; the real compiler path stays in the runner's login environment.
+    static func swiftEnvironment(worktree: URL, base: [String: String] = Shell.environment) -> [String: String?] {
+        let bin = worktree.appending(path: ".oby/bin")
+        guard FileManager.default.fileExists(atPath: bin.appending(path: "swift").path),
+              let path = base["PATH"] else { return [:] }
+        let real = path.split(separator: ":").map(String.init)
+            .map { URL(filePath: $0).appending(path: "swift") }
+            .first(where: { FileManager.default.isExecutableFile(atPath: $0.path) })
+        guard let real else { return [:] }
+        return ["PATH": "\(bin.path):\(path)", "OBY_REAL_SWIFT": real.path,
+                "OBY_SWIFT_BUILD_REPORT": worktree.appending(path: ".oby/first-swift-build-seconds").path]
     }
 
     /// Claude Code without the account's claude.ai connectors (Slack, Drive, Claude Docs, …): each
@@ -1195,7 +1224,9 @@ nonisolated enum Agents {
     /// STAGING_API_KEY=…` in the service's environment) doesn't pass through either. Throws when
     /// the vault can't be read.
     static func overrides(vault: Vault = .shared, base: [String: String] = Shell.environment) throws -> [String: String?] {
-        overrides(identity: identity.withLock { $0 }).merging(withheld(base, leaks: try vault.forAgents())) { $1 }
+        overrides(identity: identity.withLock { $0 })
+            .merging(buildEnvironment()) { $1 }
+            .merging(withheld(base, leaks: try vault.forAgents())) { $1 }
     }
 
     /// The variables in `env` that hold one of the vault's secrets, plain or encoded, each as a removal.
@@ -1235,6 +1266,28 @@ nonisolated enum Agents {
         // Who commits, from the environment: no git config file is written for it.
         for (key, value) in identity?.environment ?? [:] { overrides[key] = value }
         return overrides
+    }
+
+    static func installSwiftWrapper(in worktree: URL) throws {
+        let bin = worktree.appending(path: ".oby/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        let script = """
+        #!/bin/sh
+        if [ \"$1\" = build ] && [ ! -e \"$OBY_SWIFT_BUILD_REPORT\" ]; then
+            oby_swift_start=$(date +%s)
+            \"$OBY_REAL_SWIFT\" \"$@\"
+            oby_swift_status=$?
+            oby_swift_end=$(date +%s)
+            printf '%s\\n' $((oby_swift_end - oby_swift_start)) > \"$OBY_SWIFT_BUILD_REPORT.tmp\"
+            mv \"$OBY_SWIFT_BUILD_REPORT.tmp\" \"$OBY_SWIFT_BUILD_REPORT\"
+            exit $oby_swift_status
+        fi
+        exec \"$OBY_REAL_SWIFT\" \"$@\"
+        """
+        let wrapper = bin.appending(path: "swift")
+        try script.write(to: wrapper, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: wrapper.path)
     }
 
     #if os(Linux)
@@ -1348,6 +1401,46 @@ nonisolated enum Workspace {
     static func clone(_ repo: String) -> URL { root.appending(path: "repos/\(repo)") }
     static func worktree(_ id: String) -> URL { root.appending(path: "jobs/\(id)") }
 
+    /// Copies a SwiftPM build directory using filesystem clones where the platform supports them,
+    /// falling back to an ordinary recursive copy. The source and destination are fakeable paths,
+    /// so preparation tests never need a repository or a compiler.
+    @discardableResult
+    static func copyBuild(_ source: URL, to destination: URL) async throws -> Bool {
+        guard FileManager.default.fileExists(atPath: source.path) else { return false }
+        try? FileManager.default.removeItem(at: destination)
+        let arguments: [String]
+        #if os(macOS)
+        arguments = ["cp", "-Rc", source.path, destination.path]
+        #else
+        arguments = ["cp", "-a", "--reflink=auto", source.path, destination.path]
+        #endif
+        let copied = try? await Shell.run(arguments)
+        if copied?.status != 0 {
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.copyItem(at: source, to: destination)
+        }
+        return true
+    }
+
+    /// Seeds a job's `.build` from the matching author worktree first, then the runner's warm
+    /// `dev` checkout. A stale cache is ignored by its commit marker.
+    @discardableResult
+    static func seedBuild(_ job: Job, commit: String, into worktree: URL) async throws -> Bool {
+        if let author = job.reviewOf {
+            let authorWorktree = Self.worktree(author)
+            let source = authorWorktree.appending(path: ".build")
+            if FileManager.default.fileExists(atPath: source.path),
+               let head = try? await Shell.ok(["git", "-C", authorWorktree.path, "rev-parse", "HEAD"]),
+               head.trimmingCharacters(in: .whitespacesAndNewlines) == commit {
+                return try await copyBuild(source, to: worktree.appending(path: ".build"))
+            }
+        }
+        guard job.repo == "deskree-inc/oby",
+              let cached = try? String(contentsOf: root.appending(path: "updates/cache-commit"), encoding: .utf8),
+              cached.trimmingCharacters(in: .whitespacesAndNewlines) == commit else { return false }
+        return try await copyBuild(root.appending(path: "updates/source/.build"), to: worktree.appending(path: ".build"))
+    }
+
     /// An epic's open sub-issues with their titles: GitHub's sub-issues, otherwise the open issues
     /// its task list names.
     static func openSubIssues(of epic: Int, in repo: String) async -> [(number: Int, title: String)] {
@@ -1442,6 +1535,8 @@ nonisolated enum Workspace {
         let worktree = worktree(job.id)
         try await git(["worktree", "add", "--quiet", "-b", job.branch, worktree.path, start])
         job.startCommit = try await Shell.ok(["git", "-C", clone.path, "rev-parse", "--verify", "\(start)^{commit}"], env: ["GIT_NO_REPLACE_OBJECTS": "1"])
+        try Agents.installSwiftWrapper(in: worktree)
+        _ = try? await seedBuild(job, commit: job.startCommit!, into: worktree)
         return try inputs(job, pullRequest: pullRequest, issue: issue, in: worktree)
     }
 

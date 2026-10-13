@@ -18,6 +18,8 @@ final class Updates {
         var failed: String?
         var installed: String?
         var digest: String?
+        /// The commit whose `.build` is the warm cache in `source`.
+        var cacheCommit: String?
         /// Fetching `dev` fails since the inbox last heard: one item per outage.
         var outage: Bool?
         /// When the runner last restarted to install an update: the next waits `spacing` from then.
@@ -113,6 +115,8 @@ final class Updates {
             _ = try await command(["git", "clean", "-fd"], source, [:])
             step = "swift build -c release"
             _ = try await command(["swift", "build", "-c", "release"], source, [:])
+            try Data(commit.utf8).write(to: root.appending(path: "cache-commit"), options: .atomic)
+            state.cacheCommit = commit
             step = "swift test"
             // Like a Mac check, the tests' Obys get a throwaway home, never the runner's own data.
             let home = FileManager.default.temporaryDirectory.appending(path: "oby-update-home-\(commit.prefix(12))")
