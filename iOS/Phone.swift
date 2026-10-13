@@ -140,8 +140,7 @@ final class Phone {
     private(set) var accounts: [Account] = []
     /// What waits in the runner's inbox, put-off items too: answered on the Mac, it goes from here too.
     private(set) var inbox: [InboxItem] = []
-    private var queued: [OfflineMessage] = []
-    private var queuedInbox: [OfflineInboxAnswer] = []
+    private var offlineQueue = OfflineQueue()
     private(set) var models: ModelSettings?
     /// The mode new jobs get by default, as the runner last said, or nil from a runner without modes.
     private(set) var defaultMode: RunnerMode?
@@ -163,9 +162,9 @@ final class Phone {
     init() {
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
         if let data = UserDefaults.standard.data(forKey: "mac.link") { link = try? MacLink.paired(data) }
-        queued = (try? JSONDecoder().decode([OfflineMessage].self, from: UserDefaults.standard.data(forKey: "phone.outbox") ?? Data())) ?? []
-        queuedInbox = (try? JSONDecoder().decode([OfflineInboxAnswer].self, from: UserDefaults.standard.data(forKey: "phone.inboxOutbox") ?? Data())) ?? []
-        for item in queued {
+        offlineQueue.messages = (try? JSONDecoder().decode([OfflineMessage].self, from: UserDefaults.standard.data(forKey: "phone.outbox") ?? Data())) ?? []
+        offlineQueue.answers = (try? JSONDecoder().decode([OfflineInboxAnswer].self, from: UserDefaults.standard.data(forKey: "phone.inboxOutbox") ?? Data())) ?? []
+        for item in offlineQueue.messages {
             let request = Request(said: item.said, answer: item.question.flatMap { q in item.option.map { (q, $0) } }, voice: item.voice)
             requests[item.id] = request
             echoes.append(Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil))
@@ -403,7 +402,7 @@ final class Phone {
         requests[echo.id] = Request(said: said, answer: answer, voice: voice)
         pending = echo.id
         if connection != .live {
-            queued.append(OfflineMessage(id: echo.id, said: said, question: answer?.question, option: answer?.option, voice: voice))
+            offlineQueue.queue(OfflineMessage(id: echo.id, said: said, question: answer?.question, option: answer?.option, voice: voice))
             saveQueue()
             talk = .queued(said)
             pending = nil
@@ -413,22 +412,22 @@ final class Phone {
     }
 
     private func saveQueue() {
-        UserDefaults.standard.set(try? JSONEncoder().encode(queued), forKey: "phone.outbox")
+        UserDefaults.standard.set(try? JSONEncoder().encode(offlineQueue.messages), forKey: "phone.outbox")
     }
 
     private func saveInboxQueue() {
-        UserDefaults.standard.set(try? JSONEncoder().encode(queuedInbox), forKey: "phone.inboxOutbox")
+        UserDefaults.standard.set(try? JSONEncoder().encode(offlineQueue.answers), forKey: "phone.inboxOutbox")
     }
 
     private func removeQueued(_ id: String) {
-        queued.removeAll { $0.id == id }
+        offlineQueue.removeMessage(id)
         saveQueue()
     }
 
     private func flushQueued() async {
-        guard !queued.isEmpty else { return }
-        let waiting = queued
-        queued.removeAll()
+        guard !offlineQueue.messages.isEmpty else { return }
+        let waiting = offlineQueue.messages
+        offlineQueue.messages.removeAll()
         saveQueue()
         for item in waiting {
             guard let request = requests[item.id] else { continue }
@@ -438,20 +437,21 @@ final class Phone {
     }
 
     private func flushQueuedInbox() async {
-        guard !queuedInbox.isEmpty else { return }
-        let waiting = queuedInbox
-        queuedInbox.removeAll()
+        guard !offlineQueue.answers.isEmpty else { return }
+        let waiting = offlineQueue.answers
+        offlineQueue.answers.removeAll()
         saveInboxQueue()
         for (index, item) in waiting.enumerated() {
             do {
                 apply(.inbox(try await runner.settle(item.id, answer: item.answer, done: item.done, later: item.later)))
+            } catch let error as RunnerError where error.status == 404 {
+                continue
             } catch {
-                if let error = error as? RunnerError, error.status == 404 { continue }
-                queuedInbox.append(contentsOf: waiting[index...])
-                saveInboxQueue()
+                offlineQueue.answers.append(contentsOf: waiting[index...])
                 break
             }
         }
+        saveInboxQueue()
     }
 
     private func send(_ request: Request, echo: Turn) {
@@ -535,8 +535,7 @@ final class Phone {
     /// Settles an inbox item: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
         guard connection == .live else {
-            queuedInbox.removeAll { $0.id == id }
-            queuedInbox.append(OfflineInboxAnswer(id: id, answer: answer, done: done, later: later))
+            offlineQueue.queue(OfflineInboxAnswer(id: id, answer: answer, done: done, later: later))
             saveInboxQueue()
             inbox.removeAll { $0.id == id }
             return

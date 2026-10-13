@@ -20,22 +20,29 @@ final class MacAvailability {
     private var runningJobs = false
     private let createAssertion: AssertionCreator
     private let releaseAssertion: AssertionReleaser
+    private let defaults: UserDefaults
+    private let powerSource: @MainActor () -> Bool
 
     init(createAssertion: @escaping AssertionCreator = MacAvailability.createAssertion,
-         releaseAssertion: @escaping AssertionReleaser = IOPMAssertionRelease) {
+         releaseAssertion: @escaping AssertionReleaser = IOPMAssertionRelease,
+         defaults: UserDefaults = .standard,
+         powerConnected: Bool? = nil,
+         powerSource: @escaping @MainActor () -> Bool = MacAvailability.isPowerConnected) {
         self.createAssertion = createAssertion
         self.releaseAssertion = releaseAssertion
-        keepAvailable = UserDefaults.standard.object(forKey: Self.setting) as? Bool ?? true
-        powerConnected = Self.isPowerConnected()
+        self.defaults = defaults
+        self.powerSource = powerSource
+        keepAvailable = defaults.object(forKey: Self.setting) as? Bool ?? true
+        self.powerConnected = powerConnected ?? powerSource()
         update()
     }
 
     deinit { if preventingSleep { releaseAssertion(assertion) } }
-    func setKeepAvailable(_ value: Bool) { keepAvailable = value; UserDefaults.standard.set(value, forKey: Self.setting); update() }
+    func setKeepAvailable(_ value: Bool) { keepAvailable = value; defaults.set(value, forKey: Self.setting); update() }
     func setPowerConnected(_ value: Bool) { powerConnected = value; update() }
     func setRunningJobs(_ value: Bool) {
         runningJobs = value
-        powerConnected = Self.isPowerConnected()
+        powerConnected = powerSource()
         update()
     }
     var shouldPreventSleep: Bool { runningJobs || (keepAvailable && powerConnected) }
