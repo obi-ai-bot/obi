@@ -258,9 +258,10 @@ final class IslandController {
         open()
     }
 
-    func open() {
+    func open(tab: IslandTab? = nil) {
         model.notice = nil
         if model.focus != nil { model.select(.home) }
+        else if let tab { model.select(tab) }
         else { model.select(model.openingTab) }
         set(.open)
         // Typing needs the keyboard; the panel takes it without activating Oby.
@@ -340,7 +341,7 @@ final class IslandController {
             stopListening()
             notify(problem ?? "Oby didn't catch that", happy: false)
         } else {
-            open()
+            open(tab: .chat)
             // Not in the voice's queue: the alert waits for you, and talking mustn't.
             if key == .fn { Task { GlobeKey.guideOnce() } }
         }
@@ -807,7 +808,7 @@ private struct OpenIsland: View {
     private var tabBar: some View {
         HStack(spacing: 4) {
             ForEach(IslandTab.allCases, id: \.self) { tab in
-                Button { model.select(tab) } label: {
+                Button { select(tab) } label: {
                     Label(tab.title, systemImage: tab.symbol)
                         .font(.system(size: 12, weight: .semibold))
                         .frame(maxWidth: .infinity).frame(height: 30)
@@ -821,6 +822,11 @@ private struct OpenIsland: View {
         .padding(4)
         .background(.white.opacity(0.06), in: Capsule())
         .accessibilityElement(children: .contain)
+    }
+
+    private func select(_ tab: IslandTab) {
+        selected = nil
+        model.select(tab)
     }
 
     /// The job's screen, with the same stages as the iPhone's. Both kinds publish here after Touch
@@ -939,34 +945,12 @@ private struct OpenIsland: View {
     }
 
     private var compactChat: some View {
-        let turns = model.recentTurns
-        let decisions = IslandInbox.entries(desk: desk, feed: feed, now: .now)
-        let permissions = feed.chatPermissions.filter { $0.waits(at: .now) }
         return ScrollView {
             VStack(alignment: .leading, spacing: OBYStyle.Space.sm) {
-                ForEach(allRows.filter { $0.job.isWorking }) { row in
-                    Button { selected = row.id } label: {
-                        Label("Started \(row.job.heading)", systemImage: "play.circle")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityHint("Opens the job")
-                }
-                ForEach(decisions.filter { ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns) == nil }) { entry in
-                    InlineDecision(entry: entry, desk: desk, feed: feed, onOpen: { selected = Row.id($0, local: $1) })
-                }
                 ForEach(Array(model.recentTurns.enumerated()), id: \.element.id) { index, turn in
                     TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? model.recentTurns[index - 1] : nil),
                             jobs: [], account: { _, _ in "" }, isLocal: { _ in false },
                             onOpenJob: { onOpenWindow((id: $0, local: $1)) }, showTime: false)
-                    ForEach(decisions.filter { ConversationModel.decisionAnchor(job: $0.item.job, created: $0.item.created, turns: turns) == turn.id }) { entry in
-                        InlineDecision(entry: entry, desk: desk, feed: feed, onOpen: { selected = Row.id($0, local: $1) })
-                    }
-                }
-                ForEach(permissions) { record in
-                    InlinePermission(record: record, feed: feed)
                 }
                 switch desk.talk {
                 case .plan(let drafts) where drafts.count == 1:
@@ -993,7 +977,7 @@ private struct OpenIsland: View {
             }
         }
         .defaultScrollAnchor(.bottom)
-        .frame(height: model.recentTurns.isEmpty && decisions.isEmpty && permissions.isEmpty && !thinking ? 0 : 190)
+        .frame(height: model.recentTurns.isEmpty && !thinking ? 0 : 190)
         .accessibilityLabel("Recent conversation with Oby")
     }
 
