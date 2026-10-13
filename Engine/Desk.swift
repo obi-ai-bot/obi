@@ -1755,9 +1755,10 @@ final class Desk {
         agent?.kill()
         guard let route = AccountStore.next(accounts.accounts, agent: job.agent) else {
             let first = accounts.accounts.filter(\.signedIn).compactMap(\.fullUntil).min()
-            // A reset not far off (#306): the job waits for room, as a job started for it does,
-            // and goes on in its worktree and branch once an account has some.
-            if let soon = accounts.accounts.filter(\.signedIn).compactMap(\.fullUntil).filter({ $0 > .now }).min(),
+            // A reset the tool named, not far off (#306): the job waits for room, as a job started
+            // for it does, and goes on in its worktree and branch once an account has some. An hour
+            // we only assumed isn't a reset: that fails, so it doesn't wait round after round.
+            if resets != nil, let soon = accounts.accounts.filter(\.signedIn).compactMap(\.fullUntil).filter({ $0 > .now }).min(),
                soon.timeIntervalSinceNow <= Self.limitWaitCap {
                 Logger.jobs.notice("job \(id, privacy: .public): \(from, privacy: .public) hit its limit\(when, privacy: .public), and no account has room; waiting for one")
                 handoffs[id, default: []].append("\(from) hit its limit\(when); the job waited for an account with room.")

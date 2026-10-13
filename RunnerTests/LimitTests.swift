@@ -216,6 +216,19 @@ struct LimitRetryTests {
         #expect(desk.job("waits")?.status == .running && desk.job("waits")?.startWhen == nil)
     }
 
+    /// No reset named and no other account: the assumed hour isn't a reset to wait for.
+    @Test func withNoRoomAnywhereAndNoResetNamedTheJobFails() async throws {
+        var fix = job
+        fix.id = "unnamed"
+        fix.account = codex.id
+        fix.agent = "codex"
+        desk.dispatch(fix)
+        for _ in 0..<500 where desk.job("unnamed")?.status != .running { try await Task.sleep(for: .milliseconds(10)) }
+        made.agents.first?.agent.onEvent(.limit(resets: nil))
+        let ended = try #require(desk.job("unnamed"))
+        #expect(ended.status == .failed && ended.needsYou && made.agents.count == 1)
+    }
+
     @Test func withNoRoomAnywhereAFarResetFailsTheJobSayingWhenTheFirstResets() async throws {
         // Only the Codex account is signed in; its weekly limit is days away.
         let resets = Date.now.addingTimeInterval(3 * 24 * 3600)
