@@ -118,6 +118,18 @@ struct ReviewTests {
 
     // MARK: Starting the review
 
+    @Test func reviewGetsTheAuthorsAnswersAndTreatsThemAsSettledDecisions() {
+        var answered = author
+        answered.notes = ["Keep the command enabled.", "Use the existing default."]
+        let review = Review.make(for: answered, pr: 80, account: work)
+        let prompt = Review.prompt(review)
+        #expect(review.notes == answered.notes)
+        #expect(prompt.contains("The user's answers and later directions to the author, oldest first:"))
+        #expect(prompt.contains("1. Keep the command enabled.\n2. Use the existing default."))
+        #expect(prompt.contains("they override the original task and issue text"))
+        #expect(prompt.contains("If that is the only basis for changes requested, approve the review"))
+    }
+
     @Test func aPublishedJobIsReviewedByTheOtherToolOnAnotherAccount() async throws {
         let published = try await publishAuthor()
         #expect(published.published == url.absoluteString && published.reviewing != nil && published.reviewError == nil)
