@@ -80,8 +80,9 @@ struct BuildTests {
     @Test func checksRunAtTheRunnerPriority() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
+        let expected = try await Shell.ok(Agents.niced(["sh", "-c", "ps -o ni= -p $$"]), in: folder)
         let result = await Rounds.run("ps -o ni= -p $$", in: folder, timeout: 5, env: [:], boxed: false)
         #expect(result.passed)
-        #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == "10")
+        #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == expected.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }
