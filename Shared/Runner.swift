@@ -1087,6 +1087,21 @@ nonisolated struct Runner: Sendable {
     }
 }
 
+/// The job `POST /v1/jobs` sends back. Swift leaves nils out, but a missing check keeps the plan's,
+/// so no check and the usual model go as null.
+nonisolated struct DispatchedJob: Encodable {
+    var job: Job
+
+    private enum Nulls: String, CodingKey { case check, model }
+
+    func encode(to encoder: any Encoder) throws {
+        try job.encode(to: encoder)
+        var nulls = encoder.container(keyedBy: Nulls.self)
+        if job.check == nil { try nulls.encodeNil(forKey: .check) }
+        if job.model == nil { try nulls.encodeNil(forKey: .model) }
+    }
+}
+
 /// A watch paired with the runner, as `GET /v1/watches` lists it.
 nonisolated struct PairedWatch: Codable, Identifiable, Equatable, Sendable {
     var id: String
