@@ -129,6 +129,23 @@ struct ParallelTests {
 
     /// Reviews and rebase rounds take a slot like any running job; a job waiting for the user's
     /// answer takes none.
+    /// Oby's reviews take the next free slot before new jobs that waited longer (2026-10-13): they
+    /// finish work that's nearly done and unblock its merge.
+    @Test func reviewsTakeTheNextSlotBeforeOlderNewJobs() {
+        var older = Job(id: "older", request: "fix oby", agent: "claude", account: "default", repo: "deskree-inc/oby",
+                        branch: "oby/fix-1", base: "dev", kind: .fix, task: "fix oby")
+        older.created = Date(timeIntervalSince1970: 100)
+        var review = older
+        review.id = "review"
+        review.reviewOf = "author"
+        review.created = Date(timeIntervalSince1970: 200)
+        var newer = older
+        newer.id = "newer"
+        newer.created = Date(timeIntervalSince1970: 300)
+        #expect(Desk.goesFirst(review, older) && !Desk.goesFirst(older, review))
+        #expect([newer, older, review].sorted(by: Desk.goesFirst).map(\.id) == ["review", "older", "newer"])
+    }
+
     @Test func whatTakesASlot() {
         var running = job("r")
         running.status = .running
