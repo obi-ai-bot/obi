@@ -421,9 +421,17 @@ To answer the brain's question, send the original words with the answer:
 
 **The brain answers with context.** Before the user's words it reads a briefing the runner builds: the conversation so far, the jobs (running, needing the user, in review, finished or merged in the last two days, with their titles and stages), the inbox, each account's usage, and the week's failure records (below: counts by cause, the rounds the failed jobs used, and each record's trigger, cause, signature, issue and fix job; what the post-mortem wrote is in the quoted file). So it answers "why did jobs fail this week?", questions about the work ("how are the jobs going?", "what did the #12 job change?", "how long until Codex resets?") as a `reply`, and reads follow-ups ("and the vault one?", "cancel it"). The briefing holds only what the user and Oby said and what the runner knows; what agents wrote (a job's result and current step, an inbox question and its options, a failure's reason), and an inbox item's `headline`, `happened` and recommendation, which a model wrote from those words, reach the brain as a quoted file it may read, never in a prompt, as every other outside text does. The typed plan is still checked in Swift. A plan acts once it's made: the runner can't tell a client that gave up waiting from a slow one, so an app that lets the user cancel a turn only drops the answer, and a stop the turn asked for still happens.
 
-Bare cancel words ("never mind", "stop", "cancel", "forget it") never reach the brain: the answer is `none`, and nothing stops. Stopping work takes a job's name or "stop everything".
+Bare cancel words ("never mind", "stop", "cancel", "forget it") never reach the brain. When a conversation turn is underway they request a boundary stop; otherwise the answer is `none` and nothing stops. Stopping coding work still takes a job's name or "stop everything".
 
 The conversation so far is the runner's own, the last 50 of the turns it keeps (`GET /v1/conversation`, below). An app that shows its own thread sends it instead, oldest first; `who` is `user` or `oby`, `text` 1 to 2,000 characters, at most 50 turns (`422` otherwise). Either way the new exchange joins the runner's conversation.
+
+While a turn carries out actions, `GET /v1/events` sends a `step` event when each action starts and when it ends. Its `turn` is the user's turn id, `index` starts at 1, `action` is the plan action, `text` is a short description, `state` is `running`, `done` or `failed`, and `at` is ISO 8601 time:
+
+```json
+{"turn":"8d…","index":1,"action":"move_job","text":"Moving Vault secrets to Codex · Deskree","state":"running","at":"2026-10-12T12:00:00Z"}
+```
+
+`POST /v1/conversation/stop` asks the turn underway to stop after its current action. The in-flight `POST /v1/plans` then returns a reply describing what it completed. The cancel words `stop` and `never mind` have the same effect. The turn budget is 110 seconds; clients should wait 120 seconds while following its step events.
 
 ```json
 {"said": "and the vault one?",
@@ -457,7 +465,7 @@ Words that ask to move a job ("move the vault job to Claude", "use Fable for tha
 - on an answer (a reply, a question, or jobs it started);
 - on an action the brain already took this turn, or one that couldn't happen (with why);
 - on a later step only Oby's keyword rules could plan;
-- or after 36 seconds (`Desk.turnBudget`, under the apps' 45-second wait). Then the reply ends with "say “continue” for the rest".
+- or after 110 seconds (`Desk.turnBudget`, under the apps' 120-second wait). Then the reply ends with "say “continue” for the rest".
 
 The reply lists everything that happened, in order: `"Moved Vault secrets from Claude Code · Deskree to Claude Code · Personal. It goes on there now. Moved Watch home from Claude Code · Deskree to Codex · Deskree. It starts again there."` One move may name up to 10 jobs going to the same place. A job that had failed or was interrupted (an account's limit, a restart) starts again where it went ("It starts again there"). The briefing names each job's account (`… · Claude Code · Deskree · running on tetrix-lab …`), so "its jobs" and "everything on Deskree" resolve.
 

@@ -36,6 +36,7 @@ final class WatchAPI {
         router.get("v1/jobs/:id") { _, context in try await self.api.job(context.parameters.require("id")) }
         router.get("v1/events") { _, _ in await self.api.events() }
         router.post("v1/plans") { request, _ in try await self.api.plan(try await API.decode(PlanRequest.self, from: request)) }
+        router.post("v1/conversation/stop") { _, _ in await self.api.stopConversation() }
         router.post("v1/jobs") { request, _ in try await self.api.dispatch(try await API.decode(DispatchRequest.self, from: request)) }
         router.post("v1/jobs/:id/messages") { request, context in
             try await self.api.message(context.parameters.require("id"), try await API.decode(NewMessage.self, from: request))

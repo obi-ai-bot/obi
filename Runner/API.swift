@@ -44,6 +44,7 @@ final class API {
         desk.onInboxChange = { [weak self] item in self?.send("inbox", InboxJSON(item: item)) }
         desk.onCheckChange = { [weak self] check in self?.send("check", MacCheckJSON(check: check)) }
         desk.onTurnChange = { [weak self] turn in self?.send("turn", TurnJSON(turn: turn)) }
+        desk.onStepChange = { [weak self] step in self?.send("step", step) }
         watchAccounts()
     }
 
@@ -56,6 +57,7 @@ final class API {
         }
         router.get("v1/status") { _, _ in await self.status() }
         router.post("v1/plans") { request, _ in try await self.plan(try await Self.decode(PlanRequest.self, from: request)) }
+        router.post("v1/conversation/stop") { _, _ in await self.stopConversation() }
         router.get("v1/conversation") { request, _ in
             try await self.conversation(before: request.uri.queryParameters.get("before").map { String($0) },
                                         limit: request.uri.queryParameters.get("limit", as: Int.self))
@@ -179,6 +181,12 @@ final class API {
         let said = request.answer.map { Desk.answered(words, question: $0.question, option: $0.option) } ?? words
         let (talk, started) = await desk.exchange(said, shown: request.answer?.option, turns: turns)
         return Self.json(PlanAnswer(talk, started: started))
+    }
+
+    /// Stops the conversation after the action currently underway has finished.
+    func stopConversation() -> Response {
+        desk.stopConversation()
+        return Self.json(["stopped": true])
     }
 
     /// One page of the conversation, oldest first: the latest `limit` turns (50 unless asked,
