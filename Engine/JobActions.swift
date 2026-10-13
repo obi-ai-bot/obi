@@ -43,7 +43,9 @@ extension Plan {
             break
         }
         if action != .answerInbox && action != .fixFailure, item != nil || option != nil || answer != nil { problems.append("only answer_inbox has an item, an option or an answer") }
-        if action != .messageJob, message != nil { problems.append("only message_job has a message") }
+        if action != .messageJob && action != .answerPermission, let message, !message.isEmpty {
+            problems.append("only message_job or answer_permission has a message")
+        }
         if (answer ?? "").count > 2000 { problems.append("answer is longer than 2,000 characters") }
         return problems
     }

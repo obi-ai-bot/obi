@@ -721,9 +721,12 @@ final class Desk {
                 if self.conversationTurn == eventTurn {
                     batch = self.orchestratorEvents
                     self.orchestratorEvents.removeAll()
-                } else {
-                    batch = []
                 }
+            }
+            // A user turn can replace the orchestrator's conversation id while its plan is in
+            // flight. Keep that batch queued; the next wake will run after the user's turn.
+            if self.conversationTurn != eventTurn, !batch.isEmpty {
+                self.orchestratorEvents.insert(contentsOf: batch, at: 0)
             }
             if !replies.isEmpty { addReply(replies.joined(separator: " ")) }
             if conversationTurn == eventTurn { conversationTurn = nil }
@@ -931,7 +934,7 @@ final class Desk {
                     escalateOrchestrator(currentOrchestratorEvents, why: "Oby couldn't verify the event by reading its job first. I recommend reviewing the job before choosing a next step.")
                     return .reply("I couldn't safely act on that event because I didn't read its job first. I left it for you to review.")
                 }
-                let allowed: Set<Plan.Action> = [.readJob, .retryJob, .answerInbox, .startNow, .moveJob, .replyOnly,
+                let allowed: Set<Plan.Action> = [.readJob, .retryJob, .answerInbox, .startNow, .moveJob, .replyOnly, .ignore,
                                                  .messageJob, .fixFailure, .askReviewAgain]
                 if !allowed.contains(action) || (action == .askUser) {
                     let question = result.plan.question?.text ?? result.plan.reply
@@ -941,11 +944,6 @@ final class Desk {
                     }
                     escalateOrchestrator(currentOrchestratorEvents, why: "Oby read the job. \(question.isEmpty ? "This needs your decision." : question)" + (recommendation.map { " Oby recommends: \($0)." } ?? " Oby recommends that you review the evidence and choose."))
                     return .reply("I read the job, but this needs your decision. I left it in Needs you.")
-                }
-                if action == .replyOnly, done.isEmpty {
-                    escalateOrchestrator(currentOrchestratorEvents,
-                        why: result.plan.reply.isEmpty ? "Oby read the job but couldn't settle the event automatically. Oby recommends that you review the evidence and choose." : result.plan.reply)
-                    return .reply("I read the job but left the event for you: \(result.plan.reply)")
                 }
                 if action == .readJob,
                    let id = (result.plan.jobs ?? []).first,
@@ -2666,9 +2664,11 @@ final class Desk {
         if published != nil { reviewOrCheck(job, rebasedFrom: rebasedFrom) }
         if job.reviewOf != nil { reviewEnded(job) }
         onFinish(job)
-        orchestrate(OrchestratorEvent(kind: job.status.rawValue, job: job.id,
-                                       summary: "Job \(job.heading) (\(job.id)) ended \(job.status.rawValue). Read its report before deciding what to do.",
-                                       evidence: ["jobs/\(job.id)/report", "jobs/\(job.id)/last-agent-output"]))
+        if job.status == .failed || job.status == .interrupted || job.limit != nil {
+            orchestrate(OrchestratorEvent(kind: job.limit == nil ? job.status.rawValue : "limit", job: job.id,
+                                           summary: "Job \(job.heading) (\(job.id)) ended \(job.status.rawValue)\(job.limit.map { ": \($0)" } ?? ""). Read its report before deciding what to do.",
+                                           evidence: ["jobs/\(job.id)/report", "jobs/\(job.id)/last-agent-output"]))
+        }
         // A job waiting for a slot takes this one's (#237).
         releaseWaiting()
         // Jobs waiting for this one to end look now, not at their next minute (#216).
