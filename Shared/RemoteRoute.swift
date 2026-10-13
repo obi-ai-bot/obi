@@ -9,6 +9,8 @@ nonisolated struct MacLink: Codable, Equatable, Sendable {
     var name: String
     /// The tunnel's hostname: oby-<opaque>.tetrix.pro.
     var hostname: String
+    /// The device id pinned by the Mac during pairing.
+    var deviceID: String? = nil
     /// The Mac gateway's pinned X25519 public key, carried by pairing. Nil only for links created
     /// before E2E was introduced; a gateway that has paired keys refuses those legacy links.
     var publicKey: Data? = nil
@@ -80,8 +82,8 @@ nonisolated enum RemoteRoute: Equatable, Sendable {
         return .away(link.tunnelURL)
     }
 
-    /// The gateway's address on the local network, from what Bonjour resolved. Plain HTTP for
-    /// now: the gateway (#284) decides what it speaks at home, and #287 encrypts end to end.
+    /// The gateway's address on the local network, from what Bonjour resolved. HTTP transport is
+    /// acceptable here because the body is sealed end to end by the client session.
     static func lanURL(host: String, port: Int) -> URL? {
         URL(string: "http://\(host.contains(":") ? "[\(host)]" : host):\(port)")
     }

@@ -42,6 +42,20 @@ struct E2ETests {
         try guardrail.accept(E2E.Metadata(method: "GET", route: "/v1/status", device: "watch", counter: 1))
     }
 
+    @Test func acceptAndRecordAllowsOnlyOneConcurrentCopy() async throws {
+        let guardrail = E2E.ReplayGuard()
+        let metadata = E2E.Metadata(method: "POST", route: "/v1/plans", device: "phone", counter: 1)
+        let accepted = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+            for _ in 0..<16 {
+                group.addTask { (try? guardrail.acceptAndRecord(metadata)) != nil }
+            }
+            var count = 0
+            for await result in group { if result { count += 1 } }
+            return count
+        }
+        #expect(accepted == 1)
+    }
+
     @Test func gatewayDecryptsOnlyAfterReplayChecks() throws {
         let gateway = Gateway(keys: mac, devices: ["phone": phone.publicKey])
         let metadata = E2E.Metadata(method: "POST", route: "/v1/plans", device: "phone", counter: 1)
@@ -62,5 +76,18 @@ struct E2ETests {
         #expect(try gateway.open(valid, metadata: metadata) == Data("valid".utf8))
         let restarted = Gateway(keys: mac, replayFile: replay, devices: ["phone": phone.publicKey])
         #expect(throws: E2E.Failure.replay) { try restarted.open(valid, metadata: metadata) }
+    }
+
+    @Test func clientSealsRequestsAndOpensAuthenticatedResponses() throws {
+        let counterKey = "oby-test-e2e-\(UUID().uuidString)"
+        let client = try E2E.Client(device: "phone", keys: phone, gatewayPublicKey: mac.publicKey, counterKey: counterKey)
+        let request = try client.seal(Data("private request".utf8), method: "POST", route: "/v1/plans")
+        let gateway = Gateway(keys: mac, devices: ["phone": phone.publicKey])
+        #expect(try gateway.open(request.body, metadata: request.metadata) == Data("private request".utf8))
+        let responseMetadata = E2E.Metadata(method: "POST", route: "/v1/plans", device: "phone",
+                                            counter: request.metadata.counter, direction: .response)
+        let response = try E2E.seal(Data("private response".utf8), to: phone.publicKey,
+                                    metadata: responseMetadata, authenticatedBy: mac.privateKey)
+        #expect(try client.open(response, metadata: responseMetadata) == Data("private response".utf8))
     }
 }

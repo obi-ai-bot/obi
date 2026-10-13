@@ -135,6 +135,29 @@ final class DevicesTests {
         #expect(try devices.register(name: "Test iPhone", publicKey: mine) == id)
     }
 
+    @Test func firstE2EKeyCanBeAddedToAnExistingDeviceButReplacementNeedsPairing() throws {
+        let mine = key.publicKey.x963Representation.base64EncodedString()
+        openPairing()
+        let id = try devices.register(name: "Test iPhone", publicKey: mine)
+        let first = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
+        #expect(try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: first) == id)
+
+        let replacement = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
+        #expect((#expect(throws: APIError.self) {
+            try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: replacement)
+        })?.status == .forbidden)
+        openPairing(at: .now - 601)
+        #expect((#expect(throws: APIError.self) {
+            try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: replacement)
+        })?.status == .forbidden)
+        openPairing()
+        #expect(try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: replacement) == id)
+        #expect(!FileManager.default.fileExists(atPath: devices.pairing.path))
+        #expect((#expect(throws: APIError.self) {
+            try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: first)
+        })?.status == .forbidden)
+    }
+
     @Test func malformedKeysDontRegister() {
         for key in ["BJ3x", "not base64!", Data(repeating: 4, count: 65).base64EncodedString(), key.publicKey.rawRepresentation.base64EncodedString()] {
             let error = #expect(throws: APIError.self) { try self.devices.register(name: "x", publicKey: key) }

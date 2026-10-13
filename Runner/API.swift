@@ -59,12 +59,14 @@ final class API {
     }
 
     /// Every endpoint, behind the owner check: the owner's tailnet login.
-    nonisolated func router(owner: String) -> Router<BasicRequestContext> { router(access: .tailnet(owner: owner)) }
+    nonisolated func router(owner: String, e2eAllowed: Bool = false) -> Router<BasicRequestContext> {
+        router(access: .tailnet(owner: owner), e2eAllowed: e2eAllowed)
+    }
 
     /// Every endpoint, behind `Gate`.
-    nonisolated func router(access: Access) -> Router<BasicRequestContext> {
+    nonisolated func router(access: Access, e2eAllowed: Bool = false) -> Router<BasicRequestContext> {
         let router = Router()
-        router.add(middleware: Gate(access: access))
+        router.add(middleware: Gate(access: access, e2eAllowed: e2eAllowed))
         router.post("v1/speech") { request, _ in
             try await Self.json(self.speech.handle(request, repos: self.desk.repos))
         }
@@ -806,14 +808,23 @@ enum Access: Sendable {
 /// Lets in only the owner (`Access`), and sends every error as `{"error": …}`.
 struct Gate<Context: RequestContext>: RouterMiddleware {
     let access: Access
+    let e2eAllowed: Bool
 
-    init(access: Access) { self.access = access }
-    init(owner: String) { access = .tailnet(owner: owner) }
+    init(access: Access, e2eAllowed: Bool = false) {
+        self.access = access
+        self.e2eAllowed = e2eAllowed
+    }
+    init(owner: String, e2eAllowed: Bool = false) {
+        self.access = .tailnet(owner: owner)
+        self.e2eAllowed = e2eAllowed
+    }
 
     @concurrent func handle(_ request: Request, context: Context,
                             next: @concurrent (Request, Context) async throws -> Response) async throws -> Response {
         do {
-            try Self.admit(request, access: access)
+            if !(e2eAllowed && request.headers[.obyE2EVersion] == E2E.version) {
+                try Self.admit(request, access: access)
+            }
             return try await next(request, context)
         } catch let error as APIError {
             return error.response

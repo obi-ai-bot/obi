@@ -49,6 +49,35 @@ public enum E2E {
         public static func decoded(_ data: Data) throws -> Envelope { try JSONDecoder().decode(self, from: data) }
     }
 
+    /// Client-side session for the Mac gateway. The counter is persisted by key so a relaunch
+    /// cannot reuse a request number. The Mac's public key comes from the pairing record.
+    public final class Client: @unchecked Sendable {
+        public let device: String
+        public let keys: KeyPair
+        public let gatewayPublicKey: Data
+        private let counterKey: String
+        private let lock = NSLock()
+
+        public init(device: String, keys: KeyPair, gatewayPublicKey: Data, counterKey: String) throws {
+            guard gatewayPublicKey.count == 32 else { throw Failure.invalidKey }
+            _ = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: gatewayPublicKey)
+            self.device = device; self.keys = keys; self.gatewayPublicKey = gatewayPublicKey; self.counterKey = counterKey
+        }
+
+        public func seal(_ body: Data, method: String, route: String) throws -> (body: Data, metadata: Metadata) {
+            lock.lock(); defer { lock.unlock() }
+            let next = UserDefaults.standard.integer(forKey: counterKey) + 1
+            UserDefaults.standard.set(next, forKey: counterKey)
+            let metadata = Metadata(method: method, route: route, device: device, counter: UInt64(next))
+            return (try E2E.seal(body, to: gatewayPublicKey, metadata: metadata, authenticatedBy: keys.privateKey), metadata)
+        }
+
+        public func open(_ body: Data, metadata: Metadata) throws -> Data {
+            guard metadata.device == device, metadata.direction == .response else { throw Failure.invalidMessage }
+            return try E2E.open(body, with: keys.privateKey, metadata: metadata, authenticatedBy: Curve25519.KeyAgreement.PublicKey(rawRepresentation: gatewayPublicKey))
+        }
+    }
+
     public enum Failure: Error, Equatable { case unsupportedVersion; case replay; case invalidKey; case invalidMessage }
 
     public static func seal(_ plaintext: Data, to publicKey: Data, metadata: Metadata,

@@ -746,6 +746,13 @@ nonisolated struct RunnerError: LocalizedError {
 nonisolated struct Runner: Sendable {
     var base: URL
     var token: String? = nil
+    var e2e: E2E.Client?
+
+    init(base: URL, token: String? = nil, e2e: E2E.Client? = nil) {
+        self.base = base
+        self.token = token
+        self.e2e = e2e
+    }
 
     static let defaultURL = URL(string: "https://tetrix-lab.tail8de49b.ts.net:8443")!
 
@@ -939,6 +946,17 @@ nonisolated struct Runner: Sendable {
         return answer.id
     }
 
+    /// The gateway key used to complete a Mac pairing. This is public key material, but it is
+    /// pinned in the link so a later route cannot silently switch gateways.
+    func e2ePublicKey() async throws -> Data {
+        struct Answer: Decodable { var publicKey: String }
+        let answer: Answer = try await call("GET", "v1/e2e")
+        guard let key = Data(base64Encoded: answer.publicKey), key.count == 32 else {
+            throw RunnerError(message: "The runner returned no valid E2E gateway key.")
+        }
+        return key
+    }
+
     #if os(macOS)
     /// The next check for this Mac to run, now this Mac's, or nil when none waits: merge checks,
     /// Apple checks agents asked for (Engine/AppleChecks.swift), or both.
@@ -1038,13 +1056,27 @@ nonisolated struct Runner: Sendable {
         var request = URLRequest(url: URL(string: path, relativeTo: base.appending(path: "/"))!)
         request.httpMethod = method
         request.timeoutInterval = timeout
-        if let body {
+        if let e2e {
+            let clear = try body.map { try Self.encoder.encode($0) } ?? Data()
+            let route = request.url.map { $0.path + ($0.query.map { "?\($0)" } ?? "") } ?? "/\(path)"
+            let sealed = try e2e.seal(clear, method: method, route: route)
+            request.httpBody = sealed.body
+            request.setValue(E2E.version, forHTTPHeaderField: "Oby-E2E-Version")
+            request.setValue(e2e.device, forHTTPHeaderField: "Oby-E2E-Device")
+            request.setValue(String(sealed.metadata.counter), forHTTPHeaderField: "Oby-E2E-Counter")
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        } else if let body {
             request.httpBody = try Self.encoder.encode(body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         let (data, response) = try await URLSession.shared.data(for: signed(request))
         try Self.check(response, data)
-        return data
+        guard let e2e else { return data }
+        let route = request.url.map { $0.path + ($0.query.map { "?\($0)" } ?? "") } ?? "/\(path)"
+        let metadata = E2E.Metadata(method: method, route: route, device: e2e.device,
+                                    counter: UInt64(request.value(forHTTPHeaderField: "Oby-E2E-Counter") ?? "0") ?? 0,
+                                    direction: .response)
+        return try e2e.open(data, metadata: metadata)
     }
 
     #if os(macOS)

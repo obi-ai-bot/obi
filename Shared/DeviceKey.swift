@@ -32,6 +32,10 @@ nonisolated enum DeviceKey {
     /// Enclave signing key: HPKE needs a key-agreement key and the runner pins both at pairing.
     static func e2ePublicKey() throws -> Data { try e2eKey().publicKey }
 
+    static func e2eClient(device: String, gatewayPublicKey: Data, counterKey: String) throws -> E2E.Client {
+        try E2E.Client(device: device, keys: e2eKey(), gatewayPublicKey: gatewayPublicKey, counterKey: counterKey)
+    }
+
     /// Signs one publish. This is what asks for Face ID, with the exact action as the reason.
     /// It blocks until the user answers, so call it off the main actor.
     static func approve(job: String, action: String, device: String) throws -> Approval {

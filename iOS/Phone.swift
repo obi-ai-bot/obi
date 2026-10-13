@@ -163,7 +163,14 @@ final class Phone {
     /// The thread Chat shows: the runner's turns and this iPhone's words still on their way, by time.
     var thread: [Turn] { conversation.thread(with: ChatThread.pending(echoes, runner: conversation.runnerTurns)) }
 
-    var runner: Runner { Runner(base: base) }
+    var runner: Runner {
+        let client = link.flatMap { link -> E2E.Client? in
+            guard let device = link.deviceID, let gateway = link.publicKey else { return nil }
+            return try? DeviceKey.e2eClient(device: device, gatewayPublicKey: gateway,
+                                             counterKey: "oby.e2e.counter.\(device).\(link.hostname)")
+        }
+        return Runner(base: base, e2e: client)
+    }
     var active: [Job] { jobs.filter(\.isActive) }
     var signedIn: [Account] { accounts.filter(\.signedIn) }
 
@@ -547,7 +554,11 @@ final class Phone {
     func registerDevice(again: Bool = false) async throws -> String {
         if !again, let deviceID { return deviceID }
         guard DeviceKey.isAvailable else { throw RunnerError(message: "Publishing needs Face ID on your iPhone.") }
-        let id = try await runner.register(name: "iPhone", publicKey: try DeviceKey.publicKey())
+        let connection = runner
+        let id = try await connection.register(name: "iPhone", publicKey: try DeviceKey.publicKey())
+        if let link, let publicKey = try? await connection.e2ePublicKey() {
+            self.link = MacLink(name: link.name, hostname: link.hostname, deviceID: id, publicKey: publicKey)
+        }
         UserDefaults.standard.set(id, forKey: deviceKey)
         return id
     }

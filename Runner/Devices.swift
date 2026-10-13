@@ -56,14 +56,17 @@ final class Devices {
             throw APIError(.unprocessableContent, "e2ePublicKey isn't an X25519 public key (base64).")
         }
         if let index = saved.devices.firstIndex(where: { $0.publicKey == publicKey }) {
-            if let e2ePublicKey, saved.devices[index].e2ePublicKey != e2ePublicKey {
+            if let e2ePublicKey, let existing = saved.devices[index].e2ePublicKey, existing != e2ePublicKey {
                 let opened = (try? FileManager.default.attributesOfItem(atPath: pairing.path))?[.modificationDate] as? Date
                 guard let opened, now.timeIntervalSince(opened) < 600 else {
-                    throw APIError(.forbidden, "Changing this device's E2E key needs the pairing window: touch (pairing.path), then try again within 10 minutes.")
+                    throw APIError(.forbidden, "Changing this device's E2E key needs the pairing window: touch \(pairing.path), then try again within 10 minutes.")
                 }
                 saved.devices[index].e2ePublicKey = e2ePublicKey
                 try save()
                 try? FileManager.default.removeItem(at: pairing)
+            } else if let e2ePublicKey, saved.devices[index].e2ePublicKey == nil {
+                saved.devices[index].e2ePublicKey = e2ePublicKey
+                try save()
             }
             return saved.devices[index].id
         }
