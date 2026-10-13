@@ -2033,6 +2033,9 @@ final class Desk {
     /// The job, however old (#223): the list's, else the store's.
     func job(_ id: String) -> Job? { jobs.first { $0.id == id } ?? store.job(id) }
 
+    /// Whether the job's agent turn has finished and its ending path is still running.
+    func isEnding(_ id: String) -> Bool { ending.contains(id) }
+
     /// Whether the list holds the job. `replace` brings one only in the store onto the list.
     func lists(_ id: String) -> Bool { jobs.contains { $0.id == id } }
 
@@ -2560,10 +2563,35 @@ final class Desk {
             var ended = running
             (ended.status, ended.summary) = Job.ending(ended, status, summary, made: made, asked: asked.contains(id), dirty: dirty)
             ended.commits = commits
+            var finalSummary = summary
             ended.pushed = pushed
+            if self.queuesMacChecks, self.appleTool() != nil, let head = await self.worktreeHead(id) {
+                if let failed = ended.appleRan, failed.head == head, failed.state == .failed {
+                    self.handOffPublishAppleFailure(id, check: failed)
+                    return
+                }
+                if await self.needsAppleBuild(ended, id: id, head: head) {
+                    let check = self.queuePublishAppleCheck(ended, head: head)
+                    guard let result = await self.publishAppleCheck(id, checkID: check.id) else {
+                        self.end(id, .failed, summary + "\n\nThe Apple check ended before Oby received a result.",
+                                 commits: commits, pushed: pushed, made: made, dirty: dirty)
+                        return
+                    }
+                    if result.state == .failed {
+                        self.handOffPublishAppleFailure(id, check: result)
+                        return
+                    }
+                    ended.appleCheck = result
+                    running = self.job(id) ?? running
+                    if result.state == .error {
+                        ended.summary += "\n\n" + (result.problem ?? AppleCheck.unbuiltLine)
+                        finalSummary += "\n\n" + (result.problem ?? AppleCheck.unbuiltLine)
+                    }
+                }
+            }
             guard ended.canPublish, let before = ranHere[id], (commits ?? 0) > before.commits || ended.unpublished > before.unpublished else {
                 // Still waiting for Publish by hand: why its own publish failed still holds.
-                return end(id, status, summary, commits: commits, pushed: pushed, made: made, dirty: dirty,
+                return end(id, status, finalSummary, commits: commits, pushed: pushed, made: made, dirty: dirty,
                            publishError: ended.canPublish ? ended.publishError : nil)
             }
             running.phase = .publish
@@ -2572,7 +2600,7 @@ final class Desk {
             replace(running)
             do {
                 let url = try await publishOnItsOwn(ended, base, hooks(id, stoppable: true))
-                end(id, status, summary, commits: commits, pushed: pushed, made: made, published: url)
+                end(id, status, finalSummary, commits: commits, pushed: pushed, made: made, published: url)
             } catch let merged as Publish.AlreadyOnBase {
                 // Merged already (a squash merge changes the hashes): nothing is left to publish.
                 end(id, status, (merged.errorDescription ?? "Not published.") + "\n\n" + ended.summary, commits: 0, made: made)
@@ -2581,7 +2609,7 @@ final class Desk {
                     end(id, .failed, (blocked.errorDescription ?? "Not published.") + "\n\n" + ended.summary, commits: commits, pushed: pushed, made: made)
                 }
             } catch {
-                end(id, status, summary, commits: commits, pushed: pushed, made: made, publishError: error.localizedDescription)
+                end(id, status, finalSummary, commits: commits, pushed: pushed, made: made, publishError: error.localizedDescription)
             }
         }
     }
@@ -2605,6 +2633,46 @@ final class Desk {
         let prompt = Prompts.publishFix(findings)
         run(job, prompt: prompt, resume: job.session)
         return true
+    }
+
+    /// Uses the actual committed diff when the job has a start commit. The brief remains the
+    /// fallback for older jobs and test fixtures that do not have a readable worktree.
+    private func needsAppleBuild(_ job: Job, id: String, head: String) async -> Bool {
+        if (job.appleRan?.head == head && job.appleRan?.state == .passed)
+            || (job.appleCheck?.finalCheck != nil && job.appleCheck?.head == head && job.appleCheck?.state == .error) {
+            return false
+        }
+        if let start = job.startCommit,
+           let output = try? await Shell.ok(["git", "-C", Workspace.worktree(id).path, "diff", "--name-only", "--no-renames", "\(start)..HEAD"]) {
+            return output.split(separator: "\n").contains { path in
+                AppleCheck.folders.contains { folder in String(path) == folder || String(path).hasPrefix(folder) }
+            }
+        }
+        return AppleCheck.touchesApple(job, worktree: Workspace.worktree(id))
+    }
+
+    /// A pre-publish compiler or test failure is an author round. It does not consume a review
+    /// round, and the failure stays quoted in the worktree's inputs for the next agent.
+    private func handOffPublishAppleFailure(_ id: String, check: MacCheck) {
+        guard var author = job(id), author.isActive else { return }
+        let report = AppleCheck.report(check, log: appleLogs[check.id]) ?? "The Apple check failed for commit \(check.head.prefix(12))."
+        guard let session = author.session else {
+            end(id, .failed, "The Apple check failed, but the job has no session to pick up.\n\n\(report)")
+            return
+        }
+        let file = "apple-check-\(check.round).md"
+        do { try quoteReview(author, file, vault.forAgent(MacCheck.quoted(check, log: appleLogs[check.id]))) }
+        catch {
+            end(id, .failed, "Oby couldn't hand the Apple check to \(author.agentName): \(error.localizedDescription)\n\n\(report)")
+            return
+        }
+        var again = Review.round(author)
+        again.step = "Working on the Apple check"
+        again.appleCheck?.handedOff = true
+        ending.remove(id)
+        agents.removeValue(forKey: id)?.end()
+        replace(again)
+        run(again, prompt: Review.roundPrompt(again, file: file), resume: session)
     }
 
     /// How many of the job's `commits` beyond `base` its pull request has: those in the commit Oby
@@ -3089,7 +3157,7 @@ nonisolated enum Rounds {
     /// account, and ends it after `timeout` seconds: then it fails, saying so.
     /// `env` is what changes from Oby's environment: `Agents.overrides(vault:)`, so no vault secret reaches it.
     static func run(_ command: String, in worktree: URL, timeout: TimeInterval, env: [String: String?], boxed: Bool = Agents.bubblewrap) async -> Check {
-        let result = try? await Shell.run(Agents.sandboxed(Agents.niced(["sh", "-c", command]), in: worktree, own: nil, bubblewrap: boxed), in: worktree,
+        let result = try? await Shell.run(Agents.sandboxed(Agents.nicedForCurrentProcess(["sh", "-c", command]), in: worktree, own: nil, bubblewrap: boxed), in: worktree,
                                           env: env, timeout: timeout)
         var output = result.map { String(decoding: $0.out, as: UTF8.self) + $0.err } ?? "Oby couldn't run it."
         if result?.timedOut == true {

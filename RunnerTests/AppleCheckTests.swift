@@ -14,14 +14,16 @@ struct AppleCheckTests {
         var onEvent: (AgentEvent) -> Void = { _ in }
         var prompt = ""
         var sent: [String] = []
+        var endCount = 0
+        var killCount = 0
         func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
             self.prompt = prompt
             self.onEvent = onEvent
         }
         func send(_ text: String) { sent.append(text) }
-        func end() {}
+        func end() { endCount += 1 }
         func stop() {}
-        func kill() {}
+        func kill() { killCount += 1 }
     }
 
     /// What the desk did, and the commit the job's worktree is on.
@@ -31,6 +33,8 @@ struct AppleCheckTests {
         var head: String? = AppleCheckTests.head
         var events: [MacCheck] = []
         var reviews: [CheckRun] = []
+        var quoted: [(file: String, text: String)] = []
+        var published: [Job] = []
         /// What the job's final check was given to run with.
         var env: [String: String?] = [:]
     }
@@ -59,7 +63,8 @@ struct AppleCheckTests {
         }
         desk.countCommits = { _, _ in 1 }
         desk.worktreeHead = { [made] _ in made.head }
-        desk.publishOnItsOwn = { [url] job, _, hooks in
+        desk.publishOnItsOwn = { [url, made] job, _, hooks in
+            made.published.append(job)
             hooks.sent(Outgoing(action: .push, repo: job.repo, id: AppleCheckTests.head, branch: job.branch))
             return url
         }
@@ -67,7 +72,7 @@ struct AppleCheckTests {
             made.reviews.append(run)
             return URL(string: "https://github.com/deskree-inc/oby/runs/1")!
         }
-        desk.quoteReview = { _, _, _ in }
+        desk.quoteReview = { [made] _, file, text in made.quoted.append((file, text)) }
         desk.reviewedHead = { _ in AppleCheckTests.head }
         desk.onCheckChange = { [made] in made.events.append($0) }
         desk.queuesMacChecks = true
@@ -107,6 +112,129 @@ struct AppleCheckTests {
     }
 
     // MARK: The queue
+
+    @Test func aPublishAppleCheckKeepsTheStoredJobActiveWhileItWaits() async throws {
+        try await running()
+        var ended = try #require(desk.job("apple118"))
+        ended.status = .done
+        ended.summary = "Finished."
+
+        let check = desk.queuePublishAppleCheck(ended, head: Self.head)
+
+        #expect(check.isApple && check.finalCheck != nil && check.head == Self.head)
+        #expect(desk.job("apple118")?.status == .running)
+        #expect(desk.job("apple118")?.appleCheck?.id == check.id)
+    }
+
+    @Test func aPassingPrePublishAppleCheckKeepsTheJobActiveAndThenPublishesItsResult() async throws {
+        desk.appleTool = { [tool] in tool }
+        try await running()
+
+        desk.finish("apple118", .done, "Finished.")
+        try await until("the pre-publish Apple check is queued") { desk.job("apple118")?.appleCheck?.finalCheck != nil }
+        let queued = try #require(desk.job("apple118")?.appleCheck)
+        #expect(queued.state == .queued && desk.job("apple118")?.status == .running)
+
+        let taken = try #require(desk.nextMacCheck(mac: "Studio", kinds: [.apple]))
+        _ = try desk.macCheckEnded(taken.id, MacCheck.Report(passed: true,
+            steps: steps.map { MacCheck.Step(name: $0.name, passed: true, seconds: 1) }, failures: []))
+        try await until("the published job ends") { desk.job("apple118")?.status == .done && desk.job("apple118")?.published != nil }
+        let ended = try #require(desk.job("apple118"))
+        #expect(ended.appleCheck?.state == .passed && ended.appleRan?.state == .passed)
+        #expect(made.published.count == 1 && made.published[0].appleCheck?.state == .passed)
+    }
+
+    @Test func anUnclaimedPrePublishAppleCheckPublishesAndSaysTheAppsWereNotBuilt() async throws {
+        desk.appleTool = { [tool] in tool }
+        try await running()
+
+        desk.finish("apple118", .done, "Finished.")
+        try await until("the pre-publish Apple check is queued") { desk.job("apple118")?.appleCheck?.finalCheck != nil }
+        let queued = try #require(desk.job("apple118")?.appleCheck)
+        #expect(desk.appleCheck("apple118", now: queued.created + AppleCheck.finalWait(desk.limits.testRun) + 1)?.state == .error)
+
+        try await until("the no-Mac job publishes") { desk.job("apple118")?.status == .done && desk.job("apple118")?.published != nil }
+        let ended = try #require(desk.job("apple118"))
+        #expect(ended.summary.contains(AppleCheck.unbuiltLine))
+        #expect(made.published.count == 1 && made.published[0].appleCheck?.state == .error)
+    }
+
+    @Test func aFailedPrePublishAppleCheckStartsAnAuthorRoundWithQuotedDiagnostics() async throws {
+        desk.appleTool = { [tool] in tool }
+        try await running()
+        var author = try #require(desk.job("apple118"))
+        author.session = "agent-session"
+        desk.replace(author)
+
+        desk.finish("apple118", .done, "Finished.")
+        try await until("the pre-publish Apple check is queued") { desk.job("apple118")?.appleCheck?.finalCheck != nil }
+        let taken = try #require(desk.nextMacCheck(mac: "Studio", kinds: [.apple]))
+        var buildStep = steps[0]
+        buildStep.passed = false
+        buildStep.buildErrors = ["Mac/Thing.swift:8: error: invalid actor isolation"]
+        _ = try desk.macCheckEnded(taken.id, MacCheck.Report(passed: false, steps: [buildStep, steps[1]], failures: [],
+                                                              log: "Mac/Thing.swift:8: error: invalid actor isolation"))
+
+        try await until("the failed build returns to its author") {
+            desk.job("apple118")?.isActive == true && desk.job("apple118")?.step == "Working on the Apple check" && !desk.isEnding("apple118")
+        }
+        let round = try #require(desk.job("apple118"))
+        #expect(round.appleCheck?.handedOff == true && round.status == .running)
+        #expect(made.published.isEmpty && made.agents.count == 2)
+        #expect(made.agents[0].agent.endCount == 1 && desk.isEnding("apple118") == false)
+        #expect(made.quoted.last?.file == "apple-check-1.md")
+        #expect(made.quoted.last?.text.contains("> Mac/Thing.swift:8: error: invalid actor isolation") == true)
+        #expect(made.agents.last?.agent.prompt.contains("apple-check-1.md") == true)
+    }
+
+    @Test func aFailedPrePublishAppleCheckWithoutASessionEndsTheJobWithBuildErrors() async throws {
+        desk.appleTool = { [tool] in tool }
+        try await running()
+
+        desk.finish("apple118", .done, "Finished.")
+        try await until("the pre-publish Apple check is queued") { desk.job("apple118")?.appleCheck?.finalCheck != nil }
+        let taken = try #require(desk.nextMacCheck(mac: "Studio", kinds: [.apple]))
+        var buildStep = steps[0]
+        buildStep.passed = false
+        buildStep.buildErrors = ["Mac/Thing.swift:8: error: invalid actor isolation"]
+        _ = try desk.macCheckEnded(taken.id, MacCheck.Report(passed: false, steps: [buildStep, steps[1]], failures: [],
+                                                              log: "Mac/Thing.swift:8: error: invalid actor isolation"))
+
+        try await until("the job ends after its failed Apple check") {
+            desk.job("apple118")?.status == .failed && !desk.isEnding("apple118")
+        }
+        let failed = try #require(desk.job("apple118"))
+        #expect(failed.summary.contains("The Apple check failed, but the job has no session to pick up."))
+        #expect(failed.summary.contains("Mac/Thing.swift:8: error: invalid actor isolation"))
+        #expect(made.agents.count == 1 && made.agents[0].agent.killCount == 1)
+        #expect(made.published.isEmpty)
+    }
+
+    @Test func aReplacedPrePublishCheckEndsTheJobAndClearsItsEndingState() async throws {
+        desk.appleTool = { [tool] in tool }
+        try await running()
+
+        desk.finish("apple118", .done, "Finished.")
+        try await until("the pre-publish Apple check is queued") { desk.job("apple118")?.appleCheck?.finalCheck != nil }
+        var replaced = try #require(desk.job("apple118"))
+        replaced.appleCheck?.id = "replacement"
+        desk.replace(replaced)
+
+        try await until("the missing result ends the job") { desk.job("apple118")?.status == .failed && !desk.isEnding("apple118") }
+        #expect(desk.job("apple118")?.summary.contains("The Apple check ended before Oby received a result.") == true)
+        #expect(made.published.isEmpty)
+    }
+
+    @Test func everyAppleCompiledPathIsRecognizedAndRunnerOnlyPathsAreNot() {
+        for folder in AppleCheck.folders {
+            var changed = author
+            changed.files = [folder + "Example.swift"]
+            #expect(AppleCheck.touchesApple(changed, worktree: URL(filePath: "/tmp")))
+        }
+        var runnerOnly = author
+        runnerOnly.files = ["Runner/Jobs.swift", "docs/runner-api.md"]
+        #expect(!AppleCheck.touchesApple(runnerOnly, worktree: URL(filePath: "/tmp")))
+    }
 
     @Test func anAgentsCheckGoesFirstToAMacThatTakesAppleChecksAndItsResultStaysWithTheJob() async throws {
         try await running()

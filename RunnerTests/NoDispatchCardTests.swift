@@ -72,7 +72,7 @@ struct NoDispatchCardTests {
     @Test func aCancelledOrLateTurnStartsNothing() async throws {
         final class Gate: @unchecked Sendable {
             private let lock = NSLock()
-            private var state = (reading: false, open: false)
+            private var state = (reading: false, open: false, finishedReads: 0)
 
             var reading: Bool {
                 lock.lock(); defer { lock.unlock() }
@@ -98,11 +98,18 @@ struct NoDispatchCardTests {
             func markNotReading() {
                 lock.lock(); defer { lock.unlock() }
                 state.reading = false
+                state.finishedReads += 1
+            }
+
+            var finishedReads: Int {
+                lock.lock(); defer { lock.unlock() }
+                return state.finishedReads
             }
         }
         let gate = Gate()
         desk.issueFiles = { [gate] _, _ in
             gate.markReading()
+            defer { gate.markNotReading() }
             while !gate.open { try? await Task.sleep(for: .milliseconds(10)) }
             return ["iOS/Home.swift"]
         }
@@ -111,12 +118,12 @@ struct NoDispatchCardTests {
         desk.cancel()
         gate.open = true
         try await until("the plan is dead") { brain.answered.count == 1 }
+        try await until("the cancelled file read finishes") { gate.finishedReads == 1 }
         try await Task.sleep(for: .milliseconds(100))
         #expect(desk.jobs.isEmpty && desk.inbox.isEmpty && desk.turns.isEmpty && desk.talk == .none)
 
         // Past its time while the files are still being read: the turn ends with "didn't answer
         // in time", and the plan, when the files come, starts nothing.
-        gate.markNotReading()
         gate.open = false
         // Leave enough time for the plan to reach the blocked read before the timeout: under load
         // (the whole suite, a Mac check) it took over 3 seconds, the turn gave up first, and the
