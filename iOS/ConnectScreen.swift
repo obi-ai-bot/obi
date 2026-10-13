@@ -1,6 +1,7 @@
 import Network
 import Observation
 import SwiftUI
+import Vision
 import VisionKit
 
 /// Settings › Your Mac (#285): how this iPhone reaches the Mac, at home over the local network
