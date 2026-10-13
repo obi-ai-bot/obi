@@ -436,7 +436,7 @@ final class Failures {
             let outgoing = job.outgoing ?? []
             // A check that passed with no merge error is Oby's merge under way.
             if pr.state == .merged, !outgoing.contains(where: { $0.action == .merge }), !(job.macCheck?.state == .passed && job.mergeError == nil) {
-                add(.handMerge, "pr", "Its pull request was merged outside Oby.", at: pr.mergedAt)
+                add(.handMerge, "pr", "Its pull request was merged outside Oby. " + waiting(job), at: pr.mergedAt)
             }
             let pushed = Set(outgoing.filter { $0.action == .push }.map(\.id))
             if let head = pr.head, !pushed.isEmpty, !pushed.contains(head), !job.isActive {
@@ -444,6 +444,33 @@ final class Failures {
             }
         }
         return found
+    }
+
+    /// What Oby was still waiting for when someone merged `job`'s pull request, so the record says why
+    /// they had to step in: the commit it pushed, the last review, and the last merge and Apple checks.
+    nonisolated static func waiting(_ job: Job) -> String {
+        func short(_ sha: String?) -> String { sha.map { String($0.prefix(7)) } ?? "none" }
+        func line(_ check: MacCheck) -> String {
+            let failing = (check.failures ?? []).isEmpty ? "" : " (" + (check.failures ?? []).joined(separator: ", ") + ")"
+            return "\(check.isApple ? "Apple" : "merge") check on \(short(check.head)), round \(check.round): \(check.state.rawValue)\(failing)"
+        }
+        let head = job.pushedHead
+        var facts = ["It was at \(short(head)), round \(job.currentRound)"]
+        if job.isActive { facts.append("its agent was still working") }
+        if job.reviewing != nil { facts.append("Oby's review was under way") }
+        else if let review = job.review { facts.append("last review: \(review.verdict.rawValue), round \(review.round)") }
+        else { facts.append("no review yet") }
+        facts.append(job.macCheck.map(line) ?? "no merge check")
+        if let apple = job.appleCheck ?? job.appleRan { facts.append(line(apple)) }
+        var next = "Oby was waiting for "
+        if let check = job.macCheck, check.head == head, [.queued, .running, .passed].contains(check.state) {
+            next += "its merge check on \(short(head)) to \(check.state == .passed ? "merge" : "finish")."
+        } else if job.review?.verdict != .approved || job.reviewing != nil || job.isActive {
+            next += "a review of \(short(head)) before queueing a merge check."
+        } else {
+            next += "a merge check on \(short(head)), which wasn't queued."
+        }
+        return facts.joined(separator: "; ") + ". " + next
     }
 
     /// A job changed: what went wrong is recorded, once, and studied.

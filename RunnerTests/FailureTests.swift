@@ -317,6 +317,26 @@ struct FailureTests {
         #expect(found.map(\.trigger) == [.handMerge])
     }
 
+    /// #276: a merge by hand says what Oby was waiting for: here a review of the head pushed after a failed merge check.
+    @Test func handMergeRecordsWhatObyWasWaitingFor() throws {
+        var failed = MacCheck(id: "7a65129d", job: "hand", repo: "deskree-inc/oby", pr: 80, branch: "oby/fix-75", base: "dev", head: CheckTests.head, round: 1)
+        failed.state = .failed
+        failed.failures = ["agentsUseConnectedAppsWithoutEverSeeingTheLogin()"]
+        let job = FailureTests.job("hand") {
+            $0.published = "https://github.com/deskree-inc/oby/pull/80"
+            $0.outgoing = [Outgoing(action: .push, repo: "deskree-inc/oby", id: CheckTests.head, branch: "oby/fix-75"),
+                           Outgoing(action: .push, repo: "deskree-inc/oby", id: CheckTests.next, branch: "oby/fix-75")]
+            $0.review = Review(verdict: .approved, job: "rev", agent: "codex", account: "Work", round: 5)
+            $0.reviewing = "rev6"
+            $0.macCheck = failed
+            $0.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now, head: CheckTests.next)
+        }
+        let what = try #require(Failures.found(in: job).first { $0.trigger == .handMerge }).what
+        #expect(what.contains("merge check on \(CheckTests.head.prefix(7)), round 1: failed (agentsUseConnectedAppsWithoutEverSeeingTheLogin())"))
+        #expect(what.contains("Oby's review was under way"))
+        #expect(what.contains("waiting for a review of \(CheckTests.next.prefix(7)) before queueing a merge check"))
+    }
+
     // MARK: Post-mortems and what Oby does with them
 
     @Test func repeatsGroupBySignatureIntoOneIssue() async throws {
