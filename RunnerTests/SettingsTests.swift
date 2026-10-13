@@ -66,7 +66,7 @@ struct SettingsTests {
             Self.setting("codex", model: "luna"),
             ConversationTests.reply("")
         ])
-        desk.makeBrain = { [brain] _, _ in [brain] }
+        desk.makeBrain = { [brain] (_: String?, _: String?, _: Vault) in [brain] }
         _ = await desk.plan("Use Sonnet for Claude Code and Luna for Codex")
         #expect(AgentModels.value("claude", "model") == "claude-sonnet-5-5")
         #expect(AgentModels.value("claude", "effort") == "high")
@@ -80,7 +80,7 @@ struct SettingsTests {
         let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
         desk.repos = ["deskree-inc/oby"]
         let brain = ConversationTests.FakeBrain([Self.setting(maxRunning: 50)])
-        desk.makeBrain = { [brain] _, _ in [brain] }
+        desk.makeBrain = { [brain] (_: String?, _: String?, _: Vault) in [brain] }
         let result = await desk.plan("run 50 jobs")
         guard case .reply(let text) = result else { Issue.record("expected refusal reply"); return }
         #expect(text.contains("1 to 20"))
@@ -93,7 +93,7 @@ struct SettingsTests {
         let desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
         desk.repos = ["deskree-inc/oby"]
         let brain = ConversationTests.FakeBrain([Self.setting(account: "Personal", lift: true), Self.setting(account: "Personal", lift: false), ConversationTests.reply("")])
-        desk.makeBrain = { [brain] _, _ in [brain] }
+        desk.makeBrain = { [brain] (_: String?, _: String?, _: Vault) in [brain] }
         _ = await desk.plan("lift Personal's reserve and put it back")
         #expect(accounts.state(account.id)?.reserveLifted == nil)
     }

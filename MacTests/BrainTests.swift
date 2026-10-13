@@ -70,6 +70,24 @@ struct BrainTests {
         #expect(result.plan.dispatches.first?.repo == "deskree-inc/oby")
     }
 
+    @Test func plannerUsesCodexBeforeRulesWhenClaudeFails() async {
+        struct BrokenClaude: BrainAdapter, SelfRetryingBrainAdapter {
+            let name = "claude"
+            func complete(system: String, user: String, quoted: String?, schema: Data, timeout: TimeInterval) async throws -> Data {
+                throw Shell.Failure(message: "Claude account is at its limit")
+            }
+        }
+        struct WorkingCodex: BrainAdapter {
+            let name = "codex"
+            let response: Data
+            func complete(system: String, user: String, quoted: String?, schema: Data, timeout: TimeInterval) async throws -> Data { response }
+        }
+        let result = await Planner(adapters: [BrokenClaude(), WorkingCodex(response: review)]).plan("review oby #7", context: context)
+        #expect(result.by == "codex")
+        #expect(result.plan.dispatches.first?.repo == "deskree-inc/tetrix-front-end")
+        #expect(result.refused.count == 1)
+    }
+
     @Test func schemaListsOnlyWhatsConnected() throws {
         let schema = try #require(JSONSerialization.jsonObject(with: Plan.schema(for: context)) as? [String: Any])
         let actions = ((schema["properties"] as? [String: Any])?["action"] as? [String: Any])?["enum"] as? [String]

@@ -39,7 +39,7 @@ struct IslandLayoutTests {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
-        desk.makeBrain = { _, _ in [] }
+        desk.makeBrain = { (_: String?, _: String?, _: Vault) in [] }
         let feed = RunnerFeed()
         let model = IslandModel(desk: desk, feed: feed)
         let reply = Turn(id: "remote", who: .oby, text: "Hello from the runner")

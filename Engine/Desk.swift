@@ -89,8 +89,10 @@ final class Desk {
     @ObservationIgnored var settingModelEfforts: [String: [String: [String]]] = [:]
     @ObservationIgnored private var settingOptionsLoaded = false
     @ObservationIgnored var loadSettingOptions: () async -> ([String: [String]], [String: [String]], [String: [String: [String]]])? = { nil }
-    /// The brain's adapters, on the Claude account whose home is given. Tests put in their own.
-    @ObservationIgnored var makeBrain: (_ home: String?, Vault) -> [any BrainAdapter] = { [ClaudeBrain(home: $0, vault: $1)] }
+    /// The brain's adapters, on the chosen Claude and Codex accounts. Tests put in their own.
+    @ObservationIgnored var makeBrain: (_ claudeHome: String?, _ codexHome: String?, Vault) -> [any BrainAdapter] = {
+        [ClaudeBrain(home: $0, vault: $2), CodexBrain(home: $1.map { URL(filePath: $0) }, vault: $2)]
+    }
     /// How long `ask` waits for an answer before the turn ends with `Conversation.timedOut`, so
     /// the island never stays on Thinking. A Lead goal gets twice this.
     @ObservationIgnored var patience: Duration = .seconds(45)
@@ -755,7 +757,8 @@ final class Desk {
             if stopRequested { return done.isEmpty ? .none : .reply(done.joined(separator: " ")) }
             context.turnStep = step
             context.turnLength = said.count
-            var result = await Planner(adapters: makeBrain(thinker?.home, vault)).plan(request, context: context)
+            let codex = AccountStore.route(accounts.accounts, agent: "codex", for: .review)
+            var result = await Planner(adapters: makeBrain(thinker?.home, codex?.home, vault)).plan(request, context: context)
             guard live() else {
                 result.refused.append("the turn was cancelled before the plan came: nothing done")
                 record(BrainTurn(said: request, by: result.by, plan: result.plan, refused: result.refused))
@@ -2496,7 +2499,8 @@ final class Desk {
         rewriting.insert(key)
         // The brain's model, on the least busy Claude account, as the brain thinks.
         let thinker = AccountStore.thinker(accounts.accounts)
-        let rewriter = InboxRewriter(adapters: makeBrain(thinker?.home, vault), timeout: rewritePatience)
+        let codex = AccountStore.route(accounts.accounts, agent: "codex", for: .review)
+        let rewriter = InboxRewriter(adapters: makeBrain(thinker?.home, codex?.home, vault), timeout: rewritePatience)
         Task {
             let rewrite = await rewriter.rewrite(item)
             rewriting.remove(key)

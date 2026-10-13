@@ -46,7 +46,7 @@ struct ReadJobTests {
         desk = Desk(accounts: accounts, store: store)
         desk.repos = ["deskree-inc/oby"]
         brain = ConversationTests.FakeBrain([ConversationTests.reply("Fine.")])
-        desk.makeBrain = { [brain] _, _ in [brain] }
+        desk.makeBrain = { [brain] (_: String?, _: String?, _: Vault) in [brain] }
     }
 
     @Test func aReadPutsTheMacCheckInTheNextStepsQuotedFileAndNotInThePrompt() async throws {

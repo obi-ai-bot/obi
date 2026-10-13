@@ -79,7 +79,7 @@ struct ClaimTests {
         }
         desk.issueFiles = { _, issue in Claims.files(title: "Issue \(issue)", body: Self.bodies[issue] ?? "") }
         brain = ConversationTests.FakeBrain([Self.twoIssues])
-        desk.makeBrain = { [brain] _, _ in [brain] }
+        desk.makeBrain = { [brain] (_: String?, _: String?, _: Vault) in [brain] }
     }
 
     func until(_ what: String, _ condition: () -> Bool) async throws {

@@ -66,7 +66,7 @@ struct ConversationStepsTests {
         desk.prepare = { $0 }
         desk.makeAgent = { _, _, _ in IdleAgent() }
         let brain = ScriptedBrain(plans)
-        desk.makeBrain = { [brain] _, _ in [brain] }
+        desk.makeBrain = { [brain] (_: String?, _: String?, _: Vault) in [brain] }
         return (desk, brain)
     }
 

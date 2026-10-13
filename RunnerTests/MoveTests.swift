@@ -348,7 +348,7 @@ struct MoveJobTests {
 
         let brain = ConversationTests.FakeBrain([Self.move(["aaaa1111"], agent: "claude", account: "Personal"),
                                                  Self.move(["bbbb2222"], agent: "claude", account: "Work"), ConversationTests.reply("")])
-        desk.makeBrain = { _, _ in [brain] }
+        desk.makeBrain = { (_: String?, _: String?, _: Vault) in [brain] }
         desk.repos = ["deskree-inc/oby"]
         let talk = await desk.converse("Codex is full: move its jobs to Personal and Work")
         guard case .reply(let text) = talk else { Issue.record("no reply: \(talk)"); return }
@@ -367,7 +367,7 @@ struct MoveJobTests {
         _ = try await running("aaaa1111")
         // The brain asks for the same move again: Oby doesn't do it twice.
         let brain = ConversationTests.FakeBrain([Self.move(["aaaa1111"], agent: "claude", account: "Personal")])
-        desk.makeBrain = { _, _ in [brain] }
+        desk.makeBrain = { (_: String?, _: String?, _: Vault) in [brain] }
         desk.repos = ["deskree-inc/oby"]
         #expect(await desk.converse("move it to Personal") == .reply("Moved Vault secrets from Codex · Deskree to Claude Code · Personal. It goes on there now."))
         #expect(brain.prompts.count == 2)
@@ -427,7 +427,7 @@ struct MoveJobTests {
         let first = try await running("ab12cd34")
         first.onEvent(.session("thread-1"))
         let brain = ConversationTests.FakeBrain([Self.move("ab12cd34", agent: "claude")])
-        desk.makeBrain = { _, _ in [brain] }
+        desk.makeBrain = { (_: String?, _: String?, _: Vault) in [brain] }
         desk.repos = ["deskree-inc/oby"]
         let talk = await desk.converse("move the vault job to Claude")
         #expect(talk == .reply("Moved Vault secrets from Codex · Deskree to Claude Code · Personal. It goes on there now."))

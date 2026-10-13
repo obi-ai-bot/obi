@@ -491,7 +491,7 @@ struct StartWhenTests {
         let brain = ConversationTests.FakeBrain([
             #"{"action":"dispatch","reply":"Oby will fix #12 on Codex once it resets.","question":null,"jobs":[],"all":false,"move":null,"dispatches":[{"agent":"auto","account":"auto","repo":"deskree-inc/oby","base_branch":null,"pr":null,"issue":12,"epic":null,"kind":"fix","title":"Login screen","task":"Fix #12","inputs":[],"rounds":1,"check":null,"complexity":"routine","start_when":[{"account":"Deskree","window":"fiveHour","under":null}]}]}"#,
         ])
-        desk.makeBrain = { _, _ in [brain] }
+        desk.makeBrain = { (_: String?, _: String?, _: Vault) in [brain] }
         // The job starts waiting as the plan is made (#269), and the reply says what it waits for.
         guard case .reply(let text) = await desk.plan("fix oby #12 on Codex when it resets") else { Issue.record("no plan"); return }
         #expect(text == "Oby will fix #12 on Codex once it resets.")

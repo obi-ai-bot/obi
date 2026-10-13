@@ -32,7 +32,7 @@ struct NoDispatchCardTests {
         desk.makeAgent = { _, _, _ in ConversationTests.IdleAgent() }
         desk.issueFiles = { _, issue in issue == 12 ? ["iOS/Home.swift"] : nil }
         brain = ConversationTests.FakeBrain([Self.fix12])
-        desk.makeBrain = { [brain] _, _ in [brain] }
+        desk.makeBrain = { [brain] (_: String?, _: String?, _: Vault) in [brain] }
     }
 
     func until(_ what: String, tries: Int = 2000, _ condition: () -> Bool) async throws {
