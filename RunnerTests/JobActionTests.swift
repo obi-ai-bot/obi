@@ -179,7 +179,7 @@ struct JobActionTests {
                       branch: "oby/build-9", base: "dev", pr: nil, kind: .build, task: "Encrypt")
         job.title = "Encryption"
         job.startWhen = [.at(.now.addingTimeInterval(3600))]
-        desk.dispatch(Desk.Draft(said: job.request, reply: "", job: job, guessed: false))
+        desk.dispatch(job)
         try await until("it waits") { desk.scheduled.contains(job.id) }
         #expect(made.agents.isEmpty)
         brain.plans = [Self.plan("start_now", [job.id]), ConversationTests.reply("")]
@@ -200,7 +200,7 @@ struct JobActionTests {
                       branch: "oby/build-9", base: "dev", pr: nil, kind: .build, task: "Encrypt")
         job.title = "Encryption"
         job.startWhen = [.room(agent: "claude")]
-        desk.dispatch(Desk.Draft(said: job.request, reply: "", job: job, guessed: false))
+        desk.dispatch(job)
         try await until("it waits for room") { desk.job(job.id)?.waiting?.reserved == ["default"] }
         brain.plans = [Self.plan("start_now", [job.id]), ConversationTests.reply("")]
         let talk = await desk.converse("start the encryption job anyway")
