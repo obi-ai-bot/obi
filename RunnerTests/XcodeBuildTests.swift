@@ -131,4 +131,38 @@ import Testing
         #expect(desk.job("merged")?.build != nil)
         #expect(desk.job("alone")?.build == nil && desk.job("open")?.build == nil)
     }
+
+    @Test @MainActor func aRestartInsideTheWindowStillTagsTheSettledBatches() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = JobStore(url: folder.appending(path: "oby.sqlite"))
+        for id in ["first", "second"] {
+            var job = Job(id: id, request: "", agent: "claude", account: "default", repo: "deskree-inc/oby",
+                          branch: "oby/\(id)", base: "dev", kind: .fix, task: "A merged batch")
+            job.status = .done
+            job.batch = "chat-one"
+            job.pullRequest = PullRequestStatus(state: .merged, base: "dev", checkedAt: .now)
+            store.save(job)
+        }
+
+        let before = Desk(accounts: AccountStore(root: folder), store: store)
+        before.xcodeBuildInterval = .seconds(3600)
+        before.createXcodeBuildTag = { _, _, _ in Issue.record("tagged before the window ended") }
+        await before.settleBuildBatch("second")
+        before.pendingXcodeBuildTask?.cancel()
+        #expect(store.job("first")?.buildSettled != nil && store.job("second")?.buildSettled != nil)
+
+        // The runner restarts: a new desk reads the same store, and the window's start was kept.
+        let after = Desk(accounts: AccountStore(root: folder), store: store)
+        after.xcodeBuildInterval = .milliseconds(10)
+        var tags: [String] = []
+        after.xcodeBuildCandidate = { _ in ("oby-build/2026-10-13.1", String(repeating: "a", count: 40), nil) }
+        after.createXcodeBuildTag = { _, tag, _ in tags.append(tag) }
+        after.resumeXcodeBuilds()
+        for _ in 0..<100 where tags.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(tags == ["oby-build/2026-10-13.1"])
+        #expect(after.job("first")?.build != nil && after.job("second")?.build != nil)
+    }
 }

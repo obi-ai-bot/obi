@@ -95,6 +95,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var batch: String?
     /// The Xcode Cloud tag published for this batch, or the reason no tag was needed.
     var build: String?
+    /// When its batch settled and waited for the Xcode Cloud tag, so a restart picks the wait up again.
+    var buildSettled: Date?
     /// How Oby claimed the job's issue when it started (assigned, labeled, moved on the board),
     /// or why it couldn't; nil until then, and on jobs the Lead didn't start.
     var claim: String?

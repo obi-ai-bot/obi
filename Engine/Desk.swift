@@ -2437,10 +2437,30 @@ final class Desk {
         let members = store.recent(-1).filter { ($0.batch ?? $0.id) == batch }
         guard !members.isEmpty, members.allSatisfy(buildBatchSettled),
               members.allSatisfy({ $0.build == nil }) else { return }
+        // Saved with the jobs, so the wait survives a restart (`resumeXcodeBuilds`).
+        for member in members where member.buildSettled == nil {
+            guard var latest = job(member.id) ?? store.job(member.id) else { continue }
+            latest.buildSettled = .now
+            if lists(latest.id) { replace(latest) } else { store.save(latest) }
+        }
         pendingXcodeBuildBatches.insert(batch)
+        armXcodeBuild(after: xcodeBuildInterval)
+    }
+
+    /// After a restart, the batches that settled and hadn't been tagged yet wait out what's left of
+    /// their window.
+    func resumeXcodeBuilds() {
+        let waiting = store.recent(-1).filter { $0.buildSettled != nil && $0.build == nil }
+        guard let first = waiting.compactMap(\.buildSettled).min() else { return }
+        pendingXcodeBuildBatches.formUnion(waiting.map { $0.batch ?? $0.id })
+        let elapsed = Duration.seconds(max(0, Date.now.timeIntervalSince(first)))
+        armXcodeBuild(after: max(.zero, xcodeBuildInterval - elapsed))
+    }
+
+    private func armXcodeBuild(after delay: Duration) {
         guard pendingXcodeBuildTask == nil else { return }
         pendingXcodeBuildTask = Task {
-            try? await Task.sleep(for: self.xcodeBuildInterval)
+            try? await Task.sleep(for: delay)
             await self.settlePendingXcodeBuildBatches()
         }
     }
