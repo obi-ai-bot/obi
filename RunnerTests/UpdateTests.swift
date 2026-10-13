@@ -73,6 +73,7 @@ struct UpdateTests {
         await updates.poll()
         #expect(fake.calls.map(\.args).suffix(2) == [["swift", "build", "-c", "release"], ["swift", "test"]])
         #expect(fake.calls.allSatisfy { $0.directory == updates.root.appending(path: "source") })
+        #expect(try String(contentsOf: updates.root.appending(path: "cache-commit"), encoding: .utf8) == fake.head)
         // The tests' Obys get a throwaway home, like a Mac check's, and it's gone afterwards.
         let test = try #require(fake.calls.last)
         let home = try #require(test.env["OBY_HOME"] ?? nil)

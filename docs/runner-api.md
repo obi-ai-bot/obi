@@ -64,6 +64,7 @@ This document is the contract between the runner and its clients. Change it in t
   "claim": null,
   "limit": null,
   "startCommit": null,
+  "firstSwiftBuildSeconds": null,
   "outgoing": [],
   "moves": [],
   "question": null,
@@ -129,6 +130,7 @@ This document is the contract between the runner and its clients. Change it in t
 
   Such a job is `failed` with `limit` set (like `"the same failure twice in a row"` or ``"`swift test` still fails after 4 rounds"``), keeps its branch and pushes nothing. Its `summary` starts with `Stopped at a limit: <limit>. The branch is kept and nothing was pushed; one more round is possible.` and the notch says `Stopped at a limit: <title>`. One more round: its inbox item (kind `failed`) offers `One more round` instead of `Try again`, or `POST /v1/jobs/{id}/messages`; either clears `limit`. Stopping a job (or a limit stopping it) also ends a check that's still running. Older runners don't send this key.
 - `startCommit`: the commit the work started from (the base on origin, or the pull request's head), recorded when the worktree is set up, or null before then and on older jobs. Test integrity compares with it: an agent can move a branch or a ref, not this. Older runners don't send this key.
+- `firstSwiftBuildSeconds`: how long the job's first `swift build` check took, in whole seconds, or null when the job has not run one. The runner includes `First swift build: …` in the finished job's summary. Older runners don't send this key.
 - `model`: a model the user chose for this job (the stronger one on the plan's card, or one it was moved to), or null for the one in Settings › Models.
 - `moves`: every time the user moved the job to another tool, account or model (`POST /v1/jobs/{id}/move`), oldest first. Always a list, empty when it never moved. Each is `{"from": "Codex · Deskree", "to": "Claude Code · Personal", "why": "Codex keeps looping", "date": "2026-10-11T14:02:10Z"}`: `from` and `to` are the tool and the account, with the model after another ` · ` when the job ran one of its own (`"Claude Code · Personal · Fable 5.1"`); `why` is what the user said when they moved it, or null. The job screens show the latest as "Moved from Codex · Deskree to Claude Code · Personal".
 - `connectionUses`: every call the job's agent made to a connected app through the broker (Connected apps, below), oldest first. Always a list, empty before the first. Each records the job, connection, tool, `read` or `write`, whether it was allowed, the vault secret's name, host and date; it never records a value or request or response body.

@@ -990,7 +990,7 @@ struct StoppedAll: Encodable {
 struct JobJSON: Encodable {
     var job: Job
 
-    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, fromPR, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting, mode, permission, connectionUses }
+    private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, fromPR, rounds, round, check, model, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, firstSwiftBuildSeconds, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting, mode, permission, connectionUses }
 
     private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou }
 
@@ -1038,6 +1038,7 @@ struct JobJSON: Encodable {
         if job.question == nil { try nulls.encodeNil(forKey: .question) }
         if job.limit == nil { try nulls.encodeNil(forKey: .limit) }
         if job.startCommit == nil { try nulls.encodeNil(forKey: .startCommit) }
+        if job.firstSwiftBuildSeconds == nil { try nulls.encodeNil(forKey: .firstSwiftBuildSeconds) }
         if job.xcodeCloud == nil { try nulls.encodeNil(forKey: .xcodeCloud) }
         if job.xcodeCloudError == nil { try nulls.encodeNil(forKey: .xcodeCloudError) }
         if job.macCheck == nil { try nulls.encodeNil(forKey: .macCheck) }

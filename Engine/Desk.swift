@@ -1916,6 +1916,12 @@ final class Desk {
                 // Stopped or moved while the check ran.
                 guard let result = try await checkWork(id, command, current: current), let checked = self.job(id) else { return }
                 job = checked
+                if job.firstSwiftBuildSeconds == nil,
+                   let text = try? String(contentsOf: Workspace.worktree(id).appending(path: ".oby/first-swift-build-seconds"), encoding: .utf8),
+                   let seconds = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    job.firstSwiftBuildSeconds = seconds
+                    replace(job)
+                }
                 check = result
             } catch {
                 agent.end()
@@ -1992,6 +1998,7 @@ final class Desk {
         // The check runs the agent's code: it gets no variable that holds a vault secret, and doesn't run when the vault can't be read.
         // It has the agent's `oby-check apple`, waiting for the Mac up to the check's time limit (#68).
         let env = try Agents.overrides(vault: vault)
+            .merging(Agents.swiftEnvironment(worktree: Workspace.worktree(id))) { $1 }
             .merging(AppleCheck.environment(worktree: Workspace.worktree(id), tool: appleTool(), wait: limits.testRun)) { $1 }
         let started = Date.now
         var result = await runCheck(id, command, limits.testRun, env)
@@ -2253,7 +2260,8 @@ final class Desk {
             }
             return
         }
-        (job.status, job.summary) = Job.ending(job, status, summary, made: made, asked: asked.contains(id), dirty: dirty)
+        let reported = job.firstSwiftBuildSeconds.map { "First swift build: \(MacCheck.duration($0)).\n\n" + summary } ?? summary
+        (job.status, job.summary) = Job.ending(job, status, reported, made: made, asked: asked.contains(id), dirty: dirty)
         if job.status == .failed && status == .done { job.phase = .work }
         // Why it went to its account, and how it moved between accounts, for the report.
         if let moves = handoffs[id], !moves.isEmpty { job.summary += "\n\n" + moves.joined(separator: "\n") }
@@ -2596,7 +2604,7 @@ nonisolated enum Rounds {
     /// account, and ends it after `timeout` seconds: then it fails, saying so.
     /// `env` is what changes from Oby's environment: `Agents.overrides(vault:)`, so no vault secret reaches it.
     static func run(_ command: String, in worktree: URL, timeout: TimeInterval, env: [String: String?], boxed: Bool = Agents.bubblewrap) async -> Check {
-        let result = try? await Shell.run(Agents.sandboxed(["sh", "-c", command], in: worktree, own: nil, bubblewrap: boxed), in: worktree,
+        let result = try? await Shell.run(Agents.sandboxed(Agents.niced(["sh", "-c", command]), in: worktree, own: nil, bubblewrap: boxed), in: worktree,
                                           env: env, timeout: timeout)
         var output = result.map { String(decoding: $0.out, as: UTF8.self) + $0.err } ?? "Oby couldn't run it."
         if result?.timedOut == true {

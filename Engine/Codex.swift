@@ -246,9 +246,10 @@ final class CodexServer {
     /// `mcp`: the broker, as Codex's `oby` MCP server, its token in the environment.
     init(home: URL?, in directory: URL?, log: URL?, mcp: AgentMCP? = nil) throws {
         process.executableURL = URL(filePath: "/usr/bin/env")
-        process.arguments = Agents.sandboxed(["codex"] + (mcp?.codexArguments ?? []) + ["app-server"], in: directory, own: home?.path ?? "\(Agents.home)/.codex")
+        process.arguments = Agents.sandboxed(Agents.niced(["codex"] + (mcp?.codexArguments ?? []) + ["app-server"]), in: directory, own: home?.path ?? "\(Agents.home)/.codex")
         process.currentDirectoryURL = directory
         process.environment = try Agents.environment(AppleCheck.environment(worktree: directory)
+            .merging(directory.map { Agents.swiftEnvironment(worktree: $0) } ?? [:]) { $1 }
             .merging(["CODEX_HOME": home?.path, AgentMCP.tokenVariable: mcp?.token]) { $1 })
         process.standardInput = input
         process.standardOutput = output
