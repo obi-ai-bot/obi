@@ -189,6 +189,18 @@ struct JobActionTests {
         #expect(turns.count >= 2 && turns.allSatisfy { $0.plan.dispatches.isEmpty && [.answerInbox, .ignore].contains($0.plan.action) })
     }
 
+    /// The runner's step events (#303) say what each of these actions is doing.
+    @Test func eachActionReportsItsSteps() async throws {
+        let desk = makeDesk([ended("fa11ed00", "Notch three screens", issue: 281), ended("01d55000", "Old PR job", issue: 55, status: .interrupted)])
+        var steps: [DeskStep] = []
+        desk.onStepChange = { steps.append($0) }
+        brain.plans = [Self.plan("retry_job", ["fa11ed00"]), Self.plan("dismiss_job", ["01d55000"]), ConversationTests.reply("")]
+        _ = await desk.converse("try the notch job again and dismiss the old one")
+        #expect(steps.map(\.text) == ["Trying Notch three screens again", "Trying Notch three screens again",
+                                      "Letting Old PR job go", "Letting Old PR job go"])
+        #expect(steps.map(\.state) == [.running, .done, .running, .done])
+    }
+
     // MARK: Start now
 
     @Test func startNowStartsAJobWaitingForItsStartWhen() async throws {
