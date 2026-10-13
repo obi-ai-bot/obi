@@ -628,6 +628,10 @@ nonisolated struct CodexBrain: BrainAdapter, SelfRetryingBrainAdapter {
 /// rules' waits for the user's Start in the inbox.
 nonisolated struct Planner: Sendable {
     var adapters: [any BrainAdapter] = [ClaudeBrain(), CodexBrain()]
+    /// Whether rules stand in when no adapter gives an acceptable plan. A later step of a turn
+    /// (`Desk.plan`) turns this off: rules only read the user's own words, so there they would guess
+    /// at work the turn already did, and are told to do nothing.
+    var fallsBackToRules = true
 
     struct Result: Sendable {
         var plan: Plan
@@ -683,6 +687,7 @@ nonisolated struct Planner: Sendable {
                 message = user + "\n\nYour last plan was refused: " + problems.joined(separator: "; ") + ". Make a new one."
             }
         }
+        guard fallsBackToRules else { return Result(plan: Plan(action: .ignore, reply: "", dispatches: [], question: nil), by: "rules", refused: refused) }
         return Result(plan: Rules.plan(said, context: context), by: "rules", refused: refused)
     }
 

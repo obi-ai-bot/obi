@@ -183,6 +183,10 @@ struct JobActionTests {
         #expect(desk.jobs.map(\.id) == ["fa11ed00"])
         #expect(desk.item(item.id)?.answer == Inbox.tryAgain)
         #expect(brain.prompts.count >= 2 && brain.prompts.dropFirst().allSatisfy { $0.contains("Answered Notch three screens's item") })
+        // The repeat was refused and nothing guessed in its place: every plan of the turn is
+        // answer_inbox or the empty stop, and none is a dispatch.
+        let turns = JobStore(url: folder.appending(path: "oby.sqlite")).turns()
+        #expect(turns.count >= 2 && turns.allSatisfy { $0.plan.dispatches.isEmpty && [.answerInbox, .ignore].contains($0.plan.action) })
     }
 
     // MARK: Start now

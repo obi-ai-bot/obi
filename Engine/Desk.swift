@@ -761,7 +761,7 @@ final class Desk {
             context.turnStep = step
             context.turnLength = said.count
             let codex = AccountStore.route(accounts.accounts, agent: "codex", for: .review)
-            var result = await Planner(adapters: makeBrain(thinker?.home, codex?.home, vault)).plan(request, context: context)
+            var result = await Planner(adapters: makeBrain(thinker?.home, codex?.home, vault), fallsBackToRules: step == 0).plan(request, context: context)
             guard live() else {
                 result.refused.append("the turn was cancelled before the plan came: nothing done")
                 record(BrainTurn(said: request, by: result.by, plan: result.plan, refused: result.refused))
