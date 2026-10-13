@@ -260,6 +260,8 @@ final class Desk {
     /// The message that started a looping job's current round (the check's output, "Keep going"),
     /// for an agent that takes the round over; nil when the round began with the task or the user's words.
     private var roundMessage: [String: String] = [:]
+    /// The latest secret-scan findings handed to a job for a publish fix round.
+    private var publishFindings: [String: [Publish.Finding]] = [:]
     /// Why routing chose each job's account, and how it moved between accounts when one hit its
     /// limit, oldest first: the report says so.
     private var handoffs: [String: [String]] = [:]
@@ -2259,11 +2261,35 @@ final class Desk {
                 // Merged already (a squash merge changes the hashes): nothing is left to publish.
                 end(id, status, (merged.errorDescription ?? "Not published.") + "\n\n" + ended.summary, commits: 0, made: made)
             } catch let blocked as Publish.Blocked {
-                end(id, .failed, (blocked.errorDescription ?? "Not published.") + "\n\n" + ended.summary, commits: commits, pushed: pushed, made: made)
+                if !publishFixRound(id, findings: blocked.findings) {
+                    end(id, .failed, (blocked.errorDescription ?? "Not published.") + "\n\n" + ended.summary, commits: commits, pushed: pushed, made: made)
+                }
             } catch {
                 end(id, status, summary, commits: commits, pushed: pushed, made: made, publishError: error.localizedDescription)
             }
         }
+    }
+
+    /// Gives the agent a bounded round to fix a secret-scan finding before Publish is tried again.
+    /// A finding that comes back unchanged stops the job instead of looping forever.
+    private func publishFixRound(_ id: String, findings: [Publish.Finding]) -> Bool {
+        guard var job = job(id), job.isActive, job.currentRound < job.maxRounds,
+              Set(publishFindings[id] ?? []) != Set(findings) else { return false }
+        publishFindings[id] = findings
+        ending.remove(id)
+        agents.removeValue(forKey: id)?.end()
+        job.status = .running
+        job.phase = .work
+        job.publishStep = nil
+        job.publishError = nil
+        job.finished = nil
+        job.round = job.currentRound + 1
+        job.step = "Round \(job.currentRound) of \(job.maxRounds)"
+        replace(job)
+        let prompt = Prompts.publishFix(findings)
+        run(job, prompt: prompt)
+        agents[id]?.send(prompt)
+        return true
     }
 
     /// How many of the job's `commits` beyond `base` its pull request has: those in the commit Oby
@@ -2337,6 +2363,7 @@ final class Desk {
         waitingForUser.remove(id)
         afterTurns.removeValue(forKey: id)?.cancel()
         failures[id] = nil
+        publishFindings[id] = nil
         denials[id] = nil
         limited.remove(id)
         takeovers[id] = nil

@@ -1669,6 +1669,12 @@ nonisolated enum Prompts {
         return "Your changes to \(Job.listed(files)) are uncommitted, so this job has nothing committed yet. \(check), commit when they pass, and don't end your turn before the commit exists. Then finish with a short summary."
     }
 
+    /// What an agent hears when publishing found a possible secret in its changes.
+    static func publishFix(_ findings: [Publish.Finding]) -> String {
+        let places = findings.map { "- \($0.description)" }.joined(separator: "\n")
+        return "Oby's secret scan blocked publishing at these locations:\n\n\(places)\n\nRework each flagged line so it does not look like a secret. You can build the value at runtime, use an obviously fake value, or rename the variable. Do not include any real secret value in the code, commit message, or summary. Run the checks in the foreground, commit the fix, and finish with a short summary."
+    }
+
     /// The jobs in flight on the same files, each on its own branch, and what that means for this
     /// one's work: a small change, and a rebase if another merges first (#237). Nil when none overlap.
     static func alongsideLine(_ job: Job, _ others: [Job]) -> String? {
