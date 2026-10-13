@@ -1233,6 +1233,22 @@ nonisolated enum Agents {
         #endif
     }
 
+    /// `nice -n` is relative to the caller. Keep the agent's requested priority absolute when
+    /// the runner itself was started with a non-default niceness.
+    static func nicedForCurrentProcess(_ argv: [String], priority: Int = processPriority, inheritedPriority: Int? = nil) -> [String] {
+        let inherited: Int
+        if let inheritedPriority {
+            inherited = inheritedPriority
+        } else {
+#if canImport(Glibc)
+            inherited = Int(getpriority(Int32(PRIO_PROCESS.rawValue), 0))
+#else
+            inherited = Int(getpriority(PRIO_PROCESS, 0))
+#endif
+        }
+        return ["nice", "-n", String(max(0, priority - inherited))] + argv
+    }
+
     /// The wrapper passes this value to SwiftPM's explicit `-j` option. Keep half the machine's
     /// threads available for the runner and the other jobs.
     static func buildEnvironment(processorCount: Int = ProcessInfo.processInfo.activeProcessorCount) -> [String: String?] {

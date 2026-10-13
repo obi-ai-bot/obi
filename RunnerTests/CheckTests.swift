@@ -499,6 +499,27 @@ struct CheckTests {
         #expect(desk.job("author")?.reviewError == nil)
     }
 
+    @Test func onlyFirstRoundCompilerFailuresBypassTheReviewCap() {
+        var check = MacCheck(id: "build345", job: "author", repo: author.repo, pr: 80,
+                             branch: author.branch, base: "dev", head: Self.head, round: 1)
+        check.state = .failed
+        check.steps = [MacCheck.Step(name: "Mac app and MacTests", passed: false, seconds: 1,
+                                     buildErrors: ["Mac/Thing.swift:8: error: invalid actor isolation"])]
+        #expect(check.fixableFailure)
+
+        var capped = author
+        capped.review = Review(verdict: .approved, job: "review", agent: "codex", account: "Work", round: Review.maxRounds)
+        capped.macCheck = check
+        #expect(capped.checkStop == nil)
+
+        capped.macCheck?.round = 2
+        #expect(capped.checkStop == MacCheck.stopLine)
+
+        capped.macCheck?.round = 1
+        capped.macCheck?.steps = [MacCheck.Step(name: "Mac app and MacTests", passed: false, seconds: 1)]
+        #expect(!capped.macCheck!.fixableFailure && capped.checkStop == MacCheck.reviewsUsedLine)
+    }
+
     @Test func aStoppedCheckThatNamedNoTestOffersTryAgainFirst() throws {
         var author = author
         author.status = .done

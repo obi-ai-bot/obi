@@ -1179,6 +1179,9 @@ extension Job {
         // Its round came and went, and the pull request still has the commit that failed.
         if check.handedOff == true { return MacCheck.nothingNewLine }
         if check.round >= MacCheck.maxRounds { return MacCheck.stopLine }
+        // A compiler/test failure after approval gets one automatic author round even when the
+        // normal review allowance is exhausted. A repeat reaches the owner instead of looping.
+        if check.fixableFailure { return check.round == 1 ? nil : MacCheck.stopLine }
         if (review?.round ?? 0) >= reviewCap { return MacCheck.reviewsUsedLine }
         return nil
     }
@@ -1567,6 +1570,9 @@ extension Desk {
             author.mergeError = "The Mac check failed, but the job has no session to pick up."
             return replace(author)
         }
+        if check.fixableFailure, check.round == 1 {
+            author.extraReviews = max(author.extraReviews ?? 0, (author.review?.round ?? 0) + 1 - Review.maxRounds)
+        }
         let file = "mac-check-\(check.round).md"
         do {
             try quoteReview(author, file, vault.forAgent(MacCheck.quoted(check, log: log)))
@@ -1583,6 +1589,12 @@ extension Desk {
 }
 
 extension MacCheck {
+    /// A compiler/build failure is actionable by the author. Infrastructure failures and ordinary
+    /// merge-check test failures remain subject to the existing review-round decision.
+    nonisolated var fixableFailure: Bool {
+        (steps ?? []).contains { !($0.buildErrors ?? []).isEmpty }
+    }
+
     /// There's no check with that id.
     struct Unknown: LocalizedError {
         var errorDescription: String? { "There's no such check." }
