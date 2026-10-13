@@ -390,6 +390,18 @@ final class Desk {
     var onCheckChange: (MacCheck) -> Void = { _ in }
     /// Jobs whose Xcode Cloud failure is being handed to their author (`recoverCloud`), once at a time.
     @ObservationIgnored var cloudRecovering: Set<String> = []
+    /// Rebases a completed Xcode Cloud conflict in the job's worktree. Tests put in their own.
+    @ObservationIgnored var cloudRebase: (_ job: Job, _ onto: String) async throws -> String = { job, onto in
+        let worktree = Workspace.worktree(job.id)
+        let result = try await Shell.run(["git", "-C", worktree.path, "rebase", onto], timeout: 120)
+        guard result.status == 0 else {
+            let names = (try? await Shell.ok(["git", "-C", worktree.path, "diff", "--name-only", "--diff-filter=U"]))?
+                .split(separator: "\n").map(String.init) ?? []
+            _ = try? await Shell.run(["git", "-C", worktree.path, "rebase", "--abort"], timeout: 30)
+            throw CloudRebaseConflict(files: names)
+        }
+        return try await Shell.ok(["git", "-C", worktree.path, "rev-parse", "HEAD^{commit}"])
+    }
     /// Jobs whose Mac check result is being posted and merged or handed back (`finishCheck`), once at a time.
     @ObservationIgnored var finishingChecks: Set<String> = []
     /// Whether an approval queues a Mac check: on the runner, which Macs ask for checks. The Mac's
@@ -2383,7 +2395,7 @@ final class Desk {
 
     /// What publishing `id` reports as it goes. A job publishing as it ends is `stoppable`: once
     /// it's stopped, nothing more goes out.
-    private func hooks(_ id: String, stoppable: Bool) -> Publish.Hooks {
+    func hooks(_ id: String, stoppable: Bool) -> Publish.Hooks {
         Publish.Hooks(progress: { [weak self] in self?.publishing(id, $0) },
                       proceed: { [weak self] in if stoppable, self?.job(id)?.isActive != true { throw Publish.Stopped() } },
                       sent: { [weak self] in self?.sent(id, $0) })

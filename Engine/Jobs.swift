@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 #if canImport(OSLog)
 import OSLog
 #endif
@@ -1202,7 +1207,17 @@ nonisolated enum Agents {
     static let processPriority = 10
 
     static func niced(_ argv: [String], priority: Int = processPriority) -> [String] {
-        ["nice", "-n", String(priority)] + argv
+        // `nice -n` is an adjustment, while Oby may itself be launched with a non-zero
+        // niceness. Keep the child at the requested absolute priority in either case.
+        ["nice", "-n", String(max(0, priority - currentPriority))] + argv
+    }
+
+    static var currentPriority: Int {
+        #if canImport(Darwin) || canImport(Glibc)
+        return Int(getpriority(0, 0))
+        #else
+        return 0
+        #endif
     }
 
     /// The wrapper passes this value to SwiftPM's explicit `-j` option. Keep half the machine's

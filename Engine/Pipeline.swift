@@ -135,7 +135,8 @@ extension Job {
             let current = cloud.head == (pullRequest?.head ?? pushedHead)
             let state: Stage.State = current && cloud.state == .passed && xcodeCloudError == nil ? .done
                 : current && cloud.state == .failed ? .failed : .current
-            set(.cloud, state, detail: state == .done ? "Passed" : state == .failed ? "Failed" : "Pending",
+            let waitingForRebase = cloud.conflict && isActive
+            set(.cloud, state, detail: state == .done ? "Passed" : waitingForRebase ? "Xcode Cloud: waiting for a rebase onto \(base ?? "dev")" : state == .failed ? "Failed" : "Pending",
                 reason: xcodeCloudError ?? (state == .failed ? cloud.problem ?? cloud.details : nil))
         }
         // The user let it go: nothing is published, reviewed or merged. A pull request from an
