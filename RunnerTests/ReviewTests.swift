@@ -701,6 +701,28 @@ struct ReviewTests {
         #expect(desk.job("author")?.reviewing == nil && desk.job("author")?.reviewError == "Oby's review was stopped: Stopped by you.")
     }
 
+    @Test func aCapacityFailureRetriesTheReviewOnAnotherAccount() async throws {
+        _ = try await publishAuthor()
+        let (review, agent) = try await reviewJob()
+        agent.onEvent(.turnEnded(summary: "Selected model is at capacity", failed: true))
+        agent.onEvent(.finished(summary: "Selected model is at capacity", failed: true))
+        try await until("the review retries on another account") {
+            desk.job("author")?.reviewing != review.id && made.agents.last?.job.reviewOf == "author"
+                && made.agents.last?.job.account == personal.id
+        }
+        #expect(desk.job("author")?.reviewCapacityRetries == 1)
+        #expect(desk.job("author")?.reviewError == nil)
+    }
+
+    @Test func capacityRetriesBackOffAndStopAfterTheBound() {
+        #expect(Review.retriesCapacityFailure(after: 0))
+        #expect(Review.retriesCapacityFailure(after: Review.maxCapacityRetries - 1))
+        #expect(!Review.retriesCapacityFailure(after: Review.maxCapacityRetries))
+        #expect(Review.capacityRetryDelay(1) == 15)
+        #expect(Review.capacityRetryDelay(2) == 30)
+        #expect(Review.capacityRetryDelay(3) == 60)
+    }
+
     @Test func aRestartInterruptsTheReviewAndTheAuthorStopsWaiting() throws {
         let store = JobStore(url: folder.appending(path: "restart.sqlite"))
         var published = author
