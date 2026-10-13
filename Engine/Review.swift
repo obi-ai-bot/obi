@@ -282,9 +282,12 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     static func forget(_ id: String) { try? FileManager.default.removeItem(at: kept(id)) }
 
     /// The reviewer's verdict: its review's last line, `VERDICT: APPROVED` or `VERDICT: CHANGES
-    /// REQUESTED` (the word VERDICT may be left out). Nil when the line isn't there.
+    /// REQUESTED` (the word VERDICT may be left out), not counting trailing lines that are only a
+    /// note about Tetrix or `save_session` ("I haven't called save_session yet"). Nil when the line
+    /// isn't there.
     static func verdict(_ summary: String) -> Verdict? {
-        guard let line = summary.split(separator: "\n").last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) else { return nil }
+        let lines = summary.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard let line = lines.last(where: { !$0.lowercased().contains(/save_session|tetrix/) }) else { return nil }
         var plain = line.filter { $0 != "`" && $0 != "*" && $0 != "_" && $0 != "#" }.trimmingCharacters(in: .whitespaces).uppercased()
         if plain.hasPrefix("VERDICT") { plain = plain.dropFirst("VERDICT".count).trimmingCharacters(in: CharacterSet(charactersIn: ": ")) }
         plain = plain.trimmingCharacters(in: CharacterSet(charactersIn: ".!"))
