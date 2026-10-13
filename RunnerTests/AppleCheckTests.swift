@@ -10,16 +10,6 @@ import Testing
 /// runner's queue, the Mac's checkout of commits that aren't on GitHub, and the reviewer's view.
 @MainActor
 struct AppleCheckTests {
-    /// A wall clock for deadline tests; advancing it doesn't depend on a loaded test runner.
-    final class TestClock: @unchecked Sendable {
-        private let lock = NSLock()
-        private var time = Date(timeIntervalSince1970: 0)
-        private var timers = 0
-        func now() -> Date { lock.withLock { time } }
-        func advance(_ interval: TimeInterval) { lock.withLock { time.addTimeInterval(interval) } }
-        func nextTimer() -> Int { lock.withLock { timers += 1; return timers } }
-    }
-
     final class Agent: AgentRun {
         var onEvent: (AgentEvent) -> Void = { _ in }
         var prompt = ""
@@ -661,19 +651,15 @@ struct AppleCheckTests {
         // --wait is the whole wait, requests included: a runner slow to answer doesn't stretch it.
         let queued = #"{"check":{"id":"ab12cd34","state":"queued"},"line":"Apple check ab12cd34 is queued, waiting for a Mac.","report":null}"#
         let slow: CheckCommand.Send = { method, _ in
-            if method == "GET" { try await Task.sleep(for: .seconds(3600)) }
+            if method == "GET" { try await Task.sleep(for: .seconds(30)) }
             return (200, Data(queued.utf8))
         }
         printed = []
-        let clock = TestClock()
-        let timer: CheckCommand.Timer = { seconds in
-            let number = clock.nextTimer()
-            if number == 1 { try await Task.sleep(for: .seconds(3600)) }
-            else { clock.advance(seconds) }
-        }
+        let start = ContinuousClock.now
         #expect(await CheckCommand.run(["apple", "--wait", "1"], environment: ["OBY_CHECK_URL": "http://x", "OBY_CHECK_TOKEN": "t"], send: slow,
-                                       now: { clock.now() }, sleep: { _ in }, timer: timer,
                                        uncommitted: { false }, print: { printed.append($0) }) == 3)
+        // Well under the slow runner's 30 seconds, with room for a loaded runner's parallel tests.
+        #expect(ContinuousClock.now - start < .seconds(20))
         #expect(printed.last?.hasPrefix("Still queued after ") == true)
 
         // The runner installs a script that runs its own executable, `check` first.

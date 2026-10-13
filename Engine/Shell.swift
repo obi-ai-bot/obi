@@ -112,9 +112,8 @@ nonisolated enum Shell {
                 do { group = try ProcessGroup.run(process) } catch { done.resume(throwing: error); return }
                 running.started(group)
 
-                let expired = Collected()
-                let kill = DispatchWorkItem { expired.data = Data([1]); group.end(after: Halt.dropping) }
-                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: kill)
+                let deadline = Deadline()
+                deadline.schedule(timeout) { group.end(after: Halt.dropping) }
                 // Read stderr on its own thread so a chatty tool can't fill the pipe and stall.
                 let err = Collected()
                 let reading = DispatchGroup()
@@ -128,9 +127,9 @@ nonisolated enum Shell {
                 let out = stdout.fileHandleForReading.readDataToEndOfFile()
                 reading.wait()
                 process.waitUntilExit()
-                kill.cancel()
+                let timedOut = deadline.finish()
                 done.resume(returning: Output(status: process.terminationStatus, out: out, err: String(decoding: err.data, as: UTF8.self),
-                                              timedOut: !expired.data.isEmpty,
+                                              timedOut: timedOut,
                                               terminatedBySignal: process.terminationReason == .uncaughtSignal))
             }
         }
@@ -152,6 +151,34 @@ nonisolated enum Shell {
     }
 
     private final class Collected: @unchecked Sendable { var data = Data() }
+
+    /// A process timeout uses its own sleeping thread so a saturated Dispatch worker pool cannot
+    /// delay ending the command. Finishing the process wakes that thread instead of leaving it
+    /// around until the original timeout expires.
+    private final class Deadline: @unchecked Sendable {
+        private let condition = NSCondition()
+        private var finished = false
+        private var expired = false
+
+        func schedule(_ seconds: TimeInterval, onTimeout: @escaping @Sendable () -> Void) {
+            Thread.detachNewThread { [self] in
+                condition.lock()
+                let timedOut = !finished && !condition.wait(until: Date.now.addingTimeInterval(seconds)) && !finished
+                if timedOut { expired = true; finished = true }
+                condition.unlock()
+                if timedOut { onTimeout() }
+            }
+        }
+
+        func finish() -> Bool {
+            condition.lock()
+            finished = true
+            condition.broadcast()
+            let timedOut = expired
+            condition.unlock()
+            return timedOut
+        }
+    }
 
     /// The process group a run started, for cancelling it: whichever comes second, the start or
     /// the cancel, ends it.
