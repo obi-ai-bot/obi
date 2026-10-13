@@ -388,6 +388,13 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         return .approved
     }
 
+    /// Applies follow-up filtering only when Git produced a diff. A first review, an escalation,
+    /// or a failed diff must retain its located blockers because there is no delta to compare.
+    static func findings(_ summary: String, changedLines: [String: Set<Int>]?) -> (blocking: [String], later: [String], unsorted: [String])? {
+        let parsed = findings(summary)
+        return evidenced(changedLines.map { demoteUnchangedBlockers(parsed, changed: $0) } ?? parsed)
+    }
+
     /// Parses added-line ranges from `git diff --unified=0`. A blocker with a cited source location
     /// outside these ranges is not caused by the follow-up commits and cannot block this round.
     static func changedLines(_ diff: String) -> [String: Set<Int>] {
@@ -739,7 +746,7 @@ extension Desk {
         }
         let account = accounts.state(review.account)?.account.name ?? review.account
         let changed = Review.changedLines(for: review)
-        let findings = Review.evidenced(Review.demoteUnchangedBlockers(Review.findings(review.summary), changed: changed ?? [:]))
+        let findings = Review.findings(review.summary, changedLines: changed)
         let verdict = Review.verdict(said, after: findings)
         var result = Review(verdict: verdict, job: review.id, agent: review.agent, account: account, round: (author.review?.round ?? 0) + 1)
         result.policyVersion = 2

@@ -156,6 +156,21 @@ struct ReviewTests {
         #expect(Review.verdict(.changesRequested, after: allDemoted) == .approved)
     }
 
+    @Test func missingDiffKeepsLocatedBlockersBlocking() throws {
+        let summary = """
+            A verified issue.
+
+            Blocking:
+            - Engine/A.swift:10 broken. Evidence: swift test failed.
+
+            VERDICT: CHANGES REQUESTED
+            """
+        let findings = try #require(Review.findings(summary, changedLines: nil))
+        #expect(findings.blocking == ["Engine/A.swift:10 broken. Evidence: swift test failed."])
+        #expect(findings.later.isEmpty)
+        #expect(Review.verdict(.changesRequested, after: findings) == .changesRequested)
+    }
+
     @Test func reviewGetsTheAuthorsAnswersAndTreatsThemAsSettledDecisions() {
         var answered = author
         answered.notes = ["Keep the command enabled.", "Use the existing default."]
