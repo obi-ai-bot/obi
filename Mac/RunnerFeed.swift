@@ -335,15 +335,6 @@ final class RunnerFeed {
         await runner?.cancelPlan()
     }
 
-    /// Dispatches a draft the runner planned (`Desk.dispatchElsewhere`): the job, queued there,
-    /// listed here at once; its events bring the rest.
-    func dispatch(_ draft: Desk.Draft) async throws -> Job {
-        guard let runner else { throw RunnerError(message: "The runner on this Mac isn't running yet.") }
-        let job = try await runner.dispatch(draft.job)
-        apply(job)
-        return job
-    }
-
     /// The runner's exact sentence for publishing a job: Publish shows it, and Touch ID approves it.
     func publishAction(_ id: String) async throws -> String {
         guard let runner else { throw RunnerError(message: "Set the runner's URL in Settings to publish it.") }
