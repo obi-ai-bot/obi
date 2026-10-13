@@ -419,6 +419,7 @@ nonisolated struct ModelOptions: Codable, Equatable, Sendable {
     struct Tool: Codable, Equatable, Sendable {
         var models: [Model]
         var efforts: [String]?
+        var complexEfforts: [String]?
     }
     var claude: Tool
     var codex: Tool
