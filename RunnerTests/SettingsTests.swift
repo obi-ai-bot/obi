@@ -17,6 +17,22 @@ struct SettingsTests {
         return "{\"action\":\"set_setting\",\"reply\":\"\",\"question\":null,\"dispatches\":[],\"jobs\":[],\"setting\":{\"agent\":\(quote(agent)),\"model\":\(quote(model)),\"effort\":\(quote(effort)),\"maxRunning\":\(maxRunning.map(String.init) ?? "null"),\"account\":\(quote(account)),\"lift\":\(lift.map(String.init) ?? "null")}}"
     }
 
+    /// A Claude Code and a Codex account can share a name ("Deskree"): the schema's account enum
+    /// lists it once, since a JSON Schema enum with a repeated item fails the whole brain call.
+    @Test func settingAccountsAreListedOnceInTheSchema() throws {
+        func accounts(_ names: [String]) throws -> Any? {
+            let context = BrainContext(accounts: ["claude": ["Deskree"], "codex": ["Deskree"]], repos: [], settingAccounts: names)
+            let schema = try #require(JSONSerialization.jsonObject(with: Plan.schema(for: context)) as? [String: Any])
+            let setting = (schema["properties"] as? [String: Any])?["setting"] as? [String: Any]
+            let object = (setting?["anyOf"] as? [[String: Any]])?.first { $0["properties"] != nil }
+            return (object?["properties"] as? [String: Any])?["account"]
+        }
+        let account = try #require(try accounts(["Deskree", "Personal", "Deskree"]) as? [String: Any])
+        let choices = (account["anyOf"] as? [[String: Any]])?.compactMap { $0["enum"] as? [String] }.first
+        #expect(choices == ["Deskree", "Personal"])
+        #expect((try accounts([]) as? [String: Any])?["type"] as? String == "null")
+    }
+
     @Test func validatesChoicesAndMaxRunning() {
         #expect(plan(Plan.Setting(agent: "claude", model: "claude-sonnet-5-5", effort: "high"))
             .problems(in: context, canary: "x").isEmpty)
