@@ -73,7 +73,7 @@ struct BrainTests {
     @Test func schemaListsOnlyWhatsConnected() throws {
         let schema = try #require(JSONSerialization.jsonObject(with: Plan.schema(for: context)) as? [String: Any])
         let actions = ((schema["properties"] as? [String: Any])?["action"] as? [String: Any])?["enum"] as? [String]
-        #expect(actions == ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore", "answer_permission", "set_mode", "read_job"])
+        #expect(actions == ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore", "answer_permission", "set_mode", "read_job", "set_setting"])
         #expect(String(decoding: Plan.schema(for: context), as: UTF8.self).contains("deskree-inc/tetrix-frontend"))
     }
 }

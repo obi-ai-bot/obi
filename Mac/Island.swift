@@ -173,6 +173,12 @@ final class IslandController {
             guard let self else { return [] }
             return [Briefing.Place(name: feed.name, jobs: feed.jobs, inbox: feed.inbox, accounts: feed.accounts)]
         }
+        desk.loadSettingOptions = {
+            guard let codex = try? await CodexAgent.models(home: nil), !codex.isEmpty else { return nil }
+            return (["claude": AgentModels.claude.map(\.0), "codex": codex.map(\.id)],
+                    ["claude": AgentModels.claudeEfforts, "codex": Array(Set(codex.flatMap(\.efforts))).sorted()],
+                    ["codex": Dictionary(uniqueKeysWithValues: codex.map { ($0.id, $0.efforts) })])
+        }
         desk.stopElsewhere = { [weak self] ids in
             guard let self else { return [:] }
             var failed: [String: String] = [:]
@@ -191,6 +197,13 @@ final class IslandController {
             let job = try await feed.about(id) { try await $0.move(id, agent: target.agent, account: target.account, model: target.model, why: why) }
             feed.apply(job)
             return job
+        }
+        desk.liftElsewhereReserve = { [weak self] id, lift in
+            guard let self, let runner = feed.runner else { return false }
+            do {
+                _ = try await runner.liftReserve(id, lift)
+                return true
+            } catch { return false }
         }
         // "Allow it", "no, run only the runner tests" and "stop asking on the Watch job" reach the
         // runner's jobs too (#134): a permission through its answer, a plan through the job's words,

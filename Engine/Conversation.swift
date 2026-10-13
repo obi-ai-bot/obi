@@ -69,6 +69,11 @@ nonisolated struct Briefing: Equatable, Sendable {
     var places: [Place]
     /// This Mac's own accounts; a runner's come with its place.
     var accounts: [AccountState]
+    /// The settings the brain may change, and the choices Swift will validate.
+    var settingModels: [String: [String]] = [:]
+    var settingEfforts: [String: [String]] = [:]
+    var settingModelEfforts: [String: [String: [String]]] = [:]
+    var maxRunning: Int = JobSlots.saved
     var now = Date.now
     /// The week's failure records, newest first (Engine/Failures.swift), so "why did jobs fail
     /// this week?" has its answer.
@@ -217,6 +222,20 @@ nonisolated struct Briefing: Equatable, Sendable {
         for state in accounts { lines.append("- " + Self.describe(state, now: now)) }
         for place in places {
             for state in place.accounts { lines.append("- " + Self.describe(state, now: now, place: place.name)) }
+        }
+        lines += ["", "## Settings you can change in chat", "",
+                  "- Models: " + settingModels.keys.sorted().map { agent in
+                      "\(Job.agentNames[agent] ?? agent): " + settingModels[agent, default: []].map { model in
+                          let efforts = settingModelEfforts[agent]?[model] ?? settingEfforts[agent, default: []]
+                          return efforts.isEmpty ? model : "\(model) [\(efforts.joined(separator: ", "))]"
+                      }.joined(separator: ", ")
+                  }.joined(separator: " · "),
+                  "- Jobs at once: \(maxRunning) (1 to 20)"]
+        let reserveAccounts = accounts + places.flatMap(\.accounts)
+        if reserveAccounts.isEmpty {
+            lines.append("- Weekly reserves: no accounts.")
+        } else {
+            lines.append("- Weekly reserves: " + reserveAccounts.map { "\($0.account.name) (\($0.account.id))" }.joined(separator: ", ") + "; lift or put back.")
         }
         return lines.joined(separator: "\n") + "\n"
     }

@@ -919,6 +919,8 @@ The saved rules, oldest first:
 
 Each tool's model and effort, as in `status.models`. `GET /v1/settings/models/options` lists the choices: Claude Code's models and efforts, and the models the signed-in Codex account offers (from its own `model/list`) with the efforts each takes.
 
+The chat's set_setting action uses those same choices. It changes one tool's model and/or effort, maxRunning (1 through 20), or an account's weekly reserve (lift true or false). Swift checks every value against the briefing before the runner applies it; a rejected model or effort includes the available choices. Each action reply names the old and new value. A request that changes two tools is planned as two actions so the brain receives a fresh briefing between them.
+
 ```json
 {"claude": {"models": [{"id": "claude-opus-5-5", "name": "Opus 5.5"}], "efforts": ["low", "medium", "high", "xhigh", "max"]},
  "codex": {"models": [{"id": "gpt-6-sol", "name": "GPT-6-Sol", "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]}]}}
