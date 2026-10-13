@@ -54,12 +54,12 @@ final class MacAvailability {
     }
     func startMonitoring() {
         guard powerSourceRunLoop == nil else { return }
-        powerSourceRunLoop = IOPSNotificationCreateRunLoopSource(nil) { [weak self] _ in
+        powerSourceRunLoop = IOPSNotificationCreateRunLoopSource(nil, { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 setPowerConnected(powerSource())
             }
-        }?.takeRetainedValue()
+        }, nil)?.takeRetainedValue()
         if let powerSourceRunLoop {
             CFRunLoopAddSource(CFRunLoopGetMain(), powerSourceRunLoop, .commonModes)
         }
