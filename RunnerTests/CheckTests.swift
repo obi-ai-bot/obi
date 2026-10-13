@@ -889,6 +889,19 @@ struct CheckTests {
         ** TEST FAILED **
         """
 
+    @Test func aBuildThatFailedKeepsItsCompilerErrorsOnTheStep() async {
+        let phone = MacCheck.commands(cache: URL(filePath: "/cache"))[2]
+        let output = "Watch/Watch.swift:640:9: error: invalid redeclaration of 'working'\nWatch/Watch.swift:640:9: error: invalid redeclaration of 'working'\n** BUILD FAILED **"
+        let built = await MacCheck.step(phone, attempt: { _, _ in attempt(65, output, bundled: false) }, reset: {})
+        #expect(built.step.failing == nil)
+        #expect(built.step.buildErrors == ["Watch/Watch.swift:640:9: error: invalid redeclaration of 'working'"])
+        // They survive the runner's trimming of a report, and a failed step with no error line has none.
+        let report = MacCheck.Report(passed: false, steps: [built.step], failures: [], log: built.log, problem: nil)
+        #expect(MacCheck.trimmed(report).steps.first?.buildErrors == built.step.buildErrors)
+        let bare = await MacCheck.step(phone, attempt: { _, _ in attempt(65, "** TEST FAILED **") }, reset: {})
+        #expect(bare.step.buildErrors == nil)
+    }
+
     @Test func aFailedStepIsClassifiedFromItsResultBundleAndOutput() {
         let commands = MacCheck.commands(cache: URL(filePath: "/cache"))
         let (swift, mac, phone) = (commands[0], commands[1], commands[2])
