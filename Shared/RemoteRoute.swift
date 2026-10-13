@@ -9,6 +9,9 @@ nonisolated struct MacLink: Codable, Equatable, Sendable {
     var name: String
     /// The tunnel's hostname: oby-<opaque>.tetrix.pro.
     var hostname: String
+    /// The Mac gateway's pinned X25519 public key, carried by pairing. Nil only for links created
+    /// before E2E was introduced; a gateway that has paired keys refuses those legacy links.
+    var publicKey: Data? = nil
 
     /// Where the tunnel answers.
     var tunnelURL: URL { URL(string: "https://\(hostname)")! }
@@ -34,6 +37,9 @@ nonisolated struct MacLink: Codable, Equatable, Sendable {
         let link = try JSONDecoder().decode(MacLink.self, from: data)
         guard isHostname(link.hostname) else {
             throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: [], debugDescription: "Not a remote access hostname: \(link.hostname)"))
+        }
+        if let publicKey = link.publicKey, publicKey.count != 32 {
+            throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: [], debugDescription: "The Mac's E2E public key isn't X25519."))
         }
         return link
     }
