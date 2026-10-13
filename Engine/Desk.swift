@@ -53,6 +53,7 @@ final class Desk {
     /// event stream. Not when a cancelled turn leaves the thread: that happens only on the Mac.
     var onTurnChange: (Turn) -> Void = { _ in }
     /// The jobs the brain's plan or the Lead just started, for the reply turn that tells of them.
+    var onStepChange: (DeskStep) -> Void = { _ in }
     private var justStarted: [String] = []
     private(set) var jobs: [Job] {
         didSet { accounts.countRunning(jobs) }
@@ -80,11 +81,13 @@ final class Desk {
     @ObservationIgnored var patience: Duration = .seconds(45)
     /// How long one turn may keep acting (`plan`): the apps give up on an answer after 45 seconds,
     /// so the steps stop in time to say what they did.
-    @ObservationIgnored var turnBudget: Duration = .seconds(36)
+    @ObservationIgnored var turnBudget: Duration = .seconds(110)
     /// Counts asks: a result from a turn that was cancelled or replaced is ignored.
     private var asking = 0
     /// The user's turn waiting for its answer, in `turns`, or nil.
     private var pending: String?
+    private var conversationTurn: String?
+    private var stopRequested = false
     /// Called with every job that's added or changes, for the runner's event stream.
     var onJobChange: (Job) -> Void = { _ in }
     /// What only the user can answer (Engine/Inbox.swift), oldest first, done ones too: the same
@@ -554,12 +557,23 @@ final class Desk {
 
     /// `converse`, with the jobs Oby's answer started (#269): `POST /v1/plans` answers them.
     func exchange(_ said: String, shown: String? = nil, turns given: [Turn]? = nil) async -> (talk: Talk, started: [Job]) {
-        guard !Conversation.cancels(said) else { return (.none, []) }
-        let talk = await plan(said, turns: given) { !Task.isCancelled }
-        add(Turn(who: .user, text: shown ?? said))
+        if Conversation.cancels(said) { stopConversation(); return .none }
+        let turn = Turn(who: .user, text: shown ?? said)
+        conversationTurn = turn.id
+        stopRequested = false
+        let talk = await plan(said, turns: given) { !Task.isCancelled && !self.stopRequested }
+        conversationTurn = nil
+        stopRequested = false
+        add(turn)
         guard let reply = Self.reply(in: talk) else { return (talk, []) }
-        let turn = addReply(reply)
-        return (talk, (turn.jobs ?? []).compactMap(job))
+        let replyTurn = addReply(reply)
+        return (talk, (replyTurn.jobs ?? []).compactMap(job))
+    }
+
+    /// Ends the current conversation after its action finishes.
+    func stopConversation() {
+        guard conversationTurn != nil else { return }
+        stopRequested = true
     }
 
     /// The conversation's turns before `before` (a turn's id; nil for the newest), at most `limit`,
@@ -646,6 +660,9 @@ final class Desk {
         for step in 0..<Self.mostSteps {
             var context = brainContext(turns: given ?? turns.filter { $0.id != pending })
             context.quoted = reads.quoted(adding: context.quoted)
+            // A runner stop is checked before asking the brain for another action. Mac turns use
+            // `live` to discard a late plan, but still let that plan finish so its answer is logged.
+            if stopRequested { return done.isEmpty ? .none : .reply(done.joined(separator: " ")) }
             var result = await Planner(adapters: makeBrain(thinker?.home, vault)).plan(request, context: context)
             guard live() else {
                 result.refused.append("the turn was cancelled before the plan came: nothing done")
@@ -666,7 +683,7 @@ final class Desk {
             // The same action twice in one turn: it's done; the brain only repeated itself.
             if acting, !taken.insert(Self.signature(result.plan)).inserted { break }
             guard acting else { return Self.after(done, await answer(result, said: said, attachments: attachments, live: live)) }
-            let talk = await card(for: result, said: said, live: live)
+            let talk = await card(for: result, said: said, attachments: attachments, live: live, stepIndex: step + 1)
             guard case .reply(let text) = talk else { return Self.after(done, talk) }
             if !text.isEmpty { done.append(text) }
             // An action that couldn't happen ends the turn: the user hears why.
@@ -872,8 +889,9 @@ final class Desk {
     /// stopped once it has, here and elsewhere. `attachments` go to the jobs that start. `live` is
     /// asked again right before they do: the epics and the issues' files take network time, and a
     /// turn cancelled or given up on meanwhile starts nothing (the answer is `.none`).
-    func card(for result: Planner.Result, said: String, attachments: [String] = [], live: () -> Bool = { true }) async -> Talk {
+    func card(for result: Planner.Result, said: String, attachments: [String] = [], live: () -> Bool = { true }, stepIndex: Int = 1) async -> Talk {
         let plan = result.plan
+        return await step(plan, turn: conversationTurn ?? "", index: stepIndex) {
         switch plan.action {
         case .dispatch:
             // Each job is routed knowing where the ones before it went, so a plan spreads out.
@@ -994,6 +1012,7 @@ final class Desk {
         case .readJob:
             // Read in the loop (`plan`); a read that gets here changes nothing and says nothing.
             return .none
+        }
         }
     }
 
