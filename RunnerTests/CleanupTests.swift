@@ -18,7 +18,7 @@ struct CleanupTests {
     @Test func oldSettledWorktreesGoButRecentOpenAndNeededStay() async {
         let cleanup = WorktreeCleanup(root: URL(filePath: "/tmp/oby-cleanup-test"), clock: { self.now })
         var removed: [String] = []
-        cleanup.remove = { removed.append($0.id); return true }
+        cleanup.remove = { removed.append($0.id); return .removed }
         cleanup.removeBranch = { _ in }
         var recent = candidate("recent", finished: -23 * 60 * 60)
         recent.pullRequest?.state = .open
@@ -36,7 +36,12 @@ struct CleanupTests {
         let cleanup = WorktreeCleanup(root: URL(filePath: "/tmp/oby-cleanup-test"), clock: { self.now })
         var removed: [String] = []
         var removedBranches: [String] = []
-        cleanup.remove = { removed.append($0.id); return true }
+        var worktrees = Set<String>()
+        cleanup.remove = {
+            guard worktrees.insert($0.id).inserted else { return .alreadyGone }
+            removed.append($0.id)
+            return .removed
+        }
         cleanup.removeBranch = { removedBranches.append($0.id) }
         var author = candidate("author")
         author.pullRequest?.state = .open

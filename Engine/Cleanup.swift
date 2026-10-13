@@ -5,6 +5,12 @@ import Foundation
 final class WorktreeCleanup {
     static let age: TimeInterval = 24 * 60 * 60
 
+    enum WorktreeRemoval: Equatable, Sendable {
+        case removed
+        case alreadyGone
+        case failed
+    }
+
     struct Status: Equatable, Sendable {
         var lastRun: Date?
         var bytes: Int64
@@ -12,7 +18,7 @@ final class WorktreeCleanup {
     }
 
     let clock: () -> Date
-    var remove: (Job) async -> Bool
+    var remove: (Job) async -> WorktreeRemoval
     var removeBranch: (Job) async -> Void
     private(set) var status: Status
 
@@ -23,10 +29,14 @@ final class WorktreeCleanup {
         self.remove = { job in
             let clone = Workspace.clone(job.repo)
             let worktree = Workspace.worktree(job.id)
-            guard FileManager.default.fileExists(atPath: worktree.path),
-                  FileManager.default.fileExists(atPath: clone.appending(path: ".git").path) else { return false }
-            guard (try? await Shell.ok(["git", "-C", clone.path, "worktree", "remove", "--force", worktree.path])) != nil else { return false }
-            return true
+            guard FileManager.default.fileExists(atPath: clone.appending(path: ".git").path) else { return .failed }
+            guard FileManager.default.fileExists(atPath: worktree.path) else { return .alreadyGone }
+            do {
+                _ = try await Shell.ok(["git", "-C", clone.path, "worktree", "remove", "--force", worktree.path])
+                return .removed
+            } catch {
+                return .failed
+            }
         }
         self.removeBranch = { job in
             let clone = Workspace.clone(job.repo)
@@ -38,7 +48,7 @@ final class WorktreeCleanup {
         let now = clock()
         let byID = Dictionary(jobs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         for job in jobs where shouldRemove(job, authors: byID, now: now) && !inUse(job.id) {
-            guard await remove(job) else { continue }
+            guard await remove(job) != .failed else { continue }
             if shouldRemoveBranch(job, authors: byID) { await removeBranch(job) }
         }
         status = Status(lastRun: now, bytes: Self.size(of: URL(filePath: status.path)), path: status.path)
