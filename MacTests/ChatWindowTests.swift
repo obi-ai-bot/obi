@@ -9,6 +9,18 @@ import Testing
 struct ChatWindowTests {
     let now = Date(timeIntervalSince1970: 1_791_582_173)
 
+    private func offscreenWindow<Content: View>(size: NSSize, root: Content) -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -20_000, y: -20_000), size: size),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.alphaValue = 0
+        window.contentView = NSHostingView(rootView: root)
+        window.orderFront(nil)
+        return window
+    }
+
     /// The + button, the microphone and the text share a middle on one line (#322).
     @Test func composerButtonsAreCenteredOnTheFirstLine() {
         let row = ComposerMetrics.rowHeight
@@ -95,11 +107,8 @@ struct ChatWindowTests {
         let root = ChatComposer(text: .constant(""), focused: .constant(true), tray: Tray(),
                                 onSend: {}, onScreenshot: {}, onStop: { exits += 1; return true })
             .onExitCommand { exits += 1 }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 100),
-                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: root)
-        window.makeKeyAndOrderFront(nil)
+        let window = offscreenWindow(size: NSSize(width: 500, height: 100), root: root)
+        window.makeKey()
         defer { window.close() }
         for _ in 0..<40 {
             if window.firstResponder is ComposerEditor.Editor { break }
@@ -111,7 +120,7 @@ struct ChatWindowTests {
                                                  characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
         // Dispatch through AppKit with this window key, as a real Escape key arrives.
         // The suite is serialized because key-window/input-context state is global.
-        window.makeKeyAndOrderFront(nil)
+        window.makeKey()
         NSApp.sendEvent(escape)
         #expect(exits == 1)
     }
@@ -121,11 +130,9 @@ struct ChatWindowTests {
         let model = IslandModel(desk: Desk(), feed: feed)
         let state = ChatState()
         state.open()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
-                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: ChatView(model: model, state: state, onOpenSettings: { _ in }))
-        window.makeKeyAndOrderFront(nil)
+        let window = offscreenWindow(size: NSSize(width: 900, height: 600),
+                                     root: ChatView(model: model, state: state, onOpenSettings: { _ in }))
+        window.makeKey()
         defer { window.close() }
         for _ in 0..<40 {
             if window.firstResponder is ComposerEditor.Editor { break }
