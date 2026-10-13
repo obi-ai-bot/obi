@@ -430,14 +430,22 @@ struct ConversationTests {
     }
 
     @Test func replacingARunnerPlanCancelsTheRunnerBeforeTheOldRequest() async throws {
-        final class Events { var values: [String] = [] }
+        final class Events {
+            var values: [String] = []
+            var finishFirst: (() -> Void)?
+        }
         let events = Events()
         desk.plansElsewhere = { true }
-        desk.cancelElsewhere = { events.values.append("cancel") }
+        desk.cancelElsewhere = {
+            events.values.append("cancel")
+            events.finishFirst?()
+        }
         desk.planElsewhere = { said, _ in
             if said == "first" {
-                events.values.append("first started")
-                try? await Task.sleep(for: .seconds(1))
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    events.finishFirst = { continuation.resume() }
+                    events.values.append("first started")
+                }
                 events.values.append("first finished")
             } else {
                 events.values.append("second planned")
