@@ -113,7 +113,7 @@ final class Phone {
     var base: URL { route?.url ?? runnerURL }
     @ObservationIgnored private let finder = MacFinder()
     var talk: Talk = .none
-    private(set) var connection: RunnerConnection = .connecting
+    private(set) var connection: RunnerConnection
     private(set) var lastSeen: Date? = UserDefaults.standard.object(forKey: "runner.lastSeen") as? Date
     private(set) var host = ""
     /// The job list arrived at least once, so an empty list really is empty.
@@ -139,8 +139,8 @@ final class Phone {
     @ObservationIgnored private var syncing: Task<Void, Never>?
     private(set) var accounts: [Account] = []
     /// What waits in the runner's inbox, put-off items too: answered on the Mac, it goes from here too.
-    private(set) var inbox: [InboxItem] = []
-    private let offlineQueue = OfflineQueue()
+    private(set) var inbox: [InboxItem]
+    private let offlineQueue: OfflineQueue
     private(set) var models: ModelSettings?
     /// The mode new jobs get by default, as the runner last said, or nil from a runner without modes.
     private(set) var defaultMode: RunnerMode?
@@ -159,7 +159,10 @@ final class Phone {
         return "Your Mac is asleep or offline. Last seen \(time)"
     }
 
-    init() {
+    init(offlineQueue: OfflineQueue = OfflineQueue(), connection: RunnerConnection = .connecting, inbox: [InboxItem] = []) {
+        self.offlineQueue = offlineQueue
+        self.connection = connection
+        self.inbox = inbox
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
         if let data = UserDefaults.standard.data(forKey: "mac.link") { link = try? MacLink.paired(data) }
         for item in offlineQueue.messages {
@@ -430,8 +433,11 @@ final class Phone {
             guard let self else { return }
             do {
                 apply(.inbox(try await runner.settle(item.id, answer: item.answer, done: item.done, later: item.later)))
-            } catch let error as RunnerError where error.status == 404 {
-                throw OfflineQueue.FlushError.alreadySettled
+            } catch {
+                if OfflineQueue.isAlreadySettled(error) {
+                    throw OfflineQueue.FlushError.alreadySettled
+                }
+                throw error
             }
         }
     }

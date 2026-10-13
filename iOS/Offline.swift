@@ -18,6 +18,10 @@ struct OfflineMessage: Codable, Equatable, Sendable {
 final class OfflineQueue: @unchecked Sendable {
     enum FlushError: Error { case alreadySettled }
 
+    static func isAlreadySettled(_ error: Error) -> Bool {
+        (error as? RunnerError)?.status == 404
+    }
+
     var messages: [OfflineMessage] = []
     var answers: [OfflineInboxAnswer] = []
     private let defaults: UserDefaults

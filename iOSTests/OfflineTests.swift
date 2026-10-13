@@ -5,10 +5,10 @@ import Testing
 struct OfflineTests {
     @Test func queueReplacesAnswersAndRemovesDiscardedMessages() {
         let message = OfflineMessage(id: "m1", said: "build it", question: nil, option: nil, voice: false)
-        let suiteName = "com.deskree.oby.offline-(UUID().uuidString)"
+        let suiteName = "com.deskree.oby.offline-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        var queue = OfflineQueue(defaults: defaults)
+        let queue = OfflineQueue(defaults: defaults)
         queue.queue(message)
         queue.queue(message)
         queue.removeMessage("m1")
@@ -21,10 +21,10 @@ struct OfflineTests {
     }
 
     @Test func flushKeepsLaterAnswersAfterFailureAndDropsAlreadySettled() async {
-        let suiteName = "com.deskree.oby.offline-(UUID().uuidString)"
+        let suiteName = "com.deskree.oby.offline-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        var queue = OfflineQueue(defaults: defaults)
+        let queue = OfflineQueue(defaults: defaults)
         queue.answers = [
             OfflineInboxAnswer(id: "settled", answer: "Allow", done: nil, later: nil),
             OfflineInboxAnswer(id: "fails", answer: "Deny", done: nil, later: nil),
@@ -35,6 +35,46 @@ struct OfflineTests {
             if item.id == "fails" { throw URLError(.notConnected) }
         }
         #expect(queue.answers.map(\.id) == ["fails", "later"])
+    }
+
+    @Test func phoneDiscardAndRetryRemoveThePersistedOutboxEntry() {
+        let suiteName = "com.deskree.oby.phone-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let queue = OfflineQueue(defaults: defaults)
+        let phone = Phone(offlineQueue: queue)
+
+        phone.ask("discard this")
+        let discarded = phone.echoes[0].id
+        phone.discard(echo: discarded)
+        #expect(OfflineQueue(defaults: defaults).messages.isEmpty)
+
+        phone.ask("retry this")
+        let retried = phone.echoes[0].id
+        phone.retry(echo: retried)
+        let restored = OfflineQueue(defaults: defaults)
+        #expect(restored.messages.count == 1)
+        #expect(restored.messages[0].id != retried)
+    }
+
+    @Test func phoneOfflineSettleRemovesInboxAndPersistsOneAnswer() async throws {
+        let suiteName = "com.deskree.oby.phone-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let item = InboxItem(
+            kind: "question", id: "i1", job: "j1", title: "Question", text: "Allow?", options: ["Allow"],
+            created: .now, done: nil, later: nil, answer: nil, headline: nil, happened: nil, recommended: nil, why: nil)
+        let phone = Phone(offlineQueue: OfflineQueue(defaults: defaults), inbox: [item])
+
+        try await phone.settle("i1", answer: "Allow")
+
+        #expect(phone.inbox.isEmpty)
+        #expect(OfflineQueue(defaults: defaults).answers == [OfflineInboxAnswer(id: "i1", answer: "Allow", done: nil, later: nil)])
+    }
+
+    @Test func alreadySettled404IsMapped() {
+        #expect(OfflineQueue.isAlreadySettled(RunnerError(message: "gone", status: 404)))
+        #expect(!OfflineQueue.isAlreadySettled(RunnerError(message: "bad", status: 400)))
     }
 
     @Test func messageAndInboxActionsRoundTripThroughCodableStorage() throws {

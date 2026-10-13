@@ -8,7 +8,7 @@ struct AvailabilityTests {
     @Test func runningJobsTakeAndReleaseTheAssertion() {
         var created = 0
         var released = 0
-        let suiteName = "com.deskree.oby.availability-(UUID().uuidString)"
+        let suiteName = "com.deskree.oby.availability-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let availability = MacAvailability(
@@ -33,7 +33,7 @@ struct AvailabilityTests {
     }
 
     @Test func failedAssertionIsReportedAsSleepingSoon() {
-        let suiteName = "com.deskree.oby.availability-(UUID().uuidString)"
+        let suiteName = "com.deskree.oby.availability-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let availability = MacAvailability(createAssertion: { _, _, _, _ in kIOReturnError }, defaults: defaults, powerConnected: false, powerSource: { false })
