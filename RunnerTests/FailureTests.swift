@@ -200,6 +200,9 @@ struct FailureTests {
         log.observe(test.job("stopped") { $0.status = .stopped })
         log.observe(test.job("old") { $0.status = .failed; $0.finished = .now.addingTimeInterval(-3 * 86_400) })
         #expect(test.triggers(of: "named").isEmpty && test.triggers(of: "stopped").isEmpty && test.triggers(of: "old").isEmpty)
+        // A build error names no test, but the compiler named the file and line: the agent's next round fixes it (#271).
+        log.observe(test.job("build") { var check = test.check("c7", .failed); check.steps = [MacCheck.Step(name: "Mac app and MacTests", passed: false, seconds: 21, buildErrors: ["Mac/App/ChatWindow.swift:251:33: error: unable to type-check"])]; $0.appleRan = check })
+        #expect(test.triggers(of: "build").isEmpty)
         // An Apple check no Mac took (#157) isn't the Mac failing: the agent carries on without it.
         log.observe(test.job("nomac") { var check = test.check("c5", .error); check.kind = .apple; check.problem = AppleCheck.noMacLine; $0.appleCheck = check })
         #expect(test.triggers(of: "nomac").isEmpty)

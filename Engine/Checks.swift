@@ -34,6 +34,9 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         var retried: Bool? = nil
         /// The simulator runtime its last run used, like "iOS 26.5 (23F77)", or nil off a simulator.
         var runtime: String? = nil
+        /// The compiler's `File.swift:12:9: error: …` lines when it failed on a build error and so
+        /// named no test (#271); the author's next round has them in the step's output.
+        var buildErrors: [String]? = nil
 
         /// "iPhone app with Watch, and iOSTests on iOS 26.5 (23F77)"
         var label: String { name + (runtime.map { " on " + $0 } ?? "") }
@@ -196,9 +199,11 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             let failing = step.failing.map { tests in
                 Array(tests.map { FailingTest(test: one($0.test, 300), message: flat($0.message, 500)) }.filter { !$0.test.isEmpty }.prefix(50))
             }
+            let built = step.buildErrors.map { Array($0.map { one($0, 300) }.filter { !$0.isEmpty }.prefix(10)) }
             return Step(name: one(step.name, 100), passed: step.passed, seconds: max(0, step.seconds),
                         failing: failing.flatMap { $0.isEmpty ? nil : $0 }, retried: step.retried == true ? true : nil,
-                        runtime: step.runtime.map { one($0, 60) }.flatMap { $0.isEmpty ? nil : $0 })
+                        runtime: step.runtime.map { one($0, 60) }.flatMap { $0.isEmpty ? nil : $0 },
+                        buildErrors: built.flatMap { $0.isEmpty ? nil : $0 })
         }
         report.failures = Array(report.failures.map { one($0, 300) }.filter { !$0.isEmpty }.prefix(50))
         report.log = report.log.map { String($0.suffix(8000)) }
@@ -843,6 +848,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             // Paths as the author's agent knows them: from the repository's root.
             let local = { (text: String) in text.replacing(worktree.path + "/", with: "") }
             outcome.step.failing = outcome.step.failing?.map { FailingTest(test: $0.test, message: local($0.message)) }
+            outcome.step.buildErrors = outcome.step.buildErrors?.map(local)
             steps.append(outcome.step)
             Logger.jobs.notice("check \(check.id, privacy: .public): \(command.name, privacy: .public) \(outcome.step.passed ? "passed" : "failed", privacy: .public) in \(outcome.step.seconds, privacy: .public)s")
             for test in outcome.step.failing ?? [] where !failures.contains(test.test) { failures.append(test.test) }
@@ -1019,6 +1025,12 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             return Outcome(step: step)
         case let .failed(tests, log):
             step.failing = tests.isEmpty ? nil : tests
+            // A build that failed names no test, but it isn't unexplained: the compiler said where.
+            if tests.isEmpty {
+                var seen = Set<Substring>()
+                let errors = (log ?? "").split(separator: "\n").filter(sourceError).filter { seen.insert($0).inserted }.map(String.init)
+                step.buildErrors = errors.isEmpty ? nil : errors
+            }
             return Outcome(step: step, log: log)
         case let .trouble(trouble):
             // How the second run ended, when that's more than the trouble says.

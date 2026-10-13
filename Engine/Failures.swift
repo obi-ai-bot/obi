@@ -426,7 +426,9 @@ final class Failures {
             let kind = check.isApple ? "Apple" : "merge"
             // An Apple check no Mac took (#157): the agent carries on without it, and a Mac that comes back takes it late.
             if check.state == .error, !check.unclaimed { add(.checkError, check.id, "The Mac couldn't run its \(kind) check.", at: check.finished ?? check.created) }
-            if check.state == .failed, (check.failures ?? []).isEmpty { add(.unnamedFailure, check.id, "Its \(kind) check failed without naming a test.", at: check.finished ?? check.created) }
+            // A build error names no test, but the compiler named the file and line: the agent fixes it in its next round (#271).
+            let built = (check.steps ?? []).contains { !($0.buildErrors ?? []).isEmpty }
+            if check.state == .failed, (check.failures ?? []).isEmpty, !built { add(.unnamedFailure, check.id, "Its \(kind) check failed without naming a test.", at: check.finished ?? check.created) }
         }
         if job.mergeError != nil, let check = job.macCheck {
             add(.mergeError, "\(check.id)-\(check.tries ?? 0)", "Oby couldn't merge its pull request.", at: check.finished ?? check.created)
