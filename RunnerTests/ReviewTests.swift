@@ -145,10 +145,15 @@ struct ReviewTests {
             """)
         let findings: (blocking: [String], later: [String], unsorted: [String])? = (
             ["Sources/Thing.swift:10: the new code fails Evidence: reproduced.",
-             "Sources/Thing.swift:40: an old bug Evidence: reproduced."], [], [])
+             "Sources/Thing.swift:40: an old bug Evidence: reproduced.",
+             "Sources/Untouched.swift:50: an unrelated old bug Evidence: reproduced."], [], [])
         let result = try #require(Review.demoteUnchangedBlockers(findings, changed: changed))
         #expect(result.blocking == ["Sources/Thing.swift:10: the new code fails Evidence: reproduced."])
-        #expect(result.later == ["Sources/Thing.swift:40: an old bug Evidence: reproduced."])
+        #expect(result.later == ["Sources/Thing.swift:40: an old bug Evidence: reproduced.",
+                                 "Sources/Untouched.swift:50: an unrelated old bug Evidence: reproduced."])
+        #expect(Review.verdict(.changesRequested, after: result) == .changesRequested)
+        let allDemoted = Review.demoteUnchangedBlockers((blocking: ["Sources/Untouched.swift:50: old issue Evidence: reproduced."], later: [], unsorted: []), changed: changed)
+        #expect(Review.verdict(.changesRequested, after: allDemoted) == .approved)
     }
 
     @Test func reviewGetsTheAuthorsAnswersAndTreatsThemAsSettledDecisions() {

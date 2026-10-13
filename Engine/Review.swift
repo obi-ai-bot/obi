@@ -380,6 +380,14 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         return (verified, findings.later + candidates, findings.unsorted)
     }
 
+    /// Once located blockers have been filtered against the follow-up diff, no remaining blocker
+    /// means the review can no longer request changes. Keep the original verdict when findings
+    /// could not be sorted, since an unplaced finding may still block.
+    static func verdict(_ verdict: Verdict, after findings: (blocking: [String], later: [String], unsorted: [String])?) -> Verdict {
+        guard verdict == .changesRequested, let findings, findings.blocking.isEmpty, findings.unsorted.isEmpty else { return verdict }
+        return .approved
+    }
+
     /// Parses added-line ranges from `git diff --unified=0`. A blocker with a cited source location
     /// outside these ranges is not caused by the follow-up commits and cannot block this round.
     static func changedLines(_ diff: String) -> [String: Set<Int>] {
@@ -404,11 +412,11 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         var later = findings.later
         for finding in findings.blocking {
             guard let match = finding.firstMatch(of: /((?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+):(\d+)/),
-                  let line = Int(match.2), let lines = changed[String(match.1)] else {
+                  let line = Int(match.2) else {
                 blocking.append(finding)
                 continue
             }
-            if lines.contains(line) { blocking.append(finding) } else { later.append(finding) }
+            if changed[String(match.1)]?.contains(line) == true { blocking.append(finding) } else { later.append(finding) }
         }
         return (blocking, later, findings.unsorted)
     }
@@ -416,7 +424,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// Reads only the follow-up delta from the reviewer worktree. Nil leaves findings untouched if
     /// Git cannot produce a diff (for example, an older job without the branch ref).
     static func changedLines(for review: Job) -> [String: Set<Int>]? {
-        guard let previous = review.review, previous.round > 0, previous.round < escalationRound,
+        guard let previous = review.review, previous.round > 0, previous.round < maxRounds,
               let branch = previous.branch else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
@@ -724,16 +732,17 @@ extension Desk {
             author.reviewError = "Oby's review \(how)" + (first.isEmpty ? "." : ": \(first)")
             return replace(author)
         }
-        guard let verdict = Review.decide(review.summary) else {
+        guard let said = Review.decide(review.summary) else {
             if retryCapacityReview(review, first: first, author: &author) { return }
             author.reviewError = "The reviewer gave no verdict" + (first.isEmpty ? "." : ": \(first)")
             return replace(author)
         }
         let account = accounts.state(review.account)?.account.name ?? review.account
-        var result = Review(verdict: verdict, job: review.id, agent: review.agent, account: account, round: (author.review?.round ?? 0) + 1)
-        result.policyVersion = 2
         let changed = Review.changedLines(for: review)
         let findings = Review.evidenced(Review.demoteUnchangedBlockers(Review.findings(review.summary), changed: changed ?? [:]))
+        let verdict = Review.verdict(said, after: findings)
+        var result = Review(verdict: verdict, job: review.id, agent: review.agent, account: account, round: (author.review?.round ?? 0) + 1)
+        result.policyVersion = 2
         result.branch = review.branch
         result.blocking = findings.flatMap { $0.blocking.isEmpty ? nil : $0.blocking }
         let before = (author.review?.blockedBefore ?? []) + (author.review?.blocking ?? [])
