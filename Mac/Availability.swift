@@ -18,6 +18,8 @@ final class MacAvailability {
     private var assertion: IOPMAssertionID = 0
     private var powerConnected = true
     private var runningJobs = false
+    private var runnerEnabled: Bool
+    private var powerSourceRunLoop: CFRunLoopSource?
     private let createAssertion: AssertionCreator
     private let releaseAssertion: AssertionReleaser
     private let defaults: UserDefaults
@@ -32,20 +34,44 @@ final class MacAvailability {
         self.releaseAssertion = releaseAssertion
         self.defaults = defaults
         self.powerSource = powerSource
-        keepAvailable = defaults.object(forKey: Self.setting) as? Bool ?? true
+        runnerEnabled = defaults.object(forKey: RunnerFeed.thisMacKey) as? Bool ?? false
+        keepAvailable = defaults.object(forKey: Self.setting) as? Bool ?? runnerEnabled
         self.powerConnected = powerConnected ?? powerSource()
         update()
     }
 
-    isolated deinit { if preventingSleep { releaseAssertion(assertion) } }
+    isolated deinit {
+        if let powerSourceRunLoop {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), powerSourceRunLoop, .commonModes)
+        }
+        if preventingSleep { releaseAssertion(assertion) }
+    }
     func setKeepAvailable(_ value: Bool) { keepAvailable = value; defaults.set(value, forKey: Self.setting); update() }
+    func setRunnerEnabled(_ value: Bool) {
+        runnerEnabled = value
+        if defaults.object(forKey: Self.setting) == nil { keepAvailable = value }
+        update()
+    }
+    func startMonitoring() {
+        guard powerSourceRunLoop == nil else { return }
+        powerSourceRunLoop = IOPSNotificationCreateRunLoopSource(nil) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                setPowerConnected(powerSource())
+            }
+        }?.takeRetainedValue()
+        if let powerSourceRunLoop {
+            CFRunLoopAddSource(CFRunLoopGetMain(), powerSourceRunLoop, .commonModes)
+        }
+        setPowerConnected(powerSource())
+    }
     func setPowerConnected(_ value: Bool) { powerConnected = value; update() }
     func setRunningJobs(_ value: Bool) {
         runningJobs = value
         powerConnected = powerSource()
         update()
     }
-    var shouldPreventSleep: Bool { runningJobs || (keepAvailable && powerConnected) }
+    var shouldPreventSleep: Bool { runningJobs || (keepAvailable && runnerEnabled && powerConnected) }
     var label: String { state == .available ? "Available" : "Sleeping soon" }
 
     private func update() {

@@ -16,7 +16,7 @@ struct OfflineTests {
         queue.queue(OfflineInboxAnswer(id: "i1", answer: "Allow", done: nil, later: nil))
         queue.queue(OfflineInboxAnswer(id: "i1", answer: "Deny", done: nil, later: nil))
         #expect(queue.messages.isEmpty)
-        #expect(queue.answers == [OfflineInboxAnswer(id: "i1", answer: "Deny", done: nil, later: nil)])
+        #expect(queue.answers.count == 1 && queue.answers[0].id == "i1" && queue.answers[0].answer == "Deny")
         let restored = OfflineQueue(defaults: defaults)
         #expect(restored.messages.isEmpty && restored.answers == queue.answers)
     }
@@ -70,7 +70,40 @@ struct OfflineTests {
         try await phone.settle("i1", answer: "Allow")
 
         #expect(phone.inbox.isEmpty)
-        #expect(OfflineQueue(defaults: defaults).answers == [OfflineInboxAnswer(id: "i1", answer: "Allow", done: nil, later: nil)])
+        let answer = OfflineQueue(defaults: defaults).answers
+        #expect(answer.count == 1 && answer[0].id == "i1" && answer[0].answer == "Allow")
+    }
+
+    @Test func messagesFlushInOrderAndKeepUnacceptedTail() async {
+        let queue = OfflineQueue(defaults: UserDefaults(suiteName: "com.deskree.oby.flush-\(UUID().uuidString)")!)
+        queue.messages = [
+            OfflineMessage(id: "one", said: "one", question: nil, option: nil, voice: false),
+            OfflineMessage(id: "two", said: "two", question: nil, option: nil, voice: false),
+            OfflineMessage(id: "three", said: "three", question: nil, option: nil, voice: false)
+        ]
+        var sent: [String] = []
+        await queue.flushMessages { message in
+            sent.append(message.id)
+            if message.id == "two" { throw URLError(.notConnectedToInternet) }
+        }
+        #expect(sent == ["one", "two"])
+        #expect(queue.messages.map(\.id) == ["two", "three"])
+    }
+
+    @Test func queuesExpireOldEntriesAndKeepTheirNewestBoundedTail() {
+        let suiteName = "com.deskree.oby.limits-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let queue = OfflineQueue(defaults: defaults)
+        let old = Date.now.addingTimeInterval(-OfflineQueue.maxAge - 1)
+        queue.messages = [OfflineMessage(id: "old", said: "old", question: nil, option: nil, voice: false, queuedAt: old)]
+            + (0..<OfflineQueue.maxEntries + 1).map { index in
+                OfflineMessage(id: "m\(index)", said: "m\(index)", question: nil, option: nil, voice: false)
+            }
+        queue.save()
+        #expect(queue.messages.count == OfflineQueue.maxEntries)
+        #expect(queue.messages.first?.id == "m1")
+        #expect(!queue.messages.contains(where: { $0.id == "old" }))
     }
 
     @Test func alreadySettled404IsMapped() {

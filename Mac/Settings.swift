@@ -89,6 +89,7 @@ struct SettingsView: View {
 /// for it, and the Apple Watches paired with it.
 struct RunnerSettingsView: View {
     let feed: RunnerFeed
+    let availability: MacAvailability
     /// The always-on runner whose jobs the island lists and RunnerFeed follows; empty turns that off.
     @AppStorage("runnerURL") private var runnerURL = ""
     /// "This Mac" (#283): the runner is Oby's login item on this Mac, and Oby follows it on 127.0.0.1.
@@ -136,6 +137,15 @@ struct RunnerSettingsView: View {
                 Text(onThisMac
                      ? "Oby's runner runs on this Mac as a login item: it starts when you log in and keeps working while Oby's window is closed. Oby plans and runs every job there, on 127.0.0.1, and lists them in the island and the window. Your iPhone and Apple Watch reach it through the gateway."
                      : "The runner does the work while your Mac is closed. The island lists the jobs running there too, and Oby tells you when one needs you. It answers only your Tailscale login, so this Mac needs Tailscale on. Leave it empty to turn this off.")
+            }
+            Section {
+                Toggle("Keep my Mac available", isOn: Binding(get: { availability.keepAvailable }, set: availability.setKeepAvailable))
+                LabeledContent("Availability", value: availability.label)
+                Link("Recommend Wake for network access", destination: URL(string: "x-apple.systempreferences:com.apple.energysaver")!)
+            } header: {
+                Text("This Mac")
+            } footer: {
+                Text("On power, Oby prevents idle sleep while This Mac is enabled and this setting is on. A running job always keeps this Mac awake.")
             }
             // As on the iPhone (Shared/PermissionsSection.swift). This Mac's own jobs' default is in General.
             PermissionsSection(runner: feed.runner, defaultMode: feed.defaultMode, setDefault: feed.setDefaultMode)

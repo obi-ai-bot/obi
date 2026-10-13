@@ -417,13 +417,12 @@ final class Phone {
 
     private func flushQueued() async {
         guard !offlineQueue.messages.isEmpty else { return }
-        let waiting = offlineQueue.messages
-        offlineQueue.messages.removeAll()
-        offlineQueue.save()
-        for item in waiting {
-            guard let request = requests[item.id] else { continue }
+        await offlineQueue.flushMessages { [weak self] item in
+            guard let self else { return }
+            guard let request = requests[item.id] else { return }
             let echo = echoes.first(where: { $0.id == item.id }) ?? Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil)
-            send(request, echo: echo)
+            let result = try await runner.plan(request.said, answer: request.answer)
+            apply(result, request: request, echo: echo)
         }
     }
 
@@ -444,39 +443,52 @@ final class Phone {
 
     private func send(_ request: Request, echo: Turn) {
         planning = Task {
-            let result: Talk
-            var started: [Job] = []
             do {
-                switch try await runner.plan(request.said, answer: request.answer) {
-                case .question(let said, let question): result = .question(said: said, question)
-                case .reply(let text, let jobs): result = .reply(text); started = jobs
-                case .none: result = .none
-                }
+                let result = try await runner.plan(request.said, answer: request.answer)
+                guard !Task.isCancelled else { return }
+                apply(result, request: request, echo: echo)
             } catch {
-                result = .reply(error.localizedDescription)
                 // The request didn't go through (or the runner answered with an error): the words
                 // stay in the thread with why, to try again or edit. If the runner got them after
                 // all (a timeout), its turn settles the echo as usual.
                 if !Task.isCancelled {
                     failures[echo.id] = error.localizedDescription
+                    finish(.reply(error.localizedDescription), started: [], request: request, echo: echo)
                 }
             }
-            // Cancelled or replaced while the brain was thinking.
-            guard !Task.isCancelled else { return }
-            // The request is over: its words are the runner's now, or stay with their failure.
-            if pending == echo.id { pending = nil }
-            conversation.settleLatestSteps()
-            talk = result
-            // The work Oby started (#269) shows at once, before its events come, and the phone
-            // asks to notify the first time something starts from it.
-            for job in started { apply(.job(job)) }
-            if !started.isEmpty { Notifications.ask() }
-            if request.voice, speakReplies {
-                switch result {
-                case .reply(let text): speaker.say(text)
-                case .question(_, let question): speaker.say(question.text)
-                default: break
-                }
+        }
+    }
+
+    /// Applies a response the runner accepted, shared by live sends and the sequential offline
+    /// flush. The queue removes its message only after this operation's network call succeeds.
+    private func apply(_ result: PlanResult, request: Request, echo: Turn) {
+        let talk: Talk
+        let started: [Job]
+        switch result {
+        case .question(let said, let question):
+            talk = .question(said: said, question)
+            started = []
+        case .reply(let text, let jobs):
+            talk = .reply(text)
+            started = jobs
+        case .none:
+            talk = .none
+            started = []
+        }
+        finish(talk, started: started, request: request, echo: echo)
+    }
+
+    private func finish(_ talk: Talk, started: [Job], request: Request, echo: Turn) {
+        if pending == echo.id { pending = nil }
+        conversation.settleLatestSteps()
+        self.talk = talk
+        for job in started { apply(.job(job)) }
+        if !started.isEmpty { Notifications.ask() }
+        if request.voice, speakReplies {
+            switch talk {
+            case .reply(let text): speaker.say(text)
+            case .question(_, let question): speaker.say(question.text)
+            default: break
             }
         }
     }

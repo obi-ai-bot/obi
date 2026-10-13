@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Observation
 import SwiftUI
 import WebKit
 
@@ -132,6 +133,7 @@ final class IslandController {
     let stopAllKey = StopAllKey()
     private let panel = NotchPanel()
     private var timer: Timer?
+    private var observingAvailability = false
     private var lastMouse: CGPoint?
     private var clickMonitor: Any?
     private var noticeTask: Task<Void, Never>?
@@ -152,13 +154,8 @@ final class IslandController {
     }
 
     func start() {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                availability.setRunningJobs(!desk.active.isEmpty || !feed.active.isEmpty)
-                try? await Task.sleep(for: .milliseconds(250))
-            }
-        }
+        availability.startMonitoring()
+        observeAvailability()
         panel.contentView = NSHostingView(rootView: IslandView(
             model: model, character: character,
             onOpen: { [weak self] in self?.open() },
@@ -266,7 +263,11 @@ final class IslandController {
             return try await feed.plan(said, answer: answer, attachments: attachments)
         }
         desk.cancelElsewhere = { [weak self] in await self?.feed.cancelPlan() }
-        feed.onFollow = { [weak self] local in self?.desk.issueSync.enabled = !local }
+        feed.onFollow = { [weak self] local in
+            self?.desk.issueSync.enabled = !local
+            self?.availability.setRunnerEnabled(local)
+            self?.updateAvailability()
+        }
         feed.start()
         Task { await desk.refresh() }
         talkKey.on = { [weak self] in self?.talk($0) }
@@ -285,6 +286,31 @@ final class IslandController {
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             MainActor.assumeIsolated { self?.close() }
         }
+    }
+
+    private func updateAvailability() {
+        availability.setRunningJobs(!desk.active.isEmpty || (feed.local && !feed.active.isEmpty) || feed.checks.current != nil)
+    }
+
+    /// Observation fires once per change, so re-register after updating the assertion. This keeps
+    /// the closed island idle instead of polling the runner and the local desk on a timer.
+    private func observeAvailability() {
+        guard !observingAvailability else { return }
+        observingAvailability = true
+        withObservationTracking {
+            _ = desk.active
+            _ = feed.active
+            _ = feed.local
+            _ = feed.checks.current
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                observingAvailability = false
+                updateAvailability()
+                observeAvailability()
+            }
+        }
+        updateAvailability()
     }
 
     /// Stop all (⌃⌥⌘. or the menu): every job on this Mac and on the runner stops now, and the

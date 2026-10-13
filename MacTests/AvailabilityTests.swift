@@ -42,4 +42,17 @@ struct AvailabilityTests {
         #expect(!availability.preventingSleep)
         #expect(availability.label == "Sleeping soon")
     }
+
+    @Test func defaultAvailabilityRequiresThisMacRunner() {
+        let suiteName = "com.deskree.oby.availability-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: RunnerFeed.thisMacKey)
+        let availability = MacAvailability(defaults: defaults, powerConnected: true, powerSource: { true })
+        #expect(availability.keepAvailable)
+        #expect(availability.preventingSleep)
+
+        availability.setRunnerEnabled(false)
+        #expect(!availability.preventingSleep)
+    }
 }
