@@ -83,12 +83,9 @@ nonisolated enum Moves {
         }
         let tool = account?.agent ?? wanted ?? chosenModel.map(agent(ofModel:)) ?? job.agent
         if account == nil {
-            let alreadyWaitingForOwnRoom = job.startWhen?.contains { condition in
-                if case .window(let account, _, _) = condition { return account == job.account }
-                return false
-            } == true
             if tool == job.agent, let own = accounts.first(where: { $0.account.id == job.account }),
-               alreadyWaitingForOwnRoom || AccountStore.choose([own], agent: tool, now: now) != nil {
+               (model != nil && own.signedIn && !own.isFull(at: now) && !own.weekNearlyFull(at: now))
+                   || AccountStore.choose([own], agent: tool, now: now) != nil {
                 account = own.account
             }
         }

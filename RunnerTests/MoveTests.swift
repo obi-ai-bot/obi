@@ -61,7 +61,10 @@ struct MoveChoiceTests {
     @Test func aMoveWithoutAnAccountUsesTheSharedNearlyFullRule() throws {
         let lifted = state("current", "claude", fiveHour: 0.1, sevenDay: 0.99, lifted: now + 86_400)
         let spare = state("spare", "claude", fiveHour: 0.1, sevenDay: 0.2)
-        #expect(try choose(MoveTarget(agent: "claude"), [lifted, spare]) == ("spare", nil))
+        var job = codexJob
+        job.agent = "claude"
+        job.account = lifted.account.id
+        #expect(try choose(MoveTarget(agent: "claude"), [lifted, spare], job: job) == ("spare", nil))
     }
 
     @Test func aModelNamesItsToolAndStaysOnTheJobsAccountWhenItCan() throws {
