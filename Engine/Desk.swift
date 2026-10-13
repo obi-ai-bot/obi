@@ -82,6 +82,11 @@ final class Desk {
         throw Shell.Failure(message: "The runner isn't set up.")
     }
     @ObservationIgnored var cancelElsewhere: () async -> Void = {}
+    @ObservationIgnored var liftElsewhereReserve: (_ id: String, _ lift: Bool) async -> Bool = { _, _ in false }
+    @ObservationIgnored var settingModels: [String: [String]] = ["claude": AgentModels.claude.map(\.0), "codex": []]
+    @ObservationIgnored var settingEfforts: [String: [String]] = ["claude": AgentModels.claudeEfforts, "codex": []]
+    @ObservationIgnored var settingModelEfforts: [String: [String: [String]]] = [:]
+    @ObservationIgnored var loadSettingOptions: () async -> ([String: [String]], [String: [String]], [String: [String: [String]]])? = { nil }
     /// The brain's adapters, on the Claude account whose home is given. Tests put in their own.
     @ObservationIgnored var makeBrain: (_ home: String?, Vault) -> [any BrainAdapter] = { [ClaudeBrain(home: $0, vault: $1)] }
     /// How long `ask` waits for an answer before the turn ends with `Conversation.timedOut`, so
@@ -513,12 +518,14 @@ final class Desk {
         }
         return BrainContext(accounts: choices, repos: repos, briefing: briefing.text, quoted: briefing.quoted, jobs: briefing.stoppable,
                             movable: briefing.jobs.map(\.job.id), models: Moves.models, moveAccounts: moveAccounts,
-                            permissions: briefing.permissions)
+                            settingModels: settingModels, settingEfforts: settingEfforts,
+                            settingAccounts: moveAccounts.values.flatMap { $0 }, permissions: briefing.permissions)
     }
 
     /// What the brain is told before the user's words (Engine/Conversation.swift).
     func briefing(turns: [Turn]) -> Briefing {
         Briefing(turns: turns, places: [Briefing.Place(name: "this Mac", jobs: jobs, inbox: inbox)] + elsewhere(), accounts: accounts.accounts,
+                 settingModels: settingModels, settingEfforts: settingEfforts, maxRunning: maxRunning,
                  failures: failureLog.week())
     }
 
@@ -768,14 +775,15 @@ final class Desk {
     }
 
     /// The actions that change something, after which the brain plans the next step.
-    nonisolated static let acting: Set<Plan.Action> = [.stopAgent, .moveJob, .answerPermission, .setMode]
+    nonisolated static let acting: Set<Plan.Action> = [.stopAgent, .moveJob, .answerPermission, .setMode, .setSetting]
     /// The most actions one turn takes.
     nonisolated static let mostSteps = 6
 
     /// What makes two actions the same: what they do, to which jobs, how.
     nonisolated static func signature(_ plan: Plan) -> String {
         [plan.action.rawValue, (plan.jobs ?? []).sorted().joined(separator: ","), plan.all == true ? "all" : "",
-         plan.move.map { "\($0.agent)/\($0.account)/\($0.model)" } ?? "", plan.mode?.rawValue ?? "", plan.decision?.rawValue ?? ""]
+         plan.move.map { "\($0.agent)/\($0.account)/\($0.model)" } ?? "", plan.mode?.rawValue ?? "", plan.decision?.rawValue ?? "",
+         plan.setting.map { "\($0.agent ?? "")/\($0.model ?? "")/\($0.effort ?? "")/\($0.maxRunning.map(String.init) ?? "")/\($0.account ?? "")/\($0.lift.map(String.init) ?? "")" } ?? ""]
             .joined(separator: "|")
     }
 
@@ -1082,6 +1090,8 @@ final class Desk {
         case .readJob:
             // Read in the loop (`plan`); a read that gets here changes nothing and says nothing.
             return .none
+        case .setSetting:
+            return .reply(await applySetting(plan.setting))
         }
         }
     }

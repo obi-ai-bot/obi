@@ -14,6 +14,8 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
         case setMode = "set_mode"
         /// The chat reads a job before it answers (#302, Engine/ReadJob.swift): its report, pull request, Mac check, verdict and post-mortem.
         case readJob = "read_job"
+        /// The user changes Oby's runner settings in chat.
+        case setSetting = "set_setting"
     }
     enum Kind: String, Codable, CaseIterable, Sendable { case review, fix, build, test, investigate }
     /// How hard the work looks: a complex job gets a stronger model offered, never applied on its own.
@@ -83,6 +85,15 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
         var model: String
     }
 
+    struct Setting: Codable, Equatable, Sendable {
+        var agent: String? = nil
+        var model: String? = nil
+        var effort: String? = nil
+        var maxRunning: Int? = nil
+        var account: String? = nil
+        var lift: Bool? = nil
+    }
+
     var action: Action
     var reply: String
     /// One job per independent piece of work, up to 10; empty unless the action is dispatch.
@@ -100,6 +111,7 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
     var message: String? = nil
     /// set_mode's mode.
     var mode: PermissionMode? = nil
+    var setting: Setting? = nil
 
     /// How long a reply may be: a few short sentences, which the Mac also speaks.
     static let replyLength = 400
@@ -130,6 +142,9 @@ nonisolated struct BrainContext: Sendable {
     /// What a job may move to: each tool's models by id, and its accounts by name, here and elsewhere.
     var models: [String: [String]] = [:]
     var moveAccounts: [String: [String]] = [:]
+    var settingModels: [String: [String]] = [:]
+    var settingEfforts: [String: [String]] = [:]
+    var settingAccounts: [String] = []
     /// The jobs whose permission prompt waits for the user, by id: the ones answer_permission may name.
     var permissions: [String] = []
     /// Routing hints for choosing the brain model; they are not user instructions.
@@ -162,7 +177,7 @@ extension Plan {
                     problems.append("recommended is the index of one of the options, or null")
                 }
             }
-        case .replyOnly, .stopAgent, .moveJob, .ignore, .answerPermission, .setMode, .readJob:
+        case .replyOnly, .stopAgent, .moveJob, .ignore, .answerPermission, .setMode, .readJob, .setSetting:
             if !dispatches.isEmpty || question != nil { problems.append("\(action.rawValue) has no dispatches or question object") }
         }
         // Only stop_agent, move_job, answer_permission and set_mode name jobs, and only ones the
@@ -189,6 +204,9 @@ extension Plan {
         case .readJob:
             if named.count != 1 { problems.append("read_job names one job") }
             for id in named where !context.movable.contains(id) { problems.append("\(id) isn't a job Oby can read") }
+        case .setSetting:
+            if let setting { problems += Self.problems(of: setting, in: context) }
+            else { problems.append("set_setting needs its setting object") }
         default:
             if !named.isEmpty { problems.append("only stop_agent, move_job, answer_permission and set_mode name jobs") }
         }
@@ -196,7 +214,35 @@ extension Plan {
         if action != .moveJob, move != nil { problems.append("only move_job has a move object") }
         if action != .answerPermission, decision != nil || !(message ?? "").isEmpty { problems.append("only answer_permission has a decision or a message") }
         if action != .setMode, mode != nil { problems.append("only set_mode has a mode") }
+        if action != .setSetting, setting != nil { problems.append("only set_setting has a setting object") }
         if (message ?? "").count > 2000 { problems.append("message is longer than 2,000 characters") }
+        return problems
+    }
+
+    nonisolated private static func problems(of setting: Setting, in context: BrainContext) -> [String] {
+        var problems: [String] = []
+        let modelChange = setting.agent != nil || setting.model != nil || setting.effort != nil
+        let maxChange = setting.maxRunning != nil
+        let reserveChange = setting.account != nil || setting.lift != nil
+        guard [modelChange, maxChange, reserveChange].filter({ $0 }).count == 1 else {
+            return ["set_setting changes one model, maxRunning, or account reserve"]
+        }
+        if modelChange {
+            guard let agent = setting.agent, ["claude", "codex"].contains(agent) else { return ["setting needs a tool"] }
+            if let model = setting.model, !(context.settingModels[agent] ?? []).contains(model) {
+                problems.append("unknown model; choices: " + (context.settingModels[agent] ?? []).joined(separator: ", "))
+            }
+            if let effort = setting.effort, !(context.settingEfforts[agent] ?? []).contains(effort) {
+                problems.append("unknown effort; choices: " + (context.settingEfforts[agent] ?? []).joined(separator: ", "))
+            }
+            if setting.model == nil && setting.effort == nil { problems.append("setting needs a model or effort") }
+        } else if let max = setting.maxRunning, !JobSlots.range.contains(max) {
+            problems.append("maxRunning goes from \(JobSlots.range.lowerBound) to \(JobSlots.range.upperBound)")
+        } else if reserveChange {
+            guard let account = setting.account else { problems.append("reserve setting needs an account"); return problems }
+            if !context.settingAccounts.contains(account) { problems.append("unknown account") }
+            if setting.lift == nil { problems.append("reserve setting needs lift") }
+        }
         return problems
     }
 
@@ -336,6 +382,18 @@ extension Plan {
             "properties": ["text": ["type": "string"], "options": ["type": "array", "items": ["type": "string"], "maxItems": Question.mostOptions],
                            "recommended": ["type": ["integer", "null"], "minimum": 0, "maximum": Question.mostOptions - 1]],
         ]
+        let setting: [String: Any] = [
+            "type": "object", "additionalProperties": false,
+            "required": ["agent", "model", "effort", "max_running", "account", "lift"],
+            "properties": [
+                "agent": nullable(["enum": ["claude", "codex"]]),
+                "model": ["type": ["string", "null"]],
+                "effort": ["type": ["string", "null"]],
+                "max_running": ["type": ["integer", "null"], "minimum": 1, "maximum": 20],
+                "account": nullable(["enum": context.settingAccounts]),
+                "lift": ["type": ["boolean", "null"]],
+            ],
+        ]
         // The jobs stop_agent, move_job, answer_permission and set_mode may name, the briefing's order kept.
         var named = context.jobs
         for id in context.movable + context.permissions where !named.contains(id) { named.append(id) }
@@ -349,9 +407,9 @@ extension Plan {
         ]
         let schema: [String: Any] = [
             "type": "object", "additionalProperties": false,
-            "required": ["action", "reply", "dispatches", "question", "jobs", "all", "move", "decision", "message", "mode"],
+            "required": ["action", "reply", "dispatches", "question", "jobs", "all", "move", "decision", "message", "mode", "setting"],
             "properties": [
-                "action": ["enum": ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore", "answer_permission", "set_mode", "read_job"]],
+                "action": ["enum": ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore", "answer_permission", "set_mode", "read_job", "set_setting"]],
                 "reply": ["type": "string", "maxLength": replyLength],
                 "dispatches": ["type": "array", "items": dispatch, "maxItems": 10],
                 "question": nullable(question),
@@ -361,6 +419,7 @@ extension Plan {
                 "decision": nullable(["enum": PermissionDecision.allCases.map(\.rawValue)]),
                 "message": ["type": ["string", "null"], "maxLength": 2000],
                 "mode": nullable(["enum": PermissionMode.allCases.map(\.rawValue)]),
+                "setting": nullable(setting),
             ],
         ]
         return (try? JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
@@ -532,6 +591,8 @@ nonisolated struct Planner: Sendable {
             : ""
         return """
         You are Oby's brain, inside a Mac app that hands coding work (reviews, fixes, builds, tests, investigations) to a coding agent working in its own copy of a repository, and that talks with the user about that work. Turn what the user says now into one plan that matches the JSON schema.
+
+        Settings can be changed by asking: set_setting changes one tool's listed model or effort, the 1-to-20 maxRunning cap, or an account's weekly reserve. Plan separate set_setting actions for separate tools, and use the choices in the briefing.
 
         You work like Claude Code: the user tells you what they want in plain words, and you make it happen, one action at a time. Each plan is one action. When it changes something (stop_agent, move_job, answer_permission, set_mode), Oby does it and asks you again, with the user's words followed by what it already did this turn and a fresh briefing; then plan the next action the request still needs, until all of it is done, and finish with reply_only and an empty reply (Oby tells the user what it did). Never plan an action Oby already did this turn. One request can take several steps: "Deskree's limit is full, move its jobs to Personal and Codex" is a move_job of some of the jobs on Deskree to Personal, then a move_job of the rest to Codex.
 
