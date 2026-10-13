@@ -631,8 +631,16 @@ final class Failures {
             let evidence = FailureRecord.Evidence(
                 summary: leaks.redact("The user said: \(turn.said)\n\nWhat went wrong before rules planned:\n" + turn.refused.map { "- " + $0 }.joined(separator: "\n")),
                 step: "Planning: the brain's turn", log: Self.log(around: nil, now: turn.date))
+            let cause = turn.refused.joined(separator: " ")
+            let namedCause: String
+            if cause.localizedCaseInsensitiveContains("timeout") { namedCause = "timeout" }
+            else if let range = cause.range(of: "exit code ") {
+                let code = cause[range.upperBound...].prefix { $0.isNumber }
+                namedCause = code.isEmpty ? "exit code" : "exit code \(code)"
+            } else if cause.localizedCaseInsensitiveContains("empty") { namedCause = "empty" }
+            else { namedCause = "unknown cause" }
             save(FailureRecord(id: id, trigger: .brainFallback, date: turn.date, title: "The brain",
-                               what: "The brain didn't answer, so rules planned instead.", evidence: evidence))
+                               what: "The brain fallback was caused by \(namedCause); rules planned instead.", evidence: evidence))
         }
         study()
     }
