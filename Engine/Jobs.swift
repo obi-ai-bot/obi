@@ -1395,8 +1395,11 @@ nonisolated enum Agents {
                 // An absolute path, as `git worktree add` writes it.
                 let admin = String(pointer.dropFirst("gitdir: ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
                 let common = URL(filePath: admin).deletingLastPathComponent().deletingLastPathComponent().path
-                args += ["--overlay-src", common, "--tmp-overlay", common]
-                for real in ["objects", "refs", "logs", "packed-refs"] { args += ["--bind-try", "\(common)/\(real)", "\(common)/\(real)"] }
+                // Keep the common git directory read-only, while exposing the writable data
+                // directories separately. Binding the directory refreshes packed-refs after
+                // an outside rename; binding the file itself would pin its old inode.
+                args += ["--ro-bind", common, common]
+                for real in ["objects", "refs", "logs"] { args += ["--bind-try", "\(common)/\(real)", "\(common)/\(real)"] }
                 args += ["--bind", admin, admin, "--ro-bind", "\(admin)/commondir", "\(admin)/commondir"]
             }
         }
@@ -1544,6 +1547,10 @@ nonisolated enum Workspace {
             let excluded = (try? String(contentsOf: exclude, encoding: .utf8)) ?? ""
             try (excluded + "\n.oby/\n").write(to: exclude, atomically: true, encoding: .utf8)
         }
+        // The runner and agents share this clone. Keep the runner's Git from packing refs
+        // while an agent is using them through bubblewrap.
+        try await git(["config", "gc.auto", "0"])
+        try await git(["config", "maintenance.auto", "false"])
         // One at a time with the clone's other fetches (#235).
         try await Publish.gitFetch(["--prune", "--quiet", "origin"], into: clone)
         // Agents commit unsigned: no signing key reaches them, and a gpgsign from the user's own

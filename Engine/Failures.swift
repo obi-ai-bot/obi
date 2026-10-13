@@ -754,7 +754,7 @@ final class Failures {
         }
         do {
             do {
-                try await git(["fetch", "--prune", "--quiet", "origin"])
+                try await git(["-c", "gc.auto=0", "fetch", "--prune", "--quiet", "origin"])
             } catch {
                 Logger.jobs.error("failures: Oby's source couldn't be fetched: \(error.localizedDescription, privacy: .public)")
             }
