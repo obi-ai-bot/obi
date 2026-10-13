@@ -8,6 +8,8 @@ nonisolated enum Shell {
         var err: String
         /// It ran past its timeout and Oby ended it.
         var timedOut = false
+        /// The process ended from an uncaught signal instead of returning an exit code.
+        var terminatedBySignal = false
         var text: String { String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
@@ -128,7 +130,8 @@ nonisolated enum Shell {
                 process.waitUntilExit()
                 kill.cancel()
                 done.resume(returning: Output(status: process.terminationStatus, out: out, err: String(decoding: err.data, as: UTF8.self),
-                                              timedOut: !expired.data.isEmpty))
+                                              timedOut: !expired.data.isEmpty,
+                                              terminatedBySignal: process.terminationReason == .uncaughtSignal))
             }
         }
     }

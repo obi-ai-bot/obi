@@ -126,6 +126,18 @@ struct UpdateTests {
         #expect(try String(contentsOf: updates.binary, encoding: .utf8) == "old binary")
     }
 
+    @Test(arguments: [true, false])
+    func timedOutOrSignaledTestRunDoesNotRerunNamedFailures(timedOut: Bool) async throws {
+        fake.testResults = [Shell.Output(status: 1,
+                                         out: Data("✘ Test UpdateTests.example() recorded an issue".utf8), err: "",
+                                         timedOut: timedOut, terminatedBySignal: !timedOut)]
+        await updates.poll()
+        #expect(fake.calls.filter { $0.args.first == "swift" && $0.args.dropFirst().first == "test" }.map(\.args) == [["swift", "test"]])
+        #expect(fake.installs == 0 && fake.restarts == 0)
+        #expect(desk.inbox.count == 1)
+        #expect(desk.inbox[0].text.contains(timedOut ? "timed out" : "terminated by signal"))
+    }
+
     @Test func buildFailureReportsCompilerDiagnosticsWithoutRerunningTests() async throws {
         updates.command = { [fake] args, directory, env in
             fake.calls.append((args, directory, env))

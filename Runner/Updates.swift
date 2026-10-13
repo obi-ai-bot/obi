@@ -145,8 +145,12 @@ final class Updates {
             try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: home) }
             let result = try await testCommand(["swift", "test"], source, MacCheck.home(home))
-            if result.status != 0 || result.timedOut {
+            if result.status != 0 || result.timedOut || result.terminatedBySignal {
                 let output = [result.text, result.err].filter { !$0.isEmpty }.joined(separator: "\n")
+                guard !result.timedOut, !result.terminatedBySignal else {
+                    let reason = result.timedOut ? "timed out" : "terminated by signal"
+                    throw Shell.Failure(message: "swift test \(reason)")
+                }
                 let failures = Self.testFailures(in: output)
                 guard !failures.isEmpty else {
                     let diagnostics = Self.compilerDiagnostics(output)
