@@ -190,6 +190,10 @@ final class APITests {
                 #expect(status["github"] as? String == "owner")
                 // Nor any check runs: the owner can't write them, so reviews and Mac checks stay in Oby (#198).
                 #expect(status["checks"] as? String == "no app")
+                let cleanup = try #require(status["cleanup"] as? [String: Any])
+                #expect(cleanup["path"] as? String == Workspace.root.appending(path: "jobs").path)
+                #expect(cleanup["bytes"] is Int)
+                #expect(cleanup["lastRun"] is NSNull)
             }
             try await client.execute(uri: "/v1/nowhere", method: .get, headers: owner) { response in
                 #expect(response.status == .notFound)

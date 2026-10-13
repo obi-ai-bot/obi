@@ -368,10 +368,13 @@ There's no draft to confirm any more: the work the brain plans starts as it's pl
  "models": {"claude": {"model": "claude-opus-5-5", "effort": "xhigh"}, "codex": {"model": "gpt-6-sol", "effort": "high"}},
  "maxRunning": 6, "running": 4,
  "clearedAt": "2026-10-10T08:12:00Z",
- "github": "app", "checks": "ok", "permissions": {"mode": "bypass"}}
+ "github": "app", "checks": "ok", "permissions": {"mode": "bypass"},
+ "cleanup": {"path": "/srv/nvme/oby/jobs", "bytes": 8912896, "lastRun": "2026-10-13T08:00:00Z"}}
 ```
 
 `permissions.mode` is Settings › Permissions: the mode new jobs get (`PUT /v1/settings/permissions`). Older runners don't send the key.
+
+`cleanup` is the runner's job-worktree disk usage and cleanup status. `path` is the worktree folder, `bytes` is its allocated disk usage, and `lastRun` is when the last cleanup pass completed, or null before the first pass. The runner runs cleanup at startup and every three hours. It removes a worktree only for a settled job finished more than 24 hours ago (merged, closed, dismissed or stopped), or immediately after an Oby review job has a verdict; open pull requests, jobs needing the user, queued or waiting jobs, and worktrees in use by an agent, check, publish or merge are kept. Older runners don't send the key.
 
 `runner.version` is the running API version. `runner.update` adds `{"commit": "<dev SHA>", "waiting": "<candidate SHA>", "phase": "draining"}` for Settings › Runner. `commit` is the running executable's dev commit, or null before its first self-install or after an untracked manual install. `waiting` is null when no update is pending. `phase` is `idle`, `building`, `ready` (built and tested, waiting for its turn to restart), `draining`, `restarting` or `failed`. Clients of older runners accept an absent `update`; refresh status to observe progress.
 

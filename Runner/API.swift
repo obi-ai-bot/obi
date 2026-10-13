@@ -152,7 +152,7 @@ final class API {
         Self.json(Status(runner: .init(version: Self.version, host: ProcessInfo.processInfo.hostName, update: updates?.status),
                          accounts: accounts, models: .current, maxRunning: desk.maxRunning, running: desk.runningCount, clearedAt: cleared.at,
                          github: (GitHubApp.inUse ? GitHubActor.app : .owner).rawValue, checks: GitHubApp.checks,
-                         permissions: ModeJSON(mode: desk.defaultMode.rawValue)))
+                         permissions: ModeJSON(mode: desk.defaultMode.rawValue), cleanup: .init(path: desk.cleanupStatus.path, bytes: desk.cleanupStatus.bytes, lastRun: desk.cleanupStatus.lastRun)))
     }
 
     /// Clear done, on the iPhone or the Mac: the runner records now, answers it, and tells every
@@ -820,8 +820,24 @@ struct Status: Encodable {
     var checks: String = "no app"
     /// Settings › Permissions: the mode new jobs get.
     var permissions: ModeJSON
+    var cleanup: CleanupJSON
 
-    private enum Keys: String, CodingKey { case runner, accounts, models, maxRunning, running, clearedAt, github, checks, permissions }
+    struct CleanupJSON: Encodable {
+        var path: String
+        var bytes: Int64
+        var lastRun: Date?
+
+        private enum Keys: String, CodingKey { case path, bytes, lastRun }
+
+        func encode(to encoder: any Encoder) throws {
+            var keys = encoder.container(keyedBy: Keys.self)
+            try keys.encode(path, forKey: .path)
+            try keys.encode(bytes, forKey: .bytes)
+            try keys.encode(lastRun, forKey: .lastRun)
+        }
+    }
+
+    private enum Keys: String, CodingKey { case runner, accounts, models, maxRunning, running, clearedAt, github, checks, permissions, cleanup }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -834,6 +850,7 @@ struct Status: Encodable {
         try keys.encode(github, forKey: .github)
         try keys.encode(checks, forKey: .checks)
         try keys.encode(permissions, forKey: .permissions)
+        try keys.encode(cleanup, forKey: .cleanup)
     }
 }
 
