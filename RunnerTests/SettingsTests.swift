@@ -12,6 +12,13 @@ struct SettingsTests {
         Plan(action: .setSetting, reply: "", dispatches: [], question: nil, setting: setting)
     }
 
+    @Test func complexEffortDefaultsMatchTheToolDefaults() {
+        #expect(AgentModels.defaults["claude.complexEffort"] == "xhigh")
+        #expect(AgentModels.defaults["codex.complexEffort"] == "high")
+        #expect(CodexRPC.turnStart(thread: "t", prompt: "complex", model: "gpt-6.1-sol",
+                                   effort: AgentModels.defaults["codex.complexEffort"] ?? "")["effort"] as? String == "high")
+    }
+
     static func setting(_ agent: String? = nil, model: String? = nil, effort: String? = nil, maxRunning: Int? = nil, account: String? = nil, lift: Bool? = nil) -> String {
         let quote = { (value: String?) in value.map { "\"\($0)\"" } ?? "null" }
         return "{\"action\":\"set_setting\",\"reply\":\"\",\"question\":null,\"dispatches\":[],\"jobs\":[],\"setting\":{\"agent\":\(quote(agent)),\"model\":\(quote(model)),\"effort\":\(quote(effort)),\"maxRunning\":\(maxRunning.map(String.init) ?? "null"),\"account\":\(quote(account)),\"lift\":\(lift.map(String.init) ?? "null")}}"
@@ -40,6 +47,23 @@ struct SettingsTests {
             == ["maxRunning goes from 1 to 20"])
         #expect(plan(Plan.Setting(agent: "claude", model: "unknown")).problems(in: context, canary: "x")
             == ["unknown model; choices: claude-sonnet-5-5"])
+    }
+
+    @Test func validatesComplexEffortAgainstTheToolsChoices() {
+        #expect(plan(Plan.Setting(agent: "codex", complexEffort: "medium"))
+            .problems(in: context, canary: "x").isEmpty)
+        #expect(plan(Plan.Setting(agent: "codex", complexEffort: "xhigh"))
+            .problems(in: context, canary: "x") == ["unknown complex effort; choices: medium"])
+    }
+
+    @Test func complexEffortChangesAndRestoresTheToolSetting() async throws {
+        let folder = try temporaryFolder()
+        let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        let old = AgentModels.value("codex", "complexEffort")
+        let reply = await desk.applySetting(Plan.Setting(agent: "codex", complexEffort: "xhigh"))
+        #expect(AgentModels.value("codex", "complexEffort") == "xhigh")
+        #expect(reply.contains("complex jobs") && reply.contains("Extra high"))
+        UserDefaults.standard.set(old, forKey: "codex.complexEffort")
     }
 
     @Test func modelAndEffortChangeLandsInSettings() async throws {

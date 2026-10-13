@@ -60,6 +60,10 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var check: String?
     /// A model for this job instead of Settings › Models: the stronger one the card offered.
     var model: String?
+    /// The draft's complexity, or nil on jobs created before it was recorded.
+    var complexity: Plan.Complexity? = nil
+    /// The effort used by this job's turns, recorded so reports and resumed rounds agree.
+    var effort: String? = nil
     /// What the user told the agent along the way, oldest first.
     var notes: [String]?
     /// Execution facts used by the shared pipeline derivation; nil on older jobs.
@@ -617,6 +621,8 @@ final class ClaudeAgent: AgentRun {
     private let configDirectory: URL?
     /// This job's model, or nil for Settings › Models.
     var model: String?
+    /// The effort selected for this job's complexity, or nil for the tool default.
+    var effort: String?
     /// The most turns it takes for one message (`JobLimits.maxTurns`), or nil for no limit.
     var maxTurns: Int?
     /// The broker's endpoint for this job (Engine/Connected.swift), or nil when nothing is connected.
@@ -690,7 +696,7 @@ final class ClaudeAgent: AgentRun {
 
     /// The command line and environment Claude Code starts with.
     nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil,
-                                   mcp: AgentMCP? = nil, mode: PermissionMode = .bypass) throws -> (arguments: [String], environment: [String: String]) {
+                                   mcp: AgentMCP? = nil, mode: PermissionMode = .bypass, effort: String? = nil) throws -> (arguments: [String], environment: [String: String]) {
         // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
         // mcpServers (Tetrix) stay; only its claude.ai connectors are off. The broker joins them as
         // `oby`, from a file, with the job's token only.
@@ -707,7 +713,7 @@ final class ClaudeAgent: AgentRun {
                             + (brokerConfig.map { ["--mcp-config", $0] } ?? [])
                             + ["--mcp-config", mcpFile(worktree: worktree).path,
                                "--permission-mode", StreamJSON.claudeMode(mode),
-                               "--model", model ?? AgentModels.value("claude", "model"), "--effort", AgentModels.value("claude", "effort")]
+                               "--model", model ?? AgentModels.value("claude", "model"), "--effort", effort ?? AgentModels.value("claude", "effort")]
                             + (maxTurns.map { ["--max-turns", String($0)] } ?? [])
                             + (resume.map { ["--resume", $0] } ?? [])),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude",
@@ -726,7 +732,7 @@ final class ClaudeAgent: AgentRun {
         try Self.writeMCP(Self.mcpConfig(configDirectory: configDirectory), to: Self.mcpFile(worktree: worktree))
         let launch: (arguments: [String], environment: [String: String])
         do {
-            launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mcp: mcp, mode: mode)
+            launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mcp: mcp, mode: mode, effort: effort)
         } catch {
             dropMCP()
             throw error

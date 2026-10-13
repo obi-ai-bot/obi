@@ -467,8 +467,10 @@ struct ModelsSettingsView: View {
     let feed: RunnerFeed
     @AppStorage("claude.model") private var claudeModel = AgentModels.defaults["claude.model"] ?? ""
     @AppStorage("claude.effort") private var claudeEffort = AgentModels.defaults["claude.effort"] ?? ""
+    @AppStorage("claude.complexEffort") private var claudeComplexEffort = AgentModels.defaults["claude.complexEffort"] ?? ""
     @AppStorage("codex.model") private var codexModel = AgentModels.defaults["codex.model"] ?? ""
     @AppStorage("codex.effort") private var codexEffort = AgentModels.defaults["codex.effort"] ?? ""
+    @AppStorage("codex.complexEffort") private var codexComplexEffort = AgentModels.defaults["codex.complexEffort"] ?? ""
     /// What the signed-in Codex account offers, from its own model list.
     @State private var codexModels: [CodexModel] = []
     /// What the runner offers, once it has answered.
@@ -484,12 +486,18 @@ struct ModelsSettingsView: View {
                 Picker("Effort", selection: $claudeEffort) {
                     ForEach(AgentModels.claudeEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
                 }
+                Picker("Complex job effort", selection: $claudeComplexEffort) {
+                    ForEach(AgentModels.claudeEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
+                }
             }
             Section("Codex on this Mac") {
                 Picker("Model", selection: $codexModel) {
                     ForEach(codexChoices, id: \.id) { Text($0.name).tag($0.id) }
                 }
                 Picker("Effort", selection: $codexEffort) {
+                    ForEach(codexEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
+                }
+                Picker("Complex job effort", selection: $codexComplexEffort) {
                     ForEach(codexEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
                 }
             }

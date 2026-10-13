@@ -5,17 +5,23 @@ import Foundation
 extension Desk {
     func applySetting(_ setting: Plan.Setting?) async -> String {
         guard let setting else { return "Couldn't change settings: the setting was missing." }
-        if let agent = setting.agent, setting.model != nil || setting.effort != nil {
+        if let agent = setting.agent, setting.model != nil || setting.effort != nil || setting.complexEffort != nil {
             let oldModel = AgentModels.value(agent, "model")
             let oldEffort = AgentModels.value(agent, "effort")
+            let oldComplexEffort = AgentModels.value(agent, "complexEffort")
             if let model = setting.model { UserDefaults.standard.set(model, forKey: "\(agent).model") }
             if let effort = setting.effort { UserDefaults.standard.set(effort, forKey: "\(agent).effort") }
+            if let effort = setting.complexEffort { UserDefaults.standard.set(effort, forKey: "\(agent).complexEffort") }
             _ = UserDefaults.standard.synchronize()
             let newModel = AgentModels.value(agent, "model")
             let newEffort = AgentModels.value(agent, "effort")
+            let newComplexEffort = AgentModels.value(agent, "complexEffort")
             var changed = "\(AgentModels.name(oldModel)) · \(AgentModels.effortName(oldEffort)) to \(AgentModels.name(newModel)) · \(AgentModels.effortName(newEffort))"
-            if setting.model != nil && setting.effort == nil { changed = "\(AgentModels.name(oldModel)) to \(AgentModels.name(newModel))" }
-            if setting.model == nil && setting.effort != nil { changed = "\(AgentModels.effortName(oldEffort)) to \(AgentModels.effortName(newEffort))" }
+            if setting.model != nil && setting.effort == nil && setting.complexEffort == nil { changed = "\(AgentModels.name(oldModel)) to \(AgentModels.name(newModel))" }
+            if setting.model == nil && setting.effort != nil && setting.complexEffort == nil { changed = "\(AgentModels.effortName(oldEffort)) to \(AgentModels.effortName(newEffort))" }
+            if setting.model == nil && setting.effort == nil && setting.complexEffort != nil {
+                changed = "complex jobs from \(AgentModels.effortName(oldComplexEffort)) to \(AgentModels.effortName(newComplexEffort))"
+            }
             return "Changed \(Job.agentNames[agent] ?? agent)'s \(changed)."
         }
         if let max = setting.maxRunning {

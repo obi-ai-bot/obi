@@ -99,6 +99,9 @@ struct RunnerModelsSections: View {
                 Picker("Effort", selection: binding(\.claude.effort)) {
                     ForEach(options.claude.efforts ?? [], id: \.self) { Text(ModelChoice.effortName($0)).tag($0) }
                 }
+                Picker("Complex job effort", selection: complexBinding(\.claude, choices: options.claude.complexEfforts ?? options.claude.efforts ?? [])) {
+                    ForEach(options.claude.complexEfforts ?? options.claude.efforts ?? [], id: \.self) { Text(ModelChoice.effortName($0)).tag($0) }
+                }
             }
             Section(title("Codex")) {
                 Picker("Model", selection: binding(\.codex.model)) {
@@ -108,6 +111,9 @@ struct RunnerModelsSections: View {
                     ForEach(options.codex.models.first { $0.id == current.codex.model }?.efforts ?? [], id: \.self) {
                         Text(ModelChoice.effortName($0)).tag($0)
                     }
+                }
+                Picker("Complex job effort", selection: complexBinding(\.codex, choices: options.codex.models.first { $0.id == current.codex.model }?.efforts ?? [])) {
+                    ForEach(options.codex.models.first { $0.id == current.codex.model }?.efforts ?? [], id: \.self) { Text(ModelChoice.effortName($0)).tag($0) }
                 }
                 if let problem { Text(problem).foregroundStyle(.red) }
             }
@@ -131,6 +137,21 @@ struct RunnerModelsSections: View {
                 } catch {
                     problem = error.localizedDescription
                 }
+            }
+        }
+    }
+
+    private func complexBinding(_ path: WritableKeyPath<ModelSettings, ModelChoice>, choices: [String]) -> Binding<String> {
+        Binding {
+            let choice = (chosen ?? models)?[keyPath: path]
+            return choice?.complexEffort ?? choice?.effort ?? choices.first ?? ""
+        } set: { value in
+            guard var changed = chosen ?? models else { return }
+            changed[keyPath: path].complexEffort = value
+            chosen = changed
+            Task {
+                do { try await save(changed); problem = nil }
+                catch { problem = error.localizedDescription }
             }
         }
     }

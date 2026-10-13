@@ -306,10 +306,10 @@ final class APITests {
         let json = String(decoding: try API.encode(JobJSON(job: job)), as: UTF8.self)
         #expect(json.contains(#""created":"2026-10-09T21:42:53Z""#))
         #expect(json.contains(#""started":"2026-10-09T21:42:55Z""#))
-        for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "fromPR", "check", "model", "notes", "pullRequest", "pullRequestError",
+        for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "fromPR", "check", "model", "effort", "complexity", "notes", "pullRequest", "pullRequestError",
                     "dismissed", "reviewing", "review", "reviewError", "reviewOf", "files", "lead", "claim", "question", "limit", "startCommit", "firstSwiftBuildSeconds", "macCheck", "mergeError", "appleCheck", "appleRan", "tetrix", "xcodeCloud", "xcodeCloudError", "startWhen", "waiting", "permission"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 62)
+        #expect(decoded.count == 64)
         #expect(decoded["cloudNeedsYou"] as? Bool == false)
         // A job from before modes ran as Bypass does.
         #expect(decoded["mode"] as? String == "bypass")

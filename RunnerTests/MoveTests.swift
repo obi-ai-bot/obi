@@ -179,6 +179,32 @@ struct MoveJobTests {
         return try #require(made.agents.last?.agent)
     }
 
+    @Test func complexJobUsesTheDestinationToolsEffortAfterAMove() async throws {
+        let claudeKey = "claude.complexEffort"
+        let codexKey = "codex.complexEffort"
+        let oldClaude = UserDefaults.standard.object(forKey: claudeKey)
+        let oldCodex = UserDefaults.standard.object(forKey: codexKey)
+        defer {
+            if let oldClaude { UserDefaults.standard.set(oldClaude, forKey: claudeKey) } else { UserDefaults.standard.removeObject(forKey: claudeKey) }
+            if let oldCodex { UserDefaults.standard.set(oldCodex, forKey: codexKey) } else { UserDefaults.standard.removeObject(forKey: codexKey) }
+        }
+        UserDefaults.standard.set("xhigh", forKey: claudeKey)
+        UserDefaults.standard.set("ultra", forKey: codexKey)
+
+        var complex = job
+        complex.id = "complex"
+        complex.kind = .fix
+        complex.account = personal.id
+        complex.agent = "claude"
+        complex.complexity = .complex
+        desk.dispatch(complex)
+        try await until { desk.job("complex")?.status == .running }
+        #expect(made.agents.first { $0.job.id == "complex" }?.job.effort == "xhigh")
+
+        let moved = try desk.move("complex", to: MoveTarget(agent: "codex"))
+        #expect(moved.agent == "codex" && moved.effort == "ultra")
+    }
+
     @Test func aRunningJobStopsAndGoesOnWhereItWasMoved() async throws {
         let first = try await running("moving", rounds: 3)
         first.onEvent(.session("thread-1"))
@@ -257,11 +283,11 @@ struct MoveJobTests {
         let moved = try desk.move("later", to: MoveTarget(model: "claude-fable-5-1"))
         #expect(moved.status == .done && moved.agent == "claude" && moved.model == "claude-fable-5-1" && moved.session == nil)
         #expect(moved.movedLine == "Moved from Codex · Deskree to Claude Code · Personal · Fable 5.1")
-        #expect(made.agents.count == 1)
+        #expect(made.agents.filter { $0.job.id == "later" }.count == 1)
         #expect(Moves.reply(moved) == "Moved Vault secrets from Codex · Deskree to Claude Code · Personal · Fable 5.1. Its next round runs there: tell it something, or Try again.")
         try desk.message("later", "finish the other half")
-        let (second, started, _, resume) = try #require(made.agents.last)
-        #expect(made.agents.count == 2 && resume == nil && started.agent == "claude" && started.model == "claude-fable-5-1")
+        let (second, started, _, resume) = try #require(made.agents.last { $0.job.id == "later" })
+        #expect(made.agents.filter { $0.job.id == "later" }.count == 2 && resume == nil && started.agent == "claude" && started.model == "claude-fable-5-1")
         #expect(second.prompt.contains("The user moved this job to you from Codex · Deskree."))
         #expect(second.prompt.contains("The message that started this round:\n\n> finish the other half"))
     }
