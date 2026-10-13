@@ -55,6 +55,19 @@ struct AttachmentTests {
         #expect(Attachments.inputs(job) == [".oby/inputs/screenshot-1a2b3c.png", ".oby/inputs/clipboard-4d5e6f.txt"])
     }
 
+    @Test func dispatchAttachmentsMustBeInTheAppsAttachmentFolder() throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let attached = folder.appending(path: "attachments/screenshot.png")
+        try FileManager.default.createDirectory(at: attached.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try png.write(to: attached)
+
+        #expect(try Attachments.validated([attached.path], in: attached.deletingLastPathComponent()) == [attached.path])
+        #expect(throws: Shell.Failure.self) {
+            try Attachments.validated([folder.appending(path: "private.txt").path], in: attached.deletingLastPathComponent())
+        }
+    }
+
     /// A file that's gone (kept too long) leaves the job without it, rather than failing the job.
     @Test func aMissingAttachmentIsLeftOut() throws {
         let (worktree, screenshot, clipboard) = try worktree()

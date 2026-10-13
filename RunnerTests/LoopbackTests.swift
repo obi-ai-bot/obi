@@ -110,6 +110,18 @@ struct LoopbackTests {
 
 /// The runner's own token and home on a Mac (Engine/LocalRunner.swift).
 struct LocalRunnerTests {
+    @MainActor @Test func localRunnerUsesTheAppsAccounts() throws {
+        let root = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let appRoot = root.appending(path: "Oby")
+        let app = AccountStore(root: appRoot)
+        let account = try app.add(agent: "codex", name: "Work", payer: "Deskree")
+
+        let local = LocalRunner.accounts(local: true, appRoot: appRoot, workspace: root.appending(path: "Runner"))
+        #expect(local.accounts.map(\.account) == app.accounts.map(\.account))
+        #expect(local.accounts.last?.account == account)
+    }
+
     @Test func loopbackNames() {
         for host in ["127.0.0.1", "127.0.0.1:7777", "localhost", "Localhost:1", "[::1]", "[::1]:7777"] {
             #expect(LocalRunner.isLoopback(host: host), Comment(rawValue: host))

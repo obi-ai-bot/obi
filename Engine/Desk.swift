@@ -536,12 +536,18 @@ final class Desk {
         let said = words.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !said.isEmpty else { return }
         if Conversation.cancels(said) { return cancel() }
-        cancel()
+        let replacing = plansElsewhere() ? planning : nil
+        drop()
         asking += 1
         let mine = asking
         if plansElsewhere() {
             talk = .thinking(said)
-            Task {
+            planning = Task {
+                // Invalidate the runner before cancelling the old request. Otherwise the old
+                // request can finish on the runner and start work before its cancellation arrives.
+                if replacing != nil { await cancelElsewhere() }
+                replacing?.cancel()
+                _ = await replacing?.result
                 var result: Talk
                 do { result = try await planElsewhere(said, nil) }
                 catch { result = .reply(error.localizedDescription) }
@@ -580,9 +586,24 @@ final class Desk {
     /// Drops the turn under way: its words leave the thread, and its answer, when it comes, is
     /// ignored. Work the plan started already goes on: stop it by name.
     func cancel() {
+        drop()
+        guard plansElsewhere() else { return }
+        // Its request to the runner stops, and the runner is told, so its plan starts and stops nothing.
+        let planning = planning
+        self.planning = Task {
+            await cancelElsewhere()
+            planning?.cancel()
+            _ = await planning?.result
+        }
+    }
+
+    /// The plan under way on the runner (`ask`, when planning elsewhere), until it ends or is cancelled.
+    @ObservationIgnored private var planning: Task<Void, Never>?
+
+    /// Forgets the turn under way, whoever is planning it.
+    private func drop() {
         asking += 1
         stopRequested = false
-        if plansElsewhere() { Task { await cancelElsewhere() } }
         if let pending {
             remove(pending)
             self.pending = nil

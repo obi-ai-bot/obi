@@ -17,14 +17,14 @@ nonisolated enum LocalRunner {
     static let port = 7777
     /// Where the Mac app follows the runner on this Mac.
     static let url = URL(string: "http://127.0.0.1:\(port)")!
-    /// The keychain service the token lives under (Oby.app and `oby-runner` are signed by the
-    /// same team, so each reads what the other made without a prompt), and the item's name.
+    /// The keychain service the token lives under, and the item's name. Oby.app and `oby-runner`
+    /// are different programs: the first time one reads what the other made, macOS may ask the user.
     static let keychainService = "com.deskree.oby.runner"
     static let tokenName = "token"
 
     /// The app's own folder: `~/Library/Application Support/Oby` (`Workspace.root` without `OBY_HOME`).
-    /// A Mac runner shares its `accounts.json` and account homes with the app (Settings › Accounts
-    /// adds and signs them in), and nothing else.
+    /// A Mac runner shares its `accounts.json` and account homes (Settings › Accounts adds and
+    /// signs them in: `accounts(local:)`) and the app's attachments with the app, and nothing else.
     static var appRoot: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Oby", directoryHint: .isDirectory)
     }
@@ -32,6 +32,17 @@ nonisolated enum LocalRunner {
     /// What the runner's `OBY_HOME` defaults to on a Mac: `~/Library/Application Support/Oby/Runner`,
     /// inside the app's own folder but never the same: each has its own `oby.sqlite`, clones and worktrees.
     static var home: URL { appRoot.appending(path: "Runner", directoryHint: .isDirectory) }
+
+    /// Where the app keeps what the user attached to a request (the tray's screenshots and clipboard):
+    /// the only files a dispatch may attach to a job (`Attachments.validated`).
+    static var attachments: URL { appRoot.appending(path: "attachments", directoryHint: .isDirectory) }
+
+    /// The accounts the runner spreads jobs across. A runner for this Mac's app (`local`) reads the
+    /// app's own `accounts.json` and account homes, so what Settings set up (Codex, named Claude
+    /// accounts) is what it runs jobs on; any other runner has accounts of its own, in its `OBY_HOME`.
+    static func accounts(local: Bool, appRoot: URL = appRoot, workspace: URL = Workspace.root) -> AccountStore {
+        AccountStore(root: local ? appRoot : workspace)
+    }
 
     /// Where the token is kept: the keychain on a Mac. Linux runners have an owner instead.
     static var keychain: any LocalTokenStore {

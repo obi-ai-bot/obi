@@ -93,12 +93,9 @@ Task {
     }
 }
 // Jobs that were queued or running when the runner went down carry on (Engine/Restarts.swift).
-#if os(macOS)
-let accountRoot = LocalRunner.appRoot
-#else
-let accountRoot = Workspace.root
-#endif
-let desk = Desk(accounts: AccountStore(root: accountRoot), restarts: Restarts(file: Workspace.root.appending(path: "restarts.json")))
+// The runner for this Mac's app answers with the app's accounts (LocalRunner.accounts).
+let isLocal: Bool = if case .local = access { true } else { false }
+let desk = Desk(accounts: LocalRunner.accounts(local: isLocal), restarts: Restarts(file: Workspace.root.appending(path: "restarts.json")))
 desk.issueSync.enabled = true
 // Every failure is recorded, studied and acted on (Engine/Failures.swift).
 desk.failureLog.enabled = true
@@ -197,6 +194,16 @@ Task {
     while !Task.isCancelled {
         try? await Task.sleep(for: .seconds(60))
         desk.failureLog.sweep()
+    }
+}
+
+// Accounts the user adds or removes in the app's Settings reach a runner that shares them within seconds.
+if isLocal {
+    Task {
+        while true {
+            try? await Task.sleep(for: .seconds(10))
+            if desk.accounts.reloadSaved() { await desk.accounts.refresh() }
+        }
     }
 }
 
