@@ -606,6 +606,8 @@ private struct OpenIsland: View {
 
     /// The list or a job grows the island up to here, then scrolls: the panel is 760 points tall.
     private static let maxHeight: CGFloat = 420
+    /// What's left under the last row of a list, a job or the chat: the island has no padding of its own there.
+    private static let bottomRoom: CGFloat = 14
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
@@ -680,7 +682,7 @@ private struct OpenIsland: View {
             }
             if selected != nil && thinking {
                 // Over a job's screen, Oby's thinking and its Cancel stay in sight.
-                thinkingRow
+                thinkingRow.padding(.bottom, Self.bottomRoom)
             }
         }
         .padding(insets)
@@ -763,7 +765,9 @@ private struct OpenIsland: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
         }
-        .frame(height: min(contentHeight, selected == nil ? 250 : Self.maxHeight))
+        // The scroll area runs to the island's bottom edge; the last row ends clear of its corners.
+        .contentMargins(.bottom, Self.bottomRoom, for: .scrollContent)
+        .frame(height: min(contentHeight + Self.bottomRoom, selected == nil ? 250 : Self.maxHeight))
     }
 
     /// The jobs under their groups' headings, as Home shows them on the iPhone.
@@ -947,6 +951,7 @@ private struct OpenIsland: View {
             compactChat
             field
         }
+        .padding(.bottom, Self.bottomRoom)
     }
 
     private var compactChat: some View {

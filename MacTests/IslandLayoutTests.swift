@@ -70,6 +70,16 @@ struct IslandLayoutTests {
         }
     }
 
+    /// No band of padding under the open island's content (#322): it runs to the bottom edge.
+    @Test(arguments: screens)
+    func theOpenContentReachesTheBottom(screen: Screen) throws {
+        let open = Self.layout(.open, on: screen)
+        let content = try #require(open.content)
+        #expect(content.maxY == open.size.height)
+        #expect(try #require(open.insets).bottom == 0)
+        #expect(content.minY > 0 && content.width > 0)
+    }
+
     @Test(arguments: screens.filter { $0.notch != nil })
     func theCutoutIsWhereTheScreenHasIt(screen: Screen) throws {
         // Centered on the screen, the island has the camera at its middle.

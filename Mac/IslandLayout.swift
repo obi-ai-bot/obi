@@ -42,6 +42,9 @@ nonisolated struct IslandLayout {
     static let lineHeight: CGFloat = 15
     /// The most lines the hover line wraps to.
     static let maxLines = 2
+    /// The open island has no padding under its content: lists and Settings scroll to the island's
+    /// bottom edge, and each keeps its own room under its last row (#322).
+    static let openBottom: CGFloat = 0
 
     /// The space between "Oby" and the hover line, under the camera or beside Oby.
     static func gap(below: Bool) -> CGFloat { below ? 8 : 12 }
@@ -87,7 +90,7 @@ nonisolated struct IslandLayout {
             let start = layout.character.maxX + 4
             layout.line = CGRect(x: start, y: 0, width: size.width - start - 14, height: size.height)
         case .open:
-            layout.insets = EdgeInsets(top: top + 10, leading: 22, bottom: 22, trailing: 22)
+            layout.insets = EdgeInsets(top: top + 10, leading: 22, bottom: openBottom, trailing: 22)
         case .listening:
             layout.insets = EdgeInsets(top: top + 6, leading: layout.character.maxX + 12, bottom: 24, trailing: 28)
         }
