@@ -1188,10 +1188,10 @@ nonisolated enum Agents {
         ["nice", "-n", String(priority)] + argv
     }
 
-    /// SwiftPM reads this value when a build has no explicit `-j`. Keep half the machine's
+    /// The wrapper passes this value to SwiftPM's explicit `-j` option. Keep half the machine's
     /// threads available for the runner and the other jobs.
     static func buildEnvironment(processorCount: Int = ProcessInfo.processInfo.activeProcessorCount) -> [String: String?] {
-        ["SWIFTPM_BUILD_JOBS": String(max(1, processorCount / 2))]
+        ["OBY_SWIFT_BUILD_JOBS": String(max(1, processorCount / 2))]
     }
 
     static func environment(_ extra: [String: String?], vault: Vault = .shared, base: [String: String] = Shell.environment) throws -> [String: String] {
@@ -1200,8 +1200,8 @@ nonisolated enum Agents {
         return env
     }
 
-    /// Puts the job's private Swift wrapper first on PATH. It records only the first explicit
-    /// `swift build`; the real compiler path stays in the runner's login environment.
+    /// Puts the job's private Swift wrapper first on PATH. It records the first build used by a
+    /// `swift build` or `swift test`; the real compiler path stays in the runner's login environment.
     static func swiftEnvironment(worktree: URL, base: [String: String] = Shell.environment) -> [String: String?] {
         let bin = worktree.appending(path: ".oby/bin")
         guard FileManager.default.fileExists(atPath: bin.appending(path: "swift").path),
@@ -1274,7 +1274,24 @@ nonisolated enum Agents {
                                                  attributes: [.posixPermissions: 0o700])
         let script = """
         #!/bin/sh
-        if [ \"$1\" = build ] && [ ! -e \"$OBY_SWIFT_BUILD_REPORT\" ]; then
+        oby_swift_has_jobs=
+        for oby_swift_arg in \"$@\"; do
+            case \"$oby_swift_arg\" in
+                -j|--jobs|--jobs=*) oby_swift_has_jobs=1 ;;
+            esac
+        done
+        if [ \"$oby_swift_has_jobs\" != 1 ] && { [ \"$1\" = build ] || [ \"$1\" = test ]; }; then
+            set -- \"$@\" -j \"${OBY_SWIFT_BUILD_JOBS:-1}\"
+        fi
+        if [ \"$1\" = test ] && [ ! -e \"$OBY_SWIFT_BUILD_REPORT\" ]; then
+            oby_swift_start=$(date +%s)
+            \"$OBY_REAL_SWIFT\" build -j \"${OBY_SWIFT_BUILD_JOBS:-1}\"
+            oby_swift_status=$?
+            oby_swift_end=$(date +%s)
+            printf '%s\\n' $((oby_swift_end - oby_swift_start)) > \"$OBY_SWIFT_BUILD_REPORT.tmp\"
+            mv \"$OBY_SWIFT_BUILD_REPORT.tmp\" \"$OBY_SWIFT_BUILD_REPORT\"
+            [ $oby_swift_status -eq 0 ] || exit $oby_swift_status
+        elif [ \"$1\" = build ] && [ ! -e \"$OBY_SWIFT_BUILD_REPORT\" ]; then
             oby_swift_start=$(date +%s)
             \"$OBY_REAL_SWIFT\" \"$@\"
             oby_swift_status=$?
@@ -1425,9 +1442,9 @@ nonisolated enum Workspace {
     /// Seeds a job's `.build` from the matching author worktree first, then the runner's warm
     /// `dev` checkout. A stale cache is ignored by its commit marker.
     @discardableResult
-    static func seedBuild(_ job: Job, commit: String, into worktree: URL) async throws -> Bool {
+    static func seedBuild(_ job: Job, commit: String, into worktree: URL, root: URL = Self.root) async throws -> Bool {
         if let author = job.reviewOf {
-            let authorWorktree = Self.worktree(author)
+            let authorWorktree = root.appending(path: "jobs/\(author)")
             let source = authorWorktree.appending(path: ".build")
             if FileManager.default.fileExists(atPath: source.path),
                let head = try? await Shell.ok(["git", "-C", authorWorktree.path, "rev-parse", "HEAD"]),

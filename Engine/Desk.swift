@@ -1834,10 +1834,6 @@ final class Desk {
                     job.firstSwiftBuildSeconds = seconds
                     replace(job)
                 }
-                if job.firstSwiftBuildSeconds == nil, let seconds = result.firstSwiftBuildSeconds {
-                    job.firstSwiftBuildSeconds = seconds
-                    replace(job)
-                }
                 check = result
             } catch {
                 agent.end()
@@ -2501,8 +2497,6 @@ nonisolated enum Rounds {
         var failing: [String]? = nil
         /// What each failing test said, by its id (`MacCheck.messages`), read from all of the output too.
         var said: [String: String] = [:]
-        /// The first build in this job's check, when the command was `swift build`.
-        var firstSwiftBuildSeconds: Int?
         /// No Mac took the Apple check it asked for (`Desk.appleUnbuilt`): it ran, or ran again, with
         /// `oby-check` passing over the build, so it passed without the Apple build.
         var appleUnbuilt = false
@@ -2522,7 +2516,6 @@ nonisolated enum Rounds {
     /// account, and ends it after `timeout` seconds: then it fails, saying so.
     /// `env` is what changes from Oby's environment: `Agents.overrides(vault:)`, so no vault secret reaches it.
     static func run(_ command: String, in worktree: URL, timeout: TimeInterval, env: [String: String?], boxed: Bool = Agents.bubblewrap) async -> Check {
-        let started = Date.now
         let result = try? await Shell.run(Agents.sandboxed(Agents.niced(["sh", "-c", command]), in: worktree, own: nil, bubblewrap: boxed), in: worktree,
                                           env: env, timeout: timeout)
         var output = result.map { String(decoding: $0.out, as: UTF8.self) + $0.err } ?? "Oby couldn't run it."
@@ -2531,11 +2524,8 @@ nonisolated enum Rounds {
             let last = MacCheck.lastStarted(in: output).map { " The last test that started: \($0)." } ?? ""
             output += "\n\nOby stopped it after \(JobLimits.span(timeout)), the most a test run may take.\(last)"
         }
-        let buildSeconds = command.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("swift build")
-            ? Int(Date.now.timeIntervalSince(started).rounded()) : nil
         return Check(command: command, passed: result?.status == 0 && result?.timedOut == false, output: String(output.suffix(4000)),
-                     failing: Fingerprint.failingTests(output), said: MacCheck.messages(in: output),
-                     firstSwiftBuildSeconds: buildSeconds)
+                     failing: Fingerprint.failingTests(output), said: MacCheck.messages(in: output))
     }
 
     /// The failing tests, each with what it said, at most 20 of them: the output's end the agent
