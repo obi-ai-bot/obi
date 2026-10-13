@@ -32,6 +32,11 @@ nonisolated enum DeviceKey {
     /// Enclave signing key: HPKE needs a key-agreement key and the runner pins both at pairing.
     static func e2ePublicKey() throws -> Data { try e2eKey().publicKey }
 
+    static func e2eRegistrationProof(publicKey: Data, e2ePublicKey: Data) throws -> String {
+        let message = Data("oby-e2e-register\n\(publicKey.base64EncodedString())\n\(e2ePublicKey.base64EncodedString())".utf8)
+        return try sign(message, context: nil)
+    }
+
     static func e2eClient(device: String, gatewayPublicKey: Data, counterKey: String) throws -> E2E.Client {
         try E2E.Client(device: device, keys: e2eKey(), gatewayPublicKey: gatewayPublicKey, counterKey: counterKey)
     }

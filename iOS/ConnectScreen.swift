@@ -64,7 +64,10 @@ struct ConnectScreen: View {
             return
         }
         problem = nil
-        phone.link = MacLink(name: name, hostname: host)
+        Task { @MainActor in
+            do { try await phone.pair(name: name, hostname: host) }
+            catch { problem = error.localizedDescription }
+        }
     }
 }
 

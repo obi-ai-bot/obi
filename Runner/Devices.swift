@@ -48,12 +48,17 @@ final class Devices {
     /// The tailnet header can't be the gate: agents share the runner's machine, so through its tailnet
     /// address they arrive as the owner. They can't touch `pairing`: OBY_HOME is empty in their bubblewrap.
     // ponytail: only as strong as that bubblewrap, so Linux only; a runner on a Mac needs its agents boxed too.
-    func register(name: String, publicKey: String, e2ePublicKey: String? = nil, now: Date = .now) throws -> String {
+    func register(name: String, publicKey: String, e2ePublicKey: String? = nil, e2eProof: String? = nil, now: Date = .now) throws -> String {
         guard Self.key(publicKey) != nil else {
             throw APIError(.unprocessableContent, "publicKey isn't a P-256 public key (X9.63, base64).")
         }
         if let e2ePublicKey, Self.e2eKey(e2ePublicKey) == nil {
             throw APIError(.unprocessableContent, "e2ePublicKey isn't an X25519 public key (base64).")
+        }
+        if let e2ePublicKey, saved.devices.first(where: { $0.publicKey == publicKey })?.e2ePublicKey != e2ePublicKey {
+            guard let proof = e2eProof, Self.validProof(proof, publicKey: publicKey, e2ePublicKey: e2ePublicKey) else {
+                throw APIError(.forbidden, "The device must prove possession of its publishing key before setting an E2E key.")
+            }
         }
         if let index = saved.devices.firstIndex(where: { $0.publicKey == publicKey }) {
             if let e2ePublicKey, let existing = saved.devices[index].e2ePublicKey, existing != e2ePublicKey {
@@ -152,6 +157,12 @@ final class Devices {
 
     private static func e2eKey(_ base64: String) -> Curve25519.KeyAgreement.PublicKey? {
         Data(base64Encoded: base64).flatMap { try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: $0) }
+    }
+
+    private static func validProof(_ base64: String, publicKey: String, e2ePublicKey: String) -> Bool {
+        guard let key = key(publicKey), let der = Data(base64Encoded: base64),
+              let signature = try? P256.Signing.ECDSASignature(derRepresentation: der) else { return false }
+        return key.isValidSignature(signature, for: Data("oby-e2e-register\n\(publicKey)\n\(e2ePublicKey)".utf8))
     }
 
     private func save() throws {

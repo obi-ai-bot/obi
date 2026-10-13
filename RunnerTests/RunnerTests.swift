@@ -69,6 +69,12 @@ final class DevicesTests {
         return Approval(device: device, action: action, signedAt: signedAt, signature: signature.derRepresentation.base64EncodedString())
     }
 
+    func proof(for e2e: String, key: P256.Signing.PrivateKey? = nil) throws -> String {
+        let publicKey = (key ?? self.key).publicKey.x963Representation.base64EncodedString()
+        let signature = try (key ?? self.key).signature(for: Data("oby-e2e-register\n\(publicKey)\n\(e2e)".utf8))
+        return signature.derRepresentation.base64EncodedString()
+    }
+
     func refusal(_ approval: Approval, at now: Date? = nil) -> HTTPResponse.Status? {
         do {
             try devices.check(approval, job: "ab12cd34", action: action, now: now ?? self.now)
@@ -140,21 +146,31 @@ final class DevicesTests {
         openPairing()
         let id = try devices.register(name: "Test iPhone", publicKey: mine)
         let first = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
-        #expect(try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: first) == id)
+        #expect(try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: first, e2eProof: try proof(for: first)) == id)
 
         let replacement = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
         #expect((#expect(throws: APIError.self) {
-            try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: replacement)
+            try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: replacement, e2eProof: try proof(for: replacement))
         })?.status == .forbidden)
         openPairing(at: .now - 601)
         #expect((#expect(throws: APIError.self) {
-            try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: replacement)
+            try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: replacement, e2eProof: try proof(for: replacement))
         })?.status == .forbidden)
         openPairing()
-        #expect(try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: replacement) == id)
+        #expect(try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: replacement, e2eProof: try proof(for: replacement)) == id)
         #expect(!FileManager.default.fileExists(atPath: devices.pairing.path))
         #expect((#expect(throws: APIError.self) {
-            try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: first)
+            try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: first, e2eProof: try proof(for: first))
+        })?.status == .forbidden)
+    }
+
+    @Test func aFirstE2EKeyNeedsProofOfTheP256PrivateKey() throws {
+        let mine = key.publicKey.x963Representation.base64EncodedString()
+        openPairing()
+        _ = try devices.register(name: "Test iPhone", publicKey: mine)
+        let e2e = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
+        #expect((#expect(throws: APIError.self) {
+            try devices.register(name: "Test iPhone", publicKey: mine, e2ePublicKey: e2e, e2eProof: "bad")
         })?.status == .forbidden)
     }
 

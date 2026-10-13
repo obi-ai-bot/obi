@@ -80,6 +80,9 @@ struct E2EGate<Context: RequestContext>: RouterMiddleware {
 
     @concurrent func handle(_ request: Request, context: Context,
                             next: @concurrent (Request, Context) async throws -> Response) async throws -> Response {
+        if request.uri.path == "/v1/pairing" {
+            return try await next(request, context)
+        }
         guard request.headers[.obyE2EVersion] == E2E.version,
               let device = request.headers[.obyE2EDevice], !device.isEmpty,
               let counterText = request.headers[.obyE2ECounter], let counter = UInt64(counterText) else {

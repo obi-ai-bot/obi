@@ -42,6 +42,24 @@ struct E2ETests {
         try guardrail.accept(E2E.Metadata(method: "GET", route: "/v1/status", device: "watch", counter: 1))
     }
 
+    @Test func replayGuardAllowsAuthenticatedRequestsThatFinishOutOfOrder() throws {
+        let guardrail = E2E.ReplayGuard()
+        let later = E2E.Metadata(method: "GET", route: "/v1/status", device: "phone", counter: 2)
+        let earlier = E2E.Metadata(method: "GET", route: "/v1/status", device: "phone", counter: 1)
+        try guardrail.acceptAndRecord(later)
+        try guardrail.acceptAndRecord(earlier)
+        #expect(throws: E2E.Failure.replay) { try guardrail.accept(earlier) }
+    }
+
+    @Test func replayGuardRejectsCountersOutsideItsWindow() throws {
+        let guardrail = E2E.ReplayGuard()
+        try guardrail.acceptAndRecord(E2E.Metadata(method: "GET", route: "/v1/status", device: "phone", counter: 100))
+        #expect(throws: E2E.Failure.replay) {
+            try guardrail.accept(E2E.Metadata(method: "GET", route: "/v1/status", device: "phone", counter: 36))
+        }
+        try guardrail.accept(E2E.Metadata(method: "GET", route: "/v1/status", device: "phone", counter: 37))
+    }
+
     @Test func acceptAndRecordAllowsOnlyOneConcurrentCopy() async throws {
         let guardrail = E2E.ReplayGuard()
         let metadata = E2E.Metadata(method: "POST", route: "/v1/plans", device: "phone", counter: 1)

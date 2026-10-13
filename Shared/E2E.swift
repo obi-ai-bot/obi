@@ -110,17 +110,29 @@ public enum E2E {
         catch { throw Failure.invalidMessage }
     }
 
-    /// Per-device replay protection. Counters must increase strictly; a new device starts at 1.
+    /// Per-device replay protection. Counters may arrive out of order within a bounded window,
+    /// which is necessary when independent HTTP requests are in flight at once.
     public final class ReplayGuard: @unchecked Sendable {
-        private var last: [String: UInt64] = [:]
+        private struct Window: Codable {
+            var highest: UInt64
+            var counters: Set<UInt64>
+        }
+
+        private var windows: [String: Window] = [:]
         private let lock = NSLock()
         private let file: URL?
         private let capacity: Int
 
         public init(file: URL? = nil, capacity: Int = 4096) {
             self.file = file; self.capacity = capacity
-            if let file, let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode([String: UInt64].self, from: data) {
-                last = saved
+            if let file, let data = try? Data(contentsOf: file) {
+                if let saved = try? JSONDecoder().decode([String: Window].self, from: data) {
+                    windows = saved
+                } else if let legacy = try? JSONDecoder().decode([String: UInt64].self, from: data) {
+                    // State written by the original strict-counter implementation remains a
+                    // valid lower bound: the next request must still be newer than it.
+                    windows = legacy.mapValues { Window(highest: $0, counters: [$0]) }
+                }
             }
         }
 
@@ -128,20 +140,18 @@ public enum E2E {
         public func accept(_ metadata: Metadata) throws {
             guard metadata.counter > 0 else { throw Failure.replay }
             lock.lock(); defer { lock.unlock() }
-            guard metadata.counter > (last[metadata.device] ?? 0) else { throw Failure.replay }
+            guard Self.acceptable(metadata.counter, in: windows[metadata.device]) else { throw Failure.replay }
         }
 
         public func record(_ metadata: Metadata) throws {
             lock.lock(); defer { lock.unlock() }
-            last[metadata.device] = metadata.counter
-            if last.count > capacity {
-                let keep = last.sorted { $0.value > $1.value }.prefix(capacity)
-                last = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
-            }
+            guard metadata.counter > 0 else { throw Failure.replay }
+            guard Self.acceptable(metadata.counter, in: windows[metadata.device]) else { throw Failure.replay }
+            Self.insert(metadata.counter, into: &windows, device: metadata.device, capacity: capacity)
             guard let file else { return }
             let folder = file.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            try JSONEncoder().encode(last).write(to: file, options: .atomic)
+            try JSONEncoder().encode(windows).write(to: file, options: .atomic)
         }
 
         /// Atomically verifies and records an authenticated message. Call this only after the
@@ -150,16 +160,34 @@ public enum E2E {
         public func acceptAndRecord(_ metadata: Metadata) throws {
             guard metadata.counter > 0 else { throw Failure.replay }
             lock.lock(); defer { lock.unlock() }
-            guard metadata.counter > (last[metadata.device] ?? 0) else { throw Failure.replay }
-            last[metadata.device] = metadata.counter
-            if last.count > capacity {
-                let keep = last.sorted { $0.value > $1.value }.prefix(capacity)
-                last = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
-            }
+            guard Self.acceptable(metadata.counter, in: windows[metadata.device]) else { throw Failure.replay }
+            Self.insert(metadata.counter, into: &windows, device: metadata.device, capacity: capacity)
             guard let file else { return }
             let folder = file.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            try JSONEncoder().encode(last).write(to: file, options: .atomic)
+            try JSONEncoder().encode(windows).write(to: file, options: .atomic)
+        }
+
+        private static func acceptable(_ counter: UInt64, in window: Window?) -> Bool {
+            guard let window else { return true }
+            guard counter <= window.highest || window.highest < UInt64.max else {
+                return true
+            }
+            let floor = window.highest > 64 ? window.highest - 63 : 1
+            return counter >= floor && !window.counters.contains(counter)
+        }
+
+        private static func insert(_ counter: UInt64, into windows: inout [String: Window], device: String, capacity: Int) {
+            var window = windows[device] ?? Window(highest: 0, counters: [])
+            if counter > window.highest { window.highest = counter }
+            let floor = window.highest > 64 ? window.highest - 63 : 1
+            window.counters = window.counters.filter { $0 >= floor }
+            window.counters.insert(counter)
+            windows[device] = window
+            if windows.count > capacity {
+                let keep = windows.sorted { $0.value.highest > $1.value.highest }.prefix(capacity)
+                windows = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
+            }
         }
     }
 }

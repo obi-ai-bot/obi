@@ -150,6 +150,7 @@ final class API {
             try await self.checkResult(context.parameters.require("id"), try await Self.decode(MacCheck.Report.self, from: request))
         }
         router.post("v1/devices") { request, _ in try await self.register(try await Self.decode(NewDevice.self, from: request)) }
+        router.post("v1/pairing") { request, _ in try await self.pair(try await Self.decode(NewDevice.self, from: request)) }
         router.get("v1/e2e") { _, _ in Self.json(["publicKey": await self.gatewayPublicKey()]) }
         router.post("v1/activities") { request, _ in try await self.activity(try await Self.decode(Push.Token.self, from: request)) }
         router.post("v1/notifications") { request, _ in try await self.notifications(try await Self.decode(NotificationToken.self, from: request)) }
@@ -618,9 +619,14 @@ final class API {
     }
 
     func register(_ device: NewDevice) throws -> Response {
-        let id = try devices.register(name: device.name, publicKey: device.publicKey, e2ePublicKey: device.e2ePublicKey)
+        let id = try devices.register(name: device.name, publicKey: device.publicKey, e2ePublicKey: device.e2ePublicKey, e2eProof: device.e2eProof)
         if let e2ePublicKey = device.e2ePublicKey, let gateway { try gateway.register(device: id, publicKey: e2ePublicKey) }
         return Self.json(["id": id, "publicKey": gateway?.publicKey.base64EncodedString() ?? ""])
+    }
+
+    func pair(_ device: NewDevice) throws -> Response {
+        let answer = try register(device)
+        return answer
     }
 
     func gatewayPublicKey() -> String { gateway?.publicKey.base64EncodedString() ?? "" }
@@ -822,7 +828,8 @@ struct Gate<Context: RequestContext>: RouterMiddleware {
     @concurrent func handle(_ request: Request, context: Context,
                             next: @concurrent (Request, Context) async throws -> Response) async throws -> Response {
         do {
-            if !(e2eAllowed && request.headers[.obyE2EVersion] == E2E.version) {
+            let pairing = e2eAllowed && request.uri.path == "/v1/pairing"
+            if !pairing && !(e2eAllowed && request.headers[.obyE2EVersion] == E2E.version) {
                 try Self.admit(request, access: access)
             }
             return try await next(request, context)
@@ -1397,6 +1404,7 @@ struct NewDevice: Decodable {
     var name: String
     var publicKey: String
     var e2ePublicKey: String?
+    var e2eProof: String?
 }
 
 struct NotificationToken: Decodable {

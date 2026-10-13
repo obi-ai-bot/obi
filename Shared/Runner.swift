@@ -935,15 +935,31 @@ nonisolated struct Runner: Sendable {
     #endif
 
     func register(name: String, publicKey: Data) async throws -> String {
-        struct Body: Encodable { var name: String; var publicKey: String; var e2ePublicKey: String? }
+        struct Body: Encodable { var name: String; var publicKey: String; var e2ePublicKey: String?; var e2eProof: String? }
         struct Answer: Decodable { var id: String; var publicKey: String? }
         #if os(iOS) || os(macOS)
-        let e2e = try? DeviceKey.e2ePublicKey().base64EncodedString()
+        let e2eData = try? DeviceKey.e2ePublicKey()
+        let e2e = e2eData?.base64EncodedString()
+        let proof = e2eData.flatMap { try? DeviceKey.e2eRegistrationProof(publicKey: publicKey, e2ePublicKey: $0) }
         #else
         let e2e: String? = nil
+        let proof: String? = nil
         #endif
-        let answer: Answer = try await call("POST", "v1/devices", body: Body(name: name, publicKey: publicKey.base64EncodedString(), e2ePublicKey: e2e))
+        let answer: Answer = try await call("POST", "v1/devices", body: Body(name: name, publicKey: publicKey.base64EncodedString(), e2ePublicKey: e2e, e2eProof: proof))
         return answer.id
+    }
+
+    func pair(name: String, publicKey: Data) async throws -> (id: String, publicKey: Data) {
+        struct Body: Encodable { var name: String; var publicKey: String; var e2ePublicKey: String; var e2eProof: String }
+        struct Answer: Decodable { var id: String; var publicKey: String }
+        let e2e = try DeviceKey.e2ePublicKey()
+        let body = Body(name: name, publicKey: publicKey.base64EncodedString(), e2ePublicKey: e2e.base64EncodedString(),
+                        e2eProof: try DeviceKey.e2eRegistrationProof(publicKey: publicKey, e2ePublicKey: e2e))
+        let answer: Answer = try await call("POST", "v1/pairing", body: body)
+        guard let gateway = Data(base64Encoded: answer.publicKey), gateway.count == 32 else {
+            throw RunnerError(message: "The runner returned no valid E2E gateway key.")
+        }
+        return (answer.id, gateway)
     }
 
     /// The gateway key used to complete a Mac pairing. This is public key material, but it is
