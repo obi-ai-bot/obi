@@ -76,6 +76,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var reviewing: String?
     var review: Review?
     var reviewError: String?
+    /// Consecutive retries after a reviewer hit model or account capacity; kept on the author so
+    /// a restart cannot turn a bounded retry into an unbounded loop.
+    var reviewCapacityRetries: Int?
     /// Reviews the user allowed beyond `Review.maxRounds` (One more round on a merge that stopped
     /// because Oby's reviews were used up), or nil.
     var extraReviews: Int?

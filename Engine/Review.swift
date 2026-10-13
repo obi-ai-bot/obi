@@ -67,6 +67,17 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// the pipeline stalled on its own rule. A blocker that keeps coming back still stops the job
     /// (`stopsHere`). Each review costs an account's weekly limit.
     static let maxRounds = 6
+    /// Capacity failures get a few chances on another account and then a slower retry on the
+    /// available accounts. They are operationally transient, but must not loop forever.
+    static let maxCapacityRetries = 3
+    static func retriesCapacityFailure(after retries: Int) -> Bool { retries < maxCapacityRetries }
+    static func capacityRetryDelay(_ retries: Int) -> TimeInterval {
+        TimeInterval(min(15 * (1 << max(0, retries - 1)), 60))
+    }
+
+    static func isCapacityFailure(_ text: String) -> Bool {
+        Limits.isLimit(text) || text.contains(/(?i)\b(?:selected model|model|server|service) is at capacity\b|\bcapacity exceeded\b/)
+    }
 
     var label: String { verdict == .approved ? "Approved" : "Changes requested" }
     var agentName: String { Job.agentNames[agent] ?? agent }
@@ -104,8 +115,8 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// same tool. A review is short, so it takes an account ahead of its weekly pace first
     /// (`AccountStore.choose`), keeping the ones on pace for new work. A window whose reset time
     /// has passed has room again. Nil when no account can.
-    static func reviewer(_ accounts: [AccountState], for author: Job, now: Date = .now) -> AccountStore.Route? {
-        let others = candidates(accounts, for: author).map { reset($0, at: now) }
+    static func reviewer(_ accounts: [AccountState], for author: Job, excluding: String? = nil, now: Date = .now) -> AccountStore.Route? {
+        let others = candidates(accounts, for: author).filter { $0.account.id != excluding }.map { reset($0, at: now) }
         let otherTool = author.agent == "claude" ? "codex" : author.agent == "codex" ? "claude" : nil
         // The other tool first, while it's outside its weekly reserve; then any account, the
         // reserved ones last (AccountStore.choose).
@@ -146,7 +157,9 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// What the author's job says while its review waits for an account with room, like
     /// "Waiting for an account with room (resets 10:45 PM)".
     static let waiting = "Waiting for an account with room"
+    static let retrying = "Retrying review after capacity"
     static func waitLine(resets: Date?) -> String { waiting + (resets.map { " (resets \(Limits.clock($0)))" } ?? "") }
+    static func retryLine(_ retries: Int) -> String { "\(retrying) (attempt \(retries) of \(maxCapacityRetries))" }
 
     /// The review job for `author`'s pull request `pr`, on `account`'s default model. Its `review`
     /// is the author's latest, the one it follows up, or nil for the first.
@@ -538,22 +551,37 @@ extension Desk {
     /// changes are what it answers (`Review.wantsFollowUp`), or until Oby has reviewed it `Job.reviewCap` times. After changes requested, the reviewer gets the last review's
     /// blocking findings to check, and the earlier ones, quoted in a file (`Review.followUp`). When the other accounts are signed in but full, the review waits
     /// and starts as soon as one has room (`startWaitingReviews`).
-    func reviewPublished(_ job: Job) {
+    func reviewPublished(_ job: Job) { reviewPublished(job, excluding: nil) }
+
+    private func reviewPublished(_ job: Job, excluding failedAccount: String?) {
         guard job.reviewOf == nil, job.reviewing == nil, let pr = Review.pullRequest(of: job) else { return }
         var author = job
         guard job.review?.wantsFollowUp == true || (job.review?.round ?? 0) < job.reviewCap else {
             author.reviewError = "Oby reviewed it \(job.review?.round ?? 0) times already: a person reviews it from here."
             return replace(author)
         }
-        guard let route = Review.reviewer(accounts.accounts, for: job) else {
+        guard let route = Review.reviewer(accounts.accounts, for: job, excluding: failedAccount) else {
             guard !Review.candidates(accounts.accounts, for: job).isEmpty else {
+                if let retries = author.reviewCapacityRetries, retries > 0 {
+                    author.reviewError = Review.retryLine(retries)
+                    replace(author)
+                    scheduleCapacityRetry(retries, for: author.id)
+                    return
+                }
                 author.reviewError = "No other account is signed in with room to review it."
                 return replace(author)
+            }
+            if let retries = author.reviewCapacityRetries, retries > 0 {
+                author.reviewError = Review.retryLine(retries)
+                replace(author)
+                scheduleCapacityRetry(retries, for: author.id)
+                return
             }
             author.reviewError = Review.waitLine(resets: Review.roomAt(accounts.accounts, for: job))
             // Unchanged, nothing is saved: saving counts the accounts' jobs, which would wake this again.
             if author.reviewError != job.reviewError { replace(author) }
-            return watchForRoom()
+            watchForRoom()
+            return
         }
         let account = route.account
         var review = Review.make(for: job, pr: pr, account: account)
@@ -568,6 +596,7 @@ extension Desk {
         }
         author.reviewing = review.id
         author.reviewError = nil
+        roomWatch.retries.removeValue(forKey: author.id)?.cancel()
         replace(author)
         Logger.jobs.notice("job \(job.id, privacy: .public): \(review.agentName, privacy: .public) (\(account.name, privacy: .public)) reviews pull request #\(pr, privacy: .public) as job \(review.id, privacy: .public). \(route.why, privacy: .public)")
         // Why it went there is logged, not in its report: a review's last line is its verdict.
@@ -585,10 +614,12 @@ extension Desk {
         let first = review.summary.split(separator: "\n").first.map(String.init) ?? ""
         guard review.status == .done else {
             let how = switch review.status { case .stopped: "was stopped"; case .interrupted: "was interrupted"; default: "failed" }
+            if retryCapacityReview(review, first: first, author: &author) { return }
             author.reviewError = "Oby's review \(how)" + (first.isEmpty ? "." : ": \(first)")
             return replace(author)
         }
         guard let verdict = Review.decide(review.summary) else {
+            if retryCapacityReview(review, first: first, author: &author) { return }
             author.reviewError = "The reviewer gave no verdict" + (first.isEmpty ? "." : ": \(first)")
             return replace(author)
         }
@@ -611,8 +642,27 @@ extension Desk {
         author.review = result
         author.summary = Review.report(author.summary, followUps: result.followUps)
         author.reviewError = nil
+        author.reviewCapacityRetries = nil
         replace(author)
         applyReview(id, review: review)
+    }
+
+    /// A capacity message has no verdict to apply. Try another account/tool immediately; if
+    /// none has room, retain a waiting state and retry with bounded exponential backoff.
+    private func retryCapacityReview(_ review: Job, first: String, author: inout Job) -> Bool {
+        guard Review.isCapacityFailure(first) else { return false }
+        let retries = author.reviewCapacityRetries ?? 0
+        guard Review.retriesCapacityFailure(after: retries) else {
+            author.reviewCapacityRetries = nil
+            author.reviewError = "Oby's review failed after \(retries) capacity retries" + (first.isEmpty ? "." : ": \(first)")
+            replace(author)
+            return true
+        }
+        author.reviewCapacityRetries = retries + 1
+        author.reviewError = Review.retryLine(retries + 1)
+        replace(author)
+        reviewPublished(author, excluding: review.account)
+        return true
     }
 
     /// The rest of a review's end, once its verdict is on the author (`Review.applying`): the check
@@ -699,6 +749,10 @@ extension Desk {
     /// Not while the author runs again (it publishes again, and is reviewed then). One whose pull
     /// request was merged or closed waits no more.
     func startWaitingReviews() {
+        for job in jobs where job.reviewError?.hasPrefix(Review.retrying) == true
+            && (job.reviewCapacityRetries ?? 0) > 0 {
+            scheduleCapacityRetry(job.reviewCapacityRetries ?? 0, for: job.id)
+        }
         // New commits refused a review under an earlier, lower cap (2 before 2026-10-13): they get it now.
         for job in jobs where !job.isActive && job.reviewing == nil && job.dismissed == nil
             && job.reviewError?.hasPrefix("Oby reviewed it") == true && (job.review?.round ?? 0) < job.reviewCap {
@@ -723,6 +777,7 @@ extension Desk {
         var watching = false
         var wake: Task<Void, Never>?
         var at: Date?
+        var retries: [String: Task<Void, Never>] = [:]
         init(_ desk: Desk) { self.desk = desk }
     }
 
@@ -776,6 +831,26 @@ extension Desk {
                 watch.at = nil
                 watch.desk?.startWaitingReviews()
             }
+        }
+    }
+
+    private func scheduleCapacityRetry(_ retries: Int, for author: String) {
+        let watch = roomWatch
+        guard watch.retries[author] == nil else { return }
+        let delay = Review.capacityRetryDelay(retries)
+        watch.retries[author] = Task { [weak watch] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let watch else { return }
+            watch.retries[author] = nil
+            watch.desk?.retryCapacityReviews(author)
+        }
+    }
+
+    /// Recheck capacity-failed reviews after their backoff; persisted retry markers are restored
+    /// by `startWaitingReviews` after a runner restart.
+    func retryCapacityReviews(_ only: String? = nil) {
+        for job in jobs where (only == nil || job.id == only) && job.reviewError?.hasPrefix(Review.retrying) == true && !job.isActive {
+            reviewPublished(job)
         }
     }
 }
