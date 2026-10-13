@@ -367,6 +367,45 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         }
     }
 
+    /// Creates the single follow-up issue for all review findings, after the PR is merged. A
+    /// stable marker in the body lets a retry find a creation that succeeded before a crash.
+    static func fileReviewFollowUps(_ job: Job, findings: [String]) async throws -> String {
+        guard let pr = job.pr, !findings.isEmpty else { throw Shell.Failure(message: "No merged pull request has review follow-ups.") }
+        let marker = "oby-review-follow-ups-pr-\(pr)"
+        let title = "Follow up review findings from #\(pr)"
+        let body = """
+            Oby's reviews of [pull request #\(pr)](https://github.com/\(job.repo)/pull/\(pr)) found these items worth doing later:
+
+            \(findings.map { "- \($0)" }.joined(separator: "\n"))
+
+            <!-- \(marker) -->
+            """
+        let secrets = try await Review.scan(body)
+        guard secrets.isEmpty else { throw Shell.Failure(message: "Not posted: possible secret in the review follow-up issue.") }
+
+        let away = FileManager.default.temporaryDirectory
+        let env: [String: String?] = ["GH_PROMPT_DISABLED": "1"]
+        let existing = try await Shell.ok(reviewFollowUpSearchArguments(repo: job.repo, marker: marker), in: away, env: env, as: .app)
+        if let json = try? JSONSerialization.jsonObject(with: Data(existing.utf8)) as? [String: Any],
+           let items = json["items"] as? [[String: Any]],
+           let match = items.first(where: { ($0["body"] as? String)?.contains(marker) == true }),
+           let url = match["html_url"] as? String {
+            return url
+        }
+        let created = try await Shell.ok(["gh", "api", "repos/\(job.repo)/issues", "-f", "title=\(title)", "-f", "body=\(body)"], in: away, env: env, as: .app)
+        guard let json = try? JSONSerialization.jsonObject(with: Data(created.utf8)) as? [String: Any],
+              let url = json["html_url"] as? String else {
+            throw Shell.Failure(message: "GitHub created the follow-up issue without returning its URL.")
+        }
+        return url
+    }
+
+    /// GitHub's issue search endpoint accepts GET only; `gh api` otherwise changes to POST when
+    /// form fields are present. Keep the command construction testable without invoking GitHub.
+    nonisolated static func reviewFollowUpSearchArguments(repo: String, marker: String) -> [String] {
+        ["gh", "api", "-X", "GET", "search/issues", "-f", "q=repo:\(repo) \(marker)"]
+    }
+
     /// Why the pull request as GitHub's REST API has it (`GET repos/{o}/{r}/pulls/{n}`) isn't the
     /// one checked, or nil when it is: open, into dev, with the checked head.
     static func mismatch(_ view: Data, _ check: MacCheck) -> String? {
@@ -1479,6 +1518,17 @@ extension Desk {
         merged.mergeError = nil
         // Replacing it closes the `oby-failure` issues it fixes (`Failures.observe`): GitHub won't, on dev.
         replace(merged)
+        if let findings = merged.review?.followUps, !findings.isEmpty, merged.review?.followUpIssue == nil {
+            do {
+                let url = try await fileReviewFollowUps(merged, findings)
+                guard var latest = self.job(id), var review = latest.review else { return }
+                review.followUpIssue = url
+                latest.review = review
+                replace(latest)
+            } catch {
+                Logger.jobs.error("job \(id, privacy: .public): couldn't file review follow-ups: \(error.localizedDescription, privacy: .public)")
+            }
+        }
         // Unlike a merge seen by the follower, this path already set the merged state itself.
         Task { await settleBuildBatch(id) }
     }

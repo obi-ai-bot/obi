@@ -406,6 +406,9 @@ final class Desk {
     @ObservationIgnored var postCheck: (_ author: Job, _ run: CheckRun) async throws -> URL = CheckRun.post
     @ObservationIgnored var scanForMerge: (_ job: Job, _ head: String) async throws -> [Publish.Finding] = MacCheck.scan
     @ObservationIgnored var mergePullRequest: (_ job: Job, _ check: MacCheck) async throws -> Void = MacCheck.merge
+    /// Files accumulated review follow-ups once the pull request has merged. Tests replace it with
+    /// a recorder; production uses GitHub with a stable marker to recover across restarts.
+    @ObservationIgnored var fileReviewFollowUps: (_ job: Job, _ findings: [String]) async throws -> String = MacCheck.fileReviewFollowUps
     /// The Xcode Cloud build selected when a batch settles, and the tag created for it. Tests replace these.
     @ObservationIgnored var xcodeBuildCandidate: (_ repo: String) async throws -> (tag: String?, head: String, reason: String?) = { repo in
         try await XcodeBuild.candidate(repo: repo, clone: Workspace.clone(repo))

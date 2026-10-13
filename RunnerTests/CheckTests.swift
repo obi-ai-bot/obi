@@ -36,6 +36,7 @@ struct CheckTests {
         var scanned: [String] = []
         var findings: [Publish.Finding] = []
         var merged: [MacCheck] = []
+        var followUpIssues: [(job: Job, findings: [String])] = []
         var mergeError: Error?
         var events: [MacCheck] = []
     }
@@ -85,11 +86,22 @@ struct CheckTests {
             if let error = made.mergeError { throw error }
             made.merged.append(check)
         }
+        desk.fileReviewFollowUps = { [made] job, findings in
+            made.followUpIssues.append((job, findings))
+            return "https://github.com/deskree-inc/oby/issues/900"
+        }
         desk.onCheckChange = { [made] in made.events.append($0) }
         // A rebase is reviewed again unless a test says its patch is the same (#237).
         desk.samePatch = { _, _, _, _ in false }
         // As the runner's desk: Macs take its checks.
         desk.queuesMacChecks = true
+    }
+
+    @Test func reviewFollowUpSearchUsesGet() {
+        #expect(MacCheck.reviewFollowUpSearchArguments(
+            repo: "deskree-inc/oby",
+            marker: "oby-review-follow-ups-pr-80"
+        ) == ["gh", "api", "-X", "GET", "search/issues", "-f", "q=repo:deskree-inc/oby oby-review-follow-ups-pr-80"])
     }
 
     /// The fix job on issue 75 whose pull request Oby reviews, checks and merges.
@@ -122,6 +134,7 @@ struct CheckTests {
     func approve(_ summary: String = "It does what was asked.\n\nVERDICT: APPROVED") async throws {
         try await until("a review job runs") { made.agents.last?.job.reviewOf == "author" && desk.job(made.agents.last?.job.id ?? "")?.status == .running }
         let reviewer = try #require(made.agents.last)
+        let summary = summary.replacingOccurrences(of: "Blocking:\n- Fix the off-by-one", with: "Blocking:\n- Fix the off-by-one. Evidence: fixture test reports an off-by-one")
         reviewer.agent.onEvent(.turnEnded(summary: summary, failed: false))
         reviewer.agent.onEvent(.finished(summary: summary, failed: false))
         try await until("the review is on the author") { desk.job("author")?.review?.job == reviewer.job.id && desk.job("author")?.review?.checkRun != nil }
@@ -249,6 +262,8 @@ struct CheckTests {
         _ = try desk.macCheckEnded(check.id, MacCheck.Report(passed: true, steps: steps, failures: [], log: nil))
         try await until("the approved follow-up merges") { desk.job("author")?.pullRequest?.state == .merged }
         #expect(made.scanned == [Self.next] && made.merged.map(\.head) == [Self.next])
+        #expect(desk.job("author")?.review?.followUpIssue == "https://github.com/deskree-inc/oby/issues/900")
+        #expect(made.followUpIssues.count == 1 && made.followUpIssues[0].findings == ["Add coverage"])
         #expect(made.agents.count == 4)
     }
 
