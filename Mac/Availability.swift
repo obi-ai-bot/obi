@@ -8,6 +8,8 @@ import Observation
 @MainActor
 @Observable
 final class MacAvailability {
+    typealias AssertionCreator = @MainActor (CFString, IOPMAssertionLevel, CFString, UnsafeMutablePointer<IOPMAssertionID>) -> IOReturn
+    typealias AssertionReleaser = @MainActor (IOPMAssertionID) -> IOReturn
     static let setting = "runner.keepAvailable"
     enum State: Equatable, Sendable { case available, sleepingSoon }
     private(set) var state: State = .sleepingSoon
@@ -16,14 +18,19 @@ final class MacAvailability {
     private var assertion: IOPMAssertionID = 0
     private var powerConnected = true
     private var runningJobs = false
+    private let createAssertion: AssertionCreator
+    private let releaseAssertion: AssertionReleaser
 
-    init() {
+    init(createAssertion: @escaping AssertionCreator = MacAvailability.createAssertion,
+         releaseAssertion: @escaping AssertionReleaser = IOPMAssertionRelease) {
+        self.createAssertion = createAssertion
+        self.releaseAssertion = releaseAssertion
         keepAvailable = UserDefaults.standard.object(forKey: Self.setting) as? Bool ?? true
         powerConnected = Self.isPowerConnected()
         update()
     }
 
-    deinit { if preventingSleep { IOPMAssertionRelease(assertion) } }
+    deinit { if preventingSleep { releaseAssertion(assertion) } }
     func setKeepAvailable(_ value: Bool) { keepAvailable = value; UserDefaults.standard.set(value, forKey: Self.setting); update() }
     func setPowerConnected(_ value: Bool) { powerConnected = value; update() }
     func setRunningJobs(_ value: Bool) {
@@ -35,21 +42,30 @@ final class MacAvailability {
     var label: String { state == .available ? "Available" : "Sleeping soon" }
 
     private func update() {
-        state = shouldPreventSleep ? .available : .sleepingSoon
-        guard shouldPreventSleep != preventingSleep else { return }
+        guard shouldPreventSleep != preventingSleep else {
+            if !shouldPreventSleep { state = .sleepingSoon }
+            return
+        }
         if shouldPreventSleep {
             var id: IOPMAssertionID = 0
-            let result = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
-                                                     IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                                                     "Oby keeps the Mac available for its runner" as CFString, &id)
-            guard result == kIOReturnSuccess else { return }
+            let result = createAssertion(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+                                         IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                         "Oby keeps the Mac available for its runner" as CFString, &id)
+            guard result == kIOReturnSuccess else { state = .sleepingSoon; return }
             assertion = id
             preventingSleep = true
+            state = .available
         } else {
-            IOPMAssertionRelease(assertion)
+            releaseAssertion(assertion)
             assertion = 0
             preventingSleep = false
+            state = .sleepingSoon
         }
+    }
+
+    private static func createAssertion(_ type: CFString, _ level: IOPMAssertionLevel, _ name: CFString,
+                                        _ id: UnsafeMutablePointer<IOPMAssertionID>) -> IOReturn {
+        IOPMAssertionCreateWithName(type, level, name, id)
     }
 
     private static func isPowerConnected() -> Bool {

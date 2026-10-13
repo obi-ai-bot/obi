@@ -42,19 +42,6 @@ final class Phone {
         var answer: (question: String, option: String)?
         var voice: Bool
     }
-    private struct QueuedRequest: Codable {
-        var id: String
-        var said: String
-        var question: String?
-        var option: String?
-        var voice: Bool
-    }
-    private struct QueuedInbox: Codable {
-        var id: String
-        var answer: String?
-        var done: Bool?
-        var later: Date?
-    }
     @ObservationIgnored private let speaker = PhoneSpeaker()
     @ObservationIgnored private var planning: Task<Void, Never>?
     @ObservationIgnored private var spoken = false
@@ -153,8 +140,8 @@ final class Phone {
     private(set) var accounts: [Account] = []
     /// What waits in the runner's inbox, put-off items too: answered on the Mac, it goes from here too.
     private(set) var inbox: [InboxItem] = []
-    private var queued: [QueuedRequest] = []
-    private var queuedInbox: [QueuedInbox] = []
+    private var queued: [OfflineMessage] = []
+    private var queuedInbox: [OfflineInboxAnswer] = []
     private(set) var models: ModelSettings?
     /// The mode new jobs get by default, as the runner last said, or nil from a runner without modes.
     private(set) var defaultMode: RunnerMode?
@@ -176,8 +163,8 @@ final class Phone {
     init() {
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
         if let data = UserDefaults.standard.data(forKey: "mac.link") { link = try? MacLink.paired(data) }
-        queued = (try? JSONDecoder().decode([QueuedRequest].self, from: UserDefaults.standard.data(forKey: "phone.outbox") ?? Data())) ?? []
-        queuedInbox = (try? JSONDecoder().decode([QueuedInbox].self, from: UserDefaults.standard.data(forKey: "phone.inboxOutbox") ?? Data())) ?? []
+        queued = (try? JSONDecoder().decode([OfflineMessage].self, from: UserDefaults.standard.data(forKey: "phone.outbox") ?? Data())) ?? []
+        queuedInbox = (try? JSONDecoder().decode([OfflineInboxAnswer].self, from: UserDefaults.standard.data(forKey: "phone.inboxOutbox") ?? Data())) ?? []
         for item in queued {
             let request = Request(said: item.said, answer: item.question.flatMap { q in item.option.map { (q, $0) } }, voice: item.voice)
             requests[item.id] = request
@@ -393,12 +380,14 @@ final class Phone {
     /// Try again on words that didn't go through: the same request, sent anew.
     func retry(echo id: String) {
         guard let request = requests[id] else { return }
+        removeQueued(id)
         drop(echo: id)
         plan(request.said, answer: request.answer, voice: request.voice)
     }
 
     /// Edit on words that didn't go through: they leave the thread for the field.
     func discard(echo id: String) {
+        removeQueued(id)
         drop(echo: id)
     }
 
@@ -414,7 +403,7 @@ final class Phone {
         requests[echo.id] = Request(said: said, answer: answer, voice: voice)
         pending = echo.id
         if connection != .live {
-            queued.append(QueuedRequest(id: echo.id, said: said, question: answer?.question, option: answer?.option, voice: voice))
+            queued.append(OfflineMessage(id: echo.id, said: said, question: answer?.question, option: answer?.option, voice: voice))
             saveQueue()
             talk = .queued(said)
             pending = nil
@@ -429,6 +418,11 @@ final class Phone {
 
     private func saveInboxQueue() {
         UserDefaults.standard.set(try? JSONEncoder().encode(queuedInbox), forKey: "phone.inboxOutbox")
+    }
+
+    private func removeQueued(_ id: String) {
+        queued.removeAll { $0.id == id }
+        saveQueue()
     }
 
     private func flushQueued() async {
@@ -448,11 +442,12 @@ final class Phone {
         let waiting = queuedInbox
         queuedInbox.removeAll()
         saveInboxQueue()
-        for item in waiting {
+        for (index, item) in waiting.enumerated() {
             do {
                 apply(.inbox(try await runner.settle(item.id, answer: item.answer, done: item.done, later: item.later)))
             } catch {
-                queuedInbox.append(item)
+                if let error = error as? RunnerError, error.status == 404 { continue }
+                queuedInbox.append(contentsOf: waiting[index...])
                 saveInboxQueue()
                 break
             }
@@ -476,10 +471,6 @@ final class Phone {
                 // all (a timeout), its turn settles the echo as usual.
                 if !Task.isCancelled {
                     failures[echo.id] = error.localizedDescription
-                    if connection != .live {
-                        queued.append(QueuedRequest(id: echo.id, said: request.said, question: request.answer?.question, option: request.answer?.option, voice: request.voice))
-                        saveQueue()
-                    }
                 }
             }
             // Cancelled or replaced while the brain was thinking.
@@ -544,8 +535,10 @@ final class Phone {
     /// Settles an inbox item: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
         guard connection == .live else {
-            queuedInbox.append(QueuedInbox(id: id, answer: answer, done: done, later: later))
+            queuedInbox.removeAll { $0.id == id }
+            queuedInbox.append(OfflineInboxAnswer(id: id, answer: answer, done: done, later: later))
             saveInboxQueue()
+            inbox.removeAll { $0.id == id }
             return
         }
         apply(.inbox(try await runner.settle(id, answer: answer, done: done, later: later)))
