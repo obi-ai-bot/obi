@@ -1284,8 +1284,25 @@ nonisolated enum Agents {
             set -- \"$@\" -j \"${OBY_SWIFT_BUILD_JOBS:-1}\"
         fi
         if [ \"$1\" = test ] && [ ! -e \"$OBY_SWIFT_BUILD_REPORT\" ]; then
+            oby_swift_build_flags=
+            oby_swift_take_next=
+            oby_swift_quote() { printf \"'%s'\" \"$(printf '%s' \"$1\" | sed \"s/'/'\\\\''/g\")\"; }
+            for oby_swift_arg in \"$@\"; do
+                if [ -n \"$oby_swift_take_next\" ]; then
+                    oby_swift_build_flags=\"$oby_swift_build_flags $(oby_swift_quote \"$oby_swift_arg\")\"
+                    oby_swift_take_next=
+                    continue
+                fi
+                case \"$oby_swift_arg\" in
+                    --package-path|--scratch-path|--build-path|--configuration|-c)
+                        oby_swift_build_flags=\"$oby_swift_build_flags $(oby_swift_quote \"$oby_swift_arg\")\"
+                        oby_swift_take_next=1 ;;
+                    --package-path=*|--scratch-path=*|--build-path=*|--configuration=*)
+                        oby_swift_build_flags=\"$oby_swift_build_flags $(oby_swift_quote \"$oby_swift_arg\")\" ;;
+                esac
+            done
             oby_swift_start=$(date +%s)
-            \"$OBY_REAL_SWIFT\" build -j \"${OBY_SWIFT_BUILD_JOBS:-1}\"
+            eval \"\\\"$OBY_REAL_SWIFT\\\" build -j \\\"${OBY_SWIFT_BUILD_JOBS:-1}\\\"$oby_swift_build_flags\"
             oby_swift_status=$?
             oby_swift_end=$(date +%s)
             printf '%s\\n' $((oby_swift_end - oby_swift_start)) > \"$OBY_SWIFT_BUILD_REPORT.tmp\"
