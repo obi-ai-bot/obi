@@ -192,6 +192,13 @@ final class IslandController {
             feed.apply(job)
             return job
         }
+        desk.liftElsewhereReserve = { [weak self] id, lift in
+            guard let self, let runner = feed.runner else { return false }
+            do {
+                _ = try await runner.liftReserve(id, lift)
+                return true
+            } catch { return false }
+        }
         // "Allow it", "no, run only the runner tests" and "stop asking on the Watch job" reach the
         // runner's jobs too (#134): a permission through its answer, a plan through the job's words,
         // as its card would send them.

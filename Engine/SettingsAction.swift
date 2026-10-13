@@ -25,15 +25,23 @@ extension Desk {
             return "Changed jobs at once from \(old) to \(max)."
         }
         if let name = setting.account, let lift = setting.lift {
-            guard let state = accounts.accounts.first(where: {
+            if let state = accounts.accounts.first(where: {
                 $0.account.id == name || $0.account.name.caseInsensitiveCompare(name) == .orderedSame
-            }), let changed = accounts.liftReserve(state.account.id, lift) else {
+            }) {
+                guard let changed = liftReserve(state.account.id, lift) else {
+                    return "Couldn't change \(name)'s weekly reserve: that account is gone."
+                }
+                let old = state.reserveLiftedUntil() != nil
+                return lift
+                    ? "Lifted \(changed.account.name)'s weekly reserve (was \(old ? "lifted" : "in place"))."
+                    : "Put \(changed.account.name)'s weekly reserve back (was \(old ? "lifted" : "in place"))."
+            }
+            guard let remote = elsewhere().flatMap(\.accounts).first(where: {
+                $0.account.id == name || $0.account.name.caseInsensitiveCompare(name) == .orderedSame
+            }), await liftElsewhereReserve(remote.account.id, lift) else {
                 return "Couldn't change \(name)'s weekly reserve: that account is gone."
             }
-            let old = state.reserveLiftedUntil() != nil
-            return lift
-                ? "Lifted \(changed.account.name)'s weekly reserve (was \(old ? "lifted" : "in place"))."
-                : "Put \(changed.account.name)'s weekly reserve back (was \(old ? "lifted" : "in place"))."
+            return lift ? "Lifted \(remote.account.name)'s weekly reserve." : "Put \(remote.account.name)'s weekly reserve back."
         }
         return "Couldn't change settings: the setting was incomplete."
     }

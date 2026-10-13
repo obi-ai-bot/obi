@@ -70,11 +70,9 @@ nonisolated struct Briefing: Equatable, Sendable {
     /// This Mac's own accounts; a runner's come with its place.
     var accounts: [AccountState]
     /// The settings the brain may change, and the choices Swift will validate.
-    var settingModels: [String: [String]] = [
-        "claude": AgentModels.claude.map(\.0),
-        "codex": [AgentModels.value("codex", "model"), AgentModels.stronger["codex"]].compactMap { $0 }
-    ]
-    var settingEfforts: [String: [String]] = ["claude": AgentModels.claudeEfforts, "codex": ["low", "medium", "high", "xhigh"]]
+    var settingModels: [String: [String]] = [:]
+    var settingEfforts: [String: [String]] = [:]
+    var settingModelEfforts: [String: [String: [String]]] = [:]
     var maxRunning: Int = JobSlots.saved
     var now = Date.now
     /// The week's failure records, newest first (Engine/Failures.swift), so "why did jobs fail
@@ -227,7 +225,10 @@ nonisolated struct Briefing: Equatable, Sendable {
         }
         lines += ["", "## Settings you can change in chat", "",
                   "- Models: " + settingModels.keys.sorted().map { agent in
-                      "\(Job.agentNames[agent] ?? agent): \(settingModels[agent, default: []].joined(separator: ", ")); efforts \(settingEfforts[agent, default: []].joined(separator: ", "))"
+                      "\(Job.agentNames[agent] ?? agent): " + settingModels[agent, default: []].map { model in
+                          let efforts = settingModelEfforts[agent]?[model] ?? settingEfforts[agent, default: []]
+                          return efforts.isEmpty ? model : "\(model) [\(efforts.joined(separator: ", "))]"
+                      }.joined(separator: ", ")
                   }.joined(separator: " · "),
                   "- Jobs at once: \(maxRunning) (1 to 20)"]
         let reserveAccounts = accounts + places.flatMap(\.accounts)

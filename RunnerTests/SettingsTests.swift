@@ -12,6 +12,10 @@ struct SettingsTests {
         Plan(action: .setSetting, reply: "", dispatches: [], question: nil, setting: setting)
     }
 
+    static func setting(_ agent: String, model: String) -> String {
+        "{\"action\":\"set_setting\",\"reply\":\"\",\"question\":null,\"dispatches\":[],\"jobs\":[],\"setting\":{\"agent\":\"\(agent)\",\"model\":\"\(model)\",\"effort\":null,\"maxRunning\":null,\"account\":null,\"lift\":null}}"
+    }
+
     @Test func validatesChoicesAndMaxRunning() {
         #expect(plan(Plan.Setting(agent: "claude", model: "claude-sonnet-5-5", effort: "high"))
             .problems(in: context, canary: "x").isEmpty)
@@ -31,6 +35,25 @@ struct SettingsTests {
         #expect(AgentModels.value("claude", "effort") == "high")
         UserDefaults.standard.set(oldModel, forKey: "claude.model")
         UserDefaults.standard.set(oldEffort, forKey: "claude.effort")
+    }
+
+    @Test func planTakesTwoToolChangesInOneMessage() async throws {
+        let folder = try temporaryFolder()
+        let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        desk.repos = ["deskree-inc/oby"]
+        desk.settingModels["codex"] = ["luna"]
+        desk.settingEfforts["codex"] = ["max"]
+        let brain = ConversationTests.FakeBrain([
+            Self.setting("claude", model: "claude-sonnet-5-5"),
+            Self.setting("codex", model: "luna"),
+            ConversationTests.reply("")
+        ])
+        desk.makeBrain = { [brain] _, _ in [brain] }
+        _ = await desk.plan("Use Sonnet for Claude Code and Luna for Codex")
+        #expect(AgentModels.value("claude", "model") == "claude-sonnet-5-5")
+        #expect(AgentModels.value("codex", "model") == "luna")
+        UserDefaults.standard.removeObject(forKey: "claude.model")
+        UserDefaults.standard.removeObject(forKey: "codex.model")
     }
 
     @Test func reserveCanBeLiftedAndPutBack() async throws {

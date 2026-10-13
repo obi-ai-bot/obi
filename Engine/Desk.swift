@@ -83,9 +83,11 @@ final class Desk {
     }
     @ObservationIgnored var cancelElsewhere: () async -> Void = {}
     @ObservationIgnored var liftElsewhereReserve: (_ id: String, _ lift: Bool) async -> Bool = { _, _ in false }
+    /// The runner's model choices for chat settings, refreshed from Codex before planning.
     @ObservationIgnored var settingModels: [String: [String]] = ["claude": AgentModels.claude.map(\.0), "codex": []]
     @ObservationIgnored var settingEfforts: [String: [String]] = ["claude": AgentModels.claudeEfforts, "codex": []]
     @ObservationIgnored var settingModelEfforts: [String: [String: [String]]] = [:]
+    @ObservationIgnored private var settingOptionsLoaded = false
     @ObservationIgnored var loadSettingOptions: () async -> ([String: [String]], [String: [String]], [String: [String: [String]]])? = { nil }
     /// The brain's adapters, on the Claude account whose home is given. Tests put in their own.
     @ObservationIgnored var makeBrain: (_ home: String?, Vault) -> [any BrainAdapter] = { [ClaudeBrain(home: $0, vault: $1)] }
@@ -502,6 +504,17 @@ final class Desk {
         resumeChecks()
     }
 
+    func refreshSettingOptions() async {
+        guard !settingOptionsLoaded else { return }
+        settingOptionsLoaded = true
+        if let options = await loadSettingOptions() {
+            settingModels = options.0
+            settingEfforts = options.1
+            settingModelEfforts = options.2
+        }
+        settingModelEfforts["claude"] = Dictionary(uniqueKeysWithValues: settingModels["claude", default: []].map { ($0, settingEfforts["claude", default: []]) })
+    }
+
     /// The brain picks "auto" or an account by name; Swift turns that into a real account. With
     /// the briefing: these `turns` (the conversation so far), the jobs here and elsewhere, the
     /// inbox and the accounts.
@@ -519,13 +532,14 @@ final class Desk {
         return BrainContext(accounts: choices, repos: repos, briefing: briefing.text, quoted: briefing.quoted, jobs: briefing.stoppable,
                             movable: briefing.jobs.map(\.job.id), models: Moves.models, moveAccounts: moveAccounts,
                             settingModels: settingModels, settingEfforts: settingEfforts,
+                            settingModelEfforts: settingModelEfforts,
                             settingAccounts: moveAccounts.values.flatMap { $0 }, permissions: briefing.permissions)
     }
 
     /// What the brain is told before the user's words (Engine/Conversation.swift).
     func briefing(turns: [Turn]) -> Briefing {
         Briefing(turns: turns, places: [Briefing.Place(name: "this Mac", jobs: jobs, inbox: inbox)] + elsewhere(), accounts: accounts.accounts,
-                 settingModels: settingModels, settingEfforts: settingEfforts, maxRunning: maxRunning,
+                 settingModels: settingModels, settingEfforts: settingEfforts, settingModelEfforts: settingModelEfforts, maxRunning: maxRunning,
                  failures: failureLog.week())
     }
 
@@ -718,6 +732,7 @@ final class Desk {
     /// the turn was cancelled, replaced or given up on, and then nothing does, and the answer is `.none`.
     /// `attachments` go to the jobs the plan starts.
     func plan(_ said: String, turns given: [Turn]? = nil, attachments: [String] = [], live: @escaping () -> Bool = { true }) async -> Talk {
+        await refreshSettingOptions()
         if repos.isEmpty { await refresh() }
         // The brain and the Lead think with the least busy Claude account too, so a busy one doesn't slow them.
         let thinker = AccountStore.thinker(accounts.accounts)
@@ -746,7 +761,7 @@ final class Desk {
                 return done.isEmpty ? .none : .reply(done.joined(separator: " "))
             }
             record(BrainTurn(said: request, by: result.by, plan: result.plan, refused: result.refused))
-            if let refusal = BrainSafety.rulesActingRefusal(for: result, step: step) { return .reply(refusal) }
+            if let refusal = BrainSafety.rulesActingRefusal(for: result, step: step) { return Self.after(done, .reply(refusal)) }
             // Rules only stand in for the brain on the user's own words: a later step they planned is a guess.
             if step > 0, result.by == "rules" { break }
             // The chat reads before it answers (#302): what's read is in the next step's quoted file.

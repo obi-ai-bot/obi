@@ -144,6 +144,7 @@ nonisolated struct BrainContext: Sendable {
     var moveAccounts: [String: [String]] = [:]
     var settingModels: [String: [String]] = [:]
     var settingEfforts: [String: [String]] = [:]
+    var settingModelEfforts: [String: [String: [String]]] = [:]
     var settingAccounts: [String] = []
     /// The jobs whose permission prompt waits for the user, by id: the ones answer_permission may name.
     var permissions: [String] = []
@@ -234,6 +235,10 @@ extension Plan {
             }
             if let effort = setting.effort, !(context.settingEfforts[agent] ?? []).contains(effort) {
                 problems.append("unknown effort; choices: " + (context.settingEfforts[agent] ?? []).joined(separator: ", "))
+            }
+            let model = setting.model ?? AgentModels.value(agent, "model")
+            if let effort = setting.effort, let choices = context.settingModelEfforts[agent]?[model], !choices.contains(effort) {
+                problems.append("unknown effort for \(model); choices: " + choices.joined(separator: ", "))
             }
             if setting.model == nil && setting.effort == nil { problems.append("setting needs a model or effort") }
         } else if let max = setting.maxRunning, !JobSlots.range.contains(max) {
@@ -719,7 +724,7 @@ nonisolated enum Rules {
                 return Plan(action: .dispatch, reply: "Review in \(name), PR #\(pr).", dispatches: [job(pr, nil, nil)], question: nil)
             case .investigate?:
                 return Plan(action: .dispatch, reply: "Investigate in \(name), issue #\(issue).", dispatches: [job(nil, issue, nil)], question: nil)
-            default:
+        default:
                 var finish = job(pr, issue, nil)
                 finish.kind = stem ?? .fix
                 return Plan(action: .dispatch, reply: "\(finish.kind.rawValue.capitalized) in \(name), issue #\(issue) from PR #\(pr).",

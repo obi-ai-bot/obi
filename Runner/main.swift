@@ -96,6 +96,13 @@ Task {
 // The runner for this Mac's app answers with the app's accounts (LocalRunner.accounts).
 let isLocal: Bool = if case .local = access { true } else { false }
 let desk = Desk(accounts: LocalRunner.accounts(local: isLocal), restarts: Restarts(file: Workspace.root.appending(path: "restarts.json")))
+desk.loadSettingOptions = {
+    guard let codex = try? await CodexAgent.models(home: nil), !codex.isEmpty else { return nil }
+    let models = ["claude": AgentModels.claude.map(\.0), "codex": codex.map(\.id)]
+    let efforts = ["claude": AgentModels.claudeEfforts, "codex": Array(Set(codex.flatMap(\.efforts))).sorted()]
+    let perModel = ["codex": Dictionary(uniqueKeysWithValues: codex.map { ($0.id, $0.efforts) })]
+    return (models, efforts, perModel)
+}
 desk.issueSync.enabled = true
 // Every failure is recorded, studied and acted on (Engine/Failures.swift).
 desk.failureLog.enabled = true
