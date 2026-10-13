@@ -375,7 +375,13 @@ final class Desk {
     }
     @ObservationIgnored var integrity: (Job) async -> Integrity.Report = { job in
         guard let ref = Integrity.ref(job) else { return Integrity.Report() }
-        return await Integrity.check(worktree: Workspace.worktree(job.id), against: ref, base: job.base)
+        let worktree = Workspace.worktree(job.id)
+        var trustedBaseTip: String?
+        if let base = job.base, (try? await Publish.fetch(base, of: job, into: worktree)) != nil {
+            trustedBaseTip = try? await Shell.ok(["git", "-C", worktree.path, "rev-parse", "--verify",
+                                                   "refs/remotes/origin/\(base)^{commit}"])
+        }
+        return await Integrity.check(worktree: worktree, against: ref, trustedBaseTip: trustedBaseTip)
     }
     /// Publishes a job that ended done with commits, with no one to approve it: the check passed
     /// and the secret scan gates it (case 4.1). Tests put in their own.

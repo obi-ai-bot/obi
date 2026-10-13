@@ -748,11 +748,20 @@ struct IntegrityRepositoryTests {
         try "@Test func devReplacement() {}\n".write(to: repo.appending(path: "Tests/DevTests.swift"), atomically: true, encoding: .utf8)
         _ = try await git("add", "-A")
         _ = try await git("commit", "-q", "-m", "dev updates tests")
+        let trustedTip = try await git("rev-parse", "dev")
         _ = try await git("update-ref", "refs/remotes/origin/dev", "dev")
         _ = try await git("checkout", "-q", "oby/fix-64")
         _ = try await git("rebase", "dev")
 
-        #expect(await Integrity.check(worktree: repo, against: start, base: "dev") == Integrity.Report())
+        #expect(await Integrity.check(worktree: repo, against: start, trustedBaseTip: trustedTip) == Integrity.Report())
+
+        // A job can rewrite its remote-tracking ref. Oby's pinned tip still exposes its deletion.
+        try FileManager.default.removeItem(at: repo.appending(path: "Tests/DevTests.swift"))
+        _ = try await git("add", "-A")
+        _ = try await git("commit", "-q", "-m", "job weakens tests")
+        _ = try await git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        let problems = await Integrity.check(worktree: repo, against: start, trustedBaseTip: trustedTip).problems
+        #expect(problems.contains("deletes the test file Tests/DevTests.swift"))
     }
 
     @Test func agentAttributesCantHideTheDiff() async throws {

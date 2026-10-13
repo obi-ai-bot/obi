@@ -145,15 +145,17 @@ nonisolated enum Integrity {
 
     /// What the worktree's work (committed or not) does to the tests since it left `ref`. Fails
     /// closed: when git can't say, that's the problem.
-    static func check(worktree: URL, against ref: String, base branch: String? = nil) async -> Report {
+    static func check(worktree: URL, against ref: String, trustedBaseTip: String? = nil) async -> Report {
         let git = ["git", "-c", "core.quotePath=false", "-C", worktree.path]
-        // A fixed start commit avoids refs the agent can move, but after rebasing onto a newer
-        // base it also includes that base's test changes. In that case the current merge base
-        // isolates the job's patch. Fall back to the recorded start if the base ref is unavailable.
+        // The start commit is immutable from the agent's job state. Oby may supply a freshly
+        // fetched base tip to exclude base changes after a rebase; never resolve a mutable ref here.
         let fixed = ref.contains(/^[0-9a-f]{40}$/)
+        let comparisonEnv: [String: String?] = ["GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": "/dev/null"]
         var comparison: String?
-        if let branch {
-            comparison = try? await Shell.ok(git + ["merge-base", "HEAD", "refs/remotes/origin/\(branch)"])
+        if fixed, let trustedBaseTip,
+           let candidate = try? await Shell.ok(git + ["merge-base", "HEAD", trustedBaseTip], env: comparisonEnv),
+           (try? await Shell.ok(git + ["merge-base", "--is-ancestor", ref, candidate], env: comparisonEnv)) != nil {
+            comparison = candidate
         }
         if comparison == nil {
             comparison = fixed ? ref : try? await Shell.ok(git + ["merge-base", ref, "HEAD"])
