@@ -22,7 +22,7 @@ struct RunnerJobsTests {
     }
 
     /// Clear done on the island takes only settled jobs (#280): a published job whose pull request
-    /// is open stays, with its review, until it merges; a dismissed one goes.
+    /// is open goes too since 2026-10-13 (Oby takes it to the merge); a dismissed one goes.
     @Test func clearDoneKeepsAnOpenPullRequest() {
         let cleared = Date.now
         var job = Job(id: "a", request: "fix oby", agent: "claude", account: "default", repo: "deskree-inc/oby",
@@ -36,8 +36,9 @@ struct RunnerJobsTests {
         review.status = .done
         review.finished = cleared - 30
         review.reviewOf = job.id
-        #expect(!job.settled(among: [job, review]) && job.listed(after: cleared, among: [job, review]))
-        #expect(review.listed(after: cleared, among: [job, review]) && !review.clearable(among: [job, review]))
+        // Since 2026-10-13 an open pull request clears too: Oby takes it to the merge, and it comes back if it needs you.
+        #expect(job.settled(among: [job, review]) && !job.listed(after: cleared, among: [job, review]))
+        #expect(!review.listed(after: cleared, among: [job, review]) && review.clearable(among: [job, review]))
 
         var merged = job
         merged.pullRequest = PullRequestStatus(state: .merged, base: "dev", mergedAt: cleared - 10, checkedAt: cleared - 5)
