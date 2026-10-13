@@ -1,5 +1,10 @@
 import Foundation
 import Crypto
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 @testable import ObyEngine
 
 /// Owns a checkout outside every agent sandbox. A commit that failed is tried once, even across
@@ -58,10 +63,26 @@ final class Updates {
     var command: ([String], URL, [String: String?]) async throws -> String = { args, directory, env in
         let result = try await Shell.run(args, in: directory, env: env, timeout: 1800)
         guard result.status == 0, !result.timedOut else {
-            throw Shell.Failure(message: result.timedOut ? "timed out" : "exit \(result.status)")
+            let output = [result.text, result.err].filter { !$0.isEmpty }.joined(separator: "\n")
+            let diagnostics = args.prefix(2) == ["swift", "build"] ? Updates.compilerDiagnostics(output) : ""
+            let reason = result.timedOut ? "timed out" : "exit \(result.status)"
+            throw Shell.Failure(message: diagnostics.isEmpty ? reason : diagnostics)
         }
         return result.text
     }
+    /// `swift test` needs its output even on failure, both to identify failed tests and to report
+    /// compiler diagnostics without exposing the rest of a potentially sensitive build log.
+    var testCommand: ([String], URL, [String: String?]) async throws -> Shell.Output = { args, directory, env in
+        try await Shell.run(args, in: directory, env: env, timeout: 1800)
+    }
+    var loadAverage: () -> Double = {
+        var values = [Double](repeating: 0, count: 1)
+        return values.withUnsafeMutableBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return 0 }
+            return getloadavg(base, 1) == 1 ? buffer[0] : 0
+        }
+    }
+    var wait: (Duration) async -> Void = { duration in try? await Task.sleep(for: duration) }
     var install: (URL, URL) throws -> Void = Updates.install
     var restart: () -> Void = { exit(75) } // Restart=on-failure in the user service.
 
@@ -123,7 +144,31 @@ final class Updates {
             try? FileManager.default.removeItem(at: home)
             try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: home) }
-            _ = try await command(["swift", "test"], source, MacCheck.home(home))
+            let result = try await testCommand(["swift", "test"], source, MacCheck.home(home))
+            if result.status != 0 || result.timedOut || result.terminatedBySignal {
+                let output = [result.text, result.err].filter { !$0.isEmpty }.joined(separator: "\n")
+                guard !result.timedOut, !result.terminatedBySignal else {
+                    let reason = result.timedOut ? "timed out" : "terminated by signal"
+                    throw Shell.Failure(message: "swift test \(reason)")
+                }
+                let failures = Self.testFailures(in: output)
+                guard !failures.isEmpty else {
+                    let diagnostics = Self.compilerDiagnostics(output)
+                    throw Shell.Failure(message: diagnostics.isEmpty ? (result.timedOut ? "timed out" : "exit \(result.status)") : diagnostics)
+                }
+                await waitForQuietLoad()
+                let filters = failures.map { NSRegularExpression.escapedPattern(for: $0.name) }
+                let rerun = try await testCommand(["swift", "test", "--filter", filters.joined(separator: "|")], source, MacCheck.home(home))
+                let rerunOutput = [rerun.text, rerun.err].filter { !$0.isEmpty }.joined(separator: "\n")
+                let stillFailing = Self.testFailures(in: rerunOutput)
+                if rerun.status == 0 && !rerun.timedOut {
+                    recordFlakyTests(failures, commit: commit)
+                } else {
+                    let named = stillFailing.isEmpty ? failures : stillFailing
+                    fail(step, head: commit, detail: Self.failureDetails(named))
+                    return
+                }
+            }
             step = "install"
             let tested = root.appending(path: "candidate")
             try? FileManager.default.removeItem(at: tested)
@@ -134,7 +179,7 @@ final class Updates {
             status.phase = drainStarted == nil ? "ready" : "draining"
             deployIfReady()
         } catch {
-            fail(step, head: head)
+            fail(step, head: head, detail: error.localizedDescription)
         }
     }
 
@@ -172,7 +217,7 @@ final class Updates {
         restart()
     }
 
-    private func fail(_ step: String, head: String?) {
+    private func fail(_ step: String, head: String?, detail: String? = nil) {
         if let head { state.failed = head } else if state.outage == true { return } else { state.outage = true }
         try? save()
         if let ready, ready != head {
@@ -195,9 +240,76 @@ final class Updates {
         // again; while one is open, the commit's next failure adds none.
         let tries = desk.inbox.filter { $0.id == id || $0.id.hasPrefix(id + "-try-") }
         guard !tries.contains(where: \.isOpen) else { return }
+        let safeDetail = detail.map { desk.vault.redacting().redact(String($0.suffix(4000))) }
         desk.updateFailed(InboxItem(id: tries.isEmpty ? id : "\(id)-try-\(tries.count + 1)", kind: .failed, job: Desk.updateJob,
-                                    title: "Runner update failed", text: "Runner update failed at \(step)\(head.map { " (\($0))" } ?? ""). The old binary is kept. \(head == nil ? "The next poll tries again." : "The next dev commit tries again.")",
+                                    title: "Runner update failed", text: "Runner update failed at \(step)\(head.map { " (\($0))" } ?? ""). The old binary is kept. \(head == nil ? "The next poll tries again." : "The next dev commit tries again.")\(safeDetail.map { "\n\($0)" } ?? "")",
                                     options: [Inbox.tryAgain], details: ["Builds and tests this commit again now, and installs it if it passes."], created: now()))
+    }
+
+    private func waitForQuietLoad() async {
+        let deadline = now().addingTimeInterval(10 * 60)
+        while loadAverage() >= Double(ProcessInfo.processInfo.activeProcessorCount), now() < deadline {
+            await wait(.seconds(10))
+        }
+    }
+
+    private func recordFlakyTests(_ failures: [TestFailure], commit: String) {
+        let details = Self.failureDetails(failures)
+        let clean = desk.vault.redacting().redact(details)
+        let record = FailureRecord(id: "runner-update-\(commit)-flaky-test", trigger: .flakyTest, date: now(),
+                                   job: Desk.updateJob, repo: Failures.repo, title: "Runner update flaky tests",
+                                   what: "swift test failed once, then passed when the failing tests were rerun: \(clean)", rounds: nil,
+                                   evidence: FailureRecord.Evidence(summary: "Runner update \(commit) installed after flaky tests passed on rerun.",
+                                                                    step: "Runner update · swift test", check: clean))
+        desk.failureLog.store.save(record)
+    }
+
+    private struct TestFailure {
+        var name: String
+        var message: String
+    }
+
+    private static func testFailures(in output: String) -> [TestFailure] {
+        let lines = output.components(separatedBy: .newlines)
+        var found: [TestFailure] = []
+        var current: TestFailure?
+        func flush() {
+            if let current, !found.contains(where: { $0.name == current.name }) { found.append(current) }
+        }
+        for line in lines {
+            if line.contains("✘ Test "), let range = line.range(of: "✘ Test ") {
+                flush()
+                let rest = line[range.upperBound...]
+                let name = String(rest.split(whereSeparator: \.isWhitespace).prefix { $0 != "recorded" && $0 != "failed" }.joined(separator: " "))
+                let message = line.range(of: ": ", options: .backwards).map { String(line[$0.upperBound...]) } ?? ""
+                if !name.isEmpty { current = TestFailure(name: name, message: message) }
+            } else if line.trimmingCharacters(in: .whitespaces).hasPrefix("↳"), current != nil {
+                if var failure = current {
+                    failure.message += (failure.message.isEmpty ? "" : "\n") + line.trimmingCharacters(in: .whitespaces)
+                    current = failure
+                }
+            } else if line.contains("Test Case '") && line.contains("' failed") {
+                flush()
+                if let start = line.range(of: "Test Case '")?.upperBound,
+                   let end = line[start...].range(of: "' failed")?.lowerBound {
+                    current = TestFailure(name: String(line[start..<end]), message: line.trimmingCharacters(in: .whitespaces))
+                    flush()
+                    current = nil
+                }
+            }
+        }
+        flush()
+        return found
+    }
+
+    private static func failureDetails(_ failures: [TestFailure]) -> String {
+        failures.map { "\($0.name): \($0.message.isEmpty ? "failed" : $0.message)" }.joined(separator: "\n")
+    }
+
+    private static func compilerDiagnostics(_ output: String) -> String {
+        output.components(separatedBy: .newlines)
+            .filter { $0.contains("error:") || $0.contains("fatal error:") }
+            .suffix(20).joined(separator: "\n")
     }
 
     /// Try again on a failed update's item: that commit is tried once more, now.

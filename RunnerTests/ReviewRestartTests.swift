@@ -88,6 +88,7 @@ struct ReviewRestartTests {
         try Data("old binary".utf8).write(to: binary)
         let updates = Updates(desk: desk, root: root, binary: binary)
         updates.command = { args, _, _ in args.prefix(2) == ["git", "rev-parse"] ? String(repeating: "a", count: 40) : "" }
+        updates.testCommand = { _, _, _ in Shell.Output(status: 0, out: Data(), err: "") }
         updates.restart = { [made] in made.restarts += 1 }
         return updates
     }

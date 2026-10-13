@@ -11,6 +11,7 @@ struct UpdateTests {
     final class Fake {
         var head = String(repeating: "a", count: 40)
         var failed: [String]?
+        var testResults: [Shell.Output] = []
         var calls: [(args: [String], directory: URL, env: [String: String?])] = []
         var installs = 0
         var restarts = 0
@@ -36,6 +37,16 @@ struct UpdateTests {
         try Data("old binary".utf8).write(to: binary)
         updates = Updates(desk: desk, root: root, binary: binary)
         updates.command = fakeCommand
+        updates.testCommand = { [fake] args, directory, env in
+            fake.calls.append((args, directory, env))
+            if !fake.testResults.isEmpty { return fake.testResults.removeFirst() }
+            if args == ["swift", "test"], args == fake.failed {
+                return Shell.Output(status: 1, out: Data("test failed".utf8), err: "")
+            }
+            return Shell.Output(status: 0, out: Data(), err: "")
+        }
+        updates.loadAverage = { 0 }
+        updates.wait = { _ in }
         updates.install = { [fake] source, target in
             fake.installs += 1
             try Updates.install(source, target)
@@ -88,6 +99,59 @@ struct UpdateTests {
         #expect(fake.installs == 1)
     }
 
+    @Test func oneFailingTestThatPassesOnRerunInstallsAndRecordsFlakiness() async throws {
+        fake.testResults = [
+            Shell.Output(status: 1, out: Data("✘ Test UpdateTests.example() recorded an issue\n↳ Expectation failed: value == 1".utf8), err: ""),
+            Shell.Output(status: 0, out: Data("✔ Test UpdateTests.example() passed".utf8), err: "")
+        ]
+        await updates.poll()
+        #expect(fake.calls.filter { $0.args.first == "swift" && $0.args.dropFirst().first == "test" }.map(\.args) == [
+            ["swift", "test"], ["swift", "test", "--filter", #"UpdateTests\.example\(\)"#]
+        ])
+        #expect(fake.installs == 1 && fake.restarts == 1 && desk.inbox.isEmpty)
+        let failure = try #require(desk.failureLog.store.failures().first)
+        #expect(failure.trigger == .flakyTest && failure.what.contains("UpdateTests.example()"))
+        #expect(failure.evidence.check?.contains("Expectation failed") == true)
+    }
+
+    @Test func failingRerunKeepsOldBinaryAndNamesTheTestInTheInbox() async throws {
+        fake.testResults = [
+            Shell.Output(status: 1, out: Data("✘ Test UpdateTests.example() recorded an issue".utf8), err: ""),
+            Shell.Output(status: 1, out: Data("✘ Test UpdateTests.example() recorded an issue\n↳ Expected true".utf8), err: "")
+        ]
+        await updates.poll()
+        #expect(fake.installs == 0 && fake.restarts == 0)
+        #expect(desk.inbox.count == 1 && desk.inbox[0].text.contains("UpdateTests.example()"))
+        #expect(desk.inbox[0].text.contains("Expected true"))
+        #expect(try String(contentsOf: updates.binary, encoding: .utf8) == "old binary")
+    }
+
+    @Test(arguments: [true, false])
+    func timedOutOrSignaledTestRunDoesNotRerunNamedFailures(timedOut: Bool) async throws {
+        fake.testResults = [Shell.Output(status: 1,
+                                         out: Data("✘ Test UpdateTests.example() recorded an issue".utf8), err: "",
+                                         timedOut: timedOut, terminatedBySignal: !timedOut)]
+        await updates.poll()
+        #expect(fake.calls.filter { $0.args.first == "swift" && $0.args.dropFirst().first == "test" }.map(\.args) == [["swift", "test"]])
+        #expect(fake.installs == 0 && fake.restarts == 0)
+        #expect(desk.inbox.count == 1)
+        #expect(desk.inbox[0].text.contains(timedOut ? "timed out" : "terminated by signal"))
+    }
+
+    @Test func buildFailureReportsCompilerDiagnosticsWithoutRerunningTests() async throws {
+        updates.command = { [fake] args, directory, env in
+            fake.calls.append((args, directory, env))
+            if args == ["swift", "build", "-c", "release"] {
+                throw Shell.Failure(message: "Sources/main.swift:8:2: error: cannot find type 'Missing'")
+            }
+            return args.prefix(2) == ["git", "rev-parse"] ? fake.head : ""
+        }
+        await updates.poll()
+        #expect(fake.calls.filter { $0.args.first == "swift" }.map(\.args) == [["swift", "build", "-c", "release"]])
+        #expect(desk.inbox.count == 1 && desk.inbox[0].text.contains("Sources/main.swift:8:2: error: cannot find type 'Missing'"))
+        #expect(fake.installs == 0 && fake.restarts == 0)
+    }
+
     /// Each try that fails is its own item (#215): a retry that fails on the same commit offers Try
     /// again again, and while one is open the commit adds no other.
     @Test func aRetryThatFailsAgainOffersTryAgainAgain() async throws {
@@ -122,6 +186,7 @@ struct UpdateTests {
         let buildCalls = fake.calls.filter { $0.args == step }.count
         let restarted = Updates(desk: desk, root: updates.root, binary: updates.binary)
         restarted.command = updates.command
+        restarted.testCommand = updates.testCommand
         await restarted.poll()
         #expect(fake.calls.filter { $0.args == step }.count == buildCalls)
         fake.head = String(repeating: "b", count: 40)
@@ -138,6 +203,7 @@ struct UpdateTests {
             fake.calls.append((args, directory, env))
             if args == build, midBuild == nil {
                 midBuild = Updates(desk: desk, root: updates.root, binary: updates.binary)
+                midBuild?.testCommand = updates.testCommand
                 throw CancellationError()
             }
             return args.prefix(2) == ["git", "rev-parse"] ? fake.head : ""
@@ -145,6 +211,7 @@ struct UpdateTests {
         await updates.poll()
         let restarted = try #require(midBuild)
         restarted.command = fakeCommand
+        restarted.testCommand = updates.testCommand
         restarted.install = updates.install
         restarted.restart = updates.restart
         await restarted.poll()
@@ -163,6 +230,7 @@ struct UpdateTests {
         // A restart mid-outage doesn't report it again.
         let restarted = Updates(desk: desk, root: updates.root, binary: updates.binary)
         restarted.command = fakeCommand
+        restarted.testCommand = updates.testCommand
         restarted.now = { date }
         await restarted.poll()
         #expect(desk.inbox.count == 1 && desk.inbox[0].text.contains("fetch dev"))
@@ -301,6 +369,7 @@ struct UpdateTests {
         let fresh = restarted()
         let next = Updates(desk: fresh, root: updates.root, binary: updates.binary)
         next.command = fakeCommand
+        next.testCommand = updates.testCommand
         next.install = updates.install
         next.restart = updates.restart
         next.now = { date }
@@ -328,6 +397,7 @@ struct UpdateTests {
         let fresh = restarted()
         let next = Updates(desk: fresh, root: updates.root, binary: updates.binary)
         next.command = fakeCommand
+        next.testCommand = updates.testCommand
         next.install = updates.install
         next.restart = updates.restart
         next.now = { date }

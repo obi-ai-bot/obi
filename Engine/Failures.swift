@@ -33,6 +33,8 @@ nonisolated struct FailureRecord: Codable, Identifiable, Equatable, Sendable {
         case checkError, unnamedFailure
         /// Publishing or merging failed.
         case publishError, mergeError
+        /// A runner update's test failed once and passed on its named-test rerun.
+        case flakyTest
         /// The job stayed in one step past its limit, or a Mac check waited past its own.
         case stuck
         /// The brain didn't answer, and rules planned instead.
