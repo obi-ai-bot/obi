@@ -506,12 +506,11 @@ final class Desk {
 
     func refreshSettingOptions() async {
         guard !settingOptionsLoaded else { return }
+        guard let options = await loadSettingOptions() else { return }
         settingOptionsLoaded = true
-        if let options = await loadSettingOptions() {
-            settingModels = options.0
-            settingEfforts = options.1
-            settingModelEfforts = options.2
-        }
+        settingModels = options.0
+        settingEfforts = options.1
+        settingModelEfforts = options.2
         settingModelEfforts["claude"] = Dictionary(uniqueKeysWithValues: settingModels["claude", default: []].map { ($0, settingEfforts["claude", default: []]) })
     }
 
@@ -762,6 +761,14 @@ final class Desk {
             }
             record(BrainTurn(said: request, by: result.by, plan: result.plan, refused: result.refused))
             if let refusal = BrainSafety.rulesActingRefusal(for: result, step: step) { return Self.after(done, .reply(refusal)) }
+            if result.by == "rules", let refusal = result.refused.last,
+               let start = refusal.range(of: "plan refused ("),
+               let end = refusal[start.upperBound...].firstIndex(of: ")") {
+                let reason = refusal[start.upperBound..<end]
+                if reason.contains("maxRunning goes") || reason.contains("unknown model") || reason.contains("unknown effort") || reason.contains("setting needs") || reason.contains("reserve setting") {
+                    return Self.after(done, .reply("I couldn't use that setting: \(reason)."))
+                }
+            }
             // Rules only stand in for the brain on the user's own words: a later step they planned is a guess.
             if step > 0, result.by == "rules" { break }
             // The chat reads before it answers (#302): what's read is in the next step's quoted file.

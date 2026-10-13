@@ -173,6 +173,12 @@ final class IslandController {
             guard let self else { return [] }
             return [Briefing.Place(name: feed.name, jobs: feed.jobs, inbox: feed.inbox, accounts: feed.accounts)]
         }
+        desk.loadSettingOptions = {
+            guard let codex = try? await CodexAgent.models(home: nil), !codex.isEmpty else { return nil }
+            return (["claude": AgentModels.claude.map(\.0), "codex": codex.map(\.id)],
+                    ["claude": AgentModels.claudeEfforts, "codex": Array(Set(codex.flatMap(\.efforts))).sorted()],
+                    ["codex": Dictionary(uniqueKeysWithValues: codex.map { ($0.id, $0.efforts) })])
+        }
         desk.stopElsewhere = { [weak self] ids in
             guard let self else { return [:] }
             var failed: [String: String] = [:]
