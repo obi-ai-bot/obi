@@ -569,11 +569,11 @@ struct ReviewTests {
         let came = try #require(second.review)
         #expect(came.repeated == false && came.cameBack == true && !came.stopsHere && came.wantsFollowUp && !second.reviewNeedsYou)
         try await roundPublishes(after: 2)
-        // The author was told what is unmet, and that it has no more rounds for it.
-        let prompt = try #require(made.agents.last?.agent.prompt)
+        // The author's second round (the agents: author, review, round 1, review, round 2) was told what is unmet, and that it has no more rounds for it.
+        let prompt = made.agents[4].agent.prompt
         #expect(prompt.contains("start with `Again:`") && prompt.contains("name every test you added"))
         // The first round's prompt says nothing of it.
-        #expect(!(try #require(made.agents.dropFirst(2).first?.agent.prompt).contains("name every test you added")))
+        #expect(!made.agents[2].agent.prompt.contains("name every test you added"))
         let third = try await review("Still.\n\nBlocking:\n- Again: the required tests are still missing\n- A new problem\n\nVERDICT: CHANGES REQUESTED")
         #expect(third.review?.repeated == true && third.review?.stopsHere == true && third.reviewNeedsYou)
     }
