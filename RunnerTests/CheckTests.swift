@@ -172,7 +172,7 @@ struct CheckTests {
         #expect(desk.job("author")?.macCheck == back && made.events.last == back)
         // The lease outlasts the longest check: every step to its timeout, each xcodebuild step twice.
         let longest = MacCheck.commands(cache: URL(filePath: "/")).reduce(0) { $0 + $1.timeout * ($1.xcodebuild ? 2 : 1) }
-        #expect(MacCheck.lease > longest && longest == 170 * 60)
+        #expect(MacCheck.lease > longest && longest == 110 * 60)
         #expect(desk.nextMacCheck(mac: "Laptop", now: relaunched + longest) == nil)
         #expect(desk.nextMacCheck(mac: MacCheck.unnamedMac, now: relaunched + longest) == nil)
         // A Mac that went quiet past the lease: the next one to ask gets it, and it's no longer Studio's.
@@ -280,6 +280,29 @@ struct CheckTests {
         #expect(stages.last?.id == .merged && stages.last?.state == .done && stages.last?.title == "Merged into dev")
         #expect(stages.first { $0.id == .review }?.detail == "Approved by Oby")
         #expect(made.agents.count == 2 && !merged.needsYou)
+    }
+
+    @Test func aMergeCheckReusesAPassingAppleCheckWhenTheMacHasNoResults() async throws {
+        let check = try await approved()
+        var author = try #require(desk.job("author"))
+        var apple = MacCheck.make(for: author, pr: 80, head: Self.head)
+        apple.kind = .apple
+        apple.state = .passed
+        apple.steps = Array(steps.dropFirst())
+        author.appleRan = apple
+        desk.replace(author)
+        _ = desk.nextMacCheck(mac: "Studio")
+
+        var reportSteps = steps
+        reportSteps[1].passed = false
+        reportSteps[2].passed = false
+        let report = MacCheck.Report(passed: false, steps: reportSteps, failures: [],
+                                    problem: "Mac check couldn't run: the Mac app's tests ended without a result bundle or a failing test.")
+        let ended = try desk.macCheckEnded(check.id, report)
+
+        #expect(ended.state == .passed && ended.steps == steps && ended.problem == nil)
+        try await until("the recovered check merges") { desk.job("author")?.pullRequest?.state == .merged }
+        #expect(made.merged.map(\.id) == [check.id] && made.runs.first?.conclusion == .success)
     }
 
     @Test func aSecretOrAFailedMergeLeavesItUnmergedSayingWhy() async throws {
@@ -1023,8 +1046,8 @@ struct CheckTests {
         outcome = await MacCheck.step(phone) { run, _ in
             run == 1 ? attempt(65, ended, bundled: false) : attempt(15, "◇ Test hangs() started.", timedOut: true, bundled: false)
         } reset: {}
-        #expect(outcome.problem?.hasSuffix("once more. It was stopped after 40 minutes; the last test that started was hangs().") == true)
-        #expect(outcome.log?.hasPrefix("Oby stopped it after 40 minutes; the last test that started was hangs().") == true)
+        #expect(outcome.problem?.hasSuffix("once more. It was stopped after 20 minutes; the last test that started was hangs().") == true)
+        #expect(outcome.log?.hasPrefix("Oby stopped it after 20 minutes; the last test that started was hangs().") == true)
     }
 
     // MARK: Simulator runtimes
