@@ -483,8 +483,12 @@ nonisolated struct Planner: Sendable {
         let schema = Plan.schema(for: context)
         let user = (context.briefing.map { $0 + "\n\n" } ?? "") + "The user says now:\n" + said
         var refused: [String] = []
+        let usesDeepModel = context.turnStep > 0 || (context.turnLength ?? said.count) > 600
+        // ClaudeBrain reserves half of this budget for its one process retry. Give Sonnet
+        // enough total time that each attempt can still complete a normal planning turn.
+        let budget: TimeInterval = usesDeepModel ? 40 : 20
         for adapter in adapters {
-            let deadline = Date.now.addingTimeInterval(20)
+            let deadline = Date.now.addingTimeInterval(budget)
             var message = user
             for _ in 0..<2 {
                 let left = deadline.timeIntervalSinceNow
@@ -492,7 +496,7 @@ nonisolated struct Planner: Sendable {
                 let data: Data
                 do {
                     if let modelAware = adapter as? any ModelAwareBrainAdapter {
-                        let model = context.turnStep > 0 || (context.turnLength ?? said.count) > 600 ? ClaudeBrain.deepModel : ClaudeBrain.quickModel
+                        let model = usesDeepModel ? ClaudeBrain.deepModel : ClaudeBrain.quickModel
                         data = try await modelAware.complete(model: model, system: system, user: message, quoted: context.quoted, schema: schema, timeout: left)
                     } else {
                         data = try await adapter.complete(system: system, user: message, quoted: context.quoted, schema: schema, timeout: left)
