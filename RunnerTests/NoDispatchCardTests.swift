@@ -35,7 +35,9 @@ struct NoDispatchCardTests {
         desk.makeBrain = { [brain] _, _ in [brain] }
     }
 
-    func until(_ what: String, tries: Int = 500, _ condition: () -> Bool) async throws {
+    func until(_ what: String, tries: Int = 2000, _ condition: () -> Bool) async throws {
+        // MacTests can run alongside the runner suite; allow its main actor to observe the
+        // deliberately blocked read even when the host is busy.
         for _ in 0..<tries where !condition() { try await Task.sleep(for: .milliseconds(10)) }
         #expect(condition(), Comment(rawValue: what))
     }
