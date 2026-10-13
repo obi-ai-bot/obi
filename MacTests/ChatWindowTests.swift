@@ -9,6 +9,17 @@ import Testing
 struct ChatWindowTests {
     let now = Date(timeIntervalSince1970: 1_791_582_173)
 
+    /// The + button, the microphone and the text share a middle on one line (#322).
+    @Test func composerButtonsAreCenteredOnTheFirstLine() {
+        let row = ComposerMetrics.rowHeight
+        // A button sits `buttonInset` above the row's bottom, the text's line `textInset` above and below.
+        let button = row - ComposerMetrics.buttonInset - ComposerMetrics.button / 2
+        let text = ComposerMetrics.textInset + ComposerMetrics.lineHeight / 2
+        #expect(button == row / 2 && text == row / 2)
+        #expect(ComposerMetrics.buttonInset * 2 + ComposerMetrics.button == row)
+        #expect(ComposerMetrics.textInset * 2 + ComposerMetrics.lineHeight == row)
+    }
+
     @Test func composerGrowsByLineAndCapsAtHalfTheWindow() {
         #expect(ComposerMetrics.height(lines: 1, maximum: 300) == 22)
         #expect(ComposerMetrics.height(lines: 2, maximum: 300) == 44)

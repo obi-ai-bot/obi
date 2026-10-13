@@ -4,6 +4,13 @@ import SwiftUI
 /// The text's layout controls growth, including wrapped and pasted lines; the viewport caps it.
 nonisolated enum ComposerMetrics {
     static let lineHeight: CGFloat = 22
+    /// The composer's height with one line, and the buttons in it: the + and the microphone (or Send)
+    /// share one size, and sit at the bottom, centered on a single line of text (#322).
+    static let rowHeight: CGFloat = 52
+    static let button: CGFloat = 34
+    static var buttonInset: CGFloat { (rowHeight - button) / 2 }
+    /// Above and below the text, so one line fills the row and sits at its middle.
+    static var textInset: CGFloat { (rowHeight - lineHeight) / 2 }
     static func height(lines: Int, maximum: CGFloat) -> CGFloat {
         min(max(lineHeight, maximum), CGFloat(max(1, lines)) * lineHeight)
     }
@@ -38,7 +45,7 @@ struct ChatComposer: View {
     @State private var width: CGFloat = 300
 
     private var lines: Int { ComposerMetrics.lines(text, width: width) }
-    private var editorHeight: CGFloat { ComposerMetrics.height(lines: lines, maximum: maximumHeight - 28) }
+    private var editorHeight: CGFloat { ComposerMetrics.height(lines: lines, maximum: maximumHeight - 2 * ComposerMetrics.textInset) }
     private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
@@ -50,9 +57,11 @@ struct ChatComposer: View {
                     Button("Clipboard", action: tray.pasteClipboard)
                     Button("File", action: tray.chooseFile)
                 } label: {
-                    Image(systemName: "plus").font(OBYStyle.body.weight(.medium)).frame(width: 30, height: 34)
+                    Image(systemName: "plus").font(OBYStyle.body.weight(.medium))
+                        .frame(width: ComposerMetrics.button, height: ComposerMetrics.button).contentShape(Rectangle())
                 }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().padding(.bottom, 9)
+                .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+                .padding(.bottom, ComposerMetrics.buttonInset)
                 .accessibilityLabel("Add attachment")
                 ComposerEditor(text: $text, focused: $focused, focusRequest: focusRequest, onSend: onSend, onStop: onStop)
                     .frame(height: editorHeight)
@@ -63,24 +72,24 @@ struct ChatComposer: View {
                                 .padding(.top, 2).allowsHitTesting(false)
                         }
                     }
-                    .padding(.vertical, 14)
+                    .padding(.vertical, ComposerMetrics.textInset)
                 if empty {
                     Image(systemName: "mic").font(OBYStyle.body.weight(.medium))
-                        .foregroundStyle(OBYStyle.userText).frame(width: 34, height: 34)
-                        .background(OBYStyle.userBubble, in: Circle()).padding(.bottom, 9)
+                        .foregroundStyle(OBYStyle.userText).frame(width: ComposerMetrics.button, height: ComposerMetrics.button)
+                        .background(OBYStyle.userBubble, in: Circle()).padding(.bottom, ComposerMetrics.buttonInset)
                         .help("Hold fn (or Control-Option) to talk")
                         .accessibilityLabel("Hold fn to talk")
                 } else {
                     Button(action: onSend) {
                         Image(systemName: "arrow.up").font(OBYStyle.body.weight(.bold))
-                            .foregroundStyle(OBYStyle.userText).frame(width: 34, height: 34)
+                            .foregroundStyle(OBYStyle.userText).frame(width: ComposerMetrics.button, height: ComposerMetrics.button)
                             .background(OBYStyle.userBubble, in: Circle())
                     }
-                    .buttonStyle(.plain).padding(.bottom, 9).accessibilityLabel("Send")
+                    .buttonStyle(.plain).padding(.bottom, ComposerMetrics.buttonInset).accessibilityLabel("Send")
                 }
             }
             .padding(.leading, OBYStyle.Space.md).padding(.trailing, OBYStyle.Space.sm)
-            .frame(minHeight: 52)
+            .frame(minHeight: ComposerMetrics.rowHeight)
             .background(OBYStyle.composer, in: RoundedRectangle(cornerRadius: lines > 1 ? OBYStyle.expandedComposer : 26))
         }
     }
