@@ -1225,7 +1225,8 @@ nonisolated enum Agents {
             .first(where: { FileManager.default.isExecutableFile(atPath: $0.path) })
         guard let real else { return [:] }
         return ["PATH": "\(bin.path):\(path)", "OBY_REAL_SWIFT": real.path,
-                "OBY_SWIFT_BUILD_REPORT": worktree.appending(path: ".oby/first-swift-build-seconds").path]
+                "OBY_SWIFT_BUILD_REPORT": worktree.appending(path: ".oby/first-swift-build-seconds").path,
+                "OBY_REVIEW_JOB": worktree.appending(path: ".oby/review-job").path]
     }
 
     /// Claude Code without the account's claude.ai connectors (Slack, Drive, Claude Docs, …): each
@@ -1288,6 +1289,30 @@ nonisolated enum Agents {
                                                  attributes: [.posixPermissions: 0o700])
         let script = """
         #!/bin/sh
+        oby_run_swift() {
+            if [ ! -e \"$OBY_REVIEW_JOB\" ]; then
+                \"$OBY_REAL_SWIFT\" \"$@\"
+                return $?
+            fi
+            oby_review_output=\"$OBY_SWIFT_BUILD_REPORT.review-output\"
+            \"$OBY_REAL_SWIFT\" \"$@\" > \"$oby_review_output\" 2>&1
+            oby_review_status=$?
+            cat \"$oby_review_output\"
+            if [ $oby_review_status -ne 0 ] && [ ! -e \"$OBY_SWIFT_BUILD_REPORT.review-retried\" ] \
+                && grep -q 'compiled with module cache path' \"$oby_review_output\"; then
+                echo \"Oby couldn't build the PR for review; retrying once with a clean .build.\"
+                : > \"$OBY_SWIFT_BUILD_REPORT.review-retried\"
+                rm -rf .build
+                \"$OBY_REAL_SWIFT\" \"$@\" > \"$oby_review_output\" 2>&1
+                oby_review_status=$?
+                cat \"$oby_review_output\"
+                if [ $oby_review_status -ne 0 ]; then
+                    echo \"Oby couldn't build the PR for review after retry.\"
+                fi
+            fi
+            rm -f \"$oby_review_output\"
+            return $oby_review_status
+        }
         oby_swift_has_jobs=
         for oby_swift_arg in \"$@\"; do
             case \"$oby_swift_arg\" in
@@ -1316,7 +1341,7 @@ nonisolated enum Agents {
                 esac
             done
             oby_swift_start=$(date +%s)
-            eval \"\\\"$OBY_REAL_SWIFT\\\" build -j \\\"${OBY_SWIFT_BUILD_JOBS:-1}\\\"$oby_swift_build_flags\"
+            eval \"oby_run_swift build -j \\\"${OBY_SWIFT_BUILD_JOBS:-1}\\\"$oby_swift_build_flags\"
             oby_swift_status=$?
             oby_swift_end=$(date +%s)
             printf '%s\\n' $((oby_swift_end - oby_swift_start)) > \"$OBY_SWIFT_BUILD_REPORT.tmp\"
@@ -1324,14 +1349,15 @@ nonisolated enum Agents {
             [ $oby_swift_status -eq 0 ] || exit $oby_swift_status
         elif [ \"$1\" = build ] && [ ! -e \"$OBY_SWIFT_BUILD_REPORT\" ]; then
             oby_swift_start=$(date +%s)
-            \"$OBY_REAL_SWIFT\" \"$@\"
+            oby_run_swift \"$@\"
             oby_swift_status=$?
             oby_swift_end=$(date +%s)
             printf '%s\\n' $((oby_swift_end - oby_swift_start)) > \"$OBY_SWIFT_BUILD_REPORT.tmp\"
             mv \"$OBY_SWIFT_BUILD_REPORT.tmp\" \"$OBY_SWIFT_BUILD_REPORT\"
             exit $oby_swift_status
         fi
-        exec \"$OBY_REAL_SWIFT\" \"$@\"
+        oby_run_swift \"$@\"
+        exit $?
         """
         let wrapper = bin.appending(path: "swift")
         try script.write(to: wrapper, atomically: true, encoding: .utf8)
@@ -1449,6 +1475,17 @@ nonisolated enum Workspace {
     static func clone(_ repo: String) -> URL { root.appending(path: "repos/\(repo)") }
     static func worktree(_ id: String) -> URL { root.appending(path: "jobs/\(id)") }
 
+    /// Removes Swift module caches because their precompiled modules embed the source path.
+    private static func removeModuleCaches(in build: URL) throws {
+        guard let entries = FileManager.default.enumerator(at: build, includingPropertiesForKeys: [.isDirectoryKey]) else { return }
+        for case let entry as URL in entries {
+            guard entry.lastPathComponent.hasPrefix("ModuleCache"),
+                  (try entry.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true else { continue }
+            try FileManager.default.removeItem(at: entry)
+            entries.skipDescendants()
+        }
+    }
+
     /// Copies a SwiftPM build directory using filesystem clones where the platform supports them,
     /// falling back to an ordinary recursive copy. The source and destination are fakeable paths,
     /// so preparation tests never need a repository or a compiler.
@@ -1467,6 +1504,7 @@ nonisolated enum Workspace {
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.copyItem(at: source, to: destination)
         }
+        try removeModuleCaches(in: destination)
         return true
     }
 
@@ -1583,6 +1621,11 @@ nonisolated enum Workspace {
         let worktree = worktree(job.id)
         try await git(["worktree", "add", "--quiet", "-b", job.branch, worktree.path, start])
         job.startCommit = try await Shell.ok(["git", "-C", clone.path, "rev-parse", "--verify", "\(start)^{commit}"], env: ["GIT_NO_REPLACE_OBJECTS": "1"])
+        if job.kind == .review {
+            let marker = worktree.appending(path: ".oby/review-job")
+            try FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: marker)
+        }
         try Agents.installSwiftWrapper(in: worktree)
         _ = try? await seedBuild(job, commit: job.startCommit!, into: worktree)
         return try inputs(job, pullRequest: pullRequest, issue: issue, in: worktree)

@@ -173,6 +173,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             ownText,
             "What the user asked that agent for: \(job.task)",
             "Judge whether the changes do what the user asked, correctly and completely, and whether they're safe and follow the repository's own guidance (AGENTS.md, CLAUDE.md, README). Read the diff and the code around it; run the repository's tests or checks when that tells you more. Raise only what matters: bugs, missing pieces, risks, and what a person must know before merging.",
+            "If a build or test still fails after Oby's clean retry, report it as Oby's problem: say Oby couldn't build the PR for review and include the error. Do not say you couldn't run the tests, and do not approve or request changes based on reading alone; return no verdict.",
             blocking,
             AppleCheck.reviewLine(job),
             "This is a review only: make no commits and change no files. Don't push, open pull requests or post anything to GitHub: Oby posts your review itself.",
@@ -195,6 +196,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
             "What the user asked that agent for: \(job.task)",
             "This is a follow-up, not a fresh review. Check only " + (input == nil ? "" : "that each blocking finding in that file is fixed, and ")
                 + "that the new commits don't break anything. Don't review the rest of the pull request again, and don't raise what the last review didn't: it was judged then. Read the new changes and the code around them; run the repository's tests or checks when that tells you more.",
+            "If a build or test still fails after Oby's clean retry, report it as Oby's problem: say Oby couldn't build the PR for review and include the error. Do not say you couldn't run the tests, and do not approve or request changes based on reading alone; return no verdict.",
             "Blocking means a finding the last review blocked on that isn't fixed, or something the new commits broke: a bug, a security or data-loss problem, or a requirement or test they broke. Anything else you notice in the new commits is worth doing later.",
         ]
         if input != nil { lines.append(again) }
