@@ -264,6 +264,29 @@ struct FailureTests {
         log.sweep()
         #expect(test.triggers(of: "slow") == [.stuck])
 
+        // A job whose agent waits for an Apple check has its round's clock stopped: that isn't a stuck step.
+        desk.enqueue(test.job("waiting") { $0.status = .queued; $0.finished = nil })
+        try await test.until("it runs") { desk.job("waiting")?.status == .running }
+        var asked = test.check("wait", .running)
+        asked.kind = .apple
+        asked.started = .now.addingTimeInterval(3000)
+        asked.agentAsked = .now
+        var waiting = try #require(desk.job("waiting"))
+        waiting.appleCheck = asked
+        desk.replace(waiting)
+        log.now = { .now }
+        log.sweep()
+        log.now = { .now.addingTimeInterval(3600) }
+        log.sweep()
+        #expect(test.triggers(of: "waiting").isEmpty)
+        // Once the check ended, the step's clock starts over.
+        waiting.appleCheck?.state = .error
+        desk.replace(waiting)
+        log.sweep()
+        log.now = { .now.addingTimeInterval(7200) }
+        log.sweep()
+        #expect(test.triggers(of: "waiting").contains(.stuck))
+
         desk.record(BrainTurn(said: "build the vault on the runner", by: "rules", plan: Plan(action: .ignore, reply: "", dispatches: [], question: nil),
                               refused: ["claude haiku failed: claude exited 15"]))
         log.now = { .now }

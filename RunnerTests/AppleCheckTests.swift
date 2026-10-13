@@ -187,6 +187,28 @@ struct AppleCheckTests {
         #expect(AppleCheck.report(nothing, log: nil) == "The Apple check of commit 1a2b3c4d5e6f couldn't run: \(simulator)")
     }
 
+    @Test func aMacThatTookAnAgentsCheckAndWentQuietLosesItAfterItsOwnShortLease() async throws {
+        try await running()
+        let check = try await desk.askAppleCheck("apple118")
+        let taken = try #require(desk.nextMacCheck(mac: "Studio", kinds: [.apple]))
+        let started = try #require(taken.started)
+        #expect(AppleCheck.lease < MacCheck.lease && taken.leaseLimit == AppleCheck.lease)
+        // Within the lease the Mac is busy, and the agent keeps waiting.
+        #expect(desk.appleCheck("apple118", now: started + AppleCheck.lease)?.state == .running)
+        #expect(desk.busyMac(now: started + AppleCheck.lease)?.id == check.id)
+        // Past it another Mac takes the check from the silent one.
+        #expect(desk.busyMac(now: started + AppleCheck.lease + 1) == nil)
+        let again = try #require(desk.nextMacCheck(mac: "Laptop", kinds: [.apple], now: started + AppleCheck.lease + 1))
+        #expect(again.id == check.id && again.mac == "Laptop" && again.state == .running)
+
+        // No other Mac asks: the agent's next look ends it, and the agent carries on without it.
+        let quiet = try #require(desk.appleCheck("apple118", now: again.started! + AppleCheck.lease + 1))
+        #expect(quiet.state == .error && quiet.problem == AppleCheck.quietLine && quiet.finished != nil && !quiet.agentWaits)
+        #expect(made.events.last == quiet)
+        // What the quiet Mac reports late has no one waiting.
+        #expect(throws: (any Error).self) { try desk.macCheckEnded(check.id, failing) }
+    }
+
     @Test func noMacTakingItSaysSoButABusyMacKeepsItWaiting() async throws {
         try await running()
         let check = try await desk.askAppleCheck("apple118")

@@ -118,6 +118,8 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
     /// (the Mac's own trouble runs it again, `step`), and half an hour for the checkout, the resets
     /// and the result bundles. 3 hours 20 minutes today.
     static let lease: TimeInterval = commands(cache: URL(filePath: "/")).reduce(30 * 60) { $0 + $1.timeout * ($1.xcodebuild ? 2 : 1) }
+    /// How long a Mac may hold this check before another one gets it: an agent's Apple check has its own, shorter one.
+    var leaseLimit: TimeInterval { isApple ? AppleCheck.lease : Self.lease }
     static let stopLine = "The Mac check failed \(maxRounds) times. Take it from here."
     /// A failed check whose round for the author ended without a new commit to check.
     static let nothingNewLine = "The agent's round for it pushed no new commit. Try again to check the same commit, or take it from here."

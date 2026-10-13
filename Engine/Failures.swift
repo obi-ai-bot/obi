@@ -576,6 +576,8 @@ final class Failures {
     /// (`Desk.startOrWait`, #231, #237) isn't in a step yet: its clock starts when it starts.
     private func track(_ job: Job) {
         guard job.isActive, !job.waitsForAnswer, !job.waitsForPermission, !Self.waitsItsTurn(job) else { since[job.id] = nil; return }
+        // Its agent waits for a check, its round's clock stopped (`Desk.paceRound`): the check's own lease limits that.
+        if job.appleCheck?.agentWaits == true { since[job.id] = nil; return }
         let key = "\(job.phase?.rawValue ?? "prepare")-\(job.currentRound)-\(job.publishStep?.rawValue ?? "")"
         if since[job.id]?.key != key { since[job.id] = (key, now()) }
     }
@@ -617,7 +619,7 @@ final class Failures {
         for job in desk.jobs {
             for check in [job.macCheck, job.appleCheck].compactMap({ $0 }) {
                 let waited = check.state == .queued ? now.timeIntervalSince(check.created) > Self.queuedCheck
-                    : check.state == .running && now.timeIntervalSince(check.started ?? check.created) > MacCheck.lease
+                    : check.state == .running && now.timeIntervalSince(check.started ?? check.created) > check.leaseLimit
                 guard waited else { continue }
                 let found = Found(id: "\(job.id)-stuck-\(check.id)-\(check.state.rawValue)", trigger: .stuck,
                                   what: "Its \(check.isApple ? "Apple" : "merge") check stayed \(check.state.rawValue) too long.", date: now)
