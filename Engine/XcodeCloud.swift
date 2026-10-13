@@ -70,8 +70,14 @@ nonisolated struct XcodeCloud: Codable, Equatable, Sendable {
         let details = latest.map { run in
             ([run.name + ": " + (run.conclusion ?? run.status)] + [run.text].filter { !$0.isEmpty }).joined(separator: "\n")
         }.joined(separator: "\n\n")
+        // A conflict is actionable by Oby only when it is the sole failure reported by
+        // Xcode Cloud. A conflict message alongside another failed task is still a build
+        // failure and must go through the normal author round.
+        let conflict = !failed.isEmpty && failed.allSatisfy {
+            $0.text.localizedCaseInsensitiveContains(conflictLine)
+        }
         return XcodeCloud(head: head, state: state, details: String(details.prefix(16000)),
-                          conflict: failed.contains { $0.text.localizedCaseInsensitiveContains(conflictLine) }, checkedAt: now)
+                          conflict: conflict, checkedAt: now)
     }
 
     private static func latest(_ data: Data, head: String) throws -> [Run] {
@@ -91,6 +97,7 @@ nonisolated struct XcodeCloud: Codable, Equatable, Sendable {
                       read: ([String]) async throws -> Data) async throws -> XcodeCloud? {
         let data = try await read(arguments(repo: repo, head: head))
         guard var result = try decode(data, head: head, at: now) else { return nil }
+        let failedCount = try latest(data, head: head).filter(\.failed).count
         for run in try latest(data, head: head) where run.failed && (run.output?.annotations_count ?? 0) > 0 {
             let data = try await read(["gh", "api", "repos/\(repo)/check-runs/\(run.id)/annotations?per_page=100", "--paginate", "--slurp"])
             struct Annotation: Decodable { var path: String?; var start_line: Int?; var title: String?; var message: String; var raw_details: String? }
@@ -98,7 +105,10 @@ nonisolated struct XcodeCloud: Codable, Equatable, Sendable {
             let details = annotations.map {
                 [$0.path, $0.start_line.map(String.init), $0.title, $0.message, $0.raw_details].compactMap { $0 }.joined(separator: "\n")
             }.joined(separator: "\n\n")
-            result.conflict = result.conflict || details.localizedCaseInsensitiveContains(conflictLine)
+            // An annotation can carry the only conflict text when the check summary is sparse.
+            // It can establish a conflict for a single failed task; mixed failed tasks remain
+            // ordinary failures even if one annotation mentions the base branch.
+            result.conflict = result.conflict || (failedCount == 1 && details.localizedCaseInsensitiveContains(conflictLine))
             result.details = String((details + "\n\n" + result.details).prefix(16000))
         }
         return result
@@ -227,7 +237,7 @@ extension Desk {
                 latest.xcodeCloud?.problem = nil
                 // The user asked again: the same base may be tried again.
                 if again { latest.rebasedOnto = nil }
-            }, stop: { latest, why in
+            }, step: "Xcode Cloud: waiting for a rebase onto \(author.base ?? "dev")", stop: { latest, why in
                 latest.xcodeCloud?.problem = "Xcode Cloud says it conflicts with \(latest.base ?? "its base"). \(why)"
                 latest.xcodeCloud?.stops += 1
             })

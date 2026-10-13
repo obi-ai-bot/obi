@@ -72,6 +72,11 @@ struct XcodeCloudTests {
         #expect(try XcodeCloud.decode(data([run(conclusion: "failure"), run(2)]), head: head)?.state == .passed)
         let failed = try #require(try XcodeCloud.decode(data([run(conclusion: "failure", summary: "Your source code changes conflict with changes made on the pull request target branch")]), head: head))
         #expect(failed.conflict && failed.state == .failed)
+        let mixed = try #require(try XcodeCloud.decode(data([
+            run(conclusion: "failure", summary: "Your source code changes conflict with changes made on the pull request target branch"),
+            run(2, name: "Build - macOS", conclusion: "failure", summary: "The app does not compile")
+        ]), head: head))
+        #expect(!mixed.conflict && mixed.state == .failed)
         #expect(try XcodeCloud.decode(data([run(conclusion: "cancelled")]), head: head)?.state == .failed)
         #expect(throws: (any Error).self) { try XcodeCloud.decode(Data("{}".utf8), head: head) }
         #expect(throws: (any Error).self) { try XcodeCloud.arguments(repo: "deskree-inc/oby", head: "--help") }
@@ -192,7 +197,8 @@ struct XcodeCloudTests {
         }
         await observe(result(conflict: true))
         var author = try #require(desk.job("cloud"))
-        #expect(agents.count == 1 && fetched == 1 && author.status == .running && author.step == "Rebasing onto dev")
+        #expect(agents.count == 1 && fetched == 1 && author.status == .running && author.step == "Xcode Cloud: waiting for a rebase onto dev")
+        #expect(author.pipeline.stages.first { $0.id == .cloud }?.detail == "Xcode Cloud: waiting for a rebase onto dev")
         #expect(author.rebasedOnto == onto && author.rebasedFrom == head && author.xcodeCloud?.rounds == 0)
         #expect(agents[0].prompt.contains("`git rebase \(onto)`") && agents[0].prompt.contains("Never merge dev into this branch."))
         #expect(desk.inbox.filter(\.isOpen).isEmpty)
@@ -208,7 +214,7 @@ struct XcodeCloudTests {
         // One more round fetches dev and rebases again, even onto the same commit.
         try desk.settle(try #require(desk.inbox.first { $0.isOpen }).id, .answer(Inbox.oneMoreRound))
         try await waitFor { agents.count == 2 }
-        #expect(fetched == 2 && desk.job("cloud")?.step == "Rebasing onto dev")
+        #expect(fetched == 2 && desk.job("cloud")?.step == "Xcode Cloud: waiting for a rebase onto dev")
     }
 
     /// The rebase can't start (dev couldn't be fetched): it needs you, saying why.

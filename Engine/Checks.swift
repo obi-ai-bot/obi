@@ -1473,7 +1473,7 @@ extension Desk {
     /// `prepare` marks the job once the base is fetched, before the round starts. Where the rebase
     /// can't settle it, `stop` writes why on the job, and a person takes it from here.
     func rebase(_ id: String, holds: (Job) -> Bool, prepare: (inout Job) -> Void = { _ in },
-                stop write: (inout Job, String) -> Void) async {
+                step: String? = nil, stop write: (inout Job, String) -> Void) async {
         func stop(_ why: String) {
             guard var latest = job(id), !latest.isActive, holds(latest) else { return }
             write(&latest, why)
@@ -1503,7 +1503,7 @@ extension Desk {
         latest.mergeError = nil
         latest.extraReviews = max(latest.extraReviews ?? 0, (latest.review?.round ?? 0) + 1 - Review.maxRounds)
         var again = Review.round(latest)
-        again.step = "Rebasing onto \(base)"
+        again.step = step ?? "Rebasing onto \(base)"
         replace(again)
         Logger.jobs.notice("job \(id, privacy: .public): pull request conflicts with \(base, privacy: .public), rebasing onto \(onto, privacy: .public)")
         run(again, prompt: MacCheck.rebasePrompt(again, base: base, onto: onto), resume: session)
