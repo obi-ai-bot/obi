@@ -54,12 +54,14 @@ final class MacAvailability {
     }
     func startMonitoring() {
         guard powerSourceRunLoop == nil else { return }
-        powerSourceRunLoop = IOPSNotificationCreateRunLoopSource({ [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                setPowerConnected(powerSource())
+        powerSourceRunLoop = IOPSNotificationCreateRunLoopSource({ context in
+            guard let context else { return }
+            let availability = Unmanaged<MacAvailability>.fromOpaque(context).takeUnretainedValue()
+            Task { @MainActor [weak availability] in
+                guard let availability else { return }
+                availability.setPowerConnected(availability.powerSource())
             }
-        }, nil)?.takeRetainedValue()
+        }, Unmanaged.passUnretained(self).toOpaque())?.takeRetainedValue()
         if let powerSourceRunLoop {
             CFRunLoopAddSource(CFRunLoopGetMain(), powerSourceRunLoop, .commonModes)
         }
