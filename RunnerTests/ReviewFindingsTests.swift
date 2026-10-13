@@ -15,6 +15,16 @@ struct ReviewFindingsTests {
         #expect(Review.decide("Blocking:\n- \(none)\n- (None of the new paths are tested)\n\nVERDICT: APPROVED") == .changesRequested)
     }
 
+    @Test func aNoteAfterTheVerdictLineDoesNotHideTheVerdict() {
+        let note = "I haven't called `save_session` yet; say if you want it saved before you post this."
+        let review = "Blocking:\n- A race drops a plan.\n\nVERDICT: CHANGES REQUESTED\n\n\(note)"
+        #expect(Review.verdict(review) == .changesRequested && Review.decide(review) == .changesRequested)
+        #expect(Review.verdict("Fine.\n\n**APPROVED**\n\nTetrix showed nothing.\n\(note)") == .approved)
+        // Any other line after the verdict still hides it.
+        #expect(Review.verdict("VERDICT: APPROVED\n\nBut also fix this.\n\(note)") == nil)
+        #expect(Review.verdict(note) == nil)
+    }
+
     // MARK: Blocking or not
 
     @Test func onlyBlockingFindingsRequestChanges() {
