@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Finding the Mac's gateway at home (#285, iOS/ConnectScreen.swift). The rest of the Info.plist is generated. -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_oby._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Oby looks for your Mac on the local network, to reach it directly when you're home.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

@@ -1,0 +1,32 @@
+// Oby's control plane (#285): a Worker at oby-control.tetrix.pro with a D1 database.
+// Deploying is the user's step: docs/remote-access.md has the exact commands.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "oby-control",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  // The Worker's own hostname, a first-level name under the zone so Universal SSL covers it.
+  "routes": [{ "pattern": "oby-control.tetrix.pro", "custom_domain": true }],
+  // Plain settings. Secrets (the Cloudflare API token, the account and zone ids, the email
+  // sender's key) are never here: `wrangler secret put`, or .dev.vars for `wrangler dev`.
+  "vars": {
+    // The zone the devices' hostnames live in, and their prefix: oby-<opaque>.tetrix.pro.
+    "DOMAIN": "tetrix.pro",
+    "HOSTNAME_PREFIX": "oby-",
+    // What every tunnel routes to on the Mac: the gateway (#284). Nothing else is reachable.
+    "GATEWAY": "http://127.0.0.1:8810",
+    "EMAIL_FROM": "Oby <oby@tetrix.pro>",
+    // "true" only in .dev.vars: then the sign-in code comes back in the response instead of an email.
+    "DEV_ECHO_OTP": "false"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "oby-control",
+      // `wrangler d1 create oby-control` prints the id; paste it here before the first deploy.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

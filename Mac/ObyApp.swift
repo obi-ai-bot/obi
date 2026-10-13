@@ -49,6 +49,7 @@ private struct SettingsTabs: View {
         TabView(selection: Binding { selection.tab } set: { selection.tab = $0 }) {
             SettingsView(desk: app.island.desk).tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general)
             RunnerSettingsView(feed: app.island.feed).tabItem { Label("Runner", systemImage: "server.rack") }.tag(SettingsTab.runner)
+            RemoteAccessSettingsView(remote: app.island.remote).tabItem { Label("Remote", systemImage: "antenna.radiowaves.left.and.right") }.tag(SettingsTab.remote)
             AccountsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Accounts", systemImage: "person.2") }.tag(SettingsTab.accounts)
             ModelsSettingsView(feed: app.island.feed).tabItem { Label("Models", systemImage: "cpu") }.tag(SettingsTab.models)
             VaultSettingsView(vault: .shared).tabItem { Label("Vault", systemImage: "lock") }.tag(SettingsTab.vault)
@@ -103,6 +104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // The tunnel is Oby's child: it ends with Oby (Mac/RemoteAccess.swift).
+        island.remote.stop()
         island.desk.quit()
     }
 }

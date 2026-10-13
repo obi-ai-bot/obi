@@ -108,12 +108,14 @@
 			membershipExceptions = (
 				Info.plist,
 				Oby.entitlements,
+				Tools/bundle-cloudflared.sh,
 			);
 			target = FB61F80A30795FDE00A9523D /* Oby */;
 		};
 		0B1E0C0A000000000000C4 /* Exceptions for "iOS" folder in "ObyPhone" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Info.plist,
 				Oby.entitlements,
 				README.md,
 			);
@@ -332,6 +334,7 @@
 				FB61F80830795FDE00A9523D /* Frameworks */,
 				FB61F80930795FDE00A9523D /* Resources */,
 				0B1E0C0A00000000000000F1 /* Bundle the character */,
+				0B1E0C0A00000000000000F2 /* Bundle cloudflared */,
 			);
 			buildRules = (
 			);
@@ -586,6 +589,27 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		0B1E0C0A00000000000000F2 /* Bundle cloudflared */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Mac/Tools/bundle-cloudflared.sh",
+			);
+			name = "Bundle cloudflared";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/cloudflared",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/zsh;
+			shellScript = "set -e\n# Download (once, into the cache), bundle and sign cloudflared (#285): Mac/Tools/bundle-cloudflared.sh.\nzsh \"$SRCROOT/Mac/Tools/bundle-cloudflared.sh\"\n";
+		};
 		0B1E0C0A00000000000000F1 /* Bundle the character */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -942,6 +966,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
+				INFOPLIST_FILE = iOS/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Oby asks for Face ID before it publishes anything for you.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens when you tap the mic to dictate, until you tap stop or for up to 60 seconds.";
@@ -985,6 +1010,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
+				INFOPLIST_FILE = iOS/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Oby asks for Face ID before it publishes anything for you.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens when you tap the mic to dictate, until you tap stop or for up to 60 seconds.";

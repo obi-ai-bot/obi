@@ -27,6 +27,16 @@ struct SettingsScreen: View {
                     Text("The runner does the work while your Mac is closed. It answers only your Tailscale login, so this iPhone needs Tailscale on.")
                 }
 
+                Section {
+                    NavigationLink {
+                        ConnectScreen()
+                    } label: {
+                        LabeledContent("Your Mac", value: phone.link.map { phone.route?.label ?? $0.name } ?? "Not linked")
+                    }
+                } footer: {
+                    Text("Reach your Mac from anywhere: at home over the local network, away through the Mac's own tunnel (its Settings › Remote access).")
+                }
+
                 VoiceSection(speaks: Binding(get: { phone.speakReplies }, set: { phone.speakReplies = $0 }))
 
                 NotificationsSection { UIApplication.shared.registerForRemoteNotifications() }

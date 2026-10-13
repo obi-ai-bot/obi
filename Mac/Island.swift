@@ -118,6 +118,8 @@ final class IslandController {
     let feed = RunnerFeed()
     /// Sparkle, and the island's "Update ready · Restart" (Mac/Updater.swift).
     let updater = Updater()
+    /// Reach this Mac from anywhere (#285): Settings › Remote access and the tunnel it runs.
+    let remote = RemoteAccess()
     let model: IslandModel
     let character = ObyCharacter()
     let talkKey = TalkKey()
@@ -155,6 +157,8 @@ final class IslandController {
         place()
         panel.orderFrontRegardless()
         character.pause(true)
+        // Remote access was on: the tunnel runs again, as a child of this login item.
+        remote.start()
         desk.onFinish = { [weak self] job in self?.notify(job.doneLine, happy: job.status == .done) }
         // A question from one of this Mac's jobs, as the runner's come (RunnerFeed.Notice.question).
         desk.onInboxChange = { [weak self] item in

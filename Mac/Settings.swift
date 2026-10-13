@@ -177,6 +177,85 @@ struct RunnerSettingsView: View {
     }
 }
 
+/// Settings › Remote access: reach this Mac from anywhere (#285, Mac/RemoteAccess.swift). Sign in
+/// to Oby's control plane with a code by email, then turn it on: this Mac gets a hostname of its
+/// own and runs its tunnel. The iPhone connects to the hostname when it's away from home.
+struct RemoteAccessSettingsView: View {
+    let remote: RemoteAccess
+    @State private var email = ""
+    @State private var code = ""
+    @State private var forgetting = false
+
+    var body: some View {
+        Form {
+            Section {
+                switch remote.step {
+                case .signedOut:
+                    TextField("Email", text: $email, prompt: Text("you@example.com"))
+                        .onSubmit(sendCode)
+                    Button("Send Code") { sendCode() }
+                        .disabled(remote.busy || email.trimmingCharacters(in: .whitespaces).isEmpty)
+                case .codeSent(let to):
+                    Text("A six-digit code went to \(to). It works for ten minutes.")
+                    TextField("Code", text: $code, prompt: Text("123456"))
+                        .onSubmit(verify)
+                    HStack {
+                        Button("Sign In") { verify() }
+                            .disabled(remote.busy || code.trimmingCharacters(in: .whitespaces).count != 6)
+                        Button("Use Another Email") { remote.useAnotherEmail() }
+                            .disabled(remote.busy)
+                    }
+                case .signedIn, .on:
+                    LabeledContent("Signed in as", value: remote.email ?? "")
+                }
+            } header: {
+                Text("Oby account")
+            } footer: {
+                Text("Remote access goes through Oby's control plane (oby-control.tetrix.pro), which signs you in with a code by email and gives this Mac a hostname of its own.")
+            }
+            if remote.step == .signedIn || remote.step == .on {
+                Section {
+                    Toggle("Reach this Mac from anywhere", isOn: Binding(get: { remote.step == .on }, set: { on in
+                        if on { Task { await remote.turnOn() } } else { remote.turnOff() }
+                    }))
+                    .disabled(remote.busy)
+                    if let hostname = remote.hostname {
+                        LabeledContent("Hostname", value: hostname).textSelection(.enabled)
+                    }
+                    LabeledContent("Status", value: remote.busy ? "Setting up…" : remote.status)
+                    Button("Forget This Mac", role: .destructive) { forgetting = true }
+                        .disabled(remote.busy)
+                } header: {
+                    Text("Remote access")
+                } footer: {
+                    Text("On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Pair the iPhone to hand it the hostname. Off keeps the hostname for next time. Forget removes this Mac from your account, and the hostname stops answering.")
+                }
+            }
+            if let problem = remote.problem {
+                Text(problem).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
+        .confirmationDialog("Forget this Mac?", isPresented: $forgetting) {
+            Button("Forget", role: .destructive) { Task { await remote.forget() } }
+        } message: {
+            Text("Its tunnel and hostname are removed from your Oby account, and this Mac signs out. Turning remote access on again makes a new hostname.")
+        }
+    }
+
+    private func sendCode() {
+        Task { await remote.requestCode(email) }
+    }
+
+    private func verify() {
+        Task {
+            await remote.verify(code)
+            if remote.step == .signedIn { code = "" }
+        }
+    }
+}
+
 /// Settings › Accounts: the logins Oby spreads jobs across, who pays for each, and how much each has
 /// used, on this Mac and on the runner, as the iPhone shows them (Shared/SettingsSections.swift).
 struct AccountsSettingsView: View {
