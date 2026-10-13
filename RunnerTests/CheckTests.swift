@@ -97,6 +97,13 @@ struct CheckTests {
         desk.queuesMacChecks = true
     }
 
+    @Test func reviewFollowUpSearchUsesGet() {
+        #expect(MacCheck.reviewFollowUpSearchArguments(
+            repo: "deskree-inc/oby",
+            marker: "oby-review-follow-ups-pr-80"
+        ) == ["gh", "api", "-X", "GET", "search/issues", "-f", "q=repo:deskree-inc/oby oby-review-follow-ups-pr-80"])
+    }
+
     /// The fix job on issue 75 whose pull request Oby reviews, checks and merges.
     var author: Job {
         var author = job

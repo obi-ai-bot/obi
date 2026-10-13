@@ -385,8 +385,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
 
         let away = FileManager.default.temporaryDirectory
         let env: [String: String?] = ["GH_PROMPT_DISABLED": "1"]
-        let query = "repo:\(job.repo) \(marker)"
-        let existing = try await Shell.ok(["gh", "api", "search/issues", "-f", "q=\(query)"], in: away, env: env, as: .app)
+        let existing = try await Shell.ok(reviewFollowUpSearchArguments(repo: job.repo, marker: marker), in: away, env: env, as: .app)
         if let json = try? JSONSerialization.jsonObject(with: Data(existing.utf8)) as? [String: Any],
            let items = json["items"] as? [[String: Any]],
            let match = items.first(where: { ($0["body"] as? String)?.contains(marker) == true }),
@@ -399,6 +398,12 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             throw Shell.Failure(message: "GitHub created the follow-up issue without returning its URL.")
         }
         return url
+    }
+
+    /// GitHub's issue search endpoint accepts GET only; `gh api` otherwise changes to POST when
+    /// form fields are present. Keep the command construction testable without invoking GitHub.
+    nonisolated static func reviewFollowUpSearchArguments(repo: String, marker: String) -> [String] {
+        ["gh", "api", "-X", "GET", "search/issues", "-f", "q=repo:\(repo) \(marker)"]
     }
 
     /// Why the pull request as GitHub's REST API has it (`GET repos/{o}/{r}/pulls/{n}`) isn't the
