@@ -578,6 +578,17 @@ struct ReviewTests {
         #expect(third.review?.repeated == true && third.review?.stopsHere == true && third.reviewNeedsYou)
     }
 
+    /// There is nothing to come back to in the first review: its `Again:` is just a blocker.
+    @Test func anAgainInTheFirstReviewIsNotABlockerThatCameBack() async throws {
+        _ = try await publishAuthor()
+        let first = try await review("One bug.\n\nBlocking:\n- Again: the wait returns early\n\nVERDICT: CHANGES REQUESTED")
+        let result = try #require(first.review)
+        #expect(result.repeated == false && result.cameBack == nil && !result.stopsHere && result.wantsFollowUp)
+        try await roundPublishes(after: 1)
+        // The author's round is not told that a blocker is unmet.
+        #expect(!made.agents[2].agent.prompt.contains("name every test you added"))
+    }
+
     @Test func aBlockerThatComesBackWithNoProgressStopsAtOnce() {
         var before = Review(verdict: .changesRequested, job: "r1", agent: "codex", account: "Work", round: 1)
         before.blocking = ["A", "B"]

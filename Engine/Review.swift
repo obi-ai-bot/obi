@@ -596,8 +596,8 @@ extension Desk {
         result.blockedBefore = before.isEmpty ? nil : before
         // Only a follow-up is told about `Again:`.
         if verdict == .changesRequested {
-            let came = Review.repeats(result.blocking ?? [])
-            result.repeated = author.review != nil && came && Review.stopsOnRepeat(result.blocking ?? [], after: author.review)
+            let came = author.review != nil && Review.repeats(result.blocking ?? [])
+            result.repeated = came && Review.stopsOnRepeat(result.blocking ?? [], after: author.review)
             result.cameBack = came && result.repeated != true ? true : nil
         }
         let followUps = (author.review?.followUps ?? []) + (findings?.later ?? [])
