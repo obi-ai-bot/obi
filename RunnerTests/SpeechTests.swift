@@ -327,8 +327,8 @@ final class SpeechTests {
         while squatter.isRunning { try await Task.sleep(for: .milliseconds(5)) }
         try FileManager.default.removeItem(at: folder.appending(path: "mode"))
         try await speech.startServers()
-        let recovered = try await speech.transcribe(device: device, utterance: utterance, audio: chunk, final: true)
-        #expect(recovered.text == "texto 6400")
+        let recovered = try await speech.transcribe(device: device, utterance: UUID().uuidString, audio: chunk, final: true)
+        #expect(recovered.text == "texto 3200")
         await speech.stopServers()
         try clean()
     }
