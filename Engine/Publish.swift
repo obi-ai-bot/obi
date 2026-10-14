@@ -30,11 +30,15 @@ nonisolated enum Publish {
         /// Nil when the file's name is the problem, like `.env`.
         var line: Int?
         var rule: String
+        /// Commit whose patch introduced this finding. Nil for text outside the branch history.
+        var commit: String? = nil
+        /// True when the finding remains in an unpublished commit but is absent from the branch tip.
+        var historyOnly: Bool = false
         var description: String { "\(file)\(line.map { ":\($0)" } ?? "") (\(rule))" }
 
         /// With the vault's secrets taken out of the file's name.
         func redacted(by leaks: Leaks) -> Finding {
-            leaks.isEmpty ? self : Finding(file: leaks.redact(file), line: line, rule: rule)
+            leaks.isEmpty ? self : Finding(file: leaks.redact(file), line: line, rule: rule, commit: commit, historyOnly: historyOnly)
         }
     }
 
@@ -113,7 +117,10 @@ nonisolated enum Publish {
         let texts = outgoing(job, messages: messages, title: title, closes: closes)
         let said: [Finding]
         do {
-            said = try await scan(texts: texts)
+            let nonMessageTexts = texts.filter { $0.name != "commit message" }
+            let otherFindings = try await scan(texts: nonMessageTexts)
+            let messageFindings = try await scanCommitMessages(worktree, base: base, head: head)
+            said = otherFindings + messageFindings
         } catch {
             throw Shell.Failure(message: "Not published: the secret scan couldn't run (\(error.localizedDescription)).")
         }
@@ -449,6 +456,25 @@ nonisolated enum Publish {
         return (found + (try await gitleaks(lines))).filter { seen.insert($0).inserted }
     }
 
+    /// Scans each unpublished commit message separately so a finding can name the commit whose
+    /// message must be rewritten. NUL framing is safe because Git commit messages cannot contain NUL.
+    static func scanCommitMessages(_ worktree: URL, base: String, head: String = "HEAD", vault: Vault = .shared) async throws -> [Finding] {
+        let git = ["git", "-C", worktree.path]
+        let raw = try await Shell.ok(git + ["log", "-z", "--format=%H%x00%B", "refs/remotes/origin/\(base)..\(head)"])
+        let fields = raw.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+        var findings: [Finding] = []
+        for index in stride(from: 0, to: fields.count, by: 2) where index + 1 < fields.count {
+            let commit = fields[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard commit.count == 40, commit.allSatisfy(\.isHexDigit) else { continue }
+            let message = fields[index + 1]
+            for var finding in try await scan(texts: [(name: "commit message", text: message)], vault: vault) {
+                finding.commit = commit
+                findings.append(finding)
+            }
+        }
+        return findings
+    }
+
     /// Scans what publishing would send: each commit up to `head` that isn't on origin/<base>,
     /// and the diff they add up to, for the built-in rules and the vault's secrets. If the scan
     /// can't run, it throws and nothing is published.
@@ -462,15 +488,31 @@ nonisolated enum Publish {
         // --text and --no-textconv: no attribute or driver can hide what the push sends.
         let options = ["--no-color", "--no-ext-diff", "--no-textconv", "--text", "--diff-filter=d", "--src-prefix=a/", "--dst-prefix=b/"]
         let since = "refs/remotes/origin/\(base)"
-        let diff: String
+        let commitDiffs: [(commit: String, diff: String)]
+        let headDiff: String
         do {
             // Files' names as they are, not escaped, so the vault's secrets are found in them too.
             let git = ["git", "-C", worktree.path, "-c", "core.quotePath=false"]
             // A merge as what its author changed from git's own merge of its parents: content a merge
             // brings in that neither side had is pushed too, even if a later commit takes it out.
-            let commits = try await Shell.ok(git + ["log", "-p", "--diff-merges=remerge", "--format="] + options + ["\(since)..\(head)"])
-            let total = try await Shell.ok(git + ["diff"] + options + ["\(since)...\(head)"])
-            diff = commits + "\n" + total
+            let log = try await Shell.ok(git + ["log", "-p", "--diff-merges=remerge", "--format=__OBY_COMMIT__%H"] + options + ["\(since)..\(head)"])
+            var parsed: [(commit: String, diff: String)] = []
+            var currentCommit: String?
+            var currentLines: [String] = []
+            for line in log.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+                let prefix = "__OBY_COMMIT__"
+                let candidate = line.hasPrefix(prefix) ? String(line.dropFirst(prefix.count)) : ""
+                if candidate.count == 40, candidate.allSatisfy(\.isHexDigit) {
+                    if let currentCommit { parsed.append((currentCommit, currentLines.joined(separator: "\n"))) }
+                    currentCommit = candidate
+                    currentLines = []
+                } else if currentCommit != nil {
+                    currentLines.append(line)
+                }
+            }
+            if let currentCommit { parsed.append((currentCommit, currentLines.joined(separator: "\n"))) }
+            commitDiffs = parsed
+            headDiff = try await Shell.ok(git + ["diff"] + options + ["\(since)...\(head)"])
         } catch {
             throw Shell.Failure(message: "Not published: the secret scan couldn't read the changes (\(error.localizedDescription)).")
         }
@@ -480,10 +522,28 @@ nonisolated enum Publish {
         } catch {
             throw Shell.Failure(message: "Not published: the secret scan couldn't read the commits' files (\(error.localizedDescription)).")
         }
+        // Attribute each finding to the commit whose patch introduced it. The tip diff marks
+        // findings that were subsequently removed from HEAD but still remain in branch history.
+        let atHead = findings(inDiff: headDiff, leaks: leaks)
+        let history = commitDiffs.flatMap { commit, diff in
+            findings(inDiff: diff, leaks: leaks).map { finding in
+                var finding = finding
+                finding.commit = commit
+                finding.historyOnly = !atHead.contains { $0.file == finding.file && $0.rule == finding.rule }
+                return finding
+            }
+        }
         // gitleaks names files as the diff does: a vault secret in a name is redacted there too.
+        var leakedHistory: [Finding] = []
+        for (commit, diff) in commitDiffs {
+            leakedHistory += try await gitleaks(parse(diff).lines).map { finding in
+                var finding = finding.redacted(by: leaks)
+                finding.commit = commit
+                return finding
+            }
+        }
         var seen = Set<Finding>()
-        return (findings(inDiff: diff, leaks: leaks) + blobs.map { $0.redacted(by: leaks) }
-                + (try await gitleaks(parse(diff).lines)).map { $0.redacted(by: leaks) }).filter { seen.insert($0).inserted }
+        return (history + blobs.map { $0.redacted(by: leaks) } + leakedHistory).filter { seen.insert($0).inserted }
     }
 
     /// The biggest file the vault scan reads whole; a bigger one is a finding, so it isn't pushed unscanned.
