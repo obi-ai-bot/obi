@@ -1315,7 +1315,19 @@ The review output schema obid passes with `--json-schema`:
        "detail": {"type": "string", "maxLength": 4000}}}}}}
 ```
 
-Whatever the agent wrote must still pass the spec's schema for findings (paths, one-line titles, no control characters) before it is sent; a finding that doesn't is dropped and the summary says how many were.
+Whatever the agent wrote must still pass the spec's schema before it is sent, and obid makes it so; what the agent wrote never fails the job once it matches the output schema above:
+
+- **Findings.** A finding that doesn't pass the spec's schema for findings (a valid path, a one-line title, no control or bidirectional characters, the lengths) is dropped. Call the number dropped N.
+- **The summary.** The result's `summary` is the spec's `block_text`, 1 to 4,000 characters (counted in Unicode code points, as JSON Schema counts them). obid builds it from the agent's `summary` in this order:
+  1. Each CR LF, then each remaining CR, becomes LF.
+  2. Every other character `block_text` forbids is removed: U+0000 to U+0008, U+000B to U+001F, U+007F, U+202A to U+202E and U+2066 to U+2069.
+  3. When N is more than 0, the note is `obid dropped N finding(s) that didn't match the spec's schema.`, with N as a number; otherwise there is no note.
+  4. The summary is the cleaned text, then (when there is a note and the cleaned text isn't empty) a blank line, then the note. When that is longer than 4,000 characters, the cleaned text is cut to the first `4,000 − 1 − (the rest's length)` characters and followed by `…` (U+2026), so the summary is exactly 4,000 characters and the note is whole.
+  5. An empty summary (the cleaned text and the note both empty) is left out of the result: the field is optional.
+
+  The publish gate (step 8) scans the summary as built here. With nothing to clean and nothing dropped, the summary is exactly the agent's.
+
+**What obid sends in an exchange it was asked in, and in what order.** First `accept` (body `{}`, or `{"by_rule": "<decision id>"}` when a remembered decision accepted it) or `decline`; after an `accept`, any number of `status` with `state` `queued` or `working` and no `note`; then one `result`. obid never sends a `status` before its `accept` or `decline`: a request waiting in the owner's inbox sends nothing back. The protocol allows a `status` there (spec `protocol.md` section 4); obid doesn't send one, so the asking Obi learns nothing about the owner's inbox, and the e2e scenario's steps 5.4 and 7.3 rely on that order.
 
 ### obid only: plug-ins
 

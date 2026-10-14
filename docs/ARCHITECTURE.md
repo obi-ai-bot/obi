@@ -212,12 +212,12 @@ impl PluginHost {
         -> Result<PluginStatus, PluginError>;                             // PUT /v1/obid/plugins/{id}
     pub async fn context(&self, request: ContextRequest) -> Vec<(PluginId, Vec<ContextItem>)>; // never fails
     pub fn agent_mcp_servers(&self) -> Vec<(PluginId, McpServerSpec, Vec<String>)>;
-    pub fn events(&self) -> tokio::sync::mpsc::Receiver<PluginEvent>;
+    pub fn take_events(&self) -> Option<tokio::sync::mpsc::Receiver<PluginEvent>>; // Some on the first call only, None after
     pub async fn shutdown(&self);
 }
 ```
 
-The plug-in boundary's first pull request is these two crates with exactly these signatures, `start` finding no plug-ins yet (so `list` is empty, `context` and `agent_mcp_servers` give nothing, and `events` never yields). From then on the Rust core depends on the real crates; it never writes a stand-in of its own. What `obid` does with the host (when it starts and stops it, the two HTTP routes, where context, MCP servers and events go) is the Rust core's; everything behind these signatures is the plug-in boundary's.
+The plug-in boundary's first pull request is these two crates with exactly these signatures, `start` finding no plug-ins yet (so `list` is empty, `context` and `agent_mcp_servers` give nothing, and the receiver from `take_events` never yields). Every event from every plug-in goes to that one receiver: `take_events` hands it over on its first call and answers `None` on every later call, so there is one consumer (`obid`, which takes it once at start) and no event is split between two. The receiver ends (`recv` gives `None`) only after `shutdown`. From then on the Rust core depends on the real crates; it never writes a stand-in of its own. What `obid` does with the host (when it starts and stops it, the two HTTP routes, where context, MCP servers and events go) is the Rust core's; everything behind these signatures is the plug-in boundary's.
 
 ## 6. Phase 1: workstreams and who edits what
 
