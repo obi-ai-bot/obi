@@ -149,11 +149,14 @@ struct PublishTests {
         try ("# deploy key\n" + key).write(to: repo.appending(path: "deploy/key.pem"), atomically: true, encoding: .utf8)
         try await git(repo, "add", ".")
         try await git(repo, "commit", "--quiet", "-m", "add a key")
+        let introducing = try await Shell.ok(["git", "-C", repo.path, "rev-parse", "HEAD"],
+                                             env: ["GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"])
         try await git(repo, "rm", "--quiet", "deploy/key.pem")
         try await git(repo, "commit", "--quiet", "-m", "remove the key")
 
         let findings = try await Publish.scan(repo, base: "main")
-        #expect(findings.contains(Publish.Finding(file: "deploy/key.pem", line: 2, rule: "private key")))
+        #expect(findings.contains { $0.file == "deploy/key.pem" && $0.line == 2 && $0.rule == "private key"
+            && $0.commit == introducing && $0.historyOnly })
         #expect(!findings.contains { $0.file == "fixture.pem" })
     }
 }
