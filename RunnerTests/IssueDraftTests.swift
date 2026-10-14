@@ -26,6 +26,13 @@ import Testing
         #expect(body.contains("`@octocat`"))
     }
 
+    @Test func mentionsInsideCodeSpansStayAlone() {
+        #expect(IssueDraft.safeMentions("Ask `@octocat` first.") == "Ask `@octocat` first.")
+        #expect(IssueDraft.safeMentions("Use `code @octocat here` as-is.") == "Use `code @octocat here` as-is.")
+        #expect(IssueDraft.safeMentions("Ping @octocat and `@already`.") == "Ping `@octocat` and `@already`.")
+        #expect(IssueDraft.safeMentions("email@example.com stays") == "email@example.com stays")
+    }
+
     @Test func invalidFileClaimsAreRefusedLikeOtherRepositoryClaims() {
         var bad = fields()
         bad.files = ["../outside.swift"]

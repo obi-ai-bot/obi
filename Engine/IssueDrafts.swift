@@ -51,13 +51,31 @@ nonisolated struct IssueDraft: Codable, Identifiable, Equatable, Sendable {
     /// GitHub's issue body, generated deterministically so every model produces the same result.
     nonisolated func body(_ fields: Fields? = nil) -> String {
         let fields = fields ?? self.fields
-        func safeMentions(_ text: String) -> String {
-            text.replacingOccurrences(of: #"(?<![\w`])@([A-Za-z0-9-]+)"#, with: "`@$1`", options: .regularExpression)
-        }
-        var result = "## What\n\n\(safeMentions(fields.what))\n\n## Why\n\n\(safeMentions(fields.why))\n\n## How\n\n\(safeMentions(fields.how))\n\n### Acceptance tests\n\n"
-        result += fields.acceptance.map { "- [ ] \(safeMentions($0))" }.joined(separator: "\n")
+        var result = "## What\n\n\(Self.safeMentions(fields.what))\n\n## Why\n\n\(Self.safeMentions(fields.why))\n\n## How\n\n\(Self.safeMentions(fields.how))\n\n### Acceptance tests\n\n"
+        result += fields.acceptance.map { "- [ ] \(Self.safeMentions($0))" }.joined(separator: "\n")
         if !fields.files.isEmpty { result += "\n\nFiles: " + fields.files.map { "`\($0)`" }.joined(separator: ", ") }
         result += "\n\n<!-- oby-draft: \(id) -->\nDrafted with Oby from chat."
+        return result
+    }
+
+    /// Wraps `@name` mentions in backticks so they never notify, but leaves existing code spans alone.
+    nonisolated static func safeMentions(_ text: String) -> String {
+        var result = ""
+        var index = text.startIndex
+        while index < text.endIndex {
+            if text[index] == "`" {
+                let afterOpen = text.index(after: index)
+                if let close = text[afterOpen...].firstIndex(of: "`") {
+                    result += text[index...close]
+                    index = text.index(after: close)
+                    continue
+                }
+            }
+            let nextTick = text[index...].firstIndex(of: "`") ?? text.endIndex
+            let plain = String(text[index..<nextTick])
+            result += plain.replacingOccurrences(of: #"(?<!\w)@([A-Za-z0-9-]+)"#, with: "`@$1`", options: .regularExpression)
+            index = nextTick
+        }
         return result
     }
 

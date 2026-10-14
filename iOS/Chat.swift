@@ -60,8 +60,20 @@ struct ChatScreen: View {
                 }
                 .safeAreaInset(edge: .bottom) {
                     VStack(alignment: .leading, spacing: 6) {
+                        if let editingIssueDraft {
+                            HStack {
+                                Text("Editing \(editingIssueDraft.fields.title)")
+                                    .font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+                                Spacer()
+                                Button { leaveIssueEdit(editingIssueDraft.id) } label: {
+                                    Image(systemName: "xmark").font(.footnote.weight(.semibold))
+                                }
+                                .accessibilityLabel("Cancel edit")
+                            }
+                            .padding(.horizontal, 16)
+                        }
                         if let issueEditProblem { Text(issueEditProblem).font(.footnote).foregroundStyle(.red).padding(.horizontal, 16) }
-                        Composer(text: $text, prompt: "Tell Oby what you need", typing: $typing, onSend: send)
+                        Composer(text: $text, prompt: editingIssueDraft == nil ? "Tell Oby what you need" : "Edit the draft, then send", typing: $typing, onSend: send)
                     }
                 }
                 .scrollDismissesKeyboard(.interactively)
@@ -114,7 +126,10 @@ struct ChatScreen: View {
                                 TurnRow(turn: turn, jobs: ConversationModel.jobs(of: turn, among: phone.jobs), account: account,
                                         issueDraft: turn.issueDraft.flatMap { phone.issueDrafts[$0] },
                                         onCreateIssue: { id, version in Task { try? await phone.createIssueDraft(id, version: version) } },
-                                        onDiscardIssue: { id in Task { try? await phone.discardIssueDraft(id) } },
+                                        onDiscardIssue: { id in
+                                            leaveIssueEdit(id)
+                                            Task { try? await phone.discardIssueDraft(id) }
+                                        },
                                         onEditIssue: { draft in editingIssueDraft = draft; issueEditProblem = nil; text = draft.preview; typing = true },
                                         steps: phone.conversation.steps(under: turn, in: turns),
                                         failure: phone.failures[turn.id],
@@ -229,15 +244,22 @@ struct ChatScreen: View {
             Task {
                 do {
                     try await phone.editIssueDraft(draft.id, version: draft.version, fields: fields)
-                    if text == body { text = "" }
-                    editingIssueDraft = nil
-                    typing = false
+                    leaveIssueEdit(draft.id, clearText: text == body)
                 } catch { issueEditProblem = error.localizedDescription }
             }
             return
         }
         phone.ask(text, spoken: spoken)
         text = ""
+        typing = false
+    }
+
+    /// Leaves the issue-draft edit in the composer (Discard, Cancel, or a successful PUT).
+    private func leaveIssueEdit(_ id: String, clearText: Bool = true) {
+        guard editingIssueDraft?.id == id else { return }
+        editingIssueDraft = IssueDraftCard.composerAfterLeaving(editingIssueDraft, draftID: id)
+        if clearText { text = "" }
+        issueEditProblem = nil
         typing = false
     }
 }

@@ -244,7 +244,8 @@ final class RunnerFeed {
                         let (items, words) = try await runner.inboxWithWords()
                         // History is an enhancement: an older runner or failed history request must not take chat offline.
                         let history = try? await runner.inboxWithWords(state: "done")
-                        let drafts = try await runner.issueDrafts()
+                        // `all`: created cards stay visible after reconnect; a 404 means unsupported.
+                        let drafts = try await runner.issueDrafts(state: "all")
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
                         host = status.runner.host
@@ -259,7 +260,7 @@ final class RunnerFeed {
                         // Settings › Runner changed while the open jobs were fetched again.
                         try Task.checkCancellation()
                         inbox = items
-                        issueDrafts = Dictionary(uniqueKeysWithValues: drafts.map { ($0.id, $0) })
+                        issueDrafts = IssueDraftCard.applying(drafts, over: issueDrafts)
                         if let (past, pastWords) = history {
                             inboxHistory = past.filter { !$0.isOpen }
                             inboxWords = pastWords.merging(words, uniquingKeysWith: { _, fresh in fresh })

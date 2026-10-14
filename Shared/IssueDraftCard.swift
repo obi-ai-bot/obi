@@ -10,12 +10,26 @@ struct IssueDraftCard: View {
 
     static func title(for draft: RunnerIssueDraft) -> String {
         switch draft.state {
-        case .draft: "\(draft.fields.repo) · Draft v\(draft.version)"
-        case .creating: "\(draft.fields.repo) · Creating…"
+        case .draft: "\(draft.fields.title) · \(draft.fields.repo) · Draft v\(draft.version)"
+        case .creating: "\(draft.fields.title) · \(draft.fields.repo) · Creating…"
         case .created: "\(draft.fields.repo) · Created #\(draft.issue ?? 0)"
-        case .failed: "\(draft.fields.repo) · Failed: \(draft.error ?? "GitHub couldn't create the issue")"
+        case .failed: "\(draft.fields.title) · \(draft.fields.repo) · Failed: \(draft.error ?? "GitHub couldn't create the issue")"
         case .discarded: "\(draft.fields.repo) · Discarded"
         }
+    }
+
+    /// After Discard (or Cancel edit), the composer leaves editing mode for that draft.
+    static func composerAfterLeaving(_ editing: RunnerIssueDraft?, draftID: String) -> RunnerIssueDraft? {
+        editing?.id == draftID ? nil : editing
+    }
+
+    /// Replaces the map from a reconnect fetch while keeping created cards the thread still shows.
+    static func applying(_ fetched: [RunnerIssueDraft], over existing: [String: RunnerIssueDraft]) -> [String: RunnerIssueDraft] {
+        var next = Dictionary(uniqueKeysWithValues: fetched.map { ($0.id, $0) })
+        for (id, draft) in existing where draft.state == .created && next[id] == nil {
+            next[id] = draft
+        }
+        return next
     }
 
     static func options(for draft: RunnerIssueDraft) -> [CardOption] {

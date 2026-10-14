@@ -16,10 +16,35 @@ import Testing
         #expect(options.first?.recommended == true)
     }
 
+    @Test func draftCardShowsTheProposedTitleBeforeCreate() {
+        let title = IssueDraftCard.title(for: draft(.draft))
+        #expect(title.hasPrefix("Retry uploads"))
+        #expect(title.contains("deskree-inc/oby"))
+        #expect(title.contains("Draft v2"))
+    }
+
     @Test func createdIssueShowsItsNumberWithoutOptions() {
         let issue = draft(.created, issue: 412)
         #expect(IssueDraftCard.title(for: issue).contains("#412"))
         #expect(IssueDraftCard.options(for: issue).isEmpty)
+    }
+
+    @Test func discardClearsComposerEditingForThatDraft() {
+        let editing = draft(.draft)
+        #expect(IssueDraftCard.composerAfterLeaving(editing, draftID: editing.id) == nil)
+        #expect(IssueDraftCard.composerAfterLeaving(editing, draftID: "other") == editing)
+        #expect(IssueDraftCard.composerAfterLeaving(nil, draftID: editing.id) == nil)
+    }
+
+    @Test func reconnectKeepsCreatedIssueCards() {
+        let created = draft(.created, issue: 412)
+        let open = draft(.draft)
+        var openOther = open
+        openOther.id = "bbbbbbbb"
+        let kept = IssueDraftCard.applying([openOther], over: [created.id: created, open.id: open])
+        #expect(kept[created.id] == created)
+        #expect(kept[openOther.id] == openOther)
+        #expect(kept[open.id] == nil)
     }
 
     @Test func editingPreviewUpdatesBodyAndKeepsUnshownFields() {
@@ -46,5 +71,12 @@ import Testing
         value.fields.title = "Retry uploads safely"
         value.fields.acceptance = ["Offline retries stop after three attempts"]
         #expect(IssueDraftCard.changedLine(for: value) == "Changed: title, acceptance")
+    }
+
+    /// A runner without `/v1/issue-drafts` answers 404: treat as unsupported and carry on.
+    @Test func missingIssueDraftsEndpointIsUnsupported() async throws {
+        let stub = RunnerStub { _ in (404, #"{"error": "Not found."}"#) }
+        let drafts = try await stub.runner.issueDrafts(state: "all")
+        #expect(drafts.isEmpty)
     }
 }

@@ -1137,7 +1137,15 @@ nonisolated struct Runner: Sendable {
         }
     }
 
-    func issueDrafts(state: String = "open") async throws -> [RunnerIssueDraft] { try await call("GET", "v1/issue-drafts?state=\(state)") }
+    /// Open or all issue drafts. A runner older than the endpoint answers `404`, which means none
+    /// (treat as unsupported and carry on); any other failure throws so the app tries again.
+    func issueDrafts(state: String = "open") async throws -> [RunnerIssueDraft] {
+        do {
+            return try await call("GET", "v1/issue-drafts?state=\(state)")
+        } catch let error as RunnerError where error.status == 404 {
+            return []
+        }
+    }
     func editIssueDraft(_ id: String, version: Int, fields: RunnerIssueDraft.Fields) async throws -> RunnerIssueDraft {
         struct Body: Encodable { var version: Int; var fields: RunnerIssueDraft.Fields }
         return try await call("PUT", "v1/issue-drafts/\(id)", body: Body(version: version, fields: fields))

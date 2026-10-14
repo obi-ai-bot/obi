@@ -111,6 +111,16 @@ struct RunnerTests {
         }
     }
 
+    /// Same status surface for issue drafts: clients map 404 to an empty list, not a dropped connection.
+    @Test func issueDraftErrorsKeepTheirStatus() throws {
+        let url = URL(string: "https://runner.example/v1/issue-drafts")!
+        for status in [404, 502] {
+            let response = try #require(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil))
+            let error = #expect(throws: RunnerError.self) { try Runner.check(response, Data(#"{"error": "No."}"#.utf8)) }
+            #expect(error?.status == status && error?.message == "No.")
+        }
+    }
+
     /// The bytes the Face ID key signs must be exactly what the runner checks.
     @Test func approvalMessage() {
         let message = Approval.message(job: "abc", action: "Push oby/fix-1 to deskree-inc/oby and open a pull request into dev.", signedAt: "2026-10-09T22:01:07Z")

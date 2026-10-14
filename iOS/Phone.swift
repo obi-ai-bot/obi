@@ -280,7 +280,8 @@ final class Phone {
         defaultMode = RunnerMode(status.permissions?.mode)
         await take(try await runner.jobs())
         inbox = try await runner.inbox()
-        issueDrafts = Dictionary(uniqueKeysWithValues: try await runner.issueDrafts().map { ($0.id, $0) })
+        // `all`: created cards stay visible after reconnect; a 404 means unsupported.
+        issueDrafts = IssueDraftCard.applying(try await runner.issueDrafts(state: "all"), over: issueDrafts)
         // The thread's latest page every time: what was said on the Mac while the connection was
         // down is in it.
         await conversation.reload()

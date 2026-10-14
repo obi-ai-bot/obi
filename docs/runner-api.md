@@ -456,7 +456,7 @@ To answer the brain's question, send the original words with the answer:
 
 **Drafting issues.** The brain may answer a request to write an issue with `draft_issue`, or replace all fields of an open draft with `revise_issue`. Both are non-acting plans: Swift validates them and stores a versioned card. The brain cannot create an issue. The user must call the create endpoint explicitly from the card. The briefing lists open draft ids, repository, title, version and state; the full rendered body is in the quoted `work.md` file because it may contain lookup text. `GET /v1/events` sends an `issueDraft` event after each state change, and `TurnJSON.issueDraft` identifies the card shown under Oby's reply.
 
-`GET /v1/issue-drafts?state=open` lists drafts in `draft`, `creating` or `failed` state; `state=all` includes created and discarded drafts too. `GET /v1/issue-drafts/{id}` adds the rendered `preview`.
+`GET /v1/issue-drafts?state=open` lists drafts in `draft`, `creating` or `failed` state; `state=all` includes created and discarded drafts too (clients that show created cards after reconnect use `all`). `GET /v1/issue-drafts/{id}` adds the rendered `preview`. A runner older than the endpoint answers `404`, which means none (unsupported); any other failure means try again.
 
 `PUT /v1/issue-drafts/{id}` accepts the user's complete replacement fields and current version, increments the version, and returns the updated draft. A stale version or a draft that is no longer editable returns `409` with the current draft. Invalid fields return `422`.
 
@@ -719,7 +719,7 @@ data: { …Turn }
 - `check` comes when a Mac check or an Apple check (below) is queued, taken by a Mac or ends. A Mac that runs checks asks for one (`GET /v1/checks/next`) when one is `queued`; other apps can ignore it, since the job's own event carries `macCheck` and `appleCheck` too.
 - `turn` comes with every turn of the conversation that's added, from any app, and again when one changes (its `jobs`): the turn as `GET /v1/conversation` lists it. Replace the turn with that `id`, or add it in `at` order. Older runners don't send it.
 - Settled jobs, failed checks, review errors and studied failures wake Oby's orchestrator. Events arriving within 30 seconds are handled in one turn. Event summaries are written by Oby; the brain must read the related job before acting, and agent/check output remains quoted evidence.
-- A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop. Fetch what you show (`GET /v1/status`, `GET /v1/jobs`, `GET /v1/inbox`; a runner older than the inbox answers `404` there, which means an empty inbox, and any other failure means try again) only once the events' response has arrived, and apply the events that came meanwhile over it: the runner follows a connection before it answers, so nothing that changes in between is lost.
+- A `: ping` comment every 15 seconds keeps the connection open. Reconnect after any drop. Fetch what you show (`GET /v1/status`, `GET /v1/jobs`, `GET /v1/inbox`, `GET /v1/issue-drafts?state=all`; a runner older than the inbox or issue drafts answers `404` there, which means none, and any other failure means try again) only once the events' response has arrived, and apply the events that came meanwhile over it: the runner follows a connection before it answers, so nothing that changes in between is lost.
 
 ### Orchestrator policy
 

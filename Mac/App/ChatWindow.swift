@@ -252,8 +252,11 @@ private struct ConversationColumn: View {
                                 TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? day.turns[index - 1] : nil), jobs: ConversationModel.jobs(of: turn, among: desk.jobs + feed.jobs),
                                         issueDraft: turn.issueDraft.flatMap { feed.issueDrafts[$0] },
                                         onCreateIssue: { id, version in Task { try? await feed.createIssueDraft(id, version: version) } },
-                                        onDiscardIssue: { id in Task { try? await feed.discardIssueDraft(id) } },
-                                        onEditIssue: { draft in editingIssueDraft = draft; text = draft.preview; typing = true },
+                                        onDiscardIssue: { id in
+                                            leaveIssueEdit(id)
+                                            Task { try? await feed.discardIssueDraft(id) }
+                                        },
+                                        onEditIssue: { draft in editingIssueDraft = draft; sendProblem = nil; text = draft.preview; typing = true },
                                         account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
                                         isLocal: { id in desk.jobs.contains { $0.id == id } },
                                         onOpenJob: onOpenJob,
@@ -358,6 +361,14 @@ private struct ConversationColumn: View {
                         .buttonStyle(.plain).disabled(sendingAnswer).accessibilityLabel("Cancel reply")
                 }
             }
+            if let editingIssueDraft {
+                HStack {
+                    Text("Editing \(editingIssueDraft.fields.title)").font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary).lineLimit(1)
+                    Spacer()
+                    Button { leaveIssueEdit(editingIssueDraft.id) } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).disabled(sendingAnswer).accessibilityLabel("Cancel edit")
+                }
+            }
             if let sendProblem {
                 HStack {
                     Text(sendProblem).font(OBYStyle.caption).foregroundStyle(.red)
@@ -371,6 +382,15 @@ private struct ConversationColumn: View {
                          onStop: { if thinking { desk.cancel(); return true }; return false })
                 .disabled(sendingAnswer)
         }
+    }
+
+    /// Leaves the issue-draft edit in the composer (Discard, Cancel, or a successful PUT).
+    private func leaveIssueEdit(_ id: String, clearText: Bool = true) {
+        guard editingIssueDraft?.id == id else { return }
+        editingIssueDraft = IssueDraftCard.composerAfterLeaving(editingIssueDraft, draftID: id)
+        if clearText { text = "" }
+        sendProblem = nil
+        typing = false
     }
 
     private func send() {
@@ -387,8 +407,7 @@ private struct ConversationColumn: View {
                 defer { sendingAnswer = false }
                 do {
                     try await feed.editIssueDraft(draft.id, version: draft.version, fields: fields)
-                    if text == value { text = "" }
-                    editingIssueDraft = nil
+                    leaveIssueEdit(draft.id, clearText: text == value)
                 } catch { sendProblem = error.localizedDescription }
             }
             return
