@@ -29,6 +29,7 @@ struct IslandSettings: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Metrics.cardGap) {
                 accounts
+                thisMac
                 runner
                 IslandPermissions(runner: feed.runner, defaultMode: feed.defaultMode, setDefault: feed.setDefaultMode)
                 voice
@@ -85,6 +86,16 @@ struct IslandSettings: View {
             IslandRow("Test on this Mac", help: "Build and test the agents' work on this Mac") {
                 Toggle("Test on this Mac", isOn: $buildAgents).labelsHidden().toggleStyle(.switch).controlSize(.small)
             }
+        }
+    }
+
+    private var thisMac: some View {
+        IslandCard("This Mac") {
+            IslandRow("Keep available", help: "Prevent idle sleep while This Mac is enabled") {
+                Toggle("Keep available", isOn: Binding(get: { model.availability.keepAvailable }, set: model.availability.setKeepAvailable))
+                    .labelsHidden().toggleStyle(.switch).controlSize(.small)
+            }
+            IslandRow("Availability") { Text(model.availability.label).foregroundStyle(OBYStyle.secondary) }
         }
     }
 

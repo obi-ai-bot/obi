@@ -127,7 +127,7 @@ struct ChatWindowTests {
 
     @Test func openingChatFocusesTheComposerAndNewDecisionsLeaveTypingAlone() async throws {
         let feed = RunnerFeed()
-        let model = IslandModel(desk: Desk(), feed: feed)
+        let model = IslandModel(desk: Desk(), feed: feed, availability: MacAvailability())
         let state = ChatState()
         state.open()
         let window = offscreenWindow(size: NSSize(width: 900, height: 600),

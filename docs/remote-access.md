@@ -83,5 +83,5 @@ The switch between the two keeps the conversation: only the connection is made a
 ## Limits and what's next
 
 - The gateway on `127.0.0.1:8810` is #284: until it exists, the tunnel is up and routes to nothing (Cloudflare answers 502). Device tokens and the route allowlist are its job; the control plane only makes the tunnel.
-- Pushes through the control plane and the Mac staying awake are #286; end-to-end encryption between the devices and the Mac is #287; the runner on the Mac is #283 and #288.
+- The Mac staying awake is #286. Pushes still use the runner's direct APNs path; a control-plane relay remains deferred until its Worker API, D1 token storage, and APNs secret configuration are designed and deployed. End-to-end encryption between the devices and the Mac is #287; the runner on the Mac is #283 and #288.
 - Sign in with Apple waits for the Deskree team (#282).

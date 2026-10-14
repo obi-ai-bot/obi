@@ -64,7 +64,7 @@ struct ChatScreen: View {
                     if case .offline = phone.connection {
                         ToolbarItem(placement: .topBarTrailing) {
                             Image(systemName: "wifi.exclamationmark").foregroundStyle(.orange)
-                                .accessibilityLabel("The runner isn't answering")
+                                .accessibilityLabel(phone.offlineLine)
                         }
                     }
                 }

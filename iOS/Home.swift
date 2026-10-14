@@ -21,8 +21,8 @@ struct HomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     header
-                    if case .offline(let why) = phone.connection {
-                        Label(why, systemImage: "wifi.exclamationmark")
+                    if case .offline = phone.connection {
+                        Label(phone.offlineLine, systemImage: "wifi.exclamationmark")
                             .font(.footnote).foregroundStyle(.orange)
                             .padding(.horizontal, 4)
                     }
@@ -169,7 +169,7 @@ struct HomeView: View {
         switch phone.connection {
         case .live: "On \(phone.host)."
         case .connecting: "Reaching the runner…"
-        case .offline: "The runner isn't answering."
+        case .offline: phone.offlineLine
         }
     }
 

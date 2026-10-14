@@ -13,6 +13,7 @@ final class Phone {
     enum Talk: Equatable {
         case none
         case thinking(String)
+        case queued(String)
         case question(said: String, Question)
         case reply(String)
     }
@@ -36,7 +37,7 @@ final class Phone {
     /// request answers, and then `echoes.last` is someone else.
     @ObservationIgnored private var pending: String?
 
-    private struct Request {
+    private struct Request: Sendable {
         var said: String
         var answer: (question: String, option: String)?
         var voice: Bool
@@ -85,6 +86,7 @@ final class Phone {
             failures = [:]
             requests = [:]
             pending = nil
+            restoreQueuedMessages(for: offlineQueueTarget)
             start()
         }
     }
@@ -92,11 +94,19 @@ final class Phone {
     /// nil until pairing, or Settings › Your Mac, gives one. Then the Mac is where the calls go.
     var link: MacLink? {
         didSet {
+            if oldValue?.hostname != link?.hostname {
+                conversation.forget()
+                echoes = []
+                failures = [:]
+                requests = [:]
+                pending = nil
+            }
             if let link, let data = try? link.encoded() {
                 UserDefaults.standard.set(data, forKey: "mac.link")
             } else {
                 UserDefaults.standard.removeObject(forKey: "mac.link")
             }
+            restoreQueuedMessages(for: offlineQueueTarget)
             if loop != nil { finder.find(named: link?.name) { [weak self] url in self?.lan = url } }
             reroute()
         }
@@ -110,9 +120,16 @@ final class Phone {
     var route: RemoteRoute? { RemoteRoute.choose(lan: lan, link: link) }
     /// Where the calls go: the linked Mac by its route, else the runner.
     var base: URL { route?.url ?? runnerURL }
+    /// A stable identity for the logical runner, unaffected by switching between its home and
+    /// tunnel routes. Unpaired runners use their configured URL.
+    private var offlineQueueTarget: String {
+        if let link { return "mac:\(link.hostname.lowercased())" }
+        return "runner:\(runnerURL.absoluteString)"
+    }
     @ObservationIgnored private let finder = MacFinder()
     var talk: Talk = .none
-    private(set) var connection: RunnerConnection = .connecting
+    private(set) var connection: RunnerConnection
+    private(set) var lastSeen: Date? = UserDefaults.standard.object(forKey: "runner.lastSeen") as? Date
     private(set) var host = ""
     /// The job list arrived at least once, so an empty list really is empty.
     private(set) var loaded = false
@@ -137,7 +154,8 @@ final class Phone {
     @ObservationIgnored private var syncing: Task<Void, Never>?
     private(set) var accounts: [Account] = []
     /// What waits in the runner's inbox, put-off items too: answered on the Mac, it goes from here too.
-    private(set) var inbox: [InboxItem] = []
+    private(set) var inbox: [InboxItem]
+    private let offlineQueue: OfflineQueue
     private(set) var models: ModelSettings?
     /// The mode new jobs get by default, as the runner last said, or nil from a runner without modes.
     private(set) var defaultMode: RunnerMode?
@@ -150,7 +168,16 @@ final class Phone {
     /// The job whose notification's Publish was tapped; its screen publishes once it's ready.
     var publishing: String?
 
-    init() {
+    var offlineLine: String {
+        guard connection != .live else { return "Connected to \(host)" }
+        let time = lastSeen.map { $0.formatted(date: .omitted, time: .shortened) } ?? "never"
+        return "Your Mac is asleep or offline. Last seen \(time)"
+    }
+
+    init(offlineQueue: OfflineQueue = OfflineQueue(), connection: RunnerConnection = .connecting, inbox: [InboxItem] = []) {
+        self.offlineQueue = offlineQueue
+        self.connection = connection
+        self.inbox = inbox
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
         if let data = UserDefaults.standard.data(forKey: "mac.link") { link = try? MacLink.paired(data) }
         JobsActivity.watchTokens { [weak self] in self?.runner }
@@ -158,6 +185,8 @@ final class Phone {
             guard let self else { return [] }
             return try await runner.conversation(before: before, limit: limit)
         }
+        offlineQueue.bindUnscopedEntries(to: offlineQueueTarget)
+        restoreQueuedMessages(for: offlineQueueTarget)
     }
 
     /// The thread Chat shows: the runner's turns and this iPhone's words still on their way, by time.
@@ -235,8 +264,12 @@ final class Phone {
         // Alerts whose job needs nothing any more, if their clearing push didn't arrive.
         await Notifications.clear(Set(jobs.filter { !$0.needsYou && !$0.waitsForAnswer }.map(\.id)))
         connection = .live
+        lastSeen = .now
+        UserDefaults.standard.set(lastSeen, forKey: "runner.lastSeen")
         // Jobs dispatched from the Mac or the runner API notify too, so ask on connecting.
         Notifications.ask()
+        await flushQueued()
+        await flushQueuedInbox()
         do { _ = try await registerDevice(again: true) } catch {
             Logger.phone.error("registering this iPhone failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -359,12 +392,14 @@ final class Phone {
     /// Try again on words that didn't go through: the same request, sent anew.
     func retry(echo id: String) {
         guard let request = requests[id] else { return }
+        removeQueued(id)
         drop(echo: id)
         plan(request.said, answer: request.answer, voice: request.voice)
     }
 
     /// Edit on words that didn't go through: they leave the thread for the field.
     func discard(echo id: String) {
+        removeQueued(id)
         drop(echo: id)
     }
 
@@ -379,38 +414,110 @@ final class Phone {
         echoes.append(echo)
         requests[echo.id] = Request(said: said, answer: answer, voice: voice)
         pending = echo.id
-        planning = Task {
-            let result: Talk
-            var started: [Job] = []
+        if connection != .live {
+            offlineQueue.queue(OfflineMessage(id: echo.id, said: said, question: answer?.question, option: answer?.option, voice: voice, target: offlineQueueTarget))
+            talk = .queued(said)
+            pending = nil
+            return
+        }
+        send(Request(said: said, answer: answer, voice: voice), echo: echo)
+    }
+
+    private func removeQueued(_ id: String) {
+        offlineQueue.removeMessage(id)
+    }
+
+    private func restoreQueuedMessages(for target: String) {
+        for item in offlineQueue.messages where item.target == target {
+            requests[item.id] = Request(said: item.said, answer: item.question.flatMap { question in item.option.map { (question, $0) } }, voice: item.voice)
+            if !echoes.contains(where: { $0.id == item.id }) {
+                echoes.append(Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil))
+            }
+        }
+    }
+
+    private func flushQueued() async {
+        let target = offlineQueueTarget
+        guard offlineQueue.messages.contains(where: { $0.target == target }) else { return }
+        let destinationRunner = runner
+        await offlineQueue.flushMessages(for: target) { [weak self] item in
+            guard let self else { throw CancellationError() }
+            let request = requests[item.id] ?? Request(
+                said: item.said,
+                answer: item.question.flatMap { question in item.option.map { (question, $0) } },
+                voice: item.voice
+            )
+            let echo = echoes.first(where: { $0.id == item.id }) ?? Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil)
+            let result = try await destinationRunner.plan(request.said, answer: request.answer)
+            apply(result, request: request, echo: echo)
+        }
+    }
+
+    private func flushQueuedInbox() async {
+        let target = offlineQueueTarget
+        guard offlineQueue.answers.contains(where: { $0.target == target }) else { return }
+        let destinationRunner = runner
+        await offlineQueue.flushAnswers(for: target) { [weak self] item in
+            guard let self else { throw CancellationError() }
             do {
-                switch try await runner.plan(said, answer: answer) {
-                case .question(let said, let question): result = .question(said: said, question)
-                case .reply(let text, let jobs): result = .reply(text); started = jobs
-                case .none: result = .none
-                }
+                apply(.inbox(try await destinationRunner.settle(item.id, answer: item.answer, done: item.done, later: item.later)))
             } catch {
-                result = .reply(error.localizedDescription)
+                if OfflineQueue.isAlreadySettled(error) {
+                    throw OfflineQueue.FlushError.alreadySettled
+                }
+                throw error
+            }
+        }
+    }
+
+    private func send(_ request: Request, echo: Turn) {
+        planning = Task {
+            do {
+                let result = try await runner.plan(request.said, answer: request.answer)
+                guard !Task.isCancelled else { return }
+                apply(result, request: request, echo: echo)
+            } catch {
                 // The request didn't go through (or the runner answered with an error): the words
                 // stay in the thread with why, to try again or edit. If the runner got them after
                 // all (a timeout), its turn settles the echo as usual.
-                if !Task.isCancelled { failures[echo.id] = error.localizedDescription }
-            }
-            // Cancelled or replaced while the brain was thinking.
-            guard !Task.isCancelled else { return }
-            // The request is over: its words are the runner's now, or stay with their failure.
-            if pending == echo.id { pending = nil }
-            conversation.settleLatestSteps()
-            talk = result
-            // The work Oby started (#269) shows at once, before its events come, and the phone
-            // asks to notify the first time something starts from it.
-            for job in started { apply(.job(job)) }
-            if !started.isEmpty { Notifications.ask() }
-            if spoken, speakReplies {
-                switch result {
-                case .reply(let text): speaker.say(text)
-                case .question(_, let question): speaker.say(question.text)
-                default: break
+                if !Task.isCancelled {
+                    failures[echo.id] = error.localizedDescription
+                    finish(.reply(error.localizedDescription), started: [], request: request, echo: echo)
                 }
+            }
+        }
+    }
+
+    /// Applies a response the runner accepted, shared by live sends and the sequential offline
+    /// flush. The queue removes its message only after this operation's network call succeeds.
+    private func apply(_ result: PlanResult, request: Request, echo: Turn) {
+        let talk: Talk
+        let started: [Job]
+        switch result {
+        case .question(let said, let question):
+            talk = .question(said: said, question)
+            started = []
+        case .reply(let text, let jobs):
+            talk = .reply(text)
+            started = jobs
+        case .none:
+            talk = .none
+            started = []
+        }
+        finish(talk, started: started, request: request, echo: echo)
+    }
+
+    private func finish(_ talk: Talk, started: [Job], request: Request, echo: Turn) {
+        if pending == echo.id { pending = nil }
+        conversation.settleLatestSteps()
+        self.talk = talk
+        for job in started { apply(.job(job)) }
+        if !started.isEmpty { Notifications.ask() }
+        if request.voice, speakReplies {
+            switch talk {
+            case .reply(let text): speaker.say(text)
+            case .question(_, let question): speaker.say(question.text)
+            default: break
             }
         }
     }
@@ -456,6 +563,11 @@ final class Phone {
 
     /// Settles an inbox item: an answer goes to its job, `done` lets it go, `later` puts it off.
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws {
+        guard connection == .live else {
+            offlineQueue.queue(OfflineInboxAnswer(id: id, answer: answer, done: done, later: later, target: offlineQueueTarget))
+            inbox.removeAll { $0.id == id }
+            return
+        }
         apply(.inbox(try await runner.settle(id, answer: answer, done: done, later: later)))
     }
 

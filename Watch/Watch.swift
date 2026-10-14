@@ -35,6 +35,8 @@ final class Watch: NSObject {
     /// The phone is near and answers now. Without it, a paired watch calls the runner itself;
     /// an unpaired one queues requests until the phone is back.
     private(set) var reachable = false
+    private(set) var offline = false
+    private(set) var lastSeen: Date?
     /// The Watch API, once the iPhone paired this watch with the runner.
     private(set) var link = WatchLink.saved
     /// Oby is on screen: only then does the watch follow the runner's events itself.
@@ -94,6 +96,10 @@ final class Watch: NSObject {
 
     /// Paired with the runner: the watch works without its iPhone.
     var paired: Bool { link != nil }
+    var offlineLine: String {
+        let time = lastSeen.map { $0.formatted(date: .omitted, time: .shortened) } ?? "never"
+        return "Your Mac is asleep or offline. Last seen \(time)"
+    }
     /// The runner directly, while the phone is out of reach.
     private var direct: WatchLink? { reachable ? nil : link }
     /// Live words come from the phone, or from the runner when paired.
@@ -141,6 +147,8 @@ final class Watch: NSObject {
         accounts = context.accounts
         host = context.host
         loaded = true
+        offline = false
+        lastSeen = context.sentAt
         saveGlance()
     }
 
@@ -153,8 +161,11 @@ final class Watch: NSObject {
             let recent = all.filter { !$0.needsYou && !$0.isActive && ($0.finished ?? now) > now.addingTimeInterval(-2 * 86400) }
             jobs = Array((all.filter(\.needsYou) + all.filter { $0.isActive && !$0.needsYou } + recent).prefix(20))
             loaded = true
+            offline = false
+            lastSeen = .now
             saveGlance()
         } catch {
+            offline = true
             Logger.watch.error("fetching the jobs from the runner failed: \(error.localizedDescription, privacy: .public)")
         }
     }
@@ -765,6 +776,7 @@ extension Watch: WCSessionDelegate {
         Task { @MainActor in
             self.load(context)
             self.reachable = reachable
+            self.offline = !reachable && self.link == nil
             if reachable { self.useDictation = false }
             self.follow()
             self.refresh()
@@ -776,6 +788,7 @@ extension Watch: WCSessionDelegate {
         let reachable = session.isReachable
         Task { @MainActor in
             self.reachable = reachable
+            if reachable { self.offline = false }
             if reachable { self.useDictation = false } else { self.lostPhone() }
             self.follow()
             self.refresh()

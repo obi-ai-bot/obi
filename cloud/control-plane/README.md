@@ -5,3 +5,5 @@ A Cloudflare Worker with a D1 database (#285): sign-in by email code, one instal
 - How it's deployed, its API, and how the Mac and the iPhone use it: [docs/remote-access.md](../../docs/remote-access.md).
 - `pnpm install`, then `pnpm exec vitest run --config worker.vitest.ts` (inside workerd, with the Cloudflare API and the email sender mocked), `pnpm check` (TypeScript), `pnpm dev` (`wrangler dev` with `.dev.vars`).
 - Secrets are never in git, D1 or logs: `wrangler secret put` in production, `.dev.vars` locally (`.dev.vars.example` has the placeholders).
+
+The Worker currently provisions tunnels only. It does not relay APNs pushes; the runner sends APNs directly while awake until a separately specified relay adds token storage, APNs secrets, and an event API.

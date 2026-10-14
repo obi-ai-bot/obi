@@ -76,7 +76,7 @@ struct BriefingCountTests {
         }
         let running = job("r1", title: "Vault secrets", created: 300)
         feed.apply(running)
-        let model = IslandModel(desk: desk, feed: feed)
+        let model = IslandModel(desk: desk, feed: feed, availability: MacAvailability())
         #expect(model.working == 1 && model.waiting == 14)
         #expect(model.summary == "1 agent is working, 14 waiting. Nothing needs you.")
         #expect(waiting.allSatisfy { $0.badge == JobBadge(text: "Waiting", tone: .gray) && $0.group == .waiting })

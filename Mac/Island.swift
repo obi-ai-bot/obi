@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Observation
 import SwiftUI
 import WebKit
 
@@ -20,6 +21,7 @@ final class IslandModel {
     static let tabKey = "island.lastTab"
     let desk: Desk
     let feed: RunnerFeed
+    let availability: MacAvailability
     /// The update waiting to be installed, if any (Mac/Updater.swift): the open island's pill.
     let updater: Updater
     /// What you say while you hold fn.
@@ -46,9 +48,10 @@ final class IslandModel {
     /// The last open-island surface. Home takes precedence when something needs attention.
     var tab: IslandTab
 
-    init(desk: Desk, feed: RunnerFeed, updater: Updater = Updater()) {
+    @MainActor init(desk: Desk, feed: RunnerFeed, updater: Updater = Updater(), availability: MacAvailability) {
         self.desk = desk
         self.feed = feed
+        self.availability = availability
         self.updater = updater
         tab = IslandTab(rawValue: UserDefaults.standard.integer(forKey: Self.tabKey)) ?? .home
     }
@@ -123,12 +126,14 @@ final class IslandController {
     let updater = Updater()
     /// Reach this Mac from anywhere (#285): Settings › Remote access and the tunnel it runs.
     let remote = RemoteAccess()
+    let availability = MacAvailability()
     let model: IslandModel
     let character = ObyCharacter()
     let talkKey = TalkKey()
     let stopAllKey = StopAllKey()
     private let panel = NotchPanel()
     private var timer: Timer?
+    private var observingAvailability = false
     private var lastMouse: CGPoint?
     private var clickMonitor: Any?
     private var noticeTask: Task<Void, Never>?
@@ -143,12 +148,14 @@ final class IslandController {
 
     init() {
         desk.issueSync.enabled = true
-        model = IslandModel(desk: desk, feed: feed, updater: updater)
+        model = IslandModel(desk: desk, feed: feed, updater: updater, availability: availability)
         // A restart never interrupts a check this Mac runs for the runner.
         updater.busy = { [weak feed] in feed?.checks.current != nil }
     }
 
     func start() {
+        availability.startMonitoring()
+        observeAvailability()
         panel.contentView = NSHostingView(rootView: IslandView(
             model: model, character: character,
             onOpen: { [weak self] in self?.open() },
@@ -256,7 +263,11 @@ final class IslandController {
             return try await feed.plan(said, answer: answer, attachments: attachments)
         }
         desk.cancelElsewhere = { [weak self] in await self?.feed.cancelPlan() }
-        feed.onFollow = { [weak self] local in self?.desk.issueSync.enabled = !local }
+        feed.onFollow = { [weak self] local in
+            self?.desk.issueSync.enabled = !local
+            self?.availability.setRunnerEnabled(local)
+            self?.updateAvailability()
+        }
         feed.start()
         Task { await desk.refresh() }
         talkKey.on = { [weak self] in self?.talk($0) }
@@ -275,6 +286,31 @@ final class IslandController {
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             MainActor.assumeIsolated { self?.close() }
         }
+    }
+
+    private func updateAvailability() {
+        availability.setRunningJobs(!desk.active.isEmpty || (feed.local && !feed.active.isEmpty) || feed.checks.current != nil)
+    }
+
+    /// Observation fires once per change, so re-register after updating the assertion. This keeps
+    /// the closed island idle instead of polling the runner and the local desk on a timer.
+    private func observeAvailability() {
+        guard !observingAvailability else { return }
+        observingAvailability = true
+        withObservationTracking {
+            _ = desk.active
+            _ = feed.active
+            _ = feed.local
+            _ = feed.checks.current
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                observingAvailability = false
+                updateAvailability()
+                observeAvailability()
+            }
+        }
+        updateAvailability()
     }
 
     /// Stop all (⌃⌥⌘. or the menu): every job on this Mac and on the runner stops now, and the
