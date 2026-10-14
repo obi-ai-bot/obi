@@ -1575,7 +1575,8 @@ final class Desk {
     /// What started, in Oby's voice: "On it. Claude Code is fixing oby #12 (Login screen) on
     /// Deskree." A job that waits for something says so.
     func startedLine(_ jobs: [Job]) -> String {
-        let doing = ["review": "reviewing", "fix": "fixing", "build": "building", "test": "testing", "investigate": "investigating"]
+        let doing = ["review": "reviewing", "fix": "fixing", "build": "building", "test": "testing",
+                     "investigate": "investigating", "research": "researching"]
         return "On it. " + Self.list(jobs.map { job in
             let account = accounts.state(job.account)?.account.name ?? job.account
             return job.startWhen == nil

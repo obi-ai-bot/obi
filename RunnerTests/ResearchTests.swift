@@ -7,7 +7,7 @@ import Testing
 
 @Suite(.serialized)
 struct ResearchTests {
-    @Test func researchRunsAtComplexEffortWithTwoRounds() {
+    @Test @MainActor func researchRunsAtComplexEffortWithTwoRounds() async throws {
         var research = job
         research.kind = .research
         research.rounds = 1
@@ -18,6 +18,26 @@ struct ResearchTests {
         research.rounds = 9
         Research.shape(&research)
         #expect(research.rounds == 4)
+
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let accounts = AccountStore(root: folder)
+        let claude = try accounts.add(agent: "claude", name: "Default", payer: "Test")
+        let codex = try accounts.add(agent: "codex", name: "Deskree", payer: "Deskree")
+        accounts.setLabel("Max", for: claude.id)
+        accounts.setLabel("Plus", for: codex.id)
+        #expect(accounts.state(claude.id)?.signedIn == true && accounts.state(codex.id)?.signedIn == true)
+        let desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        desk.repos = ["deskree-inc/oby"]
+        desk.prepare = { $0 }
+        desk.makeAgent = { _, _, _ in ConversationTests.IdleAgent() }
+        let queued = try await desk.dispatch(Desk.NewJob(repo: "deskree-inc/oby", kind: "research", task: "Compare designs",
+                                                         account: codex.id, agent: "codex", rounds: 1))
+        #expect(queued.kind == Plan.Kind.research && queued.complexity == .complex && queued.rounds == 2)
+        #expect(queued.effort == AgentModels.effort("codex", complex: true))
+        let moved = try desk.move(queued.id, to: MoveTarget(agent: "claude", account: claude.id, model: nil))
+        #expect(moved.complexity == Plan.Complexity.complex && moved.rounds == 2)
+        #expect(moved.effort == AgentModels.effort("claude", complex: true))
     }
 
     @Test func roundOneAlwaysGetsTheVerifyRound() {
@@ -236,30 +256,40 @@ struct ResearchTests {
         #expect(store.report("missing") == nil)
     }
 
-    @Test @MainActor func theReportIsServedByItsEndpoint() async throws {
+    @Test @MainActor func theReportIsStoredAndServed() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
+        let vault = Vault(store: FileVault(folder: folder.appending(path: "vault")))
+        let secret = ["fixture", String(UUID().uuidString.prefix(12)), "value"].joined(separator: "-")
+        try vault.add(secret, as: "staging-api-key")
         let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        desk.vault = vault
         desk.prepare = { $0 }
         var research = job
-        research.id = "report-job"
+        research.id = "report-scrub"
         research.kind = .research
-        research.status = .done
-        desk.store.save(research)
-        desk.store.save(ResearchReport(job: research.id, commit: "abc123", markdown: "# Answer\n\nVerified.", created: .now, proposals: []))
+        research.pr = nil
+        research.base = nil
+        research.startCommit = "abc123def456"
+        desk.dispatch(research)
+        let worktree = Workspace.worktree(research.id)
+        try FileManager.default.createDirectory(at: worktree.appending(path: ".oby"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: worktree) }
+        let path = "\(worktree.path)/Engine/Brain.swift:529"
+        try Data("# Answer\n\nSecret \(secret) at \(path)\n".utf8).write(to: worktree.appending(path: ".oby/report.md"))
+        desk.finish(research.id, .done, "Done with \(secret)")
+        #expect(desk.job(research.id)?.report == true)
         let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
         let app = Application(router: api.router(owner: "well@example.com"))
         try await app.test(.router) { client in
-            try await client.execute(uri: "/v1/jobs/report-job/report", method: .get,
+            try await client.execute(uri: "/v1/jobs/report-scrub/report", method: .get,
                                      headers: [.tailscaleUserLogin: "well@example.com"]) { response in
                 #expect(response.status == .ok)
                 let body = object(Data(response.body.readableBytesView))
-                #expect(body["commit"] as? String == "abc123")
-                #expect(body["markdown"] as? String == "# Answer\n\nVerified.")
-            }
-            try await client.execute(uri: "/v1/jobs/report-job/report", method: .get,
-                                     headers: [.tailscaleUserLogin: "well@example.com"]) { response in
-                #expect(response.status == .ok)
+                let markdown = body["markdown"] as? String ?? ""
+                #expect(!markdown.contains(secret))
+                #expect(markdown.contains("[vault: staging-api-key]"))
+                #expect(markdown.contains("https://github.com/deskree-inc/oby/blob/abc123def456/Engine/Brain.swift#L529"))
             }
         }
     }
@@ -280,18 +310,24 @@ struct ResearchTests {
         }
     }
 
-    @Test @MainActor func proposalsAreScannedBeforeTheyCanBeFiledAndFileOnlyOnce() async throws {
+    @Test @MainActor func proposalsFileOnlyOnTapAndAreScanned() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
-        let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        let accounts = AccountStore(root: folder)
+        let claude = try accounts.add(agent: "claude", name: "Default", payer: "Test")
+        accounts.setLabel("Max", for: claude.id)
+        let desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        desk.repos = ["deskree-inc/oby"]
         desk.prepare = { $0 }
+        desk.makeAgent = { _, _, _ in ConversationTests.IdleAgent() }
         var research = job
         research.id = "proposal-job"
         research.kind = .research
         research.status = .done
         desk.store.save(research)
-        let proposal = ProposedIssue(index: 0, repo: "deskree-inc/oby", title: "Document architecture", body: "## What\nDocument the design.", labels: [], filed: nil, filedAt: nil)
-        desk.store.save(ResearchReport(job: research.id, commit: "abc123", markdown: "# Answer", created: .now, proposals: [proposal]))
+        let clean = ProposedIssue(index: 0, repo: "deskree-inc/oby", title: "Document architecture", body: "## What\nDocument the design.", labels: [], filed: nil, filedAt: nil)
+        let second = ProposedIssue(index: 1, repo: "deskree-inc/oby", title: "Add migration guide", body: "## What\nGuide the move.", labels: [], filed: nil, filedAt: nil)
+        desk.store.save(ResearchReport(job: research.id, commit: "abc123", markdown: "# Answer", created: .now, proposals: [clean, second]))
         let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
         let app = Application(router: api.router(owner: "well@example.com"))
         actor Calls { var gh = 0; func sawGH() { gh += 1 }; func count() -> Int { gh } }
@@ -300,7 +336,8 @@ struct ResearchTests {
             if args.first == "gitleaks" { return Shell.Output(status: 0, out: Data(), err: "") }
             if args.prefix(3).elementsEqual(["gh", "issue", "create"]) {
                 await calls.sawGH()
-                return Shell.Output(status: 0, out: Data("https://github.com/deskree-inc/oby/issues/999".utf8), err: "")
+                let n = await calls.count()
+                return Shell.Output(status: 0, out: Data("https://github.com/deskree-inc/oby/issues/\(998 + n)".utf8), err: "")
             }
             throw Shell.Failure(message: "Unexpected command")
         })) {
@@ -315,11 +352,20 @@ struct ResearchTests {
                                          headers: headers, body: ByteBuffer(string: #"{"start":false}"#)) { response in
                     #expect(response.status == .conflict)
                 }
+                try await client.execute(uri: "/v1/jobs/proposal-job/proposals/1/file", method: .post,
+                                         headers: headers, body: ByteBuffer(string: #"{"start":true}"#)) { response in
+                    #expect(response.status == .created)
+                    let body = object(Data(response.body.readableBytesView))
+                    #expect(body["issue"] as? String == "https://github.com/deskree-inc/oby/issues/1000")
+                    #expect(body["jobId"] as? String != nil)
+                }
             }
         }
-        #expect(await calls.count() == 1)
+        #expect(await calls.count() == 2)
         #expect(desk.store.report(research.id)?.proposals.first?.filed == "https://github.com/deskree-inc/oby/issues/999")
         #expect(desk.job(research.id)?.outgoing?.contains(where: { $0.action == .issue }) == true)
+        let started = desk.jobs.first { $0.kind == .build && $0.issue == 1000 }
+        #expect(started?.task == "Work on #1000: Add migration guide")
     }
 
     @Test @MainActor func aMissingScannerFilesNothing() async throws {
