@@ -2,7 +2,7 @@ import SwiftUI
 import WebKit
 
 /// Home, the glance (#11): Oby, what's going on, the Inbox, the jobs, and the field where you
-/// type a task. The thread itself is the Chat tab (iOS/Chat.swift).
+/// type a task. The thread itself is the Chat tab (apps/ios/app/Chat.swift).
 struct HomeView: View {
     @Environment(Phone.self) private var phone
     @Environment(\.scenePhase) private var scenePhase

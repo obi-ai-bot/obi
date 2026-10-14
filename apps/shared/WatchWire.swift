@@ -1,13 +1,13 @@
 import Foundation
 
 // What the iPhone and the Apple Watch say to each other over WatchConnectivity
-// (iOS/WatchRelay.swift and Watch/Watch.swift). The watch can't reach the tailnet, so the phone
+// (apps/ios/app/WatchRelay.swift and apps/watch/Watch.swift). The watch can't reach the tailnet, so the phone
 // keeps the jobs on it and carries out what it asks; out of the phone's reach, a paired watch
-// calls the runner's Watch API through a Cloudflare Tunnel instead (Watch/WatchLink.swift). Messages are dictionaries of property-list
+// calls the runner's Watch API through a Cloudflare Tunnel instead (apps/watch/WatchLink.swift). Messages are dictionaries of property-list
 // values; the typed parts travel as JSON made with Runner.encoder.
 #if os(iOS) || os(watchOS)
 /// The jobs the phone keeps on the watch, as the application context: the ones the watch shows,
-/// trimmed to what WatchConnectivity carries (iOS/WatchRelay.swift).
+/// trimmed to what WatchConnectivity carries (apps/ios/app/WatchRelay.swift).
 nonisolated struct WatchContext: Codable, Equatable, Sendable {
     var jobs: [Job]
     var accounts: [Account]
@@ -69,7 +69,7 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 ///   awaits (#304). Ephemeral, like `transcript`: never queued, and absent from runners without steps.
 /// - `published`: `job` (its id), with `url`, `pending` (Face ID waits on the phone) or `error`.
 ///
-/// From the phone, answered in the reply (iOS/WatchPairing.swift):
+/// From the phone, answered in the reply (apps/ios/app/WatchPairing.swift):
 /// - `pairKey`: nothing; answered with `publicKey` (the watch's Secure Enclave key, X9.63) and `name`.
 /// - `paired`: `watch` (its id on the runner), `url` (the Watch API's address), `clientId` and
 ///   `clientSecret` (the Cloudflare Access service token); answered with `ok`.

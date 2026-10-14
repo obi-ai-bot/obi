@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// Oby, animated: frames rendered from Character/oby.html (Watch/README.md) played at 15 fps,
+/// Oby, animated: frames rendered from Character/oby.html (apps/watch/README.md) played at 15 fps,
 /// since watchOS has no WebKit. It plays only while it's on screen, the app is in front,
 /// the wrist is up and Reduce Motion is off; otherwise it holds the loop's first frame, Oby calm.
 /// A reaction plays once over the loop, then the loop starts again from its first frame: both

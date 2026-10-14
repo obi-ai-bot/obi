@@ -11,7 +11,7 @@ struct ReviewTests {
         #expect(Review.securityPath("Runner/Gateway.swift"))
         #expect(Review.securityPath("cloud/control-plane/src/routes.ts"))
         #expect(Review.securityPath("Engine/TokenStore.swift"))
-        #expect(!Review.securityPath("Mac/Island.swift"))
+        #expect(!Review.securityPath("apps/mac/app/Island.swift"))
         let prompt = Review.securityPrompt("Review pull request #4")
         #expect(prompt.contains("Every claim about authentication or route reachability must include a probe"))
         #expect(prompt.contains("more than 80% sure"))

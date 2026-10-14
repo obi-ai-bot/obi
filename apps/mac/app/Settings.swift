@@ -13,7 +13,7 @@ struct SettingsView: View {
     @State private var rules: [PermissionRule] = []
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var problem: String?
-    /// Oby reads its reply out loud when you talked to it (Mac/Speech.swift).
+    /// Oby reads its reply out loud when you talked to it (apps/mac/app/Speech.swift).
     @AppStorage(Speaker.setting) private var speaks = true
 
     var body: some View {
@@ -95,9 +95,9 @@ struct RunnerSettingsView: View {
     @AppStorage("runnerURL") private var runnerURL = ""
     /// "This Mac" (#283): the runner is Oby's login item on this Mac, and Oby follows it on 127.0.0.1.
     @AppStorage(RunnerFeed.thisMacKey) private var onThisMac = false
-    /// The login item, registered with "This Mac" and unregistered with a remote runner (Mac/LoginItem.swift).
+    /// The login item, registered with "This Mac" and unregistered with a remote runner (apps/mac/app/LoginItem.swift).
     @State private var loginItem = RunnerLoginItem()
-    /// Merge checks on this Mac (Mac/MacChecks.swift).
+    /// Merge checks on this Mac (apps/mac/app/MacChecks.swift).
     @AppStorage(MacChecks.setting) private var runMergeChecks = true
     /// Apple checks agents ask for (Engine/AppleChecks.swift).
     @AppStorage(MacChecks.appleSetting) private var runAppleChecks = true
@@ -220,7 +220,7 @@ struct RunnerSettingsView: View {
     }
 }
 
-/// Settings › Remote access: reach this Mac from anywhere (#285, Mac/RemoteAccess.swift). Sign in
+/// Settings › Remote access: reach this Mac from anywhere (#285, apps/mac/app/RemoteAccess.swift). Sign in
 /// to Oby's control plane with a code by email, then turn it on: this Mac gets a hostname of its
 /// own and runs its tunnel. The iPhone connects to the hostname when it's away from home.
 struct RemoteAccessSettingsView: View {

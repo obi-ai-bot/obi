@@ -488,7 +488,7 @@ struct ThinkingLine: View {
     }
 }
 
-/// A job's screen in the middle column (Mac/JobView.swift), with Back: the same screen the island
+/// A job's screen in the middle column (apps/mac/app/JobView.swift), with Back: the same screen the island
 /// opens, publishing after Touch ID the same way.
 private struct JobPane: View {
     let model: IslandModel

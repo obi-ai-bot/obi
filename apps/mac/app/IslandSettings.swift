@@ -4,7 +4,7 @@ import UserNotifications
 
 /// The quick settings surface in the notch: one short label per control, grouped in cards with the
 /// same row height and spacing. What needs more words is a tooltip; the full Mac and iPhone settings
-/// (Mac/Settings.swift) are one tap away for anything uncommon.
+/// (apps/mac/app/Settings.swift) are one tap away for anything uncommon.
 struct IslandSettings: View {
     let model: IslandModel
     @AppStorage(Speaker.setting) private var speaks = true
