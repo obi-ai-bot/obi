@@ -247,6 +247,40 @@ struct ReviewTests {
         #expect(Publish.refusal(review, base: "dev", defaultBranch: "main") == "A review made commits; nothing was published.")
     }
 
+    /// A chat-dispatched standalone review of an Oby PR must attach to the author job (#411).
+    @Test func aStandaloneReviewLinksToItsAuthorAndApprovalQueuesTheMacCheck() async throws {
+        let head = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        desk.queuesMacChecks = true
+        desk.reviewedHead = { _ in head }
+        // No other signed-in account: publish leaves reviewing nil so a later enqueue can link.
+        accounts.setLabel(nil, for: personal.id)
+        accounts.setLabel(nil, for: work.id)
+        let published = try await publishAuthor(authorAccountFiveHour: 0.97)
+        #expect(published.reviewing == nil && published.pushedHead == head)
+
+        accounts.setLabel("Plus · work@example.com", for: work.id)
+        let standalone = Job(id: "solo", request: "Review oby #80", agent: "codex", account: work.id,
+                             repo: "deskree-inc/oby", branch: "oby/review-80-solo", base: "dev",
+                             pr: 80, kind: .review, task: "Review pull request #80.")
+        #expect(standalone.reviewOf == nil)
+        let linked = desk.enqueue(standalone)
+        #expect(linked.reviewOf == "author" && desk.job("author")?.reviewing == linked.id)
+
+        try await until("the linked review runs") {
+            made.agents.last?.job.id == linked.id && desk.job(linked.id)?.status == .running
+        }
+        let agent = try #require(made.agents.last?.agent)
+        agent.onEvent(.turnEnded(summary: "Looks good.\n\nVERDICT: APPROVED", failed: false))
+        agent.onEvent(.finished(summary: "Looks good.\n\nVERDICT: APPROVED", failed: false))
+        try await until("the verdict reaches the author") {
+            desk.job("author")?.review?.verdict == .approved && desk.job("author")?.review?.job == linked.id
+        }
+        try await until("approval queues the Mac check") { desk.job("author")?.macCheck != nil }
+        let author = try #require(desk.job("author"))
+        #expect(author.macCheck?.state == .queued && author.macCheck?.head == head && author.macCheck?.job == "author")
+        #expect(author.reviewing == nil && author.reviewError == nil)
+    }
+
     /// Older integration fixtures predate the verified-blocker contract. Give their blocking
     /// examples explicit fixture evidence so those tests continue exercising the follow-up flow.
     private static func addEvidenceToBlockingFixtures(_ summary: String) -> String {
