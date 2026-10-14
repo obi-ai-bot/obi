@@ -42,6 +42,7 @@ final class Desk {
         var request: String? = nil
         /// How the job asks (#134), or nil for Settings › Permissions' default.
         var mode: PermissionMode? = nil
+        var reads: [String]? = nil
     }
 
     var talk: Talk = .none
@@ -1533,6 +1534,8 @@ final class Desk {
         job.attachments = attachments.isEmpty ? nil : attachments
         // The mode the user named ("plan first", #134), or Settings › Permissions' default when it queues.
         job.mode = dispatch.mode
+        job.reads = dispatch.reads
+        Research.shape(&job)
         let conditions = (dispatch.startWhen ?? []) + (held.isEmpty ? [] : [StartCondition.room(agent: agent)])
         if !conditions.isEmpty {
             // Its account's name is the one it runs on, by id.
@@ -1572,7 +1575,8 @@ final class Desk {
     /// What started, in Oby's voice: "On it. Claude Code is fixing oby #12 (Login screen) on
     /// Deskree." A job that waits for something says so.
     func startedLine(_ jobs: [Job]) -> String {
-        let doing = ["review": "reviewing", "fix": "fixing", "build": "building", "test": "testing", "investigate": "investigating"]
+        let doing = ["review": "reviewing", "fix": "fixing", "build": "building", "test": "testing",
+                     "investigate": "investigating", "research": "researching"]
         return "On it. " + Self.list(jobs.map { job in
             let account = accounts.state(job.account)?.account.name ?? job.account
             return job.startWhen == nil
@@ -1596,7 +1600,9 @@ final class Desk {
     /// a plan's jobs, a guessed plan's on Start, and the runner's `POST /v1/jobs`.
     @discardableResult
     func dispatch(_ job: Job, why: String? = nil) -> Job {
-        enqueue(job, why: why)
+        var job = job
+        Research.shape(&job)
+        return enqueue(job, why: why)
     }
 
     /// Starts a job from a whole body (#269), as the brain's plan would have made it: checked
@@ -1618,7 +1624,7 @@ final class Desk {
         }
         var dispatch = Plan.Dispatch(agent: agent, account: account, repo: new.repo, baseBranch: new.base, pr: new.pr, issue: new.issue,
                                      epic: nil, kind: kind, title: new.title, task: new.task, inputs: [], rounds: new.rounds ?? 1,
-                                     check: new.check, complexity: .routine)
+                                     check: new.check, complexity: .routine, reads: new.reads)
         let canary = String(UUID().uuidString.prefix(8)).lowercased()
         let problems = Plan(action: .dispatch, reply: "", dispatches: [dispatch], question: nil).problems(in: brainContext(turns: []), canary: canary)
         guard problems.isEmpty else { throw Shell.Failure(message: problems.joined(separator: "; ") + ".") }
@@ -1818,6 +1824,7 @@ final class Desk {
     @discardableResult
     func publish(_ id: String, approve: (String) async throws -> Void) async throws -> URL {
         guard let job = job(id), job.canPublish, let base = job.base else { throw Shell.Failure(message: "Nothing to publish.") }
+        guard job.kind != .research else { throw Shell.Failure(message: "Research jobs don't publish.") }
         do {
             let url = try await publishByHand(job, base, approve, hooks(id, stoppable: false))
             if var job = self.job(id) {
@@ -1900,6 +1907,7 @@ final class Desk {
         moved.agent = account.agent
         moved.model = model
         moved.effort = AgentModels.effort(moved.agent, complex: moved.complexity == .complex)
+        Research.shape(&moved)
         let to = Moves.place(moved, accounts: accounts.accounts)
         moved.moves = (job.moves ?? []) + [Job.Move(from: from, to: to, why: reason, date: .now)]
         // Waiting on the room of an account it left: it runs where it went (#216). A new model alone keeps its wait.
@@ -2174,13 +2182,15 @@ final class Desk {
     static func agent(for job: Job, home: URL?, resume: String?) -> (any AgentRun)? {
         switch job.agent {
         case "claude":
-            let claude = ClaudeAgent(worktree: Workspace.worktree(job.id), configDirectory: home, resume: resume)
+            let reads = (job.reads ?? []).map { Workspace.worktree(job.id).appending(path: ".oby/reads/\($0)").path }
+            let claude = ClaudeAgent(worktree: Workspace.worktree(job.id), configDirectory: home, resume: resume, kind: job.kind, reading: reads)
             claude.model = job.model
             claude.effort = job.effort
             claude.mode = job.currentMode
             return claude
         case "codex":
-            let codex = CodexAgent(worktree: Workspace.worktree(job.id), home: home, resume: resume)
+            let reads = (job.reads ?? []).map { Workspace.worktree(job.id).appending(path: ".oby/reads/\($0)").path }
+            let codex = CodexAgent(worktree: Workspace.worktree(job.id), home: home, resume: resume, kind: job.kind, reading: reads)
             codex.model = job.model
             codex.effort = job.effort
             codex.mode = job.currentMode
@@ -2358,7 +2368,7 @@ final class Desk {
         guard (job.notes?.count ?? 0) == heard else { return }
         var next = Rounds.next(job, summary: summary, failed: failed, check: check, previous: failures[id])
         // Done with its work left uncommitted, and rounds left: one more round to commit it (#220).
-        if case .finish(.done, _) = next {
+        if case .finish(.done, _) = next, job.kind != .research {
             let files = await uncommitted(job)
             // Superseded while git looked (the user's words, another agent): that turn decides, whatever git said.
             guard current(), let latest = self.job(id), latest.isActive, (latest.notes?.count ?? 0) == heard else { return }
@@ -2774,11 +2784,61 @@ final class Desk {
             }
             return
         }
-        let reported = job.firstSwiftBuildSeconds.map { "First swift build: \(MacCheck.duration($0)).\n\n" + summary } ?? summary
+        var endingStatus = status
+        var endingSummary = summary
+        if job.kind == .research {
+            let path = Workspace.worktree(id).appending(path: ".oby/report.md")
+            let file = try? Data(contentsOf: path)
+            var markdown = file.map { String(decoding: $0.prefix(256 * 1024), as: UTF8.self) } ?? summary
+            if file?.count ?? 0 > 256 * 1024 { markdown += "\n\n[Report cut at 256 KB.]" }
+            if markdown.isEmpty {
+                markdown = "The research agent wrote no report or summary."
+                endingStatus = .failed
+                endingSummary = "The research agent wrote no report or summary."
+            }
+            do {
+                markdown = ResearchLinks.rewrite(try vault.forAgent(markdown), job: job)
+                endingSummary = ResearchLinks.rewrite(try vault.forAgent(endingSummary), job: job)
+            }
+            catch {
+                job.status = .failed
+                job.summary = "Not published: Oby couldn't remove vault secrets from the research report."
+                job.finished = .now
+                replace(job)
+                onFinish(job)
+                return
+            }
+            let proposalPath = Workspace.worktree(id).appending(path: ".oby/proposed-issues.json")
+            var proposals: [ProposedIssue] = []
+            var dropped: [String] = []
+            if let data = try? Data(contentsOf: proposalPath), let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                for (index, row) in rows.enumerated() {
+                    guard index < 10, let repo = row["repo"] as? String, repos.contains(repo),
+                          let title = row["title"] as? String, (1...120).contains(title.count),
+                          let body = row["body"] as? String, body.count <= 8000,
+                          let labels = row["labels"] as? [String], labels.count <= 5 else {
+                        dropped.append("Proposal \(index + 1) was dropped because its repo, title, body or labels were invalid.")
+                        continue
+                    }
+                    do {
+                        proposals.append(ProposedIssue(index: index, repo: repo, title: try vault.forAgent(title),
+                                                       body: try vault.forAgent(body), labels: try labels.map { try vault.forAgent($0) },
+                                                       filed: nil, filedAt: nil))
+                    } catch {
+                        dropped.append("Proposal \(index + 1) was dropped because it could not be checked for vault secrets.")
+                    }
+                }
+                if rows.count > 10 { dropped.append("Only the first 10 proposed issues are considered.") }
+            }
+            if !dropped.isEmpty { markdown += "\n\n## Proposal notes\n\n" + dropped.map { "- " + $0 }.joined(separator: "\n") }
+            store.save(ResearchReport(job: id, commit: job.startCommit ?? "", markdown: markdown, created: .now, proposals: proposals))
+            job.report = true
+        }
+        let reported = job.firstSwiftBuildSeconds.map { "First swift build: \(MacCheck.duration($0)).\n\n" + endingSummary } ?? endingSummary
         let withEffort = job.reviewOf == nil && job.complexity == .complex
             ? reported + "\n\nReasoning effort: \(AgentModels.effortName(job.effort ?? AgentModels.effort(job.agent, complex: job.complexity == .complex)))."
             : reported
-        (job.status, job.summary) = Job.ending(job, status, withEffort, made: made, asked: asked.contains(id), dirty: dirty)
+        (job.status, job.summary) = Job.ending(job, endingStatus, withEffort, made: made, asked: asked.contains(id), dirty: dirty)
         if job.status == .failed && status == .done { job.phase = .work }
         // Why it went to its account, and how it moved between accounts, for the report.
         if let moves = handoffs[id], !moves.isEmpty { job.summary += "\n\n" + moves.joined(separator: "\n") }
@@ -3310,6 +3370,9 @@ nonisolated enum Rounds {
                              + "\n\nPut the existing tests, skip markers and test or CI config back as they were. New tests are welcome.")
             }
             return .again(parts.joined(separator: "\n\n") + "\n\nFix it, run `\(check.command)` again yourself, and finish with a short summary.")
+        }
+        if job.kind == .research, job.currentRound == 1 {
+            return .again(Research.verifyRound)
         }
         switch verdict(summary) {
         // No verdict line: take the agent at its word rather than loop on a missing line.

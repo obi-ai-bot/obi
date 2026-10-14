@@ -69,6 +69,11 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var complexity: Plan.Complexity? = nil
     /// The effort used by this job's turns, recorded so reports and resumed rounds agree.
     var effort: String? = nil
+    /// A persisted report document is available for this job.
+    var report: Bool? = nil
+    /// Repositories exported read-only for research and their pinned commits.
+    var reads: [String]? = nil
+    var readCommits: [String: String]? = nil
     /// What the user told the agent along the way, oldest first.
     var notes: [String]?
     /// Execution facts used by the shared pipeline derivation; nil on older jobs.
@@ -261,7 +266,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// jobs (a review makes no commits), and never once its pull request was merged or closed: the
     /// branch has nowhere to go.
     var canPublish: Bool {
-        status == .done && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
+        status == .done && kind != .research && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
             && (pullRequest?.state ?? .open) == .open
     }
     /// Oby's review requested changes for the last time it may (`Review.stopsHere`: a blocker came
@@ -341,6 +346,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// fails too, saying so: they have nowhere to go, and the failure alerts the user (Push).
     /// `dirty`: the files its worktree has changed but not committed (#220); then they're the reason.
     static func ending(_ job: Job, _ status: Status, _ summary: String, made: Int?, asked: Bool = false, dirty: [String] = []) -> (Status, String) {
+        if status == .done, job.kind == .research, let made, made > 0 {
+            return (.failed, "Not published: research jobs don't commit. Its \(made) commits stay on the branch.\n\n" + summary)
+        }
         // ponytail: only jobs Oby opened the pull request for; on someone else's pull request
         // `made` counts from its head, which `pushed` doesn't.
         if status == .done, job.pr == nil, job.published != nil, let state = job.pullRequest?.state, state != .open,
@@ -669,6 +677,7 @@ final class ClaudeAgent: AgentRun {
     private var result: (summary: String, failed: Bool)?
     /// The session to pick up again, or nil for a new one.
     private let resume: String?
+    private let reading: [String]
     /// User messages written, and the ones Claude Code took in (it echoes each). A message written
     /// mid-turn joins that turn or queues a turn of its own, so only a result after the last one
     /// ends the turn.
@@ -677,10 +686,13 @@ final class ClaudeAgent: AgentRun {
     /// A message is waiting for its turn's result: the process ending now ends mid-turn.
     private var waiting = false
 
-    init(worktree: URL, configDirectory: URL? = nil, resume: String? = nil) {
+    let kind: Plan.Kind
+    init(worktree: URL, configDirectory: URL? = nil, resume: String? = nil, kind: Plan.Kind = .build, reading: [String] = []) {
         self.worktree = worktree
         self.configDirectory = configDirectory
         self.resume = resume
+        self.kind = kind
+        self.reading = reading
     }
 
     /// Where a job's Claude Code reads its MCP servers from (`mcpConfig`): in Oby's own folder,
@@ -727,7 +739,8 @@ final class ClaudeAgent: AgentRun {
 
     /// The command line and environment Claude Code starts with.
     nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil,
-                                   mcp: AgentMCP? = nil, mode: PermissionMode = .bypass, effort: String? = nil) throws -> (arguments: [String], environment: [String: String]) {
+                                   mcp: AgentMCP? = nil, mode: PermissionMode = .bypass, effort: String? = nil, reading: [String] = [],
+                                   research: Bool = false) throws -> (arguments: [String], environment: [String: String]) {
         // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
         // mcpServers (Tetrix) stay; only its claude.ai connectors are off. The broker joins them as
         // `oby`, from a file, with the job's token only.
@@ -749,7 +762,7 @@ final class ClaudeAgent: AgentRun {
                             + (resume.map { ["--resume", $0] } ?? [])),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude",
                             // Oby's folder is hidden in the box: only the MCP config shows, read-only.
-                            reading: [mcpFile(worktree: worktree).path])
+                            reading: [mcpFile(worktree: worktree).path] + reading, research: research)
         let environment = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 }
             .merging(AppleCheck.environment(worktree: worktree)) { $1 }
             .merging(Agents.swiftEnvironment(worktree: worktree)) { $1 })
@@ -763,7 +776,7 @@ final class ClaudeAgent: AgentRun {
         try Self.writeMCP(Self.mcpConfig(configDirectory: configDirectory), to: Self.mcpFile(worktree: worktree))
         let launch: (arguments: [String], environment: [String: String])
         do {
-            launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mcp: mcp, mode: mode, effort: effort)
+            launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mcp: mcp, mode: mode, effort: effort, reading: reading, research: kind == .research)
         } catch {
             dropMCP()
             throw error
@@ -869,7 +882,7 @@ final class ClaudeAgent: AgentRun {
         }
         if let (id, tool, toolInput) = StreamJSON.permission(message) {
             // Policy's fixed denials first, in every mode; then the job's mode and the user's rules (Desk).
-            if let denied = Policy.deny(tool: tool, input: toolInput, worktree: worktree) {
+            if let denied = Policy.deny(tool: tool, input: toolInput, worktree: worktree, kind: kind) {
                 Logger.jobs.notice("denied \(tool, privacy: .public): \(denied, privacy: .public)")
                 answer(id, ["behavior": "deny", "message": denied])
                 onEvent(.permission(denied: denied))
@@ -1201,7 +1214,26 @@ nonisolated enum Policy {
                                            "session_digest", "session_context", "repo_sessions", "list_sessions", TetrixUse.save]
 
     /// Why this tool call is refused, or nil to allow it.
-    static func deny(tool: String, input: [String: Any], worktree: URL) -> String? {
+    static func deny(tool: String, input: [String: Any], worktree: URL, kind: Plan.Kind? = nil) -> String? {
+        if kind == .research {
+            if tool == "Bash" {
+                return "Research jobs can't run shell commands. Use read tools and write only .oby/report.md or .oby/proposed-issues.json."
+            }
+            if ["Edit", "MultiEdit", "Write", "NotebookEdit"].contains(tool) {
+                guard let path = (input["file_path"] ?? input["notebook_path"]) as? String else {
+                    return "Research jobs may write only .oby/report.md and .oby/proposed-issues.json."
+                }
+                let root = worktree.standardizedFileURL.resolvingSymlinksInPath()
+                let candidate = URL(fileURLWithPath: path.hasPrefix("/") ? path : worktree.appending(path: path).path)
+                    .standardizedFileURL.resolvingSymlinksInPath()
+                let allowed = [".oby/report.md", ".oby/proposed-issues.json"].map {
+                    root.appending(path: $0).standardizedFileURL.path
+                }
+                if !allowed.contains(candidate.path) {
+                    return "Research jobs may write only .oby/report.md and .oby/proposed-issues.json."
+                }
+            }
+        }
         // mcp__<server>__<tool>, where the server can be "tetrix" or a connector like "claude_ai_Tetrix".
         let mcp = tool.components(separatedBy: "__")
         if mcp.first == "mcp" {
@@ -1228,7 +1260,7 @@ nonisolated enum Policy {
         }
         if let path = (input["file_path"] ?? input["notebook_path"]) as? String {
             let root = worktree.standardizedFileURL.path + "/"
-            let file = URL(filePath: path, relativeTo: worktree).standardizedFileURL.path
+            let file = URL(fileURLWithPath: path.hasPrefix("/") ? path : (worktree.path as NSString).appendingPathComponent(path)).standardizedFileURL.path
             if !file.hasPrefix(root) { return "Stay inside this job's worktree (\(worktree.path))." }
         }
         return nil
@@ -1452,17 +1484,20 @@ nonisolated enum Agents {
     /// for `tools`, git's settings (read-only) and the job's own account, and so is all of `OBY_HOME`:
     /// no gh token, APNs key, ssh key, vault, other account, or anything else the user keeps there. Nothing
     /// else an agent writes lasts, so it can't leave behind a program or a git config that the runner
-    /// runs later outside the box. Writable for real: the worktree, the git data it commits to, and
-    /// `own`, the job's account home (nil for none).
+    /// runs later outside the box. Normally the worktree and git data are writable; research gets a
+    /// read-only worktree and git data, with `.oby` writable for outputs (Policy limits those to the
+    /// report files). `own` is the job's account home (nil for none).
     /// `reading` are folders the process may read but not write, inside what's hidden otherwise
     /// (the Lead's own directory and the repositories' checkouts, under `OBY_HOME`).
     /// `apple`: `oby-check apple`'s script and the runner it runs, shown read-only to a process in a
     /// worktree (Engine/AppleChecks.swift).
-    /// On the Mac, `argv` as it is: gh's login is in the keychain, and agents have no credential helper.
+    /// On the Mac, `argv` runs as-is: Oby's permission policy restricts research file tools, Claude
+    /// research can't use Bash, and Codex research uses its read-only sandbox.
     // ponytail: one Unix user, hidden by path. Sockets that run commands for this user (docker is
     // hidden, nothing else is) and the runner's API on 127.0.0.1 stay reachable; a Unix user of its
     // own for agents is the upgrade.
     static func sandboxed(_ argv: [String], in worktree: URL?, own: String?, reading: [String] = [], bubblewrap: Bool = Agents.bubblewrap,
+                          research: Bool = false,
                           apple: AppleCheck.Tool? = AppleCheck.installed,
                           exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> [String] {
         guard bubblewrap else { return argv }
@@ -1485,7 +1520,7 @@ nonisolated enum Agents {
             // git finds a config (.git, commondir) are read-only. A real packed-refs can't be replaced,
             // so `git pack-refs` fails rather than drop the loose refs it would have packed.
             let path = worktree.path
-            args += ["--bind", path, path, "--ro-bind", "\(path)/.git", "\(path)/.git"]
+            args += [research ? "--ro-bind" : "--bind", path, path, "--ro-bind", "\(path)/.git", "\(path)/.git"]
             if let pointer = try? String(contentsOfFile: "\(path)/.git", encoding: .utf8), pointer.hasPrefix("gitdir: ") {
                 // An absolute path, as `git worktree add` writes it.
                 let admin = String(pointer.dropFirst("gitdir: ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1494,9 +1529,14 @@ nonisolated enum Agents {
                 // directories separately. Binding the directory refreshes packed-refs after
                 // an outside rename; binding the file itself would pin its old inode.
                 args += ["--ro-bind", common, common]
-                for real in ["objects", "refs", "logs"] { args += ["--bind-try", "\(common)/\(real)", "\(common)/\(real)"] }
-                args += ["--bind", admin, admin, "--ro-bind", "\(admin)/commondir", "\(admin)/commondir"]
+                if research {
+                    args += ["--ro-bind", admin, admin]
+                } else {
+                    for real in ["objects", "refs", "logs"] { args += ["--bind-try", "\(common)/\(real)", "\(common)/\(real)"] }
+                    args += ["--bind", admin, admin, "--ro-bind", "\(admin)/commondir", "\(admin)/commondir"]
+                }
             }
+            if research { args += ["--bind", "\(path)/.oby", "\(path)/.oby"] }
         }
         for folder in reading where exists(folder) { args += ["--ro-bind", folder, folder] }
         if worktree != nil, let apple { args += apple.binds }
@@ -1544,8 +1584,8 @@ nonisolated enum Workspace {
     static let root = ProcessInfo.processInfo.environment["OBY_HOME"]
         .flatMap { $0.isEmpty ? nil : URL(filePath: $0, directoryHint: .isDirectory) }
         ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Oby")
-    static func clone(_ repo: String) -> URL { root.appending(path: "repos/\(repo)") }
-    static func worktree(_ id: String) -> URL { root.appending(path: "jobs/\(id)") }
+    static func clone(_ repo: String, root: URL = root) -> URL { root.appending(path: "repos/\(repo)") }
+    static func worktree(_ id: String, root: URL = Self.root) -> URL { root.appending(path: "jobs/\(id)") }
 
     /// Removes Swift module caches because their precompiled modules embed the source path.
     private static func removeModuleCaches(in build: URL) throws {
@@ -1637,27 +1677,6 @@ nonisolated enum Workspace {
                             "-q", ".[].full_name"]).split(separator: "\n").map(String.init)
     }
 
-    /// The shared clone a read or a job will use. A clone is prepared once and never receives
-    /// agent work directly; only jobs get worktrees from it.
-    static func ensureClone(_ repo: String) async throws -> URL {
-        let clone = clone(repo)
-        @discardableResult func git(_ arguments: [String]) async throws -> String {
-            try await Shell.ok(["git", "-C", clone.path] + arguments)
-        }
-        if !FileManager.default.fileExists(atPath: clone.appending(path: ".git").path) {
-            try FileManager.default.createDirectory(at: clone.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try await Shell.ok(["gh", "repo", "clone", repo, clone.path])
-            try await git(["config", "remote.origin.pushurl", "oby-publishes-only-through-the-notch"])
-            let exclude = clone.appending(path: ".git/info/exclude")
-            let excluded = (try? String(contentsOf: exclude, encoding: .utf8)) ?? ""
-            try (excluded + "\n.oby/\n").write(to: exclude, atomically: true, encoding: .utf8)
-        }
-        try await git(["config", "gc.auto", "0"])
-        try await git(["config", "maintenance.auto", "false"])
-        try await git(["config", "commit.gpgsign", "false"])
-        return clone
-    }
-
     /// Oby's working base, or the remote's declared default branch when there is no `dev`.
     static func defaultBase(clone: URL) async throws -> String {
         if (try? await Shell.ok(["git", "-C", clone.path, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/dev"])) != nil {
@@ -1669,13 +1688,12 @@ nonisolated enum Workspace {
 
     /// Clones the repository on first use, fetches it, and adds a worktree on a new branch.
     /// Returns the job with the branch it really got (and the PR's base branch).
-    static func prepare(_ job: Job) async throws -> Job {
+    static func prepare(_ job: Job, root: URL = Workspace.root, cloneURL: (String) -> String? = { _ in nil }) async throws -> Job {
         var job = job
-        let clone = clone(job.repo)
+        let clone = try await ensureClone(job.repo, cloneURL: cloneURL(job.repo), root: root)
         @discardableResult func git(_ arguments: [String]) async throws -> String {
             try await Shell.ok(["git", "-C", clone.path] + arguments)
         }
-        _ = try await ensureClone(job.repo)
         // The runner and agents share this clone. Keep the runner's Git from packing refs
         // while an agent is using them through bubblewrap.
         try await git(["config", "gc.auto", "0"])
@@ -1714,7 +1732,7 @@ nonisolated enum Workspace {
             n += 1
             job.branch = "\(wanted)-\(n)"
         }
-        let worktree = worktree(job.id)
+        let worktree = worktree(job.id, root: root)
         try await git(["worktree", "add", "--quiet", "-b", job.branch, worktree.path, start])
         job.startCommit = try await Shell.ok(["git", "-C", clone.path, "rev-parse", "--verify", "\(start)^{commit}"], env: ["GIT_NO_REPLACE_OBJECTS": "1"])
         if job.kind == .review {
@@ -1723,8 +1741,76 @@ nonisolated enum Workspace {
             try Data().write(to: marker)
         }
         try Agents.installSwiftWrapper(in: worktree)
-        _ = try? await seedBuild(job, commit: job.startCommit!, into: worktree)
+        _ = try? await seedBuild(job, commit: job.startCommit!, into: worktree, root: root)
+        try await prepareReads(&job, in: worktree, root: root, cloneURL: cloneURL)
         return try inputs(job, pullRequest: pullRequest, issue: issue, in: worktree)
+    }
+
+    static func ensureClone(_ repo: String, cloneURL: String? = nil, root: URL = root) async throws -> URL {
+        let clone = clone(repo, root: root)
+        if !FileManager.default.fileExists(atPath: clone.appending(path: ".git").path) {
+            try FileManager.default.createDirectory(at: clone.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if let cloneURL { try await Shell.ok(["git", "clone", cloneURL, clone.path]) }
+            else { try await Shell.ok(["gh", "repo", "clone", repo, clone.path]) }
+            try await Shell.ok(["git", "-C", clone.path, "config", "remote.origin.pushurl", "oby-publishes-only-through-the-notch"])
+            let exclude = clone.appending(path: ".git/info/exclude")
+            let excluded = (try? String(contentsOf: exclude, encoding: .utf8)) ?? ""
+            try (excluded + "\n.oby/\n").write(to: exclude, atomically: true, encoding: .utf8)
+        }
+        try await Shell.ok(["git", "-C", clone.path, "config", "gc.auto", "0"])
+        try await Shell.ok(["git", "-C", clone.path, "config", "maintenance.auto", "false"])
+        try await Shell.ok(["git", "-C", clone.path, "config", "commit.gpgsign", "false"])
+        return clone
+    }
+
+    static func prepareReads(_ job: inout Job, in worktree: URL, root: URL = root, cloneURL: (String) -> String? = { _ in nil }) async throws {
+        guard job.kind == .research, let reads = job.reads, !reads.isEmpty else { return }
+        var commits: [String: String] = [:]
+        for repo in reads {
+            let clone = try await ensureClone(repo, cloneURL: cloneURL(repo), root: root)
+            try await Publish.gitFetch(["--prune", "--quiet", "origin"], into: clone)
+            let head = try await Shell.ok(["git", "-C", clone.path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+            let branch = String(head.dropFirst("origin/".count))
+            let sha = try await Shell.ok(["git", "-C", clone.path, "rev-parse", "--verify", "origin/\(branch)^{commit}"])
+            let listing = try await Shell.ok(["git", "-C", clone.path, "ls-tree", "-r", "-l", sha])
+            let bytes = listing.split(separator: "\n").reduce(Int64(0)) { total, line in
+                let parts = line.split(whereSeparator: \.isWhitespace)
+                return total + (parts.count > 3 ? Int64(parts[3]) ?? 0 : 0)
+            }
+            if bytes > 300_000_000 { throw Shell.Failure(message: "\(repo) is too big to read (\(bytes / 1_000_000) MB)") }
+            let path = worktree.appending(path: ".oby/reads/\(repo)")
+            try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
+            try await archive(sha, from: clone, to: path)
+            _ = try await Shell.ok(["chmod", "-R", "a-w", path.path])
+            commits[repo] = sha
+        }
+        job.readCommits = commits
+        let list = reads.map { repo in
+            let sha = commits[repo] ?? ""
+            return "- \(repo) at \(sha): https://github.com/\(repo)/blob/\(sha)/<path>#L<start>-L<end>"
+        }.joined(separator: "\n")
+        try FileManager.default.createDirectory(at: worktree.appending(path: ".oby/inputs"), withIntermediateDirectories: true)
+        try Vault.shared.forAgent("Named repositories (read-only snapshots):\n\(list)")
+            .write(to: worktree.appending(path: ".oby/inputs/reads.md"), atomically: true, encoding: .utf8)
+    }
+
+    private static func archive(_ sha: String, from clone: URL, to folder: URL) async throws {
+        let pipe = Pipe()
+        let source = Process(), sink = Process()
+        source.executableURL = URL(filePath: "/usr/bin/env")
+        source.arguments = ["git", "-C", clone.path, "archive", "--format=tar", sha]
+        source.standardOutput = pipe
+        sink.executableURL = URL(filePath: "/usr/bin/env")
+        sink.arguments = ["tar", "-x", "-C", folder.path]
+        sink.standardInput = pipe
+        do { try sink.run(); try source.run() }
+        catch { sink.terminate(); throw error }
+        source.waitUntilExit()
+        pipe.fileHandleForWriting.closeFile()
+        sink.waitUntilExit()
+        guard source.terminationStatus == 0, sink.terminationStatus == 0 else {
+            throw Shell.Failure(message: "Couldn't export the read-only repository snapshot.")
+        }
     }
 
     /// Writes what the agent reads in `.oby/inputs`: the job's attachments, and its pull request or
@@ -1757,6 +1843,7 @@ nonisolated enum Prompts {
     static func agent(_ job: Job, apple: Bool = false, alongside: [Job] = []) -> String {
         // Oby's own review of a pull request: a review only, no commits (Engine/Review.swift).
         if job.reviewOf != nil { return Review.prompt(job) }
+        if job.kind == .research { return Research.prompt(job) }
         var lines: [String] = []
         if let pr = job.pr {
             let base = "origin/\(job.base ?? "HEAD")"
@@ -1922,6 +2009,7 @@ nonisolated final class JobStore {
         // The inbox (Engine/Inbox.swift) and the conversation (Engine/Conversation.swift), the same way.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS conversation (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
+        sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS reports (job TEXT PRIMARY KEY, body TEXT NOT NULL)", nil, nil, nil)
         // Settings › Permissions and the saved rules (Engine/Permissions.swift).
         createPermissionTables()
     }
@@ -1938,6 +2026,26 @@ nonisolated final class JobStore {
         sqlite3_bind_double(statement, 2, job.created.timeIntervalSince1970)
         sqlite3_bind_text(statement, 3, String(decoding: body, as: UTF8.self), -1, transient)
         if sqlite3_step(statement) != SQLITE_DONE { Logger.jobs.error("saving job \(job.id, privacy: .public) failed") }
+    }
+
+    func save(_ report: ResearchReport) {
+        guard let body = try? JSONEncoder().encode(report) else { return }
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO reports (job, body) VALUES (?, ?)", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(statement, 1, report.job, -1, transient)
+        sqlite3_bind_text(statement, 2, String(decoding: body, as: UTF8.self), -1, transient)
+        if sqlite3_step(statement) != SQLITE_DONE { Logger.jobs.error("saving report for \(report.job, privacy: .public) failed") }
+    }
+
+    func report(_ id: String) -> ResearchReport? {
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT body FROM reports WHERE job = ?", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, id, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { return nil }
+        return try? JSONDecoder().decode(ResearchReport.self, from: Data(String(cString: text).utf8))
     }
 
     /// The newest `limit` jobs, newest first; every job for -1.

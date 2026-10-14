@@ -117,13 +117,13 @@ nonisolated enum PermissionPolicy {
                                            "uv", "poetry", "bundle", "rake", "mix", "dotnet", "gradle", "./gradlew", "xcrun", "brew", "deno"]
 
     /// The mode's answer to a call Policy let through, after the user's saved rules for the repository.
-    static func decide(_ call: ToolCall, mode: PermissionMode, rules: [PermissionRule], worktree: URL) -> Verdict {
+    static func decide(_ call: ToolCall, mode: PermissionMode, rules: [PermissionRule], worktree: URL, kind: Plan.Kind? = nil) -> Verdict {
         // Policy's fixed denials, again, on what the call carries in full (a command, the files, an MCP
         // tool's name): no mode or rule gets past them. Not for the quiet tools: whether a helper runs
         // in the background is in its whole input, which the agents gave Policy before asking.
         if !quiet.contains(call.tool) {
             let inputs: [[String: Any]] = call.paths.isEmpty ? [call.command.map { ["command": $0] } ?? [:]] : call.paths.map { ["file_path": $0] }
-            if let fixed = inputs.lazy.compactMap({ Policy.deny(tool: call.tool, input: $0, worktree: worktree) }).first { return .deny(fixed) }
+            if let fixed = inputs.lazy.compactMap({ Policy.deny(tool: call.tool, input: $0, worktree: worktree, kind: kind) }).first { return .deny(fixed) }
         }
         // Plan's own end: the plan waits for the user in Plan, and in any other mode there's nothing to approve.
         if call.tool == "ExitPlanMode" { return mode == .plan ? .ask : .allow }
@@ -454,7 +454,7 @@ extension Desk {
     func ask(_ call: ToolCall, job: Job) {
         let id = job.id
         let worktree = Workspace.worktree(id)
-        switch PermissionPolicy.decide(call, mode: job.currentMode, rules: rules(for: job.repo), worktree: worktree) {
+        switch PermissionPolicy.decide(call, mode: job.currentMode, rules: rules(for: job.repo), worktree: worktree, kind: job.kind) {
         case .allow:
             tally(id, denied: nil)
             agents[id]?.answer(call, .allow)
@@ -500,7 +500,7 @@ extension Desk {
         var answered: String?
         for ask in waiting {
             guard ask.call.plan == nil else { kept.append(ask); continue }
-            switch PermissionPolicy.decide(ask.call, mode: job.currentMode, rules: rules, worktree: Workspace.worktree(id)) {
+            switch PermissionPolicy.decide(ask.call, mode: job.currentMode, rules: rules, worktree: Workspace.worktree(id), kind: job.kind) {
             case .allow:
                 agents[id]?.answer(ask.call, .allow)
                 answered = answered ?? "Allowed: \(ask.permission.title)"

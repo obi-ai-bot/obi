@@ -80,6 +80,10 @@ final class API {
         router.post("v1/jobs") { request, _ in try await self.dispatch(try await Self.decode(DispatchRequest.self, from: request)) }
         router.get("v1/jobs") { request, _ in await self.jobs(limit: request.uri.queryParameters.get("limit", as: Int.self) ?? 50) }
         router.get("v1/jobs/:id") { _, context in try await self.job(context.parameters.require("id")) }
+        router.get("v1/jobs/:id/report") { _, context in try await self.report(context.parameters.require("id")) }
+        router.post("v1/jobs/:id/proposals/:index/file") { request, context in
+            try await self.fileProposal(context.parameters.require("id"), index: context.parameters.require("index"), request: try await Self.decode(FileProposalRequest.self, from: request))
+        }
         router.get("v1/jobs/:id/wait") { _, context in try await self.wait(context.parameters.require("id")) }
         router.post("v1/jobs/:id/stop") { _, context in try await self.stop(context.parameters.require("id")) }
         router.post("v1/stop-all") { _, _ in await self.stopAll() }
@@ -293,6 +297,49 @@ final class API {
 
     func job(_ id: String) throws -> Response {
         Self.json(JobJSON(job: try known(id)))
+    }
+
+    func report(_ id: String) throws -> Response {
+        _ = try known(id)
+        guard let report = desk.store.report(id) else { throw APIError(.notFound, "This job has no research report.") }
+        return Self.json(ResearchReportJSON(report))
+    }
+
+    func fileProposal(_ id: String, index: String, request: FileProposalRequest) async throws -> Response {
+        _ = try known(id)
+        guard let value = Int(index), var report = desk.store.report(id),
+              let position = report.proposals.firstIndex(where: { $0.index == value }) else {
+            throw APIError(.notFound, "There's no proposed issue with that index.")
+        }
+        guard report.proposals[position].filed == nil else { throw APIError(.conflict, "This issue was already filed.") }
+        let proposal = report.proposals[position]
+        do {
+            let findings = try await Publish.scan(texts: [("issue title", proposal.title), ("issue body", proposal.body)])
+            guard findings.isEmpty else { throw APIError(.unprocessableContent, "The proposed issue didn't pass Oby's secret scan.") }
+        } catch let error as APIError { throw error }
+        catch { throw APIError(.unprocessableContent, "Oby's secret scanner couldn't run; nothing was filed.") }
+        let created: String
+        do {
+            let output = try await Shell.run(["gh", "issue", "create", "-R", proposal.repo, "--title", proposal.title, "--body-file", "-"],
+                                             input: Data(proposal.body.utf8), as: .app)
+            guard output.status == 0 else { throw Shell.Failure(message: output.err.isEmpty ? "gh issue create exited \(output.status)." : output.err) }
+            created = output.text
+        } catch { throw APIError(.unprocessableContent, "GitHub couldn't create the proposed issue: \(error.localizedDescription)") }
+        guard let url = URL(string: created), url.scheme == "https", url.host == "github.com" else {
+            throw APIError(.internalServerError, "GitHub created an issue but returned an invalid URL.")
+        }
+        let number = url.path.split(separator: "/").last.flatMap { Int($0) }
+        report.proposals[position].filed = created
+        report.proposals[position].filedAt = .now
+        desk.store.save(report)
+        desk.sent(id, Outgoing(action: .issue, repo: proposal.repo, id: created))
+        var started: Job?
+        if request.start, let number {
+            do { started = try await desk.dispatch(Desk.NewJob(repo: proposal.repo, kind: "build", task: "Work on #\(number): \(proposal.title)", issue: number)) }
+            catch { throw APIError(.unprocessableContent, "Issue filed, but its build job couldn't start: \(error.localizedDescription)") }
+        }
+        if let job = desk.job(id) { desk.replace(job) }
+        return Self.json(FileProposalResponse(issue: created, jobId: started?.id), status: started == nil ? .ok : .created)
     }
 
     /// Answers once the job has ended, with the job. The iPhone waits on this as a background
@@ -1092,7 +1139,7 @@ struct JobJSON: Encodable {
 
     private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, fromPR, rounds, round, check, model, effort, complexity, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, firstSwiftBuildSeconds, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting, mode, permission, connectionUses }
 
-    private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou }
+    private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou, report }
 
     func encode(to encoder: any Encoder) throws {
         // Oby's own review makes no commits; the ones in its worktree are the pull request's. Saying 0
@@ -1106,6 +1153,7 @@ struct JobJSON: Encodable {
         try derived.encode(job.mergeNeedsYou, forKey: .mergeNeedsYou)
         try derived.encode(job.reviewNeedsYou, forKey: .reviewNeedsYou)
         try derived.encode(job.cloudNeedsYou, forKey: .cloudNeedsYou)
+        try derived.encode(job.report ?? false, forKey: .report)
         var nulls = encoder.container(keyedBy: Nullable.self)
         if job.base == nil { try nulls.encodeNil(forKey: .base) }
         if job.pr == nil { try nulls.encodeNil(forKey: .pr) }
@@ -1436,18 +1484,32 @@ struct DispatchRequest: Decodable {
         var request: String?
         /// How the job asks (`ask`, `acceptEdits`, `plan` or `bypass`, #134); left out, Settings' default.
         var mode: String?
+        var reads: [String]?
 
         /// The job to start, or nil when the body holds no work of its own. Its mode is checked by the endpoint.
         var new: Desk.NewJob? {
             guard let repo, let kind, let task else { return nil }
             return Desk.NewJob(repo: repo, kind: kind, task: task, pr: pr, issue: issue, title: title, branch: branch, base: base,
                                account: account, agent: agent, rounds: rounds, check: check, model: model, files: files,
-                               startWhen: startWhen.flatMap { $0.isEmpty ? nil : $0 }, request: request)
+                               startWhen: startWhen.flatMap { $0.isEmpty ? nil : $0 }, request: request, reads: reads)
         }
     }
 
     var job: Body
 }
+
+struct ResearchReportJSON: Encodable {
+    var job: String
+    var commit: String
+    var markdown: String
+    var proposals: [ProposedIssue]
+    init(_ report: ResearchReport) {
+        job = report.job; commit = report.commit; markdown = report.markdown; proposals = report.proposals
+    }
+}
+
+struct FileProposalRequest: Decodable { var start: Bool = false }
+struct FileProposalResponse: Encodable { var issue: String; var jobId: String? }
 
 /// A phone's approval to publish one job.
 struct Approval: Decodable {

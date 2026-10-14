@@ -18,6 +18,7 @@ nonisolated struct Outgoing: Codable, Equatable, Sendable {
         static let checkRun = Action(rawValue: "checkRun")
         static let merge = Action(rawValue: "merge")
         static let buildTag = Action(rawValue: "buildTag")
+        static let issue = Action(rawValue: "issue")
     }
 
     var action: Action
@@ -37,6 +38,7 @@ nonisolated struct Outgoing: Codable, Equatable, Sendable {
         case .comment: "Commented \(id)"
         case .checkRun: "Posted the check \(id)"
         case .merge: "Squash-merged \(id) into \(MacCheck.into) and deleted \(branch ?? "its branch")"
+        case .issue: "Filed issue \(id)"
         default: "\(action.rawValue) \(id)"
         }
     }

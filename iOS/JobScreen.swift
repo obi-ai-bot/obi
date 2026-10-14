@@ -16,6 +16,8 @@ struct JobScreen: View {
     /// Asked the runner for a job the list doesn't have (it keeps only the latest 50).
     @State private var looked = false
     @State private var moving = false
+    @State private var researchReport: ResearchDocument?
+    @State private var showingReport = false
 
     private var job: Job? { phone.jobs.first { $0.id == id } }
 
@@ -38,6 +40,12 @@ struct JobScreen: View {
                         Label(job.step, systemImage: "gearshape.2").font(.subheadline)
                     }
                     result(job)
+                    if job.report == true {
+                        Button("Read report", systemImage: "doc.text") {
+                            Task { await run { researchReport = try await phone.runner.report(job.id); showingReport = true } }
+                        }
+                        .buttonStyle(.bordered)
+                    }
                     DisclosureGroup("What you asked", isExpanded: $requestExpanded) {
                         ReadingText(job.request).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
@@ -102,6 +110,17 @@ struct JobScreen: View {
         }
         .sheet(isPresented: $moving) {
             if let job { MoveSheet(job: job) }
+        }
+        .sheet(isPresented: $showingReport) {
+            if let researchReport {
+                NavigationStack {
+                    ReportView(report: researchReport) { index, start in
+                        try await phone.runner.fileProposal(id, index: index, start: start)
+                    }
+                    .navigationTitle("Research report")
+                    .navigationBarTitleDisplayMode(.inline)
+                }
+            }
         }
         .onChange(of: publishAsked, initial: true) { publishFromNotification() }
         .task(id: id) {
