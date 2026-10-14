@@ -38,12 +38,14 @@ import Testing
 
     @Test func reconnectKeepsCreatedIssueCards() {
         let created = draft(.created, issue: 412)
-        let open = draft(.draft)
-        var openOther = open
-        openOther.id = "bbbbbbbb"
-        let kept = RunnerIssueDraft.applying([openOther], over: [created.id: created, open.id: open])
-        #expect(kept[created.id] == created)
-        #expect(kept[openOther.id] == openOther)
+        var open = draft(.draft)
+        open.id = "ffffffff"
+        var fetched = draft(.draft)
+        fetched.id = "bbbbbbbb"
+        let kept = RunnerIssueDraft.applying([fetched], over: [created.id: created, open.id: open])
+        #expect(kept[created.id]?.state == .created)
+        #expect(kept[created.id]?.issue == 412)
+        #expect(kept[fetched.id]?.id == "bbbbbbbb")
         #expect(kept[open.id] == nil)
     }
 

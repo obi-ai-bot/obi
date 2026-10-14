@@ -208,6 +208,7 @@ final class RunnerFeed {
         inbox = []
         inboxHistory = []
         inboxWords = [:]
+        issueDrafts = [:]
         accounts = []
         models = nil
         extras = [:]

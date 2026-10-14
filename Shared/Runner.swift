@@ -623,7 +623,8 @@ nonisolated struct RunnerIssueDraft: Codable, Identifiable, Equatable, Sendable 
 
     /// Replaces the map from a reconnect fetch while keeping created cards the thread still shows.
     nonisolated static func applying(_ fetched: [RunnerIssueDraft], over existing: [String: RunnerIssueDraft]) -> [String: RunnerIssueDraft] {
-        var next = Dictionary(uniqueKeysWithValues: fetched.map { ($0.id, $0) })
+        var next: [String: RunnerIssueDraft] = [:]
+        for draft in fetched { next[draft.id] = draft }
         for (id, draft) in existing where draft.state == .created && next[id] == nil {
             next[id] = draft
         }
