@@ -40,7 +40,7 @@ Open the playground in a browser. It needs a local server, because browsers
 block ES modules loaded from `file://`:
 
 ```bash
-python3 -m http.server 5173 --directory Character
+python3 -m http.server 5173 --directory character
 ```
 
 Then open http://localhost:5173/oby.html. The top row of buttons sets the
