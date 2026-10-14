@@ -11,11 +11,16 @@
 //   OBI_E2E_KEEP=1   keep the run folder afterwards
 //
 // It runs the preflight checks, then the eight scenario steps in order, prints one line per check,
-// and exits 0 only when every one passed. A step that isn't implemented yet says so; once steps
-// are implemented, a failed step marks the implemented steps after it as not run.
+// and exits 0 only when every one passed. A step that isn't implemented yet says so; an
+// implemented step after a step that failed or isn't implemented is not run, and says which.
+// Every process it starts goes through start() and is stopped when the run ends, however it ends
+// (a pass, a failure, an exception, SIGINT or SIGTERM).
+//
+// Who edits what (docs/ARCHITECTURE.md, section 6): the bodies in `steps` are the Rust core's;
+// the rest of this file, and e2e/lib/{fixture,scenario,scenario-doc,snapshot}.mjs, are the lead's.
 
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -23,6 +28,7 @@ import { FIXTURE, buildFixture, git } from "./lib/fixture.mjs";
 import {
   AGENT_FLAGS, BRIEF, CANARY, EXPECTED_FINDINGS, EXPECTED_RESULT, OBIS, STUB_PROMPT,
 } from "./lib/scenario.mjs";
+import { scenarioDocProblems } from "./lib/scenario-doc.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const OBI_DIR = resolve(here, "..");
@@ -48,11 +54,69 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const ctx = { runDir: RUN_DIR, live: LIVE, env, processes: [] };
 
 // ---------------------------------------------------------------------------------------------
+// Processes. Every process the run starts is started here, as the leader of its own process group,
+// so stopping it also stops what it started (pnpm starts wrangler, which starts workerd).
+
+// Starts `command` with exactly `env` (nothing inherited), its stdout and stderr appended to `log`.
+// Returns the child, with `exited` (a promise of {code, signal}) and `name`.
+function start(name, command, args, { cwd, env: childEnv, log, stdio } = {}) {
+  const child = spawn(command, args, { cwd, env: childEnv, detached: true, stdio: stdio ?? ["ignore", "pipe", "pipe"] });
+  child.name = name;
+  child.exited = new Promise((resolveExit) => child.on("exit", (code, signal) => resolveExit({ code, signal })));
+  child.on("error", (e) => (child.spawnError = e));
+  if (log) {
+    mkdirSync(dirname(log), { recursive: true });
+    const out = createWriteStream(log, { flags: "a" });
+    child.stdout?.pipe(out);
+    child.stderr?.pipe(out);
+  }
+  ctx.processes.push(child);
+  return child;
+}
+ctx.start = start;
+
+const running = (child) => child.exitCode === null && child.signalCode === null;
+function signalGroup(child, signal) {
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {}
+  }
+}
+
+// SIGTERM to every process still running, then SIGKILL to any still running 10 seconds later.
+async function stopAll() {
+  const live = ctx.processes.filter((p) => p.pid && running(p));
+  for (const p of live) signalGroup(p, "SIGTERM");
+  const grace = new Promise((r) => setTimeout(r, 10_000).unref());
+  await Promise.race([Promise.all(live.map((p) => p.exited)), grace]);
+  for (const p of live) if (running(p)) signalGroup(p, "SIGKILL");
+}
+
+let finished = false;
+async function finish() {
+  if (finished) return;
+  finished = true;
+  await stopAll();
+  if (process.env.OBI_E2E_KEEP === "1") console.log(`Kept ${RUN_DIR}.`);
+  else rmSync(RUN_DIR, { recursive: true, force: true });
+}
+
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+  process.on(signal, () => {
+    console.log(`\n${signal}: stopping every process the run started.`);
+    finish().finally(() => process.exit(code));
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
 // Preflight: what can be checked before anything runs. These may pass today.
 
 function runStub(worktree, prompt) {
   return new Promise((resolvePromise) => {
-    const child = spawn(env.STUB_AGENT, AGENT_FLAGS, {
+    const child = start("stub-agent", env.STUB_AGENT, AGENT_FLAGS, {
       cwd: worktree,
       env: { PATH: process.env.PATH, HOME: worktree, LANG: "C.UTF-8" },
       stdio: ["pipe", "pipe", "pipe"],
@@ -130,8 +194,10 @@ const preflight = [
     },
   },
   {
-    title: "SCENARIO.md's review_request and result validate against obi-sphere's spec v0.1",
+    title: "SCENARIO.md, the fixture messages and the harness's values agree, and the messages validate against obi-sphere's spec v0.1",
     run: async () => {
+      const drift = scenarioDocProblems();
+      assert(drift.length === 0, `SCENARIO.md and the harness disagree: ${drift.join("; ")}`);
       const spec = await loadSpec();
       ctx.spec = spec;
       const verify = join(env.OBI_SPHERE_DIR, "spec", "conformance", "verify.mjs");
@@ -145,7 +211,7 @@ const preflight = [
       for (const f of EXPECTED_FINDINGS) assert(spec.findingId(f.file, f.line, f.title) === f.id, `finding ${f.file}:${f.line} should have id ${spec.findingId(f.file, f.line, f.title)}`);
       assert(spec.resultProblems(EXPECTED_RESULT).length === 0, `the expected result isn't consistent: ${spec.resultProblems(EXPECTED_RESULT).join("; ")}`);
       assert(!JSON.stringify(EXPECTED_RESULT).includes(CANARY), "the expected result carries the canary");
-      return "brief, review_request and result valid; finding ids match the spec's derivation";
+      return "SCENARIO.md matches e2e/fixtures/messages and scenario.mjs; brief, review_request and result valid; finding ids match the spec's derivation";
     },
   },
 ];
@@ -219,7 +285,7 @@ const steps = [
 
 // ---------------------------------------------------------------------------------------------
 
-async function main() {
+async function run() {
   console.log(`Obi e2e: a review across two Obis (${LIVE ? "live: real Claude Code" : "stub agents"})`);
   console.log(`  OBI_SPHERE_DIR  ${env.OBI_SPHERE_DIR}${existsSync(env.OBI_SPHERE_DIR) ? "" : "  (missing)"}`);
   console.log(`  OBID_BIN        ${env.OBID_BIN}${existsSync(env.OBID_BIN) ? "" : "  (missing)"}`);
@@ -238,18 +304,21 @@ async function main() {
   }
 
   console.log("\nScenario");
-  let blockedBy = failures ? "preflight" : null;
+  // Why the steps after this point can't run: a failed preflight, or an earlier step that failed
+  // or isn't implemented (every step builds on the ones before it).
+  let blockedBy = failures ? "the preflight failed" : null;
   let green = 0;
   for (const step of steps) {
     const label = `step ${step.n} (${step.title})`;
     if (!step.implemented) {
       failures++;
+      blockedBy ??= `step ${step.n} isn't implemented`;
       console.log(`  FAIL  ${label}: not implemented [${step.by}]`);
       continue;
     }
     if (blockedBy) {
       failures++;
-      console.log(`  FAIL  ${label}: not run, ${blockedBy} failed [${step.by}]`);
+      console.log(`  FAIL  ${label}: not run, ${blockedBy} [${step.by}]`);
       continue;
     }
     try {
@@ -258,16 +327,21 @@ async function main() {
       console.log(`  PASS  ${label}`);
     } catch (e) {
       failures++;
-      blockedBy = `step ${step.n}`;
+      blockedBy = `step ${step.n} failed`;
       console.log(`  FAIL  ${label}: ${e.message} [${step.by}]`);
     }
   }
 
-  for (const p of ctx.processes) p.kill?.("SIGTERM");
   console.log(`\n${green} of ${steps.length} scenario steps green; ${failures} check(s) failed.`);
-  if (process.env.OBI_E2E_KEEP === "1") console.log(`Kept ${RUN_DIR}.`);
-  else rmSync(RUN_DIR, { recursive: true, force: true });
   return failures === 0;
 }
 
-process.exit((await main()) ? 0 : 1);
+let passed = false;
+try {
+  passed = await run();
+} catch (e) {
+  console.log(`\nThe harness itself failed: ${e.stack ?? e}`);
+} finally {
+  await finish();
+}
+process.exit(passed ? 0 : 1);

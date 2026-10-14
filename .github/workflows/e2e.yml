@@ -1,5 +1,7 @@
 # The end-to-end scenario (e2e/SCENARIO.md): `make e2e` with stub agents, on Linux and macOS.
-# It is red until Phase 1 makes each step green; the run shows which steps are.
+# It is red until Phase 1 makes each step green; the run shows which steps are. `make e2e` builds
+# obid from core/ with cargo first (once core/ exists), so this job needs no change when it lands.
+# This file belongs to the lead (docs/ARCHITECTURE.md, section 6).
 name: E2E
 
 on:
@@ -56,6 +58,13 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+
+      # obid is Rust (core/): `make e2e` runs `cargo build -p obid` in it before the harness.
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          cargo --version
 
       # OBI_SPHERE_DIR defaults to ../obi-sphere, which is where it was checked out.
       - name: make e2e

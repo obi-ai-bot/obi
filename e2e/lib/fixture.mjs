@@ -57,7 +57,9 @@ export function buildFixture(root) {
   const work = join(root, "work");
   const remote = join(root, "remote.git");
   mkdirSync(work, { recursive: true });
-  git(work, ["init", "-q", "--template=", "-b", "main", "."]);
+  // SHA-1 objects, asked for by name: the pinned ids are SHA-1, and a git whose default for new
+  // repositories is SHA-256 (as Git 3.0 announces) would otherwise make other ids.
+  git(work, ["init", "-q", "--template=", "--object-format=sha1", "-b", "main", "."]);
   for (const commit of COMMITS) {
     if (commit.branch !== "main") git(work, ["checkout", "-q", "-b", commit.branch]);
     const from = join(FIXTURE_FILES, commit.files);
