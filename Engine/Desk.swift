@@ -491,7 +491,7 @@ final class Desk {
         self.cleanup = WorktreeCleanup()
         self.restarts = restarts
         self.makeDelegate = { [accounts] item in
-            let account = accounts.accounts.first(where: { $0.account.name == item.account })?.account
+            let account = accounts.accounts.first(where: { $0.account.id == item.account || $0.account.name == item.account })?.account
             return Desk.delegateRunner(for: item, account: account)
         }
         // ponytail: every job is read to find the outstanding ones; a column to query when there are many thousands.
@@ -595,7 +595,7 @@ final class Desk {
             if let index = states.firstIndex(where: { $0.account.id == account.id }) { states[index].running += 1 }
             let id = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8)).lowercased()
             let item = Delegation(id: id, turn: turn, role: brief.role, goal: brief.goal, context: brief.context, repo: brief.repo,
-                ref: brief.ref, commit: nil, web: brief.web, agent: account.agent, account: account.name,
+                ref: brief.ref, commit: nil, web: brief.web, agent: account.agent, account: account.id,
                 model: account.agent == "claude" ? ClaudeBrain.deepModel : AgentModels.value("codex", "model"),
                 effort: AgentModels.value(account.agent, brief.role == .reviewer ? "complexEffort" : "effort"))
             prepared.append(item)
@@ -632,14 +632,15 @@ final class Desk {
             // Setup above awaits clone/ref/worktree operations. Stop can reenter the desk during
             // any of them, so only the still-queued record may transition to running.
             if var latest = delegation(id), latest.status == .queued {
-                let accountName = latest.account
+                let accountID = latest.account
                 latest.status = .running; latest.started = .now; latest.step = "Starting"; save(latest)
                 let result = await runner.run(latest, in: snapshot!, onStep: { [weak self] step in
                     Task { @MainActor in self?.updateDelegation(id, step: step) }
                 }, onUsage: { [weak self] event in
                     Task { @MainActor in
-                        guard let self, let account = self.accounts.accounts.first(where: { $0.account.name == accountName }) else { return }
-                        self.accounts.record(event, for: account.account.id)
+                        guard let self else { return }
+                        let id = self.accounts.accounts.first(where: { $0.account.id == accountID || $0.account.name == accountID })?.account.id ?? accountID
+                        self.accounts.record(event, for: id)
                     }
                 })
                 if var finished = delegation(id), finished.status == .running {

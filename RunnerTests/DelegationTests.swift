@@ -123,7 +123,9 @@ struct DelegationTests {
         let snapshot = root.appending(path: "snapshot")
         let brief = root.appending(path: "brief.md")
         try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: snapshot.appending(path: "Engine"), withIntermediateDirectories: true)
         try "source".write(to: snapshot.appending(path: "source.swift"), atomically: true, encoding: .utf8)
+        try "nested".write(to: snapshot.appending(path: "Engine/Delegates.swift"), atomically: true, encoding: .utf8)
         try "brief".write(to: brief, atomically: true, encoding: .utf8)
 
         #expect(DelegatePolicy.allowsRead(path: snapshot.appending(path: "source.swift").path, in: snapshot, brief: brief, bubblewrap: false))
@@ -138,8 +140,36 @@ struct DelegationTests {
         #expect(DelegatePolicy.allowsRead(path: DelegateBox.alias(brief).path, in: snapshot, brief: brief, bubblewrap: true))
         #expect(!DelegatePolicy.allowsRead(path: brief.path, in: snapshot, brief: brief, bubblewrap: true))
 
+        // Bare symlink names and nested relatives must resolve inside the snapshot (#417).
+        #expect(!DelegatePolicy.allows(command: "cat private-link", in: snapshot))
+        #expect(!DelegatePolicy.allows(command: "rg secret private-link", in: snapshot))
+        #expect(DelegatePolicy.allows(command: "cat Engine/Delegates.swift", in: snapshot))
+        #expect(DelegatePolicy.allows(command: "rg DelegatePolicy Engine/Delegates.swift", in: snapshot))
+
+        #expect(DelegatePolicy.allows(tool: "Grep", input: ["pattern": "DelegatePolicy", "path": "Engine"], in: snapshot, brief: brief, web: false, bubblewrap: false))
+        #expect(DelegatePolicy.allows(tool: "Glob", input: ["pattern": "**/*.swift"], in: snapshot, brief: brief, web: false, bubblewrap: false))
+        #expect(DelegatePolicy.allows(tool: "Grep", input: ["pattern": "secret"], in: snapshot, brief: brief, web: false, bubblewrap: false))
+        #expect(!DelegatePolicy.allows(tool: "Grep", input: ["pattern": "secret", "path": "private-link"], in: snapshot, brief: brief, web: false, bubblewrap: false))
+        #expect(!DelegatePolicy.allows(tool: "Glob", input: ["pattern": "*", "path": "/etc"], in: snapshot, brief: brief, web: false, bubblewrap: false))
+
         #expect(DelegateBox.claudeTools(web: false) == "Read,Grep,Glob,Bash")
         #expect(DelegateBox.claudeTools(web: true).contains("WebFetch") && DelegateBox.claudeTools(web: true).contains("WebSearch"))
+    }
+
+    @Test func runningSpecialistsCountTowardAccountRoom() async throws {
+        desk.makeDelegate = { _ in FakeDelegate(DelegateResult(outcome: .complete, summary: "Checked", findings: [], openQuestions: []), delay: .seconds(30)) }
+        brain.plans = [Self.json(Plan(action: .delegate, reply: "Sending a researcher.", dispatches: [], question: nil,
+                                      delegations: [Self.brief("Check the claim")])),
+                       Self.json(Plan(action: .replyOnly, reply: "Done.", dispatches: [], question: nil))]
+        #expect(desk.accounts.accounts.first?.running == 0)
+        _ = await desk.converse("Check this")
+        try await until { desk.delegations.first?.status == .running }
+        let item = try #require(desk.delegations.first)
+        #expect(item.account == "default")
+        #expect(desk.accounts.state("default")?.running == 1)
+        #expect(desk.stopDelegation(item.id)?.status == .stopped)
+        try await until { desk.accounts.state("default")?.running == 0 }
+        #expect(desk.accounts.state("default")?.running == 0)
     }
 
     @Test func specialistBriefCarriesRoleInstructions() throws {

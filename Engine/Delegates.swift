@@ -167,14 +167,7 @@ nonisolated final class ClaudeDelegate: DelegateRunner, @unchecked Sendable {
             try await eachLine(of: output.fileHandleForReading) { data in
                 guard let message = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
                 if let (id, tool, values) = StreamJSON.permission(message) {
-                    let allowed: Bool
-                    if tool == "Read" { allowed = DelegatePolicy.allowsRead(path: values["file_path"] as? String ?? "", in: snapshot, brief: brief) }
-                    else if tool == "WebFetch" || tool == "WebSearch" { allowed = item.web }
-                    else if tool == "Bash" {
-                        let denied = Policy.deny(tool: tool, input: values, worktree: snapshot) != nil
-                        allowed = !denied && DelegatePolicy.allows(command: values["command"] as? String ?? "", in: snapshot)
-                    }
-                    else { allowed = false }
+                    let allowed = DelegatePolicy.allows(tool: tool, input: values, in: snapshot, brief: brief, web: item.web)
                     let decision: ToolAnswer = allowed ? .allow : .deny("Specialists can read, search and fetch only.")
                     let response = ["type": "control_response", "response": ["subtype": "success", "request_id": id,
                                      "response": StreamJSON.answer(decision, tool: tool, input: values)]] as [String: Any]
@@ -296,6 +289,26 @@ nonisolated final class CodexDelegate: DelegateRunner, @unchecked Sendable {
 }
 
 nonisolated enum DelegatePolicy {
+    /// Claude specialist tool permissions: Read/Grep/Glob stay in the snapshot (and the brief),
+    /// Bash uses the read-only command allow-list, and web tools need `web`.
+    static func allows(tool: String, input: [String: Any], in snapshot: URL, brief: URL, web: Bool,
+                       bubblewrap: Bool = Agents.bubblewrap) -> Bool {
+        switch tool {
+        case "Read":
+            return allowsRead(path: input["file_path"] as? String ?? "", in: snapshot, brief: brief, bubblewrap: bubblewrap)
+        case "Grep", "Glob":
+            let path = input["path"] as? String ?? ""
+            return path.isEmpty || allowsRead(path: path, in: snapshot, brief: brief, bubblewrap: bubblewrap)
+        case "WebFetch", "WebSearch":
+            return web
+        case "Bash":
+            let denied = Policy.deny(tool: tool, input: input, worktree: snapshot) != nil
+            return !denied && allows(command: input["command"] as? String ?? "", in: snapshot)
+        default:
+            return false
+        }
+    }
+
     static func allowsRead(path: String, in snapshot: URL, brief: URL, bubblewrap: Bool = Agents.bubblewrap) -> Bool {
         guard !path.isEmpty, !path.hasPrefix("~"),
               !path.split(separator: "/", omittingEmptySubsequences: false).contains("..") else { return false }
@@ -356,18 +369,20 @@ nonisolated enum DelegatePolicy {
         }
     }
 
+    /// Every non-flag path argument must resolve inside the snapshot: absolute paths, nested
+    /// relatives (`Engine/Delegates.swift`), bare names and globs. Symlinks are followed so a
+    /// link at the snapshot root can't open the home directory.
     private static func pathsStayInside(_ words: [String], snapshot: URL?) -> Bool {
-        let root = snapshot?.standardizedFileURL.resolvingSymlinksInPath()
+        let root = snapshot.map { resolvedPath($0) }
         for word in words where !word.hasPrefix("-") {
             if word.split(separator: "/", omittingEmptySubsequences: false).contains("..") || word.hasPrefix("~") { return false }
-            if word.hasPrefix("/") {
-                guard let root else { return false }
-                let url = URL(filePath: word).standardizedFileURL.resolvingSymlinksInPath()
-                guard url.path == root.path || url.path.hasPrefix(root.path + "/") else { return false }
-            } else if let root, word.contains("/") {
-                let url = URL(filePath: word, relativeTo: root).standardizedFileURL.resolvingSymlinksInPath()
-                guard url.path == root.path || url.path.hasPrefix(root.path + "/") else { return false }
+            guard let root else {
+                if word.hasPrefix("/") { return false }
+                continue
             }
+            let requested = word.hasPrefix("/") ? URL(filePath: word) : root.appending(path: word)
+            let resolved = resolvedPath(requested)
+            guard resolved.path == root.path || resolved.path.hasPrefix(root.path + "/") else { return false }
         }
         return true
     }
