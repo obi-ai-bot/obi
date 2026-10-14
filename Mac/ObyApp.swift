@@ -45,15 +45,34 @@ private struct SettingsTabs: View {
     private let selection = SettingsSelection.shared
 
     var body: some View {
-        TabView(selection: Binding { selection.tab } set: { selection.tab = $0 }) {
-            SettingsView(desk: app.island.desk).tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general)
-            RunnerSettingsView(feed: app.island.feed, availability: app.island.availability, remote: app.island.remote).tabItem { Label("Runner", systemImage: "server.rack") }.tag(SettingsTab.runner)
-            RemoteAccessSettingsView(remote: app.island.remote).tabItem { Label("Remote", systemImage: "antenna.radiowaves.left.and.right") }.tag(SettingsTab.remote)
-            AccountsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Accounts", systemImage: "person.2") }.tag(SettingsTab.accounts)
-            ModelsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Models", systemImage: "cpu") }.tag(SettingsTab.models)
-            VaultSettingsView(vault: .shared).tabItem { Label("Vault", systemImage: "lock") }.tag(SettingsTab.vault)
-            AboutSettingsView(updater: app.island.updater).tabItem { Label("About", systemImage: "info.circle") }.tag(SettingsTab.about)
+        VStack(spacing: 0) {
+            Picker("Settings", selection: Binding { selection.tab } set: { selection.tab = $0 }) {
+                Text("General").tag(SettingsTab.general)
+                Text("Runner").tag(SettingsTab.runner)
+                Text("Remote").tag(SettingsTab.remote)
+                Text("Accounts").tag(SettingsTab.accounts)
+                Text("Models").tag(SettingsTab.models)
+                Text("Vault").tag(SettingsTab.vault)
+                Text("About").tag(SettingsTab.about)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding()
+            Divider()
+            Group {
+                switch selection.tab {
+                case .general: SettingsView(desk: app.island.desk)
+                case .runner: RunnerSettingsView(feed: app.island.feed, availability: app.island.availability, remote: app.island.remote)
+                case .remote: RemoteAccessSettingsView(remote: app.island.remote)
+                case .accounts: AccountsSettingsView(store: app.island.desk.accounts, feed: app.island.feed)
+                case .models: ModelsSettingsView(store: app.island.desk.accounts, feed: app.island.feed)
+                case .vault: VaultSettingsView(vault: .shared)
+                case .about: AboutSettingsView(updater: app.island.updater)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(width: 640, height: 640)
     }
 }
 
