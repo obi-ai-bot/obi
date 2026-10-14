@@ -109,7 +109,7 @@ private struct FirstLaunchView: View {
                 .resizable().renderingMode(.template).frame(width: 72, height: 72)
                 .padding(.bottom, 8)
             title("Hi, I'm Oby.")
-            text("I live in the notch and hand your coding work to the tools you already use: Claude Code and Codex, and Cursor soon. They work in their own copies of your repositories, and I tell you when they're done.")
+            text("I live in the notch and hand your coding work to the tools you already use: Claude Code, Codex and Cursor. They work in their own copies of your repositories, and I tell you when they're done.")
             text("Two minutes and we're set. You can skip any step.")
         }
     }
@@ -173,7 +173,7 @@ private struct FirstLaunchView: View {
             } else {
                 Text(sentence).font(.system(size: 17, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
                 if tools.connected == ["cursor"] {
-                    Label("With only Cursor, Oby may ask you more often: Cursor can't hold it to a typed plan. Oby can't run jobs on Cursor yet either.",
+                    Label("With only Cursor, Oby may ask you more often: Cursor can't hold it to a typed plan.",
                           systemImage: "exclamationmark.triangle")
                         .font(.system(size: 12)).foregroundStyle(.orange)
                 }
@@ -302,9 +302,12 @@ private struct FirstLaunchView: View {
         case "gemini":
             return [installed ? "Found. Gemini isn't in Oby's first version." : "Not installed. Gemini isn't in Oby's first version."]
         case "cursor":
-            guard installed else { return ["Not installed. Install the Cursor CLI (cursor-agent), and Oby finds it."] }
-            return [tools.models["cursor"]?.isEmpty == false ? "Signed in." : "Found, signed out.",
-                    "Oby can't run jobs on Cursor yet."]
+            guard installed else { return ["Install the Cursor CLI: `\(Tools.installCursor)`, and Oby finds it."] }
+            guard tools.cursorHasACP else { return ["Update the Cursor CLI: `\(Tools.updateCursor)`. Oby needs its `acp` command."] }
+            let accounts = tools.accounts("cursor")
+            if accounts.isEmpty { return ["Found. Connect an account so Oby can send it jobs."] }
+            return accounts.map { "\($0.account.name): \($0.label ?? "signed out")" }
+                + (CursorFacts.separateLogins ? [] : [CursorFacts.oneLogin + "."])
         default:
             guard installed else { return ["Not installed. Install \(Usage.tool(agent)), and Oby finds it."] }
             let accounts = tools.accounts(agent)
@@ -317,7 +320,7 @@ private struct FirstLaunchView: View {
     private func toolButtons(_ agent: String) -> some View {
         if tools.installed[agent] != nil {
             switch agent {
-            case "claude", "codex":
+            case "claude", "codex", "cursor":
                 let signedOut = tools.accounts(agent).filter { !$0.signedIn }
                 if tools.accounts(agent).isEmpty {
                     Button("Connect") { attempt { try tools.connect(agent) } }
@@ -326,14 +329,15 @@ private struct FirstLaunchView: View {
                 } else {
                     Label("Connected", systemImage: "checkmark.circle.fill").font(.system(size: 13)).foregroundStyle(.green)
                 }
-            case "cursor":
-                if tools.models["cursor"]?.isEmpty == false {
-                    Label("Connected", systemImage: "checkmark.circle.fill").font(.system(size: 13)).foregroundStyle(.green)
-                } else {
-                    Button("Sign In") { attempt { try tools.signInCursor() } }
-                }
             default:
                 EmptyView()
+            }
+        }
+        // Installing is never automatic: the command is for the user to run.
+        if agent == "cursor", tools.installed[agent] == nil || !tools.cursorHasACP {
+            Button("Copy Command") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(tools.installed[agent] == nil ? Tools.installCursor : Tools.updateCursor, forType: .string)
             }
         }
     }

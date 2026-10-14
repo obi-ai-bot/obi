@@ -400,7 +400,7 @@ extension ModelChoice {
     /// "Fable 5.1", "GPT-6-Astra", or the id as it is.
     nonisolated static func name(_ model: String) -> String {
         let names = ["claude-opus-5-5": "Opus 5.5", "claude-sonnet-5-5": "Sonnet 5.5", "claude-haiku-5-5": "Haiku 5.5",
-                     "claude-fable-5-1": "Fable 5.1", "gpt-6-astra": "GPT-6-Astra"]
+                     "claude-fable-5-1": "Fable 5.1", "gpt-6-astra": "GPT-6-Astra", "auto": "Auto"]
         return names[model] ?? model
     }
 }
@@ -1142,8 +1142,8 @@ nonisolated struct MoveBody: Encodable, Sendable {
 /// What the job screens' "Move to…" offers, on the iPhone, the Mac and the Watch (docs/runner-api.md,
 /// `POST /v1/jobs/{id}/move`).
 nonisolated enum MoveChoice {
-    static let tools = [("claude", "Claude Code"), ("codex", "Codex")]
-    /// Claude Code's models. Codex's come from the runner's options; its strongest when they don't.
+    static let tools = [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor")]
+    /// Claude Code's models. Codex's and Cursor's come from the runner's options; Codex's strongest when they don't.
     static let claudeModels = ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
     static let codexStrongest = "gpt-6-astra"
     /// The model that drops the job's own for the tool's from Settings › Models.
