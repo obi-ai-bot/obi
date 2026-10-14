@@ -1,52 +1,35 @@
 # CI
 
-Three workflows run on every pull request into `dev` and on every push to `dev`, so a merge into `dev` can wait for them (#66). Nothing else triggers them. A newer push to the same pull request, or to `dev`, cancels the run it supersedes.
+Every workflow below runs on GitHub's hosted runners, on pull requests into `dev` and on pushes to `dev` (Restructure: on pull requests that touch the folders it moves, and by hand). Nothing else triggers them, and no machine of ours is involved. A newer push to the same pull request, or to `dev`, cancels the run it supersedes. Each workflow belongs to one workstream (docs/ARCHITECTURE.md, section 6), which edits only its own; this page is the lead's.
 
-| Check | Workflow | What it does | Where it runs | How long |
+## obi (this repository)
+
+| Check | Workflow | Where it is | What it does | Where it runs |
 | --- | --- | --- | --- | --- |
-| **Runner on Linux** | [`runner-linux.yml`](../.github/workflows/runner-linux.yml) | Installs bubblewrap and SQLite's headers, sets up Swift 6.4.0 with swiftly, then `swift build --build-tests` and `swift test` for the runner package (`Package.swift`: `Engine/`, `Runner/`, `RunnerTests/`). | Hosted, `ubuntu-26.04` (tetrix-lab's Ubuntu) | About 9–13 min with an empty cache, 7–9 min with one (estimated, see below) |
-| **Mac and iPhone** | [`apple.yml`](../.github/workflows/apple.yml) | Builds the Mac app and runs `MacTests`, then builds `ObyPhone` (with `ObyWatch` and `ObyActivity` embedded) and runs `iOSTests` on an iPhone 17 simulator. Signed ad hoc. | Hosted, `xcode-27` (Xcode 27.0 on macOS 27, Apple silicon) | About 10–16 min (estimated, see below) |
-| **E2E** | [`e2e.yml`](../.github/workflows/e2e.yml) | Checks out obi-ai-bot/obi-sphere's `dev` next to this repository (it is private: the job needs the repository secret `OBI_SPHERE_READ_TOKEN`, a token with read access to it, and fails saying so without it), installs a stable Rust toolchain, then `make e2e`: it builds `obid` from `core/` (once `core/Cargo.toml` exists), then runs the preflight and the eight steps of [e2e/SCENARIO.md](../e2e/SCENARIO.md) with stub agents. Red until Phase 1 makes every step green; the log says which step fails and why. | Hosted, `ubuntu-26.04` and `macos-26` | Not measured yet |
+| **E2E** | [`e2e.yml`](../.github/workflows/e2e.yml) (lead) | `dev` | Checks out obi-ai-bot/obi-sphere's `dev` next to this repository (it is private: the job needs the repository secret `OBI_SPHERE_READ_TOKEN`, a token with read access to it, and fails saying so without it; the token is not kept after that checkout). Checks that obi-sphere's server's copies of the e2e fixtures still match this repository's (`OBI_DIR=obi node obi-sphere/server/scripts/check-fixtures.mjs`), or says with a notice that the script isn't in obi-sphere's `dev` yet. Installs a stable Rust toolchain, then `make e2e`: it builds `obid` from `core/` (once `core/Cargo.toml` exists), then runs the preflight and the eight steps of [e2e/SCENARIO.md](../e2e/SCENARIO.md) with stub agents. Red until Phase 1 makes every step green; the log says which step fails and why. | `ubuntu-26.04` and `macos-26` |
+| **Core** | `core.yml` (Rust core) | open Phase 1 pull request | In `core/`, against the committed `Cargo.lock`: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`. Caches the cargo registry and `core/target`. | `ubuntu-26.04` and `macos-26` |
+| **Restructure** | `restructure.yml` (repository restructure) | open Phase 1 pull requests | No folders differ only by case; `swift build --build-tests` for the Swift package; the Mac, iPhone and Watch apps built unsigned (`CODE_SIGNING_ALLOWED=NO`) from wherever the project is (`Oby.xcodeproj` before the move, `apps/Oby.xcodeproj` after it); `MacTests` and `iOSTests` compiled with `build-for-testing`; the Mac and iPhone apps bundle the character. It runs no tests. | `ubuntu-26.04` (the case check), `xcode-27` (the rest) |
+| **Plug-ins** | none yet | | The plug-in boundary has added no workflow of its own. | |
+| **Runner on Linux** | [`runner-linux.yml`](../.github/workflows/runner-linux.yml) | `dev`, **disabled on GitHub** | `swift build --build-tests` and `swift test` for the runner package (`Package.swift`: `Engine/`, `Runner/`, `RunnerTests/`), with bubblewrap. | `ubuntu-26.04` |
+| **Apple apps** | [`apple.yml`](../.github/workflows/apple.yml) | `dev`, **disabled on GitHub** | Builds the Mac app and runs `MacTests`, then builds `ObyPhone` (with `ObyWatch` and `ObyActivity` embedded) and runs `iOSTests` on an iPhone simulator. Signed ad hoc. | `xcode-27` |
 
-To gate merges on the first two, add them, by these names, as required status checks in `dev`'s branch rules (Settings › Rules).
+`apple.yml` and `runner-linux.yml` are disabled in this repository's Actions settings: they never run, so no CI runs the apps' tests or `swift test` for the frozen engine. Those run locally (`swift test`; `xcodebuild test` on a Mac with Xcode 27).
 
-## Where it runs
+## obi-sphere
 
-Every job runs on GitHub's hosted runners; no machine of ours is involved. Runner on Linux and Mac and iPhone are described below; E2E runs `make e2e` once on `ubuntu-26.04` and once on `macos-26` (it builds nothing with Xcode, so it needs no `xcode-27` image).
+| Check | Workflow | Where it is | What it does | Where it runs |
+| --- | --- | --- | --- | --- |
+| **Spec** | `spec.yml` (lead) | `dev` | `make spec-check`: the schemas compile and lint, the fixtures are reproducible, and the reference verifier judges every fixture as it says (spec/conformance/README.md). | `ubuntu-latest` |
+| **Server** | `server.yml` (Sphere server) | open Phase 1 pull request | Installs `spec/` and `server/`; compares `server/e2e/fixtures/` with this repository's e2e fixtures (needs obi-sphere's secret `OBI_READ_TOKEN`, a token with read access to obi; without it the run warns and skips the comparison); the validators against the spec's schemas; types; the tests inside workerd with D1; the scripted client's tests; the conformance suite with the server's checker; scenario steps 1, 3, 5 and 7 against a local Sphere; 200 concurrent sends against a local Sphere. | `ubuntu-latest` and `macos-latest` |
 
-- **Linux:** `ubuntu-26.04`, the same Ubuntu as tetrix-lab, so bwrap gets its user namespaces from the same AppArmor profile (`bwrap-userns-restrict`) as the runner does. A step checks that `bwrap` runs before the tests: the bubblewrap tests skip themselves when it can't, and here they must run. If AppArmor ever blocks it, that step lifts the restriction for the run (`kernel.apparmor_restrict_unprivileged_userns=0`) and leaves a warning on the run.
-- **macOS:** the project needs Xcode 27. GitHub's `macos-26` and `macos-latest` images stop at Xcode 26.6, but its `xcode-27` image ships Xcode 27.0 (default), 27.1 and 27.2 beta, with iOS 27.0 and watchOS 27.0 simulators ([image readme](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md), image 20261006 checked on 2026-10-10). The workflow pins Xcode 27.0 with `DEVELOPER_DIR`. That image is a **public preview**: no SLA, and jobs can queue while GitHub balances capacity ([actions/runner-images#14404](https://github.com/actions/runner-images/issues/14404)). When Xcode 27 reaches a GA label (`macos-27` or `macos-latest`), switch `runs-on` to it. If the preview turns out unusable, the fallback is a self-hosted Mac labeled `oby-mac` (`runs-on: [self-hosted, oby-mac]`).
+## The runners
 
-If the repository is private, macOS minutes count ten times against the plan's included minutes, Linux minutes once.
+- **Linux:** `ubuntu-26.04`, the same Ubuntu as tetrix-lab, so bubblewrap gets its user namespaces from the same AppArmor profile (`bwrap-userns-restrict`) as the runner does.
+- **macOS without Xcode:** `macos-26` for E2E and Core, which build nothing with Xcode.
+- **macOS with Xcode:** the project needs Xcode 27. GitHub's `xcode-27` image ships it ([image readme](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md)); the workflows pin Xcode 27.0 with `DEVELOPER_DIR`. That image is a **public preview**: no SLA, and jobs can queue while GitHub balances capacity ([actions/runner-images#14404](https://github.com/actions/runner-images/issues/14404)). When Xcode 27 reaches a GA label (`macos-27` or `macos-latest`), switch `runs-on` to it.
 
-## How long each job takes
-
-The figures below for Runner on Linux and Mac and iPhone were estimated before either workflow first ran on GitHub; replace them with the times of green runs on `dev`. E2E has no figure: it is red by design until Phase 1 makes its steps green (e2e/SCENARIO.md).
-
-**Runner on Linux.** Measured on tetrix-lab (16 cores, Swift 6.4.0) on 2026-10-10:
-
-| Step | tetrix-lab |
-| --- | --- |
-| Set up Swift with swiftly (download, verify, extract) | 35 s |
-| `swift build --build-tests`, nothing built yet (fetching the dependencies took about 30 s of it) | 202 s |
-| The same, with the dependencies already built (Oby's own targets only) | 134–139 s |
-| `swift test` (146 tests in 27 suites) | 7 s |
-
-A hosted Linux runner has 4 cores, so the build takes roughly 2.5–3.5 times as long. Estimate: 9–13 min with an empty cache, 7–9 min when the cache restores the dependencies. Oby's own targets are most of the build, so the cache saves less than it would in a project with lighter code.
-
-**Mac and iPhone.** Estimated, with no measurement yet: about 4–7 min for the Mac app and `MacTests`, and 5–8 min for `ObyPhone`, `ObyWatch` and `ObyActivity`, booting the simulator and `iOSTests`. Add queueing time while `xcode-27` is in preview.
-
-## Caching
-
-- **Linux:** `.build` and `~/.cache/org.swift.swiftpm`, keyed by the runner's architecture, the Swift version and `Package.resolved`; a run with a new `Package.resolved` starts from the newest cache for the same Swift. That keeps the dependencies' checkouts and builds; Oby's own targets rebuild from source.
-- **macOS:** nothing. `Oby.xcodeproj`'s one Swift package dependency, Sparkle (the Mac app's updater, #282), is a prebuilt binary that resolves in seconds.
+Both repositories are private, so macOS minutes count ten times against the plan's included minutes, Linux minutes once.
 
 ## Signing
 
-CI has no certificates. Both Apple builds pass `CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=`, so they're signed ad hoc with no team or profile, and `ENABLE_HARDENED_RUNTIME=NO`, so the ad-hoc-signed Mac test host can load the test bundle. Hardened runtime matters only for notarized builds, which CI doesn't make: [`scripts/release.sh`](../scripts/release.sh) makes them on a Mac ([release.md](release.md)).
-
-Every target's team and bundle id come from [`Config/Signing.xcconfig`](../Config/Signing.xcconfig) (`OBY_TEAM_ID`, `OBY_MAC_BUNDLE_ID`, `OBY_IPHONE_BUNDLE_ID`), which the project reads as its base configuration. Settings on the command line beat an xcconfig, so CI's flags above still win.
-
-## The `Oby` scheme
-
-`MacTests` run through the `Oby` scheme, which isn't shared in the project: only `ObyPhone` and `ObyWatch` are. Xcode makes it on each Mac, but a fresh checkout has none, so the workflow copies [`.github/ci/Oby.xcscheme`](../.github/ci/Oby.xcscheme) into the project when it has no shared `Oby` scheme. Once the project shares one (Product › Scheme › Manage Schemes, Shared), the project's wins, and the copy in `.github/ci/` can go.
+CI has no certificates. Restructure builds the apps with `CODE_SIGNING_ALLOWED=NO`; `apple.yml`, when enabled, signs ad hoc with no team or profile. Notarized builds are made on a Mac by [`scripts/release.sh`](../scripts/release.sh) ([release.md](release.md)), never in CI.

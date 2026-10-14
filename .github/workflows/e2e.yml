@@ -49,6 +49,8 @@ jobs:
           ref: dev
           path: obi-sphere
           token: ${{ secrets.OBI_SPHERE_READ_TOKEN }}
+          # The token is for this checkout only: nothing later uses it, so git doesn't keep it.
+          persist-credentials: false
 
       # The pnpm obi-sphere pins (spec/package.json, packageManager).
       - uses: pnpm/action-setup@v4
@@ -58,6 +60,17 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+
+      # obi-sphere's server keeps copies of this repository's e2e fixtures; they must still match
+      # obi's (this checkout). The check is obi-sphere's script and needs only Node (set up above).
+      # Until the server is in obi-sphere's dev, the script isn't there: the step says so and passes.
+      - name: obi-sphere's copies of the e2e fixtures match obi's
+        run: |
+          if [ -f obi-sphere/server/scripts/check-fixtures.mjs ]; then
+            OBI_DIR=obi node obi-sphere/server/scripts/check-fixtures.mjs
+          else
+            echo "::notice::obi-sphere/server/scripts/check-fixtures.mjs is not in obi-sphere's dev yet: the fixture comparison is skipped."
+          fi
 
       # obid is Rust (core/): `make e2e` runs `cargo build -p obid` in it before the harness.
       - name: Rust toolchain
