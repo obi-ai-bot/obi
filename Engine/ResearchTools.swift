@@ -141,8 +141,14 @@ actor ResearchTools {
             let sha = resolved.trimmingCharacters(in: .whitespacesAndNewlines)
             guard sha.wholeMatch(of: /[0-9a-fA-F]{40}/) != nil else { throw Shell.Failure(message: "Git returned an invalid commit id") }
             let short = String(sha.prefix(7))
-            let target = lookup.tool == .searchCode ? (lookup.query.map { " \($0.debugDescription)" } ?? "")
-                : (lookup.path.map { " \($0)" } ?? lookup.number.map { " #\($0)" } ?? "")
+            var target = ""
+            if lookup.tool == .searchCode, let query = lookup.query {
+                target = " \(query.debugDescription)"
+            } else if let path = lookup.path {
+                target = " \(path)"
+            } else if let number = lookup.number {
+                target = " #\(number)"
+            }
             let title = "\(lookup.tool.rawValue) \(repo)@\(ref)\(target) (sha \(short))"
             let output: String
             switch lookup.tool {
@@ -245,7 +251,11 @@ actor ResearchTools {
         #else
         let streamType = SOCK_STREAM
         #endif
-        var hints = addrinfo(ai_flags: AI_ADDRCONFIG, ai_family: AF_UNSPEC, ai_socktype: streamType, ai_protocol: 0, ai_addrlen: 0, ai_addr: nil, ai_canonname: nil, ai_next: nil)
+        var hints = addrinfo()
+        hints.ai_flags = AI_ADDRCONFIG
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = streamType
+        hints.ai_protocol = 0
         var first: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, nil, &hints, &first) == 0, let first else { return nil }
         defer { freeaddrinfo(first) }
