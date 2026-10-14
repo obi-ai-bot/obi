@@ -52,8 +52,7 @@ struct OwnerSocketTests {
         #expect(response == "[]")
     }
 
-    @Test(.enabled(if: bubblewrapRuns))
-    func bubblewrapCanReachOnlyJobTokenRoutesAndCannotSeeTheOwnerSocket() async throws {
+    @Test func bubblewrapCanReachOnlyJobTokenRoutesAndCannotSeeTheOwnerSocket() async throws {
         let root = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: root) }
         let run = Workspace.root.appending(path: "run", directoryHint: .isDirectory)
@@ -70,13 +69,14 @@ struct OwnerSocketTests {
         try await app.test(.live) { server in
             let port = try #require(server.port)
             let token = AppleCheck.token(for: "agentbox1")
+            let socketCheck = bubblewrapRuns ? "test ! -e '\(socket.path)' && " : ""
+            let probes = "\(socketCheck)curl -sS -o /dev/null -w '%{http_code}' -H 'Tailscale-User-Login: owner@example.com' 'http://localhost:\(port)/v1/jobs' && printf ' ' && curl -sS -o /dev/null -w '%{http_code}' 'http://localhost:\(port)/v1/jobs' && printf ' ' && curl -sS -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer \(token)' 'http://localhost:\(port)/v1/agent/apple-check'"
             let process = Process()
             let output = Pipe()
             process.executableURL = URL(filePath: "/usr/bin/env")
-            process.arguments = Agents.sandboxed([
-                "sh", "-c",
-                "test ! -e '\(socket.path)' && curl -sS -o /dev/null -w '%{http_code}' -H 'Tailscale-User-Login: owner@example.com' 'http://localhost:\(port)/v1/jobs' && printf ' ' && curl -sS -o /dev/null -w '%{http_code}' 'http://localhost:\(port)/v1/jobs' && printf ' ' && curl -sS -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer \(token)' 'http://localhost:\(port)/v1/agent/apple-check'"
-            ], in: nil, own: nil)
+            process.arguments = bubblewrapRuns
+                ? Agents.sandboxed(["sh", "-c", probes], in: nil, own: nil)
+                : ["sh", "-c", probes]
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
             try process.run()
