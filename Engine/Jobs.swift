@@ -739,7 +739,8 @@ final class ClaudeAgent: AgentRun {
 
     /// The command line and environment Claude Code starts with.
     nonisolated static func launch(worktree: URL, configDirectory: URL?, model: String?, resume: String?, maxTurns: Int? = nil,
-                                   mcp: AgentMCP? = nil, mode: PermissionMode = .bypass, effort: String? = nil, reading: [String] = []) throws -> (arguments: [String], environment: [String: String]) {
+                                   mcp: AgentMCP? = nil, mode: PermissionMode = .bypass, effort: String? = nil, reading: [String] = [],
+                                   research: Bool = false) throws -> (arguments: [String], environment: [String: String]) {
         // Never --bare: it skips the user's own login. Never --strict-mcp-config: the account's own
         // mcpServers (Tetrix) stay; only its claude.ai connectors are off. The broker joins them as
         // `oby`, from a file, with the job's token only.
@@ -761,7 +762,7 @@ final class ClaudeAgent: AgentRun {
                             + (resume.map { ["--resume", $0] } ?? [])),
                             in: worktree, own: configDirectory?.path ?? "\(Agents.home)/.claude",
                             // Oby's folder is hidden in the box: only the MCP config shows, read-only.
-                            reading: [mcpFile(worktree: worktree).path] + reading)
+                            reading: [mcpFile(worktree: worktree).path] + reading, research: research)
         let environment = try Agents.environment(Agents.noConnectors.merging(["CLAUDE_CONFIG_DIR": configDirectory?.path]) { $1 }
             .merging(AppleCheck.environment(worktree: worktree)) { $1 }
             .merging(Agents.swiftEnvironment(worktree: worktree)) { $1 })
@@ -775,7 +776,7 @@ final class ClaudeAgent: AgentRun {
         try Self.writeMCP(Self.mcpConfig(configDirectory: configDirectory), to: Self.mcpFile(worktree: worktree))
         let launch: (arguments: [String], environment: [String: String])
         do {
-            launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mcp: mcp, mode: mode, effort: effort, reading: reading)
+            launch = try Self.launch(worktree: worktree, configDirectory: configDirectory, model: model, resume: resume, maxTurns: maxTurns, mcp: mcp, mode: mode, effort: effort, reading: reading, research: kind == .research)
         } catch {
             dropMCP()
             throw error
@@ -1215,14 +1216,22 @@ nonisolated enum Policy {
     /// Why this tool call is refused, or nil to allow it.
     static func deny(tool: String, input: [String: Any], worktree: URL, kind: Plan.Kind? = nil) -> String? {
         if kind == .research {
-            if ["Edit", "MultiEdit", "Write", "NotebookEdit"].contains(tool), let path = (input["file_path"] ?? input["notebook_path"]) as? String {
-                let root = (worktree.path as NSString).appendingPathComponent(".oby") + "/"
-                let file = URL(fileURLWithPath: path.hasPrefix("/") ? path : (worktree.path as NSString).appendingPathComponent(path)).standardizedFileURL.path
-                if !file.hasPrefix(root) { return "Research jobs may write only under .oby/. Write findings in .oby/report.md." }
+            if tool == "Bash" {
+                return "Research jobs can't run shell commands. Use read tools and write only .oby/report.md or .oby/proposed-issues.json."
             }
-            if tool == "Bash", let command = input["command"] as? String,
-               command.contains(/\bgit\s+(-[cC]\s+\S+\s+|--\S+\s+)*(commit|push|tag|rebase|reset|checkout\s+-b|switch\s+-c)\b/) {
-                return "Research jobs don't commit: write your findings in .oby/report.md."
+            if ["Edit", "MultiEdit", "Write", "NotebookEdit"].contains(tool) {
+                guard let path = (input["file_path"] ?? input["notebook_path"]) as? String else {
+                    return "Research jobs may write only .oby/report.md and .oby/proposed-issues.json."
+                }
+                let root = worktree.standardizedFileURL.resolvingSymlinksInPath()
+                let candidate = URL(fileURLWithPath: path.hasPrefix("/") ? path : worktree.appending(path: path).path)
+                    .standardizedFileURL.resolvingSymlinksInPath()
+                let allowed = [".oby/report.md", ".oby/proposed-issues.json"].map {
+                    root.appending(path: $0).standardizedFileURL.path
+                }
+                if !allowed.contains(candidate.path) {
+                    return "Research jobs may write only .oby/report.md and .oby/proposed-issues.json."
+                }
             }
         }
         // mcp__<server>__<tool>, where the server can be "tetrix" or a connector like "claude_ai_Tetrix".
@@ -1475,17 +1484,20 @@ nonisolated enum Agents {
     /// for `tools`, git's settings (read-only) and the job's own account, and so is all of `OBY_HOME`:
     /// no gh token, APNs key, ssh key, vault, other account, or anything else the user keeps there. Nothing
     /// else an agent writes lasts, so it can't leave behind a program or a git config that the runner
-    /// runs later outside the box. Writable for real: the worktree, the git data it commits to, and
-    /// `own`, the job's account home (nil for none).
+    /// runs later outside the box. Normally the worktree and git data are writable; research gets a
+    /// read-only worktree and git data, with `.oby` writable for outputs (Policy limits those to the
+    /// report files). `own` is the job's account home (nil for none).
     /// `reading` are folders the process may read but not write, inside what's hidden otherwise
     /// (the Lead's own directory and the repositories' checkouts, under `OBY_HOME`).
     /// `apple`: `oby-check apple`'s script and the runner it runs, shown read-only to a process in a
     /// worktree (Engine/AppleChecks.swift).
-    /// On the Mac, `argv` as it is: gh's login is in the keychain, and agents have no credential helper.
+    /// On the Mac, `argv` runs as-is: Oby's permission policy restricts research file tools, Claude
+    /// research can't use Bash, and Codex research uses its read-only sandbox.
     // ponytail: one Unix user, hidden by path. Sockets that run commands for this user (docker is
     // hidden, nothing else is) and the runner's API on 127.0.0.1 stay reachable; a Unix user of its
     // own for agents is the upgrade.
     static func sandboxed(_ argv: [String], in worktree: URL?, own: String?, reading: [String] = [], bubblewrap: Bool = Agents.bubblewrap,
+                          research: Bool = false,
                           apple: AppleCheck.Tool? = AppleCheck.installed,
                           exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> [String] {
         guard bubblewrap else { return argv }
@@ -1508,7 +1520,7 @@ nonisolated enum Agents {
             // git finds a config (.git, commondir) are read-only. A real packed-refs can't be replaced,
             // so `git pack-refs` fails rather than drop the loose refs it would have packed.
             let path = worktree.path
-            args += ["--bind", path, path, "--ro-bind", "\(path)/.git", "\(path)/.git"]
+            args += [research ? "--ro-bind" : "--bind", path, path, "--ro-bind", "\(path)/.git", "\(path)/.git"]
             if let pointer = try? String(contentsOfFile: "\(path)/.git", encoding: .utf8), pointer.hasPrefix("gitdir: ") {
                 // An absolute path, as `git worktree add` writes it.
                 let admin = String(pointer.dropFirst("gitdir: ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1517,9 +1529,14 @@ nonisolated enum Agents {
                 // directories separately. Binding the directory refreshes packed-refs after
                 // an outside rename; binding the file itself would pin its old inode.
                 args += ["--ro-bind", common, common]
-                for real in ["objects", "refs", "logs"] { args += ["--bind-try", "\(common)/\(real)", "\(common)/\(real)"] }
-                args += ["--bind", admin, admin, "--ro-bind", "\(admin)/commondir", "\(admin)/commondir"]
+                if research {
+                    args += ["--ro-bind", admin, admin]
+                } else {
+                    for real in ["objects", "refs", "logs"] { args += ["--bind-try", "\(common)/\(real)", "\(common)/\(real)"] }
+                    args += ["--bind", admin, admin, "--ro-bind", "\(admin)/commondir", "\(admin)/commondir"]
+                }
             }
+            if research { args += ["--bind", "\(path)/.oby", "\(path)/.oby"] }
         }
         for folder in reading where exists(folder) { args += ["--ro-bind", folder, folder] }
         if worktree != nil, let apple { args += apple.binds }

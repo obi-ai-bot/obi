@@ -50,7 +50,7 @@ final class CodexAgent: AgentRun {
         self.onEvent = onEvent
         let log = worktree.appending(path: ".oby/agent.log")
         _ = FileManager.default.createFile(atPath: log.path, contents: nil)
-        let server = try CodexServer(home: home, in: worktree, log: log, mcp: mcp, reading: reading)
+        let server = try CodexServer(home: home, in: worktree, log: log, mcp: mcp, reading: reading, research: kind == .research)
         self.server = server
         server.onMessage = { [weak self] in self?.handle($0) }
         server.onExit = { [weak self] in
@@ -96,7 +96,7 @@ final class CodexAgent: AgentRun {
             var params = CodexRPC.turnStart(thread: thread, prompt: text, model: model ?? AgentModels.value("codex", "model"),
                                             effort: effort ?? AgentModels.value("codex", "effort"))
             // The mode changed since the thread started (a plan approved): this turn runs with the new one.
-            if mode != started { params.merge(CodexRPC.turnOverrides(mode: mode, git: git)) { $1 } }
+            if mode != started { params.merge(CodexRPC.turnOverrides(mode: mode, git: git, research: kind == .research)) { $1 } }
             let turn = try? await server.call("turn/start", params)
             self.turn = (turn?["turn"] as? [String: Any])?["id"] as? String
         }
@@ -249,9 +249,9 @@ final class CodexServer {
     var isRunning: Bool { process.isRunning }
 
     /// `mcp`: the broker, as Codex's `oby` MCP server, its token in the environment.
-    init(home: URL?, in directory: URL?, log: URL?, mcp: AgentMCP? = nil, reading: [String] = []) throws {
+    init(home: URL?, in directory: URL?, log: URL?, mcp: AgentMCP? = nil, reading: [String] = [], research: Bool = false) throws {
         process.executableURL = URL(filePath: "/usr/bin/env")
-        process.arguments = Agents.sandboxed(Agents.niced(["codex"] + (mcp?.codexArguments ?? []) + ["app-server"]), in: directory, own: home?.path ?? "\(Agents.home)/.codex", reading: reading)
+        process.arguments = Agents.sandboxed(Agents.niced(["codex"] + (mcp?.codexArguments ?? []) + ["app-server"]), in: directory, own: home?.path ?? "\(Agents.home)/.codex", reading: reading, research: research)
         process.currentDirectoryURL = directory
         process.environment = try Agents.environment(AppleCheck.environment(worktree: directory)
             .merging(directory.map { Agents.swiftEnvironment(worktree: $0) } ?? [:]) { $1 }
@@ -365,6 +365,11 @@ nonisolated enum CodexRPC {
             if !web.isEmpty { params["config"] = web }
             return params
         }
+        if research {
+            var params: [String: Any] = ["cwd": worktree.path, "sandbox": "read-only", "approvalPolicy": "untrusted", "approvalsReviewer": "user"]
+            if !web.isEmpty { params["config"] = web }
+            return params
+        }
         if mode == .plan {
             var params: [String: Any] = ["cwd": worktree.path, "sandbox": "read-only", "approvalPolicy": "untrusted", "approvalsReviewer": "user"]
             if !web.isEmpty { params["config"] = web }
@@ -386,8 +391,9 @@ nonisolated enum CodexRPC {
     /// What a turn carries when the job's mode changed since its thread started: the mode's
     /// approvals and sandbox, as `threadStart` would set them.
     // ponytail: turn/start's sandboxPolicy shape is from app-server's v2 protocol, not yet proven against a real Codex.
-    static func turnOverrides(mode: PermissionMode, git: String?, bubblewrap: Bool = Agents.bubblewrap) -> [String: Any] {
+    static func turnOverrides(mode: PermissionMode, git: String?, bubblewrap: Bool = Agents.bubblewrap, research: Bool = false) -> [String: Any] {
         if bubblewrap { return ["approvalPolicy": "untrusted", "sandboxPolicy": ["type": "dangerFullAccess"]] }
+        if research { return ["approvalPolicy": "untrusted", "sandboxPolicy": ["type": "readOnly"]] }
         if mode == .plan { return ["approvalPolicy": "untrusted", "sandboxPolicy": ["type": "readOnly"]] }
         return ["approvalPolicy": mode == .bypass ? "on-request" : "untrusted",
                 "sandboxPolicy": ["type": "workspaceWrite", "writableRoots": git.map { [$0] } ?? [], "networkAccess": false]]

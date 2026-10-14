@@ -578,9 +578,17 @@ final class PermissionTests {
         #expect(CodexRPC.threadStart(worktree: worktree, git: nil, bubblewrap: false, mode: .acceptEdits)["sandbox"] as? String == "workspace-write")
         let plan = CodexRPC.threadStart(worktree: worktree, git: nil, bubblewrap: false, mode: .plan)
         #expect(plan["sandbox"] as? String == "read-only" && plan["approvalPolicy"] as? String == "untrusted")
+        let research = CodexRPC.threadStart(worktree: worktree, git: "/tmp/git", bubblewrap: false, research: true)
+        #expect(research["sandbox"] as? String == "read-only" && research["approvalPolicy"] as? String == "untrusted")
+        #expect((research["config"] as? [String: Any])?["web_search"] as? String == "live")
         #expect(CodexRPC.threadStart(worktree: worktree, git: nil, bubblewrap: true, mode: .plan)["sandbox"] as? String == "danger-full-access")
         let approved = CodexRPC.turnOverrides(mode: .bypass, git: "/tmp/git", bubblewrap: false)
         #expect(approved["approvalPolicy"] as? String == "on-request" && (approved["sandboxPolicy"] as? [String: Any])?["type"] as? String == "workspaceWrite")
+        let researchTurn = CodexRPC.turnOverrides(mode: .bypass, git: "/tmp/git", bubblewrap: false, research: true)
+        #expect(researchTurn["approvalPolicy"] as? String == "untrusted" && (researchTurn["sandboxPolicy"] as? [String: Any])?["type"] as? String == "readOnly")
+        let reportChange: [String: Any] = ["id": 9, "method": "item/fileChange/requestApproval", "params": ["itemId": "report"]]
+        #expect(CodexRPC.answer(reportChange, files: ["report": ["/tmp/oby/jobs/abc/.oby/report.md"]], worktree: worktree, kind: .research) == .accept)
+        #expect(CodexRPC.answer(reportChange, files: ["report": ["/tmp/oby/jobs/abc/.oby/reads/acme/arch/CLAUDE.md"]], worktree: worktree, kind: .research) == .decline("Research jobs may write only .oby/report.md and .oby/proposed-issues.json."))
     }
 
     // MARK: The API

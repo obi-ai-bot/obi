@@ -62,7 +62,28 @@ struct ResearchTests {
         let root = URL(filePath: "/tmp/research-test")
         #expect(Policy.deny(tool: "Edit", input: ["file_path": "Engine/Brain.swift"], worktree: root, kind: .research) != nil)
         #expect(Policy.deny(tool: "Write", input: ["file_path": ".oby/report.md"], worktree: root, kind: .research) == nil)
-        #expect(Policy.deny(tool: "Bash", input: ["command": "git commit -m x"], worktree: root, kind: .research)?.contains("don't commit") == true)
+        #expect(Policy.deny(tool: "Write", input: ["file_path": ".oby/proposed-issues.json"], worktree: root, kind: .research) == nil)
+        for path in ["Engine/Brain.swift", ".oby/reads/acme/arch/CLAUDE.md", ".oby/inputs/reads.md"] {
+            #expect(Policy.deny(tool: "Write", input: ["file_path": path], worktree: root, kind: .research) != nil, "\(path)")
+        }
+        #expect(Policy.deny(tool: "MultiEdit", input: [:], worktree: root, kind: .research) != nil)
+        for command in ["printf x > Engine/Brain.swift", "chmod -R u+w .oby/reads", "git commit -m x"] {
+            #expect(Policy.deny(tool: "Bash", input: ["command": command], worktree: root, kind: .research) != nil, "\(command)")
+        }
+    }
+
+    @Test func researchWritesCannotEscapeThroughSymlinks() throws {
+        let root = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let worktree = root.appending(path: "jobs/research")
+        let oby = worktree.appending(path: ".oby")
+        let engine = worktree.appending(path: "Engine")
+        try FileManager.default.createDirectory(at: oby, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: engine, withIntermediateDirectories: true)
+        let source = engine.appending(path: "Brain.swift")
+        try Data("source".utf8).write(to: source)
+        try FileManager.default.createSymbolicLink(at: oby.appending(path: "report.md"), withDestinationURL: source)
+        #expect(Policy.deny(tool: "Write", input: ["file_path": ".oby/report.md"], worktree: worktree, kind: .research) != nil)
     }
 
     @Test func worktreePathsBecomeGitHubLinksAndRejectTraversal() async throws {
@@ -141,29 +162,33 @@ struct ResearchTests {
         let worktree = root.appending(path: "jobs/research")
         let reads = worktree.appending(path: ".oby/reads/acme/arch")
         try FileManager.default.createDirectory(at: reads, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: worktree.appending(path: ".git"), withIntermediateDirectories: true)
         let target = reads.appending(path: "CLAUDE.md")
         try Data("architecture".utf8).write(to: target)
         func boxed(_ argv: [String]) -> [String] {
             Agents.sandboxed(argv, in: worktree, own: nil,
-                             reading: [worktree.appending(path: ".oby/reads").path], bubblewrap: true, apple: nil)
+                             reading: [worktree.appending(path: ".oby/reads").path], bubblewrap: true, research: true, apple: nil)
         }
         let writeCommand = ["sh", "-c", "touch \"\(target.path)\""]
+        let reportCommand = ["sh", "-c", "printf report > \"\(worktree.appending(path: ".oby/report.md").path)\""]
+        let readonlyWorktree = ["--ro-bind", worktree.path, worktree.path]
+        let writableOby = ["--bind", worktree.appending(path: ".oby").path, worktree.appending(path: ".oby").path]
         let readOnlyBind = ["--ro-bind", worktree.appending(path: ".oby/reads").path,
                             worktree.appending(path: ".oby/reads").path]
         let writeBox = boxed(writeCommand)
-        // The read-only export bind must follow the writable worktree bind so it overrides it.
-        let writableBind = ["--bind", worktree.path, worktree.path]
         func index(of sequence: [String]) -> Int? {
             guard sequence.count <= writeBox.count else { return nil }
             return (0...(writeBox.count - sequence.count)).first {
                 Array(writeBox[$0..<$0 + sequence.count]) == sequence
             }
         }
-        if let writableBindIndex = index(of: writableBind),
+        if let worktreeReadOnlyIndex = index(of: readonlyWorktree),
+           let obyWritableIndex = index(of: writableOby),
            let readOnlyBindIndex = index(of: readOnlyBind) {
-            #expect(readOnlyBindIndex > writableBindIndex)
+            #expect(obyWritableIndex > worktreeReadOnlyIndex)
+            #expect(readOnlyBindIndex > obyWritableIndex)
         } else {
-            Issue.record("The sandbox should bind the research export read-only")
+            Issue.record("The research sandbox should keep the worktree read-only, expose .oby for reports, and keep exports read-only")
         }
 
         guard bubblewrapRuns else { return }
@@ -178,6 +203,7 @@ struct ResearchTests {
             return process.terminationStatus
         }
         #expect(try run(["sh", "-c", "touch \"\(target.path)\""]) != 0)
+        #expect(try run(reportCommand) == 0)
         #expect(try run(["gh", "auth", "status"]) != 0)
     }
 
