@@ -173,6 +173,18 @@ struct RunnerAccountTerminalTests {
         #expect(!FileManager.default.fileExists(atPath: marker.path))
     }
 
+    @Test func claudeLoginDropsInheritedSessionAndProviderVariables() async throws {
+        let account = Account(id: "test", agent: "claude", name: "Test", payer: "", home: "/tmp/oby-login-test")
+        let script = AccountStore.signInScript(for: account).replacingOccurrences(of: "\nclaude auth login\n", with: """
+
+        test -z "${CLAUDECODE+x}" && test -z "${CLAUDE_CODE_TEST+x}" && test -z "${ANTHROPIC_API_KEY+x}" && test "$OBY_LOGIN_KEEP" = yes || exit 9
+
+        """)
+        let result = try await Shell.run(["/bin/sh"], input: Data(script.utf8),
+                                         env: ["CLAUDECODE": "nested", "CLAUDE_CODE_TEST": "test", "ANTHROPIC_API_KEY": "test", "OBY_LOGIN_KEEP": "yes"])
+        #expect(result.status == 0)
+    }
+
     @MainActor @Test func settingsSelectionOpensTheRequestedTab() {
         let state = SettingsSelection.shared
         let savedTab = state.tab, savedShow = state.show

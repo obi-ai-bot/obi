@@ -510,6 +510,10 @@ final class AccountStore {
             lines += ["export XDG_CONFIG_HOME=\(quote(home + "/.config"))", "export HOME=\(quote(home))"]
         }
         if headless { lines.append("export NO_OPEN_BROWSER=1") }
+        if account.agent == "claude" {
+            // Terminal may inherit a Claude session or API credentials from its shell setup.
+            lines += ["unset CLAUDECODE", #"for oby_login_key in $(/usr/bin/env | /usr/bin/sed -E -n 's/^((CLAUDE_CODE_|ANTHROPIC_)[A-Za-z0-9_]*)=.*/\1/p'); do unset "$oby_login_key"; done"#]
+        }
         lines.append("echo \(quote("Oby: sign in to the account for \(who)."))")
         if headless { lines.append("echo 'Open the link on any device.'") }
         lines += [login, "echo", "echo 'Done? Go back to Oby. You can close this window.'"]
