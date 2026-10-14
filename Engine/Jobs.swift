@@ -85,6 +85,12 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var reviewing: String?
     var review: Review?
     var reviewError: String?
+    /// A second, independent security review is required for this pull request.
+    var securityReviewRequired: Bool?
+    var securityReviewing: String?
+    var securityReview: Review?
+    var securityReviewError: String?
+    var generalReview: Review?
     /// Consecutive retries after a reviewer hit model or account capacity; kept on the author so
     /// a restart cannot turn a bounded retry into an unbounded loop.
     var reviewCapacityRetries: Int?
@@ -93,6 +99,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     var extraReviews: Int?
     /// The job whose pull request this job reviews: set on the review jobs Oby starts itself.
     var reviewOf: String?
+    /// This review job performs the security pass rather than the general review.
+    var securityReviewJob: Bool?
     /// The files the job is expected to touch, its claim (`holdsClaim`). Jobs whose files overlap
     /// run side by side (#237): each agent is told which in-flight jobs touch the same files
     /// (`Prompts.agent`), and when two approved pull requests overlap, the older merges first

@@ -7,6 +7,44 @@ import Testing
 /// requested back to the author as its next round (Engine/Review.swift).
 @MainActor
 struct ReviewTests {
+    @Test func securitySurfaceClassifierAndPromptRequireProbes() {
+        #expect(Review.securityPath("Runner/Gateway.swift"))
+        #expect(Review.securityPath("cloud/control-plane/src/routes.ts"))
+        #expect(Review.securityPath("Engine/TokenStore.swift"))
+        #expect(!Review.securityPath("Mac/Island.swift"))
+        let prompt = Review.securityPrompt("Review pull request #4")
+        #expect(prompt.contains("Every claim about authentication or route reachability must include a probe"))
+        #expect(prompt.contains("more than 80% sure"))
+    }
+
+    @Test func securitySurfaceRunsSecondReviewBeforeQueueingMacCheck() async throws {
+        desk.securityPaths = { _ in ["Runner/Gateway.swift"] }
+        desk.queuesMacChecks = true
+        desk.reviewedHead = { _ in "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b" }
+        desk.dispatch(author)
+        try await until("author starts") { desk.job("author")?.status == .running }
+        let authorAgent = try #require(made.agents.last?.agent)
+        authorAgent.onEvent(.session("security-session"))
+        authorAgent.onEvent(.turnEnded(summary: "change gateway", failed: false))
+        authorAgent.onEvent(.finished(summary: "change gateway", failed: false))
+        try await until("general review starts") { made.agents.last?.job.reviewOf == "author" }
+        let general = try #require(made.agents.last)
+        general.agent.onEvent(.turnEnded(summary: "Looks sound.\n\nBlocking: none\n\nWorth doing later: none\n\nVERDICT: APPROVED", failed: false))
+        general.agent.onEvent(.finished(summary: "Looks sound.\n\nBlocking: none\n\nWorth doing later: none\n\nVERDICT: APPROVED", failed: false))
+        try await until("security review starts") { desk.job("author")?.securityReviewing != nil }
+        let securityID = try #require(desk.job("author")?.securityReviewing)
+        try await until("security reviewer starts") { made.agents.contains { $0.job.id == securityID } }
+        let security = try #require(made.agents.first { $0.job.id == securityID })
+        #expect(security.job.securityReviewJob == true)
+        #expect(security.agent.prompt.contains("Every claim about authentication or route reachability must include a probe"))
+        #expect(desk.job("author")?.generalReview?.verdict == .approved)
+        #expect(desk.job("author")?.macCheck == nil)
+        security.agent.onEvent(.turnEnded(summary: "No blockers.\n\nBlocking: none\n\nWorth doing later: none\n\nVERDICT: APPROVED", failed: false))
+        security.agent.onEvent(.finished(summary: "No blockers.\n\nBlocking: none\n\nWorth doing later: none\n\nVERDICT: APPROVED", failed: false))
+        try await until("both reviews approve") { desk.job("author")?.securityReview?.verdict == .approved && desk.job("author")?.macCheck != nil }
+        #expect(desk.job("author")?.macCheck?.state == .queued)
+    }
+
     /// An agent whose events the test sends, noting its prompt.
     final class Agent: AgentRun {
         var onEvent: (AgentEvent) -> Void = { _ in }
@@ -50,6 +88,7 @@ struct ReviewTests {
         accounts.setLabel("Plus · work@example.com", for: work.id)
         desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
         desk.prepare = { $0 }
+        desk.securityPaths = { _ in [] }
         desk.makeAgent = { [made] job, _, resume in
             let agent = Agent()
             made.agents.append((job, agent, resume))
