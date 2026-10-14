@@ -319,7 +319,7 @@ final class RunnerFeed {
     /// show it (`Desk.planElsewhere`): the drafts are its, and Dispatch sends them back to it.
     func plan(_ said: String, answer: (question: String, option: String)?, attachments: [String] = []) async throws -> Desk.Talk {
         guard let runner else { throw RunnerError(message: "The runner on this Mac isn't running yet.") }
-        switch try await runner.plan(said, answer: answer, attachments: attachments) {
+        switch try await runner.plan(said, answer: answer, attachmentIDs: attachments) {
         case .question(let said, let question):
             return .question(said: said, Plan.Question(text: question.text, options: question.options, details: question.details,
                                                        recommended: question.recommended, plan: question.plan))

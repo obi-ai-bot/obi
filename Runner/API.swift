@@ -20,10 +20,12 @@ final class API {
     let cleared: Cleared
     /// Connected apps, used by agents through the broker (Runner/Broker.swift).
     let broker: Broker
+    let attachmentStore: AttachmentStore
     /// Everyone following `GET /v1/events`.
     private var streams: [UUID: AsyncStream<String>.Continuation] = [:]
     /// The accounts as last sent, so an unchanged list isn't sent again.
     private var sentAccounts = Data()
+    private var attachmentUploads: [Date] = []
     /// Keeps the cap on running jobs (`PUT /v1/settings/jobs`). Tests put in their own.
     var saveMaxRunning: (Int) -> Void = JobSlots.save
 
@@ -36,6 +38,7 @@ final class API {
         self.push = push
         self.cleared = cleared ?? Cleared(file: nil)
         self.broker = broker ?? Broker(desk: desk, connections: ConnectionStore(file: nil), uses: UseLog(file: nil), base: "http://127.0.0.1:7777")
+        self.attachmentStore = AttachmentStore(jobs: desk.store, vault: desk.vault)
         sentAccounts = (try? Self.encode(accounts)) ?? Data()
         desk.onJobChange = { [weak self] job in
             self?.send("job", JobJSON(job: job))
@@ -67,6 +70,11 @@ final class API {
         }
         router.get("v1/status") { _, _ in await self.status() }
         router.post("v1/plans") { request, _ in try await self.plan(try await Self.decode(PlanRequest.self, from: request)) }
+        router.post("v1/attachments") { request, _ in try await self.uploadAttachment(request) }
+        router.get("v1/attachments/:id") { _, context in try await self.attachment(context.parameters.require("id")) }
+        router.get("v1/attachments/:id/content") { _, context in try await self.attachmentContent(context.parameters.require("id")) }
+        router.get("v1/attachments/:id/thumbnail") { _, context in try await self.attachmentThumbnail(context.parameters.require("id")) }
+        router.delete("v1/attachments/:id") { _, context in try await self.deleteAttachment(context.parameters.require("id")) }
         router.post("v1/plans/cancel") { _, _ in await self.cancelPlan() }
         router.post("v1/conversation/stop") { _, _ in await self.stopConversation() }
         router.get("v1/conversation") { request, _ in
@@ -190,14 +198,59 @@ final class API {
         guard !words.isEmpty else { return Self.json(PlanAnswer(.none)) }
         let turns = try request.turns.map(Self.turns)
         let said = request.answer.map { Desk.answered(words, question: $0.question, option: $0.option) } ?? words
+        if request.attachments != nil { throw APIError(.gone, "Update Oby: attachments are uploaded now.") }
         let attachments: [String]
-        do {
-            attachments = try Attachments.validated(request.attachments ?? [])
-        } catch {
-            throw APIError(.unprocessableContent, error.localizedDescription)
-        }
+        do { attachments = try attachmentStore.validate(request.attachmentIds ?? []).map(\.id) }
+        catch { throw APIError(.unprocessableContent, error.localizedDescription) }
         let (talk, started) = await desk.exchange(said, shown: request.answer?.option, turns: turns, attachments: attachments)
+        for job in started { try? attachmentStore.link(attachments, toJob: job.id) }
         return Self.json(PlanAnswer(talk, started: started))
+    }
+
+    private func uploadAttachment(_ original: Request) async throws -> Response {
+        attachmentUploads.removeAll { $0 < Date.now.addingTimeInterval(-3600) }
+        guard attachmentUploads.count < 60 else { throw APIError(.tooManyRequests, "At most 60 attachments may be uploaded per hour.") }
+        var request = original
+        let body: ByteBuffer
+        do { body = try await request.collectBody(upTo: AttachmentStore.maxBytes) }
+        catch { throw APIError(.contentTooLarge, "An attachment may be at most 25 MB.") }
+        guard body.readableBytes > 0 else { throw APIError(.unsupportedMediaType, "An attachment can't be empty.") }
+        let name = request.uri.queryParameters.get("name").map { String($0) } ?? "attachment"
+        let source = request.uri.queryParameters.get("source").map { String($0) } ?? ""
+        do {
+            let metadata = try attachmentStore.upload(Data(body.readableBytesView), name: name,
+                                                      source: source)
+            attachmentUploads.append(.now)
+            return Self.json(metadata, status: .created)
+        } catch AttachmentStoreError.tooLarge { throw APIError(.contentTooLarge, "An attachment may be at most 25 MB.") }
+        catch AttachmentStoreError.empty { throw APIError(.unsupportedMediaType, "An attachment can't be empty.") }
+        catch AttachmentStoreError.secret(let name) { throw APIError(.unprocessableContent, "This file holds the vault secret \(name), so it wasn't uploaded.") }
+        catch { throw APIError(.unprocessableContent, error.localizedDescription) }
+    }
+
+    private func attachment(_ id: String) throws -> Response {
+        guard let value = attachmentStore.attachment(id) else { throw APIError(.notFound, "There's no attachment with that id.") }
+        return Self.json(value)
+    }
+
+    private func attachmentContent(_ id: String) throws -> Response {
+        do {
+            let (metadata, data) = try attachmentStore.content(id)
+            var headers: HTTPFields = [.contentType: metadata.type]
+            headers[HTTPField.Name("Content-Disposition")!] = "attachment; filename=\"\(metadata.name.replacingOccurrences(of: "\"", with: ""))\""
+            return Response(status: .ok, headers: headers, body: ResponseBody(byteBuffer: ByteBuffer(bytes: data)))
+        } catch { throw APIError(.notFound, error.localizedDescription) }
+    }
+
+    private func attachmentThumbnail(_ id: String) throws -> Response {
+        guard let data = try? attachmentStore.thumbnail(id) else { throw APIError(.notFound, "A thumbnail isn't available for this attachment.") }
+        return Response(status: .ok, headers: [.contentType: "image/jpeg"], body: ResponseBody(byteBuffer: ByteBuffer(bytes: data)))
+    }
+
+    private func deleteAttachment(_ id: String) throws -> Response {
+        do { try attachmentStore.delete(id); return Self.json(["deleted": true]) }
+        catch AttachmentStoreError.linked { throw APIError(.conflict, "This attachment is already linked to a turn or job.") }
+        catch { throw APIError(.notFound, error.localizedDescription) }
     }
 
     /// Stops the conversation after the action currently underway has finished.
@@ -239,6 +292,7 @@ final class API {
     /// own is from before Oby started planned work by itself: `410`, with where it went.
     func dispatch(_ request: DispatchRequest) async throws -> Response {
         do {
+            if request.job.attachments != nil { throw APIError(.gone, "Update Oby: attachments are uploaded now.") }
             if var new = request.job.new {
                 new.mode = try request.job.mode.map { try Self.mode($0) }
                 return Self.json(JobJSON(job: try await desk.dispatch(new)), status: .created)
@@ -951,7 +1005,7 @@ struct ClearedJSON: Encodable {
 struct TurnJSON: Encodable {
     var turn: Turn
 
-    private enum Keys: String, CodingKey { case id, who, text, at, jobs }
+    private enum Keys: String, CodingKey { case id, who, text, at, jobs, attachments }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -960,6 +1014,7 @@ struct TurnJSON: Encodable {
         try keys.encode(turn.text, forKey: .text)
         try keys.encode(turn.date, forKey: .at)
         try keys.encode(turn.jobs ?? [], forKey: .jobs)
+        try keys.encode(turn.attachments ?? [], forKey: .attachments)
     }
 }
 
@@ -1326,6 +1381,7 @@ struct PlanRequest: Decodable {
     /// The conversation so far, oldest first, or nil for the runner's own.
     var turns: [Turn]?
     var attachments: [String]?
+    var attachmentIds: [String]?
 }
 
 /// A whole job for `POST /v1/jobs` (#269): the work (`repo`, `kind`, `task`), what it's about
@@ -1351,6 +1407,7 @@ struct DispatchRequest: Decodable {
         var files: [String]?
         /// Files attached by the Mac user, copied into the runner's worktree.
         var attachments: [String]?
+        var attachmentIds: [String]?
         /// What the job waits for before it starts (#216); left out or empty, it starts at once.
         var startWhen: [StartCondition]?
         var request: String?
@@ -1362,7 +1419,7 @@ struct DispatchRequest: Decodable {
             guard let repo, let kind, let task else { return nil }
             return Desk.NewJob(repo: repo, kind: kind, task: task, pr: pr, issue: issue, title: title, branch: branch, base: base,
                                account: account, agent: agent, rounds: rounds, check: check, model: model, files: files,
-                               startWhen: startWhen.flatMap { $0.isEmpty ? nil : $0 }, request: request)
+                               attachmentIDs: attachmentIds, startWhen: startWhen.flatMap { $0.isEmpty ? nil : $0 }, request: request)
         }
     }
 

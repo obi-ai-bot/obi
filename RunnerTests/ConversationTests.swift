@@ -570,7 +570,7 @@ struct ConversationTests {
             #expect(turns.map { $0["id"] as? String } == all)
             #expect(turns.map { $0["text"] as? String } == ["first?", "One.", "second?", "Two.", "third?", "Three.", "review PR 12", "Oby will review PR #12 in oby."])
             #expect(turns.map { $0["who"] as? String } == ["user", "oby", "user", "oby", "user", "oby", "user", "oby"])
-            #expect(turns.allSatisfy { Set($0.keys) == ["id", "who", "text", "at", "jobs"] && ($0["jobs"] as? [String]) != nil })
+            #expect(turns.allSatisfy { Set($0.keys) == ["id", "who", "text", "at", "jobs", "attachments"] && ($0["jobs"] as? [String]) != nil && ($0["attachments"] as? [Any]) != nil })
             #expect(turns.last?["jobs"] as? [String] == [job.id])
             #expect(try #require(turns.first?["at"] as? String).hasSuffix("Z"))
             // The latest 3, then the 3 before the oldest shown, then what's left.

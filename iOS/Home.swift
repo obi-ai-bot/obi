@@ -174,8 +174,8 @@ struct HomeView: View {
     }
 
     /// `spoken`: the draft has dictated words, so Oby may speak its reply.
-    private func send(spoken: Bool) {
-        phone.ask(text, spoken: spoken)
+    private func send(spoken: Bool, attachmentIDs: [String]) {
+        phone.ask(text, spoken: spoken, attachmentIDs: attachmentIDs)
         text = ""
         typing = false
     }

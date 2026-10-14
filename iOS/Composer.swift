@@ -1,4 +1,6 @@
 import SwiftUI
+import PhotosUI
+import UniformTypeIdentifiers
 
 /// The field where you type a task or dictate one, with Send: at the bottom of Home and of Chat,
 /// one and the same. Tap the mic and what you say goes into the field as it's heard; tap Stop and
@@ -10,15 +12,27 @@ struct Composer: View {
     /// The keyboard's focus, owned by the screen so it can take it after an edit or let it go.
     var typing: FocusState<Bool>.Binding
     /// Sends the field; true when it has dictated words, so Oby may speak its reply.
-    let onSend: (_ spoken: Bool) -> Void
+    let onSend: (_ spoken: Bool, _ attachmentIDs: [String]) -> Void
     @State private var selection: TextSelection?
     /// The field has dictated words in it: cleared, it's typed again.
     @State private var dictated = false
     /// What dictation last put in the field. The field holding anything else means someone
     /// typed or it was filled from elsewhere, and dictation stops there.
     @State private var written: String?
+    @State private var photos: [PhotosPickerItem] = []
+    @State private var importingFiles = false
+    @State private var attachments: [DraftAttachment] = []
+    @State private var attachmentProblem: String?
+    @State private var uploading = false
 
     private var sendable: Bool { ChatThread.words(text) != nil }
+
+    private struct DraftAttachment: Identifiable {
+        let id = UUID()
+        var name: String
+        var data: Data
+        var uploadedID: String?
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -29,16 +43,47 @@ struct Composer: View {
             if let problem = phone.voice.problem {
                 Text(problem).font(.footnote).foregroundStyle(.red).padding(.horizontal, 12)
             }
+            if let attachmentProblem {
+                Text(attachmentProblem).font(.footnote).foregroundStyle(.red).padding(.horizontal, 12)
+            }
+            if !attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(attachments) { item in
+                            HStack(spacing: 6) {
+                                Image(systemName: item.name.lowercased().hasSuffix(".pdf") ? "doc.richtext" : "photo")
+                                Text(item.name).lineLimit(1).frame(maxWidth: 120)
+                                Button { attachments.removeAll { $0.id == item.id } } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                }.accessibilityLabel("Remove \(item.name)")
+                            }
+                            .font(.caption)
+                            .padding(8)
+                            .background(Color.primary.opacity(0.08), in: Capsule())
+                        }
+                    }.padding(.horizontal, 4)
+                }
+            }
             HStack(spacing: 8) {
+                Menu {
+                    PhotosPicker(selection: $photos, maxSelectionCount: max(1, 10 - attachments.count), matching: .images) {
+                        Label("Photos", systemImage: "photo.on.rectangle")
+                    }
+                    Button { importingFiles = true } label: { Label("Files", systemImage: "folder") }
+                } label: {
+                    Image(systemName: "plus.circle.fill").font(.title2).foregroundStyle(.secondary)
+                }
+                .accessibilityLabel("Add attachment")
+                .disabled(attachments.count >= 10 || uploading)
                 TextField(prompt, text: $text, selection: $selection, axis: .vertical)
                     .lineLimit(1...4)
                     .focused(typing)
                     .submitLabel(.send)
-                    .onSubmit(send)
+                    .onSubmit { Task { await send() } }
                     .accessibilityAddTraits(phone.voice.listening ? .updatesFrequently : [])
                 DictationMic(active: phone.voice.active, listening: phone.voice.listening,
                              finishing: phone.voice.finishing, level: phone.voice.level, toggle: toggleDictation)
-                Button(action: send) {
+                Button { Task { await send() } } label: {
                     Image(systemName: "arrow.up")
                         .font(.body.weight(.bold))
                         .foregroundStyle(Color(uiColor: .systemBackground))
@@ -47,6 +92,7 @@ struct Composer: View {
                 }
                 .disabled(!sendable)
                 .accessibilityLabel("Send")
+                .disabled(uploading)
             }
             .padding(.leading, 18)
             .padding(.trailing, 7)
@@ -61,11 +107,74 @@ struct Composer: View {
             if text != written, phone.voice.active || phone.voice.finishing { phone.voice.cancel() }
             if text.isEmpty { dictated = false }
         }
+        .onChange(of: photos) { _, values in
+            Task { await addPhotos(values); photos = [] }
+        }
+        .fileImporter(isPresented: $importingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            do {
+                for source in try result.get() {
+                    guard attachments.count < 10 else { break }
+                    let accessed = source.startAccessingSecurityScopedResource()
+                    defer { if accessed { source.stopAccessingSecurityScopedResource() } }
+                    let data = try Data(contentsOf: source)
+                    try add(data, name: source.lastPathComponent)
+                }
+            } catch { attachmentProblem = error.localizedDescription }
+        }
     }
 
-    private func send() {
-        guard sendable else { return }
-        onSend(dictated)
+    private func send() async {
+        guard sendable, !uploading else { return }
+        guard attachments.isEmpty || phone.connection == .live else {
+            attachmentProblem = "Connect to the runner before sending attachments."
+            return
+        }
+        uploading = true
+        defer { uploading = false }
+        do {
+            var ids: [String] = []
+            for index in attachments.indices {
+                if let existing = attachments[index].uploadedID { ids.append(existing); continue }
+                let item = attachments[index]
+                let uploaded = try await phone.runner.uploadAttachment(item.data, name: item.name, source: "iphone")
+                attachments[index].uploadedID = uploaded.id
+                ids.append(uploaded.id)
+            }
+            onSend(dictated, ids)
+            text = ""
+            attachments = []
+            attachmentProblem = nil
+        } catch {
+            attachmentProblem = "Upload failed. Nothing was sent. \(error.localizedDescription)"
+        }
+    }
+
+    private func addPhotos(_ items: [PhotosPickerItem]) async {
+        for item in items where attachments.count < 10 {
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self) else { continue }
+                try add(data, name: "photo-\(attachments.count + 1).jpg")
+            } catch { attachmentProblem = error.localizedDescription }
+        }
+    }
+
+    private func add(_ data: Data, name: String) throws {
+        guard data.count <= 25 * 1024 * 1024 else { throw AttachmentDraftError.tooLarge }
+        guard attachments.count < 10 else { throw AttachmentDraftError.tooMany }
+        guard attachments.reduce(data.count, { $0 + $1.data.count }) <= 50 * 1024 * 1024 else { throw AttachmentDraftError.messageTooLarge }
+        attachments.append(DraftAttachment(name: name, data: data, uploadedID: nil))
+        attachmentProblem = nil
+    }
+
+    private enum AttachmentDraftError: LocalizedError {
+        case tooLarge, tooMany, messageTooLarge
+        var errorDescription: String? {
+            switch self {
+            case .tooLarge: "Each file must be 25 MB or smaller."
+            case .tooMany: "A message can have at most 10 files."
+            case .messageTooLarge: "Attachments in one message must total 50 MB or less."
+            }
+        }
     }
 
     /// What the field holds with `words` dictated after `prefix`: a space between, unless there's one.

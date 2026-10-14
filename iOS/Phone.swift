@@ -41,6 +41,7 @@ final class Phone {
         var said: String
         var answer: (question: String, option: String)?
         var voice: Bool
+        var attachmentIDs: [String] = []
     }
     @ObservationIgnored private let speaker = PhoneSpeaker()
     @ObservationIgnored private var planning: Task<Void, Never>?
@@ -343,11 +344,15 @@ final class Phone {
 
     // MARK: Planning
 
-    func ask(_ words: String, spoken: Bool = false) {
+    func ask(_ words: String, spoken: Bool = false, attachmentIDs: [String] = []) {
         guard let said = ChatThread.words(words) else { return }
+        guard attachmentIDs.isEmpty || connection == .live else {
+            talk = .reply("Connect to the runner before sending attachments.")
+            return
+        }
         cancelVoice()
         self.spoken = spoken
-        plan(said, answer: nil, voice: spoken)
+        plan(said, answer: nil, voice: spoken, attachmentIDs: attachmentIDs)
     }
 
     /// The user picked one of the brain's options.
@@ -403,7 +408,7 @@ final class Phone {
         drop(echo: id)
     }
 
-    private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false) {
+    private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false, attachmentIDs: [String] = []) {
         planning?.cancel()
         speaker.stop()
         dropPending()
@@ -412,9 +417,14 @@ final class Phone {
         // The thread shows the words as the runner will list them: an answer is its option.
         let echo = Turn(who: .user, text: answer?.option ?? said, voice: voice ? true : nil)
         echoes.append(echo)
-        requests[echo.id] = Request(said: said, answer: answer, voice: voice)
+        requests[echo.id] = Request(said: said, answer: answer, voice: voice, attachmentIDs: attachmentIDs)
         pending = echo.id
         if connection != .live {
+            guard attachmentIDs.isEmpty else {
+                failures[echo.id] = "Connect to the runner before sending attachments."
+                finish(.reply(failures[echo.id]!), started: [], request: requests[echo.id]!, echo: echo)
+                return
+            }
             offlineQueue.queue(OfflineMessage(id: echo.id, said: said, question: answer?.question, option: answer?.option, voice: voice, target: offlineQueueTarget))
             talk = .queued(said)
             pending = nil
@@ -448,7 +458,7 @@ final class Phone {
                 voice: item.voice
             )
             let echo = echoes.first(where: { $0.id == item.id }) ?? Turn(id: item.id, who: .user, text: item.option ?? item.said, voice: item.voice ? true : nil)
-            let result = try await destinationRunner.plan(request.said, answer: request.answer)
+            let result = try await destinationRunner.plan(request.said, answer: request.answer, attachmentIDs: request.attachmentIDs)
             apply(result, request: request, echo: echo)
         }
     }
@@ -473,7 +483,7 @@ final class Phone {
     private func send(_ request: Request, echo: Turn) {
         planning = Task {
             do {
-                let result = try await runner.plan(request.said, answer: request.answer)
+                let result = try await runner.plan(request.said, answer: request.answer, attachmentIDs: request.attachmentIDs)
                 guard !Task.isCancelled else { return }
                 apply(result, request: request, echo: echo)
             } catch {

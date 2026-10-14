@@ -107,7 +107,7 @@ struct AttachmentTests {
         }
     }
 
-    @Test @MainActor func plansRefuseAttachmentsOutsideTheAppsFolder() async throws {
+    @Test @MainActor func plansRefusePaths() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
         let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
@@ -120,9 +120,45 @@ struct AttachmentTests {
                                                     body: ByteBuffer(string: #"{"said":"fix this","attachments":["/etc/passwd"]}"#)) { response in
                 response.status
             }
-            #expect(response == .unprocessableContent)
+            #expect(response == .gone)
         }
         #expect(desk.jobs.isEmpty)
+    }
+
+    @Test @MainActor func attachmentAPIStoresAndReadsOpaqueUploads() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
+        let app = Application(router: api.router(owner: "well@example.com"))
+        let bytes = Data([137, 80, 78, 71, 13, 10, 26, 10])
+
+        try await app.test(.router) { client in
+            let uploaded = try await client.execute(uri: "/v1/attachments?name=..%2F..%2Fetc%2Fpasswd.png&source=iphone", method: .post,
+                                                   headers: [.tailscaleUserLogin: "well@example.com", .contentType: "image/png"],
+                                                   body: ByteBuffer(bytes: bytes)) { response in
+                (response.status, try JSONSerialization.jsonObject(with: Data(response.body.readableBytesView)) as? [String: Any])
+            }
+            #expect(uploaded.0 == .created)
+            let metadata = try #require(uploaded.1)
+            let id = try #require(metadata["id"] as? String)
+            #expect(id.count == 16 && metadata["type"] as? String == "image/png" && metadata["name"] as? String == "passwd.png")
+
+            let fetched = try await client.execute(uri: "/v1/attachments/\(id)/content", method: .get,
+                                                   headers: [.tailscaleUserLogin: "well@example.com"]) { response in
+                (response.status, Data(response.body.readableBytesView))
+            }
+            #expect(fetched.0 == .ok && fetched.1 == bytes)
+
+            let oldPath = try await client.execute(uri: "/v1/plans", method: .post,
+                                                   headers: [.tailscaleUserLogin: "well@example.com"],
+                                                   body: ByteBuffer(string: #"{"said":"fix this","attachments":["/home/u/.ssh/id_ed25519"]}"#)) { $0.status }
+            #expect(oldPath == .gone)
+            let unknown = try await client.execute(uri: "/v1/plans", method: .post,
+                                                   headers: [.tailscaleUserLogin: "well@example.com"],
+                                                   body: ByteBuffer(string: #"{"said":"fix this","attachmentIds":["aaaaaaaaaaaaaaaa"]}"#)) { $0.status }
+            #expect(unknown == .unprocessableContent)
+        }
     }
 
     /// A file that's gone (kept too long) leaves the job without it, rather than failing the job.

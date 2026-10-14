@@ -8,6 +8,7 @@ struct Attachment: Identifiable, Equatable {
     enum Kind { case screenshot, clipboardImage, clipboardText, file }
     var kind: Kind
     var file: URL
+    var uploadedID: String?
     var id: URL { file }
 
     var label: String {
@@ -41,6 +42,7 @@ final class Tray {
     /// Why the last capture or paste didn't work, until one does.
     var problem: Problem?
     private(set) var capturing = false
+    @ObservationIgnored var deleteRemote: (String) -> Void = { _ in }
 
     /// Where attachments wait for their jobs: Workspace.prepare copies them into the job's worktree.
     static let folder = LocalRunner.attachments
@@ -66,11 +68,30 @@ final class Tray {
         return "(The user attached \(parts.joined(separator: " and ")).)"
     }
 
-    /// The attachments' paths, for the jobs a request starts (`Desk.ask`).
-    var paths: [String] { items.map(\.file.path) }
+    /// Upload each chip to the selected runner, or the local desk's runner-owned store.
+    func uploadIDs(using runner: Runner?, desk: Desk) async throws -> [String] {
+        var ids: [String] = []
+        for index in items.indices {
+            if let id = items[index].uploadedID { ids.append(id); continue }
+            let attachment = items[index]
+            let data = try Data(contentsOf: attachment.file)
+            let id: String
+            if let runner {
+                id = try await runner.uploadAttachment(data, name: attachment.file.lastPathComponent, source: "mac").id
+            } else {
+                let saved = try AttachmentStore(root: Workspace.root.appending(path: "attachments", directoryHint: .isDirectory), jobs: desk.store, vault: desk.vault)
+                    .upload(data, name: attachment.file.lastPathComponent, source: "mac")
+                id = saved.id
+            }
+            items[index].uploadedID = id
+            ids.append(id)
+        }
+        return ids
+    }
 
     /// The request went out: the chips go, and the files stay for its jobs.
     func clear() {
+        for item in items { try? FileManager.default.removeItem(at: item.file) }
         items = []
         problem = nil
     }
@@ -78,6 +99,7 @@ final class Tray {
     func remove(_ item: Attachment) {
         items.removeAll { $0 == item }
         try? FileManager.default.removeItem(at: item.file)
+        if let id = item.uploadedID { deleteRemote(id) }
     }
 
     /// The camera: drag over part of any screen, or click for a whole one. Without Screen Recording,
@@ -132,7 +154,7 @@ final class Tray {
             for source in panel.urls {
                 let target = Self.folder.appending(path: "\(UUID().uuidString)-\(source.lastPathComponent)")
                 try FileManager.default.copyItem(at: source, to: target)
-                items.append(Attachment(kind: .file, file: target))
+                items.append(Attachment(kind: .file, file: target, uploadedID: nil))
             }
             problem = nil
         } catch { problem = .other("Oby couldn't attach the file: \(error.localizedDescription)") }
@@ -150,7 +172,7 @@ final class Tray {
         let name = kind == .screenshot ? "screenshot" : "clipboard"
         let file = Self.folder.appending(path: "\(name)-\(UUID().uuidString.prefix(6).lowercased()).\(ext)")
         try data.write(to: file)
-        items.append(Attachment(kind: kind, file: file))
+        items.append(Attachment(kind: kind, file: file, uploadedID: nil))
         problem = nil
     }
 }

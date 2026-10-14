@@ -540,15 +540,27 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     /// The user said it out loud (the iPhone's mic), so the thread says "You, by voice". Nil when
     /// typed, and on turns the runner kept.
     var voice: Bool?
+    var attachments: [AttachmentRef]?
 
-    init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String, jobs: [String]? = nil, voice: Bool? = nil) {
+    init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String, jobs: [String]? = nil, voice: Bool? = nil, attachments: [AttachmentRef]? = nil) {
         self.id = id
         self.date = date
         self.who = who
         self.text = text
         self.jobs = jobs
         self.voice = voice
+        self.attachments = attachments
     }
+}
+
+nonisolated struct AttachmentRef: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var name: String
+    var type: String
+    var bytes: Int
+    var width: Int?
+    var height: Int?
+    var pages: Int?
 }
 #endif
 
@@ -560,10 +572,26 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
     var text: String
     var at: Date
     var jobs: [String]?
+    var attachments: [AttachmentRef]?
 
     var turn: Turn {
-        Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text, jobs: (jobs ?? []).isEmpty ? nil : jobs)
+        Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text, jobs: (jobs ?? []).isEmpty ? nil : jobs, attachments: attachments)
     }
+}
+
+nonisolated struct RunnerAttachment: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var name: String
+    var type: String
+    var bytes: Int
+    var sha256: String
+    var width: Int?
+    var height: Int?
+    var pages: Int?
+    var source: String
+    var turn: String?
+    var jobs: [String]
+    var secretHit: Bool
 }
 
 /// One step of Oby's turn as the `step` event sends it (docs/runner-api.md, #304): "Moving Vault
@@ -833,10 +861,34 @@ nonisolated struct Runner: Sendable {
     /// How long a plan's request waits: a turn that moves jobs and answers takes longer than the brain alone (#304).
     static let planTimeout: TimeInterval = 120
 
-    func plan(_ said: String, answer: (question: String, option: String)? = nil, attachments: [String] = []) async throws -> PlanResult {
+    func plan(_ said: String, answer: (question: String, option: String)? = nil, attachmentIDs: [String] = []) async throws -> PlanResult {
         struct Answer: Encodable { var question: String; var option: String }
-        struct Body: Encodable { var said: String; var answer: Answer?; var attachments: [String] }
-        return try await call("POST", "v1/plans", body: Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }, attachments: attachments), timeout: Self.planTimeout)
+        struct Body: Encodable { var said: String; var answer: Answer?; var attachmentIds: [String] }
+        return try await call("POST", "v1/plans", body: Body(said: said, answer: answer.map { Answer(question: $0.question, option: $0.option) }, attachmentIds: attachmentIDs), timeout: Self.planTimeout)
+    }
+
+    func uploadAttachment(_ data: Data, name: String, source: String) async throws -> RunnerAttachment {
+        var components = URLComponents(url: base.appending(path: "v1/attachments"), resolvingAgainstBaseURL: true)!
+        components.queryItems = [URLQueryItem(name: "name", value: name), URLQueryItem(name: "source", value: source)]
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "POST"
+        request.httpBody = data
+        request.timeoutInterval = 60
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        let (body, response) = try await URLSession.shared.data(for: signed(request))
+        try Self.check(response, body)
+        return try Self.decoder.decode(RunnerAttachment.self, from: body)
+    }
+
+    func attachmentContent(_ id: String) async throws -> Data {
+        let request = URLRequest(url: URL(string: "v1/attachments/\(id)/content", relativeTo: base.appending(path: "/"))!)
+        let (body, response) = try await URLSession.shared.data(for: signed(request))
+        try Self.check(response, body)
+        return body
+    }
+
+    func deleteAttachment(_ id: String) async throws {
+        _ = try await send("DELETE", "v1/attachments/\(id)")
     }
 
     /// Stop: the turn Oby is working on ends where it is (`POST /v1/conversation/stop`, #304). A

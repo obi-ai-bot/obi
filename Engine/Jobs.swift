@@ -117,6 +117,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Files the user attached to the request (a screenshot, what they copied), as paths on this
     /// machine. Workspace.prepare copies them into the worktree's .oby/inputs.
     var attachments: [String]?
+    /// Opaque ids of runner-owned user uploads. Paths above remain only for Oby's generated files
+    /// and jobs persisted by older runners.
+    var attachmentIDs: [String]?
     /// Files Oby itself created for an agent, outside the user's attachment folder (review context,
     /// failure briefs). These are set only by Engine code; request paths stay in `attachments`.
     var systemAttachments: [String]?
@@ -1061,17 +1064,25 @@ nonisolated enum Attachments {
     /// that holds a secret stops the job, naming it. Throws when the vault can't be read.
     static func copy(_ job: Job, into worktree: URL, allowedFolder: URL = LocalRunner.attachments, vault: Vault = .shared) throws -> [String]? {
         let leaks = try vault.forAgents()
-        let paths = job.attachments ?? []
+        let store = AttachmentStore(jobs: JobStore(url: Workspace.root.appending(path: "oby.sqlite")), vault: vault)
+        var uploadedNames: [String: String] = [:]
+        let uploaded = try (job.attachmentIDs ?? []).map { id -> String in
+            guard let path = store.url(id)?.path, let attachment = store.attachment(id) else { throw AttachmentStoreError.unknown }
+            uploadedNames[path] = attachment.name
+            return path
+        }
+        let paths = (job.attachments ?? []) + uploaded
         let systemAttachments = Set(job.systemAttachments ?? [])
         guard systemAttachments.isSubset(of: Set(paths)) else {
             throw Shell.Failure(message: "Oby's generated attachments don't match the job's attachments.")
         }
-        _ = try validated(paths.filter { !systemAttachments.contains($0) }, in: allowedFolder)
+        let uploadedSet = Set(uploaded)
+        _ = try validated(paths.filter { !systemAttachments.contains($0) && !uploadedSet.contains($0) }, in: allowedFolder)
         var copied: [String] = []
         for path in paths {
             let file = URL(filePath: path)
             guard let data = try? Data(contentsOf: file) else { continue }
-            let target = worktree.appending(path: ".oby/inputs/\(file.lastPathComponent)")
+            let target = worktree.appending(path: ".oby/inputs/\(uploadedNames[path] ?? file.lastPathComponent)")
             if let text = String(data: data, encoding: .utf8) {
                 try Data(leaks.redact(text).utf8).write(to: target)
             } else {
@@ -1119,6 +1130,14 @@ nonisolated enum Attachments {
             let file = folder.appending(path: name)
             guard let type = fits(file.path), let data = try? Data(contentsOf: file) else { return nil }
             return (data, type)
+        }
+    }
+
+    static func imagePaths(in worktree: URL) -> [String] {
+        let folder = worktree.appending(path: ".oby/inputs")
+        return (((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).sorted()).compactMap { name in
+            let path = folder.appending(path: name).path
+            return fits(path) == nil ? nil : path
         }
     }
 }
@@ -1878,6 +1897,7 @@ nonisolated final class JobStore {
         // The inbox (Engine/Inbox.swift) and the conversation (Engine/Conversation.swift), the same way.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS conversation (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
+        sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         // Settings › Permissions and the saved rules (Engine/Permissions.swift).
         createPermissionTables()
     }
@@ -1980,6 +2000,48 @@ nonisolated final class JobStore {
             rows.append(row)
         }
         return rows
+    }
+}
+
+extension JobStore {
+    nonisolated func save(_ attachment: Attachment) {
+        guard let body = try? JSONEncoder().encode(attachment) else { return }
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO attachments (id, created, body) VALUES (?, ?, ?)", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(statement, 1, attachment.id, -1, transient)
+        sqlite3_bind_double(statement, 2, attachment.created.timeIntervalSince1970)
+        sqlite3_bind_text(statement, 3, String(decoding: body, as: UTF8.self), -1, transient)
+        sqlite3_step(statement)
+    }
+
+    nonisolated func attachment(_ id: String) -> Attachment? {
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT body FROM attachments WHERE id = ?", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, id, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { return nil }
+        return try? JSONDecoder().decode(Attachment.self, from: Data(String(cString: text).utf8))
+    }
+
+    nonisolated func attachments() -> [Attachment] {
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT body FROM attachments ORDER BY created", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        var result: [Attachment] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let text = sqlite3_column_text(statement, 0), let value = try? JSONDecoder().decode(Attachment.self, from: Data(String(cString: text).utf8)) { result.append(value) }
+        }
+        return result
+    }
+
+    nonisolated func deleteAttachment(_ id: String) {
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "DELETE FROM attachments WHERE id = ?", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, id, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_step(statement)
     }
 }
 

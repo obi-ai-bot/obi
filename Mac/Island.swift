@@ -53,6 +53,7 @@ final class IslandModel {
         self.feed = feed
         self.availability = availability
         self.updater = updater
+        tray.deleteRemote = { [weak feed] id in Task { try? await feed?.runner?.deleteAttachment(id) } }
         tab = IslandTab(rawValue: UserDefaults.standard.integer(forKey: Self.tabKey)) ?? .home
     }
 
@@ -78,8 +79,15 @@ final class IslandModel {
 
     func sendChat(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        desk.ask(tray.note.map { "\(text)\n\n\($0)" } ?? text, shown: text, attachments: tray.paths)
-        tray.clear()
+        Task {
+            do {
+                let ids = try await tray.uploadIDs(using: feed.runner, desk: desk)
+                desk.ask(text, shown: text, attachments: ids)
+                tray.clear()
+            } catch {
+                tray.problem = .other("Oby couldn't upload the attachment: \(error.localizedDescription)")
+            }
+        }
     }
 
     func stopChatJob(_ id: String, local: Bool) {
@@ -253,7 +261,7 @@ final class IslandController {
             }
         }
         desk.onReply = { [weak self] text, spoken in self?.replied(text, spoken: spoken) }
-        desk.plansElsewhere = { [weak self] in self?.feed.local ?? false }
+        desk.plansElsewhere = { [weak self] in self?.feed.runner != nil }
         desk.planElsewhere = { [weak self] said, answer in
             guard let self else { throw RunnerError(message: "Oby is closing.") }
             return try await feed.plan(said, answer: answer)

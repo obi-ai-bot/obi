@@ -46,7 +46,7 @@ struct NoDispatchCardTests {
     /// request's attachments, and links them to Oby's turn: no tap, and nothing in the inbox.
     @Test func aPlanStartsItsJobsAndLinksThemToTheTurn() async throws {
         brain.plans = [Self.twoJobs]
-        desk.ask("fix oby #12 and review PR 33", attachments: ["/tmp/shot.png"])
+        desk.ask("fix oby #12 and review PR 33", attachments: ["0123456789abcdef"])
         try await until("the reply comes") { if case .reply = desk.talk { true } else { false } }
         let turn = try #require(desk.turns.last)
         #expect(turn.who == .oby)
@@ -56,7 +56,7 @@ struct NoDispatchCardTests {
         #expect(started.map(\.issue) == [12, nil] && started.map(\.pr) == [nil, 33])
         #expect(started.map(\.branch) == ["oby/fix-12", "oby/review-33"] && started.map(\.account) == ["default", "default"])
         #expect(started.first?.title == "Login screen" && started.first?.files == ["iOS/Home.swift"])
-        #expect(started.map(\.attachments) == [["/tmp/shot.png"], ["/tmp/shot.png"]])
+        #expect(started.map(\.attachmentIDs) == [["0123456789abcdef"], ["0123456789abcdef"]])
         #expect(desk.inbox.isEmpty && JobStore(url: folder.appending(path: "oby.sqlite")).conversation().last?.jobs == started.map(\.id))
         try await until("they run") { started.allSatisfy { desk.job($0.id)?.status == .running } }
 

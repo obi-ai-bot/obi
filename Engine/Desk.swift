@@ -37,6 +37,7 @@ final class Desk {
         /// A model of the job's tool, or nil for Settings › Models.
         var model: String? = nil
         var files: [String]? = nil
+        var attachmentIDs: [String]? = nil
         var startWhen: [StartCondition]? = nil
         /// The user's own words, or nil for the task.
         var request: String? = nil
@@ -539,13 +540,17 @@ final class Desk {
     var cleanupStatus: WorktreeCleanup.Status { cleanup.status }
 
     func cleanWorktrees() async {
-        await cleanup.run(jobs: store.recent(-1)) { [weak self] id in
+        let all = store.recent(-1)
+        await cleanup.run(jobs: all) { [weak self] id in
             guard let self, let job = self.store.job(id) else { return true }
             return job.isActive || self.agents[id] != nil || self.ending.contains(id) || self.finishing.contains(id)
                 || self.finishingChecks.contains(id) || self.cloudRecovering.contains(id) || self.setups[id] != nil
                 || self.afterTurns[id] != nil || self.committingRound.contains(id) || !self.wrappingUp.isEmpty
                 || [job.macCheck?.state, job.appleCheck?.state].contains(where: { $0 == .queued || $0 == .running })
         }
+        let liveJobs = Set(all.filter { $0.isActive || FileManager.default.fileExists(atPath: Workspace.worktree($0.id).path) }.map(\.id))
+        let liveTurns = Set(store.conversation().map(\.id))
+        AttachmentStore(jobs: store, vault: vault).cleanup(liveTurns: liveTurns, liveJobs: liveJobs)
     }
 
     var active: [Job] { jobs.filter(\.isActive) }
@@ -828,7 +833,9 @@ final class Desk {
     /// `converse`, with the jobs Oby's answer started (#269): `POST /v1/plans` answers them.
     func exchange(_ said: String, shown: String? = nil, turns given: [Turn]? = nil, attachments: [String] = []) async -> (talk: Talk, started: [Job]) {
         if Conversation.cancels(said) { stopConversation(); return (.none, []) }
-        let turn = Turn(who: .user, text: shown ?? said)
+        let refs = attachments.compactMap { store.attachment($0)?.reference }
+        let turn = Turn(who: .user, text: shown ?? said, attachments: refs.isEmpty ? nil : refs)
+        if !attachments.isEmpty { try? AttachmentStore(root: Workspace.root.appending(path: "attachments", directoryHint: .isDirectory), jobs: store, vault: vault).link(attachments, toTurn: turn.id) }
         conversationTurn = turn.id
         stopRequested = false
         let talk = await plan(said, turns: given, attachments: attachments) { !Task.isCancelled && !self.stopRequested }
@@ -932,6 +939,17 @@ final class Desk {
         var reads = JobReads()
         for step in 0..<Self.mostSteps {
             var context = brainContext(turns: given ?? turns.filter { $0.id != pending })
+            if step == 0 && !attachments.isEmpty {
+                let attachmentStore = AttachmentStore(jobs: store, vault: vault)
+                context.attachments = attachments.compactMap { id in
+                    guard let metadata = attachmentStore.attachment(id) else { return nil }
+                    let mayReadImage = metadata.type.hasPrefix("image/") && metadata.bytes <= Attachments.maxImageBytes
+                    let mayReadPDF = metadata.type == "application/pdf" && metadata.bytes <= 10 * 1024 * 1024 && (metadata.pages ?? 101) <= 100
+                    let data = (mayReadImage || mayReadPDF) ? try? attachmentStore.content(id).1 : nil
+                    return BrainAttachment(name: metadata.name, type: metadata.type, bytes: metadata.bytes,
+                                           width: metadata.width, height: metadata.height, pages: metadata.pages, data: data)
+                }
+            }
             context.orchestrator = isOrchestratorTurn
             if isOrchestratorTurn {
                 context.orchestratorContext = orchestratorContext
@@ -1296,7 +1314,7 @@ final class Desk {
             for (index, dispatch) in plan.dispatches.enumerated() {
                 let files = await claims[index].value
                 do {
-                    made.append(try make(dispatch, said: said, states: &states, files: files, attachments: attachments))
+                    made.append(try make(dispatch, said: said, states: &states, files: files, attachments: [], attachmentIDs: attachments))
                 } catch {
                     return .reply(error.localizedDescription)
                 }
@@ -1439,7 +1457,7 @@ final class Desk {
     /// plan spreads out. Throws, with what to tell the user, when it can't be made: the account it
     /// names isn't signed in, none has room, or what it waits for can't be.
     private func make(_ dispatch: Plan.Dispatch, said: String, states: inout [AccountState], files: [String]?,
-                      attachments: [String]) throws -> (job: Job, route: AccountStore.Route?, held: [AccountState]) {
+                      attachments: [String], attachmentIDs: [String] = []) throws -> (job: Job, route: AccountStore.Route?, held: [AccountState]) {
         let agent = dispatch.agent == "auto" ? nil : dispatch.agent
         // A job waiting for an account's room runs on that account (#216).
         let waitsOn = dispatch.startWhen?.compactMap(\.account).first
@@ -1482,6 +1500,7 @@ final class Desk {
         job.files = files
         job.batch = conversationTurn ?? id
         job.attachments = attachments.isEmpty ? nil : attachments
+        job.attachmentIDs = attachmentIDs.isEmpty ? nil : attachmentIDs
         // The mode the user named ("plan first", #134), or Settings › Permissions' default when it queues.
         job.mode = dispatch.mode
         let conditions = (dispatch.startWhen ?? []) + (held.isEmpty ? [] : [StartCondition.room(agent: agent)])
@@ -1554,6 +1573,8 @@ final class Desk {
     /// like a plan (`Plan.problems`), routed unless it names an account, with the client's
     /// branch, files, model and what it waits for. For oby-mcp and scripts.
     func dispatch(_ new: NewJob) async throws -> Job {
+        do { _ = try AttachmentStore(jobs: store, vault: vault).validate(new.attachmentIDs ?? []) }
+        catch { throw Shell.Failure(message: error.localizedDescription) }
         if repos.isEmpty { await refresh() }
         guard let kind = Plan.Kind(rawValue: new.kind) else {
             throw Shell.Failure(message: "kind is one of " + Plan.Kind.allCases.map(\.rawValue).joined(separator: ", ") + ".")
@@ -1581,7 +1602,7 @@ final class Desk {
         else if let issue = new.issue { files = await issueFiles(new.repo, issue) }
         else { files = nil }
         var states = accounts.accounts
-        var (job, route, _) = try make(dispatch, said: new.request ?? new.task, states: &states, files: files, attachments: [])
+        var (job, route, _) = try make(dispatch, said: new.request ?? new.task, states: &states, files: files, attachments: [], attachmentIDs: new.attachmentIDs ?? [])
         if let branch = new.branch?.trimmingCharacters(in: .whitespaces), !branch.isEmpty {
             guard Plan.isBranchName(branch) else { throw Shell.Failure(message: "That isn't a branch name Oby can create.") }
             job.branch = branch
@@ -1601,6 +1622,7 @@ final class Desk {
     func enqueue(_ job: Job, why: String? = nil) -> Job {
         if let why { handoffs[job.id, default: []].append(why) }
         var job = job
+        if let ids = job.attachmentIDs { try? AttachmentStore(jobs: store, vault: vault).link(ids, toJob: job.id) }
         // Settings › Permissions' default, unless the plan or the user chose one.
         job.mode = job.mode ?? defaultMode
         job.phase = .prepare

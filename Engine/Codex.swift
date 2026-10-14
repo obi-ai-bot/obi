@@ -71,9 +71,10 @@ final class CodexAgent: AgentRun {
                 onEvent(.session(thread))
                 // Whether Tetrix is connected (Engine/TetrixUse.swift), alongside the turn: an older Codex doesn't say.
                 Task { if let on = (try? await server.call("mcpServerStatus/list", [:])).flatMap(TetrixUse.codexStatus) { onEvent(.tetrix(.connected(on))) } }
+                let images = resume == nil ? Attachments.imagePaths(in: worktree) : []
                 let turn = try await server.call("turn/start", CodexRPC.turnStart(thread: thread, prompt: prompt,
                                                                                  model: model ?? AgentModels.value("codex", "model"),
-                                                                                 effort: effort ?? AgentModels.value("codex", "effort")))
+                                                                                 effort: effort ?? AgentModels.value("codex", "effort"), images: images))
                 self.turn = (turn["turn"] as? [String: Any])?["id"] as? String
             } catch {
                 finish(summary: "Codex couldn't start: \(error.localizedDescription)", failed: true)
@@ -387,8 +388,10 @@ nonisolated enum CodexRPC {
     }
 
     /// The task, with the model and effort chosen in Settings › Models (empty means Codex's own default).
-    static func turnStart(thread: String, prompt: String, model: String, effort: String) -> [String: Any] {
-        var params: [String: Any] = ["threadId": thread, "input": [text(prompt)]]
+    static func turnStart(thread: String, prompt: String, model: String, effort: String, images: [String] = []) -> [String: Any] {
+        var input: [[String: Any]] = [text(prompt)]
+        input += images.map { ["type": "localImage", "path": $0] }
+        var params: [String: Any] = ["threadId": thread, "input": input]
         if !model.isEmpty { params["model"] = model }
         if !effort.isEmpty { params["effort"] = effort }
         return params

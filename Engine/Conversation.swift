@@ -22,14 +22,17 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     /// The user said it out loud (the Mac's talk key), so the window says "You, by voice". Nil when
     /// typed, and on turns the runner kept.
     var voice: Bool?
+    /// Files the user attached to this turn, kept by the runner and shared by every client.
+    var attachments: [AttachmentRef]?
 
-    init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String, jobs: [String]? = nil, voice: Bool? = nil) {
+    init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String, jobs: [String]? = nil, voice: Bool? = nil, attachments: [AttachmentRef]? = nil) {
         self.id = id
         self.date = date
         self.who = who
         self.text = text
         self.jobs = jobs
         self.voice = voice
+        self.attachments = attachments
     }
 }
 

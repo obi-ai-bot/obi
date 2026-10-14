@@ -430,7 +430,17 @@ One turn of the conversation with Oby: words become work that starts, a question
 {"said": "Review oby PR #33"}
 ```
 
-`attachments`, when present, is a list of file paths in the runner's own attachments folder. The runner resolves `..` and symlinks before accepting them; a path outside that folder returns `422` naming the refused file. Accepted paths are checked again before they are copied into the job's `.oby/inputs`, including jobs restored after a restart.
+`attachmentIds`, when present, is a list of up to 10 opaque ids returned by `POST /v1/attachments`. The ids must belong to this runner and must not already be linked to a turn (`422` otherwise). The old `attachments` path field returns `410`: `Update Oby: attachments are uploaded now.`
+
+### Attachments
+
+Uploads are stored by the runner under an opaque 16-character lowercase hex id; client file names are metadata only. A file is limited to 25 MB. The runner sniffs its media type, scans text against the vault and stores text with matching secrets redacted. A binary file that contains a vault secret is refused with `422` and the secret's name, never its value.
+
+`POST /v1/attachments?name=<urlencoded>&source=mac|iphone` takes raw bytes with their media type in `Content-Type`, returning `201` and the `Attachment` object. It returns `413` over 25 MB, `415` for an empty body and `422` for an invalid source or a binary vault-secret match. Owners may upload at most 60 files per hour.
+
+`GET /v1/attachments/{id}` returns metadata. `GET /v1/attachments/{id}/content` returns the bytes and their sniffed `Content-Type`. `GET /v1/attachments/{id}/thumbnail` returns a JPEG thumbnail where the runner has an image decoder, otherwise `404`. `DELETE /v1/attachments/{id}` deletes an unlinked upload; it returns `409` once a turn or job uses it.
+
+An `Attachment` has `id`, `created`, `name`, `type`, `bytes`, `sha256`, optional `width`, `height` and `pages`, `source`, optional `turn`, `jobs`, and `secretHit` fields. The filename never forms part of its disk path.
 
 To answer the brain's question, send the original words with the answer:
 
@@ -530,13 +540,13 @@ Starts a job described whole, for clients that know the work already (oby-mcp, s
 ```json
 {"job": {"repo": "deskree-inc/oby", "kind": "fix", "task": "Fix the login screen's empty state (#12).", "issue": 12,
          "title": "Login screen empty state", "account": "Deskree", "rounds": 4, "check": "swift test",
-         "files": ["iOS/Home.swift"], "startWhen": [{"pr": 205, "is": "merged"}]}}
+         "files": ["iOS/Home.swift"], "attachmentIds": ["9c1e000000000001"], "startWhen": [{"pr": 205, "is": "merged"}]}}
 ```
 
 - `repo` (a known repository), `kind` (`review`, `fix`, `build`, `test` or `investigate`) and `task` (1 to 2,000 characters) are required.
 - `pr` or `issue` says what it's about; both only for an issue's work started from a pull request's head (a `fix`, `build` or `test`). `title` is 1 to 60 characters, one line.
 - `account`: an account by id or name, or `auto` (or left out) for routing (Routing, under Account); `agent` (`claude` or `codex`) keeps routing to one tool. The job runs on the account named, or on the one its `startWhen` waits on.
-- `branch` (a name git accepts; left out, Oby names one, like `oby/fix-12`), `base` (left out, the repository's default branch), `rounds` (1 to 10; 1 unless given), `check` (one line of up to 200 characters), `model` (a model of the job's tool, like `claude-fable-5-1`; left out, Settings › Models), `files` (up to 30 paths inside the repository; `[]` claims none; left out, the issue's), `startWhen` (Start when, above; left out or `[]`, it starts at once), `request` (the user's own words; left out, the task), `mode` (`ask`, `acceptEdits`, `plan` or `bypass`, Permission modes below; left out, Settings › Permissions' default; anything else is `422`). A job the brain plans gets the mode the user named ("plan first") the same way, else the default.
+- `branch` (a name git accepts; left out, Oby names one, like `oby/fix-12`), `base` (left out, the repository's default branch), `rounds` (1 to 10; 1 unless given), `check` (one line of up to 200 characters), `model` (a model of the job's tool, like `claude-fable-5-1`; left out, Settings › Models), `files` (up to 30 paths inside the repository; `[]` claims none; left out, the issue's), `attachmentIds` (up to 10 uploaded ids; left out, none), `startWhen` (Start when, above; left out or `[]`, it starts at once), `request` (the user's own words; left out, the task), `mode` (`ask`, `acceptEdits`, `plan` or `bypass`, Permission modes below; left out, Settings › Permissions' default; anything else is `422`). A job the brain plans gets the mode the user named ("plan first") the same way, else the default.
 
 Returns the queued `Job` (`201`), routed and claimed as a planned one, as a `job` event too. `422` with why when something's wrong: an unknown repository or kind, an empty task, an account that isn't signed in, a path outside the repository, a model the tool doesn't have, or `startWhen` that can't be (Start when). `410 Gone` for a body from before #269, a plan's draft (`id` with no `repo`, `kind` and `task`): `Oby starts planned work by itself now`.
 
