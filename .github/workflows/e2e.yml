@@ -31,6 +31,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: obi
+          # Nothing later runs an authenticated git command, and the job runs code from
+          # obi-sphere's dev (its fixture check, its pnpm dependencies): git keeps no token.
+          persist-credentials: false
 
       # obi-sphere is private: checking it out needs a read-only token for it, kept as the
       # repository secret OBI_SPHERE_READ_TOKEN (contents: read on obi-ai-bot/obi-sphere only).
@@ -63,13 +66,17 @@ jobs:
 
       # obi-sphere's server keeps copies of this repository's e2e fixtures; they must still match
       # obi's (this checkout). The check is obi-sphere's script and needs only Node (set up above).
-      # Until the server is in obi-sphere's dev, the script isn't there: the step says so and passes.
+      # Until the server is in obi-sphere's dev (no server/ folder), the step says so and passes.
+      # Once server/ is there, the script must be too: a missing script fails rather than skipping.
       - name: obi-sphere's copies of the e2e fixtures match obi's
         run: |
-          if [ -f obi-sphere/server/scripts/check-fixtures.mjs ]; then
-            OBI_DIR=obi node obi-sphere/server/scripts/check-fixtures.mjs
+          if [ ! -d obi-sphere/server ]; then
+            echo "::notice::obi-sphere/server/ is not in obi-sphere's dev yet: the fixture comparison is skipped."
+          elif [ ! -f obi-sphere/server/scripts/check-fixtures.mjs ]; then
+            echo "::error::obi-sphere/server/ is in obi-sphere's dev but server/scripts/check-fixtures.mjs is not: the fixture comparison can't run."
+            exit 1
           else
-            echo "::notice::obi-sphere/server/scripts/check-fixtures.mjs is not in obi-sphere's dev yet: the fixture comparison is skipped."
+            OBI_DIR=obi node obi-sphere/server/scripts/check-fixtures.mjs
           fi
 
       # obid is Rust (core/): `make e2e` runs `cargo build -p obid` in it before the harness.
