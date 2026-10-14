@@ -248,19 +248,7 @@ private struct ConversationColumn: View {
                         }
                         ForEach(days) { day in
                             ForEach(Array(day.turns.enumerated()), id: \.element.id) { index, turn in
-                                TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? day.turns[index - 1] : nil), jobs: ConversationModel.jobs(of: turn, among: desk.jobs + feed.jobs),
-                                        account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
-                                        isLocal: { id in desk.jobs.contains { $0.id == id } },
-                                        loadAttachmentThumbnail: { id in try await attachmentThumbnail(id, for: turn) },
-                                        loadAttachmentContent: { id in try await attachmentContent(id, for: turn) },
-                                        onOpenJob: onOpenJob,
-                                        onStopJob: { model.stopChatJob($0, local: $1) },
-                                        showTime: ConversationModel.showsTime(turn, after: index > 0 ? day.turns[index - 1] : nil),
-                                        steps: conversation.steps(under: turn, in: turns))
-                                    .task(id: turn.jobs ?? []) {
-                                        // A runner's job older than its list: fetched, so its card shows.
-                                        for id in ConversationModel.missing(of: turn, among: desk.jobs + feed.jobs) { try? await feed.fetch(id) }
-                                    }
+                                turnRow(turn, after: index > 0 ? day.turns[index - 1] : nil, in: turns)
                                 ForEach(entries.filter { anchors[$0.id] == .some(turn.id) }) { entry in
                                     decision(entry, active: oldest == entry.id)
                                 }
@@ -321,6 +309,28 @@ private struct ConversationColumn: View {
         }
         guard let runner = feed.runner else { throw RunnerError(message: "The runner isn't connected.") }
         return try await runner.attachmentContent(id)
+    }
+
+    private func turnRow(_ turn: Turn, after previous: Turn?, in turns: [Turn]) -> some View {
+        let jobs = ConversationModel.jobs(of: turn, among: desk.jobs + feed.jobs)
+        let grouped = ConversationModel.grouped(turn, after: previous)
+        let showTime = ConversationModel.showsTime(turn, after: previous)
+        let steps = conversation.steps(under: turn, in: turns)
+        let account: (Job, Bool) -> String = { job, local in
+            LiveView.account(of: job, local: local, desk: desk, feed: feed)
+        }
+        let isLocal: (String) -> Bool = { id in desk.jobs.contains { $0.id == id } }
+        let stopJob: (String, Bool) -> Void = { job, local in model.stopChatJob(job, local: local) }
+        let loadThumbnail: (String) async throws -> Data = { id in try await self.attachmentThumbnail(id, for: turn) }
+        let loadContent: (String) async throws -> Data = { id in try await self.attachmentContent(id, for: turn) }
+
+        return TurnRow(turn: turn, grouped: grouped, jobs: jobs, account: account, isLocal: isLocal,
+                       onOpenJob: onOpenJob, onStopJob: stopJob, showTime: showTime, steps: steps,
+                       loadAttachmentThumbnail: loadThumbnail, loadAttachmentContent: loadContent)
+            .task(id: turn.jobs ?? []) {
+                // A runner's job older than its list: fetched, so its card shows.
+                for id in ConversationModel.missing(of: turn, among: desk.jobs + feed.jobs) { try? await feed.fetch(id) }
+            }
     }
 
     private func permission(_ record: RunnerFeed.PermissionRecord, active: Bool) -> some View {
