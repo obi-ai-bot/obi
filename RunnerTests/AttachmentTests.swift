@@ -125,6 +125,40 @@ struct AttachmentTests {
         #expect(desk.jobs.isEmpty)
     }
 
+    @Test @MainActor func plansRefuseForeignOrUsedIds() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
+        let app = Application(router: api.router(owner: "well@example.com"))
+        let headers: HTTPFields = [.tailscaleUserLogin: "well@example.com"]
+        let attachment = try api.attachmentStore.upload(png, name: "screen.png", source: "iphone")
+        try api.attachmentStore.link([attachment.id], toTurn: "earlier-turn")
+
+        try await app.test(.router) { client in
+            let unknown = try await client.execute(uri: "/v1/plans", method: .post, headers: headers,
+                                                   body: ByteBuffer(string: #"{"said":"look","attachmentIds":["aaaaaaaaaaaaaaaa"]}"#)) { $0.status }
+            #expect(unknown == .unprocessableContent)
+            let used = try await client.execute(uri: "/v1/plans", method: .post, headers: headers,
+                                                body: ByteBuffer(string: #"{"said":"look","attachmentIds":["\#(attachment.id)"]}"#)) { $0.status }
+            #expect(used == .unprocessableContent)
+        }
+        #expect(desk.jobs.isEmpty)
+    }
+
+    @Test func attachmentsCopyResolvesOpaqueIdsAndSanitizesNames() throws {
+        let (worktree, _, _) = try worktree()
+        defer { try? FileManager.default.removeItem(at: worktree.deletingLastPathComponent()) }
+        let jobs = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))
+        let store = AttachmentStore(jobs: jobs)
+        let value = try store.upload(png, name: "../../etc/passwd.png", source: "iphone")
+        defer { try? store.delete(value.id) }
+        var attached = job(agent: "codex", attachments: nil)
+        attached.attachmentIDs = [value.id]
+        #expect(try Attachments.copy(attached, into: worktree) == [try #require(store.url(value.id)?.path)])
+        #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/passwd.png")) == png)
+    }
+
     @Test @MainActor func attachmentAPIStoresAndReadsOpaqueUploads() async throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
