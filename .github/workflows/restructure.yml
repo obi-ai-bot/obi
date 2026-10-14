@@ -2,11 +2,13 @@
 # Watch apps build from their new places, `swift test` still passes for the frozen engine, and no
 # folder differs from another only by case. This workflow checks the first and the last on every
 # pull request that moves or touches those folders: it builds the three apps unsigned from wherever
-# the project is (Oby.xcodeproj at the root before the move, apps/Oby.xcodeproj after it), checks
-# that the Mac and iPhone apps bundle the character, builds the Swift package with its tests
-# (`swift build --build-tests`: the targets whose `path:` moves still compile), and lists folders
-# that differ only by case. It runs no tests: apple.yml runs the apps' tests and runner-linux.yml
-# runs `swift test`.
+# the project is (Oby.xcodeproj at the root before the move, apps/Oby.xcodeproj after it), builds
+# the Mac and iPhone test targets (MacTests, iOSTests) with `build-for-testing` so a moved test
+# folder still compiles, checks that the Mac and iPhone apps bundle the character, builds the Swift
+# package with its tests (`swift build --build-tests`: the targets whose `path:` moves still
+# compile), and lists folders that differ only by case. It runs no tests. The workflows that do,
+# apple.yml (the apps' tests) and runner-linux.yml (`swift test`), are disabled in this
+# repository's Actions, so no CI runs the apps' tests or `swift test`: they are run locally.
 # This file belongs to the repository restructure workstream.
 name: Restructure
 
@@ -115,6 +117,18 @@ jobs:
           set -o pipefail
           xcodebuild -project "$PROJECT" -scheme ObyWatch -destination 'generic/platform=watchOS Simulator' \
             -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO build | xcbeautify --renderer github-actions
+
+      - name: Mac test target (MacTests) compiles
+        run: |
+          set -o pipefail
+          xcodebuild -project "$PROJECT" -scheme Oby -destination 'generic/platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO build-for-testing | xcbeautify --renderer github-actions
+
+      - name: iPhone test target (iOSTests) compiles
+        run: |
+          set -o pipefail
+          xcodebuild -project "$PROJECT" -scheme ObyPhone -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO build-for-testing | xcbeautify --renderer github-actions
 
       - name: The Mac and iPhone apps bundle the character
         run: |
