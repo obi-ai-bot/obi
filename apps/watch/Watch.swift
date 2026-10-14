@@ -7,7 +7,7 @@ import WidgetKit
 
 /// The watch's view of the runner, through the iPhone (apps/ios/app/WatchRelay.swift): the jobs the
 /// phone keeps here, and the requests it carries out. What they say to each other is in
-/// Shared/WatchWire.swift. With the phone out of reach, a paired watch calls the runner's Watch
+/// apps/shared/WatchWire.swift. With the phone out of reach, a paired watch calls the runner's Watch
 /// API itself (apps/watch/WatchLink.swift), and goes back to the phone once it's in reach again.
 @Observable
 final class Watch: NSObject {
@@ -743,7 +743,7 @@ final class Watch: NSObject {
         await uploadWidgetToken()
     }
 
-    /// The complications' token, until the runner has accepted the latest one (Shared/WidgetToken.swift).
+    /// The complications' token, until the runner has accepted the latest one (apps/shared/WidgetToken.swift).
     private func uploadWidgetToken() async {
         guard let link else { return }
         Glance.appTopic = Bundle.main.bundleIdentifier ?? ""

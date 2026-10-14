@@ -149,7 +149,7 @@ struct HomeView: View {
                     ReadingText(reply, weight: .medium, alignment: centered ? .center : .leading)
                     Text("Type a task below.").font(.subheadline).foregroundStyle(.secondary)
                 default:
-                    // The same line as the Mac's notch and island (Shared/JobList.swift).
+                    // The same line as the Mac's notch and island (apps/shared/JobList.swift).
                     Text(Summary.line(working: phone.active.count(where: \.isWorking), waiting: phone.active.count(where: \.isWaiting), needs: needs))
                         .font(.title3.weight(.semibold))
                     Text(subline).font(.subheadline).foregroundStyle(.secondary)

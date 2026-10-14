@@ -3,7 +3,7 @@ import Testing
 @testable import Oby
 
 /// The steps of Oby's turn on the Mac (#304): the runner's `step` event the feed follows, and the
-/// list under the user's message (the cases are in apps/ios/tests/StepsTests.swift; Shared/ is one code).
+/// list under the user's message (the cases are in apps/ios/tests/StepsTests.swift; apps/shared/ is one code).
 @MainActor
 struct MacStepsTests {
     @Test func theStepEventReachesTheThread() throws {

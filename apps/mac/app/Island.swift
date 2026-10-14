@@ -100,7 +100,7 @@ final class IslandModel {
     /// Clear done would take the job from the island (`Job.settled`).
     func clears(_ job: Job) -> Bool { job.clearable(among: desk.jobs + feed.jobs) }
 
-    /// The one line the iPhone's Home says too (Shared/JobList.swift): who's working, and what
+    /// The one line the iPhone's Home says too (apps/shared/JobList.swift): who's working, and what
     /// needs you among the jobs listed.
     var summary: String {
         Summary.line(working: working, waiting: waiting, needs: NeedsYou.line((desk.jobs + feed.jobs).filter { lists($0) }))
@@ -989,7 +989,7 @@ private struct OpenIsland: View {
         }
     }
 
-    /// The jobs in one line, as the iPhone's Home and the closed notch say it (Shared/JobList.swift).
+    /// The jobs in one line, as the iPhone's Home and the closed notch say it (apps/shared/JobList.swift).
     /// What you said and what Oby answered are in the thread below.
     @ViewBuilder private var header: some View {
         VStack(alignment: .leading, spacing: 4) {

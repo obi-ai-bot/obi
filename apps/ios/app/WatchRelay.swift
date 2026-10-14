@@ -5,7 +5,7 @@ import UserNotifications
 import WatchConnectivity
 
 /// The watch can't reach the tailnet, so this phone stands between it and the runner
-/// (Shared/WatchWire.swift says what they tell each other). It keeps the jobs on the watch as the
+/// (apps/shared/WatchWire.swift says what they tell each other). It keeps the jobs on the watch as the
 /// WatchConnectivity application context, on every change, and carries out what the watch asks
 /// (plan, dispatch, publish, a message to a job) as the app itself does. iOS wakes Oby in the
 /// background for a message from the watch, so this works with the phone in a pocket.
