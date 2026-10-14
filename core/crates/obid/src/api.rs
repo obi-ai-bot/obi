@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -40,8 +40,14 @@ pub struct Cleanup {
 impl Cleanup {
     /// Measures `home/worktrees` now. It walks the whole tree, so call it off the async threads.
     pub fn measure(home: &Path) -> Cleanup {
+        Cleanup::measure_unless(home, &AtomicBool::new(false))
+    }
+
+    /// [`Cleanup::measure`], that gives up as soon as `cancelled` is set (obid was told to stop
+    /// while it measured); the bytes are then what it had counted, and nobody should use them.
+    pub fn measure_unless(home: &Path, cancelled: &AtomicBool) -> Cleanup {
         let path = worktrees(home);
-        let bytes = AtomicU64::new(disk_usage(&path));
+        let bytes = AtomicU64::new(disk_usage_unless(&path, cancelled));
         Cleanup { path, bytes }
     }
 
@@ -353,10 +359,18 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
 /// The disk space allocated under `path`, each file counted once however many links it has; 0 when
 /// it doesn't exist. Symbolic links are counted as themselves, never followed.
 pub fn disk_usage(path: &Path) -> u64 {
+    disk_usage_unless(path, &AtomicBool::new(false))
+}
+
+/// [`disk_usage`], stopping early once `cancelled` is set.
+fn disk_usage_unless(path: &Path, cancelled: &AtomicBool) -> u64 {
     let mut seen = std::collections::HashSet::new();
     let mut total = 0u64;
     let mut stack = vec![path.to_path_buf()];
     while let Some(next) = stack.pop() {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
         let Ok(meta) = std::fs::symlink_metadata(&next) else {
             continue;
         };

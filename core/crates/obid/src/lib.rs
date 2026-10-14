@@ -9,6 +9,7 @@ pub mod token;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use config::Config;
@@ -82,6 +83,10 @@ fn keep_private(folder: &std::path::Path) -> std::io::Result<()> {
 
 /// Serves the API on `config.listen` until `stop` resolves, then lets requests under way finish
 /// for at most [`SHUTDOWN_GRACE`]. `ready` is told the address once obid is listening.
+///
+/// Before it answers, obid measures `home/worktrees` (`status.cleanup.bytes`), which walks every
+/// worktree and can take a while. A `stop` that resolves meanwhile ends that walk and returns at
+/// once, without `ready` being told anything: a stop while starting is a stop, not a wait.
 pub async fn serve(
     config: Config,
     token: String,
@@ -97,9 +102,22 @@ pub async fn serve(
         .map_err(|source| StartError::Listen { address, source })?;
     let host = gethostname::gethostname().to_string_lossy().into_owned();
     let home = config.home.clone();
-    let cleanup = tokio::task::spawn_blocking(move || api::Cleanup::measure(&home))
-        .await
-        .map_err(|e| StartError::Serve(std::io::Error::other(e)))?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let measuring = {
+        let cancelled = cancelled.clone();
+        tokio::task::spawn_blocking(move || api::Cleanup::measure_unless(&home, &cancelled))
+    };
+    let mut stop = Box::pin(stop);
+    let cleanup = tokio::select! {
+        // A stop that is there already wins over a measurement that is done too.
+        biased;
+        () = &mut stop => {
+            cancelled.store(true, Ordering::Relaxed);
+            tracing::info!("stopped while starting");
+            return Ok(());
+        }
+        measured = measuring => measured.map_err(|e| StartError::Serve(std::io::Error::other(e)))?,
+    };
     let shared = Arc::new(api::Shared {
         config,
         token,
