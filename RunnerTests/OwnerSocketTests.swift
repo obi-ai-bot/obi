@@ -42,7 +42,11 @@ struct OwnerSocketTests {
     @Test func ownerLoginWorksOnlyOverTheUnixSocket() async throws {
         let root = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: root) }
-        let socket = root.appending(path: "run/owner.sock")
+        // Darwin's sockaddr_un path limit is 104 bytes; temporaryFolder() can already be long enough
+        // that appending run/owner.sock makes NIO fail to bind without creating the socket.
+        let socketRoot = URL(fileURLWithPath: "/tmp/oby-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: socketRoot) }
+        let socket = socketRoot.appending(path: "run/owner.sock")
         try FileManager.default.createDirectory(at: socket.deletingLastPathComponent(), withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         let desk = Desk(accounts: AccountStore(root: root), store: JobStore(url: root.appending(path: "oby.sqlite")))
