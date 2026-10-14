@@ -78,7 +78,7 @@ Settings › Your Mac (`apps/ios/app/ConnectScreen.swift`) links the Mac: its na
 - **At home,** it looks for the Mac's gateway with Bonjour (`_oby._tcp`, the service named after the Mac), resolves its address and talks to it on the local network. `apps/ios/app/Info.plist` declares the service and the local-network use.
 - **Away,** it goes through the tunnel, `https://<hostname>`.
 
-The switch between the two keeps the conversation: only the connection is made anew (`Shared/RemoteRoute.swift` picks the route; `Phone.base` is where the calls go). Unlink, and the iPhone is back on the runner.
+The switch between the two keeps the conversation: only the connection is made anew (`apps/shared/RemoteRoute.swift` picks the route; `Phone.base` is where the calls go). Unlink, and the iPhone is back on the runner.
 
 ## Limits and what's next
 
