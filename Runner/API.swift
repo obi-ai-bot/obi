@@ -153,7 +153,7 @@ final class API {
         router.post("v1/notifications") { request, _ in try await self.notifications(try await Self.decode(NotificationToken.self, from: request)) }
         router.get("v1/settings/models") { _, _ in Self.json(Models.current) }
         router.put("v1/settings/models") { request, _ in try Self.change(try await Self.decode(Models.self, from: request)) }
-        router.get("v1/settings/models/options") { _, _ in await Self.options() }
+        router.get("v1/settings/models/options") { _, _ in await Self.options(cursor: { await self.cursorModels() }) }
         router.get("v1/settings/jobs") { _, _ in await self.jobSettings() }
         router.put("v1/settings/jobs") { request, _ in try await self.change(try await Self.decode(JobSettings.self, from: request)) }
         router.get("v1/settings/permissions") { _, _ in await self.permissionSettings() }
@@ -806,6 +806,13 @@ final class API {
         guard [models.codex.model, models.codex.effort, codexComplexEffort].allSatisfy({ $0.wholeMatch(of: /[A-Za-z0-9._-]*/) != nil }) else {
             throw APIError(.unprocessableContent, "That isn't a Codex model and effort.")
         }
+        // Cursor's model goes to `--model` as one argument: an id, never an option.
+        if let cursor = models.cursor {
+            guard cursor.model.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._:-]{0,99}/) != nil else {
+                throw APIError(.unprocessableContent, "That isn't a Cursor model.")
+            }
+            UserDefaults.standard.set(cursor.model, forKey: "cursor.model")
+        }
         for (agent, choice) in [("claude", models.claude), ("codex", models.codex)] {
             UserDefaults.standard.set(choice.model, forKey: "\(agent).model")
             UserDefaults.standard.set(choice.effort, forKey: "\(agent).effort")
@@ -817,12 +824,26 @@ final class API {
         return json(Models.current)
     }
 
-    static func options() async -> Response {
+    /// `cursor`: the models of the first signed-in Cursor account, from `cursor-agent models`
+    /// (none when no Cursor account is signed in). Cursor has no effort, so its list is empty.
+    static func options(cursor: () async -> [CursorModel] = { [] }) async -> Response {
+        json(await optionsList(cursor: cursor))
+    }
+
+    static func optionsList(cursor: () async -> [CursorModel]) async -> Options {
         let claude = AgentModels.claude.map { Options.Model(id: $0.0, name: $0.1) }
         let codex = ((try? await CodexAgent.models(home: nil)) ?? []).map { Options.Model(id: $0.id, name: $0.name, efforts: $0.efforts) }
         let codexEfforts = Array(Set(codex.flatMap { $0.efforts ?? [] })).sorted()
-        return json(Options(claude: .init(models: claude, efforts: AgentModels.claudeEfforts, complexEfforts: AgentModels.claudeEfforts),
-                            codex: .init(models: codex, efforts: codexEfforts, complexEfforts: codexEfforts)))
+        let cursorModels = await cursor().map { Options.Model(id: $0.id, name: $0.name) }
+        return Options(claude: .init(models: claude, efforts: AgentModels.claudeEfforts, complexEfforts: AgentModels.claudeEfforts),
+                       codex: .init(models: codex, efforts: codexEfforts, complexEfforts: codexEfforts),
+                       cursor: .init(models: cursorModels, efforts: [], complexEfforts: []))
+    }
+
+    /// The models of the first signed-in Cursor account.
+    func cursorModels() async -> [CursorModel] {
+        guard let account = desk.accounts.accounts.first(where: { $0.account.agent == "cursor" && $0.signedIn })?.account else { return [] }
+        return await CursorModels.list(home: account.home)
     }
 }
 
@@ -1011,12 +1032,20 @@ struct Models: Codable {
         var complexEffort: String? = nil
     }
 
+    /// Cursor has a model and no effort.
+    struct CursorChoice: Codable {
+        var model: String
+    }
+
     var claude: Choice
     var codex: Choice
+    /// Older clients leave it out, and the value is kept.
+    var cursor: CursorChoice? = nil
 
     static var current: Models {
         Models(claude: Choice(model: AgentModels.value("claude", "model"), effort: AgentModels.value("claude", "effort"), complexEffort: AgentModels.value("claude", "complexEffort")),
-               codex: Choice(model: AgentModels.value("codex", "model"), effort: AgentModels.value("codex", "effort"), complexEffort: AgentModels.value("codex", "complexEffort")))
+               codex: Choice(model: AgentModels.value("codex", "model"), effort: AgentModels.value("codex", "effort"), complexEffort: AgentModels.value("codex", "complexEffort")),
+               cursor: CursorChoice(model: AgentModels.value("cursor", "model")))
     }
 }
 
@@ -1035,6 +1064,7 @@ struct Options: Encodable {
 
     var claude: Tool
     var codex: Tool
+    var cursor: Tool
 }
 
 /// What `POST /v1/stop-all` answers: how many jobs it stopped, and those jobs.

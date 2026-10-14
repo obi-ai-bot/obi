@@ -77,3 +77,66 @@ nonisolated enum CursorConfig {
         return ((config?["permissions"] as? [String: Any])?["allow"] as? [Any] ?? []).compactMap { $0 as? String }
     }
 }
+
+/// A model a Cursor account offers.
+nonisolated struct CursorModel: Equatable, Sendable {
+    var id: String
+    var name: String
+}
+
+/// `cursor-agent models`.
+nonisolated enum CursorModels {
+    /// It prints one model a line, as "id - Name", maybe marked "(current)" or "(default)",
+    /// between a heading and tips.
+    static func parse(_ text: String) -> [CursorModel] {
+        let plain = text.replacingOccurrences(of: "\u{1B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
+        return plain.split(separator: "\n").compactMap { line in
+            let parts = line.components(separatedBy: " - ")
+            guard parts.count >= 2 else { return nil }
+            let id = parts[0].trimmingCharacters(in: .whitespaces)
+            guard !id.isEmpty, !id.contains(" "), !id.hasSuffix(":") else { return nil }
+            let name = parts.dropFirst().joined(separator: " - ")
+                .replacingOccurrences(of: #"\s*\((current|default)\)"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+            return CursorModel(id: id, name: name.isEmpty ? id : name)
+        }
+    }
+
+    /// The account's models, asked boxed like a job, with the account's own `CURSOR_CONFIG_DIR`.
+    /// Empty when the CLI isn't there or the account is signed out.
+    static func list(home: String?) async -> [CursorModel] {
+        let argv = Agents.sandboxed(["cursor-agent", "models"], in: nil, own: home)
+        guard let out = try? await Shell.run(argv, env: CursorStatus.environment(home: home), timeout: 30), out.status == 0, !out.timedOut else { return [] }
+        return parse(out.text)
+    }
+}
+
+/// `cursor-agent status`, and the environment Oby asks it with.
+nonisolated enum CursorStatus {
+    enum Result: Equatable {
+        case signedIn(String)
+        case signedOut
+        /// The output says neither: `cursor-agent models` is the proxy then.
+        case unknown
+    }
+
+    /// The account's own config directory, and none of the logins an agent's environment never has.
+    static func environment(home: String?) -> [String: String?] {
+        ["CURSOR_CONFIG_DIR": home, "CURSOR_API_KEY": nil, "CURSOR_AUTH_TOKEN": nil]
+    }
+
+    /// "Logged in as name@example.com" is signed in, with that as its label; "Not logged in" is not.
+    // ponytail: the format is from #406's comment ("Logged in as …"); a plan name, as "Pro · …", comes
+    // with the signed-in probe's report (docs/cursor.md).
+    static func parse(_ text: String) -> Result {
+        let plain = text.replacingOccurrences(of: "\u{1B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
+        let lower = plain.lowercased()
+        if lower.contains("not logged in") || lower.contains("logged out") || lower.contains("not authenticated") || lower.contains("signed out") {
+            return .signedOut
+        }
+        if let match = plain.firstMatch(of: /(?i)logged in as\s+(\S+(?:@\S+)?)/) {
+            return .signedIn(String(match.1).trimmingCharacters(in: .punctuationCharacters.subtracting(CharacterSet(charactersIn: "@._-+"))))
+        }
+        return .unknown
+    }
+}

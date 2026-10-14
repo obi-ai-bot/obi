@@ -133,11 +133,14 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// has passed has room again. Nil when no account can.
     static func reviewer(_ accounts: [AccountState], for author: Job, excluding: String? = nil, now: Date = .now) -> AccountStore.Route? {
         let others = candidates(accounts, for: author).filter { $0.account.id != excluding }.map { reset($0, at: now) }
-        let otherTool = author.agent == "claude" ? "codex" : author.agent == "codex" ? "claude" : nil
+        // A Cursor pull request goes to Claude Code, else Codex (Cursor is never a reviewer).
+        let otherTools = author.agent == "claude" ? ["codex"] : author.agent == "codex" ? ["claude"] : ["claude", "codex"]
         // The other tool first, while it's outside its weekly reserve; then any account, the
         // reserved ones last (AccountStore.choose).
         let unreserved = others.filter { !$0.isReserved(at: now) }
-        if let otherTool, let route = AccountStore.choose(unreserved, agent: otherTool, for: .review, now: now) { return route }
+        for otherTool in otherTools {
+            if let route = AccountStore.choose(unreserved, agent: otherTool, for: .review, now: now) { return route }
+        }
         return AccountStore.choose(others, agent: nil, for: .review, now: now)
     }
 
@@ -148,7 +151,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// session. Never for a security review, which needs a different account (`reviewer` and
     /// `candidates` still leave the author's account out). Nil when it has no room.
     static func sameAccountReviewer(_ accounts: [AccountState], for author: Job, excluding: String? = nil, now: Date = .now) -> AccountStore.Route? {
-        let own = accounts.filter { $0.account.id == author.account && $0.account.id != excluding && Job.agentNames[$0.account.agent] != nil }
+        let own = accounts.filter { $0.account.id == author.account && $0.account.id != excluding && reviewers.contains($0.account.agent) }
             .map { reset($0, at: now) }
         return AccountStore.choose(own, agent: nil, for: .review, now: now)
     }
@@ -164,10 +167,13 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         return nil
     }
 
+    /// The tools that review: Cursor runs jobs but is never a reviewer (v1).
+    static let reviewers = ["claude", "codex"]
+
     /// The accounts that could review `author`'s pull request, room or not: signed in, not the
-    /// author's, and a tool that runs jobs.
+    /// author's, and a tool that reviews.
     static func candidates(_ accounts: [AccountState], for author: Job) -> [AccountState] {
-        accounts.filter { $0.signedIn && $0.account.id != author.account && Job.agentNames[$0.account.agent] != nil }
+        accounts.filter { $0.signedIn && $0.account.id != author.account && reviewers.contains($0.account.agent) }
     }
 
     /// The account as it stands at `now`: a window past its reset time is empty until a job says otherwise.

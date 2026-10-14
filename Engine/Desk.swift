@@ -87,8 +87,8 @@ final class Desk {
     @ObservationIgnored var cancelElsewhere: () async -> Void = {}
     @ObservationIgnored var liftElsewhereReserve: (_ id: String, _ lift: Bool) async -> Bool = { _, _ in false }
     /// The runner's model choices for chat settings, refreshed from Codex before planning.
-    @ObservationIgnored var settingModels: [String: [String]] = ["claude": AgentModels.claude.map(\.0), "codex": []]
-    @ObservationIgnored var settingEfforts: [String: [String]] = ["claude": AgentModels.claudeEfforts, "codex": []]
+    @ObservationIgnored var settingModels: [String: [String]] = ["claude": AgentModels.claude.map(\.0), "codex": [], "cursor": []]
+    @ObservationIgnored var settingEfforts: [String: [String]] = ["claude": AgentModels.claudeEfforts, "codex": [], "cursor": []]
     @ObservationIgnored var settingModelEfforts: [String: [String: [String]]] = [:]
     @ObservationIgnored private var settingOptionsLoaded = false
     @ObservationIgnored var loadSettingOptions: () async -> ([String: [String]], [String: [String]], [String: [String: [String]]])? = { nil }
@@ -569,6 +569,12 @@ final class Desk {
         resumeChecks()
     }
 
+    /// The models each tool offers, for telling whose a model is: Oby's own lists, and what the
+    /// runner loaded from Codex and Cursor.
+    var moveModels: [String: [String]] {
+        Moves.models.merging(settingModels) { Array(Set($0 + $1)) }
+    }
+
     func refreshSettingOptions() async {
         guard !settingOptionsLoaded else { return }
         guard let options = await loadSettingOptions() else { return }
@@ -1024,7 +1030,7 @@ final class Desk {
                     let states = accounts.accounts + elsewhere().flatMap(\.accounts)
                     for id in result.plan.jobs ?? [] {
                         guard let targetJob = job(id) ?? elsewhere().flatMap(\.jobs).first(where: { $0.id == id }),
-                              let destination = try? Moves.choose(targetJob, to: target, accounts: states, now: clock()).account,
+                              let destination = try? Moves.choose(targetJob, to: target, accounts: states, now: clock(), known: moveModels).account,
                               let state = states.first(where: { $0.account.id == destination.id }), !state.isReserved(at: clock()),
                               !state.weekNearlyFull(at: clock()), !state.isFull(at: clock()) else {
                             escalateOrchestrator(currentOrchestratorEvents,
@@ -1886,7 +1892,7 @@ final class Desk {
         guard !finishing.contains(id), !(job.isActive && ending.contains(id)) else {
             throw Shell.Failure(message: "\(job.agentName) is wrapping up. Move it once it's done.")
         }
-        let (account, model) = try Moves.choose(job, to: target, accounts: accounts.accounts)
+        let (account, model) = try Moves.choose(job, to: target, accounts: accounts.accounts, known: moveModels)
         let reason = why.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500)) }.flatMap { $0.isEmpty ? nil : $0 }
         let from = Moves.place(job, accounts: accounts.accounts)
         var moved = job

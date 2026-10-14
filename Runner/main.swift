@@ -100,8 +100,11 @@ let isLocal: Bool = if case .local = access { true } else { false }
 let desk = Desk(accounts: LocalRunner.accounts(local: isLocal), restarts: Restarts(file: Workspace.root.appending(path: "restarts.json")))
 desk.loadSettingOptions = {
     guard let codex = try? await CodexAgent.models(home: nil), !codex.isEmpty else { return nil }
-    let models = ["claude": AgentModels.claude.map(\.0), "codex": codex.map(\.id)]
-    let efforts = ["claude": AgentModels.claudeEfforts, "codex": Array(Set(codex.flatMap(\.efforts))).sorted()]
+    // Cursor's models, from the first signed-in Cursor account; none until one is.
+    let cursorHome = desk.accounts.accounts.first { $0.account.agent == "cursor" && $0.signedIn }?.account.home
+    let cursor = desk.accounts.accounts.contains { $0.account.agent == "cursor" && $0.signedIn } ? await CursorModels.list(home: cursorHome).map(\.id) : []
+    let models = ["claude": AgentModels.claude.map(\.0), "codex": codex.map(\.id), "cursor": cursor]
+    let efforts = ["claude": AgentModels.claudeEfforts, "codex": Array(Set(codex.flatMap(\.efforts))).sorted(), "cursor": [String]()]
     let perModel = ["codex": Dictionary(uniqueKeysWithValues: codex.map { ($0.id, $0.efforts) })]
     return (models, efforts, perModel)
 }

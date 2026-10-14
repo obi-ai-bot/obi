@@ -24,6 +24,7 @@ The runner works as the user it runs as, with that user's own logins, like Oby d
 
 - `gh auth login`: the repositories Oby may work on, and Publish.
 - `claude auth login`, and `codex login` if you use Codex.
+- Cursor, if you use it: install the CLI yourself (Oby never installs it): `curl https://cursor.com/install -fsS | bash`, which puts `cursor-agent` in `~/.local/bin` and its files in `~/.local/share/cursor-agent` (jobs see that folder as a throwaway copy, like Claude Code's). The CLI needs `acp`: `cursor-agent acp --help` exits 0, else `cursor-agent update`. Add a Cursor account in Settings › Accounts and sign in with its script, which runs `NO_OPEN_BROWSER=1 cursor-agent login` with the account's own `CURSOR_CONFIG_DIR` and prints a link to open on any device. Oby never reads `~/.config/cursor/auth.json`; see [`docs/cursor.md`](../docs/cursor.md) for what the probe has still to prove (one login per machine until then).
 
 Oby never reads these logins. More accounts go in `accounts.json` in `OBY_HOME`, each with its own home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`); sign in to each with that variable set.
 

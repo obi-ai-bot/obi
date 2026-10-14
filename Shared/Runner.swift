@@ -408,6 +408,12 @@ extension ModelChoice {
 nonisolated struct ModelSettings: Codable, Equatable, Sendable {
     var claude: ModelChoice
     var codex: ModelChoice
+    /// Cursor has a model and no effort; an older runner doesn't send it.
+    var cursor: CursorModelChoice? = nil
+}
+
+nonisolated struct CursorModelChoice: Codable, Equatable, Sendable {
+    var model: String
 }
 
 nonisolated struct ModelOptions: Codable, Equatable, Sendable {
@@ -423,6 +429,8 @@ nonisolated struct ModelOptions: Codable, Equatable, Sendable {
     }
     var claude: Tool
     var codex: Tool
+    /// Cursor's models, with no efforts; an older runner doesn't send it.
+    var cursor: Tool? = nil
 }
 
 #if os(iOS) || os(watchOS)

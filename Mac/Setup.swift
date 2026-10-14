@@ -176,20 +176,9 @@ final class Tools {
         (try? await Shell.run(["which", command], timeout: 10))?.status == 0
     }
 
-    /// `cursor-agent models` prints one model a line, as "id - Name", maybe marked "(current)" or
-    /// "(default)", between a heading and tips.
+    /// `cursor-agent models` (Engine/Cursor.swift reads it).
     nonisolated static func cursorModels(_ text: String) -> [Model] {
-        let plain = text.replacingOccurrences(of: "\u{1B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
-        return plain.split(separator: "\n").compactMap { line in
-            let parts = line.components(separatedBy: " - ")
-            guard parts.count >= 2 else { return nil }
-            let id = parts[0].trimmingCharacters(in: .whitespaces)
-            guard !id.isEmpty, !id.contains(" "), !id.hasSuffix(":") else { return nil }
-            let name = parts.dropFirst().joined(separator: " - ")
-                .replacingOccurrences(of: #"\s*\((current|default)\)"#, with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespaces)
-            return Model(id: id, name: name.isEmpty ? id : name)
-        }
+        CursorModels.parse(text).map { Model(id: $0.id, name: $0.name) }
     }
 }
 

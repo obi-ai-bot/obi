@@ -102,6 +102,18 @@ nonisolated struct TetrixUse: Codable, Equatable, Sendable {
         }
     }
 
+    /// `cursor-agent mcp list`: a line for the tetrix server that says it's ready or connected.
+    // ponytail: Cursor's list format isn't recorded yet (docs/cursor.md); this reads a line that names
+    // tetrix and says it's ready, connected or ✓, and not one that says it needs a login.
+    static func cursorList(_ output: String) -> Bool {
+        output.split(separator: "\n").contains { line in
+            let lower = line.lowercased()
+            guard lower.contains("tetrix"), !lower.contains("not "), !lower.contains("needs"), !lower.contains("error"),
+                  !lower.contains("failed"), !lower.contains("disabled") else { return false }
+            return line.contains("✓") || lower.contains("ready") || lower.contains("connected") || lower.contains("enabled")
+        }
+    }
+
     // MARK: Commits
 
     /// The job's commits since `since` and their `Tetrix-Session:` trailers, or nil when git can't say.
@@ -204,16 +216,24 @@ nonisolated struct TetrixUse: Codable, Equatable, Sendable {
     /// `tetrix` MCP server, never Oby holding the token.
     static func signInScript(for account: Account) -> String {
         let quote = { (text: String) in "'" + text.replacingOccurrences(of: "'", with: #"'\''"#) + "'" }
-        let (variable, steps) = account.agent == "codex"
-            ? ("CODEX_HOME", """
+        let (variable, steps) = switch account.agent {
+        case "codex":
+            ("CODEX_HOME", """
                 echo 'If Codex has no tetrix server yet, add it first: codex mcp add tetrix --url <Tetrix MCP URL>'
                 codex mcp login tetrix --scopes graph:read,hitl:write,sessions:write,offline_access
                 """)
-            : ("CLAUDE_CONFIG_DIR", """
+        case "cursor":
+            ("CURSOR_CONFIG_DIR", """
+                echo 'If Cursor has no tetrix server yet, add it first in <this account>/mcp.json, then sign in:'
+                cursor-agent mcp login tetrix
+                """)
+        default:
+            ("CLAUDE_CONFIG_DIR", """
                 echo 'In Claude Code, type /mcp, choose tetrix and Authenticate, then /exit.'
                 echo 'If tetrix is not listed, add it first: claude mcp add --scope user --transport http tetrix <Tetrix MCP URL>'
                 claude
                 """)
+        }
         return """
         #!/bin/sh
         \(account.home.map { "export \(variable)=\(quote($0))" } ?? "unset \(variable)")

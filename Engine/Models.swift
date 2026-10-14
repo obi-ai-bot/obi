@@ -32,7 +32,7 @@ nonisolated enum AgentModels {
 
     /// "Opus 5.5" for Claude Code's models; anything else as it is.
     static func name(_ model: String) -> String {
-        claude.first { $0.0 == model }?.1 ?? (model == "gpt-6-astra" ? "GPT-6-Astra" : model)
+        claude.first { $0.0 == model }?.1 ?? (model == "gpt-6-astra" ? "GPT-6-Astra" : model == "auto" ? "Auto" : model)
     }
 
     static func effortName(_ effort: String) -> String {
