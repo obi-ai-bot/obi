@@ -260,7 +260,7 @@ final class RunnerFeed {
                         // Settings › Runner changed while the open jobs were fetched again.
                         try Task.checkCancellation()
                         inbox = items
-                        issueDrafts = IssueDraftCard.applying(drafts, over: issueDrafts)
+                        issueDrafts = RunnerIssueDraft.applying(drafts, over: issueDrafts)
                         if let (past, pastWords) = history {
                             inboxHistory = past.filter { !$0.isOpen }
                             inboxWords = pastWords.merging(words, uniquingKeysWith: { _, fresh in fresh })

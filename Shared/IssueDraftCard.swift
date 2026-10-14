@@ -8,7 +8,7 @@ struct IssueDraftCard: View {
     var onEdit: () -> Void
     var onDiscard: () -> Void
 
-    static func title(for draft: RunnerIssueDraft) -> String {
+    nonisolated static func title(for draft: RunnerIssueDraft) -> String {
         switch draft.state {
         case .draft: "\(draft.fields.title) · \(draft.fields.repo) · Draft v\(draft.version)"
         case .creating: "\(draft.fields.title) · \(draft.fields.repo) · Creating…"
@@ -18,28 +18,14 @@ struct IssueDraftCard: View {
         }
     }
 
-    /// After Discard (or Cancel edit), the composer leaves editing mode for that draft.
-    static func composerAfterLeaving(_ editing: RunnerIssueDraft?, draftID: String) -> RunnerIssueDraft? {
-        editing?.id == draftID ? nil : editing
-    }
-
-    /// Replaces the map from a reconnect fetch while keeping created cards the thread still shows.
-    static func applying(_ fetched: [RunnerIssueDraft], over existing: [String: RunnerIssueDraft]) -> [String: RunnerIssueDraft] {
-        var next = Dictionary(uniqueKeysWithValues: fetched.map { ($0.id, $0) })
-        for (id, draft) in existing where draft.state == .created && next[id] == nil {
-            next[id] = draft
-        }
-        return next
-    }
-
-    static func options(for draft: RunnerIssueDraft) -> [CardOption] {
+    nonisolated static func options(for draft: RunnerIssueDraft) -> [CardOption] {
         guard draft.state != .created, draft.state != .discarded else { return [] }
         return [CardOption(label: "Create issue", answer: "create", recommended: true),
          CardOption(label: "Edit", answer: "edit"),
          CardOption(label: "Discard", answer: "discard", role: .destructive)]
     }
 
-    static func changedLine(for draft: RunnerIssueDraft) -> String? {
+    nonisolated static func changedLine(for draft: RunnerIssueDraft) -> String? {
         guard let previous = draft.previous else { return nil }
         var fields: [String] = []
         if previous.repo != draft.fields.repo { fields.append("repository") }

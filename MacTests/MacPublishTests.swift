@@ -118,6 +118,13 @@ struct MacPublishTests {
         try await fetching.value
         #expect(switching.jobs.isEmpty)
     }
+
+    /// A runner without `/v1/issue-drafts` answers 404: treat as unsupported and carry on.
+    @Test func missingIssueDraftsEndpointIsUnsupported() async throws {
+        let stub = RunnerStub { _ in (404, #"{"error": "Not found."}"#) }
+        let drafts = try await stub.runner.issueDrafts(state: "all")
+        #expect(drafts.isEmpty)
+    }
 }
 
 /// Signs as the Touch ID key does, with a software key, or cancels as the user would.

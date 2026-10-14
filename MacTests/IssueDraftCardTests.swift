@@ -31,9 +31,9 @@ import Testing
 
     @Test func discardClearsComposerEditingForThatDraft() {
         let editing = draft(.draft)
-        #expect(IssueDraftCard.composerAfterLeaving(editing, draftID: editing.id) == nil)
-        #expect(IssueDraftCard.composerAfterLeaving(editing, draftID: "other") == editing)
-        #expect(IssueDraftCard.composerAfterLeaving(nil, draftID: editing.id) == nil)
+        #expect(RunnerIssueDraft.composerAfterLeaving(editing, draftID: editing.id) == nil)
+        #expect(RunnerIssueDraft.composerAfterLeaving(editing, draftID: "other") == editing)
+        #expect(RunnerIssueDraft.composerAfterLeaving(nil, draftID: editing.id) == nil)
     }
 
     @Test func reconnectKeepsCreatedIssueCards() {
@@ -41,7 +41,7 @@ import Testing
         let open = draft(.draft)
         var openOther = open
         openOther.id = "bbbbbbbb"
-        let kept = IssueDraftCard.applying([openOther], over: [created.id: created, open.id: open])
+        let kept = RunnerIssueDraft.applying([openOther], over: [created.id: created, open.id: open])
         #expect(kept[created.id] == created)
         #expect(kept[openOther.id] == openOther)
         #expect(kept[open.id] == nil)
@@ -73,10 +73,4 @@ import Testing
         #expect(IssueDraftCard.changedLine(for: value) == "Changed: title, acceptance")
     }
 
-    /// A runner without `/v1/issue-drafts` answers 404: treat as unsupported and carry on.
-    @Test func missingIssueDraftsEndpointIsUnsupported() async throws {
-        let stub = RunnerStub { _ in (404, #"{"error": "Not found."}"#) }
-        let drafts = try await stub.runner.issueDrafts(state: "all")
-        #expect(drafts.isEmpty)
-    }
 }

@@ -615,6 +615,20 @@ nonisolated struct RunnerIssueDraft: Codable, Identifiable, Equatable, Sendable 
     var id: String; var version: Int; var fields: Fields; var state: State; var turn: String
     var created: Date; var updated: Date; var issue: Int?; var url: String?; var error: String?
     var outgoing: [Outgoing]?; var previous: Fields?; var preview: String
+
+    /// After Discard (or Cancel edit), the composer leaves editing mode for that draft.
+    nonisolated static func composerAfterLeaving(_ editing: RunnerIssueDraft?, draftID: String) -> RunnerIssueDraft? {
+        editing?.id == draftID ? nil : editing
+    }
+
+    /// Replaces the map from a reconnect fetch while keeping created cards the thread still shows.
+    nonisolated static func applying(_ fetched: [RunnerIssueDraft], over existing: [String: RunnerIssueDraft]) -> [String: RunnerIssueDraft] {
+        var next = Dictionary(uniqueKeysWithValues: fetched.map { ($0.id, $0) })
+        for (id, draft) in existing where draft.state == .created && next[id] == nil {
+            next[id] = draft
+        }
+        return next
+    }
 }
 
 /// One step of Oby's turn as the `step` event sends it (docs/runner-api.md, #304): "Moving Vault

@@ -257,7 +257,7 @@ struct ChatScreen: View {
     /// Leaves the issue-draft edit in the composer (Discard, Cancel, or a successful PUT).
     private func leaveIssueEdit(_ id: String, clearText: Bool = true) {
         guard editingIssueDraft?.id == id else { return }
-        editingIssueDraft = IssueDraftCard.composerAfterLeaving(editingIssueDraft, draftID: id)
+        editingIssueDraft = RunnerIssueDraft.composerAfterLeaving(editingIssueDraft, draftID: id)
         if clearText { text = "" }
         issueEditProblem = nil
         typing = false
