@@ -145,12 +145,17 @@ struct DelegationTests {
         #expect(!DelegatePolicy.allows(command: "rg secret private-link", in: snapshot))
         #expect(DelegatePolicy.allows(command: "cat Engine/Delegates.swift", in: snapshot))
         #expect(DelegatePolicy.allows(command: "rg DelegatePolicy Engine/Delegates.swift", in: snapshot))
+        // Shell globs must not expand onto a leak symlink; use the Glob tool instead.
+        #expect(!DelegatePolicy.allows(command: "cat l*", in: snapshot))
+        #expect(!DelegatePolicy.allows(command: "cat {private-link,x}", in: snapshot))
 
         #expect(DelegatePolicy.allows(tool: "Grep", input: ["pattern": "DelegatePolicy", "path": "Engine"], in: snapshot, brief: brief, web: false, bubblewrap: false))
         #expect(DelegatePolicy.allows(tool: "Glob", input: ["pattern": "**/*.swift"], in: snapshot, brief: brief, web: false, bubblewrap: false))
         #expect(DelegatePolicy.allows(tool: "Grep", input: ["pattern": "secret"], in: snapshot, brief: brief, web: false, bubblewrap: false))
         #expect(!DelegatePolicy.allows(tool: "Grep", input: ["pattern": "secret", "path": "private-link"], in: snapshot, brief: brief, web: false, bubblewrap: false))
         #expect(!DelegatePolicy.allows(tool: "Glob", input: ["pattern": "*", "path": "/etc"], in: snapshot, brief: brief, web: false, bubblewrap: false))
+        #expect(!DelegatePolicy.allows(tool: "Glob", input: ["pattern": "/etc/*"], in: snapshot, brief: brief, web: false, bubblewrap: false))
+        #expect(!DelegatePolicy.allows(tool: "Grep", input: ["pattern": "secret", "glob": "../**"], in: snapshot, brief: brief, web: false, bubblewrap: false))
 
         #expect(DelegateBox.claudeTools(web: false) == "Read,Grep,Glob,Bash")
         #expect(DelegateBox.claudeTools(web: true).contains("WebFetch") && DelegateBox.claudeTools(web: true).contains("WebSearch"))

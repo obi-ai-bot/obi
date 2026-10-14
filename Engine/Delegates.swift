@@ -298,7 +298,11 @@ nonisolated enum DelegatePolicy {
             return allowsRead(path: input["file_path"] as? String ?? "", in: snapshot, brief: brief, bubblewrap: bubblewrap)
         case "Grep", "Glob":
             let path = input["path"] as? String ?? ""
-            return path.isEmpty || allowsRead(path: path, in: snapshot, brief: brief, bubblewrap: bubblewrap)
+            guard path.isEmpty || allowsRead(path: path, in: snapshot, brief: brief, bubblewrap: bubblewrap) else { return false }
+            // Pattern/glob can still point outside when path is omitted or relative; refuse the same escapes.
+            return [input["pattern"] as? String, input["glob"] as? String]
+                .compactMap { $0 }
+                .allSatisfy { !leavesSnapshot($0) }
         case "WebFetch", "WebSearch":
             return web
         case "Bash":
@@ -370,11 +374,13 @@ nonisolated enum DelegatePolicy {
     }
 
     /// Every non-flag path argument must resolve inside the snapshot: absolute paths, nested
-    /// relatives (`Engine/Delegates.swift`), bare names and globs. Symlinks are followed so a
-    /// link at the snapshot root can't open the home directory.
+    /// relatives (`Engine/Delegates.swift`) and bare names. Shell globs (`*`, `?`, `[`, `{`) are
+    /// refused — specialists use the Glob tool instead — so Bash never expands a pattern onto a
+    /// symlink that leaves the snapshot. Symlinks on concrete paths are still followed.
     private static func pathsStayInside(_ words: [String], snapshot: URL?) -> Bool {
         let root = snapshot.map { resolvedPath($0) }
         for word in words where !word.hasPrefix("-") {
+            if word.contains("*") || word.contains("?") || word.contains("[") || word.contains("{") { return false }
             if word.split(separator: "/", omittingEmptySubsequences: false).contains("..") || word.hasPrefix("~") { return false }
             guard let root else {
                 if word.hasPrefix("/") { return false }
@@ -385,5 +391,11 @@ nonisolated enum DelegatePolicy {
             guard resolved.path == root.path || resolved.path.hasPrefix(root.path + "/") else { return false }
         }
         return true
+    }
+
+    /// Grep/Glob `pattern` and `glob` values must not name a location outside the snapshot.
+    private static func leavesSnapshot(_ value: String) -> Bool {
+        value.hasPrefix("/") || value.hasPrefix("~")
+            || value.split(separator: "/", omittingEmptySubsequences: false).contains("..")
     }
 }
