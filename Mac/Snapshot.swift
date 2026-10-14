@@ -5,7 +5,7 @@ import SwiftUI
 import QuickLook
 
 /// A file the user attached to their next request: a screenshot, or what they copied.
-struct Attachment: Identifiable, Equatable {
+struct TrayAttachment: Identifiable, Equatable {
     enum Kind { case screenshot, clipboardImage, clipboardText, file }
     var kind: Kind
     var file: URL
@@ -39,7 +39,7 @@ final class Tray {
         case other(String)
     }
 
-    private(set) var items: [Attachment] = []
+    private(set) var items: [TrayAttachment] = []
     /// Why the last capture or paste didn't work, until one does.
     var problem: Problem?
     private(set) var capturing = false
@@ -99,7 +99,7 @@ final class Tray {
         problem = nil
     }
 
-    func remove(_ item: Attachment) {
+    func remove(_ item: TrayAttachment) {
         items.removeAll { $0 == item }
         try? FileManager.default.removeItem(at: item.file)
         if let id = item.uploadedID { deleteRemote(id) }
@@ -170,25 +170,25 @@ final class Tray {
                 guard total <= 50 * 1024 * 1024 else { throw Shell.Failure(message: "Attachments in one message must total 50 MB or less.") }
                 let target = folder.appending(path: "\(UUID().uuidString)-\(source.lastPathComponent)")
                 try FileManager.default.copyItem(at: source, to: target)
-                items.append(Attachment(kind: .file, file: target, uploadedID: nil))
+                items.append(TrayAttachment(kind: .file, file: target, uploadedID: nil))
             }
             problem = nil
         } catch { problem = .other("Oby couldn't attach the file: \(error.localizedDescription)") }
     }
 
-    private func add(_ kind: Attachment.Kind, png image: CGImage) throws {
+    private func add(_ kind: TrayAttachment.Kind, png image: CGImage) throws {
         guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
             throw Shell.Failure(message: "the image couldn't be saved.")
         }
         try add(kind, data: data, extension: "png")
     }
 
-    private func add(_ kind: Attachment.Kind, data: Data, extension ext: String) throws {
+    private func add(_ kind: TrayAttachment.Kind, data: Data, extension ext: String) throws {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let name = kind == .screenshot ? "screenshot" : "clipboard"
         let file = folder.appending(path: "\(name)-\(UUID().uuidString.prefix(6).lowercased()).\(ext)")
         try data.write(to: file)
-        items.append(Attachment(kind: kind, file: file, uploadedID: nil))
+        items.append(TrayAttachment(kind: kind, file: file, uploadedID: nil))
         problem = nil
     }
 }

@@ -1,11 +1,14 @@
 import SwiftUI
+#if os(macOS) || os(iOS)
 import QuickLook
+#endif
 #if os(macOS)
 import AppKit
 #else
 import UIKit
 #endif
 
+#if os(macOS) || os(iOS)
 /// A turn's runner-owned files: a compact row with downloadable thumbnails and Quick Look previews.
 struct AttachmentStrip: View {
     let attachments: [AttachmentRef]
@@ -83,3 +86,4 @@ struct AttachmentStrip: View {
         #endif
     }
 }
+#endif
