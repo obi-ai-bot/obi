@@ -8,7 +8,7 @@ import UIKit
 /// network and away through the Mac's tunnel (Shared/RemoteRoute.swift), and how it pairs: the QR
 /// code the Mac's Settings › Runner shows, or its six-digit code typed here with the Mac picked
 /// from those Bonjour finds on this network. Either buys the device token every gateway request
-/// carries (iOS/Phone.swift, GatewayTokenStore). Linking by hand, without pairing, is for the tunnel only.
+/// carries (iOS/Phone.swift, GatewayTokenStore). A hostname alone cannot authorize the gateway.
 struct ConnectScreen: View {
     @Environment(Phone.self) private var phone
     @State private var name = ""
@@ -72,12 +72,12 @@ struct ConnectScreen: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .onSubmit(link)
-                Button("Link") { link() }
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || hostname.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("Save Mac name") { link() }
+                    .disabled(!canSaveMacName)
             } header: {
                 Text("Link by hand")
             } footer: {
-                Text("Without pairing, type what the Mac's Settings › Remote access shows. The tunnel is reached that way; the local network still needs the device token pairing gives.")
+                Text("Pair with the QR code or six-digit code first. The tunnel and local network both require the device token pairing stores in this iPhone's keychain. This form can update the name for the same paired Mac.")
             }
         }
         .navigationTitle("Your Mac")
@@ -103,8 +103,16 @@ struct ConnectScreen: View {
     }
 
     private func link() {
+        guard GatewayTokenStore.read() != nil, let pairedLink = phone.link else {
+            problem = "Pair with the Mac's QR code or six-digit code before linking it here."
+            return
+        }
         guard let host = MacLink.hostname(from: hostname) else {
             problem = "The hostname looks like oby-….tetrix.pro, as the Mac's Settings › Remote access shows it."
+            return
+        }
+        guard pairedLink.hostname == host else {
+            problem = "Pair with that Mac first. A hostname alone can't authorize the gateway."
             return
         }
         let name = name.trimmingCharacters(in: .whitespaces)
@@ -114,6 +122,12 @@ struct ConnectScreen: View {
         }
         problem = nil
         phone.link = MacLink(name: name, hostname: host)
+    }
+
+    private var canSaveMacName: Bool {
+        guard GatewayTokenStore.read() != nil, let pairedLink = phone.link,
+              let host = MacLink.hostname(from: hostname) else { return false }
+        return pairedLink.hostname == host && !name.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     /// What the QR code said: the gateway's URL, the Mac's link and the one-time secret.

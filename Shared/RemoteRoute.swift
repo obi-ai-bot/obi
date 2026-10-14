@@ -68,8 +68,8 @@ nonisolated enum RemoteRoute: Equatable, Sendable {
 
     /// The route to a linked Mac: the local network when Bonjour found it, else its tunnel. With
     /// no Mac linked there's none, and the iPhone keeps talking to the runner it has.
-    static func choose(lan: URL?, link: MacLink?) -> RemoteRoute? {
-        guard let link else { return nil }
+    static func choose(lan: URL?, link: MacLink?, paired: Bool) -> RemoteRoute? {
+        guard paired, let link else { return nil }
         if let lan { return .home(lan) }
         return .away(link.tunnelURL)
     }

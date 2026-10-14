@@ -35,11 +35,12 @@ struct RemoteRouteTests {
     @Test func homeWinsOverTheTunnel() throws {
         let link = MacLink(name: "MacBook", hostname: "oby-abcdefghij0123456789.tetrix.pro")
         let lan = URL(string: "http://192.168.1.20:8810")!
-        #expect(RemoteRoute.choose(lan: lan, link: link) == .home(lan))
-        #expect(RemoteRoute.choose(lan: nil, link: link) == .away(link.tunnelURL))
-        #expect(RemoteRoute.choose(lan: nil, link: nil) == nil)
+        #expect(RemoteRoute.choose(lan: lan, link: link, paired: true) == .home(lan))
+        #expect(RemoteRoute.choose(lan: nil, link: link, paired: true) == .away(link.tunnelURL))
+        #expect(RemoteRoute.choose(lan: nil, link: nil, paired: true) == nil)
         // Something on the network, but no Mac linked: the iPhone keeps its runner.
-        #expect(RemoteRoute.choose(lan: lan, link: nil) == nil)
+        #expect(RemoteRoute.choose(lan: lan, link: nil, paired: true) == nil)
+        #expect(RemoteRoute.choose(lan: lan, link: link, paired: false) == nil)
         #expect(RemoteRoute.home(lan).url == lan)
         #expect(RemoteRoute.away(link.tunnelURL).label == "Away, through the tunnel")
         #expect(RemoteRoute.home(lan).label == "At home, over the local network")

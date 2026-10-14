@@ -120,7 +120,9 @@ final class Phone {
         didSet { if lan != oldValue { reroute() } }
     }
     /// The way to the Mac now: home or away. Nil with no Mac linked: then the runner at `runnerURL`.
-    var route: RemoteRoute? { RemoteRoute.choose(lan: lan, link: link) }
+    /// A hostname only chooses a route; the gateway still requires the paired device token. An
+    /// old hand-entered link without that token must not send requests to a gateway that will 401.
+    var route: RemoteRoute? { RemoteRoute.choose(lan: lan, link: link, paired: GatewayTokenStore.read() != nil) }
     /// Where the calls go: the linked Mac by its route, else the runner.
     var base: URL { route?.url ?? runnerURL }
     /// A stable identity for the logical runner, unaffected by switching between its home and
@@ -182,7 +184,13 @@ final class Phone {
         self.connection = connection
         self.inbox = inbox
         runnerURL = UserDefaults.standard.url(forKey: "runner.url") ?? Runner.defaultURL
-        if let data = UserDefaults.standard.data(forKey: "mac.link") { link = try? MacLink.paired(data) }
+        if let data = UserDefaults.standard.data(forKey: "mac.link"), GatewayTokenStore.read() != nil {
+            link = try? MacLink.paired(data)
+        } else {
+            // A link saved before gateway pairing cannot authenticate the Mac. Require pairing
+            // again instead of restoring a link that sends requests the gateway will reject.
+            UserDefaults.standard.removeObject(forKey: "mac.link")
+        }
         JobsActivity.watchTokens { [weak self] in self?.runner }
         conversation.page = { [weak self] before, limit in
             guard let self else { return [] }
@@ -735,8 +743,18 @@ enum GatewayTokenStore {
                                     kSecAttrService as String: service, kSecAttrAccount as String: account]
         let attributes: [String: Any] = [kSecValueData as String: data, kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw RunnerError(message: "The iPhone couldn't keep the Mac's device token.") }
-        if status == errSecItemNotFound { SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil) }
+        try Self.validateSave(updateStatus: status) {
+            SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil)
+        }
+    }
+
+    static func validateSave(updateStatus: OSStatus, add: () -> OSStatus) throws {
+        guard updateStatus == errSecSuccess || updateStatus == errSecItemNotFound else {
+            throw RunnerError(message: "The iPhone couldn't keep the Mac's device token.")
+        }
+        if updateStatus == errSecItemNotFound, add() != errSecSuccess {
+            throw RunnerError(message: "The iPhone couldn't keep the Mac's device token.")
+        }
     }
 
     static func remove() {

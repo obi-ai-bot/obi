@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import Testing
 @testable import Oby
 
@@ -37,6 +38,21 @@ struct ConnectTests {
         #expect(PairingCode.normalized("123-456") == "123456")
         for wrong in ["12345", "1234567", "12345a", "", "abcdef", "123456 7"] {
             #expect(PairingCode.normalized(wrong) == nil, Comment(rawValue: wrong))
+        }
+    }
+
+    @Test func aMacLinkNeedsItsDeviceTokenBeforeRequestsCanUseItsGateway() {
+        let link = MacLink(name: "My Mac", hostname: "oby-abc.tetrix.pro")
+        let lan = URL(string: "http://192.168.1.20:8810")!
+        #expect(RemoteRoute.choose(lan: lan, link: link, paired: false) == nil)
+        #expect(RemoteRoute.choose(lan: nil, link: link, paired: false) == nil)
+        #expect(RemoteRoute.choose(lan: lan, link: link, paired: true) == .home(lan))
+        #expect(RemoteRoute.choose(lan: nil, link: link, paired: true) == .away(link.tunnelURL))
+    }
+
+    @Test func aFailedKeychainAddFailsPairing() {
+        #expect(throws: RunnerError.self) {
+            try GatewayTokenStore.validateSave(updateStatus: errSecItemNotFound) { errSecAuthFailed }
         }
     }
 
