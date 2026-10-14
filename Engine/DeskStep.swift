@@ -32,7 +32,7 @@ extension Desk {
         case .moveJob:
             let names = (plan.jobs ?? []).compactMap { job($0)?.heading }
             let destination = plan.move.map { move in
-                let tool = move.agent == "claude" ? "Claude Code" : move.agent == "codex" ? "Codex" : nil
+                let tool = Job.agentNames[move.agent]
                 return [tool, move.account == "auto" ? nil : move.account].compactMap { $0 }.joined(separator: " · ")
             }.flatMap { $0.isEmpty ? nil : $0 } ?? "the selected destination"
             return "Moving \(names.isEmpty ? "jobs" : names.joined(separator: ", ")) to \(destination ?? "the selected destination")"

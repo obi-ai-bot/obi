@@ -271,6 +271,7 @@ nonisolated enum PermissionPolicy {
             title = switch call.tool {
             case "WebFetch": "Fetch \(URL(string: detail)?.host() ?? "a web page")"
             case "WebSearch": "Search the web"
+            case ACPAgent.allowlistTool: "Let Cursor use this repository's own allowlist"
             default: "Use \(call.tool)"
             }
             // Nothing saves a rule for a tool of no family: it asks every time.

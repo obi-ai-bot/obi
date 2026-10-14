@@ -22,3 +22,58 @@ nonisolated enum CursorFacts {
     static let askActsAsAcceptEdits = "Cursor edits files without asking Oby, so Ask works as Accept edits for Cursor jobs"
     static let noConnectedApps = "Connected apps aren't available to Cursor jobs yet"
 }
+
+extension ACPTool {
+    /// Cursor through `cursor-agent acp`, on the account home `home` (Oby made it: never `~/.cursor`,
+    /// whose `permissions.allow` isn't Oby's to apply).
+    /// - `--sandbox disabled`: Cursor's own sandbox is off, so every command comes to Oby.
+    /// - `--model`: its model from Settings › Models, left out for `auto` (Cursor picks) and when
+    ///   Cursor sets its model as an option (`CursorFacts.modelOption`).
+    /// - The environment keeps Cursor's login out of the agent's reach: no `CURSOR_API_KEY` or
+    ///   `CURSOR_AUTH_TOKEN`, and `CURSOR_CONFIG_DIR` is the account's.
+    /// On Linux it runs in bubblewrap with `own: home` (`Agents.sandboxed`).
+    static func cursor(worktree: URL, home: URL?, model: String, bubblewrap: Bool = Agents.bubblewrap,
+                       exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> ACPTool {
+        let picked = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let asks = picked.isEmpty || picked == "auto" ? nil : picked
+        var command = ["cursor-agent", "--sandbox", "disabled"]
+        if let asks, !CursorFacts.modelOption { command += ["--model", asks] }
+        command.append("acp")
+        var tool = ACPTool(id: "cursor", name: "Cursor",
+                           arguments: Agents.sandboxed(Agents.niced(command), in: worktree, own: home?.path, bubblewrap: bubblewrap, exists: exists))
+        tool.environment = ["CURSOR_CONFIG_DIR": home?.path, "CURSOR_API_KEY": nil, "CURSOR_AUTH_TOKEN": nil]
+        tool.model = asks
+        tool.honoursMCP = CursorFacts.honoursMcpServers
+        if let home {
+            tool.prepare = { try CursorConfig.rewrite(home: home) }
+        } else {
+            tool.cannotStart = "Cursor jobs run on an account Oby made: add one in Settings › Accounts."
+        }
+        tool.repositoryAllowlist = { CursorConfig.repositoryAllowlist(worktree: $0) }
+        return tool
+    }
+}
+
+/// The files Cursor reads its permissions from.
+nonisolated enum CursorConfig {
+    /// What Oby sets in `<home>/cli-config.json` before each start: no command or edit is allowed
+    /// ahead of Oby, and every one is asked about (`allowlist` mode over an empty allowlist). The
+    /// CLI-managed keys (`authInfo`, `version`, whatever else) stay as they are.
+    static func rewrite(home: URL) throws {
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let file = home.appending(path: "cli-config.json")
+        var config = (try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        config["permissions"] = ["allow": [String](), "deny": [String]()]
+        config["approvalMode"] = "allowlist"
+        let data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: file, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+
+    /// What the worktree's `.cursor/cli.json` pre-allows (`permissions.allow`), in file order.
+    static func repositoryAllowlist(worktree: URL) -> [String] {
+        let file = worktree.appending(path: ".cursor/cli.json")
+        let config = (try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        return ((config?["permissions"] as? [String: Any])?["allow"] as? [Any] ?? []).compactMap { $0 as? String }
+    }
+}

@@ -136,7 +136,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         return "Sent by Oby:\n" + outgoing.map { "- \($0.line)" }.joined(separator: "\n")
     }
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
-    var agentName: String { agent == "codex" ? "Codex" : "Claude Code" }
+    var agentName: String { ["codex": "Codex", "cursor": "Cursor"][agent] ?? "Claude Code" }
 
     /// The runner's title, like "Mac runner notifications", else "Review oby #33" or the first line
     /// of what the user asked.

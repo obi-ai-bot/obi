@@ -26,6 +26,9 @@ nonisolated enum Shell {
         for key in env.keys where key == "CLAUDECODE" || key.hasPrefix("CLAUDE_CODE_") || key.hasPrefix("ANTHROPIC_") {
             env[key] = nil
         }
+        // Cursor's own logins: a key or token in an agent's environment would be a login its
+        // subprocesses see (Cursor jobs sign in through their account home).
+        for key in ["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"] { env[key] = nil }
         // The GitHub app's settings stay with the runner: nothing it runs needs where the key is.
         for key in GitHubApp.variables { env[key] = nil }
         if let user = getpwuid(getuid()), let shell = user.pointee.pw_shell {

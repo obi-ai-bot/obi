@@ -4,7 +4,9 @@ import Foundation
 nonisolated enum AgentModels {
     static let defaults = ["claude.model": "claude-opus-5-5", "claude.effort": "xhigh",
                            "claude.complexEffort": "xhigh",
-                           "codex.model": "gpt-6.1-sol", "codex.effort": "high", "codex.complexEffort": "high"]
+                           "codex.model": "gpt-6.1-sol", "codex.effort": "high", "codex.complexEffort": "high",
+                           // Cursor has no effort: "auto" lets Cursor pick the model.
+                           "cursor.model": "auto"]
 
     static let claude = [("claude-fable-5-1", "Fable 5.1"), ("claude-opus-5-5", "Opus 5.5"), ("claude-sonnet-5-5", "Sonnet 5.5"),
                          ("claude-haiku-5-5", "Haiku 5.5")]
@@ -12,7 +14,7 @@ nonisolated enum AgentModels {
     /// What a complex job is offered: Claude Code's strongest model, and Codex's (heavy on a small plan).
     static let stronger = ["claude": "claude-fable-5-1", "codex": "gpt-6-astra"]
 
-    /// `agent` is "claude" or "codex"; `what` is "model" or "effort".
+    /// `agent` is "claude", "codex" or "cursor"; `what` is "model" or "effort" (Cursor has no effort).
     static func value(_ agent: String, _ what: String) -> String {
         let key = "\(agent).\(what)"
         return UserDefaults.standard.string(forKey: key) ?? defaults[key] ?? ""

@@ -250,7 +250,10 @@ final class Desk {
         return true
     }
     /// A line for job `id`'s report, with how routing chose its account.
-    func noteStart(_ line: String, for id: String) { handoffs[id, default: []].append(line) }
+    func noteStart(_ line: String, for id: String) {
+        guard !(handoffs[id] ?? []).contains(line) else { return }
+        handoffs[id, default: []].append(line)
+    }
     /// How many slots are taken: jobs running (`Job.takesSlot`), and those about to.
     var runningCount: Int { jobs.filter(\.takesSlot).count + startingUp.count }
     /// Why routing chose the account of each job a guessed plan proposes (#269), by job id, until
@@ -2135,6 +2138,14 @@ final class Desk {
         let mcp = openBroker(job)
         (agent as? ClaudeAgent)?.mcp = mcp
         (agent as? CodexAgent)?.mcp = mcp
+        if let cursor = agent as? ACPAgent {
+            cursor.mcp = mcp
+            cursor.repo = job.repo
+            cursor.account = accounts.state(job.account)?.account.name ?? ""
+            // What this tool can't do yet, said in the job's report and never silently.
+            if mcp != nil, !CursorFacts.honoursMcpServers { noteStart(CursorFacts.noConnectedApps + ".", for: job.id) }
+            if job.currentMode == .ask, !CursorFacts.editsAsk { noteStart(CursorFacts.askActsAsAcceptEdits + ".", for: job.id) }
+        }
         // A new round, or one done over on another account: its own timer. The job's cap runs from
         // its first round until it ends.
         if jobTimers[job.id] == nil {
@@ -2153,7 +2164,7 @@ final class Desk {
         }
     }
 
-    /// Claude Code or Codex in the job's worktree, or nil for a tool that can't run jobs yet.
+    /// Claude Code, Codex or Cursor in the job's worktree, or nil for a tool that can't run jobs yet.
     static func agent(for job: Job, home: URL?, resume: String?) -> (any AgentRun)? {
         switch job.agent {
         case "claude":
@@ -2168,6 +2179,13 @@ final class Desk {
             codex.effort = job.effort
             codex.mode = job.currentMode
             return codex
+        case "cursor":
+            let worktree = Workspace.worktree(job.id)
+            let tool = ACPTool.cursor(worktree: worktree, home: home, model: job.model ?? AgentModels.value("cursor", "model"))
+            let cursor = ACPAgent(tool: tool, worktree: worktree, resume: resume)
+            cursor.model = job.model
+            cursor.mode = job.currentMode
+            return cursor
         default: return nil
         }
     }
