@@ -540,14 +540,18 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     /// The user said it out loud (the iPhone's mic), so the thread says "You, by voice". Nil when
     /// typed, and on turns the runner kept.
     var voice: Bool?
+    /// Longer Markdown answer beneath Oby's short spoken reply; nil on older turns.
+    var details: String?
 
-    init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String, jobs: [String]? = nil, voice: Bool? = nil) {
+    init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String,
+         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil) {
         self.id = id
         self.date = date
         self.who = who
         self.text = text
         self.jobs = jobs
         self.voice = voice
+        self.details = details
     }
 }
 #endif
@@ -560,9 +564,11 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
     var text: String
     var at: Date
     var jobs: [String]?
+    var details: String?
 
     var turn: Turn {
-        Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text, jobs: (jobs ?? []).isEmpty ? nil : jobs)
+        Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text,
+             jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details)
     }
 }
 

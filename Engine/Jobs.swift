@@ -1637,6 +1637,36 @@ nonisolated enum Workspace {
                             "-q", ".[].full_name"]).split(separator: "\n").map(String.init)
     }
 
+    /// The shared clone a read or a job will use. A clone is prepared once and never receives
+    /// agent work directly; only jobs get worktrees from it.
+    static func ensureClone(_ repo: String) async throws -> URL {
+        let clone = clone(repo)
+        @discardableResult func git(_ arguments: [String]) async throws -> String {
+            try await Shell.ok(["git", "-C", clone.path] + arguments)
+        }
+        if !FileManager.default.fileExists(atPath: clone.appending(path: ".git").path) {
+            try FileManager.default.createDirectory(at: clone.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try await Shell.ok(["gh", "repo", "clone", repo, clone.path])
+            try await git(["config", "remote.origin.pushurl", "oby-publishes-only-through-the-notch"])
+            let exclude = clone.appending(path: ".git/info/exclude")
+            let excluded = (try? String(contentsOf: exclude, encoding: .utf8)) ?? ""
+            try (excluded + "\n.oby/\n").write(to: exclude, atomically: true, encoding: .utf8)
+        }
+        try await git(["config", "gc.auto", "0"])
+        try await git(["config", "maintenance.auto", "false"])
+        try await git(["config", "commit.gpgsign", "false"])
+        return clone
+    }
+
+    /// Oby's working base, or the remote's declared default branch when there is no `dev`.
+    static func defaultBase(clone: URL) async throws -> String {
+        if (try? await Shell.ok(["git", "-C", clone.path, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/dev"])) != nil {
+            return "dev"
+        }
+        let head = try await Shell.ok(["git", "-C", clone.path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        return String(head.trimmingCharacters(in: .whitespacesAndNewlines).dropFirst("origin/".count))
+    }
+
     /// Clones the repository on first use, fetches it, and adds a worktree on a new branch.
     /// Returns the job with the branch it really got (and the PR's base branch).
     static func prepare(_ job: Job) async throws -> Job {
@@ -1645,15 +1675,7 @@ nonisolated enum Workspace {
         @discardableResult func git(_ arguments: [String]) async throws -> String {
             try await Shell.ok(["git", "-C", clone.path] + arguments)
         }
-        if !FileManager.default.fileExists(atPath: clone.appending(path: ".git").path) {
-            try FileManager.default.createDirectory(at: clone.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try await Shell.ok(["gh", "repo", "clone", job.repo, clone.path])
-            // Nothing is pushed from Oby's clone: only Publish pushes, to GitHub's URL.
-            try await git(["config", "remote.origin.pushurl", "oby-publishes-only-through-the-notch"])
-            let exclude = clone.appending(path: ".git/info/exclude")
-            let excluded = (try? String(contentsOf: exclude, encoding: .utf8)) ?? ""
-            try (excluded + "\n.oby/\n").write(to: exclude, atomically: true, encoding: .utf8)
-        }
+        _ = try await ensureClone(job.repo)
         // The runner and agents share this clone. Keep the runner's Git from packing refs
         // while an agent is using them through bubblewrap.
         try await git(["config", "gc.auto", "0"])
@@ -1676,9 +1698,7 @@ nonisolated enum Workspace {
         if job.pr == nil, job.base == nil {
             // ponytail: work starts from dev where a repository has one (Deskree's flow), else the
             // default branch; a per-repository setting when someone needs otherwise.
-            let dev = (try? await git(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/dev"])) != nil
-            let head = try await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-            job.base = dev ? "dev" : String(head.dropFirst("origin/".count))
+            job.base = try await defaultBase(clone: clone)
         }
         if let pr = job.pr ?? job.fromPR {
             try await Publish.gitFetch(["--quiet", "origin", "+refs/pull/\(pr)/head:refs/oby/pr-\(pr)"], into: clone)

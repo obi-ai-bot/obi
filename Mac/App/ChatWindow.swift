@@ -429,6 +429,10 @@ struct TurnRow: View {
                     .background(turn.who == .user ? OBYStyle.userBubble : OBYStyle.assistantBubble,
                                 in: RoundedRectangle(cornerRadius: OBYStyle.bubble, style: .continuous))
             }
+            if let markdown = ConversationModel.markdownDetails(for: turn) {
+                Text(markdown).font(OBYStyle.body).foregroundStyle(OBYStyle.primary).textSelection(.enabled)
+                    .padding(.leading, OBYStyle.Space.lg)
+            }
             if !steps.isEmpty {
                 StepList(steps: steps).padding(.horizontal, OBYStyle.Space.sm)
             }

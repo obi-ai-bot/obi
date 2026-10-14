@@ -290,6 +290,9 @@ private struct TurnRow: View {
                     Text("· \(ConversationModel.clock(turn.date))").font(.caption).foregroundStyle(.secondary)
                 }
                 ReadingText(turn.text, weight: .medium).textSelection(.enabled)
+                if let markdown = ConversationModel.markdownDetails(for: turn) {
+                    Text(markdown).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
+                }
                 ForEach(jobs) { job in
                     JobCard(job: job, account: account(job))
                 }

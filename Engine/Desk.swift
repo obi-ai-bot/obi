@@ -54,6 +54,9 @@ final class Desk {
     var onTurnChange: (Turn) -> Void = { _ in }
     /// The jobs the brain's plan or the Lead just started, for the reply turn that tells of them.
     var onStepChange: (DeskStep) -> Void = { _ in }
+    @ObservationIgnored var researchTools = ResearchTools()
+    @ObservationIgnored private(set) var replyDetails: String?
+    @ObservationIgnored private var researchedThisTurn = false
     private var justStarted: [String] = []
     private(set) var jobs: [Job] {
         didSet { accounts.countRunning(jobs) }
@@ -829,6 +832,8 @@ final class Desk {
 
     /// `converse`, with the jobs Oby's answer started (#269): `POST /v1/plans` answers them.
     func exchange(_ said: String, shown: String? = nil, turns given: [Turn]? = nil, attachments: [String] = []) async -> (talk: Talk, started: [Job]) {
+        replyDetails = nil
+        researchedThisTurn = false
         if Conversation.cancels(said) { stopConversation(); return (.none, []) }
         let turn = Turn(who: .user, text: shown ?? said)
         conversationTurn = turn.id
@@ -838,7 +843,7 @@ final class Desk {
         stopRequested = false
         add(turn)
         guard let reply = Self.reply(in: talk) else { return (talk, []) }
-        let replyTurn = addReply(reply)
+        let replyTurn = addReply(reply, details: replyDetails)
         return (talk, (replyTurn.jobs ?? []).compactMap(job))
     }
 
@@ -881,10 +886,10 @@ final class Desk {
     /// Oby's reply joins the thread, with the jobs its plan or the Lead just started, if any: the
     /// window shows them as cards under Oby's words, each with Stop.
     @discardableResult
-    private func addReply(_ text: String) -> Turn {
+    private func addReply(_ text: String, details: String? = nil) -> Turn {
         let started = justStarted
         justStarted = []
-        let turn = Turn(who: .oby, text: text, jobs: started.isEmpty ? nil : started)
+        let turn = Turn(who: .oby, text: text, jobs: started.isEmpty ? nil : started, details: details ?? replyDetails)
         add(turn)
         return turn
     }
@@ -918,6 +923,8 @@ final class Desk {
     /// `attachments` go to the jobs the plan starts.
     func plan(_ said: String, turns given: [Turn]? = nil, attachments: [String] = [], orchestratorContext: String? = nil, live: @escaping () -> Bool = { true }) async -> Talk {
         let isOrchestratorTurn = orchestrating && conversationTurn != nil && conversationTurn == orchestratorTurnID
+        researchedThisTurn = false
+        replyDetails = nil
         await refreshSettingOptions()
         if repos.isEmpty { await refresh() }
         // The brain and the Lead think with the least busy Claude account too, so a busy one doesn't slow them.
@@ -928,10 +935,12 @@ final class Desk {
         // full, move its jobs to Personal and Codex" is several moves). It ends on an answer (a
         // reply, a question, jobs it started), an action it already took, or the turn's budget.
         let deadline = ContinuousClock.now + turnBudget
+        await researchTools.beginTurn()
         var done: [String] = []
         var taken: Set<String> = []
         var request = said
         var reads = JobReads()
+        var research = ResearchLog()
         for step in 0..<Self.mostSteps {
             var context = brainContext(turns: given ?? turns.filter { $0.id != pending })
             context.orchestrator = isOrchestratorTurn
@@ -940,7 +949,7 @@ final class Desk {
                 if !done.isEmpty { context.orchestratorContext = (context.orchestratorContext ?? "") + "\n\nOby already did this during this event turn: \(done.joined(separator: " ")). Plan the next allowed action or reply_only."
                 }
             }
-            context.quoted = reads.quoted(adding: context.quoted)
+            context.quoted = research.quoted(adding: reads.quoted(adding: context.quoted))
             // A runner stop is checked before asking the brain for another action. Mac turns use
             // `live` to discard a late plan, but still let that plan finish so its answer is logged.
             if stopRequested { return done.isEmpty ? .none : .reply(done.joined(separator: " ")) }
@@ -1065,6 +1074,21 @@ final class Desk {
                 request = isOrchestratorTurn ? "" : reads.continued(done.isEmpty ? said : Self.continued(said, done: done))
                 continue
             }
+            if result.plan.action == .research {
+                let lookups = result.plan.lookups ?? []
+                if !lookups.isEmpty { researchedThisTurn = true }
+                let text = lookups.map(Self.researchStepText).joined(separator: ", ")
+                let event = DeskStep(turn: conversationTurn ?? "", index: step + 1, action: .research,
+                                     text: text.isEmpty ? "Looking up context" : text, state: .running)
+                onStepChange(event)
+                if !stopRequested, ContinuousClock.now < deadline { await research.run(lookups, with: researchTools) }
+                onStepChange(DeskStep(turn: event.turn, index: event.index, action: .research, text: event.text,
+                                      state: stopRequested || ContinuousClock.now >= deadline ? .failed : .done))
+                guard !stopRequested, ContinuousClock.now < deadline else { break }
+                request = research.continued(reads.continued(done.isEmpty ? said : Self.continued(said, done: done)))
+                continue
+            }
+            if result.plan.action == .replyOnly || result.plan.action == .askUser { replyDetails = result.plan.details }
             let acting = Self.acting.contains(result.plan.action)
             // The same action twice in one turn: it's done; the brain only repeated itself.
             if acting, !taken.insert(Self.signature(result.plan)).inserted { break }
@@ -1090,7 +1114,19 @@ final class Desk {
     /// The actions that change something, after which the brain plans the next step.
     nonisolated static let acting: Set<Plan.Action> = [.stopAgent, .moveJob, .answerPermission, .setMode, .setSetting, .retryJob, .dismissJob, .answerInbox, .startNow, .messageJob, .fixFailure, .askReviewAgain]
     /// The most actions one turn takes.
-    nonisolated static let mostSteps = 6
+    nonisolated static let mostSteps = 8
+
+    private nonisolated static func researchStepText(_ lookup: Plan.Lookup) -> String {
+        switch lookup.tool {
+        case .searchCode: "Searching \(lookup.repo ?? "code") for “\(lookup.query ?? "")”"
+        case .listFiles: "Listing files in \(lookup.repo ?? "repository")"
+        case .readFile: "Reading \(lookup.path ?? "file")"
+        case .gitLog: "Reading history for \(lookup.path ?? lookup.repo ?? "repository")"
+        case .viewIssue: "Reading issue #\(lookup.number ?? 0)"
+        case .viewPR: "Reading pull request #\(lookup.number ?? 0)"
+        case .fetchURL: "Reading \(lookup.url ?? "web page")"
+        }
+    }
 
     /// What makes two actions the same: what they do, to which jobs, how.
     nonisolated static func signature(_ plan: Plan) -> String {
@@ -1310,14 +1346,13 @@ final class Desk {
                 Logger.brain.notice("\(said.debugDescription, privacy: .public): the turn ended while its jobs were made; nothing started")
                 return .none
             }
-            // The brain didn't answer, so rules guessed: the user says whether that's what they
-            // meant, from the inbox (the thread shows it too), and nothing starts until Start.
-            if result.by == "rules" {
+            // Rules' guesses and work proposed after research wait for an explicit Start tap.
+            if result.by == "rules" || researchedThisTurn {
                 for (job, route, _) in made {
                     if let route { routes[job.id] = route.why }
-                    add(Inbox.proposal(job, account: accountHeading(job.account)))
+                    add(Inbox.proposal(job, account: accountHeading(job.account), why: researchedThisTurn ? "research" : nil))
                 }
-                return .reply(guessedLine(made.map(\.job)))
+                return .reply(researchedThisTurn ? "I looked into it first. A draft is waiting in your inbox; tap Start when you're ready." : guessedLine(made.map(\.job)))
             }
             let started = made.map { dispatch($0.job, why: $0.route?.why) }
             justStarted = started.map(\.id)
@@ -1402,6 +1437,9 @@ final class Desk {
             return .reply(await act(on: plan))
         case .readJob:
             // Read in the loop (`plan`); a read that gets here changes nothing and says nothing.
+            return .none
+        case .research:
+            // Research runs in `plan` and feeds its quoted results into the next brain step.
             return .none
         case .setSetting:
             return .reply(await applySetting(plan.setting))

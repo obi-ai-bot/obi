@@ -125,9 +125,11 @@ nonisolated enum Inbox {
 
     /// The item a guessed plan's job waits in: the brain didn't answer, so the user says whether
     /// what rules made of their words is what they meant. `account` is where it would run.
-    static func proposal(_ job: Job, account: String) -> InboxItem {
+    static func proposal(_ job: Job, account: String, why: String? = nil) -> InboxItem {
         var item = InboxItem(id: "\(job.id)-start", kind: .start, job: job.id, title: job.shortTitle,
-                             text: "Oby's brain didn't answer, so this plan is a guess. Start \(job.heading) on \(account)?",
+                             text: why == nil
+                                ? "Oby's brain didn't answer, so this plan is a guess. Start \(job.heading) on \(account)?"
+                                : "Oby looked into it first. Start \(job.heading) on \(account)?",
                              options: [start, cancelStart],
                              details: ["Starts it now, as planned: \(job.kind.rawValue) in \(job.repoName) on \(account), on the branch \(job.branch).",
                                        "Drops the plan. Nothing starts; say it another way."],
