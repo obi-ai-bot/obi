@@ -1,6 +1,6 @@
 # Oby's icon
 
-Every Oby icon is Sangam's character itself, rendered from `Character/` rather than drawn again, so the icon always matches the Oby that lives in the notch.
+Every Oby icon is Sangam's character itself, rendered from `character/` rather than drawn again, so the icon always matches the Oby that lives in the notch.
 
 ```
 AppIcon.icon/    Icon Composer document: iPhone, iPad, Mac and Apple Watch
@@ -22,7 +22,7 @@ compose.swift    turns the render into all of the above
 When Sangam changes the character, render it again and rebuild everything:
 
 ```bash
-zsh Character/package/build.sh
+zsh character/package/build.sh
 ```
 
 ```bash

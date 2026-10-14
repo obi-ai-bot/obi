@@ -1,4 +1,4 @@
-// Renders Oby's watch loops from Character/oby.html, frame by frame, through headless Chromium's
+// Renders Oby's watch loops from character/oby.html, frame by frame, through headless Chromium's
 // DevTools protocol (the pipeline of apps/icon/render.mjs, on a stepped clock so every frame is
 // exactly 1/30 s after the last and two runs give the same frames).
 // Usage: node apps/watch/Frames/render.mjs <out-dir> [css-size] [oby-size]
@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
 
 const [out = join(tmpdir(), 'oby-watch-frames'), cssSize = '320', obySize = '1.25'] = process.argv.slice(2);
-const characterDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../../Character');
+const characterDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../../character');
 
 // The loops. Oby is simulated at 30 fps and every `every`th frame is kept (15 fps on the watch).
 // `pre` frames of calm come before the loop starts; compose.py crossfades the loop's last frames
@@ -45,7 +45,7 @@ function findChrome() {
   throw new Error('No chrome-headless-shell: run `npx playwright install chromium-headless-shell` or set CHROME.');
 }
 
-// Character/ over HTTP: browsers won't load ES modules from file://.
+// character/ over HTTP: browsers won't load ES modules from file://.
 const types = { '.html': 'text/html', '.js': 'text/javascript' };
 const server = createServer((req, res) => {
   const path = resolve(characterDir, '.' + decodeURIComponent(new URL(req.url, 'http://x').pathname));
@@ -57,7 +57,7 @@ const pagePort = server.address().port;
 
 const port = 9334;
 // On Linux, WebGL runs on SwiftShader, and Chromium's own sandbox can't start inside another
-// one (Oby's runner): it only ever loads Character/ from this machine.
+// one (Oby's runner): it only ever loads character/ from this machine.
 const platform = process.platform === 'darwin' ? ['--use-angle=metal'] : ['--use-angle=swiftshader', '--no-sandbox'];
 const proc = spawn(findChrome(), [`--remote-debugging-port=${port}`, '--headless', '--hide-scrollbars', ...platform,
   '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', `--user-data-dir=${join(tmpdir(), 'oby-watch-chrome')}`, 'about:blank'], { stdio: 'ignore' });

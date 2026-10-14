@@ -9,7 +9,7 @@ when someone clicks it.
 The folder works on its own with no network or build step.
 
 ```
-Character/
+character/
   oby.html                 Oby: one page with all the code
   vendor/three.module.js   three.js 0.170 (MIT), the only dependency
   mac/                     sample macOS menu bar app that hosts Oby
@@ -22,7 +22,7 @@ This folder is the working copy: the playground with sliders and every
 expression. The clean copy the Oby app ships is built from it:
 
 ```bash
-zsh Character/package/build.sh    # → dist/oby and dist/oby.zip
+zsh character/package/build.sh    # → dist/oby and dist/oby.zip
 ```
 
 The build:
@@ -47,7 +47,7 @@ Then open http://localhost:5173/oby.html. The top row of buttons sets the
 state, and the buttons below play single expressions. Space or → steps through
 the expressions.
 
-To try the menu bar app, run `zsh Character/mac/build.sh`. Click the icon to open
+To try the menu bar app, run `zsh character/mac/build.sh`. Click the icon to open
 Oby, and right-click it to switch states or say hi.
 
 ## Calling Oby
