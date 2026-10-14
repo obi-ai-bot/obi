@@ -38,6 +38,41 @@ struct OfflineTests {
         #expect(queue.answers.map(\.id) == ["fails", "later"])
     }
 
+    @Test func queuesFlushOnlyToTheirOriginalRunner() async {
+        let suiteName = "com.deskree.oby.destinations-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let queue = OfflineQueue(defaults: defaults)
+        queue.queue(OfflineMessage(id: "message-a", said: "a", question: nil, option: nil, voice: false, target: "runner:a"))
+        queue.queue(OfflineMessage(id: "message-b", said: "b", question: nil, option: nil, voice: false, target: "runner:b"))
+        queue.queue(OfflineInboxAnswer(id: "answer-a", answer: "Allow", done: nil, later: nil, target: "runner:a"))
+        queue.queue(OfflineInboxAnswer(id: "answer-b", answer: "Deny", done: nil, later: nil, target: "runner:b"))
+
+        var messages: [String] = []
+        var answers: [String] = []
+        await queue.flushMessages(for: "runner:b") { messages.append($0.id) }
+        await queue.flushAnswers(for: "runner:b") { answers.append($0.id) }
+
+        #expect(messages == ["message-b"])
+        #expect(answers == ["answer-b"])
+        #expect(queue.messages.map(\.id) == ["message-a"])
+        #expect(queue.answers.map(\.id) == ["answer-a"])
+    }
+
+    @Test func legacyQueueEntriesBindToTheirCurrentRunner() {
+        let suiteName = "com.deskree.oby.legacy-destination-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let queue = OfflineQueue(defaults: defaults)
+        queue.queue(OfflineMessage(id: "legacy-message", said: "hello", question: nil, option: nil, voice: false))
+        queue.queue(OfflineInboxAnswer(id: "legacy-answer", answer: "Allow", done: nil, later: nil))
+
+        queue.bindUnscopedEntries(to: "runner:old")
+        let restored = OfflineQueue(defaults: defaults)
+        #expect(restored.messages.first?.target == "runner:old")
+        #expect(restored.answers.first?.target == "runner:old")
+    }
+
     @Test func phoneDiscardAndRetryRemoveThePersistedOutboxEntry() {
         let suiteName = "com.deskree.oby.phone-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

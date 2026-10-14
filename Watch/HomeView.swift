@@ -120,11 +120,16 @@ struct JobListScreen: View {
 
     var body: some View {
         List {
+            if watch.offline {
+                Label(watch.offlineLine, systemImage: "wifi.exclamationmark")
+                    .font(.footnote).foregroundStyle(.orange)
+                    .listRowBackground(Color.clear)
+            }
             ForEach(watch.shown) { job in
                 NavigationLink(value: HomeView.Screen.job(job.id)) { JobRow(job: job) }
             }
-            if watch.shown.isEmpty {
-                Text(watch.offline ? watch.offlineLine : watch.loaded ? "Nothing needs you." : "Waiting for your iPhone…")
+            if watch.shown.isEmpty && !watch.offline {
+                Text(watch.loaded ? "Nothing needs you." : "Waiting for your iPhone…")
                     .font(.footnote).foregroundStyle(.secondary)
                     .listRowBackground(Color.clear)
             }

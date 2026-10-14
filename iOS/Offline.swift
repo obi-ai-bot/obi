@@ -5,15 +5,17 @@ struct OfflineInboxAnswer: Codable, Equatable, Sendable {
     var answer: String?
     var done: Bool?
     var later: Date?
+    var target: String?
     var queuedAt: Date = .now
 
-    private enum CodingKeys: String, CodingKey { case id, answer, done, later, queuedAt }
+    private enum CodingKeys: String, CodingKey { case id, answer, done, later, target, queuedAt }
 
-    init(id: String, answer: String?, done: Bool?, later: Date?, queuedAt: Date = .now) {
+    init(id: String, answer: String?, done: Bool?, later: Date?, target: String? = nil, queuedAt: Date = .now) {
         self.id = id
         self.answer = answer
         self.done = done
         self.later = later
+        self.target = target
         self.queuedAt = queuedAt
     }
 
@@ -23,6 +25,7 @@ struct OfflineInboxAnswer: Codable, Equatable, Sendable {
         answer = try values.decodeIfPresent(String.self, forKey: .answer)
         done = try values.decodeIfPresent(Bool.self, forKey: .done)
         later = try values.decodeIfPresent(Date.self, forKey: .later)
+        target = try values.decodeIfPresent(String.self, forKey: .target)
         queuedAt = try values.decodeIfPresent(Date.self, forKey: .queuedAt) ?? .now
     }
 }
@@ -33,16 +36,18 @@ struct OfflineMessage: Codable, Equatable, Sendable {
     var question: String?
     var option: String?
     var voice: Bool
+    var target: String?
     var queuedAt: Date = .now
 
-    private enum CodingKeys: String, CodingKey { case id, said, question, option, voice, queuedAt }
+    private enum CodingKeys: String, CodingKey { case id, said, question, option, voice, target, queuedAt }
 
-    init(id: String, said: String, question: String?, option: String?, voice: Bool, queuedAt: Date = .now) {
+    init(id: String, said: String, question: String?, option: String?, voice: Bool, target: String? = nil, queuedAt: Date = .now) {
         self.id = id
         self.said = said
         self.question = question
         self.option = option
         self.voice = voice
+        self.target = target
         self.queuedAt = queuedAt
     }
 
@@ -53,6 +58,7 @@ struct OfflineMessage: Codable, Equatable, Sendable {
         question = try values.decodeIfPresent(String.self, forKey: .question)
         option = try values.decodeIfPresent(String.self, forKey: .option)
         voice = try values.decode(Bool.self, forKey: .voice)
+        target = try values.decodeIfPresent(String.self, forKey: .target)
         queuedAt = try values.decodeIfPresent(Date.self, forKey: .queuedAt) ?? .now
     }
 }
@@ -108,6 +114,21 @@ final class OfflineQueue: @unchecked Sendable {
         save()
     }
 
+    /// Older queue entries have no destination. Bind them once, on load, to the currently
+    /// configured runner so later runner changes cannot redirect or discard them.
+    func bindUnscopedEntries(to target: String) {
+        var changed = false
+        for index in messages.indices where messages[index].target == nil {
+            messages[index].target = target
+            changed = true
+        }
+        for index in answers.indices where answers[index].target == nil {
+            answers[index].target = target
+            changed = true
+        }
+        if changed { save() }
+    }
+
     func queue(_ answer: OfflineInboxAnswer) {
         answers.removeAll { $0.id == answer.id }
         answers.append(answer)
@@ -115,14 +136,15 @@ final class OfflineQueue: @unchecked Sendable {
     }
 
     /// Sends messages in their persisted order. A message leaves the queue only after `send`
-    /// returns, which means the runner accepted it. A failure leaves that message and everything
-    /// after it for the next connection.
-    func flushMessages(_ send: (OfflineMessage) async throws -> Void) async {
+    /// returns, which means the runner accepted it. A failure leaves that target's remaining
+    /// messages for the next connection.
+    func flushMessages(for target: String? = nil, _ send: (OfflineMessage) async throws -> Void) async {
         prune()
-        while let message = messages.first {
+        while let index = messages.firstIndex(where: { $0.target == target }) {
+            let message = messages[index]
             do {
                 try await send(message)
-                messages.removeFirst()
+                if let sentIndex = messages.firstIndex(of: message) { messages.remove(at: sentIndex) }
                 save()
             } catch {
                 save()
@@ -131,14 +153,15 @@ final class OfflineQueue: @unchecked Sendable {
         }
     }
 
-    func flushAnswers(_ send: (OfflineInboxAnswer) async throws -> Void) async {
+    func flushAnswers(for target: String? = nil, _ send: (OfflineInboxAnswer) async throws -> Void) async {
         prune()
-        while let answer = answers.first {
+        while let index = answers.firstIndex(where: { $0.target == target }) {
+            let answer = answers[index]
             do {
                 try await send(answer)
-                answers.removeFirst()
+                if let sentIndex = answers.firstIndex(of: answer) { answers.remove(at: sentIndex) }
             } catch FlushError.alreadySettled {
-                answers.removeFirst()
+                if let settledIndex = answers.firstIndex(of: answer) { answers.remove(at: settledIndex) }
             } catch {
                 save()
                 return
