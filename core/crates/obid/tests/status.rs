@@ -32,15 +32,20 @@ impl Drop for Folder {
     }
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// A port nothing listens on now, for a test that checks obid never binds it. It is below the
+/// systems' ephemeral ranges (Linux 32768 and up, macOS 49152 and up), where a port-0 bind, as by
+/// an obid another test starts at the same time, never lands.
+fn unused_port() -> u16 {
+    let start = 20_000 + (std::process::id() % 10_000) as u16;
+    (start..32_000)
+        .chain(20_000..start)
+        .find(|port| TcpListener::bind(("127.0.0.1", *port)).is_ok())
+        .expect("a free port below 32000")
 }
 
-/// The documented example, on a free port, in `folder`.
+/// The documented example, in `folder`, listening on `port`. Tests that start obid pass 0: obid
+/// binds a port the system picks and says which on its readiness line, so no two tests can race
+/// for the same one.
 fn config(folder: &Path, port: u16) -> Value {
     json!({
         "listen": format!("127.0.0.1:{port}"),
@@ -99,7 +104,7 @@ fn start(folder: &Path, config: &Value, token: Option<&str>) -> Obid {
         .stderr(std::fs::File::create(&stderr).unwrap())
         .spawn()
         .unwrap();
-    let port: u16 = config["listen"]
+    let asked: u16 = config["listen"]
         .as_str()
         .unwrap()
         .rsplit_once(':')
@@ -112,17 +117,27 @@ fn start(folder: &Path, config: &Value, token: Option<&str>) -> Obid {
     BufReader::new(child.stdout.take().unwrap())
         .read_line(&mut line)
         .unwrap();
-    assert_eq!(
-        line.trim(),
-        format!("obid listening on http://127.0.0.1:{port}"),
-        "obid didn't start: {}",
-        std::fs::read_to_string(&stderr).unwrap_or_default()
-    );
+    let port = listening_port(&line).unwrap_or_else(|| {
+        panic!(
+            "obid didn't start: {line:?} {}",
+            std::fs::read_to_string(&stderr).unwrap_or_default()
+        )
+    });
+    assert!(asked == 0 || asked == port, "{line:?}");
     Obid {
         child,
         port,
         stderr,
     }
+}
+
+/// The port in obid's readiness line, `obid listening on http://127.0.0.1:<port>`.
+fn listening_port(line: &str) -> Option<u16> {
+    line.trim()
+        .strip_prefix("obid listening on http://127.0.0.1:")?
+        .parse()
+        .ok()
+        .filter(|port| *port != 0)
 }
 
 struct Answer {
@@ -191,7 +206,7 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789a
 #[test]
 fn status_answers_with_engine_obid() {
     let folder = Folder::new("status");
-    let config = config(&folder.0, free_port());
+    let config = config(&folder.0, 0);
     let obid = start(&folder.0, &config, Some(TOKEN));
     let host = format!("127.0.0.1:{}", obid.port);
     let answer = get_status(&obid, &host, TOKEN);
@@ -258,7 +273,7 @@ fn answer_contains(value: &Value, needle: &str) -> bool {
 #[test]
 fn refuses_every_host_that_isnt_loopback() {
     let folder = Folder::new("hosts");
-    let obid = start(&folder.0, &config(&folder.0, free_port()), Some(TOKEN));
+    let obid = start(&folder.0, &config(&folder.0, 0), Some(TOKEN));
     let bearer = format!("Bearer {TOKEN}");
     for host in [
         "evil.example",
@@ -320,7 +335,7 @@ fn refuses_every_host_that_isnt_loopback() {
 #[test]
 fn lets_loopback_hosts_in_with_the_token() {
     let folder = Folder::new("loopback");
-    let obid = start(&folder.0, &config(&folder.0, free_port()), Some(TOKEN));
+    let obid = start(&folder.0, &config(&folder.0, 0), Some(TOKEN));
     let port = obid.port.to_string();
     for host in [
         "127.0.0.1".to_string(),
@@ -341,7 +356,7 @@ fn lets_loopback_hosts_in_with_the_token() {
 #[test]
 fn refuses_without_the_token() {
     let folder = Folder::new("token");
-    let obid = start(&folder.0, &config(&folder.0, free_port()), Some(TOKEN));
+    let obid = start(&folder.0, &config(&folder.0, 0), Some(TOKEN));
     let other = "cd".repeat(32);
     let wrong: Vec<Vec<(&str, String)>> = vec![
         vec![],
@@ -399,7 +414,7 @@ fn refuses_without_the_token() {
 #[test]
 fn oauth_discovery_needs_the_token() {
     let folder = Folder::new("oauth");
-    let obid = start(&folder.0, &config(&folder.0, free_port()), Some(TOKEN));
+    let obid = start(&folder.0, &config(&folder.0, 0), Some(TOKEN));
     let bearer = format!("Bearer {TOKEN}");
     for path in [
         "/.well-known/oauth-protected-resource",
@@ -439,7 +454,7 @@ fn cleanup_bytes_are_measured_at_start_not_per_request() {
     let worktrees = folder.0.join("home").join("worktrees");
     std::fs::create_dir_all(worktrees.join("job-1")).unwrap();
     std::fs::write(worktrees.join("job-1").join("file"), vec![7u8; 256 * 1024]).unwrap();
-    let obid = start(&folder.0, &config(&folder.0, free_port()), Some(TOKEN));
+    let obid = start(&folder.0, &config(&folder.0, 0), Some(TOKEN));
     let first = get_status(&obid, "127.0.0.1", TOKEN);
     assert_eq!(first.status, 200);
     let bytes = first.body["cleanup"]["bytes"].as_u64().unwrap();
@@ -462,7 +477,7 @@ fn home_is_the_owners_alone() {
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
 
     let folder = Folder::new("home-mode-new");
-    let config = config(&folder.0, free_port());
+    let config = config(&folder.0, 0);
     drop(start(&folder.0, &config, None));
     assert_eq!(mode(&folder.0.join("home")), 0o700);
 
@@ -470,7 +485,7 @@ fn home_is_the_owners_alone() {
     let home = folder.0.join("home");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let config = self::config(&folder.0, free_port());
+    let config = self::config(&folder.0, 0);
     let obid = start(&folder.0, &config, None);
     assert_eq!(mode(&home), 0o700);
     assert_eq!(mode(&home.join("api-token")), 0o600);
@@ -482,7 +497,7 @@ fn home_is_the_owners_alone() {
 #[test]
 fn makes_and_keeps_its_own_token() {
     let folder = Folder::new("own-token");
-    let config = config(&folder.0, free_port());
+    let config = config(&folder.0, 0);
     let token_file = folder.0.join("home").join("api-token");
     let first = {
         let obid = start(&folder.0, &config, None);
@@ -512,7 +527,7 @@ fn makes_and_keeps_its_own_token() {
 #[test]
 fn refuses_what_it_cant_use() {
     let folder = Folder::new("refuses");
-    let port = free_port();
+    let port = unused_port();
     let good = config(&folder.0, port);
     let mut cases: Vec<(Value, Option<&str>, &str)> = Vec::new();
     let mut with = |key: &str, value: Value, says: &'static str| {
@@ -580,21 +595,28 @@ fn refuses_what_it_cant_use() {
     assert!(String::from_utf8_lossy(&usage.stderr).contains("obid serve --config"));
 }
 
+/// Sends SIG`signal` to `pid` with the shell's built-in `kill`, which every POSIX shell has,
+/// where a `kill` program isn't on every machine.
+#[cfg(unix)]
+fn send(signal: &str, pid: u32) {
+    let sent = Command::new("sh")
+        .args(["-c", r#"kill -s "$1" "$2""#, "sh", signal, &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success(), "kill -s {signal} {pid}");
+}
+
 /// On SIGTERM or SIGINT obid stops taking requests and exits 0 within 10 seconds.
 #[cfg(unix)]
 #[test]
 fn exits_0_on_sigterm_and_sigint() {
     for signal in ["TERM", "INT"] {
         let folder = Folder::new(&format!("signal-{signal}"));
-        let mut obid = start(&folder.0, &config(&folder.0, free_port()), Some(TOKEN));
+        let mut obid = start(&folder.0, &config(&folder.0, 0), Some(TOKEN));
         assert_eq!(get_status(&obid, "127.0.0.1", TOKEN).status, 200);
         // An idle keep-alive connection must not hold obid up.
         let _idle = TcpStream::connect(("127.0.0.1", obid.port)).unwrap();
-        let sent = Command::new("kill")
-            .args([format!("-{signal}"), obid.child.id().to_string()])
-            .status()
-            .unwrap();
-        assert!(sent.success());
+        send(signal, obid.child.id());
         let began = Instant::now();
         let status = loop {
             if let Some(status) = obid.child.try_wait().unwrap() {
@@ -636,9 +658,8 @@ fn a_signal_the_moment_obid_says_it_listens_exits_0() {
     for round in 0..10 {
         for signal in ["TERM", "INT"] {
             let folder = Folder::new(&format!("signal-ready-{signal}-{round}"));
-            let port = free_port();
             let path = folder.0.join("config.json");
-            std::fs::write(&path, config(&folder.0, port).to_string()).unwrap();
+            std::fs::write(&path, config(&folder.0, 0).to_string()).unwrap();
             let mut obid = command(&folder.0, &path)
                 .env("OBID_API_TOKEN", TOKEN)
                 .stdout(Stdio::piped())
@@ -656,10 +677,8 @@ fn a_signal_the_moment_obid_says_it_listens_exits_0() {
                 .stdin(Stdio::from(obid.stdout.take().unwrap()))
                 .output()
                 .unwrap();
-            assert_eq!(
-                String::from_utf8_lossy(&line.stdout).trim(),
-                format!("obid listening on http://127.0.0.1:{port}")
-            );
+            let line = String::from_utf8_lossy(&line.stdout);
+            assert!(listening_port(&line).is_some(), "{line:?}");
             let status = exit_within_10_seconds(&mut obid, &format!("SIG{signal}"));
             assert_eq!(
                 status.code(),
@@ -672,12 +691,14 @@ fn a_signal_the_moment_obid_says_it_listens_exits_0() {
 
 /// A SIGTERM while obid is still starting (here: measuring a large `home/worktrees`, which it
 /// does before it listens) stops it with exit 0 too. obid writes `home/api-token` before that
-/// measurement, so its appearing says obid is under way.
+/// measurement, so its appearing says obid is under way. A shell starts obid, watches for the
+/// file in a busy loop and sends the signal with its built-in `kill` the moment it is there, then
+/// reports obid's exit status (143 when SIGTERM killed it).
 #[cfg(unix)]
 #[test]
 fn a_signal_while_obid_starts_exits_0() {
     let folder = Folder::new("signal-starting");
-    let config = config(&folder.0, free_port());
+    let config = config(&folder.0, 0);
     let home = folder.0.join("home");
     for d in 0..100 {
         let dir = home.join("worktrees").join(format!("wt-{d}"));
@@ -688,25 +709,42 @@ fn a_signal_while_obid_starts_exits_0() {
     }
     let path = folder.0.join("config.json");
     std::fs::write(&path, config.to_string()).unwrap();
-    let mut obid = command(&folder.0, &path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+    let script = r#"
+        "$1" serve --config "$2" >/dev/null 2>&1 &
+        obid=$!
+        n=0
+        while [ ! -e "$3" ]; do
+            n=$((n + 1))
+            if [ "$n" -gt 2000000 ]; then kill -s KILL "$obid"; echo "no token"; exit 1; fi
+        done
+        kill -s TERM "$obid"
+        wait "$obid"
+        echo "$?"
+    "#;
+    std::fs::create_dir_all(folder.0.join("env-home")).unwrap();
+    std::fs::create_dir_all(folder.0.join("tmp")).unwrap();
+    let mut shell = Command::new("sh");
+    shell
+        .args(["-c", script, "sh", OBID])
+        .arg(&path)
+        .arg(home.join("api-token"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", folder.0.join("env-home"))
+        .env("TMPDIR", folder.0.join("tmp"))
+        .stdout(Stdio::piped());
+    let mut shell = shell.spawn().unwrap();
+    exit_within_10_seconds(&mut shell, "SIGTERM while starting");
+    let mut said = String::new();
+    shell
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut said)
         .unwrap();
-    let began = Instant::now();
-    while !home.join("api-token").exists() {
-        assert!(
-            began.elapsed() < Duration::from_secs(10),
-            "obid never wrote its token"
-        );
-        assert!(obid.try_wait().unwrap().is_none(), "obid stopped early");
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    let sent = Command::new("kill")
-        .args(["-TERM", &obid.id().to_string()])
-        .status()
-        .unwrap();
-    assert!(sent.success());
-    let status = exit_within_10_seconds(&mut obid, "SIGTERM while starting");
-    assert_eq!(status.code(), Some(0), "{status:?}");
+    assert_eq!(
+        said.trim(),
+        "0",
+        "obid's exit status after SIGTERM while starting"
+    );
 }
