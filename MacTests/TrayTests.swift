@@ -1,3 +1,4 @@
+import Foundation
 import AppKit
 import Testing
 @testable import Oby
@@ -6,7 +7,8 @@ import Testing
 @MainActor
 struct TrayTests {
     private func fixture() throws -> (URL, Tray, Desk) {
-        let folder = try temporaryFolder()
+        let folder = FileManager.default.temporaryDirectory.appending(path: "oby-tray-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let staging = folder.appending(path: "staging", directoryHint: .isDirectory)
         return (folder, Tray(folder: staging), Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite"))))
     }
