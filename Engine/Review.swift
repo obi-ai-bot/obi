@@ -236,9 +236,13 @@ nonisolated struct Review: Codable, Equatable, Sendable {
         // The review fixtures and legacy interrupted jobs may not have a checked-out tree. A live
         // review job always has one; if Git fails after it exists, return nil and fail closed.
         guard FileManager.default.fileExists(atPath: Workspace.worktree(job.id).path) else { return [] }
+        return securityPaths(in: Workspace.worktree(job.id), base: base)
+    }
+
+    static func securityPaths(in worktree: URL, base: String) -> [String]? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["-C", Workspace.worktree(job.id).path, "diff", "--name-only", "--no-ext-diff", "origin/\(base)...HEAD"]
+        process.arguments = ["-C", worktree.path, "diff", "--name-only", "--no-renames", "--no-ext-diff", "origin/\(base)...HEAD"]
         let output = Pipe()
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
@@ -870,8 +874,10 @@ extension Desk {
         if review.securityReviewJob == true && verdict == .approved {
             applySecurityApproval(id, review: review, result: result)
         } else {
-            author.review = result
-            replace(author)
+            if review.securityReviewJob != true {
+                author.review = result
+                replace(author)
+            }
             applyReview(id, review: review)
         }
     }
@@ -901,7 +907,9 @@ extension Desk {
     /// so a restart anywhere before leaves it set, and the runner does it all again when it starts
     /// (`resumeReviews`): its check run may be written twice, never lost.
     func applyReview(_ id: String, review: Job) {
-        guard let author = job(id), let applying = author.review, applying.job == review.id, applying.applying == true else { return }
+        guard let author = job(id) else { return }
+        let savedReview = review.securityReviewJob == true ? author.securityReview : author.review
+        guard let applying = savedReview, applying.job == review.id, applying.applying == true else { return }
         let verdict = applying.verdict
         wrapUp("review:\(id)") { [self] in
             var result = applying
@@ -909,7 +917,7 @@ extension Desk {
             // The commit the reviewer read; the pull request's head when its worktree can't say.
             let read = await reviewedHead(review.id)
             do {
-                let url = try await postReview(author, Review.checkRun(result, summary: review.summary, head: read ?? author.pushedHead ?? "")).absoluteString
+                let url = try await postReview(author, Review.checkRun(result, summary: review.summary, head: read ?? author.pushedHead ?? "", security: review.securityReviewJob == true)).absoluteString
                 result.checkRun = url
                 sent(id, Outgoing(action: .checkRun, repo: author.repo, id: url))
             } catch {
@@ -921,8 +929,15 @@ extension Desk {
                     Logger.jobs.error("job \(id, privacy: .public): the review wasn't posted: \(error.localizedDescription, privacy: .public)")
                 }
             }
-            guard var latest = self.job(id), latest.review?.job == review.id else { return }
-            latest.review = result
+            guard var latest = self.job(id) else { return }
+            if review.securityReviewJob == true {
+                latest.securityReview = result
+                latest.securityReviewing = nil
+                latest.securityReviewError = "Oby's security review requested changes."
+            } else {
+                guard latest.review?.job == review.id else { return }
+                latest.review = result
+            }
             if verdict == .approved {
                 if latest.securityReviewRequired == true, review.securityReviewJob != true {
                     replace(latest)
@@ -997,6 +1012,13 @@ extension Desk {
             if let id = author.reviewing, let review = job(id), review.reviewOf == author.id, !review.isActive {
                 Logger.jobs.notice("job \(author.id, privacy: .public): applying review \(id, privacy: .public), which ended before the runner restarted")
                 reviewEnded(review)
+            } else if let result = author.securityReview, result.applying == true, let review = job(result.job), review.securityReviewJob == true {
+                Logger.jobs.notice("job \(author.id, privacy: .public): finishing security review \(review.id, privacy: .public), which a restart cut short")
+                if result.verdict == .approved {
+                    applySecurityApproval(author.id, review: review, result: result)
+                } else {
+                    applyReview(author.id, review: review)
+                }
             } else if let result = author.review, result.applying == true, let review = job(result.job) {
                 Logger.jobs.notice("job \(author.id, privacy: .public): finishing review \(review.id, privacy: .public), which a restart cut short")
                 applyReview(author.id, review: review)

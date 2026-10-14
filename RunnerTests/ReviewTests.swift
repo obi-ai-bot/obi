@@ -17,6 +17,31 @@ struct ReviewTests {
         #expect(prompt.contains("more than 80% sure"))
     }
 
+    @Test func renamedSecurityFileStillAppearsOnBothSidesOfDiff() throws {
+        let repo = try temporaryFolder()
+        func git(_ arguments: [String]) throws {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            process.arguments = ["-C", repo.path] + arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            #expect(process.terminationStatus == 0, Comment(rawValue: arguments.joined(separator: " ")))
+        }
+        try git(["init", "--quiet", "-b", "dev"])
+        let vault = repo.appending(path: "Engine/Vault.swift")
+        try FileManager.default.createDirectory(at: vault.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "struct Vault {}\n".write(to: vault, atomically: true, encoding: .utf8)
+        try git(["add", "."])
+        try git(["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "base"])
+        try git(["update-ref", "refs/remotes/origin/dev", "dev"])
+        try git(["mv", "Engine/Vault.swift", "Engine/Helper.swift"])
+        try git(["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "rename"])
+        let paths = try #require(Review.securityPaths(in: repo, base: "dev"))
+        #expect(Set(paths) == ["Engine/Helper.swift", "Engine/Vault.swift"])
+    }
+
     @Test func securitySurfaceRunsSecondReviewBeforeQueueingMacCheck() async throws {
         desk.securityPaths = { _ in ["Runner/Gateway.swift"] }
         desk.queuesMacChecks = true
@@ -43,6 +68,45 @@ struct ReviewTests {
         security.agent.onEvent(.finished(summary: "No blockers.\n\nBlocking: none\n\nWorth doing later: none\n\nVERDICT: APPROVED", failed: false))
         try await until("both reviews approve") { desk.job("author")?.securityReview?.verdict == .approved && desk.job("author")?.macCheck != nil }
         #expect(desk.job("author")?.macCheck?.state == .queued)
+    }
+
+    @Test func securityRejectionUsesItsOwnCheckRun() async throws {
+        desk.securityPaths = { _ in ["Runner/Gateway.swift"] }
+        _ = try await publishAuthor()
+        let general = try await review("General review passed.\n\nVERDICT: APPROVED")
+        #expect(general.securityReviewing != nil)
+        let (securityJob, securityAgent) = try await reviewJob()
+        #expect(securityJob.securityReviewJob == true)
+        securityAgent.onEvent(.turnEnded(summary: "An auth bypass is reachable.\n\nBlocking:\n- Runner/Gateway.swift:42: unauthenticated callers reach owner route. Evidence: curl returned 200.\n\nVERDICT: CHANGES REQUESTED", failed: false))
+        securityAgent.onEvent(.finished(summary: "An auth bypass is reachable.\n\nBlocking:\n- Runner/Gateway.swift:42: unauthenticated callers reach owner route. Evidence: curl returned 200.\n\nVERDICT: CHANGES REQUESTED", failed: false))
+        try await until("security rejection is posted") {
+            desk.job("author")?.securityReview?.verdict == .changesRequested
+                && made.posted.contains { $0.run.name == CheckRun.securityReview }
+        }
+        #expect(made.posted.first { $0.run.name == CheckRun.securityReview }?.run.conclusion == .failure)
+        #expect(desk.job("author")?.securityReview?.verdict == .changesRequested)
+        #expect(desk.job("author")?.macCheck == nil)
+    }
+
+    @Test func restartResumesPersistedSecurityApproval() async throws {
+        desk.securityPaths = { _ in ["Runner/Gateway.swift"] }
+        _ = try await publishAuthor()
+        _ = try await review("General review passed.\n\nVERDICT: APPROVED")
+        let securityID = try #require(desk.job("author")?.securityReviewing)
+        try await until("security reviewer starts") { made.agents.contains { $0.job.id == securityID } }
+        let securityJob = try #require(desk.job(securityID))
+        var author = try #require(desk.job("author"))
+        var result = Review(verdict: .approved, job: securityID, agent: securityJob.agent, account: "Personal", round: 2)
+        result.applying = true
+        author.securityReview = result
+        author.reviewing = nil
+        author.securityReviewing = nil
+        desk.replace(author)
+        desk.resumeReviews()
+        try await until("saved security approval is applied") {
+            desk.job("author")?.securityReview?.applying != true && made.posted.last?.run.name == CheckRun.securityReview
+        }
+        #expect(desk.job("author")?.securityReview?.verdict == .approved)
     }
 
     /// An agent whose events the test sends, noting its prompt.
@@ -154,7 +218,14 @@ struct ReviewTests {
         agent.onEvent(.turnEnded(summary: summary, failed: failed))
         agent.onEvent(.finished(summary: summary, failed: failed))
         try await until("the review ends") { desk.job(job.id)?.isActive == false }
-        try await until("the verdict is on the author") { desk.job("author")?.reviewing == nil && (desk.job("author")?.review == nil || desk.job("author")?.review?.job != job.id || desk.job("author")?.review?.checkRun != nil || desk.job("author")?.review?.postError != nil) }
+        try await until("the verdict is on the author") {
+            guard let author = desk.job("author") else { return false }
+            let result = job.securityReviewJob == true ? author.securityReview : author.review
+            if result?.job == job.id { return result?.checkRun != nil || result?.postError != nil }
+            return job.securityReviewJob == true
+                ? author.securityReviewing == nil && author.securityReviewError != nil
+                : author.reviewing == nil && author.reviewError != nil
+        }
         return try #require(desk.job("author"))
     }
 
