@@ -5,7 +5,7 @@ Deep research only — no Engine changes in this note. Tetrix MCP was not connec
 
 **Question:** How can Oby show a Cursor account's usage and limits (like Claude Code's 5-hour / weekly bars and Codex's rate limits) so routing stops treating Cursor as "reports no usage"?
 
-**Short answer:** There is no official, individual-Pro way today to read Cursor *account* quota the way Claude Code and Codex expose windows. Cursor's product shape is also different: monthly dual pools on the Spending dashboard, not 5-hour / 7-day bars. The shippable next step is stronger limit-hit → `fullUntil` handling (like Codex). Bars and pace-based routing for Cursor need either Cursor to ship a CLI/ACP quota surface, or an opt-in Enterprise Admin API path that does not help solo Pro.
+**Short answer:** There is no official, individual-Pro way today to read Cursor *account* quota the way Claude Code and Codex expose windows. Cursor's product shape is also different: monthly dual pools on the Spending dashboard, not 5-hour / 7-day bars. The shippable next step is stronger limit-hit → `fullUntil` handling (like Codex). Bars and pace-based routing for Cursor need either Cursor to ship a CLI/ACP quota surface, or an opt-in Team/Enterprise Admin API path that does not help solo Pro.
 
 ## What Oby does today
 
@@ -53,25 +53,34 @@ Oby's ACP client ignores unknown `sessionUpdate` variants (including any future 
 
 ## 2) Official Cursor APIs (Admin / Analytics)
 
-From [Cursor APIs Overview](https://cursor.com/docs/api) and [Admin API](https://cursor.com/docs/account/teams/admin-api):
+### Plan eligibility (resolved)
+
+| Plan | Admin / Analytics usage APIs? | Evidence |
+| --- | --- | --- |
+| **Team** | **Yes** — team Admin API key from Dashboard → API Keys → Team tab (admin role) | [Teams dashboard](https://cursor.com/docs/account/teams/dashboard): *"All API endpoints are available on both Team and Enterprise plans, except for the AI Code Tracking API which requires Enterprise plan."*; staff (2026-07): programmatic usage is *"Team and Enterprise features"* and *"aren't available on Pro solo"* ([thread](https://forum.cursor.com/t/need-help-to-understand-how-usage-billing-works-underneath/164650/7)) |
+| **Enterprise** | **Yes** (same usage endpoints; some *other* Admin writes, e.g. per-user spend-limit setters, are documented Enterprise-only) | Same dashboard page; [Admin API](https://cursor.com/docs/account/teams/admin-api) marks specific write endpoints *"Availability: Enterprise only"* |
+| **Pro / Hobby / individual** | **No** | Staff: Pro solo has dashboard view only ([same thread](https://forum.cursor.com/t/need-help-to-understand-how-usage-billing-works-underneath/164650/7)); personal `crsr_` keys are for Cloud Agents, not `/teams/*` (staff: [Invalid Team API Key](https://forum.cursor.com/t/admin-api-key-returns-invalid-team-api-key-not-an-auth-encoding-issue-already-verified/173692)) |
+
+**Docs conflict to ignore for usage:** the [APIs Overview](https://cursor.com/docs/api) availability column labels Admin / Analytics *"Enterprise teams"*, and its sample `403` body says *"Enterprise access required"*. That coarser table conflicts with the Teams dashboard carve-out (AI Code Tracking = Enterprise-only; other REST APIs = Team **and** Enterprise) and with staff wording. For Oby planning, treat **usage Admin/Analytics as Team + Enterprise**, not Enterprise-only, and not Pro.
+
+Auth for the usage path: team Admin API key (`crsr_…`) as Basic-auth username, empty password; reads often need `read:*` or `admin:*` ([Admin API](https://cursor.com/docs/account/teams/admin-api), [APIs Overview](https://cursor.com/docs/api)).
 
 | API | Endpoints (usage-related) | Who |
 | --- | --- | --- |
-| **Admin API** | `POST /teams/daily-usage-data`, `POST /teams/spend`, `POST /teams/filtered-usage-events`, member/spend limits, … | **Enterprise teams**; team-admin API key (`crsr_…`, Basic auth username, empty password, scope `admin:*`) |
-| **Analytics API** | Team / by-user analytics | **Enterprise teams** |
+| **Admin API** | `POST /teams/daily-usage-data`, `POST /teams/spend`, `POST /teams/filtered-usage-events`, … | **Team and Enterprise** (team-admin key) |
+| **Analytics API** | Team / by-user analytics | **Team and Enterprise** |
+| **AI Code Tracking API** | Commit-level AI attribution | **Enterprise only** (not needed for account bars) |
 | **Cloud Agents API / SDKs** | Run agents | Broader plans — **not** usage dashboards |
 
-Staff on the forum (2026-07): programmatic usage is only Admin / Analytics, *"Team and Enterprise features"*, *"aren't available on Pro solo"*; for personal Pro, *"you can only view usage in the Dashboard"* ([thread](https://forum.cursor.com/t/need-help-to-understand-how-usage-billing-works-underneath/164650/7)).
-
-Admin data shape (useful if Oby ever opts in for Enterprise):
+Admin data shape (useful if Oby ever opts in for Team/Enterprise):
 
 - **`/teams/spend`**: per-member spend for the current billing cycle (`spendCents`, limits).
 - **`/teams/daily-usage-data`**: per-user per-day activity (requests, lines, Tab, …); poll ≤ hourly; not a live 5-hour bar.
 - **`/teams/filtered-usage-events`**: per-event tokens / `chargedCents` / `requestsCosts`; sum to reconcile with dashboard.
 
-**Individual Pro:** no documented API key path for the same numbers. User API keys are for Cloud Agents, not Admin usage.
+**Individual Pro:** no documented API key path for the same numbers.
 
-**Verdict for (2):** Official bars exist only for Enterprise (and similar team admin keys). Not a Pro fix.
+**Verdict for (2):** Official programmatic usage is available to **Team and Enterprise** via a team Admin API key. It is **not** a Pro/solo fix. (Whether those payloads can drive included-pool *remaining* bars is still unverified — see follow-ups.)
 
 ---
 
@@ -90,7 +99,7 @@ From [Usage and limits](https://cursor.com/help/models-and-usage/usage-limits) a
 
 | Path | Official? | Notes |
 | --- | --- | --- |
-| Admin / Analytics API | Yes (Enterprise) | See §2 |
+| Admin / Analytics API | Yes (Team and Enterprise) | See §2 |
 | Dashboard cookie APIs (`WorkosCursorSessionToken` → `GET /api/usage-summary`, `GET /api/usage`, `POST /api/dashboard/get-filtered-usage-events`, …) | **No** — reverse-engineered; change without notice | Documented by third parties ([gist](https://gist.github.com/dmwyatt/1e9359b1862e7cbfe1e754fe4c8db764)); this is what cursor-stats used |
 | Reading `~/.config/cursor/auth.json` or session cookies from an account home | Against Oby's own rule (never read Cursor logins) and Cursor's "don't call private client endpoints outside official clients" guidance | [Forum ToS thread](https://forum.cursor.com/t/does-using-oh-my-pi-s-cursor-provider-or-an-openai-compatible-proxy-to-the-same-endpoints-violate-cursor-s-tos/167778) — staff cite Use Restrictions §1.5 (reverse engineering / internal structure); abuse enforcement risk |
 
@@ -147,7 +156,7 @@ Codex path *does* pass `Limits.reset(in: summary)` ([`Codex.swift`](https://gith
 
 | Rank | Option | Effort | Reliability | What Oby would show / routing effect |
 | --- | --- | --- | --- | --- |
-| **1 (official path that exists)** | **Enterprise Admin API** (user pastes team admin key into vault; poll spend / events ≤ hourly; never put key in agent env) | Medium–large (vault wiring, polling, Cursor-shaped windows in `Usage` + runner API, map into routing) | High for Enterprise; **zero for Pro** | Monthly included / spend bars (not 5h/7d); `reportsUsage("cursor")` true for those accounts; pace using billing-cycle reset |
+| **1 (official path that exists)** | **Team/Enterprise Admin API** (user pastes team admin key into vault; poll spend / events ≤ hourly; never put key in agent env) | Medium–large (vault wiring, polling, Cursor-shaped windows in `Usage` + runner API, map into routing) | High for Team/Enterprise; **zero for Pro** | Monthly spend / usage-derived bars (not 5h/7d); `reportsUsage("cursor")` true for those accounts; pace using billing-cycle reset. Included-pool remaining % still needs a separate verify before promising dashboard-parity bars. |
 | **2 (official, wait)** | **Cursor ships CLI/ACP account quota** (`about`/`status`/`usage`, or ACP account-limit fields — *not* only context `usage_update`) | Low in Oby once Cursor ships; unknown wait | Highest if Cursor implements it | True Settings bars + first-class routing; prefer this over Admin for Pro |
 | **3 (ship now, official signals only)** | **Harden limit-hit → `fullUntil`** for Cursor ACP/CLI text: widen `Limits.isLimit`, parse monthly cycle dates, pass `Limits.reset` from `ACP.failed`, distinguish soft Auto/slow-pool from hard full | Small–medium | High for "don't keep hammering a dead account"; **does not** populate bars or flip `reportsUsage` | Account card still "no usage"; routing still last among tools, but skips `fullUntil` accounts; failover like Codex |
 | **4 (wrong metric)** | Use `-p` JSON `usage` tokens or future ACP `usage_update` cost as "usage bars" | Small | Misleading | Session tokens ≠ subscription pools; would lie in Settings |
@@ -160,7 +169,7 @@ Codex path *does* pass `Limits.reset(in: summary)` ([`Codex.swift`](https://gith
 1. **File and ship option 3** (limit-hit parity with Codex) so Cursor accounts at least get `fullUntil` until the billing-cycle date when the error names one. That is the only Pro-safe improvement available without new Cursor product surface.
 2. **Do not** scrape the dashboard or treat token `usage` as quota.
 3. **Do not** pretend Cursor has Claude 5-hour / weekly bars. If/when data exists, add Cursor-shaped windows (monthly pool % + reset) in [`Usage`](https://github.com/deskree-inc/oby/blob/dev/Shared/Usage.swift#L1) / runner-api Account, then set `reportsUsage("cursor")`.
-4. **Optional follow-up** (product decision): Enterprise-only Admin API integration for teams that already have `crsr_` admin keys.
+4. **Optional follow-up** (product decision): Team/Enterprise Admin API integration for orgs that already have a team `crsr_` admin key.
 5. **Track / request upstream:** Cursor CLI `usage --format json` (or fields on `about`) with included-pool percent + `billingCycleEnd`, and/or ACP account-quota notifications (separate from context `usage_update`).
 
 Option 3 alone does **not** remove the string `Cursor reports no usage` from automatic routing. Removing that requires option 1 or 2 (real utilization numbers).
@@ -206,7 +215,7 @@ Cursor still has no official Pro usage API; routing correctly keeps Cursor last 
 
 **Follow-ups (separate issues)**
 
-- Enterprise Admin API opt-in for team Cursor accounts (option 1).
+- Team/Enterprise Admin API opt-in for Cursor accounts (option 1); before building bars, verify whether spend/events expose included-pool remaining (or only dollars/events).
 - When Cursor exposes Pro quota on CLI/ACP, map into Cursor-shaped Settings windows and `reportsUsage("cursor")` (option 2).
 
 ---
@@ -219,12 +228,14 @@ Cursor still has no official Pro usage API; routing correctly keeps Cursor last 
 - https://cursor.com/docs/cli/acp
 - https://cursor.com/docs/api
 - https://cursor.com/docs/account/teams/admin-api
+- https://cursor.com/docs/account/teams/dashboard
 - https://cursor.com/help/models-and-usage/usage-limits
 - https://cursor.com/docs/account/pricing
 - https://forum.cursor.com/t/cursor-agent-acp-never-reports-token-usage-over-acp-though-p-output-format-json-does/171923
 - https://forum.cursor.com/t/cli-emit-acp-usage-update-so-clients-like-zed-can-show-a-context-window-indicator/165358
 - https://forum.cursor.com/t/need-help-to-understand-how-usage-billing-works-underneath/164650/7
 - https://forum.cursor.com/t/how-to-get-cost-and-usage-data-using-cursor-api/172967
+- https://forum.cursor.com/t/admin-api-key-returns-invalid-team-api-key-not-an-auth-encoding-issue-already-verified/173692
 - https://forum.cursor.com/t/cannot-use-default-model-in-latest-cursor-cli-version-on-grandfathered-plan/155372
 - https://forum.cursor.com/t/cursor-cli-seems-aborting-when-generating/154146
 - https://forum.cursor.com/t/does-using-oh-my-pi-s-cursor-provider-or-an-openai-compatible-proxy-to-the-same-endpoints-violate-cursor-s-tos/167778
