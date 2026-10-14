@@ -231,7 +231,7 @@ final class API {
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
         let (talk, started) = await desk.exchange(said, shown: request.answer?.option, turns: turns, attachments: attachments)
-        return Self.json(PlanAnswer(talk, started: started))
+        return Self.json(PlanAnswer(talk, started: started, details: desk.replyDetails))
     }
 
     /// Stops the conversation after the action currently underway has finished.
@@ -985,7 +985,7 @@ struct ClearedJSON: Encodable {
 struct TurnJSON: Encodable {
     var turn: Turn
 
-    private enum Keys: String, CodingKey { case id, who, text, at, jobs }
+    private enum Keys: String, CodingKey { case id, who, text, at, jobs, details }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -994,6 +994,7 @@ struct TurnJSON: Encodable {
         try keys.encode(turn.text, forKey: .text)
         try keys.encode(turn.date, forKey: .at)
         try keys.encode(turn.jobs ?? [], forKey: .jobs)
+        try keys.encodeIfPresent(turn.details, forKey: .details)
     }
 }
 
@@ -1326,8 +1327,10 @@ struct PlanAnswer: Encodable {
     var said: String?
     var question: Plan.Question?
     var text: String?
+    var details: String?
 
-    @MainActor init(_ talk: Desk.Talk, started: [Job] = []) {
+    @MainActor init(_ talk: Desk.Talk, started: [Job] = [], details: String? = nil) {
+        self.details = details
         jobs = started.map { JobJSON(job: $0) }
         switch talk {
         case .question(let said, let question):

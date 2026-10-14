@@ -112,6 +112,13 @@ final class ConversationModel {
     /// The thread: the runner's turns and the app's own, oldest first, one per id.
     func thread(with local: [Turn]) -> [Turn] { Self.merged(runnerTurns, local) }
 
+    /// The long answer shown under Oby's short reply. Keeping it in the turn (separate from
+    /// `text`) means speech always receives only the short reply.
+    static func markdownDetails(for turn: Turn) -> AttributedString? {
+        guard turn.who == .oby, let details = turn.details else { return nil }
+        return try? AttributedString(markdown: details, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+    }
+
     // MARK: Order
 
     /// Oldest first; turns said at the same moment keep the order they came in.

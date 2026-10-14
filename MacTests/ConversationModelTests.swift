@@ -104,6 +104,18 @@ struct ConversationModelTests {
         #expect(!ConversationModel.grouped(first, after: nil, calendar: calendar))
     }
 
+    @Test func detailsRenderUnderTheReplyAndAreNotSpoken() throws {
+        let turn = Turn(who: .oby, text: "The route is in Runner/API.swift.",
+                        details: "Read [Runner/API.swift](https://github.com/deskree-inc/oby/blob/abc1234/Runner/API.swift#L1).")
+        let rendered = try #require(ConversationModel.markdownDetails(for: turn))
+        #expect(String(rendered.characters).contains("Runner/API.swift"))
+        #expect(rendered.runs.contains { $0.link == URL(string: "https://github.com/deskree-inc/oby/blob/abc1234/Runner/API.swift#L1") })
+        // Speech uses Turn.text; the longer citation block stays in its own field.
+        #expect(turn.text == "The route is in Runner/API.swift.")
+        #expect(turn.details?.contains("https://github.com") == true)
+        #expect(ConversationModel.markdownDetails(for: Turn(who: .user, text: "Question", details: "hidden")) == nil)
+    }
+
     @Test func aTurnsJobsResolveToCards() throws {
         var running = Job(id: "9f08fd10", request: "Review oby PR #33", agent: "claude", account: "default", repo: "deskree-inc/oby",
                           branch: "oby/review-33", pr: 33, kind: .review, task: "Review PR #33")
@@ -116,9 +128,10 @@ struct ConversationModelTests {
         #expect(ConversationModel.missing(of: oby, among: [running, other]) == ["unknown1"])
         #expect(ConversationModel.jobs(of: turn(1), among: [running]).isEmpty && ConversationModel.missing(of: turn(1), among: []).isEmpty)
         // The runner's turn as the API sends it reads into the same Turn.
-        let wire = #"{"id":"7c1e2f30","who":"oby","text":"On it.","at":"2026-10-11T09:12:04Z","jobs":["9f08fd10"]}"#
+        let wire = #"{"id":"7c1e2f30","who":"oby","text":"On it.","at":"2026-10-11T09:12:04Z","jobs":["9f08fd10"],"details":"See [the route](https://example.com)."}"#
         let read = try Runner.decoder.decode(RunnerTurn.self, from: Data(wire.utf8)).turn
         #expect(read.id == "7c1e2f30" && read.who == .oby && read.text == "On it." && read.jobs == ["9f08fd10"] && read.voice == nil)
+        #expect(read.details == "See [the route](https://example.com).")
         #expect(read.date == ISO8601DateFormatter().date(from: "2026-10-11T09:12:04Z"))
         let none = try Runner.decoder.decode(RunnerTurn.self, from: Data(#"{"id":"x","who":"user","text":"hi","at":"2026-10-11T09:12:04Z","jobs":[]}"#.utf8)).turn
         #expect(none.jobs == nil && none.who == .user)

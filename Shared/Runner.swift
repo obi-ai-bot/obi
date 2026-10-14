@@ -560,9 +560,11 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
     var text: String
     var at: Date
     var jobs: [String]?
+    var details: String?
 
     var turn: Turn {
-        Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text, jobs: (jobs ?? []).isEmpty ? nil : jobs)
+        Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text,
+             jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details)
     }
 }
 
