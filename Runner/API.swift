@@ -190,7 +190,13 @@ final class API {
         guard !words.isEmpty else { return Self.json(PlanAnswer(.none)) }
         let turns = try request.turns.map(Self.turns)
         let said = request.answer.map { Desk.answered(words, question: $0.question, option: $0.option) } ?? words
-        let (talk, started) = await desk.exchange(said, shown: request.answer?.option, turns: turns, attachments: request.attachments ?? [])
+        let attachments: [String]
+        do {
+            attachments = try Attachments.validated(request.attachments ?? [])
+        } catch {
+            throw APIError(.unprocessableContent, error.localizedDescription)
+        }
+        let (talk, started) = await desk.exchange(said, shown: request.answer?.option, turns: turns, attachments: attachments)
         return Self.json(PlanAnswer(talk, started: started))
     }
 

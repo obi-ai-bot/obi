@@ -1056,10 +1056,10 @@ nonisolated enum Attachments {
     /// returns the ones it copied: a file that's gone (kept too long) is left out, not the job.
     /// Text goes with the vault's secrets taken out; a binary file (a screenshot) can't be, so one
     /// that holds a secret stops the job, naming it. Throws when the vault can't be read.
-    static func copy(_ job: Job, into worktree: URL, vault: Vault = .shared) throws -> [String]? {
+    static func copy(_ job: Job, into worktree: URL, allowedFolder: URL = LocalRunner.attachments, vault: Vault = .shared) throws -> [String]? {
         let leaks = try vault.forAgents()
         var copied: [String] = []
-        for path in job.attachments ?? [] {
+        for path in try validated(job.attachments ?? [], in: allowedFolder) {
             let file = URL(filePath: path)
             guard let data = try? Data(contentsOf: file) else { continue }
             let target = worktree.appending(path: ".oby/inputs/\(file.lastPathComponent)")
@@ -1693,10 +1693,10 @@ nonisolated enum Workspace {
     /// Writes what the agent reads in `.oby/inputs`: the job's attachments, and its pull request or
     /// issue quoted from GitHub, each with the vault's secrets taken out. Throws, and the job fails
     /// saying why, when the vault can't be read.
-    static func inputs(_ job: Job, pullRequest: Data?, issue: Data?, in worktree: URL, vault: Vault = .shared) throws -> Job {
+    static func inputs(_ job: Job, pullRequest: Data?, issue: Data?, in worktree: URL, allowedAttachmentsFolder: URL = LocalRunner.attachments, vault: Vault = .shared) throws -> Job {
         var job = job
         try FileManager.default.createDirectory(at: worktree.appending(path: ".oby/inputs"), withIntermediateDirectories: true)
-        job.attachments = try Attachments.copy(job, into: worktree, vault: vault)
+        job.attachments = try Attachments.copy(job, into: worktree, allowedFolder: allowedAttachmentsFolder, vault: vault)
 
         if let pr = job.pr ?? job.fromPR, let pullRequest, let info = try? JSONSerialization.jsonObject(with: pullRequest) as? [String: Any] {
             if job.pr != nil { job.base = info["baseRefName"] as? String ?? job.base }

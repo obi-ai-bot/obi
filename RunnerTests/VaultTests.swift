@@ -602,7 +602,7 @@ struct VaultAgentTests {
             "url": "https://github.com/deskree-inc/oby/issues/12", "author": ["login": "someone"],
             "title": "Staging", "body": "Use \(value) to log in.", "comments": [["author": ["login": "other"], "body": Fake.hex(value)]],
         ])
-        let prepared = try Workspace.inputs(work, pullRequest: nil, issue: issue, in: worktree, vault: vault)
+        let prepared = try Workspace.inputs(work, pullRequest: nil, issue: issue, in: worktree, allowedAttachmentsFolder: directory, vault: vault)
         #expect(prepared.attachments == [notes.path, shot.path])
         for file in ["issue-12.md", "notes-1a2b3c.txt"] {
             let text = try String(contentsOf: worktree.appending(path: ".oby/inputs/\(file)"), encoding: .utf8)
@@ -613,7 +613,7 @@ struct VaultAgentTests {
 
         // A binary file that holds a secret can't be redacted: it stops the job, naming the secret.
         try (Data([0xFF, 0xFE]) + Data(value.utf8) + Data([0x00])).write(to: shot)
-        let error = #expect(throws: Shell.Failure.self) { try Attachments.copy(work, into: worktree, vault: vault) }
+        let error = #expect(throws: Shell.Failure.self) { try Attachments.copy(work, into: worktree, allowedFolder: directory, vault: vault) }
         #expect(error?.message.contains("staging-api-key") == true && error?.message.contains(value) == false)
 
         // (3) When the vault can't be read, no file is written.
