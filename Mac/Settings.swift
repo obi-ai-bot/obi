@@ -318,6 +318,11 @@ struct AccountsSettingsView: View {
                 Picker("Tool", selection: $agent) {
                     Text("Claude Code").tag("claude")
                     Text("Codex").tag("codex")
+                    Text("Cursor").tag("cursor")
+                }
+                if agent == "cursor", !CursorFacts.separateLogins {
+                    // Why a second one is refused.
+                    Text("\(CursorFacts.oneLogin): one Cursor account.").font(.caption).foregroundStyle(.secondary)
                 }
                 TextField("Name", text: $name, prompt: Text("Personal"))
                 TextField("Paid by", text: $payer, prompt: Text("Wellington"))
@@ -476,6 +481,7 @@ struct VaultSettingsView: View {
 /// Settings › Models: which model and effort Claude Code and Codex jobs use, on this Mac and on the
 /// runner (as the iPhone sets them, Shared/SettingsSections.swift).
 struct ModelsSettingsView: View {
+    let store: AccountStore
     let feed: RunnerFeed
     @AppStorage("claude.model") private var claudeModel = AgentModels.defaults["claude.model"] ?? ""
     @AppStorage("claude.effort") private var claudeEffort = AgentModels.defaults["claude.effort"] ?? ""
@@ -483,8 +489,11 @@ struct ModelsSettingsView: View {
     @AppStorage("codex.model") private var codexModel = AgentModels.defaults["codex.model"] ?? ""
     @AppStorage("codex.effort") private var codexEffort = AgentModels.defaults["codex.effort"] ?? ""
     @AppStorage("codex.complexEffort") private var codexComplexEffort = AgentModels.defaults["codex.complexEffort"] ?? ""
+    @AppStorage("cursor.model") private var cursorModel = AgentModels.defaults["cursor.model"] ?? "auto"
     /// What the signed-in Codex account offers, from its own model list.
     @State private var codexModels: [CodexModel] = []
+    /// What the signed-in Cursor account offers (`cursor-agent models`); Cursor has no effort.
+    @State private var cursorModels: [CursorModel] = []
     /// What the runner offers, once it has answered.
     @State private var runnerOptions: ModelOptions?
     @State private var problem: String?
@@ -513,6 +522,11 @@ struct ModelsSettingsView: View {
                     ForEach(codexEfforts, id: \.self) { Text(AgentModels.effortName($0)).tag($0) }
                 }
             }
+            Section("Cursor on this Mac") {
+                Picker("Model", selection: $cursorModel) {
+                    ForEach(cursorChoices, id: \.id) { Text($0.name).tag($0.id) }
+                }
+            }
             Text("New jobs on this Mac use these. Oby's brain stays on Haiku: it plans and answers in the conversation, so it should be quick.")
                 .font(.caption).foregroundStyle(.secondary)
             if feed.runner != nil {
@@ -525,6 +539,11 @@ struct ModelsSettingsView: View {
         .formStyle(.grouped)
         .frame(width: 460)
         .task { codexModels = (try? await CodexAgent.models(home: nil)) ?? [] }
+        .task {
+            // Jobs run on Oby's own Cursor account: its model list, when one is signed in.
+            guard let account = store.accounts.first(where: { $0.account.agent == "cursor" && $0.signedIn }) else { return }
+            cursorModels = await CursorModels.list(home: account.account.home)
+        }
         // Once the runner answers, and again after it comes back or its URL changes.
         .task(id: feed.connection) {
             guard feed.connection == .live, let runner = feed.runner else { return }
@@ -541,6 +560,13 @@ struct ModelsSettingsView: View {
     private var codexChoices: [CodexModel] {
         codexModels.contains { $0.id == codexModel } ? codexModels
             : [CodexModel(id: codexModel, name: codexModel, efforts: AgentModels.claudeEfforts)] + codexModels
+    }
+
+    /// Cursor's models, with Auto first (Cursor picks) and the chosen one while the list loads.
+    private var cursorChoices: [CursorModel] {
+        var choices = [CursorModel(id: "auto", name: "Auto")] + cursorModels.filter { $0.id != "auto" }
+        if !choices.contains(where: { $0.id == cursorModel }) { choices.append(CursorModel(id: cursorModel, name: cursorModel)) }
+        return choices
     }
 
     private var codexEfforts: [String] {

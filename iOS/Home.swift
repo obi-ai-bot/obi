@@ -404,9 +404,11 @@ struct PlanCard: View {
                 GridRow {
                     tile("Agent") {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(account?.agent == "codex" ? "Codex" : "Claude Code")
+                            Text(account?.agent == "codex" ? "Codex" : account?.agent == "cursor" ? "Cursor" : "Claude Code")
                             if let models = phone.models {
-                                Text((account?.agent == "codex" ? models.codex : models.claude).label)
+                                // Cursor has a model and no effort.
+                                Text(account?.agent == "cursor" ? ModelChoice.name(models.cursor?.model ?? "auto")
+                                     : (account?.agent == "codex" ? models.codex : models.claude).label)
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }

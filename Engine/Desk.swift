@@ -87,8 +87,8 @@ final class Desk {
     @ObservationIgnored var cancelElsewhere: () async -> Void = {}
     @ObservationIgnored var liftElsewhereReserve: (_ id: String, _ lift: Bool) async -> Bool = { _, _ in false }
     /// The runner's model choices for chat settings, refreshed from Codex before planning.
-    @ObservationIgnored var settingModels: [String: [String]] = ["claude": AgentModels.claude.map(\.0), "codex": []]
-    @ObservationIgnored var settingEfforts: [String: [String]] = ["claude": AgentModels.claudeEfforts, "codex": []]
+    @ObservationIgnored var settingModels: [String: [String]] = ["claude": AgentModels.claude.map(\.0), "codex": [], "cursor": []]
+    @ObservationIgnored var settingEfforts: [String: [String]] = ["claude": AgentModels.claudeEfforts, "codex": [], "cursor": []]
     @ObservationIgnored var settingModelEfforts: [String: [String: [String]]] = [:]
     @ObservationIgnored private var settingOptionsLoaded = false
     @ObservationIgnored var loadSettingOptions: () async -> ([String: [String]], [String: [String]], [String: [String: [String]]])? = { nil }
@@ -250,7 +250,10 @@ final class Desk {
         return true
     }
     /// A line for job `id`'s report, with how routing chose its account.
-    func noteStart(_ line: String, for id: String) { handoffs[id, default: []].append(line) }
+    func noteStart(_ line: String, for id: String) {
+        guard !(handoffs[id] ?? []).contains(line) else { return }
+        handoffs[id, default: []].append(line)
+    }
     /// How many slots are taken: jobs running (`Job.takesSlot`), and those about to.
     var runningCount: Int { jobs.filter(\.takesSlot).count + startingUp.count }
     /// Why routing chose the account of each job a guessed plan proposes (#269), by job id, until
@@ -564,6 +567,12 @@ final class Desk {
         startWaitingReviews()
         // Merges a restart cut short, or that failed on something that may pass now (Engine/Checks.swift).
         resumeChecks()
+    }
+
+    /// The models each tool offers, for telling whose a model is: Oby's own lists, and what the
+    /// runner loaded from Codex and Cursor.
+    var moveModels: [String: [String]] {
+        Moves.models.merging(settingModels) { Array(Set($0 + $1)) }
     }
 
     func refreshSettingOptions() async {
@@ -1021,7 +1030,7 @@ final class Desk {
                     let states = accounts.accounts + elsewhere().flatMap(\.accounts)
                     for id in result.plan.jobs ?? [] {
                         guard let targetJob = job(id) ?? elsewhere().flatMap(\.jobs).first(where: { $0.id == id }),
-                              let destination = try? Moves.choose(targetJob, to: target, accounts: states, now: clock()).account,
+                              let destination = try? Moves.choose(targetJob, to: target, accounts: states, now: clock(), known: moveModels).account,
                               let state = states.first(where: { $0.account.id == destination.id }), !state.isReserved(at: clock()),
                               !state.weekNearlyFull(at: clock()), !state.isFull(at: clock()) else {
                             escalateOrchestrator(currentOrchestratorEvents,
@@ -1883,7 +1892,7 @@ final class Desk {
         guard !finishing.contains(id), !(job.isActive && ending.contains(id)) else {
             throw Shell.Failure(message: "\(job.agentName) is wrapping up. Move it once it's done.")
         }
-        let (account, model) = try Moves.choose(job, to: target, accounts: accounts.accounts)
+        let (account, model) = try Moves.choose(job, to: target, accounts: accounts.accounts, known: moveModels)
         let reason = why.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500)) }.flatMap { $0.isEmpty ? nil : $0 }
         let from = Moves.place(job, accounts: accounts.accounts)
         var moved = job
@@ -2135,6 +2144,14 @@ final class Desk {
         let mcp = openBroker(job)
         (agent as? ClaudeAgent)?.mcp = mcp
         (agent as? CodexAgent)?.mcp = mcp
+        if let cursor = agent as? ACPAgent {
+            cursor.mcp = mcp
+            cursor.repo = job.repo
+            cursor.account = accounts.state(job.account)?.account.name ?? ""
+            // What this tool can't do yet, said in the job's report and never silently.
+            if mcp != nil, !CursorFacts.honoursMcpServers { noteStart(CursorFacts.noConnectedApps + ".", for: job.id) }
+            if job.currentMode == .ask, !CursorFacts.editsAsk { noteStart(CursorFacts.askActsAsAcceptEdits + ".", for: job.id) }
+        }
         // A new round, or one done over on another account: its own timer. The job's cap runs from
         // its first round until it ends.
         if jobTimers[job.id] == nil {
@@ -2153,7 +2170,7 @@ final class Desk {
         }
     }
 
-    /// Claude Code or Codex in the job's worktree, or nil for a tool that can't run jobs yet.
+    /// Claude Code, Codex or Cursor in the job's worktree, or nil for a tool that can't run jobs yet.
     static func agent(for job: Job, home: URL?, resume: String?) -> (any AgentRun)? {
         switch job.agent {
         case "claude":
@@ -2168,6 +2185,13 @@ final class Desk {
             codex.effort = job.effort
             codex.mode = job.currentMode
             return codex
+        case "cursor":
+            let worktree = Workspace.worktree(job.id)
+            let tool = ACPTool.cursor(worktree: worktree, home: home, model: job.model ?? AgentModels.value("cursor", "model"))
+            let cursor = ACPAgent(tool: tool, worktree: worktree, resume: resume)
+            cursor.model = job.model
+            cursor.mode = job.currentMode
+            return cursor
         default: return nil
         }
     }

@@ -1017,6 +1017,29 @@ struct ReviewTests {
 
     // MARK: The reviewer
 
+    /// A Cursor pull request goes to Claude Code, else Codex; Cursor never reviews.
+    @Test func cursorPRReviewedByClaude() {
+        var author = author
+        author.agent = "cursor"
+        author.account = "c"
+        let cursor = AccountState(account: Account(id: "c", agent: "cursor", name: "Work", payer: "", home: nil), label: "Signed in")
+        let otherCursor = AccountState(account: Account(id: "c2", agent: "cursor", name: "Home", payer: "", home: nil), label: "Signed in")
+        var claude = AccountState(account: Account(id: "p", agent: "claude", name: "Personal", payer: "", home: nil), label: "Max")
+        let codex = AccountState(account: Account(id: "w", agent: "codex", name: "Work", payer: "", home: nil), label: "Plus")
+        #expect(Review.reviewer([cursor, otherCursor, claude, codex], for: author)?.id == "p")
+        // Claude Code is out of room: Codex.
+        claude.fiveHour = 0.96
+        #expect(Review.reviewer([cursor, otherCursor, claude, codex], for: author)?.id == "w")
+        // Cursor alone has no reviewer, even another Cursor account.
+        #expect(Review.reviewer([cursor, otherCursor], for: author) == nil)
+        #expect(Review.candidates([cursor, otherCursor, codex], for: author).map(\.account.id) == ["w"])
+        // And a Claude Code or Codex pull request is never sent to Cursor.
+        var claudeAuthor = self.author
+        claudeAuthor.account = "default"
+        let mine = AccountState(account: Account(id: "default", agent: "claude", name: "Default", payer: "", home: nil), label: "Max")
+        #expect(Review.reviewer([mine, cursor], for: claudeAuthor) == nil)
+    }
+
     @Test func theReviewerIsAnotherAccountPreferringTheOtherToolWithRoom() {
         let author = author
         let mine = AccountState(account: Account(id: "default", agent: "claude", name: "Default", payer: "", home: nil), label: "Max")

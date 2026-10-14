@@ -101,8 +101,8 @@ final class Permissions {
 }
 
 /// The coding tools on this Mac, which of them are connected, and the models each one offers.
-/// Claude Code and Codex connect through Oby's accounts; Cursor through its own login (Oby can't
-/// run jobs on it yet, F6); Gemini isn't in the first version.
+/// Claude Code, Codex and Cursor connect through Oby's accounts (each with a home of its own, and a
+/// sign-in that runs the tool's own login command); Gemini isn't in the first version.
 @Observable
 final class Tools {
     struct Model: Hashable { var id: String; var name: String }
@@ -115,6 +115,8 @@ final class Tools {
     /// Each connected tool's own model list, by agent.
     private(set) var models: [String: [Model]] = [:]
     private(set) var looking = false
+    /// Whether the installed Cursor CLI has `acp` (`cursor-agent acp --help` exits 0); true until known.
+    private(set) var cursorHasACP = true
 
     init(store: AccountStore) { self.store = store }
 
@@ -147,8 +149,12 @@ final class Tools {
             let home = account.account.home.map { URL(filePath: $0) }
             lists["codex"] = ((try? await CodexAgent.models(home: home)) ?? []).map { Model(id: $0.id, name: $0.name) }
         }
-        if let cursor = found["cursor"], let out = try? await Shell.run([cursor, "models"], timeout: 30), out.status == 0 {
-            lists["cursor"] = Self.cursorModels(out.text)
+        if let cursor = found["cursor"] {
+            cursorHasACP = (try? await Shell.run([cursor, "acp", "--help"], timeout: 15))?.status == 0
+            // Jobs run on an account of Oby's own, never on the user's `~/.cursor`: its models.
+            if let account = accounts("cursor").first(where: \.signedIn) {
+                lists["cursor"] = await CursorModels.list(home: account.account.home).map { Model(id: $0.id, name: $0.name) }
+            }
         }
         models = lists
     }
@@ -162,34 +168,17 @@ final class Tools {
         }
     }
 
-    /// Opens Terminal on Cursor's own login.
-    func signInCursor() throws {
-        guard let command = installed["cursor"] else { return }
-        let script = FileManager.default.temporaryDirectory.appending(path: "oby-sign-in-cursor.command")
-        try "#!/bin/sh\necho 'Oby: sign in to Cursor.'\n\(command) login\necho\necho 'Done? Go back to Oby. You can close this window.'\n"
-            .write(to: script, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
-        guard NSWorkspace.shared.open(script) else { throw Shell.Failure(message: "Couldn't open Terminal to sign in.") }
-    }
+    /// What the setup row says to install Cursor's CLI, and to update one without `acp`.
+    static let installCursor = "curl https://cursor.com/install -fsS | bash"
+    static let updateCursor = "cursor-agent update"
 
     nonisolated static func onPath(_ command: String) async -> Bool {
         (try? await Shell.run(["which", command], timeout: 10))?.status == 0
     }
 
-    /// `cursor-agent models` prints one model a line, as "id - Name", maybe marked "(current)" or
-    /// "(default)", between a heading and tips.
+    /// `cursor-agent models` (Engine/Cursor.swift reads it).
     nonisolated static func cursorModels(_ text: String) -> [Model] {
-        let plain = text.replacingOccurrences(of: "\u{1B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
-        return plain.split(separator: "\n").compactMap { line in
-            let parts = line.components(separatedBy: " - ")
-            guard parts.count >= 2 else { return nil }
-            let id = parts[0].trimmingCharacters(in: .whitespaces)
-            guard !id.isEmpty, !id.contains(" "), !id.hasSuffix(":") else { return nil }
-            let name = parts.dropFirst().joined(separator: " - ")
-                .replacingOccurrences(of: #"\s*\((current|default)\)"#, with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespaces)
-            return Model(id: id, name: name.isEmpty ? id : name)
-        }
+        CursorModels.parse(text).map { Model(id: $0.id, name: $0.name) }
     }
 }
 
@@ -199,8 +188,8 @@ final class Tools {
 enum ModelPicks {
     /// The best planner first: Claude holds Oby to a typed plan, then Codex, then Cursor.
     static let planners = ["claude", "codex", "cursor"]
-    /// The tools Oby can run jobs on today: Cursor's runner is F6.
-    static let workers = ["claude", "codex"]
+    /// The tools Oby can run jobs on.
+    static let workers = ["claude", "codex", "cursor"]
 
     /// 0 small, 1 everyday, 2 strong, 3 strongest (Fable, Astra: only when the user picks it).
     nonisolated static func size(_ id: String) -> Int {

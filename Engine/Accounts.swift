@@ -4,13 +4,14 @@ import Observation
 /// One login of a coding tool that Oby can send jobs to, and who pays for it.
 nonisolated struct Account: Codable, Identifiable, Equatable, Sendable {
     var id: String
-    /// "claude" or "codex".
+    /// "claude", "codex" or "cursor".
     var agent: String
     /// The user's label, like "Personal".
     var name: String
     /// Who pays for it, like "Wellington" or "Deskree".
     var payer: String
-    /// The account's config directory, or nil for the tool's default (`~/.claude`, `~/.codex`).
+    /// The account's config directory, or nil for the tool's default (`~/.claude`, `~/.codex`). Cursor
+    /// accounts always have one of Oby's own.
     var home: String?
 
     /// "Codex · Deskree": the tool and the account, as reports name it.
@@ -164,7 +165,11 @@ final class AccountStore {
 
     /// Adds an account with a fresh, empty home. It's signed out until the user signs in.
     @discardableResult
-    func add(agent: String, name: String, payer: String) throws -> Account {
+    func add(agent: String, name: String, payer: String, separateLogins: Bool = CursorFacts.separateLogins) throws -> Account {
+        // Cursor keeps one login per Mac user until the probe shows two homes keep separate ones (#24).
+        if agent == "cursor", !separateLogins, accounts.contains(where: { $0.account.agent == "cursor" }) {
+            throw Shell.Failure(message: CursorFacts.oneLogin + ": it has one Cursor account already.")
+        }
         let id = UUID().uuidString.lowercased()
         let home = homes.appending(path: id)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
@@ -273,6 +278,8 @@ final class AccountStore {
                     record(used.event, for: account.id)
                 }
                 if label != nil { setTetrix((try? await CodexAgent.tetrix(home: home)) ?? nil, for: account.id) }
+            case "cursor":
+                label = await Self.cursorLabel(home: account.home)
             default:
                 break
             }
@@ -342,6 +349,9 @@ final class AccountStore {
         let pool = calm.isEmpty ? open : calm
         func tier(_ state: AccountState) -> Int {
             if state.isReserved(at: now) { return 4 }
+            // A tool that reports no usage (Cursor) takes automatic work only when nothing else can:
+            // its usage is unknown, which would otherwise rank it with the accounts that haven't said yet.
+            if !reportsUsage(state.account.agent) { return 5 }
             guard state.sevenDay != nil else { return 2 }
             switch work {
             case .new: return state.isAhead(at: now) ? 3 : 1
@@ -362,6 +372,9 @@ final class AccountStore {
     /// Why `chosen` was taken over the other `open` accounts.
     nonisolated static func reason(_ chosen: AccountState, over open: [AccountState], close: [AccountState], work: Work, now: Date) -> String {
         var reasons: [String] = []
+        if !reportsUsage(chosen.account.agent) {
+            return "\(Job.agentNames[chosen.account.agent] ?? chosen.account.agent) reports no usage: fewest jobs running"
+        }
         if let room = chosen.roomPerDay(at: now) {
             var line = "most weekly room per day left (\(String(format: "%.2f", room))/day)"
             if close.count > 1 { line += " and the fewest jobs running" }
@@ -442,6 +455,26 @@ final class AccountStore {
         choose(accounts, agent: agent, now: now) ?? choose(accounts, agent: nil, now: now)
     }
 
+    /// The account's Cursor login: what `cursor-agent status` says, boxed like a job, with the
+    /// account's `CURSOR_CONFIG_DIR`. When that says neither way, a non-empty `cursor-agent models`
+    /// means "Signed in". Oby never reads a token file.
+    static func cursorLabel(home: String?) async -> String? {
+        let own = home ?? "\(Agents.home)/.cursor"
+        let status = Agents.sandboxed(["cursor-agent", "status"], in: nil, own: own)
+        if let result = try? await Shell.run(status, env: CursorStatus.environment(home: home), timeout: 30), !result.timedOut {
+            switch CursorStatus.parse(result.text) {
+            case .signedIn(let label): return label
+            case .signedOut: return nil
+            case .unknown: break
+            }
+        }
+        return await CursorModels.list(home: own).isEmpty ? nil : "Signed in"
+    }
+
+    /// Whether a tool tells Oby about its usage windows at all: Claude Code and Codex do (the apps'
+    /// `Usage.reports` says the same). Cursor doesn't, so routing keeps it for last.
+    nonisolated static func reportsUsage(_ agent: String) -> Bool { agent == "claude" || agent == "codex" }
+
     /// "Max · name@example.com" from `claude auth status --json`, or nil when it isn't signed in.
     nonisolated static func claudeLabel(status: Data) -> String? {
         guard let info = try? JSONSerialization.jsonObject(with: status) as? [String: Any],
@@ -451,19 +484,26 @@ final class AccountStore {
     }
 
     /// What Terminal runs to sign in: the tool's own login command and nothing else.
-    nonisolated static func signInScript(for account: Account) -> String {
-        let (variable, login) = account.agent == "codex" ? ("CODEX_HOME", "codex login") : ("CLAUDE_CONFIG_DIR", "claude auth login")
+    nonisolated static func signInScript(for account: Account, headless: Bool = Agents.bubblewrap) -> String {
+        let (variable, login) = switch account.agent {
+        case "codex": ("CODEX_HOME", "codex login")
+        case "cursor": ("CURSOR_CONFIG_DIR", "cursor-agent login")
+        default: ("CLAUDE_CONFIG_DIR", "claude auth login")
+        }
         let quote = { (text: String) in "'" + text.replacingOccurrences(of: "'", with: #"'\''"#) + "'" }
         let who = account.payer.isEmpty ? account.name : "\(account.name), paid by \(account.payer)"
-        return """
-        #!/bin/sh
-        \(account.home.map { "export \(variable)=\(quote($0))" } ?? "unset \(variable)")
-        echo \(quote("Oby: sign in to the account for \(who)."))
-        \(login)
-        echo
-        echo 'Done? Go back to Oby. You can close this window.'
-
-        """
+        // On a machine with no browser (the runner) Cursor prints a link to open on any device.
+        let headless = account.agent == "cursor" && headless
+        var lines = ["#!/bin/sh", account.home.map { "export \(variable)=\(quote($0))" } ?? "unset \(variable)"]
+        // Cursor's login is a file under XDG_CONFIG_HOME: a login of the account's own takes its HOME too.
+        if account.agent == "cursor", let home = account.home {
+            lines += ["export XDG_CONFIG_HOME=\(quote(home + "/.config"))", "export HOME=\(quote(home))"]
+        }
+        if headless { lines.append("export NO_OPEN_BROWSER=1") }
+        lines.append("echo \(quote("Oby: sign in to the account for \(who)."))")
+        if headless { lines.append("echo 'Open the link on any device.'") }
+        lines += [login, "echo", "echo 'Done? Go back to Oby. You can close this window.'"]
+        return lines.joined(separator: "\n") + "\n"
     }
 
     nonisolated static func isOwned(_ path: String, in homes: URL) -> Bool {

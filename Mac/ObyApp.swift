@@ -51,7 +51,7 @@ private struct SettingsTabs: View {
             RunnerSettingsView(feed: app.island.feed, availability: app.island.availability, remote: app.island.remote).tabItem { Label("Runner", systemImage: "server.rack") }.tag(SettingsTab.runner)
             RemoteAccessSettingsView(remote: app.island.remote).tabItem { Label("Remote", systemImage: "antenna.radiowaves.left.and.right") }.tag(SettingsTab.remote)
             AccountsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Accounts", systemImage: "person.2") }.tag(SettingsTab.accounts)
-            ModelsSettingsView(feed: app.island.feed).tabItem { Label("Models", systemImage: "cpu") }.tag(SettingsTab.models)
+            ModelsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Models", systemImage: "cpu") }.tag(SettingsTab.models)
             VaultSettingsView(vault: .shared).tabItem { Label("Vault", systemImage: "lock") }.tag(SettingsTab.vault)
             AboutSettingsView(updater: app.island.updater).tabItem { Label("About", systemImage: "info.circle") }.tag(SettingsTab.about)
         }

@@ -136,7 +136,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         return "Sent by Oby:\n" + outgoing.map { "- \($0.line)" }.joined(separator: "\n")
     }
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
-    var agentName: String { agent == "codex" ? "Codex" : "Claude Code" }
+    var agentName: String { ["codex": "Codex", "cursor": "Cursor"][agent] ?? "Claude Code" }
 
     /// The runner's title, like "Mac runner notifications", else "Review oby #33" or the first line
     /// of what the user asked.
@@ -400,7 +400,7 @@ extension ModelChoice {
     /// "Fable 5.1", "GPT-6-Astra", or the id as it is.
     nonisolated static func name(_ model: String) -> String {
         let names = ["claude-opus-5-5": "Opus 5.5", "claude-sonnet-5-5": "Sonnet 5.5", "claude-haiku-5-5": "Haiku 5.5",
-                     "claude-fable-5-1": "Fable 5.1", "gpt-6-astra": "GPT-6-Astra"]
+                     "claude-fable-5-1": "Fable 5.1", "gpt-6-astra": "GPT-6-Astra", "auto": "Auto"]
         return names[model] ?? model
     }
 }
@@ -408,6 +408,12 @@ extension ModelChoice {
 nonisolated struct ModelSettings: Codable, Equatable, Sendable {
     var claude: ModelChoice
     var codex: ModelChoice
+    /// Cursor has a model and no effort; an older runner doesn't send it.
+    var cursor: CursorModelChoice? = nil
+}
+
+nonisolated struct CursorModelChoice: Codable, Equatable, Sendable {
+    var model: String
 }
 
 nonisolated struct ModelOptions: Codable, Equatable, Sendable {
@@ -423,6 +429,8 @@ nonisolated struct ModelOptions: Codable, Equatable, Sendable {
     }
     var claude: Tool
     var codex: Tool
+    /// Cursor's models, with no efforts; an older runner doesn't send it.
+    var cursor: Tool? = nil
 }
 
 #if os(iOS) || os(watchOS)
@@ -1134,8 +1142,8 @@ nonisolated struct MoveBody: Encodable, Sendable {
 /// What the job screens' "Move to…" offers, on the iPhone, the Mac and the Watch (docs/runner-api.md,
 /// `POST /v1/jobs/{id}/move`).
 nonisolated enum MoveChoice {
-    static let tools = [("claude", "Claude Code"), ("codex", "Codex")]
-    /// Claude Code's models. Codex's come from the runner's options; its strongest when they don't.
+    static let tools = [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor")]
+    /// Claude Code's models. Codex's and Cursor's come from the runner's options; Codex's strongest when they don't.
     static let claudeModels = ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
     static let codexStrongest = "gpt-6-astra"
     /// The model that drops the job's own for the tool's from Settings › Models.

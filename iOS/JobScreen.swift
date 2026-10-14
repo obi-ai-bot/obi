@@ -353,6 +353,8 @@ private struct MoveSheet: View {
 
     private var models: [(id: String, name: String)] {
         if agent == "claude" { return MoveChoice.claudeModels.map { (id: $0, name: ModelChoice.name($0)) } }
+        // Cursor's own list; none until a Cursor account is signed in, then only "as it is".
+        if agent == "cursor" { return options?.cursor?.models.map { (id: $0.id, name: $0.name) } ?? [] }
         let listed: [(id: String, name: String)] = options?.codex.models.map { (id: $0.id, name: $0.name) } ?? []
         return listed.isEmpty ? [(id: MoveChoice.codexStrongest, name: ModelChoice.name(MoveChoice.codexStrongest))] : listed
     }

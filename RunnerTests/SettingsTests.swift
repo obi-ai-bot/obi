@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import ObyEngine
+@testable import oby_runner
 
 @MainActor
 struct SettingsTests {
@@ -10,6 +11,40 @@ struct SettingsTests {
 
     func plan(_ setting: Plan.Setting) -> Plan {
         Plan(action: .setSetting, reply: "", dispatches: [], question: nil, setting: setting)
+    }
+
+    /// `GET /v1/settings/models/options` lists Cursor's models, with no efforts (#406).
+    @Test func modelsOptionsIncludeCursor() async throws {
+        let options = await API.optionsList(cursor: { [CursorModel(id: "auto", name: "Auto"), CursorModel(id: "gpt-5", name: "GPT-5")] })
+        let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(options)) as? [String: Any])
+        let cursor = try #require(json["cursor"] as? [String: Any])
+        let models = cursor["models"] as? [[String: String]]
+        #expect(models == [["id": "auto", "name": "Auto"], ["id": "gpt-5", "name": "GPT-5"]])
+        #expect((cursor["efforts"] as? [String])?.isEmpty == true)
+        // Without a signed-in Cursor account the list is empty, and Claude Code's and Codex's stay.
+        let none = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(await API.optionsList(cursor: { [] }))) as? [String: Any])
+        #expect(((none["cursor"] as? [String: Any])?["models"] as? [Any])?.isEmpty == true)
+        #expect(none["claude"] != nil && none["codex"] != nil)
+    }
+
+    /// `PUT /v1/settings/models` takes an optional `cursor`: older clients omit it, and it's an id, never an option.
+    @Test func modelsPutTakesCursorOptionally() throws {
+        let old = try JSONDecoder().decode(Models.self, from: Data(#"{"claude":{"model":"claude-opus-5-5","effort":"xhigh"},"codex":{"model":"gpt-6.1-sol","effort":"high"}}"#.utf8))
+        #expect(old.cursor == nil)
+        let new = try JSONDecoder().decode(Models.self, from: Data(#"{"claude":{"model":"claude-opus-5-5","effort":"xhigh"},"codex":{"model":"gpt-6.1-sol","effort":"high"},"cursor":{"model":"gpt-5"}}"#.utf8))
+        #expect(new.cursor?.model == "gpt-5")
+        var option = new
+        option.cursor = Models.CursorChoice(model: "--force")
+        #expect(throws: (any Error).self) { try API.change(option) }
+        #expect(Models.current.cursor?.model == AgentModels.value("cursor", "model"))
+    }
+
+    @Test func cursorTakesAModelAndNoEffort() {
+        let models = ["claude": ["claude-sonnet-5-5"], "cursor": ["gpt-5"]]
+        let context = BrainContext(accounts: ["cursor": ["Work"]], repos: [], settingModels: models, settingEfforts: ["cursor": []], settingAccounts: ["Work"])
+        #expect(plan(Plan.Setting(agent: "cursor", model: "gpt-5")).problems(in: context, canary: "x").isEmpty)
+        #expect(!plan(Plan.Setting(agent: "cursor", effort: "high")).problems(in: context, canary: "x").isEmpty)
+        #expect(!plan(Plan.Setting(agent: "cursor", model: "gpt-5", complexEffort: "high")).problems(in: context, canary: "x").isEmpty)
     }
 
     @Test func complexEffortDefaultsMatchTheToolDefaults() {

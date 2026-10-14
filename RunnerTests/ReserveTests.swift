@@ -235,7 +235,7 @@ final class ReserveTests {
         #expect(throws: Shell.Failure.self) {
             try StartWhen.checked([.room(agent: nil), .onPace(account: "personal")], job: "ab12cd34", jobs: { _ in nil }, accounts: [personal])
         }
-        #expect(throws: Shell.Failure.self) { try StartWhen.checked([.room(agent: "cursor")], job: "ab12cd34", jobs: { _ in nil }, accounts: []) }
+        #expect(throws: Shell.Failure.self) { try StartWhen.checked([.room(agent: "gemini")], job: "ab12cd34", jobs: { _ in nil }, accounts: []) }
         #expect(Desk.movedStartWhen([.room(agent: nil), .at(now)], leaving: "personal") == [.at(now)])
     }
 

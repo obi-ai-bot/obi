@@ -513,3 +513,29 @@ struct MoveJobTests {
         }
     }
 }
+
+/// Cursor lists models like gpt-5 that Codex lists too (#406): a model both have needs the tool named.
+extension MoveChoiceTests {
+    @Test func ambiguousModelNeedsTool() throws {
+        let accounts = [state("deskree", "codex"), state("work", "cursor")]
+        let known = ["claude": AgentModels.claude.map(\.0), "codex": ["gpt-5", "gpt-6-astra"], "cursor": ["auto", "gpt-5", "sonnet-4.5"]]
+        func move(_ target: MoveTarget) throws -> (account: Account, model: String?) {
+            try Moves.choose(job, to: target, accounts: accounts, now: now, known: known)
+        }
+        // No tool named: it throws, and says which to name.
+        #expect(throws: Shell.Failure.self) { try move(MoveTarget(model: "gpt-5")) }
+        do { _ = try move(MoveTarget(model: "gpt-5")) } catch {
+            #expect(error.localizedDescription == "Say which tool: Codex or Cursor")
+        }
+        // The tool named, or an account of it, settles it.
+        let cursor = try move(MoveTarget(agent: "cursor", model: "gpt-5"))
+        #expect(cursor.account.id == "work" && cursor.model == "gpt-5")
+        #expect(try move(MoveTarget(agent: "codex", model: "gpt-5")).account.id == "deskree")
+        #expect(try move(MoveTarget(account: "Work", model: "gpt-5")).account.id == "work")
+        // A model only Cursor lists is Cursor's; Claude Code's start with claude-.
+        #expect(try move(MoveTarget(model: "sonnet-4.5")).account.id == "work")
+        #expect(try Moves.tool(ofModel: "claude-opus-5-5", among: known) == "claude")
+        // The tool names the models it runs.
+        #expect(Moves.agents.contains("cursor"))
+    }
+}

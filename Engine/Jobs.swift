@@ -292,7 +292,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         dismissed == nil && (isActive || needsYou || waitsForAnswer || published != nil && (pullRequest?.state ?? .open) == .open)
     }
     var agentName: String { Job.agentNames[agent] ?? agent }
-    static let agentNames = ["claude": "Claude Code", "codex": "Codex"]
+    static let agentNames = ["claude": "Claude Code", "codex": "Codex", "cursor": "Cursor"]
     var repoName: String { String(repo.split(separator: "/").last ?? Substring(repo)) }
 
     /// The brain's title, like "Mac runner notifications", else "Review tetrix-front-end #482" or
@@ -1442,11 +1442,11 @@ nonisolated enum Agents {
     /// The user's home folder, where the tools keep their default logins.
     static let home = FileManager.default.homeDirectoryForCurrentUser.path
 
-    /// What agents see of home, each a throwaway copy: where Claude Code, Codex and Swift live, and
+    /// What agents see of home, each a throwaway copy: where Claude Code, Codex, Cursor and Swift live, and
     /// npm's and SwiftPM's caches.
     // ponytail: what tetrix-lab installs; a tool that lives elsewhere in home (~/.nvm, ~/.cargo, ~/.bun)
     // joins the list when a runner needs it.
-    static let tools = [".local/bin", ".local/lib", ".local/share/claude", ".local/share/swiftly", ".npm", ".swiftpm"]
+    static let tools = [".local/bin", ".local/lib", ".local/share/claude", ".local/share/cursor-agent", ".local/share/swiftly", ".npm", ".swiftpm"]
 
     /// On Linux, `argv` inside bubblewrap. Agents run as the runner's Unix user, so home is empty but
     /// for `tools`, git's settings (read-only) and the job's own account, and so is all of `OBY_HOME`:
@@ -1463,9 +1463,9 @@ nonisolated enum Agents {
     // hidden, nothing else is) and the runner's API on 127.0.0.1 stay reachable; a Unix user of its
     // own for agents is the upgrade.
     static func sandboxed(_ argv: [String], in worktree: URL?, own: String?, reading: [String] = [], bubblewrap: Bool = Agents.bubblewrap,
-                          apple: AppleCheck.Tool? = AppleCheck.installed) -> [String] {
+                          apple: AppleCheck.Tool? = AppleCheck.installed,
+                          exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> [String] {
         guard bubblewrap else { return argv }
-        let exists = { (path: String) in FileManager.default.fileExists(atPath: path) }
         // Never --die-with-parent: its death signal follows the thread that started bwrap, and Foundation
         // starts processes on Dispatch worker threads, which exit after about 5 s idle: agents died with
         // SIGKILL mid-turn (proven 2026-10-10 on tetrix-lab). Oby ends the box itself (Halt, ProcessGroup),
