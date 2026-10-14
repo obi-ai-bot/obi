@@ -380,3 +380,53 @@ struct PullRequestTextTests {
                 == "Not published: possible secret in Engine/Keys.swift:12 (AWS access key).")
     }
 }
+
+@MainActor
+struct PublishCommitFindingTests {
+    let repo: URL
+    let key = "AKIA" + "ABCDEFGHIJKLMNOP"
+
+    init() async throws {
+        repo = try temporaryFolder()
+        try await AlreadyOnBaseTests.git(["init", "--quiet", "-b", "dev"], in: repo)
+        try "baseline\n".write(to: repo.appending(path: "sample.swift"), atomically: true, encoding: .utf8)
+        try await AlreadyOnBaseTests.git(["add", "sample.swift"], in: repo)
+        try await AlreadyOnBaseTests.git(["commit", "--quiet", "-m", "baseline"], in: repo)
+        try await AlreadyOnBaseTests.git(["switch", "--quiet", "-c", "oby/fix-404"], in: repo)
+        try await AlreadyOnBaseTests.git(["update-ref", "refs/remotes/origin/dev", "dev"], in: repo)
+    }
+
+    func addKeyCommit() async throws -> String {
+        try "let key = \"\(key)\"\n".write(to: repo.appending(path: "sample.swift"), atomically: true, encoding: .utf8)
+        try await AlreadyOnBaseTests.git(["add", "sample.swift"], in: repo)
+        try await AlreadyOnBaseTests.git(["commit", "--quiet", "-m", "add example key"], in: repo)
+        return try await AlreadyOnBaseTests.git(["rev-parse", "HEAD"], in: repo)
+    }
+
+    @Test func removedFindingStillNamesItsIntroducingCommitAndRebasePrompt() async throws {
+        let introducing = try await addKeyCommit()
+        try "safe\n".write(to: repo.appending(path: "sample.swift"), atomically: true, encoding: .utf8)
+        try await AlreadyOnBaseTests.git(["add", "sample.swift"], in: repo)
+        try await AlreadyOnBaseTests.git(["commit", "--quiet", "-m", "remove example key"], in: repo)
+
+        let findings = try await Publish.scan(repo, base: "dev")
+        let finding = try #require(findings.first { $0.rule == "AWS access key" })
+        #expect(finding.commit == introducing)
+        #expect(finding.historyOnly)
+        let prompt = Prompts.publishFix(findings, base: "dev")
+        #expect(prompt.contains(introducing))
+        #expect(prompt.contains("git commit --fixup=<commit>"))
+        #expect(prompt.contains("GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/dev"))
+        #expect(prompt.contains("already gone from the branch tip"))
+    }
+
+    @Test func autosquashRemovesTheFindingFromEveryCommit() async throws {
+        let introducing = try await addKeyCommit()
+        try "let key = \"safe-example\"\n".write(to: repo.appending(path: "sample.swift"), atomically: true, encoding: .utf8)
+        try await AlreadyOnBaseTests.git(["add", "sample.swift"], in: repo)
+        try await AlreadyOnBaseTests.git(["commit", "--quiet", "--fixup=\(introducing)"], in: repo)
+        try await AlreadyOnBaseTests.git(["-c", "sequence.editor=:", "rebase", "-i", "--autosquash", "origin/dev"], in: repo)
+
+        #expect(try await Publish.scan(repo, base: "dev").isEmpty)
+    }
+}

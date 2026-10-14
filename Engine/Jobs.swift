@@ -1772,9 +1772,14 @@ nonisolated enum Prompts {
     }
 
     /// What an agent hears when publishing found a possible secret in its changes.
-    static func publishFix(_ findings: [Publish.Finding]) -> String {
-        let places = findings.map { "- \($0.description)" }.joined(separator: "\n")
-        return "Oby's secret scan blocked publishing at these locations:\n\n\(places)\n\nRework each flagged line so it does not look like a secret. You can build the value at runtime, use an obviously fake value, or rename the variable. Do not include any real secret value in the code, commit message, or summary. Run the checks in the foreground, commit the fix, and finish with a short summary."
+    static func publishFix(_ findings: [Publish.Finding], base: String = "dev") -> String {
+        let places = findings.map { finding in
+            "- \(finding.description)\(finding.commit.map { " — commit \($0)" } ?? "")"
+        }.joined(separator: "\n")
+        let history = findings.contains(where: \.historyOnly)
+            ? "The flagged value is already gone from the branch tip, but it is still present in the commit history."
+            : "The flagged value was introduced by the listed commit and must be removed from that commit's patch."
+        return "Oby's secret scan blocked publishing at these locations:\n\n\(places)\n\n\(history) Rewrite the listed commit(s) so no commit on this branch contains the value. Make your change with `git commit --fixup=<commit>` for the commit that introduced each finding, then run `GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/\(base)`. Never merge the base into this branch. After rebasing, check `git log -p origin/\(base)..HEAD` no longer shows the finding. Do not include any real secret value in the code, commit message, or summary. Run the checks in the foreground and finish with a short summary."
     }
 
     /// The jobs in flight on the same files, each on its own branch, and what that means for this

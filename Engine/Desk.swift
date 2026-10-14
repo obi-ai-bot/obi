@@ -2639,7 +2639,7 @@ final class Desk {
         job.round = job.currentRound + 1
         job.step = "Round \(job.currentRound) of \(job.maxRounds)"
         replace(job)
-        let prompt = Prompts.publishFix(findings)
+        let prompt = Prompts.publishFix(findings, base: job.base ?? "dev")
         run(job, prompt: prompt, resume: job.session)
         return true
     }
