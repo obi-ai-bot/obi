@@ -376,6 +376,106 @@ struct VaultScanTests {
         }
     }
 
+    /// GitHub and gitleaks as `MacCheck.merge` meets them, every call kept in the order it came:
+    /// pull request #152 titled `title`, open into dev with the checked head, one commit, no Xcode
+    /// Cloud checks, and a merge and a branch delete that work. gitleaks keeps the text it was
+    /// given and answers `gitleaks`: 0 finds nothing, 99 finds a generic API key on line 1 (as its
+    /// JSON report says), anything else is gitleaks failing to run.
+    final class Merging: Sendable {
+        static let pull = "repos/deskree-inc/oby/pulls/152"
+        let title: String
+        let gitleaks: Int32
+        let calls = Mutex<[[String]]>([])
+        let scanned = Mutex<[String]>([])
+
+        init(title: String, gitleaks: Int32 = 0) {
+            self.title = title
+            self.gitleaks = gitleaks
+        }
+
+        var job: Job {
+            var job = Job(id: "merge-151", request: "Fix #151", agent: "claude", account: "default", repo: "deskree-inc/oby",
+                          branch: "oby/fix-151", base: "dev", pr: nil, kind: .fix, task: "Fix #151")
+            job.published = "https://github.com/deskree-inc/oby/pull/152"
+            return job
+        }
+
+        var check: MacCheck { MacCheck.make(for: job, pr: 152, head: CheckTests.head) }
+
+        var put: [String]? { calls.withLock { $0 }.first { $0.starts(with: ["gh", "api", "-X", "PUT"]) } }
+
+        var stand: Shell.Stand {
+            Shell.Stand { [self] arguments, _ in
+                calls.withLock { $0.append(arguments) }
+                if arguments.first == "gitleaks", let dir = arguments.firstIndex(of: "dir"), arguments.indices.contains(dir + 1) {
+                    let text = try String(contentsOf: URL(filePath: arguments[dir + 1]), encoding: .utf8)
+                    scanned.withLock { $0.append(text) }
+                    if gitleaks == 99, let report = arguments.first(where: { $0.hasPrefix("--report-path=") }) {
+                        try Data(#"[{"RuleID":"generic-api-key","StartLine":1}]"#.utf8)
+                            .write(to: URL(filePath: String(report.dropFirst("--report-path=".count))))
+                    }
+                    return Shell.Output(status: gitleaks, out: Data(), err: gitleaks == 0 || gitleaks == 99 ? "" : "gitleaks: config not found")
+                }
+                let view = #"{"title":"\#(title)","state":"open","merged":false,"base":{"ref":"dev"},"head":{"sha":"\#(CheckTests.head)","ref":"oby/fix-151","repo":{"full_name":"deskree-inc/oby"}}}"#
+                let said: String = switch Array(arguments.prefix(3)) {
+                case ["gh", "api", Self.pull]: view
+                case ["gh", "api", "\(Self.pull)/commits?per_page=100"]: #"[{"commit":{"message":"fix: the login\n\nChecked on the Mac"}}]"#
+                case ["gh", "api", "repos/deskree-inc/oby/commits/\(CheckTests.head)/check-runs?per_page=100"]: #"[{"check_runs":[]}]"#
+                case ["gh", "api", "-X"]: "{}"
+                default: throw Shell.Failure(message: "Unexpected command \(arguments.prefix(3).joined(separator: " "))")
+                }
+                return Shell.Output(status: 0, out: Data(said.utf8), err: "")
+            }
+        }
+
+        /// Runs the merge with GitHub and gitleaks standing in; what it threw, if anything.
+        func merge() async -> Error? {
+            do {
+                try await Shell.$stand.withValue(stand) { try await MacCheck.merge(job, check) }
+                return nil
+            } catch {
+                return error
+            }
+        }
+    }
+
+    /// The merge itself scans the squash commit it is about to write, title and message, with
+    /// gitleaks among the scanners, before it asks GitHub to merge; and asks for no merge when the
+    /// scan finds something, from the built-in rules or from gitleaks, or can't run.
+    @Test func theMergeScansTheSquashCommitBeforeAskingGitHub() async throws {
+        let clean = Merging(title: "fix: the login")
+        #expect(await clean.merge() == nil)
+        let calls = clean.calls.withLock { $0 }
+        let scan = try #require(calls.firstIndex { $0.first == "gitleaks" })
+        let put = try #require(calls.firstIndex { $0.starts(with: ["gh", "api", "-X", "PUT"]) })
+        #expect(scan < put)
+        // What was scanned is what GitHub is asked to write.
+        #expect(clean.scanned.withLock { $0 } == ["fix: the login (#152)\nChecked on the Mac"])
+        #expect(clean.put == ["gh", "api", "-X", "PUT", "\(Merging.pull)/merge", "-f", "merge_method=squash", "-f", "sha=\(CheckTests.head)",
+                              "-f", "commit_title=fix: the login (#152)", "-f", "commit_message=Checked on the Mac"])
+
+        // A title someone edited on GitHub after publishing: the built-in rules find it.
+        let titled = Merging(title: "fix: \(Fake.aws)")
+        #expect((await titled.merge() as? Shell.Failure)?.message == "possible secret in squash commit title:1 (AWS access key).")
+        #expect(titled.put == nil)
+
+        // What only gitleaks finds.
+        let leaked = Merging(title: "fix: the login", gitleaks: 99)
+        #expect((await leaked.merge() as? Shell.Failure)?.message == "possible secret in squash commit title:1 (gitleaks generic-api-key).")
+        #expect(leaked.scanned.withLock { $0 } == ["fix: the login (#152)\nChecked on the Mac"])
+        #expect(leaked.put == nil)
+
+        // gitleaks can't run.
+        let broken = Merging(title: "fix: the login", gitleaks: 2)
+        let failed = (await broken.merge() as? Shell.Failure)?.message
+        #expect(failed?.hasPrefix("the secret scan of the squash commit couldn't run") == true)
+        #expect(broken.put == nil)
+        // Nor is the branch deleted when nothing was merged.
+        for merging in [titled, leaked, broken] {
+            #expect(!merging.calls.withLock { $0 }.contains { $0.contains("DELETE") })
+        }
+    }
+
     /// Wherever a base64 run starts, the value's own characters are in it.
     @Test func base64IsFoundAtAnyOffset() {
         let value = secret()
