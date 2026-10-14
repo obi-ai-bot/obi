@@ -38,13 +38,21 @@ final class WatchPairing {
         let clientSecret = clientSecret.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = try await ask([WatchWire.kind: WatchWire.Kind.pairKey.rawValue])
         guard let publicKey = key[WatchWire.publicKey] as? Data else { throw RunnerError(message: "Your watch sent no key.") }
+        let e2ePublicKey = key[WatchWire.e2ePublicKey] as? Data
         let name = key[WatchWire.name] as? String ?? "Apple Watch"
         let device = try await phone.registerDevice()
         let approval = try await Task.detached { try DeviceKey.approvePairing(publicKey: publicKey.base64EncodedString(), device: device) }.value
-        let paired = try await phone.runner.pairWatch(name: name, publicKey: publicKey, clientID: clientID, clientSecret: clientSecret, approval: approval)
+        let paired = try await phone.runner.pairWatch(name: name, publicKey: publicKey, clientID: clientID, clientSecret: clientSecret,
+                                                      approval: approval, e2ePublicKey: e2ePublicKey)
         Self.save(clientID: clientID, clientSecret: clientSecret)
-        _ = try await ask([WatchWire.kind: WatchWire.Kind.paired.rawValue, WatchWire.watch: paired.id, WatchWire.url: paired.url.absoluteString,
-                           WatchWire.clientID: clientID, WatchWire.clientSecret: clientSecret])
+        var message: [String: Any] = [WatchWire.kind: WatchWire.Kind.paired.rawValue, WatchWire.watch: paired.id,
+                                      WatchWire.url: paired.url.absoluteString, WatchWire.clientID: clientID,
+                                      WatchWire.clientSecret: clientSecret]
+        // Pin the same gateway key the iPhone already trusts; without it the watch stays on cleartext.
+        if let gateway = phone.link?.publicKey, gateway.count == 32 {
+            message[WatchWire.gatewayPublicKey] = gateway
+        }
+        _ = try await ask(message)
         watches = try await phone.runner.watches()
     }
 

@@ -15,6 +15,8 @@ final class Watches {
         var name: String
         /// P-256, X9.63 (65 bytes, uncompressed), base64.
         var publicKey: String
+        /// X25519 public key for sealed Watch API bodies, base64. Nil for watches paired before E2E.
+        var e2ePublicKey: String? = nil
         var registered: Date
     }
 
@@ -75,9 +77,16 @@ final class Watches {
 
     /// Pairs a Watch and returns its id; a key it knows keeps its id. The service token replaces
     /// the one in the vault, so the token the iPhone holds now is the one the runner keeps.
-    func pair(name: String, publicKey: String, clientID: String, clientSecret: String, now: Date = .now) throws -> String {
+    func pair(name: String, publicKey: String, clientID: String, clientSecret: String,
+              e2ePublicKey: String? = nil, now: Date = .now) throws -> String {
         guard Self.key(publicKey) != nil else {
             throw APIError(.unprocessableContent, "publicKey isn't a P-256 public key (X9.63, base64).")
+        }
+        if let e2ePublicKey {
+            guard let data = Data(base64Encoded: e2ePublicKey), data.count == 32,
+                  (try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: data)) != nil else {
+                throw APIError(.unprocessableContent, "e2ePublicKey isn't an X25519 public key (base64).")
+            }
         }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (1...100).contains(name.count) else { throw APIError(.unprocessableContent, "name is the Watch's name, up to 100 characters.") }
@@ -92,14 +101,21 @@ final class Watches {
         }
         if let known = watches.firstIndex(where: { $0.publicKey == publicKey }) {
             watches[known].name = name
+            if let e2ePublicKey { watches[known].e2ePublicKey = e2ePublicKey }
             try save()
             return watches[known].id
         }
-        let watch = Watch(id: UUID().uuidString.lowercased(), name: name, publicKey: publicKey, registered: now)
+        let watch = Watch(id: UUID().uuidString.lowercased(), name: name, publicKey: publicKey,
+                          e2ePublicKey: e2ePublicKey, registered: now)
         watches.append(watch)
         try save()
         Logger.runner.notice("paired watch \(watch.id, privacy: .public): \(watch.name, privacy: .public)")
         return watch.id
+    }
+
+    /// Whether this watch has a pinned E2E key and must seal Watch API bodies.
+    func requiresE2E(_ id: String) -> Bool {
+        watches.first(where: { $0.id == id })?.e2ePublicKey != nil
     }
 
     /// Forgets a Watch: its requests fail from now on. With the last one gone, the service

@@ -554,8 +554,9 @@ final class Phone {
     func registerDevice(again: Bool = false) async throws -> String {
         if !again, let deviceID { return deviceID }
         guard DeviceKey.isAvailable else { throw RunnerError(message: "Publishing needs Face ID on your iPhone.") }
-        let connection = runner
-        let id = try await connection.register(name: "iPhone", publicKey: try DeviceKey.publicKey())
+        // `runner` builds its E2E client with `try?`: a missing or broken gateway key must not
+        // block publish approval for devices paired before E2E.
+        let id = try await runner.register(name: "iPhone", publicKey: try DeviceKey.publicKey())
         if let link { self.link = MacLink(name: link.name, hostname: link.hostname, deviceID: id, publicKey: link.publicKey) }
         UserDefaults.standard.set(id, forKey: deviceKey)
         return id

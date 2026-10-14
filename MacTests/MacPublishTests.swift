@@ -93,6 +93,36 @@ struct MacPublishTests {
         #expect(stub.requests.isEmpty && device.status == "Needs Touch ID")
     }
 
+    /// `Runner.call` / the same path `Phone.runner` uses: with an `E2E.Client`, requests carry
+    /// `Oby-E2E-*` headers and a sealed body, and the authenticated response opens cleanly.
+    @Test func runnerCallSealsRequestsAndOpensResponses() async throws {
+        let mac = E2E.KeyPair()
+        let phone = E2E.KeyPair()
+        let counterKey = "oby-test-runner-call-\(UUID().uuidString)"
+        let client = try E2E.Client(device: "mac-device", keys: phone, gatewayPublicKey: mac.publicKey, counterKey: counterKey)
+        let stub = RunnerStub(dataAnswer: { request in
+            #expect(request.headers["Oby-E2E-Version"] == E2E.version)
+            #expect(request.headers["Oby-E2E-Device"] == "mac-device")
+            let counter = UInt64(request.headers["Oby-E2E-Counter"] ?? "") ?? 0
+            #expect(counter > 0)
+            let metadata = E2E.Metadata(method: request.method, route: request.path, device: "mac-device", counter: counter)
+            let clear = try! E2E.open(request.body, with: mac.privateKey, metadata: metadata,
+                                      authenticatedBy: phone.privateKey.publicKey)
+            #expect(clear.isEmpty || (try? JSONSerialization.jsonObject(with: clear)) != nil)
+            let responseMetadata = E2E.Metadata(method: request.method, route: request.path, device: "mac-device",
+                                                counter: counter, direction: .response)
+            let sealed = try! E2E.seal(Data(#"{"id":"d7c1"}"#.utf8), to: phone.publicKey,
+                                       metadata: responseMetadata, authenticatedBy: mac.privateKey)
+            return (200, E2E.frame(sealed))
+        })
+        let runner = Runner(base: stub.runner.base, e2e: client)
+        let id = try await runner.register(name: "Mac", publicKey: FakeKey().signing.publicKey.x963Representation)
+        #expect(id == "d7c1")
+        #expect(stub.requests.count == 1)
+        #expect(stub.requests[0].headers["Oby-E2E-Version"] == E2E.version)
+        #expect(stub.requests[0].json == nil)
+    }
+
     /// A job older than the latest 50 (an inbox item's Open job, or an alert's Publish) is fetched
     /// by its id, so its screen and its Publish open; one already listed isn't asked for again.
     @Test func olderJobIsFetched() async throws {
@@ -143,12 +173,13 @@ nonisolated final class RunnerStub: Sendable {
         var method: String
         var path: String
         var body: Data
+        var headers: [String: String]
 
         var json: [String: Any]? { (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] }
     }
 
     let host = "\(UUID().uuidString.lowercased()).runner.test"
-    let answer: @Sendable (Request) -> (Int, String)
+    let answer: @Sendable (Request) -> (Int, Data)
     private let got = Mutex<[Request]>([])
 
     var runner: Runner { Runner(base: URL(string: "https://\(host)")!) }
@@ -157,17 +188,28 @@ nonisolated final class RunnerStub: Sendable {
     var defaults: UserDefaults { UserDefaults(suiteName: "com.deskree.oby.tests")! }
 
     init(answer: @escaping @Sendable (Request) -> (Int, String)) {
-        self.answer = answer
+        self.answer = { request in
+            let (status, text) = answer(request)
+            return (status, Data(text.utf8))
+        }
+        _ = Self.registered
+        Self.stubs.withLock { $0[host] = self }
+    }
+
+    init(dataAnswer: @escaping @Sendable (Request) -> (Int, Data)) {
+        self.answer = dataAnswer
         _ = Self.registered
         Self.stubs.withLock { $0[host] = self }
     }
 
     fileprivate func take(_ request: URLRequest) -> (Int, Data) {
         let body = request.httpBody ?? request.httpBodyStream.map(Self.read) ?? Data()
-        let got = Request(method: request.httpMethod ?? "GET", path: request.url?.absoluteURL.path() ?? "", body: body)
+        var headers: [String: String] = [:]
+        request.allHTTPHeaderFields?.forEach { headers[$0.key] = $0.value }
+        let got = Request(method: request.httpMethod ?? "GET", path: request.url?.absoluteURL.path() ?? "",
+                          body: body, headers: headers)
         self.got.withLock { $0.append(got) }
-        let (status, text) = answer(got)
-        return (status, Data(text.utf8))
+        return answer(got)
     }
 
     private static func read(_ stream: InputStream) -> Data {

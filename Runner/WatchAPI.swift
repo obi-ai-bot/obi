@@ -1,6 +1,8 @@
 import Foundation
 import HTTPTypes
 import Hummingbird
+import NIOCore
+import ObyShared
 @testable import ObyEngine
 
 /// The Watch API: what the Apple Watch uses when its iPhone is out of reach (docs/runner-api.md,
@@ -15,6 +17,9 @@ final class WatchAPI {
     let api: API
     let watches: Watches
     nonisolated let access: AccessFile
+    /// Shared with the Mac gateway so sealed Watch traffic uses the same static key. Nonisolated
+    /// for WatchGate (Hummingbird middleware is not on the main actor).
+    nonisolated let gateway: Gateway?
 
     /// The largest body the Watch sends: a plan, a message, or a piece of a recording.
     nonisolated static let bodyLimit = 1 << 20
@@ -22,10 +27,11 @@ final class WatchAPI {
     /// of mono 16-bit PCM at 16 kHz.
     nonisolated static let chunkLimit = 32_000
 
-    init(api: API, watches: Watches, access: AccessFile) {
+    init(api: API, watches: Watches, access: AccessFile, gateway: Gateway? = nil) {
         self.api = api
         self.watches = watches
         self.access = access
+        self.gateway = gateway
     }
 
     /// The Watch API's endpoints, behind WatchGate.
@@ -77,13 +83,19 @@ final class WatchAPI {
     }
 
     /// A Watch's key, with the phone's Face ID approval of exactly that key, and the Access service
-    /// token, which goes to the vault. Answers the Watch's id and the address it calls.
+    /// token, which goes to the vault. Answers the Watch's id and the address it calls. When the
+    /// watch sends an X25519 `e2ePublicKey`, it is pinned on the shared gateway so sealed Watch
+    /// API traffic can be opened.
     func pair(_ new: NewWatch, now: Date = .now) throws -> Response {
         guard let config = access.config else {
             throw APIError(.conflict, "Set up the Watch API on the runner first: \(access.file.path) (docs/runner-api.md).")
         }
         try api.devices.checkPairing(new.approval, publicKey: new.publicKey, now: now)
-        let id = try watches.pair(name: new.name, publicKey: new.publicKey, clientID: new.accessClientId, clientSecret: new.accessClientSecret, now: now)
+        let id = try watches.pair(name: new.name, publicKey: new.publicKey, clientID: new.accessClientId,
+                                  clientSecret: new.accessClientSecret, e2ePublicKey: new.e2ePublicKey, now: now)
+        if let e2e = new.e2ePublicKey, let gateway {
+            try gateway.register(device: id, publicKey: e2e)
+        }
         return API.json(["id": id, "url": config.url.absoluteString], status: .created)
     }
 
@@ -175,12 +187,57 @@ struct WatchGate<Context: RequestContext>: RouterMiddleware {
                 throw APIError(.unauthorized, "Sign the request with a paired Watch's key: Oby-Watch, Oby-Time, Oby-Nonce and Oby-Signature.")
             }
             var request = request
-            let body = try await request.collectBody(upTo: WatchAPI.bodyLimit)
+            let wire = Data((try await request.collectBody(upTo: WatchAPI.bodyLimit)).readableBytesView)
             _ = try await api.authorize(Watches.Signed(watch: watch, method: request.method.rawValue, target: request.uri.string,
-                                                       time: time, nonce: nonce, signature: signature, body: Data(body.readableBytesView)))
-            return try await next(request, context)
+                                                       time: time, nonce: nonce, signature: signature, body: wire))
+            let sealed = request.headers[.obyE2EVersion] == E2E.version
+            let requires = await api.watches.requiresE2E(watch)
+            if requires && !sealed {
+                throw APIError(.unauthorized, "This watch requires an encrypted device envelope.")
+            }
+            var e2eMetadata: E2E.Metadata?
+            if sealed {
+                guard let gateway = api.gateway,
+                      let device = request.headers[.obyE2EDevice], device == watch,
+                      let counterText = request.headers[.obyE2ECounter], let counter = UInt64(counterText) else {
+                    throw APIError(.unauthorized, "This gateway requires an encrypted device envelope.")
+                }
+                let metadata = E2E.Metadata(method: request.method.rawValue, route: request.uri.string,
+                                            device: device, counter: counter)
+                let clear = try gateway.open(wire, metadata: metadata)
+                request.body = .init(buffer: ByteBuffer(bytes: clear))
+                e2eMetadata = metadata
+            } else {
+                request.body = .init(buffer: ByteBuffer(bytes: wire))
+            }
+            var response: Response
+            do {
+                response = try await next(request, context)
+            } catch let error as APIError {
+                response = error.response
+            } catch let error as HTTPError {
+                response = APIError(error.status, error.body ?? error.status.reasonPhrase).response
+            } catch {
+                response = APIError(.internalServerError, error.localizedDescription).response
+            }
+            if let metadata = e2eMetadata, let gateway = api.gateway {
+                guard let publicKey = gateway.devicePublicKey(watch) else {
+                    throw APIError(.unauthorized, "The encrypted device message was rejected.")
+                }
+                response.headers[.obyE2EVersion] = E2E.version
+                response.headers[.contentType] = "application/octet-stream"
+                response.body = response.body.map { buffer in
+                    let responseMetadata = E2E.Metadata(method: metadata.method, route: metadata.route,
+                                                        device: watch, counter: metadata.counter, direction: .response)
+                    let sealed = try gateway.seal(Data(buffer.readableBytesView), to: publicKey, metadata: responseMetadata)
+                    return ByteBuffer(bytes: E2E.frame(sealed))
+                }
+            }
+            return response
         } catch let error as APIError {
             return error.response
+        } catch let error as E2E.Failure {
+            return APIError(.unauthorized, "The encrypted device message was rejected (\(String(describing: error))).").response
         } catch let error as HTTPError {
             return APIError(error.status, error.body ?? error.status.reasonPhrase).response
         } catch {
@@ -206,6 +263,8 @@ struct NewWatch: Decodable {
     var accessClientId: String
     var accessClientSecret: String
     var approval: PairingApproval
+    /// Optional X25519 public key so the Watch API can seal like the Mac gateway.
+    var e2ePublicKey: String?
 }
 
 /// The phone's Face ID approval of one Watch's key (Devices.checkPairing).

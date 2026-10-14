@@ -925,11 +925,16 @@ nonisolated struct Runner: Sendable {
 
     /// Pairs a watch's key, approved with Face ID, and hands the runner the Access service token
     /// for its vault. Answers the watch's id and the Watch API's address.
-    func pairWatch(name: String, publicKey: Data, clientID: String, clientSecret: String, approval: PairingApproval) async throws -> (id: String, url: URL) {
-        struct Body: Encodable { var name: String; var publicKey: String; var accessClientId: String; var accessClientSecret: String; var approval: PairingApproval }
+    func pairWatch(name: String, publicKey: Data, clientID: String, clientSecret: String, approval: PairingApproval,
+                   e2ePublicKey: Data? = nil) async throws -> (id: String, url: URL) {
+        struct Body: Encodable {
+            var name: String; var publicKey: String; var accessClientId: String; var accessClientSecret: String
+            var approval: PairingApproval; var e2ePublicKey: String?
+        }
         struct Answer: Decodable { var id: String; var url: URL }
         let answer: Answer = try await call("POST", "v1/watches", body: Body(name: name, publicKey: publicKey.base64EncodedString(),
-                                                                          accessClientId: clientID, accessClientSecret: clientSecret, approval: approval))
+                                                                          accessClientId: clientID, accessClientSecret: clientSecret, approval: approval,
+                                                                          e2ePublicKey: e2ePublicKey?.base64EncodedString()))
         return (answer.id, answer.url)
     }
     #endif

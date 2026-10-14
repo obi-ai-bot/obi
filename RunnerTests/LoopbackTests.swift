@@ -186,5 +186,6 @@ struct LocalRunnerTests {
         #expect(LocalRunner.home.path.hasPrefix(app.path + "/"))
         #expect(LocalRunner.home.lastPathComponent == "Runner")
         #expect(LocalRunner.url.absoluteString == "http://127.0.0.1:7777")
+        #expect(LocalRunner.gatewayURL.absoluteString == "http://127.0.0.1:8810")
     }
 }

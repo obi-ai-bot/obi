@@ -135,7 +135,14 @@ final class RunnerFeed {
     @ObservationIgnored private var runnerChanges = 0
 
     /// The runner followed, or nil: none is set, or the one on this Mac hasn't made its token yet.
-    var runner: Runner? { Self.runner(url ?? "", token: local ? token : nil, local: local) }
+    /// After this Mac pairs with its own gateway, sealed calls use `LocalRunner.gatewayURL`.
+    var runner: Runner? { Self.runner(url ?? "", token: local ? token : nil, local: local, device: device) }
+
+    /// The owner API on this Mac (bearer token), for opening pairing before any sealed traffic.
+    var ownerRunner: Runner? {
+        guard local, let token else { return nil }
+        return Runner(base: LocalRunner.url, token: token)
+    }
     var active: [Job] { jobs.filter(\.isActive) }
 
     /// "tetrix-lab": what the runner calls itself, or its URL's first name before it has answered.
@@ -149,9 +156,24 @@ final class RunnerFeed {
     static let thisMacKey = "runnerOnThisMac"
 
     /// A runner at `url`; one on this Mac (`local`) only with its `token`, which every request carries.
-    static func runner(_ url: String, token: String? = nil, local: Bool = false) -> Runner? {
-        if local, token == nil { return nil }
-        return URL(string: url.trimmingCharacters(in: .whitespaces)).flatMap { $0.host() == nil ? nil : Runner(base: $0, token: token) }
+    /// When this Mac has paired and pinned the gateway key, sealed device calls go to the gateway
+    /// (`LocalRunner.gatewayURL`) instead of the owner loopback port.
+    static func runner(_ url: String, token: String? = nil, local: Bool = false, device: MacDevice? = nil) -> Runner? {
+        if local {
+            guard let token else { return nil }
+            let owner = Runner(base: LocalRunner.url, token: token)
+            if let device, let e2e = device.e2eClient(for: Runner(base: LocalRunner.gatewayURL))
+                ?? device.e2eClient(for: owner) {
+                return Runner(base: LocalRunner.gatewayURL, e2e: e2e)
+            }
+            return owner
+        }
+        return URL(string: url.trimmingCharacters(in: .whitespaces)).flatMap { base -> Runner? in
+            guard base.host() != nil else { return nil }
+            let plain = Runner(base: base, token: token)
+            guard let device, let e2e = device.e2eClient(for: plain) else { return plain }
+            return Runner(base: base, token: token, e2e: e2e)
+        }
     }
 
     init() {
@@ -297,28 +319,40 @@ final class RunnerFeed {
 
     /// Registers this Mac's publishing key, as the iPhone does on each connection. A runner whose
     /// pairing is closed answers 403: Settings › Runner shows its line, with Try again. The runner
-    /// on this Mac keeps its files under this user, so Oby opens its pairing itself first
-    /// (the owner opens pairing in the Mac app, Runner/Devices.swift).
+    /// on this Mac opens pairing on the owner port once, pairs itself on the gateway (pinning the
+    /// key), then re-registers over sealed calls; later connections only seal-register.
     func register(_ runner: Runner? = nil) {
-        guard let runner = runner ?? self.runner else { return }
         Task {
             do {
-                if local { _ = try await runner.openPairing() }
-                try await device.register(with: runner)
+                if local {
+                    let gateway = Runner(base: LocalRunner.gatewayURL)
+                    if device.e2eClient(for: gateway) != nil || device.id(on: Runner(base: LocalRunner.url)) != nil {
+                        let sealed = self.runner ?? device.sealed(gateway)
+                        try await device.register(with: sealed)
+                    } else {
+                        guard let owner = ownerRunner else { return }
+                        let opened = try await owner.openPairing()
+                        try await device.pair(with: gateway, secret: opened.secret, gatewayPublicKey: opened.publicKey)
+                        // Re-follow on the sealed gateway now that the key is pinned.
+                        follow(again: true)
+                    }
+                } else if let runner = runner ?? self.runner {
+                    try await device.register(with: runner)
+                }
             } catch {
                 Logger.feed.error("registering this Mac failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
 
-    /// Opens pairing on the local runner and prepares the QR payload without persisting the
+    /// Opens pairing on the local owner API and prepares the QR payload without persisting the
     /// one-time secret in the linked-device record.
     func openPairing() {
-        guard let runner = self.runner else { return }
+        guard let owner = ownerRunner ?? self.runner else { return }
         Task {
             do {
-                let opened = try await runner.openPairing()
-                let hostname = UserDefaults.standard.string(forKey: "remote.hostname") ?? runner.base.host() ?? ""
+                let opened = try await owner.openPairing()
+                let hostname = UserDefaults.standard.string(forKey: "remote.hostname") ?? owner.base.host() ?? ""
                 pairingQR = PairingQR(name: Host.current().localizedName ?? "Mac", hostname: hostname,
                                       secret: opened.secret, gatewayPublicKey: opened.publicKey)
             } catch {

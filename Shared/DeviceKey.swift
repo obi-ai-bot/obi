@@ -32,6 +32,9 @@ nonisolated enum DeviceKey {
     /// Enclave signing key: HPKE needs a key-agreement key and the runner pins both at pairing.
     static func e2ePublicKey() throws -> Data { try e2eKey().publicKey }
 
+    /// Possession proof for a new or replacement E2E key. Call only when the X25519 key is
+    /// actually changing: signing uses the biometric-gated enclave key and prompts Face ID or
+    /// Touch ID. Routine `Runner.register` must not call this.
     static func e2eRegistrationProof(publicKey: Data, e2ePublicKey: Data, context: LAContext? = nil) throws -> String {
         let message = Data("oby-e2e-register\n\(publicKey.base64EncodedString())\n\(e2ePublicKey.base64EncodedString())".utf8)
         return try sign(message, context: context)

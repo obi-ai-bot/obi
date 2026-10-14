@@ -15,8 +15,13 @@ import Security
 /// that resolves to 127.0.0.1 (DNS rebinding).
 nonisolated enum LocalRunner {
     static let port = 7777
+    /// The encrypted device gateway on this Mac (F18). Remote devices and this Mac's own
+    /// sealed device traffic use it; the owner API stays on `port`.
+    static let gatewayPort = 8810
     /// Where the Mac app follows the runner on this Mac.
     static let url = URL(string: "http://127.0.0.1:\(port)")!
+    /// Where sealed device requests go on this Mac (`OBY_GATEWAY_PORT` can change the runner's).
+    static let gatewayURL = URL(string: "http://127.0.0.1:\(gatewayPort)")!
     /// The keychain service the token lives under, and the item's name. Oby.app and `oby-runner`
     /// are different programs: the first time one reads what the other made, macOS may ask the user.
     static let keychainService = "com.deskree.oby.runner"

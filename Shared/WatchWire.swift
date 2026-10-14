@@ -72,7 +72,8 @@ nonisolated struct RelayedPlan: Codable, Equatable, Sendable {
 /// From the phone, answered in the reply (iOS/WatchPairing.swift):
 /// - `pairKey`: nothing; answered with `publicKey` (the watch's Secure Enclave key, X9.63) and `name`.
 /// - `paired`: `watch` (its id on the runner), `url` (the Watch API's address), `clientId` and
-///   `clientSecret` (the Cloudflare Access service token); answered with `ok`.
+///   `clientSecret` (the Cloudflare Access service token), and `gatewayPublicKey` (the Mac's
+///   pinned X25519 key so the watch seals device traffic); answered with `ok`.
 /// - `unpaired`: `watch`; the watch forgets its pairing if it's that one; answered with `ok`.
 ///
 /// Any reply may carry `error` instead of what was asked for.
@@ -104,6 +105,10 @@ nonisolated enum WatchWire {
     static let watch = "watch"
     static let clientID = "clientId"
     static let clientSecret = "clientSecret"
+    /// The watch's X25519 public key (32 bytes) for gateway envelopes.
+    static let e2ePublicKey = "e2ePublicKey"
+    /// The Mac gateway's pinned X25519 public key (32 bytes), so the watch seals like the iPhone.
+    static let gatewayPublicKey = "gatewayPublicKey"
     static let agent = "agent"
     static let account = "account"
     static let model = "model"

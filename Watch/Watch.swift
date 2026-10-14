@@ -677,7 +677,9 @@ final class Watch: NSObject {
         switch (message[WatchWire.kind] as? String).flatMap(WatchWire.Kind.init(rawValue:)) {
         case .pairKey:
             do {
-                return [WatchWire.publicKey: try WatchLink.publicKey(), WatchWire.name: WKInterfaceDevice.current().name]
+                return [WatchWire.publicKey: try WatchLink.publicKey(),
+                        WatchWire.e2ePublicKey: try WatchLink.e2ePublicKey(),
+                        WatchWire.name: WKInterfaceDevice.current().name]
             } catch {
                 return [WatchWire.error: error.localizedDescription]
             }
@@ -686,8 +688,13 @@ final class Watch: NSObject {
                   let clientID = message[WatchWire.clientID] as? String, let clientSecret = message[WatchWire.clientSecret] as? String else {
                 return [WatchWire.error: "The pairing was incomplete."]
             }
+            let gatewayKey = message[WatchWire.gatewayPublicKey] as? Data
+            guard gatewayKey == nil || gatewayKey?.count == 32 else {
+                return [WatchWire.error: "The Mac's gateway key isn't X25519."]
+            }
             do {
-                try WatchLink.save(WatchLink.Pairing(watch: watch, url: url, clientID: clientID, clientSecret: clientSecret))
+                try WatchLink.save(WatchLink.Pairing(watch: watch, url: url, clientID: clientID, clientSecret: clientSecret,
+                                                     gatewayPublicKey: gatewayKey))
             } catch {
                 return [WatchWire.error: error.localizedDescription]
             }

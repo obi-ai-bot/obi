@@ -143,7 +143,12 @@ let api = API(desk: desk, devices: devices,
               cleared: Cleared(file: Workspace.root.appending(path: "cleared.json")), speech: speech, broker: broker)
 // The gateway key is stable across launches and lives in the vault (Keychain on macOS, the
 // runner-only vault file on Linux). Its replay state is durable beside the runner state.
-let gateway = try? Gateway.persisted(replayFile: Workspace.root.appending(path: "e2e-replay.json"), devices: devices.e2eKeys())
+let watches = Watches(file: Workspace.root.appending(path: "watches.json"))
+var e2eDevices = devices.e2eKeys()
+for watch in await watches.watches {
+    if let key = watch.e2ePublicKey, let data = Data(base64Encoded: key) { e2eDevices[watch.id] = data }
+}
+let gateway = try? Gateway.persisted(replayFile: Workspace.root.appending(path: "e2e-replay.json"), devices: e2eDevices)
 if gateway == nil { Logger.runner.error("E2E gateway key could not be loaded; remote device traffic is disabled.") }
 api.gateway = gateway
 
@@ -238,8 +243,9 @@ Task {
     }
 }
 
-let watchAPI = WatchAPI(api: api, watches: Watches(file: Workspace.root.appending(path: "watches.json")),
-                        access: AccessFile(file: Workspace.root.appending(path: "watch.json")))
+let watchAPI = WatchAPI(api: api, watches: watches,
+                        access: AccessFile(file: Workspace.root.appending(path: "watch.json")),
+                        gateway: gateway)
 let router = api.router(access: access)
 watchAPI.pairing(on: router)
 // 127.0.0.1 only, on either machine: the tailnet reaches it through `tailscale serve`, and a Mac's
