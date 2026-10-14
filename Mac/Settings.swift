@@ -595,3 +595,82 @@ extension AccountStore {
         guard NSWorkspace.shared.open(script) else { throw Shell.Failure(message: "Couldn't open Terminal to sign in.") }
     }
 }
+
+/// Settings › Assistants: add the bundled `oby-mcp` to Claude Code or Codex (#385). Points at
+/// Contents/Helpers/oby-mcp, never a copy, so Sparkle keeps it current with the app.
+struct AssistantsSettingsView: View {
+    private enum Target: String, Identifiable {
+        case claude, codex
+        var id: String { rawValue }
+        var title: String { self == .claude ? "Claude Code" : "Codex" }
+        var argv: [String] { self == .claude ? MCPHelper.claudeAdd() : MCPHelper.codexAdd() }
+    }
+
+    @State private var confirming: Target?
+    @State private var busy = false
+    @State private var note: String?
+    @State private var problem: String?
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Bundled path", value: MCPHelper.path)
+                if !MCPHelper.isPresent {
+                    Text("Not in this build of Oby").foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("oby-mcp")
+            } footer: {
+                Text("Sparkle updates it with the app. Point Claude Code and Codex at this path, never a copy. Rebuilding by hand: rm the old binary before copying, then codesign -s - -f on the new one (a plain cp over a signed binary is killed on launch).")
+            }
+            Section("Claude Code") {
+                Button("Add to Claude Code") { confirming = .claude }
+                    .disabled(!MCPHelper.isPresent || busy)
+            }
+            Section("Codex") {
+                Button("Add to Codex") { confirming = .codex }
+                    .disabled(!MCPHelper.isPresent || busy)
+            }
+            if let note {
+                Text(note).font(.caption).foregroundStyle(.secondary)
+            }
+            if let problem {
+                Text(problem).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
+        .confirmationDialog("Add \(confirming?.title ?? "")?", isPresented: Binding(
+            get: { confirming != nil },
+            set: { if !$0 { confirming = nil } }
+        )) {
+            Button("Add") {
+                guard let target = confirming else { return }
+                confirming = nil
+                Task { await add(target) }
+            }
+            Button("Cancel", role: .cancel) { confirming = nil }
+        } message: {
+            Text(confirming.map { MCPHelper.shellLine($0.argv) } ?? "")
+        }
+    }
+
+    private func add(_ target: Target) async {
+        busy = true
+        note = nil
+        problem = nil
+        defer { busy = false }
+        let argv = target.argv
+        do {
+            let result = try await Shell.run(argv, timeout: 30)
+            if result.status == 0 {
+                note = "Added to \(target.title)."
+            } else {
+                let said = [result.err, result.text].first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? "exit \(result.status)"
+                problem = "Couldn't add to \(target.title): \(said)"
+            }
+        } catch {
+            problem = "Couldn't add to \(target.title): \(error.localizedDescription). Is \(argv[0]) on your PATH?"
+        }
+    }
+}

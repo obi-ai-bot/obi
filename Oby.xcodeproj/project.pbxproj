@@ -336,6 +336,7 @@
 				0B1E0C0A00000000000000F1 /* Bundle the character */,
 				0B1E0C0A00000000000000F2 /* Bundle cloudflared */,
 				0B1E0C0A00000000000000F3 /* Bundle the runner */,
+				0B1E0C0A00000000000000F4 /* Bundle oby-mcp */,
 			);
 			buildRules = (
 			);
@@ -648,6 +649,25 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
 			shellScript = "set -e\n# The runner on this Mac (#283): build oby-runner (Package.swift) and bundle it as the login item's program,\n# Contents/Helpers/oby-runner, with its launchd plist at Contents/Library/LaunchAgents (Mac/LoginItem.swift).\n# Xcode's build variables would point SwiftPM at the wrong SDK, so it builds in a clean environment.\nswift=(env -i HOME=\"$HOME\" PATH=\"/usr/bin:/bin:/usr/sbin:/sbin\" /usr/bin/xcrun swift build -c release --product oby-runner --package-path \"$SRCROOT\")\n\"${swift[@]}\" > /dev/null\nbin=\"$(\"${swift[@]}\" --show-bin-path)\"\nhelpers=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers\"\nagents=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchAgents\"\nmkdir -p \"$helpers\" \"$agents\"\ncp \"$bin/oby-runner\" \"$helpers/oby-runner\"\nchmod 755 \"$helpers/oby-runner\"\ncp \"$SRCROOT/Runner/com.deskree.oby.runner.plist\" \"$agents/com.deskree.oby.runner.plist\"\n# Signed as the app is: Xcode signs only the app itself after this phase.\nif [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ]; then\n  /usr/bin/codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --options runtime \"$helpers/oby-runner\"\nfi\n";
+		};
+		0B1E0C0A00000000000000F4 /* Bundle oby-mcp */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Bundle oby-mcp";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/zsh;
+			shellScript = "set -e\n# oby-mcp for Claude Code and Codex (#385): Contents/Helpers/oby-mcp, with its build commit beside it.\n# rm before copy: a plain cp over a signed binary is killed on launch (exit 137).\n# Xcode's build variables would point SwiftPM at the wrong SDK, so it builds in a clean environment.\nswift=(env -i HOME=\"$HOME\" PATH=\"/usr/bin:/bin:/usr/sbin:/sbin\" /usr/bin/xcrun swift build -c release --product oby-mcp --package-path \"$SRCROOT\")\n\"${swift[@]}\" > /dev/null\nbin=\"$(\"${swift[@]}\" --show-bin-path)\"\nhelpers=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers\"\nmkdir -p \"$helpers\"\nrm -f \"$helpers/oby-mcp\"\ncp \"$bin/oby-mcp\" \"$helpers/oby-mcp\"\nchmod 755 \"$helpers/oby-mcp\"\ncommit=\"$(/usr/bin/git -C \"$SRCROOT\" rev-parse HEAD 2>/dev/null || echo unknown)\"\nprintf '%s\\n' \"$commit\" > \"$helpers/oby-mcp.commit\"\nif [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ]; then\n  /usr/bin/codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --options runtime \"$helpers/oby-mcp\"\nfi\n";
 		};
 		0B1E0C0A000000000000C9 /* Bundle the character */ = {
 			isa = PBXShellScriptBuildPhase;

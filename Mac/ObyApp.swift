@@ -53,6 +53,7 @@ private struct SettingsTabs: View {
             AccountsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Accounts", systemImage: "person.2") }.tag(SettingsTab.accounts)
             ModelsSettingsView(store: app.island.desk.accounts, feed: app.island.feed).tabItem { Label("Models", systemImage: "cpu") }.tag(SettingsTab.models)
             VaultSettingsView(vault: .shared).tabItem { Label("Vault", systemImage: "lock") }.tag(SettingsTab.vault)
+            AssistantsSettingsView().tabItem { Label("Assistants", systemImage: "hammer") }.tag(SettingsTab.assistants)
             AboutSettingsView(updater: app.island.updater).tabItem { Label("About", systemImage: "info.circle") }.tag(SettingsTab.about)
         }
     }

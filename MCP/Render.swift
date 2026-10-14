@@ -151,8 +151,12 @@ enum Render {
         }
         lines.add("review error", job["reviewError"])
         if let check = job["macCheck"], !check.isNull {
-            lines.add("Mac check", [check["state"]?.string, check["mac"]?.string, check["problem"]?.string].compactMap { $0 }.joined(separator: " · "))
+            lines.add("Mac check", macCheck(check))
         }
+        if let check = job["appleRan"] ?? job["appleCheck"], !check.isNull {
+            lines.add("Apple check", macCheck(check))
+        }
+        lines.add("report", job["report"]?.bool == true ? "yes (GET /v1/jobs/{id}/report)" : nil)
         lines.add("merge error", job["mergeError"])
         if let question = job["question"], !question.isNull {
             lines.add("question", question["text"])
@@ -173,10 +177,45 @@ enum Render {
         return options.map { "“\($0)”" }.joined(separator: ", ")
     }
 
+    /// A Mac or Apple check: which Mac, each step, failing tests, build errors and the problem.
+    static func macCheck(_ check: JSON) -> String {
+        var head = [check["state"]?.string, check["mac"]?.string.map { "on \($0)" }, check["kind"]?.string]
+            .compactMap { $0 }.joined(separator: " · ")
+        if let round = check["round"]?.int { head += ", round \(round)" }
+        var parts = [head]
+        for step in check["steps"]?.array ?? [] {
+            var line = "\(step["name"]?.string ?? "?"): " + (step["passed"]?.bool == true ? "passed" : "failed")
+            if let seconds = step["seconds"]?.int ?? step["seconds"]?.number.map({ Int($0.rounded()) }) {
+                line += " in \(seconds) s"
+            }
+            if step["retried"]?.bool == true { line += " (second run)" }
+            if let runtime = step["runtime"]?.string, !runtime.isEmpty { line += " on \(runtime)" }
+            parts.append(line)
+            for failing in step["failing"]?.array ?? [] {
+                var test = failing["test"]?.string ?? "?"
+                if let message = failing["message"]?.string, !message.isEmpty { test += ": \(message)" }
+                parts.append("  failing: \(test)")
+            }
+            for error in step["buildErrors"]?.array?.compactMap(\.string) ?? [] where !error.isEmpty {
+                parts.append("  build error: \(error)")
+            }
+        }
+        if let failures = check["failures"]?.array?.compactMap(\.string), !failures.isEmpty {
+            parts.append("failing tests: " + failures.joined(separator: ", "))
+        }
+        if let problem = check["problem"]?.string, !problem.isEmpty { parts.append("problem: \(problem)") }
+        if let postError = check["postError"]?.string, !postError.isEmpty { parts.append("post error: \(postError)") }
+        return parts.joined(separator: "\n")
+    }
+
     // MARK: The inbox
 
-    static func inbox(_ items: [JSON]) -> String {
-        guard !items.isEmpty else { return "Oby's inbox is empty." }
+    static func inbox(_ items: [JSON], history: Bool = false) -> String {
+        guard !items.isEmpty else { return history ? "Oby's inbox history is empty." : "Oby's inbox is empty." }
+        if history {
+            let head = "\(items.count) \(items.count == 1 ? "item" : "items") in Oby's inbox history, latest settled first."
+            return head + "\n" + items.map { item in quoted("Inbox item \(item["id"]?.string ?? "?")", self.item(item)) }.joined(separator: "\n")
+        }
         let later = items.filter { $0["state"]?.string == "later" }.count
         var head = "\(items.count) \(items.count == 1 ? "item" : "items") in Oby's inbox, longest-waiting first"
         head += later > 0 ? " (\(later) put off until later)." : "."
@@ -196,6 +235,55 @@ enum Render {
         lines.add("answer", item["answer"])
         lines.add("options", options(item["options"]) ?? "none")
         lines.add("text", item["text"])
+        return lines.text
+    }
+
+    // MARK: Failures
+
+    static func failures(_ records: [JSON]) -> String {
+        guard !records.isEmpty else { return "Oby has no failure records." }
+        let head = "\(records.count) \(records.count == 1 ? "failure" : "failures"), newest first. Open one with failure."
+        return head + "\n" + records.map { quoted("Failure \($0["id"]?.string ?? "?")", failure($0)) }.joined(separator: "\n")
+    }
+
+    static func failure(_ record: JSON) -> String {
+        var lines = Lines()
+        lines.add("id", record["id"])
+        lines.add("trigger", record["trigger"])
+        lines.add("date", record["date"])
+        lines.add("job", record["job"])
+        lines.add("repo", record["repo"])
+        lines.add("title", record["title"])
+        lines.add("what", record["what"])
+        lines.add("rounds", record["rounds"])
+        lines.add("intervention", record["intervention"]?.bool == true ? "yes" : nil)
+        if let post = record["postMortem"], !post.isNull {
+            lines.add("happened", post["happened"])
+            lines.add("cause", post["cause"])
+            lines.add("signature", post["signature"])
+            lines.add("oby could handle", post["obyCouldHandle"]?.bool.map { $0 ? "yes" : "no" })
+            lines.add("fix", post["fix"]?["change"])
+            lines.add("fix files", post["fix"]?["files"]?.array?.compactMap(\.string).joined(separator: ", "))
+            lines.add("studied by", post["by"])
+        } else {
+            lines.add("post-mortem", record["studyError"]?.string.map { "not studied yet: \($0)" } ?? "not studied yet")
+        }
+        lines.add("issue", record["issue"])
+        lines.add("issue error", record["issueError"])
+        lines.add("fix job", record["fix"])
+        lines.add("fixed by", record["fixedBy"])
+        lines.add("fixed at", record["fixedAt"])
+        return lines.text
+    }
+
+    static func report(_ report: JSON) -> String {
+        var lines = Lines()
+        lines.add("job", report["job"])
+        lines.add("commit", report["commit"])
+        if let proposals = report["proposals"]?.array, !proposals.isEmpty {
+            lines.add("proposals", "\(proposals.count)")
+        }
+        lines.add("markdown", report["markdown"])
         return lines.text
     }
 

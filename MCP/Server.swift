@@ -16,7 +16,6 @@ actor Server {
     }
 
     static let name = "oby"
-    static let version = "0.1.0"
     static let protocols = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
     /// What every refusal ends with.
     static let elsewhere = "answer that in Oby."
@@ -30,6 +29,8 @@ actor Server {
         """
 
     let runner: RunnerAPI
+    /// The commit this binary was built from: `serverInfo.version` on initialize (#385).
+    let buildCommit: String
     let now: @Sendable () -> Date
     let sleep: @Sendable (TimeInterval) async throws -> Void
     /// How often `wait` asks again, in seconds.
@@ -37,11 +38,15 @@ actor Server {
 
     /// The brain's last question for the words that brought it, to send the answer back with.
     var questions: [String: JSON] = [:]
+    /// The stale-MCP warning was already put on a tool result this session.
+    var warnedStale = false
 
-    init(runner: RunnerAPI, now: @escaping @Sendable () -> Date = { Date.now },
+    init(runner: RunnerAPI, buildCommit: String = BuildInfo.commit(),
+         now: @escaping @Sendable () -> Date = { Date.now },
          sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
          interval: TimeInterval = 5) {
         self.runner = runner
+        self.buildCommit = buildCommit
         self.now = now
         self.sleep = sleep
         self.interval = interval
@@ -62,7 +67,7 @@ actor Server {
             return Self.result(id: id, [
                 "protocolVersion": .string(asked.flatMap { Self.protocols.contains($0) ? $0 : nil } ?? Self.protocols[0]),
                 "capabilities": ["tools": ["listChanged": false]],
-                "serverInfo": ["name": .string(Self.name), "version": .string(Self.version)],
+                "serverInfo": ["name": .string(Self.name), "version": .string(buildCommit)],
                 "instructions": .string(Self.instructions),
             ]).line
         case "ping":
@@ -80,6 +85,23 @@ actor Server {
             ]).line
         default:
             return Self.error(id: id, code: -32601, "Method not found").line
+        }
+    }
+
+    /// One line on the first tool result of a session when this binary's commit differs from the
+    /// runner's (`runner.update.commit`). Later calls are quiet. An unstamped binary (`unknown`)
+    /// never asks the runner.
+    func staleWarning() async -> String? {
+        guard !warnedStale else { return nil }
+        warnedStale = true
+        guard BuildInfo.canCompare(buildCommit) else { return nil }
+        do {
+            let status = try await runner.call("GET", "/v1/status")
+            let runnerCommit = status["runner"]?["update"]?["commit"]?.string
+            guard BuildInfo.isStale(mcp: buildCommit, runner: runnerCommit) else { return nil }
+            return BuildInfo.staleLine
+        } catch {
+            return nil
         }
     }
 
@@ -126,9 +148,11 @@ actor Server {
         Tool(name: "status", description: "The runner's accounts with their usage (5-hour and weekly windows, reset times, running jobs), each tool's model, and who the runner's GitHub calls go as.", reads: true),
         Tool(name: "jobs", description: "The latest jobs, newest first: id, status, pipeline stage, title, tool and account, and whether each needs the user.",
              properties: ["limit": integer("How many, 20 by default.", 1...50)], reads: true),
-        Tool(name: "job", description: "One job in full: its stage and every stage of its pipeline, step, branch, pull request, review, Mac check, question and summary.",
+        Tool(name: "job", description: "One job in full: its stage and every stage of its pipeline, step, branch, pull request, review, Mac check and Apple check (steps, failing tests, build errors, which Mac), question, summary and whether it has a research report.",
              properties: ["id": job], required: ["id"], reads: true),
-        Tool(name: "inbox", description: "What waits for the user in Oby's inbox (questions, failures, merges, permissions…), longest-waiting first, with each item's options.", reads: true),
+        Tool(name: "inbox", description: "What waits for the user in Oby's inbox (questions, failures, merges, permissions…), longest-waiting first, with each item's options. With state done, the history of settled items instead (latest first).",
+             properties: ["state": ["type": "string", "enum": ["open", "done"], "description": "open (default) for what waits now; done for settled history."],
+                          "limit": integer("How many history items when state is done, 50 by default.", 1...1000)], reads: true),
         Tool(name: "wait", description: "Waits until a job's status or stage changes (or it asks a question), up to a timeout, and answers the job then. Use it to follow a job.",
              properties: ["id": job, "timeout": integer("Seconds to wait at most, 50 by default.", 1...600)], required: ["id"], reads: true),
         Tool(name: "ask", description: askDescription, properties: askProperties, required: ["said"]),
@@ -159,6 +183,19 @@ actor Server {
         Tool(name: "stop", description: "Stops a queued or running job.", properties: ["id": job], required: ["id"]),
         Tool(name: "dismiss", description: "Lets go of a job that needs the user (failed, interrupted, or done with commits it couldn't publish): it stays as it ended and needs nothing.",
              properties: ["id": job], required: ["id"]),
+        Tool(name: "move", description: "Moves a job to another tool, account or model (POST /v1/jobs/{id}/move). At least one of agent, account or model is required; why is the user's reason the next agent hears.",
+             properties: ["id": job,
+                          "agent": ["type": "string", "enum": ["claude", "codex", "cursor"], "description": "The tool to move it to."],
+                          "account": string("The account's id or name."),
+                          "model": string("A model id of that tool, or default to drop the job's own model."),
+                          "why": string("Why the user moved it, up to 500 characters.")],
+             required: ["id"]),
+        Tool(name: "failures", description: "Oby's failure records, newest first: what went wrong, the post-mortem when studied, and any fix issue.",
+             properties: ["limit": integer("How many, 50 by default.", 1...1000)], reads: true),
+        Tool(name: "failure", description: "One failure record in full.",
+             properties: ["id": string("The failure record's id, as failures lists it.")], required: ["id"], reads: true),
+        Tool(name: "report", description: "A job's saved research report (GET /v1/jobs/{id}/report): its Markdown and proposed issues. 404 when none was saved.",
+             properties: ["id": job], required: ["id"], reads: true),
         Tool(name: "answer", description: "Settles an inbox item with one of its own options (like Try again, Dismiss, Fix it, or a permission's choices), exactly as Oby's apps do; a question also takes the user's own words.",
              properties: ["id": item, "answer": string("One of the item's options, or on a question the user's own words.")], required: ["id", "answer"]),
         Tool(name: "later", description: "Puts an inbox item off until a time; it comes back then.",
@@ -173,19 +210,25 @@ actor Server {
              properties: ["what": string("What they asked to change.")]),
     ]
 
-    /// Runs a tool: its reply, or the error as a reply.
+    /// Runs a tool: its reply, or the error as a reply. The first call of a session may start with
+    /// the stale-MCP warning when this binary's commit and the runner's differ (#385).
     func call(_ name: String, _ arguments: [String: JSON]) async -> Reply {
+        var reply: Reply
         do {
-            return try await run(name, arguments)
+            reply = try await run(name, arguments)
         } catch let refusal as Refusal {
-            return Reply(text: refusal.message, isError: true)
+            reply = Reply(text: refusal.message, isError: true)
         } catch let failure as RunnerAPI.Failure {
             // The runner's error line can name a job's title, an account or what GitHub said.
-            return Reply(text: failure.status == 0 ? failure.message
-                         : "The runner answered \(failure.status).\n" + Render.quoted("Its error", failure.message), isError: true)
+            reply = Reply(text: failure.status == 0 ? failure.message
+                          : "The runner answered \(failure.status).\n" + Render.quoted("Its error", failure.message), isError: true)
         } catch {
-            return Reply(text: error.localizedDescription, isError: true)
+            reply = Reply(text: error.localizedDescription, isError: true)
         }
+        if let warning = await staleWarning() {
+            reply.text = warning + "\n" + reply.text
+        }
+        return reply
     }
 
     private func run(_ name: String, _ arguments: [String: JSON]) async throws -> Reply {
@@ -232,7 +275,11 @@ actor Server {
         case "job":
             return Reply(text: Render.job(try await runner.call("GET", "/v1/jobs/\(try id())")))
         case "inbox":
-            return Reply(text: Render.inbox(try await inbox()))
+            let state = arguments["state"]?.string ?? "open"
+            guard state == "open" || state == "done" else { throw Refusal(message: "state is open or done.") }
+            let history = state == "done"
+            let limit = try number("limit", 1...1000) ?? 50
+            return Reply(text: Render.inbox(try await inbox(state: state, limit: limit), history: history))
         case "wait":
             return try await wait(try id(), timeout: TimeInterval(try number("timeout", 1...600) ?? 50))
         case "ask", "plan":
@@ -269,6 +316,21 @@ actor Server {
         case "dismiss":
             let job = try await runner.call("POST", "/v1/jobs/\(try id())/dismiss")
             return Reply(text: "Dismissed: it needs nothing now.\n" + Render.quoted("Job \(job["id"]?.string ?? "")", Render.row(job)))
+        case "move":
+            return try await move(try id(), agent: arguments["agent"]?.text.flatMap { $0.isEmpty ? nil : $0 },
+                                 account: arguments["account"]?.text.flatMap { $0.isEmpty ? nil : $0 },
+                                 model: arguments["model"]?.text.flatMap { $0.isEmpty ? nil : $0 },
+                                 why: arguments["why"]?.text.flatMap { $0.isEmpty ? nil : $0 })
+        case "failures":
+            let limit = try number("limit", 1...1000) ?? 50
+            let records = try await runner.call("GET", "/v1/failures?limit=\(limit)").array ?? []
+            return Reply(text: Render.failures(records))
+        case "failure":
+            let record = try await runner.call("GET", "/v1/failures/\(try id())")
+            return Reply(text: Render.quoted("Failure \(record["id"]?.string ?? "?")", Render.failure(record)))
+        case "report":
+            let report = try await runner.call("GET", "/v1/jobs/\(try id())/report")
+            return Reply(text: "Research report.\n" + Render.quoted("Report for job \(report["job"]?.string ?? "")", Render.report(report)))
         case "answer":
             return try await answer(try text("id"), try text("answer"))
         case "later":
@@ -297,13 +359,35 @@ actor Server {
         }
     }
 
-    /// The open inbox; a runner older than the inbox has none.
-    func inbox() async throws -> [JSON] {
+    /// The inbox (`open`, default) or its history (`done`); a runner older than the inbox has none.
+    func inbox(state: String = "open", limit: Int = 50) async throws -> [JSON] {
         do {
-            return try await runner.call("GET", "/v1/inbox").array ?? []
+            let path = state == "done" ? "/v1/inbox?state=done&limit=\(limit)" : "/v1/inbox"
+            return try await runner.call("GET", path).array ?? []
         } catch let failure as RunnerAPI.Failure where failure.status == 404 {
             return []
         }
+    }
+
+    /// Moves a job: at least one of agent, account or model, and why at most 500 characters.
+    func move(_ id: String, agent: String?, account: String?, model: String?, why: String?) async throws -> Reply {
+        guard agent != nil || account != nil || model != nil else {
+            throw Refusal(message: "move needs agent, account or model.")
+        }
+        if let agent, !["claude", "codex", "cursor"].contains(agent) {
+            throw Refusal(message: "agent is claude, codex or cursor.")
+        }
+        if let why, why.count > 500 { throw Refusal(message: "why is 500 characters at most.") }
+        var body: [String: JSON] = [:]
+        if let agent { body["agent"] = .string(agent) }
+        if let account {
+            let picked = try await self.account(account)
+            body["account"] = picked["id"]
+        }
+        if let model { body["model"] = .string(model) }
+        if let why { body["why"] = .string(why) }
+        let job = try await runner.call("POST", "/v1/jobs/\(id)/move", .object(body))
+        return Reply(text: "Moved.\n" + Render.quoted("Job \(job["id"]?.string ?? id)", Render.row(job)))
     }
 
     /// Asks again every `interval` until the job's status or stage changes, or `timeout` passes.

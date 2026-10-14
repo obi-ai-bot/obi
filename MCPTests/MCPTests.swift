@@ -55,10 +55,10 @@ let accounts: JSON = [
     ["id": "work", "agent": "codex", "name": "Deskree", "label": "Plus", "signedIn": true, "fiveHour": 0.5, "sevenDay": nil, "running": 0],
 ]
 
-func server(_ stub: StubRunner) -> Server { oby_mcpTestServer(stub) }
+func server(_ stub: StubRunner, buildCommit: String = "unknown") -> Server { oby_mcpTestServer(stub, buildCommit: buildCommit) }
 
-func oby_mcpTestServer(_ stub: StubRunner) -> Server {
-    Server(runner: stub.api, now: { Date(timeIntervalSince1970: 1_791_000_000) }, sleep: { _ in }, interval: 5)
+func oby_mcpTestServer(_ stub: StubRunner, buildCommit: String = "unknown") -> Server {
+    Server(runner: stub.api, buildCommit: buildCommit, now: { Date(timeIntervalSince1970: 1_791_000_000) }, sleep: { _ in }, interval: 5)
 }
 
 /// The quoted block's text, between its fences.
@@ -78,11 +78,12 @@ func inside(_ text: String) -> [String] {
 
 @Suite struct ProtocolTests {
     @Test func initializeAndListTools() async throws {
-        let server = server(StubRunner())
+        let server = server(StubRunner(), buildCommit: "abc123def")
         let initialized = try JSON.parse(Data(try #require(await server.handle(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"claude-code","version":"2"}}}"#)).utf8))
         #expect(initialized["id"] == 1)
         #expect(initialized["result"]?["protocolVersion"] == "2025-06-18")
         #expect(initialized["result"]?["serverInfo"]?["name"] == "oby")
+        #expect(initialized["result"]?["serverInfo"]?["version"] == "abc123def")
         #expect(initialized["result"]?["capabilities"]?["tools"] != nil)
         #expect(await server.handle(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#) == nil)
 
@@ -90,7 +91,7 @@ func inside(_ text: String) -> [String] {
         #expect(listed["id"] == "two")
         let names = Set(listed["result"]?["tools"]?.array?.compactMap { $0["name"]?.string } ?? [])
         #expect(names == ["status", "jobs", "job", "inbox", "wait", "ask", "plan", "dispatch", "start", "message", "stop", "dismiss",
-                          "answer", "later", "done", "publish", "merge", "settings"])
+                          "move", "failures", "failure", "report", "answer", "later", "done", "publish", "merge", "settings"])
         for tool in listed["result"]?["tools"]?.array ?? [] {
             #expect(tool["inputSchema"]?["type"] == "object")
         }
@@ -126,6 +127,29 @@ func inside(_ text: String) -> [String] {
         #expect(RunnerAPI.url(environment: [:], settings: "https://mac.test:8443/") == "https://mac.test:8443")
         #expect(RunnerAPI.url(environment: ["OBY_RUNNER_URL": "http://127.0.0.1:7777"], settings: "https://mac.test") == "http://127.0.0.1:7777")
         #expect(RunnerAPI.url(environment: ["OBY_RUNNER_URL": " "], settings: "") == RunnerAPI.defaultURL)
+    }
+
+    @Test func aStaleCommitWarnsOnce() async throws {
+        let stub = StubRunner()
+        stub.answer("GET /v1/status", ["runner": ["version": "0.2.0", "update": ["commit": "runner-ahead", "waiting": nil, "phase": "idle"]],
+                                       "accounts": accounts])
+        stub.answer("GET /v1/jobs?limit=20", [])
+        let server = server(stub, buildCommit: "mcp-old")
+        let first = await server.call("jobs", [:])
+        #expect(first.text.hasPrefix(BuildInfo.staleLine + "\n"))
+        #expect(first.text.contains("The runner has no jobs."))
+        let second = await server.call("jobs", [:])
+        #expect(!second.text.contains(BuildInfo.staleLine))
+        #expect(second.text == "The runner has no jobs.")
+    }
+
+    @Test func aMatchingCommitIsQuiet() async {
+        let stub = StubRunner()
+        stub.answer("GET /v1/status", ["runner": ["update": ["commit": "same"]], "accounts": accounts])
+        stub.answer("GET /v1/jobs?limit=20", [])
+        let reply = await server(stub, buildCommit: "same").call("jobs", [:])
+        #expect(!reply.text.contains(BuildInfo.staleLine))
+        #expect(reply.text == "The runner has no jobs.")
     }
 }
 
@@ -169,6 +193,67 @@ func inside(_ text: String) -> [String] {
         let stub = StubRunner()
         stub.answer("GET /v1/inbox", ["error": "Not found."], status: 404)
         #expect(await server(stub).call("inbox", [:]).text == "Oby's inbox is empty.")
+    }
+
+    @Test func inboxHistoryUsesStateDone() async {
+        let stub = StubRunner()
+        stub.answer("GET /v1/inbox?state=done&limit=50", [["id": "old-1", "kind": "failed", "job": "ab12cd34", "title": "T",
+                                                           "text": "Nothing committed", "options": [], "state": "done", "answer": "Dismiss"]])
+        let reply = await server(stub).call("inbox", ["state": "done"])
+        #expect(reply.text.hasPrefix("1 item in Oby's inbox history, latest settled first."))
+        #expect(inside(reply.text).first?.contains("answer: Dismiss") == true)
+        #expect(stub.calls.map { "\($0.method) \($0.path)" } == ["GET /v1/inbox?state=done&limit=50"])
+    }
+
+    @Test func jobShowsMacCheckDetails() async {
+        let stub = StubRunner()
+        var detail = job().object!
+        detail["macCheck"] = ["state": "failed", "mac": "Studio", "kind": "merge", "round": 1,
+                              "steps": [["name": "Mac app and MacTests", "passed": false, "seconds": 301,
+                                         "failing": [["test": "MacTests.PublishTests/blocksASecret()", "message": "expected clean"]]]],
+                              "failures": ["MacTests.PublishTests/blocksASecret()"], "problem": nil]
+        detail["report"] = true
+        stub.answer("GET /v1/jobs/74f0ebdc", .object(detail))
+        let text = await server(stub).call("job", ["id": "74f0ebdc"]).text
+        #expect(text.contains("failed · on Studio · merge, round 1"))
+        #expect(text.contains("failing: MacTests.PublishTests/blocksASecret(): expected clean"))
+        #expect(text.contains("report: yes (GET /v1/jobs/{id}/report)"))
+    }
+
+    @Test func moveFailuresAndReport() async {
+        let stub = StubRunner()
+        stub.answer("GET /v1/status", ["accounts": accounts])
+        stub.answer("POST /v1/jobs/74f0ebdc/move", job(status: "queued", stage: 1))
+        stub.answer("GET /v1/failures?limit=50", [["id": "ab12cd34-limit-1", "trigger": "limit", "date": "2026-10-09T21:42:53Z",
+                                                   "job": "ab12cd34", "title": "Mac runner notifications",
+                                                   "what": "Stopped at a limit", "postMortem": nil]])
+        stub.answer("GET /v1/failures/ab12cd34-limit-1", ["id": "ab12cd34-limit-1", "trigger": "limit", "what": "Stopped at a limit",
+                                                          "postMortem": ["happened": "Same failure twice", "cause": "environment",
+                                                                         "signature": "simulator-hung", "obyCouldHandle": true,
+                                                                         "fix": ["files": ["Engine/AppleChecks.swift"], "change": "Retry once"],
+                                                                         "by": "claude"]])
+        stub.answer("GET /v1/jobs/74f0ebdc/report", ["job": "74f0ebdc", "commit": "abc123", "markdown": "# Findings\nDone.", "proposals": []])
+        let server = server(stub)
+
+        let moved = await server.call("move", ["id": "74f0ebdc", "agent": "claude", "account": "Personal", "why": "Codex loops"])
+        #expect(!moved.isError, "\(moved.text)")
+        #expect(moved.text.hasPrefix("Moved."))
+        #expect(stub.calls.contains { $0.method == "POST" && $0.path == "/v1/jobs/74f0ebdc/move"
+            && $0.body == ["agent": "claude", "account": "default", "why": "Codex loops"] })
+
+        let listed = await server.call("failures", [:])
+        #expect(listed.text.hasPrefix("1 failure, newest first."))
+        #expect(inside(listed.text).first?.contains("what: Stopped at a limit") == true)
+
+        let one = await server.call("failure", ["id": "ab12cd34-limit-1"])
+        #expect(inside(one.text).first?.contains("signature: simulator-hung") == true)
+        #expect(inside(one.text).first?.contains("fix files: Engine/AppleChecks.swift") == true)
+
+        let report = await server.call("report", ["id": "74f0ebdc"])
+        #expect(report.text.hasPrefix("Research report."))
+        #expect(inside(report.text).first?.contains("# Findings") == true)
+
+        #expect(await server.call("move", ["id": "74f0ebdc"]).isError)
     }
 
     @Test func runnerErrorsComeBackAsErrors() async {

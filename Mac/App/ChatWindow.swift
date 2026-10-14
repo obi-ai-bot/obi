@@ -3,7 +3,7 @@ import SwiftUI
 
 /// The Settings window's tabs, so the sidebar's Accounts and keys, Integrations, Memory and
 /// Settings open the right one.
-nonisolated enum SettingsTab: String, CaseIterable, Sendable { case general, runner, remote, accounts, models, vault, about }
+nonisolated enum SettingsTab: String, CaseIterable, Sendable { case general, runner, remote, accounts, models, vault, assistants, about }
 
 /// Which Settings tab is up: the sidebar sets it before opening the window.
 @Observable
