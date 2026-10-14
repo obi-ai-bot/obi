@@ -30,6 +30,9 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         case start
         /// The job's agent waits for the user's OK to run a command or edit a file (`Job.permission`, #134).
         case permission
+        /// Done with commits waiting to publish (`Job.canPublish`), or stranded after its pull request
+        /// closed: Needs you always has a card. Publish itself stays on the job (Touch ID / phone).
+        case publish
 
         /// The answers that change something on an item of this kind, besides Later and Done (#215).
         /// A question's are its own options, or the user's words; an audit's `Use <column> instead`
@@ -44,6 +47,7 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
             case .failure: [Failures.fixIt, Inbox.dismiss]
             case .start: [Inbox.start, Inbox.cancelStart]
             case .permission: [Inbox.allow, Inbox.alwaysAllow, Inbox.deny]
+            case .publish: [Inbox.openPR, Inbox.dismiss]
             }
         }
 
@@ -200,6 +204,22 @@ nonisolated enum Inbox {
             let options = named && job.checkStop == MacCheck.reviewsUsedLine ? [oneMoreRound, tryAgain, dismiss] : [tryAgain, dismiss]
             return item(.merge, "merge-\(check.id)-stopped", text, options)
         }
+        // Needs you without a card left Home empty (OpenMausBot research): publish and stranded always
+        // get one. Publish by hand stays on the job (Touch ID / phone); the card offers Dismiss.
+        if job.canPublish {
+            let text = job.publishError
+                ?? "Commits are ready to publish. Publish from the job on your Mac or iPhone, or dismiss it."
+            var card = item(.publish, "publish-\(job.unpublished)-\(job.publishError == nil ? "ready" : "failed")", text, [dismiss])
+            card.recommended = 0
+            return card
+        }
+        if job.stranded {
+            let text = "Its pull request closed before \(job.unpublished) commit\(job.unpublished == 1 ? "" : "s") went out. Dismiss it, or open the pull request."
+            let options = job.published != nil ? [openPR, dismiss] : [dismiss]
+            var card = item(.publish, "stranded-\(job.unpublished)", text, options)
+            card.recommended = options.count - 1
+            return card
+        }
         guard job.status == .failed || job.status == .interrupted else { return nil }
         let line = job.summary.split(separator: "\n").first.map(String.init) ?? job.status.rawValue.capitalized
         // Each failure its own: a retry that fails within the same second is another round.
@@ -219,6 +239,7 @@ nonisolated enum Inbox {
             tryAgain: "Runs it again: the job picks up in its session, or the merge or the Mac check goes again.",
             oneMoreRound: "Hands Oby's last word to the agent for one more round.",
             dismiss: "Lets the job go. Its branch stays; nothing more happens.",
+            askOby: "Asks Oby what the failure means and what to do next.",
         ]
         let lines = options.compactMap { does[$0] }
         return lines.count == options.count && !options.isEmpty ? lines : nil

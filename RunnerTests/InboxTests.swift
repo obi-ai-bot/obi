@@ -398,6 +398,39 @@ final class InboxTests {
         #expect(Inbox.need(of: stopped) == nil)
     }
 
+    /// Needs you always has a card: publish-ready and stranded jobs used to list under Needs you
+    /// with an empty inbox (job 2138467c-class).
+    @Test func publishAndStrandedNeedsYouHaveInboxCards() throws {
+        var ready = fix
+        ready.id = "pub1"
+        ready.status = .done
+        ready.base = "dev"
+        ready.commits = 2
+        #expect(ready.canPublish && ready.needsYou)
+        let card = try #require(Inbox.need(of: ready))
+        #expect(card.kind == .publish && card.options == [Inbox.dismiss] && card.isDecision)
+        #expect(card.text.contains("ready to publish"))
+
+        var failedPublish = ready
+        failedPublish.publishError = "gh failed"
+        let failedCard = try #require(Inbox.need(of: failedPublish))
+        #expect(failedCard.kind == .publish && failedCard.text == "gh failed")
+
+        var stranded = ready
+        stranded.published = "https://github.com/deskree-inc/oby/pull/80"
+        stranded.pushed = 1
+        stranded.pullRequest = PullRequestStatus(state: .merged, base: "dev", checkedAt: .now)
+        #expect(stranded.stranded && stranded.needsYou)
+        let strandedCard = try #require(Inbox.need(of: stranded))
+        #expect(strandedCard.kind == .publish && strandedCard.options == [Inbox.openPR, Inbox.dismiss])
+
+        let desk = makeDesk([ready])
+        let open = try #require(desk.inbox.first { $0.job == "pub1" && $0.isOpen })
+        #expect(open.kind == .publish)
+        _ = try desk.settle(open.id, .answer(Inbox.dismiss))
+        #expect(desk.job("pub1")?.needsYou == false && desk.job("pub1")?.dismissed != nil)
+    }
+
     /// The inbox is for decisions (#215): every kind declares the answers that change something,
     /// every item Oby makes offers one, and one that offers none arrives done, with the reports.
     @Test func everyKindHasAnActionAndOnlyDecisionsWait() throws {

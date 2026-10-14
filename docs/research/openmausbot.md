@@ -4,6 +4,8 @@ Research snapshot: 2026-10-14, against `origin/dev` (worktree `oby/investigate-1
 
 **Tetrix:** MCP was not connected in this session (`ListMcpResources` empty). No `repo_sessions` / `session_digest` / `save_session`. This is a fresh pass, not built on a prior Tetrix session for this job.
 
+**Decision (2026-10-14):** Reliability first — Needs-you↔inbox invariant and quota-aware review admission before any MausBot steals.
+
 **GitHub issues #380–#396:** the private `deskree-inc/oby` API was unreachable here (`gh` unauthenticated; `OBY_CHECK_TOKEN` is not a GitHub token). Mapping uses local branch evidence and in-repo references only; issue titles/bodies were not loaded.
 
 | Issue | Local evidence |

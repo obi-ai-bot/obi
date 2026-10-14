@@ -3135,8 +3135,9 @@ final class Desk {
                 }
                 let (decision, message) = Inbox.decision(text)
                 try answerPermission(item.job, permission.id, decision, message: message)
-            case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss), (.merge, Inbox.dismiss): try dismiss(item.job)
-            case (.review, Inbox.openPR): break
+            case (.failed, Inbox.dismiss), (.limit, Inbox.dismiss), (.review, Inbox.dismiss), (.merge, Inbox.dismiss),
+                 (.publish, Inbox.dismiss): try dismiss(item.job)
+            case (.review, Inbox.openPR), (.publish, Inbox.openPR): break
             case (.failed, Inbox.oneMoreRound) where job(item.job)?.cloudNeedsYou == true: try oneMoreCloudRound(item.job)
             case (.failed, Inbox.askOby) where job(item.job)?.cloudNeedsYou == true: try askAboutCloud(item.job)
             case (.merge, Inbox.tryAgain): try retryMerge(item.job)

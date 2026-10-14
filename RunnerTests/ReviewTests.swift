@@ -343,22 +343,37 @@ struct ReviewTests {
 
     // MARK: The author's own account, last (#408)
 
-    @Test func withOnlyTheAuthorsAccountUnderTheLimitsTheReviewRunsThereInAFreshSession() async throws {
+    /// A first automatic review waits rather than spending the author's account (or a weekly
+    /// reserve): those stay for follow-ups, escalation and named work.
+    @Test func withOnlyTheAuthorsAccountUnderTheLimitsAFirstReviewWaits() async throws {
         accounts.setLabel(nil, for: personal.id)
         accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
         let published = try await publishAuthor()
+        try await Task.sleep(for: .milliseconds(50))
         #expect(published.session == "e6a24229")
+        #expect(published.reviewing == nil && published.waitsForReviewer)
+        #expect(published.reviewError == Review.waitLine(resets: Review.roomAt(accounts.accounts, for: published)))
+        #expect(made.agents.count == 1)
+    }
+
+    /// Escalation may still fall back to the author's own account in a fresh session (#408).
+    @Test func escalationMayUseTheAuthorsAccountInAFreshSession() async throws {
+        accounts.setLabel(nil, for: personal.id)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
+        var published = try await publishAuthor()
+        published.review = Review(verdict: .changesRequested, job: "rev3", agent: "codex", account: "Work",
+                                  round: Review.maxRounds)
+        desk.replace(published)
+        desk.reviewPublished(published)
         let (review, agent) = try await reviewJob()
         #expect(review.account == author.account && review.agent == "claude" && review.reviewOf == "author")
-        #expect(published.reviewing == review.id && desk.job("author")?.reviewError == nil)
-        // A new session: the author's was never offered, and nothing of it is in the prompt or the job.
+        #expect(desk.job("author")?.reviewing == review.id)
         let made = try #require(made.agents.last)
-        #expect(made.resume == nil && review.session == nil && review.review == nil && review.attachments == nil)
+        #expect(made.resume == nil && review.session == nil)
         for text in [agent.prompt, review.task, review.request] {
             #expect(!text.contains("e6a24229") && !text.contains("fix(engine): open the PR by itself"))
         }
         #expect(agent.prompt.contains("This is a review only: make no commits"))
-        // The verdict says so, on the author's job and in the check run's title.
         _ = try await self.review("The change does what was asked.\n\nVERDICT: APPROVED")
         let verdict = try #require(desk.job("author")?.review)
         #expect(verdict.sameAccount == true && verdict.account == "Default")
@@ -366,6 +381,25 @@ struct ReviewTests {
         let run = try #require(self.made.posted.last?.run)
         #expect(run.title == "Oby review · Claude Code · Default (same account as the author): Approved")
         #expect(Review.quoted(verdict, summary: "ok", pr: 80).contains("on the Default account (same account as the author)"))
+    }
+
+    @Test func aFirstReviewLeavesWeeklyReservesAlone() {
+        let now = Date(timeIntervalSince1970: 1_791_582_173)
+        var reserved = AccountState(account: Account(id: "p", agent: "claude", name: "Personal", payer: "", home: nil), label: "Max")
+        reserved.sevenDay = 0.85
+        reserved.sevenDayResets = now + 3600
+        var author = author
+        author.agent = "codex"
+        author.account = "work"
+        #expect(Review.reviewer([reserved], for: author, now: now, allowReserved: false) == nil)
+        #expect(Review.reviewer([reserved], for: author, now: now, allowReserved: true)?.id == "p")
+        #expect(!Review.mayUseReserve(for: author, security: false))
+        author.review = Review(verdict: .changesRequested, job: "r1", agent: "claude", account: "Personal", round: 1)
+        #expect(Review.mayUseReserve(for: author, security: false))
+        author.review?.round = Review.maxRounds
+        author.review?.verdict = .approved
+        #expect(Review.mayUseReserve(for: author, security: false))
+        #expect(Review.mayUseReserve(for: author, security: true))
     }
 
     @Test func anotherAccountWithRoomIsStillChosenOverTheAuthorsOwn() async throws {

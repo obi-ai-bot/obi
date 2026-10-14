@@ -349,6 +349,7 @@ extension InboxItem {
         case "failure": "Oby failure"
         case "start": "Start it?"
         case "permission": "Permission"
+        case "publish": "Ready to publish"
         default: "Failed"
         }
         return "\(label) · \(title) · \(Elapsed.waiting(since: created, now: now))"

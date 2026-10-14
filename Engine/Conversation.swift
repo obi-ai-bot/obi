@@ -210,10 +210,9 @@ nonisolated struct Briefing: Equatable, Sendable {
             let what = switch item.kind {
             // What the agent asked, and its options, are its own words: in the quoted file.
             case .question: "the question and its options are quoted in \(ClaudeBrain.quotedFile)"
-            case .review, .merge, .audit, .start: "\(Self.line(item.text, cap: 160)) Options: \(item.options.joined(separator: " | "))."
+            case .review, .merge, .audit, .start, .publish: "\(Self.line(item.text, cap: 160)) Options: \(item.options.joined(separator: " | "))."
             // What it asks to run or edit is the agent's own: in the quoted file.
             case .permission: "what it asks to do is quoted in \(ClaudeBrain.quotedFile). Options: \(item.options.joined(separator: " | "))."
-            case .review, .merge, .audit: "\(Self.line(item.text, cap: 160)) Options: \(item.options.joined(separator: " | "))."
             case .failed, .limit, .failure: "why is quoted in \(ClaudeBrain.quotedFile). Options: \(item.options.joined(separator: " | "))."
             }
             lines.append("- \(Self.kind(item.kind)) for job \(item.job) (\(Self.line(item.title, cap: 60)), \(place)), waiting \(Self.elapsed(since: item.created, now: now)): \(what)\(what.hasSuffix(".") ? "" : ".") Item id \(item.id).")
@@ -393,6 +392,7 @@ nonisolated struct Briefing: Equatable, Sendable {
         case .failure: "Oby failure"
         case .start: "Guessed plan, not started"
         case .permission: "Permission"
+        case .publish: "Ready to publish"
         }
     }
 

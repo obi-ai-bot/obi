@@ -131,17 +131,30 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// same tool. A review is short, so it takes an account ahead of its weekly pace first
     /// (`AccountStore.choose`), keeping the ones on pace for new work. A window whose reset time
     /// has passed has room again. Nil when no account can.
-    static func reviewer(_ accounts: [AccountState], for author: Job, excluding: String? = nil, now: Date = .now) -> AccountStore.Route? {
+    ///
+    /// `allowReserved`: when false (first automatic reviews), only accounts outside their weekly
+    /// reserve are taken, so a stack of reviews doesn't burn the 80% reserve kept for named work.
+    /// Follow-ups, escalation and security still pass true and may use the reserve last.
+    static func reviewer(_ accounts: [AccountState], for author: Job, excluding: String? = nil, now: Date = .now,
+                         allowReserved: Bool = true) -> AccountStore.Route? {
         let others = candidates(accounts, for: author).filter { $0.account.id != excluding }.map { reset($0, at: now) }
         // A Cursor pull request goes to Claude Code, else Codex (Cursor is never a reviewer).
         let otherTools = author.agent == "claude" ? ["codex"] : author.agent == "codex" ? ["claude"] : ["claude", "codex"]
         // The other tool first, while it's outside its weekly reserve; then any account, the
-        // reserved ones last (AccountStore.choose).
+        // reserved ones last (AccountStore.choose) — only when `allowReserved`.
         let unreserved = others.filter { !$0.isReserved(at: now) }
         for otherTool in otherTools {
             if let route = AccountStore.choose(unreserved, agent: otherTool, for: .review, now: now) { return route }
         }
+        if !allowReserved { return AccountStore.choose(unreserved, agent: nil, for: .review, now: now) }
         return AccountStore.choose(others, agent: nil, for: .review, now: now)
+    }
+
+    /// Whether this review may spend an account's weekly reserve (or the author's own account):
+    /// follow-ups after changes requested, the escalation review, and security reviews. First
+    /// automatic reviews wait for unreserved room instead.
+    static func mayUseReserve(for author: Job, security: Bool) -> Bool {
+        security || author.review?.wantsFollowUp == true || (author.review?.round ?? 0) >= maxRounds
     }
 
     /// The last resort when `reviewer` finds nothing (#408): the author's own account, when it's
@@ -758,11 +771,14 @@ extension Desk {
             author.reviewError = "Oby reviewed it \(job.review?.round ?? 0) times already: a person reviews it from here."
             return replace(author)
         }
-        // The author's own account only when nothing else has room (#408).
+        // First automatic reviews stay off the weekly reserve; follow-ups, escalation and security
+        // may still use it, and the author's own account only then (#408), so a burst of reviews
+        // doesn't empty Claude/Codex before named work.
+        let reserve = Review.mayUseReserve(for: job, security: security)
         let route = security
             ? Review.securityReviewer(accounts.accounts, for: job, excluding: failedAccount)
-            : (Review.reviewer(accounts.accounts, for: job, excluding: failedAccount)
-                ?? Review.sameAccountReviewer(accounts.accounts, for: job, excluding: failedAccount))
+            : (Review.reviewer(accounts.accounts, for: job, excluding: failedAccount, allowReserved: reserve)
+                ?? (reserve ? Review.sameAccountReviewer(accounts.accounts, for: job, excluding: failedAccount) : nil))
         guard let route else {
             guard !Review.candidates(accounts.accounts, for: job).isEmpty else {
                 if let retries = author.reviewCapacityRetries, retries > 0 {
@@ -780,7 +796,14 @@ extension Desk {
                 scheduleCapacityRetry(retries, for: author.id)
                 return
             }
-            author.reviewError = Review.waitLine(resets: Review.roomAt(accounts.accounts, for: job))
+            // Prefer a reserve wait line when only the 80% reserve stands in the way of a first review.
+            let held = AccountStore.heldInReserve(
+                Review.candidates(accounts.accounts, for: job).map { Review.reset($0, at: .now) }, agent: nil)
+            if !reserve, !held.isEmpty {
+                author.reviewError = "Waiting for room: " + AccountStore.reserveLine(held)
+            } else {
+                author.reviewError = Review.waitLine(resets: Review.roomAt(accounts.accounts, for: job))
+            }
             // Unchanged, nothing is saved: saving counts the accounts' jobs, which would wake this again.
             if author.reviewError != job.reviewError { replace(author) }
             watchForRoom()
