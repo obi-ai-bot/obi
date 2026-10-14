@@ -3,6 +3,13 @@ import Testing
 @testable import Oby
 
 struct PairingTests {
+    @Test func localRunnerPairingUsesTheOwnerSocket() {
+        let socket = LocalRunner.socket.path
+        let runner = Runner(base: LocalRunner.url, token: "token", unixSocket: socket)
+        #expect(runner.unixSocket == socket)
+        #expect(Runner(base: LocalRunner.url, token: "token", unixSocket: nil).unixSocket == nil)
+    }
+
     @Test func invitationDecodesTheRunnerDateFormat() throws {
         let json = #"{"code":"123456","expiresAt":"2026-10-13T12:02:00Z","hostname":"oby.example","link":"{\"hostname\":\"oby.example\",\"name\":\"My Mac\"}","name":"My Mac","secret":"one-time","url":"https://oby.example"}"#
 

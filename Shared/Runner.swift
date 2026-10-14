@@ -1,7 +1,4 @@
 import Foundation
-#if os(macOS)
-import Network
-#endif
 
 // The Mac compiles Engine/, whose Job is what the runner sends: it reads jobs into that one, and
 // has its own Account. Only the iPhone and the watch need these copies.
@@ -997,12 +994,16 @@ nonisolated struct Runner: Sendable {
                     request.timeoutInterval = 60
                     #if os(macOS)
                     if let unixSocket {
-                        let (response, bytes) = try await UnixSocketHTTP.stream(for: signed(request), path: unixSocket)
+                        let (response, bytes): (HTTPURLResponse, AsyncThrowingStream<UInt8, Error>)
+                        do {
+                            (response, bytes) = try await UnixSocketHTTP.stream(for: signed(request), path: unixSocket)
+                        } catch let error as LocalSocketError {
+                            throw RunnerError(message: error.message)
+                        }
                         try Self.check(response, nil)
                         stream.yield(.connected)
                         var parser = EventParser()
-                        var line = Data()
-                        for try await byte in bytes {
+                        var line = Data()                        for try await byte in bytes {
                             guard byte == 0x0A else { line.append(byte); continue }
                             if let event = parser.feed(String(decoding: line, as: UTF8.self)) { stream.yield(event) }
                             line.removeAll(keepingCapacity: true)
@@ -1086,12 +1087,32 @@ nonisolated struct Runner: Sendable {
 
     private func transport(_ request: URLRequest) async throws -> (Data, URLResponse) {
         #if os(macOS)
-        if let unixSocket { return try await UnixSocketHTTP.data(for: request, path: unixSocket) }
+        if let unixSocket {
+            do {
+                return try await UnixSocketHTTP.data(for: request, path: unixSocket)
+            } catch let error as LocalSocketError {
+                throw RunnerError(message: error.message)
+            }
+        }
         #endif
         return try await URLSession.shared.data(for: request)
     }
 
     #if os(macOS)
+    /// Pairing invitations and device list on this Mac's owner socket (#284, #397).
+    func createPairingInvitation(name: String, hostname: String, url: String) async throws -> Data {
+        struct Invite: Encodable { var name: String; var hostname: String; var url: String }
+        return try await send("POST", "v1/pairing/invite", body: Invite(name: name, hostname: hostname, url: url))
+    }
+
+    func pairedGatewayDevices() async throws -> Data {
+        try await send("GET", "v1/pairing/devices")
+    }
+
+    func revokeGatewayDevice(_ id: String) async throws {
+        _ = try await send("DELETE", "v1/pairing/devices/\(id)")
+    }
+
     /// What waits in the inbox, as `inbox()`, with Oby's plain words for each item, by item id.
     func inboxWithWords(state: String = "open") async throws -> ([InboxItem], [String: InboxWords]) {
         do {
@@ -1233,161 +1254,3 @@ nonisolated struct EventParser {
         return nil
     }
 }
-
-#if os(macOS)
-/// HTTP/1 requests to the local runner over its private Unix socket.
-nonisolated enum UnixSocketHTTP {
-    static func stream(for request: URLRequest, path: String) async throws -> (HTTPURLResponse, AsyncThrowingStream<UInt8, Error>) {
-        guard let url = request.url else { throw RunnerError(message: "The local runner request has no URL.") }
-        let connection = NWConnection(to: .unix(path: path), using: .tcp)
-        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready: done.resume()
-                case .failed(let error): done.resume(throwing: error)
-                default: break
-                }
-            }
-            connection.start(queue: DispatchQueue(label: "com.deskree.oby.runner-events"))
-        }
-        let target = "\(request.httpMethod ?? "GET") \(url.path)\(url.query.map { "?\($0)" } ?? "") HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\nAccept: text/event-stream\r\n"
-        let headers = (request.allHTTPHeaderFields ?? [:]).map { "\($0.key): \($0.value)\r\n" }.joined()
-        var bytes = Data((target + headers + "\r\n").utf8)
-        if let body = request.httpBody { bytes.append(body) }
-        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
-            connection.send(content: bytes, completion: .contentProcessed { error in
-                if let error { done.resume(throwing: error) } else { done.resume() }
-            })
-        }
-        var head = Data()
-        let marker = Data("\r\n\r\n".utf8)
-        while head.range(of: marker) == nil { head.append(try await next(connection)) }
-        guard let range = head.range(of: marker),
-              let text = String(data: head[..<range.lowerBound], encoding: .utf8),
-              let statusLine = text.components(separatedBy: "\r\n").first,
-              let status = Int(statusLine.split(separator: " ").dropFirst().first ?? "") else {
-            connection.cancel()
-            throw RunnerError(message: "The local runner returned an invalid HTTP response.")
-        }
-        var fields: [String: String] = [:]
-        for line in text.components(separatedBy: "\r\n").dropFirst() {
-            guard let colon = line.firstIndex(of: ":") else { continue }
-            fields[String(line[..<colon])] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-        }
-        guard let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: fields) else {
-            connection.cancel()
-            throw RunnerError(message: "The local runner returned invalid HTTP headers.")
-        }
-        let body = Data(head[range.upperBound...])
-        let stream = AsyncThrowingStream<UInt8, Error> { continuation in
-            continuation.onTermination = { _ in connection.cancel() }
-            let pump = SocketEventPump(connection: connection, continuation: continuation)
-            pump.read(body)
-        }
-        return (response, stream)
-    }
-
-    static func data(for request: URLRequest, path: String) async throws -> (Data, URLResponse) {
-        guard let url = request.url else { throw RunnerError(message: "The local runner request has no URL.") }
-        let connection = NWConnection(to: .unix(path: path), using: .tcp)
-        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready: done.resume()
-                case .failed(let error): done.resume(throwing: error)
-                default: break
-                }
-            }
-            connection.start(queue: DispatchQueue(label: "com.deskree.oby.runner-socket"))
-        }
-        var head = "\(request.httpMethod ?? "GET") \(url.path)\(url.query.map { "?\($0)" } ?? "") HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
-        for (name, value) in request.allHTTPHeaderFields ?? [:] where name.caseInsensitiveCompare("Host") != .orderedSame {
-            head += "\(name): \(value)\r\n"
-        }
-        let body = request.httpBody ?? Data()
-        if request.value(forHTTPHeaderField: "Content-Length") == nil { head += "Content-Length: \(body.count)\r\n" }
-        head += "\r\n"
-        var outgoing = Data(head.utf8)
-        outgoing.append(body)
-        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
-            connection.send(content: outgoing, completion: .contentProcessed { error in
-                if let error { done.resume(throwing: error) } else { done.resume() }
-            })
-        }
-        var incoming = Data()
-        let separator = Data("\r\n\r\n".utf8)
-        while incoming.range(of: separator) == nil {
-            incoming.append(try await withCheckedThrowingContinuation { (done: CheckedContinuation<Data, Error>) in
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, complete, error in
-                    if let error { done.resume(throwing: error) }
-                    else if let data, !data.isEmpty { done.resume(returning: data) }
-                    else if complete { done.resume(throwing: RunnerError(message: "The local runner closed its socket early.")) }
-                    else { done.resume(returning: Data()) }
-                }
-            })
-        }
-        guard let range = incoming.range(of: separator),
-              let header = String(data: incoming[..<range.lowerBound], encoding: .utf8),
-              let first = header.components(separatedBy: "\r\n").first,
-              let status = Int(first.split(separator: " ").dropFirst().first ?? "") else {
-            connection.cancel()
-            throw RunnerError(message: "The local runner returned an invalid HTTP response.")
-        }
-        var fields: [String: String] = [:]
-        for line in header.components(separatedBy: "\r\n").dropFirst() {
-            guard let colon = line.firstIndex(of: ":") else { continue }
-            fields[String(line[..<colon])] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-        }
-        guard let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: fields) else {
-            connection.cancel()
-            throw RunnerError(message: "The local runner returned invalid HTTP headers.")
-        }
-        var result = Data(incoming[range.upperBound...])
-        let length = fields.first(where: { $0.key.caseInsensitiveCompare("Content-Length") == .orderedSame }).flatMap { Int($0.value) }
-        while length.map({ result.count < $0 }) ?? true {
-            let bytes = try await withCheckedThrowingContinuation { (done: CheckedContinuation<Data, Error>) in
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, complete, error in
-                    if let error { done.resume(throwing: error) }
-                    else if let data, !data.isEmpty { done.resume(returning: data) }
-                    else if complete { done.resume(returning: Data()) }
-                    else { done.resume(returning: Data()) }
-                }
-            }
-            guard !bytes.isEmpty else { break }
-            result.append(bytes)
-        }
-        connection.cancel()
-        return (result, response)
-    }
-
-    private static func next(_ connection: NWConnection) async throws -> Data {
-        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Data, Error>) in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, complete, error in
-                if let error { done.resume(throwing: error) }
-                else if let data, !data.isEmpty { done.resume(returning: data) }
-                else if complete { done.resume(throwing: RunnerError(message: "The local runner closed its socket early.")) }
-                else { done.resume(returning: Data()) }
-            }
-        }
-    }
-}
-
-private nonisolated final class SocketEventPump: @unchecked Sendable {
-    let connection: NWConnection
-    let continuation: AsyncThrowingStream<UInt8, Error>.Continuation
-    init(connection: NWConnection, continuation: AsyncThrowingStream<UInt8, Error>.Continuation) {
-        self.connection = connection
-        self.continuation = continuation
-    }
-    func read(_ initial: Data = Data()) {
-        for byte in initial { continuation.yield(byte) }
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, complete, error in
-            guard let self else { return }
-            if let error { self.continuation.finish(throwing: error); self.connection.cancel() }
-            else if let data, !data.isEmpty { self.read(data) }
-            else if complete { self.continuation.finish(); self.connection.cancel() }
-            else { self.read() }
-        }
-    }
-}
-#endif

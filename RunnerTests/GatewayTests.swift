@@ -113,7 +113,7 @@ struct GatewayTests {
         }
     }
 
-    /// The Mac app makes invitations and manages paired devices on the runner's loopback API,
+    /// The Mac app makes invitations and manages paired devices on the runner's owner Unix socket,
     /// behind its own token (Engine/LocalRunner.swift): nothing reaching the gateway can, and
     /// nothing on the Mac reads a file for it. A tailnet runner, with no gateway, has no such endpoints.
     @Test func pairingIsMadeOnTheLoopbackAPIWithTheRunnersToken() async throws {
