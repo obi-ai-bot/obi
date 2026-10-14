@@ -99,6 +99,10 @@ final class IslandModel {
 
     func sendChat(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !tray.items.isEmpty else {
+            desk.ask(text, shown: text)
+            return
+        }
         Task {
             do {
                 let ids = try await tray.uploadIDs(using: feed.runner, desk: desk)
