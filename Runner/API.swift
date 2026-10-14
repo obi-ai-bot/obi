@@ -28,6 +28,7 @@ final class API {
     private var sentAccounts = Data()
     /// Keeps the cap on running jobs (`PUT /v1/settings/jobs`). Tests put in their own.
     var saveMaxRunning: (Int) -> Void = JobSlots.save
+    private var issueCreator: IssueCreator!
 
     /// Without `cleared` (the tests), the clear time lives in memory only; without `broker`, so do
     /// the connections and their use log.
@@ -41,6 +42,11 @@ final class API {
         self.cleared = cleared ?? Cleared(file: nil)
         self.broker = broker ?? Broker(desk: desk, connections: ConnectionStore(file: nil), uses: UseLog(file: nil), base: "http://127.0.0.1:7777")
         sentAccounts = (try? Self.encode(accounts)) ?? Data()
+        self.issueCreator = IssueCreator(store: desk.store, changed: { [weak self] draft, reply in
+            guard let self else { return }
+            self.send("issueDraft", IssueDraftJSON(draft: draft))
+            if let reply { self.desk.say(reply) }
+        })
         desk.onJobChange = { [weak self] job in
             self?.send("job", JobJSON(job: job))
             self?.push?.changed()
@@ -55,8 +61,10 @@ final class API {
                 evidence: ["jobs/\(check.job)/report", "checks/\(check.id)/steps-and-errors"]))
         }
         desk.onTurnChange = { [weak self] turn in self?.send("turn", TurnJSON(turn: turn)) }
+        desk.onIssueDraftChange = { [weak self] draft in self?.send("issueDraft", IssueDraftJSON(draft: draft)) }
         desk.onStepChange = { [weak self] step in self?.send("step", step) }
         watchAccounts()
+        Task { await issueCreator.recover(repos: desk.repos) }
     }
 
     /// Every endpoint, behind the owner check: the owner's tailnet login.
@@ -77,6 +85,11 @@ final class API {
             try await self.conversation(before: request.uri.queryParameters.get("before").map { String($0) },
                                         limit: request.uri.queryParameters.get("limit", as: Int.self))
         }
+        router.get("v1/issue-drafts") { request, _ in try await self.issueDrafts(state: request.uri.queryParameters.get("state").map { String($0) }) }
+        router.get("v1/issue-drafts/:id") { _, context in try await self.issueDraft(context.parameters.require("id")) }
+        router.put("v1/issue-drafts/:id") { request, context in try await self.editIssueDraft(context.parameters.require("id"), try await Self.decode(IssueDraftEdit.self, from: request)) }
+        router.post("v1/issue-drafts/:id/create") { request, context in try await self.createIssueDraft(context.parameters.require("id"), try await Self.decode(IssueDraftCreate.self, from: request)) }
+        router.post("v1/issue-drafts/:id/discard") { _, context in try await self.discardIssueDraft(context.parameters.require("id")) }
         router.post("v1/jobs") { request, _ in try await self.dispatch(try await Self.decode(DispatchRequest.self, from: request)) }
         router.get("v1/jobs") { request, _ in await self.jobs(limit: request.uri.queryParameters.get("limit", as: Int.self) ?? 50) }
         router.get("v1/jobs/:id") { _, context in try await self.job(context.parameters.require("id")) }
@@ -255,6 +268,68 @@ final class API {
             throw APIError(.notFound, "There's no turn \(before ?? "") in the conversation.")
         }
         return Self.json(turns.map(TurnJSON.init))
+    }
+
+    func issueDrafts(state: String?) throws -> Response {
+        let drafts = desk.issueDrafts
+        let result: [IssueDraft]
+        switch state ?? "open" {
+        case "open": result = drafts.filter { [.draft, .creating, .failed].contains($0.state) }
+        case "all": result = drafts
+        default: throw APIError(.unprocessableContent, "state is open or all.")
+        }
+        return Self.json(result.map { IssueDraftJSON(draft: $0) })
+    }
+
+    func issueDraft(_ id: String) throws -> Response {
+        guard let draft = desk.store.issueDraft(id) else { throw APIError(.notFound, "There's no issue draft \(id).") }
+        return Self.json(IssueDraftJSON(draft: draft, preview: draft.body()))
+    }
+
+    func editIssueDraft(_ id: String, _ request: IssueDraftEdit) async throws -> Response {
+        guard var draft = desk.store.issueDraft(id) else { throw APIError(.notFound, "There's no issue draft \(id).") }
+        guard draft.version == request.version, [.draft, .failed].contains(draft.state) else {
+            return Self.json(IssueDraftJSON(draft: draft, preview: draft.body()), status: .conflict)
+        }
+        let candidate = IssueDraft(id: draft.id, fields: request.fields, turn: draft.turn)
+        let problems = candidate.problems(in: desk.repos)
+        guard problems.isEmpty else { throw APIError(.unprocessableContent, problems.joined(separator: "; ")) }
+        draft.previous = draft.fields
+        draft.fields = request.fields
+        draft.version += 1
+        draft.state = .draft
+        draft.error = nil
+        draft.updated = .now
+        desk.store.save(draft)
+        desk.onIssueDraftChange(draft)
+        return Self.json(IssueDraftJSON(draft: draft, preview: draft.body()))
+    }
+
+    func createIssueDraft(_ id: String, _ request: IssueDraftCreate) async throws -> Response {
+        guard let current = desk.store.issueDraft(id) else { throw APIError(.notFound, "There's no issue draft \(id).") }
+        guard current.version == request.version, [.draft, .failed].contains(current.state) else {
+            return Self.json(IssueDraftJSON(draft: current, preview: current.body()), status: .conflict)
+        }
+        let problems = current.problems(in: desk.repos)
+        guard problems.isEmpty else { throw APIError(.unprocessableContent, problems.joined(separator: "; ")) }
+        let recentCreates = desk.issueDrafts.filter { [.creating, .created].contains($0.state) && $0.updated > .now.addingTimeInterval(-3600) }
+        guard recentCreates.count < 10 else { throw APIError(.tooManyRequests, "Issue creation is limited to 10 per hour.") }
+        guard let result = await issueCreator.create(id, version: request.version, repos: desk.repos) else {
+            throw APIError(.internalServerError, "The issue draft disappeared.")
+        }
+        if result.state == .failed { return Self.json(IssueDraftJSON(draft: result, preview: result.body()), status: .badGateway) }
+        if result.state != .created { return Self.json(IssueDraftJSON(draft: result, preview: result.body()), status: .conflict) }
+        return Self.json(IssueDraftJSON(draft: result, preview: result.body()))
+    }
+
+    func discardIssueDraft(_ id: String) throws -> Response {
+        guard var draft = desk.store.issueDraft(id) else { throw APIError(.notFound, "There's no issue draft \(id).") }
+        guard [.draft, .failed].contains(draft.state) else { throw APIError(.conflict, "That issue draft can no longer be discarded.") }
+        draft.state = .discarded
+        draft.updated = .now
+        desk.store.save(draft)
+        desk.onIssueDraftChange(draft)
+        return Self.json(IssueDraftJSON(draft: draft, preview: draft.body()))
     }
 
     /// The client's recent turns, checked: at most `Conversation.kept`, each from the user or Oby,
@@ -985,7 +1060,7 @@ struct ClearedJSON: Encodable {
 struct TurnJSON: Encodable {
     var turn: Turn
 
-    private enum Keys: String, CodingKey { case id, who, text, at, jobs, details }
+    private enum Keys: String, CodingKey { case id, who, text, at, jobs, details, issueDraft }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -995,8 +1070,35 @@ struct TurnJSON: Encodable {
         try keys.encode(turn.date, forKey: .at)
         try keys.encode(turn.jobs ?? [], forKey: .jobs)
         try keys.encodeIfPresent(turn.details, forKey: .details)
+        try keys.encodeIfPresent(turn.issueDraft, forKey: .issueDraft)
     }
 }
+
+struct IssueDraftJSON: Encodable {
+    var draft: IssueDraft
+    var preview: String?
+
+    private enum Keys: String, CodingKey { case id, version, fields, state, turn, created, updated, issue, url, error, outgoing, previous, preview }
+    func encode(to encoder: any Encoder) throws {
+        var keys = encoder.container(keyedBy: Keys.self)
+        try keys.encode(draft.id, forKey: .id)
+        try keys.encode(draft.version, forKey: .version)
+        try keys.encode(draft.fields, forKey: .fields)
+        try keys.encode(draft.state, forKey: .state)
+        try keys.encode(draft.turn, forKey: .turn)
+        try keys.encode(draft.created, forKey: .created)
+        try keys.encode(draft.updated, forKey: .updated)
+        try keys.encodeIfPresent(draft.issue, forKey: .issue)
+        try keys.encodeIfPresent(draft.url, forKey: .url)
+        try keys.encodeIfPresent(draft.error, forKey: .error)
+        try keys.encodeIfPresent(draft.outgoing, forKey: .outgoing)
+        try keys.encodeIfPresent(draft.previous, forKey: .previous)
+        try keys.encode(preview ?? draft.body(), forKey: .preview)
+    }
+}
+
+struct IssueDraftCreate: Decodable { var version: Int }
+struct IssueDraftEdit: Decodable { var version: Int; var fields: IssueDraft.Fields }
 
 /// How many jobs run at once, as Settings keeps it (`GET` and `PUT /v1/settings/jobs`).
 struct JobSettings: Codable {

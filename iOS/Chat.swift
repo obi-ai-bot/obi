@@ -36,6 +36,8 @@ struct ChatScreen: View {
     @Environment(Phone.self) private var phone
     @Environment(\.scenePhase) private var scenePhase
     @State private var text = ""
+    @State private var editingIssueDraft: RunnerIssueDraft?
+    @State private var issueEditProblem: String?
     @FocusState private var typing: Bool
     /// The job screens open: a card opens its job here.
     @State private var path: [String] = []
@@ -57,7 +59,10 @@ struct ChatScreen: View {
                     }
                 }
                 .safeAreaInset(edge: .bottom) {
-                    Composer(text: $text, prompt: "Tell Oby what you need", typing: $typing, onSend: send)
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let issueEditProblem { Text(issueEditProblem).font(.footnote).foregroundStyle(.red).padding(.horizontal, 16) }
+                        Composer(text: $text, prompt: "Tell Oby what you need", typing: $typing, onSend: send)
+                    }
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .toolbar {
@@ -107,6 +112,10 @@ struct ChatScreen: View {
                             DaySeparator(title: day.title)
                             ForEach(day.turns) { turn in
                                 TurnRow(turn: turn, jobs: ConversationModel.jobs(of: turn, among: phone.jobs), account: account,
+                                        issueDraft: turn.issueDraft.flatMap { phone.issueDrafts[$0] },
+                                        onCreateIssue: { id, version in Task { try? await phone.createIssueDraft(id, version: version) } },
+                                        onDiscardIssue: { id in Task { try? await phone.discardIssueDraft(id) } },
+                                        onEditIssue: { draft in editingIssueDraft = draft; issueEditProblem = nil; text = draft.preview; typing = true },
                                         steps: phone.conversation.steps(under: turn, in: turns),
                                         failure: phone.failures[turn.id],
                                         onRetry: { phone.retry(echo: turn.id) },
@@ -210,6 +219,23 @@ struct ChatScreen: View {
 
     /// `spoken`: the draft has dictated words, so Oby may speak its reply.
     private func send(spoken: Bool) {
+        if let draft = editingIssueDraft {
+            guard let fields = draft.fields.editing(text) else {
+                issueEditProblem = "Keep the What, Why, How and acceptance headings, with one checkbox test per line."
+                return
+            }
+            let body = text
+            issueEditProblem = nil
+            Task {
+                do {
+                    try await phone.editIssueDraft(draft.id, version: draft.version, fields: fields)
+                    if text == body { text = "" }
+                    editingIssueDraft = nil
+                    typing = false
+                } catch { issueEditProblem = error.localizedDescription }
+            }
+            return
+        }
         phone.ask(text, spoken: spoken)
         text = ""
         typing = false
@@ -238,6 +264,10 @@ private struct TurnRow: View {
     let turn: Turn
     let jobs: [Job]
     let account: (Job) -> String
+    var issueDraft: RunnerIssueDraft? = nil
+    var onCreateIssue: (String, Int) -> Void = { _, _ in }
+    var onDiscardIssue: (String) -> Void = { _ in }
+    var onEditIssue: (RunnerIssueDraft) -> Void = { _ in }
     /// What Oby does for these words, a step at a time (#304): under them, before its answer.
     var steps: [TurnStep] = []
     /// Why the words didn't reach the runner, on an echo whose request failed (Phone.failures).
@@ -292,6 +322,12 @@ private struct TurnRow: View {
                 ReadingText(turn.text, weight: .medium).textSelection(.enabled)
                 if let markdown = ConversationModel.markdownDetails(for: turn) {
                     Text(markdown).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                if let issueDraft {
+                    IssueDraftCard(draft: issueDraft,
+                                   onCreate: { onCreateIssue(issueDraft.id, issueDraft.version) },
+                                   onEdit: { onEditIssue(issueDraft) },
+                                   onDiscard: { onDiscardIssue(issueDraft.id) })
                 }
                 ForEach(jobs) { job in
                     JobCard(job: job, account: account(job))

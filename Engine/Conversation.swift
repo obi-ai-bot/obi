@@ -24,9 +24,11 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     var voice: Bool?
     /// Longer Markdown answer beneath Oby's short spoken reply; never sent to speech.
     var details: String?
+    /// The issue draft card attached to this Oby reply.
+    var issueDraft: String?
 
     init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String,
-         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil) {
+         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil, issueDraft: String? = nil) {
         self.id = id
         self.date = date
         self.who = who
@@ -34,6 +36,7 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
         self.jobs = jobs
         self.voice = voice
         self.details = details
+        self.issueDraft = issueDraft
     }
 }
 
@@ -82,6 +85,7 @@ nonisolated struct Briefing: Equatable, Sendable {
     /// The week's failure records, newest first (Engine/Failures.swift), so "why did jobs fail
     /// this week?" has its answer.
     var failures: [FailureRecord] = []
+    var issueDrafts: [IssueDraft] = []
 
     /// Finished jobs older than this are left out (by their pull request's merge when it merged
     /// later), unless they still need the user or are in review.
@@ -218,6 +222,10 @@ nonisolated struct Briefing: Equatable, Sendable {
             }
             lines.append("- \(Self.kind(item.kind)) for job \(item.job) (\(Self.line(item.title, cap: 60)), \(place)), waiting \(Self.elapsed(since: item.created, now: now)): \(what)\(what.hasSuffix(".") ? "" : ".") Item id \(item.id).")
         }
+        lines += ["", "## Issue drafts", ""]
+        let openDrafts = issueDrafts.filter { [.draft, .creating, .failed].contains($0.state) }
+        if openDrafts.isEmpty { lines.append("(No open issue drafts.)") }
+        for draft in openDrafts { lines.append("- \(draft.id) · \(draft.fields.repo) · \(Self.line(draft.fields.title, cap: 100)) · v\(draft.version) · \(draft.state.rawValue)") }
         if !failures.isEmpty {
             lines += ["", "## Failures this week, newest first", ""] + failureLines
         }
@@ -280,6 +288,9 @@ nonisolated struct Briefing: Equatable, Sendable {
     /// Nil when there's nothing.
     var quoted: String? {
         var sections: [String] = []
+        for draft in issueDrafts where [.draft, .creating, .failed].contains(draft.state) {
+            sections.append("## Issue draft \(draft.id) v\(draft.version)\n" + draft.body())
+        }
         for (_, job) in jobs {
             var lines: [String] = []
             if job.isActive, !job.step.isEmpty { lines.append("Step now: \(Self.line(job.step, cap: 200))") }

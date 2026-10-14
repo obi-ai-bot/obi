@@ -136,6 +136,7 @@ private struct ConversationColumn: View {
     let composerFocusRequest: Int
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
     @State private var text = ""
+    @State private var editingIssueDraft: RunnerIssueDraft?
     struct ReplyTarget {
         var title: String
         var send: @MainActor (String) async throws -> Void
@@ -249,6 +250,10 @@ private struct ConversationColumn: View {
                         ForEach(days) { day in
                             ForEach(Array(day.turns.enumerated()), id: \.element.id) { index, turn in
                                 TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? day.turns[index - 1] : nil), jobs: ConversationModel.jobs(of: turn, among: desk.jobs + feed.jobs),
+                                        issueDraft: turn.issueDraft.flatMap { feed.issueDrafts[$0] },
+                                        onCreateIssue: { id, version in Task { try? await feed.createIssueDraft(id, version: version) } },
+                                        onDiscardIssue: { id in Task { try? await feed.discardIssueDraft(id) } },
+                                        onEditIssue: { draft in editingIssueDraft = draft; text = draft.preview; typing = true },
                                         account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
                                         isLocal: { id in desk.jobs.contains { $0.id == id } },
                                         onOpenJob: onOpenJob,
@@ -371,6 +376,23 @@ private struct ConversationColumn: View {
     private func send() {
         let value = text
         guard !sendingAnswer, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if let draft = editingIssueDraft {
+            guard let fields = draft.fields.editing(value) else {
+                sendProblem = "Keep the What, Why, How and acceptance headings, with one checkbox test per line."
+                return
+            }
+            sendingAnswer = true
+            sendProblem = nil
+            Task {
+                defer { sendingAnswer = false }
+                do {
+                    try await feed.editIssueDraft(draft.id, version: draft.version, fields: fields)
+                    if text == value { text = "" }
+                    editingIssueDraft = nil
+                } catch { sendProblem = error.localizedDescription }
+            }
+            return
+        }
         guard let target = replyTarget else {
             model.sendChat(value)
             text = ""
@@ -407,6 +429,10 @@ struct TurnRow: View {
     let turn: Turn
     var grouped = false
     let jobs: [Job]
+    var issueDraft: RunnerIssueDraft? = nil
+    var onCreateIssue: (String, Int) -> Void = { _, _ in }
+    var onDiscardIssue: (String) -> Void = { _ in }
+    var onEditIssue: (RunnerIssueDraft) -> Void = { _ in }
     let account: (_ job: Job, _ local: Bool) -> String
     let isLocal: (_ id: String) -> Bool
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
@@ -432,6 +458,12 @@ struct TurnRow: View {
             if let markdown = ConversationModel.markdownDetails(for: turn) {
                 Text(markdown).font(OBYStyle.body).foregroundStyle(OBYStyle.primary).textSelection(.enabled)
                     .padding(.leading, OBYStyle.Space.lg)
+            }
+            if let issueDraft {
+                IssueDraftCard(draft: issueDraft, keyboardEnabled: true,
+                               onCreate: { onCreateIssue(issueDraft.id, issueDraft.version) },
+                               onEdit: { onEditIssue(issueDraft) },
+                               onDiscard: { onDiscardIssue(issueDraft.id) })
             }
             if !steps.isEmpty {
                 StepList(steps: steps).padding(.horizontal, OBYStyle.Space.sm)

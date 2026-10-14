@@ -521,6 +521,7 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     /// A turn of the conversation was added, from any app, or changed (a job dispatched from it):
     /// the Mac window's and the iPhone's thread replace it by id, or add it by time (#11).
     case turn(Turn)
+    case issueDraft(RunnerIssueDraft)
     /// One step of Oby's turn began, went on or ended (#304). Runners from before the step event never send it.
     case step(TurnStep)
 }
@@ -542,9 +543,10 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     var voice: Bool?
     /// Longer Markdown answer beneath Oby's short spoken reply; nil on older turns.
     var details: String?
+    var issueDraft: String?
 
     init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String,
-         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil) {
+         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil, issueDraft: String? = nil) {
         self.id = id
         self.date = date
         self.who = who
@@ -552,6 +554,7 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
         self.jobs = jobs
         self.voice = voice
         self.details = details
+        self.issueDraft = issueDraft
     }
 }
 #endif
@@ -565,11 +568,53 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
     var at: Date
     var jobs: [String]?
     var details: String?
+    var issueDraft: String?
 
     var turn: Turn {
         Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text,
-             jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details)
+             jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details, issueDraft: issueDraft)
     }
+
+nonisolated struct RunnerIssueDraft: Codable, Identifiable, Equatable, Sendable {
+    enum State: String, Codable, Sendable { case draft, creating, created, failed, discarded }
+    struct Fields: Codable, Equatable, Sendable {
+        var repo: String; var title: String; var what: String; var why: String; var how: String
+        var acceptance: [String]; var files: [String]; var labels: [String]
+
+        /// Reads the Markdown placed in the composer by Edit while retaining fields the preview
+        /// does not show, such as the title, repository and labels.
+        func editing(_ markdown: String) -> Self? {
+            let lines = markdown.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            func positions(_ heading: String) -> [Int] { lines.indices.filter { lines[$0] == heading } }
+            let what = positions("## What"), why = positions("## Why"), how = positions("## How"), acceptance = positions("### Acceptance tests")
+            guard what == [0], why.count == 1, how.count == 1, acceptance.count == 1,
+                  what[0] < why[0], why[0] < how[0], how[0] < acceptance[0] else { return nil }
+            func section(_ start: Int, _ end: Int) -> String {
+                lines[(start + 1)..<end].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            let tail = Array(lines[(acceptance[0] + 1)...])
+            let contentEnd = tail.firstIndex(where: { $0.hasPrefix("Files: ") || $0.hasPrefix("<!-- oby-draft:") || $0 == "Drafted with Oby from chat." }) ?? tail.endIndex
+            let tests = tail[..<contentEnd].filter { !$0.isEmpty }
+            guard !tests.isEmpty, tests.allSatisfy({ $0.hasPrefix("- [ ] ") }) else { return nil }
+            var edited = self
+            edited.what = section(what[0], why[0])
+            edited.why = section(why[0], how[0])
+            edited.how = section(how[0], acceptance[0])
+            edited.acceptance = tests.map { String($0.dropFirst("- [ ] ".count)) }
+            edited.files = []
+            if contentEnd < tail.endIndex, tail[contentEnd].hasPrefix("Files: ") {
+                let line = String(tail[contentEnd].dropFirst("Files: ".count))
+                let matches = line.matches(of: /`([^`]+)`/)
+                edited.files = matches.map { String($0.1) }
+                if !line.isEmpty && matches.isEmpty { return nil }
+            }
+            return edited
+        }
+    }
+    var id: String; var version: Int; var fields: Fields; var state: State; var turn: String
+    var created: Date; var updated: Date; var issue: Int?; var url: String?; var error: String?
+    var outgoing: [Outgoing]?; var previous: Fields?; var preview: String
+}
 }
 
 /// One step of Oby's turn as the `step` event sends it (docs/runner-api.md, #304): "Moving Vault
@@ -1092,6 +1137,17 @@ nonisolated struct Runner: Sendable {
         }
     }
 
+    func issueDrafts(state: String = "open") async throws -> [RunnerIssueDraft] { try await call("GET", "v1/issue-drafts?state=\(state)") }
+    func editIssueDraft(_ id: String, version: Int, fields: RunnerIssueDraft.Fields) async throws -> RunnerIssueDraft {
+        struct Body: Encodable { var version: Int; var fields: RunnerIssueDraft.Fields }
+        return try await call("PUT", "v1/issue-drafts/\(id)", body: Body(version: version, fields: fields))
+    }
+    func createIssueDraft(_ id: String, version: Int) async throws -> RunnerIssueDraft {
+        struct Body: Encodable { var version: Int }
+        return try await call("POST", "v1/issue-drafts/\(id)/create", body: Body(version: version), timeout: 120)
+    }
+    func discardIssueDraft(_ id: String) async throws -> RunnerIssueDraft { try await call("POST", "v1/issue-drafts/\(id)/discard") }
+
     static func check(_ response: URLResponse, _ data: Data?) throws {
         guard let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) else { return }
         struct Problem: Decodable { var error: String }
@@ -1187,6 +1243,7 @@ nonisolated struct EventParser {
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
             #endif
             case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn) }
+            case "issueDraft": return (try? Runner.decoder.decode(RunnerIssueDraft.self, from: json)).map(RunnerEvent.issueDraft)
             case "step": return (try? Runner.decoder.decode(TurnStep.self, from: json)).map(RunnerEvent.step)
             default: return nil
             }

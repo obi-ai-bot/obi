@@ -39,6 +39,7 @@ final class RunnerFeed {
     /// What waits in the runner's inbox, put-off items too, oldest first: answered on the iPhone,
     /// it goes from here too.
     private(set) var inbox: [InboxItem] = []
+    private(set) var issueDrafts: [String: RunnerIssueDraft] = [:]
     /// Confirmed decisions stay in the messenger even after leaving the attention inbox.
     private(set) var inboxHistory: [InboxItem] = []
     /// Oby's plain words for each of those items (#65), which Engine's InboxItem doesn't read, by item id.
@@ -243,6 +244,7 @@ final class RunnerFeed {
                         let (items, words) = try await runner.inboxWithWords()
                         // History is an enhancement: an older runner or failed history request must not take chat offline.
                         let history = try? await runner.inboxWithWords(state: "done")
+                        let drafts = try await runner.issueDrafts()
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
                         try Task.checkCancellation()
                         host = status.runner.host
@@ -257,6 +259,7 @@ final class RunnerFeed {
                         // Settings › Runner changed while the open jobs were fetched again.
                         try Task.checkCancellation()
                         inbox = items
+                        issueDrafts = Dictionary(uniqueKeysWithValues: drafts.map { ($0.id, $0) })
                         if let (past, pastWords) = history {
                             inboxHistory = past.filter { !$0.isOpen }
                             inboxWords = pastWords.merging(words, uniquingKeysWith: { _, fresh in fresh })
@@ -280,6 +283,7 @@ final class RunnerFeed {
                     case .accounts(let list): accounts = list
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     case .turn(let turn): conversation.apply(turn)
+                    case .issueDraft(let draft): issueDrafts[draft.id] = draft
                     case .step(let step): conversation.apply(step)
                     }
                 }
@@ -470,6 +474,22 @@ final class RunnerFeed {
 
     /// A job older than the list's 50 (an inbox item or an alert opened it): fetched, and kept
     /// among the others in age order.
+    func createIssueDraft(_ id: String, version: Int) async throws {
+        guard let runner else { throw RunnerError(message: "The runner is offline.") }
+        let value = try await runner.createIssueDraft(id, version: version)
+        issueDrafts[id] = value
+    }
+    func editIssueDraft(_ id: String, version: Int, fields: RunnerIssueDraft.Fields) async throws {
+        guard let runner else { throw RunnerError(message: "The runner is offline.") }
+        let value = try await runner.editIssueDraft(id, version: version, fields: fields)
+        issueDrafts[id] = value
+    }
+    func discardIssueDraft(_ id: String) async throws {
+        guard let runner else { throw RunnerError(message: "The runner is offline.") }
+        let value = try await runner.discardIssueDraft(id)
+        issueDrafts[id] = value
+    }
+
     func fetch(_ id: String, from runner: Runner? = nil) async throws {
         guard !jobs.contains(where: { $0.id == id }) else { return }
         guard let runner = runner ?? self.runner else { throw RunnerError(message: "Set the runner's URL in Settings to open it.") }

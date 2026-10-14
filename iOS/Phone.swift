@@ -160,6 +160,7 @@ final class Phone {
     private(set) var accounts: [Account] = []
     /// What waits in the runner's inbox, put-off items too: answered on the Mac, it goes from here too.
     private(set) var inbox: [InboxItem]
+    private(set) var issueDrafts: [String: RunnerIssueDraft] = [:]
     private let offlineQueue: OfflineQueue
     private(set) var models: ModelSettings?
     /// The mode new jobs get by default, as the runner last said, or nil from a runner without modes.
@@ -279,6 +280,7 @@ final class Phone {
         defaultMode = RunnerMode(status.permissions?.mode)
         await take(try await runner.jobs())
         inbox = try await runner.inbox()
+        issueDrafts = Dictionary(uniqueKeysWithValues: try await runner.issueDrafts().map { ($0.id, $0) })
         // The thread's latest page every time: what was said on the Mac while the connection was
         // down is in it.
         await conversation.reload()
@@ -317,6 +319,19 @@ final class Phone {
         }
     }
 
+    func createIssueDraft(_ id: String, version: Int) async throws {
+        let value = try await runner.createIssueDraft(id, version: version)
+        issueDrafts[id] = value
+    }
+    func editIssueDraft(_ id: String, version: Int, fields: RunnerIssueDraft.Fields) async throws {
+        let value = try await runner.editIssueDraft(id, version: version, fields: fields)
+        issueDrafts[id] = value
+    }
+    func discardIssueDraft(_ id: String) async throws {
+        let value = try await runner.discardIssueDraft(id)
+        issueDrafts[id] = value
+    }
+
     private func unfollow() {
         loop?.cancel()
         loop = nil
@@ -342,6 +357,7 @@ final class Phone {
             conversation.apply(turn)
             // The runner listed what this iPhone said: its echo has done its job.
             settleEchoes()
+        case .issueDraft(let draft): issueDrafts[draft.id] = draft
         case .step(let step):
             conversation.apply(step)
         }

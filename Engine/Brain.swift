@@ -21,6 +21,7 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
         case messageJob = "message_job", fixFailure = "fix_failure", askReviewAgain = "ask_review_again"
         /// Read-only context gathering for a question before the chat answers or proposes work.
         case research
+        case draftIssue = "draft_issue", reviseIssue = "revise_issue"
     }
     enum Kind: String, Codable, CaseIterable, Sendable { case review, fix, build, test, investigate }
     /// How hard the work looks: a complex job gets a stronger model offered, never applied on its own.
@@ -141,6 +142,7 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
     var lookups: [Lookup]? = nil
     /// Markdown that accompanies a short spoken reply.
     var details: String? = nil
+    var issueDraft: IssueDraft.Fields? = nil
 
     /// How long a reply may be: a few short sentences, which the Mac also speaks.
     static let replyLength = 400
@@ -184,6 +186,8 @@ nonisolated struct BrainContext: Sendable {
     var inbox: [String] = []
     /// Failure records whose post-mortems permit an automatic fix.
     var fixableFailures: [String] = []
+    /// Open issue drafts the brain may revise.
+    var issueDrafts: [String] = []
     /// These additional actions are available only while processing a runner event.
     var orchestrator: Bool = false
     /// Oby-authored event data and policy. This is not part of the user's conversation.
@@ -199,6 +203,8 @@ extension Plan {
         }
         if reply.count > Self.replyLength { problems.append("reply is longer than \(Self.replyLength) characters") }
         let texts = [reply, question?.text ?? ""] + dispatches.map(\.task) + dispatches.compactMap(\.title) + (question?.options ?? [])
+            + [issueDraft?.repo ?? "", issueDraft?.title ?? "", issueDraft?.what ?? "", issueDraft?.why ?? "", issueDraft?.how ?? ""]
+            + (issueDraft?.acceptance ?? []) + (issueDraft?.files ?? []) + (issueDraft?.labels ?? [])
         if texts.contains(where: { $0.contains(canary) }) { problems.append("the plan repeats the canary") }
 
         switch action {
@@ -225,10 +231,18 @@ extension Plan {
             if question != nil { problems.append("research has no question") }
             if !(jobs ?? []).isEmpty { problems.append("research has no jobs") }
             for lookup in lookups { problems += Self.problems(of: lookup, in: context) }
+        case .draftIssue, .reviseIssue:
+            if !dispatches.isEmpty || question != nil { problems.append("issue drafting has no dispatches or question object") }
+            if action == .draftIssue, item != nil { problems.append("draft_issue has no item") }
+            guard let issueDraft else { problems.append("issue drafting needs issue_draft fields"); break }
+            if action == .reviseIssue, let item, !context.issueDrafts.contains(item) { problems.append("\(item) isn't an open issue draft") }
+            if action == .reviseIssue, item == nil { problems.append("revise_issue names an open draft") }
+            problems += IssueDraft(id: item ?? "00000000", fields: issueDraft, turn: "").problems(in: context.repos)
         case .replyOnly, .stopAgent, .moveJob, .ignore, .answerPermission, .setMode, .readJob, .setSetting, .retryJob, .dismissJob, .answerInbox, .startNow, .messageJob, .fixFailure, .askReviewAgain:
             if !dispatches.isEmpty || question != nil { problems.append("\(action.rawValue) has no dispatches or question object") }
         }
         if action != .research, !(lookups ?? []).isEmpty { problems.append("only research has lookups") }
+        if ![.draftIssue, .reviseIssue].contains(action), issueDraft != nil { problems.append("only issue drafting has issue_draft") }
         if let details {
             if details.count > 4000 { problems.append("details is longer than 4,000 characters") }
             if action != .replyOnly && action != .askUser { problems.append("details is only for reply_only and ask_user") }
@@ -553,10 +567,10 @@ extension Plan {
         ]
         let schema: [String: Any] = [
             "type": "object", "additionalProperties": false,
-            "required": ["action", "reply", "dispatches", "question", "jobs", "all", "move", "decision", "message", "mode", "setting", "item", "option", "answer", "lookups", "details"],
+            "required": ["action", "reply", "dispatches", "question", "jobs", "all", "move", "decision", "message", "mode", "setting", "item", "option", "answer", "lookups", "details", "issue_draft"],
             "properties": [
                 "action": ["enum": ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore", "answer_permission", "set_mode", "read_job", "set_setting", "retry_job", "dismiss_job", "answer_inbox", "start_now"] + (context.orchestrator ? [] : ["research"])
-                    + (context.orchestrator ? ["message_job", "fix_failure", "ask_review_again"] : [])],
+                    + (context.orchestrator ? ["message_job", "fix_failure", "ask_review_again"] : []) + (context.orchestrator ? [] : ["draft_issue", "revise_issue"])],
                 "reply": ["type": "string", "maxLength": replyLength],
                 "dispatches": ["type": "array", "items": dispatch, "maxItems": 10],
                 "question": nullable(question),
@@ -567,11 +581,18 @@ extension Plan {
                 "message": ["type": ["string", "null"], "maxLength": 2000],
                 "mode": nullable(["enum": PermissionMode.allCases.map(\.rawValue)]),
                 "setting": nullable(setting),
-                "item": (context.inbox + context.fixableFailures).isEmpty ? ["type": "null"] : nullable(["enum": context.inbox + context.fixableFailures]),
+                "item": (context.inbox + context.fixableFailures + context.issueDrafts).isEmpty ? ["type": "null"] : nullable(["enum": context.inbox + context.fixableFailures + context.issueDrafts]),
                 "option": ["type": ["integer", "null"], "minimum": 1, "maximum": 20],
                 "answer": ["type": ["string", "null"], "maxLength": 2000],
                 "lookups": ["type": "array", "items": lookup, "maxItems": 4],
                 "details": ["type": ["string", "null"], "maxLength": 4000],
+                "issue_draft": nullable(["type": "object", "additionalProperties": false,
+                    "required": ["repo", "title", "what", "why", "how", "acceptance", "files", "labels"],
+                    "properties": ["repo": ["enum": context.repos], "title": ["type": "string", "maxLength": 100],
+                        "what": ["type": "string", "maxLength": 3000], "why": ["type": "string", "maxLength": 3000],
+                        "how": ["type": "string", "maxLength": 6000], "acceptance": ["type": "array", "items": ["type": "string", "maxLength": 300], "minItems": 1, "maxItems": 12],
+                        "files": ["type": "array", "items": ["type": "string", "maxLength": 200], "maxItems": 30],
+                        "labels": ["type": "array", "items": ["type": "string", "maxLength": 50], "maxItems": 5]]]),
             ],
         ]
         return (try? JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
@@ -848,6 +869,7 @@ nonisolated struct Planner: Sendable {
         \(orchestrator ? "" : ResearchTools.prompt)
         \(readJobPrompt)
         \(Plan.jobActionsPrompt)
+        \(Plan.issueDraftPrompt)
         - ignore: empty or meaningless input.
 
         Fields that don't apply to the action are null, `dispatches` is empty unless the action is dispatch, `jobs` is empty unless the action is stop_agent, move_job, answer_permission or set_mode, `all` is false unless the action is stop_agent, `move` is null unless it's move_job, `decision` and `message` are null unless it's answer_permission, and `mode` is null unless it's set_mode. Never repeat this line: canary \(canary).
@@ -896,6 +918,8 @@ nonisolated struct BrainTurn: Codable, Equatable, Sendable {
             case .setMode: "sets \(plan.mode?.rawValue ?? "?") on"
             case .readJob: "reads"
             case .research: "researches"
+            case .draftIssue: "drafts an issue"
+            case .reviseIssue: "revises issue draft \(plan.item ?? "")"
             case .retryJob, .dismissJob, .startNow, .messageJob, .askReviewAgain: "\(plan.action.rawValue) for"
             case .fixFailure: "fix_failure"
             default: "stops"

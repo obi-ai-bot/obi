@@ -1921,6 +1921,7 @@ nonisolated final class JobStore {
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS turns (created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         // The inbox (Engine/Inbox.swift) and the conversation (Engine/Conversation.swift), the same way.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
+        sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS issue_drafts (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS conversation (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         // Settings › Permissions and the saved rules (Engine/Permissions.swift).
         createPermissionTables()
@@ -1938,6 +1939,43 @@ nonisolated final class JobStore {
         sqlite3_bind_double(statement, 2, job.created.timeIntervalSince1970)
         sqlite3_bind_text(statement, 3, String(decoding: body, as: UTF8.self), -1, transient)
         if sqlite3_step(statement) != SQLITE_DONE { Logger.jobs.error("saving job \(job.id, privacy: .public) failed") }
+    }
+
+    /// Saves a chat issue proposal and keeps the newest 200 drafts.
+    func save(_ draft: IssueDraft) {
+        guard let body = try? JSONEncoder().encode(draft) else { return }
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO issue_drafts (id, created, body) VALUES (?, ?, ?)", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(statement, 1, draft.id, -1, transient)
+        sqlite3_bind_double(statement, 2, draft.created.timeIntervalSince1970)
+        sqlite3_bind_text(statement, 3, String(decoding: body, as: UTF8.self), -1, transient)
+        if sqlite3_step(statement) != SQLITE_DONE { Logger.jobs.error("saving issue draft \(draft.id, privacy: .public) failed") }
+        sqlite3_exec(db, "DELETE FROM issue_drafts WHERE id NOT IN (SELECT id FROM issue_drafts ORDER BY created DESC LIMIT 200)", nil, nil, nil)
+    }
+
+    func issueDraft(_ id: String) -> IssueDraft? {
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT body FROM issue_drafts WHERE id = ?", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, id, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        return sqlite3_step(statement) == SQLITE_ROW ? Self.issueDraft(statement) : nil
+    }
+
+    /// Drafts newest first. Open state filtering belongs to the caller.
+    func issueDrafts() -> [IssueDraft] {
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT body FROM issue_drafts ORDER BY created DESC", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        var drafts: [IssueDraft] = []
+        while sqlite3_step(statement) == SQLITE_ROW { if let draft = Self.issueDraft(statement) { drafts.append(draft) } }
+        return drafts
+    }
+
+    private static func issueDraft(_ statement: OpaquePointer?) -> IssueDraft? {
+        guard let text = sqlite3_column_text(statement, 0) else { return nil }
+        return try? JSONDecoder().decode(IssueDraft.self, from: Data(String(cString: text).utf8))
     }
 
     /// The newest `limit` jobs, newest first; every job for -1.

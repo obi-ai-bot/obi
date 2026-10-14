@@ -50,6 +50,8 @@ extension Desk {
             default: return "Starting \(what) now"
             }
         case .answerInbox: return "Answering an inbox item"
+        case .draftIssue: return "Drafting an issue"
+        case .reviseIssue: return "Revising an issue draft"
         }
     }
 }

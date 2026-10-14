@@ -52,12 +52,15 @@ final class Desk {
     /// Called with every turn that's added or changes (a job dispatched from it), for the runner's
     /// event stream. Not when a cancelled turn leaves the thread: that happens only on the Mac.
     var onTurnChange: (Turn) -> Void = { _ in }
+    /// Every issue draft state change, for runner SSE and app cards.
+    var onIssueDraftChange: (IssueDraft) -> Void = { _ in }
     /// The jobs the brain's plan or the Lead just started, for the reply turn that tells of them.
     var onStepChange: (DeskStep) -> Void = { _ in }
     @ObservationIgnored var researchTools = ResearchTools()
     @ObservationIgnored private(set) var replyDetails: String?
     @ObservationIgnored private var researchedThisTurn = false
     private var justStarted: [String] = []
+    private var justDraftedIssue: String?
     private(set) var jobs: [Job] {
         didSet { accounts.countRunning(jobs) }
     }
@@ -554,6 +557,7 @@ final class Desk {
     }
 
     var active: [Job] { jobs.filter(\.isActive) }
+    var issueDrafts: [IssueDraft] { store.issueDrafts() }
 
     func refresh() async {
         if let repos = try? await Workspace.knownRepos(), !repos.isEmpty { self.repos = repos }
@@ -600,14 +604,14 @@ final class Desk {
                                 guard let postMortem = record.postMortem, postMortem.obyCouldHandle,
                                       [.obyBug, .agentMistake, .flakyTest].contains(postMortem.cause) else { return nil }
                                 return record.id
-                            })
+                            }, issueDrafts: store.issueDrafts().filter { [.draft, .failed].contains($0.state) }.map(\.id))
     }
 
     /// What the brain is told before the user's words (Engine/Conversation.swift).
     func briefing(turns: [Turn]) -> Briefing {
         Briefing(turns: turns, places: [Briefing.Place(name: "this Mac", jobs: jobs, inbox: inbox)] + elsewhere(), accounts: accounts.accounts,
                  settingModels: settingModels, settingEfforts: settingEfforts, settingModelEfforts: settingModelEfforts, maxRunning: maxRunning,
-                 failures: failureLog.week())
+                 failures: failureLog.week(), issueDrafts: store.issueDrafts())
     }
 
     // MARK: The conversation
@@ -883,13 +887,19 @@ final class Desk {
         onTurnChange(turn)
     }
 
+    /// Adds an Oby reply from an explicit runner action such as issue creation.
+    func say(_ text: String) { addReply(text) }
+
     /// Oby's reply joins the thread, with the jobs its plan or the Lead just started, if any: the
     /// window shows them as cards under Oby's words, each with Stop.
     @discardableResult
-    private func addReply(_ text: String, details: String? = nil) -> Turn {
+    private func addReply(_ text: String, details: String? = nil, issueDraft: String? = nil) -> Turn {
         let started = justStarted
         justStarted = []
-        let turn = Turn(who: .oby, text: text, jobs: started.isEmpty ? nil : started, details: details ?? replyDetails)
+        let draftID = issueDraft ?? justDraftedIssue
+        justDraftedIssue = nil
+        let turn = Turn(who: .oby, text: text, jobs: started.isEmpty ? nil : started, details: details ?? replyDetails, issueDraft: draftID)
+        if let draftID, var draft = store.issueDraft(draftID) { draft.turn = turn.id; store.save(draft) }
         add(turn)
         return turn
     }
@@ -1426,6 +1436,48 @@ final class Desk {
                 }
             }
             return .reply(lines.joined(separator: " "))
+        case .draftIssue, .reviseIssue:
+            guard let fields = plan.issueDraft else { return .reply("I couldn't draft the issue. Try again.") }
+            let draft: IssueDraft
+            if plan.action == .reviseIssue {
+                guard let id = plan.item, var current = store.issueDraft(id), [.draft, .failed].contains(current.state) else {
+                    return .reply("That issue draft is no longer open to revisions.")
+                }
+                let candidate = IssueDraft(id: id, fields: fields, turn: current.turn)
+                let problems = candidate.problems(in: repos)
+                guard problems.isEmpty else { return .reply("I couldn't revise the issue: \(problems.joined(separator: "; "))") }
+                current.previous = current.fields
+                current.fields = fields
+                current.version += 1
+                current.state = .draft
+                current.error = nil
+                current.updated = .now
+                draft = current
+            } else {
+                let candidate = IssueDraft(fields: fields, turn: conversationTurn ?? "")
+                let problems = candidate.problems(in: repos)
+                guard problems.isEmpty else { return .reply("I couldn't draft the issue: \(problems.joined(separator: "; "))") }
+                let open = store.issueDrafts().filter { [.draft, .failed, .creating].contains($0.state) }
+                if open.count >= 20 {
+                    guard var expired = open.filter({ $0.state == .draft || $0.state == .failed })
+                        .min(by: { $0.created < $1.created }).flatMap({ store.issueDraft($0.id) }) else {
+                        return .reply("There are already 20 issue drafts being created. Try again when one finishes.")
+                    }
+                    expired.state = .discarded
+                    expired.updated = .now
+                    store.save(expired)
+                    onIssueDraftChange(expired)
+                    justDraftedIssue = candidate.id
+                    store.save(candidate)
+                    onIssueDraftChange(candidate)
+                    return .reply("I discarded the oldest draft, \(expired.fields.title), to keep the 20 draft limit. Drafted an issue for \(candidate.fields.repo). Check it and press Create.")
+                }
+                draft = candidate
+            }
+            store.save(draft)
+            justDraftedIssue = draft.id
+            onIssueDraftChange(draft)
+            return .reply("Drafted an issue for \(draft.fields.repo). Check it and press Create.")
         case .replyOnly, .ignore:
             guard !plan.reply.isEmpty else { return .none }
             // The brain counted wrong: with agents working here or on the runner, Oby never says
