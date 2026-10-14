@@ -7,8 +7,8 @@ import UIKit
 import AppKit
 #endif
 
-// Settings' sections the iPhone and the Mac both show, so the two stay alike: iOS/SettingsScreen.swift
-// and Mac/Settings.swift put them in their own forms, next to what only that device has.
+// Settings' sections the iPhone and the Mac both show, so the two stay alike: apps/ios/app/SettingsScreen.swift
+// and apps/mac/app/Settings.swift put them in their own forms, next to what only that device has.
 
 /// Voice: whether Oby reads its replies out loud, and the language it writes down what you say in
 /// (`VoiceSettings`).

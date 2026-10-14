@@ -5,10 +5,10 @@ import WatchConnectivity
 import WatchKit
 import WidgetKit
 
-/// The watch's view of the runner, through the iPhone (iOS/WatchRelay.swift): the jobs the
+/// The watch's view of the runner, through the iPhone (apps/ios/app/WatchRelay.swift): the jobs the
 /// phone keeps here, and the requests it carries out. What they say to each other is in
 /// Shared/WatchWire.swift. With the phone out of reach, a paired watch calls the runner's Watch
-/// API itself (Watch/WatchLink.swift), and goes back to the phone once it's in reach again.
+/// API itself (apps/watch/WatchLink.swift), and goes back to the phone once it's in reach again.
 @Observable
 final class Watch: NSObject {
     enum Talk: Equatable {
@@ -170,7 +170,7 @@ final class Watch: NSObject {
         }
     }
 
-    /// The complications and the Smart Stack (Watch/Widget) draw from the app group.
+    /// The complications and the Smart Stack (apps/watch/Widget) draw from the app group.
     private func saveGlance() {
         if Glance.save(Glance.of(jobs)) {
             WidgetCenter.shared.reloadTimelines(ofKind: Glance.kind)
@@ -683,7 +683,7 @@ final class Watch: NSObject {
 
     // MARK: Pairing and pushes
 
-    /// What the phone asks while it pairs this watch (iOS/WatchPairing.swift), or unpairs it.
+    /// What the phone asks while it pairs this watch (apps/ios/app/WatchPairing.swift), or unpairs it.
     private func answer(_ message: [String: Any]) -> [String: Any] {
         switch (message[WatchWire.kind] as? String).flatMap(WatchWire.Kind.init(rawValue:)) {
         case .pairKey:

@@ -9,7 +9,7 @@ import Security
 /// Secure Enclave key, with a time and a fresh nonce. Compiled into the app and the widget
 /// extension, which fetches the jobs itself when a WidgetKit push asks it to reload.
 nonisolated struct WatchLink: Sendable {
-    /// What pairing left here, from the iPhone (iOS/WatchPairing.swift).
+    /// What pairing left here, from the iPhone (apps/ios/app/WatchPairing.swift).
     struct Pairing: Codable, Equatable, Sendable {
         /// This watch's id on the runner.
         var watch: String

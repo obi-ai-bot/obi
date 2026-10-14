@@ -7,17 +7,17 @@ struct ObyApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            // The window with the conversation, Agents and Live (Mac/App/ChatWindow.swift); the island opens on hover or click.
+            // The window with the conversation, Agents and Live (apps/mac/app/App/ChatWindow.swift); the island opens on hover or click.
             Button("Open Oby") { app.chat.show() }
                 .keyboardShortcut("o")
-            // The same keys work from any app (Mac/StopAllKey.swift).
+            // The same keys work from any app (apps/mac/app/StopAllKey.swift).
             Button("Stop All Jobs") { app.island.stopAll() }
                 .keyboardShortcut(".", modifiers: [.control, .option, .command])
             SettingsLink { Text("Settings…") }
                 .keyboardShortcut(",")
             Button("Show First Launch…") { app.firstLaunch.show() }
             Divider()
-            // Updates (Mac/Updater.swift): the version, and Sparkle's window on demand.
+            // Updates (apps/mac/app/Updater.swift): the version, and Sparkle's window on demand.
             Text("Oby \(Updater.version)")
             Button("Check for Updates…") { app.island.updater.check() }
             Divider()
@@ -84,7 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         RunnerFeed.registerCategories()
         island.openWindow = { [weak self] job in self?.chat.show(job: job) }
         island.start()
-        // Scheduled update checks (Mac/Updater.swift), in the build that ships. A Debug build from
+        // Scheduled update checks (apps/mac/app/Updater.swift), in the build that ships. A Debug build from
         // Xcode checks only when asked, so a release never replaces it quietly.
         #if !DEBUG
         island.updater.start()
@@ -104,7 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // The tunnel is Oby's child: it ends with Oby (Mac/RemoteAccess.swift).
+        // The tunnel is Oby's child: it ends with Oby (apps/mac/app/RemoteAccess.swift).
         island.remote.stop()
         island.desk.quit()
     }
