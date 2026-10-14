@@ -574,6 +574,7 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
         Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text,
              jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details, issueDraft: issueDraft)
     }
+}
 
 nonisolated struct RunnerIssueDraft: Codable, Identifiable, Equatable, Sendable {
     enum State: String, Codable, Sendable { case draft, creating, created, failed, discarded }
@@ -614,7 +615,6 @@ nonisolated struct RunnerIssueDraft: Codable, Identifiable, Equatable, Sendable 
     var id: String; var version: Int; var fields: Fields; var state: State; var turn: String
     var created: Date; var updated: Date; var issue: Int?; var url: String?; var error: String?
     var outgoing: [Outgoing]?; var previous: Fields?; var preview: String
-}
 }
 
 /// One step of Oby's turn as the `step` event sends it (docs/runner-api.md, #304): "Moving Vault
