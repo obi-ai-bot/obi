@@ -186,6 +186,7 @@
 				Character.swift,
 				Pokes.swift,
 				DecisionCard.swift,
+				IssueDraftCard.swift,
 			);
 			target = 0B1E0C0A0000000000AE0007 /* ObyWatchWidget */;
 		};
