@@ -120,7 +120,10 @@ struct MacPublishTests {
         #expect(id == "d7c1")
         #expect(stub.requests.count == 1)
         #expect(stub.requests[0].headers["Oby-E2E-Version"] == E2E.version)
-        #expect(stub.requests[0].json == nil)
+        // The wire body is the HPKE envelope JSON, not the cleartext register payload.
+        #expect(stub.requests[0].json?["version"] as? String == E2E.version)
+        #expect(stub.requests[0].json?["name"] == nil)
+        #expect(stub.requests[0].json?["publicKey"] == nil)
     }
 
     /// A job older than the latest 50 (an inbox item's Open job, or an alert's Publish) is fetched
