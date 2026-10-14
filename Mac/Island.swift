@@ -1064,9 +1064,9 @@ private struct OpenIsland: View {
                     TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? model.recentTurns[index - 1] : nil),
                             jobs: [], account: { _, _ in "" }, isLocal: { _ in false },
                             onOpenJob: { onOpenWindow((id: $0, local: $1)) },
+                            showTime: false,
                             loadAttachmentThumbnail: { id in try await model.attachmentThumbnail(id, for: turn) },
-                            loadAttachmentContent: { id in try await model.attachmentContent(id, for: turn) },
-                            showTime: false)
+                            loadAttachmentContent: { id in try await model.attachmentContent(id, for: turn) })
                 }
                 switch desk.talk {
                 case .question(let said, let question):
