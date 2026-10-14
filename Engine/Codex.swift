@@ -7,6 +7,8 @@ import OSLog
 /// sandbox, which lets it write only in the worktree; anything more comes to Oby as an approval.
 final class CodexAgent: AgentRun {
     private let worktree: URL
+    private let kind: Plan.Kind
+    private let reading: [String]
     /// The account's own `CODEX_HOME`, or nil for Codex's default `~/.codex`.
     private let home: URL?
     private var server: CodexServer?
@@ -36,17 +38,19 @@ final class CodexAgent: AgentRun {
     /// tell why it was declined.
     private var pending: [String: (id: Any, thread: String?, turn: String?)] = [:]
 
-    init(worktree: URL, home: URL?, resume: String? = nil) {
+    init(worktree: URL, home: URL?, resume: String? = nil, kind: Plan.Kind = .build, reading: [String] = []) {
         self.worktree = worktree
         self.home = home
         self.resume = resume
+        self.kind = kind
+        self.reading = reading
     }
 
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
         self.onEvent = onEvent
         let log = worktree.appending(path: ".oby/agent.log")
         _ = FileManager.default.createFile(atPath: log.path, contents: nil)
-        let server = try CodexServer(home: home, in: worktree, log: log, mcp: mcp)
+        let server = try CodexServer(home: home, in: worktree, log: log, mcp: mcp, reading: reading)
         self.server = server
         server.onMessage = { [weak self] in self?.handle($0) }
         server.onExit = { [weak self] in
@@ -60,9 +64,9 @@ final class CodexAgent: AgentRun {
                 self.git = git
                 self.started = mode
                 let started = if let resume {
-                    try await server.call("thread/resume", CodexRPC.threadResume(thread: resume, worktree: worktree, git: git, mode: mode))
+                    try await server.call("thread/resume", CodexRPC.threadResume(thread: resume, worktree: worktree, git: git, mode: mode, research: kind == .research))
                 } else {
-                    try await server.call("thread/start", CodexRPC.threadStart(worktree: worktree, git: git, mode: mode))
+                    try await server.call("thread/start", CodexRPC.threadStart(worktree: worktree, git: git, mode: mode, research: kind == .research))
                 }
                 guard let thread = (started["thread"] as? [String: Any])?["id"] as? String else {
                     throw Shell.Failure(message: "Codex didn't start a thread.")
@@ -167,7 +171,7 @@ final class CodexAgent: AgentRun {
 
     private func answer(_ id: Any, _ request: [String: Any]) {
         guard let server else { return }
-        switch CodexRPC.answer(request, files: files, worktree: worktree) {
+        switch CodexRPC.answer(request, files: files, worktree: worktree, kind: kind) {
         case .accept:
             // Policy lets it through: the job's mode and the user's rules decide (Desk).
             guard let call = CodexRPC.call(request, files: files) else { return server.reply(id, ["decision": "accept"]) }
@@ -245,9 +249,9 @@ final class CodexServer {
     var isRunning: Bool { process.isRunning }
 
     /// `mcp`: the broker, as Codex's `oby` MCP server, its token in the environment.
-    init(home: URL?, in directory: URL?, log: URL?, mcp: AgentMCP? = nil) throws {
+    init(home: URL?, in directory: URL?, log: URL?, mcp: AgentMCP? = nil, reading: [String] = []) throws {
         process.executableURL = URL(filePath: "/usr/bin/env")
-        process.arguments = Agents.sandboxed(Agents.niced(["codex"] + (mcp?.codexArguments ?? []) + ["app-server"]), in: directory, own: home?.path ?? "\(Agents.home)/.codex")
+        process.arguments = Agents.sandboxed(Agents.niced(["codex"] + (mcp?.codexArguments ?? []) + ["app-server"]), in: directory, own: home?.path ?? "\(Agents.home)/.codex", reading: reading)
         process.currentDirectoryURL = directory
         process.environment = try Agents.environment(AppleCheck.environment(worktree: directory)
             .merging(directory.map { Agents.swiftEnvironment(worktree: $0) } ?? [:]) { $1 }
@@ -351,24 +355,32 @@ nonisolated enum CodexRPC {
     /// by themselves (`untrusted`: every command that isn't a known read, and every file change,
     /// comes to Oby). Plan runs read-only and untrusted, for a plan-only turn. On Linux every mode
     /// is untrusted already, and Oby refuses edits in Plan itself.
-    static func threadStart(worktree: URL, git: String?, bubblewrap: Bool = Agents.bubblewrap, mode: PermissionMode = .bypass) -> [String: Any] {
+    static func threadStart(worktree: URL, git: String?, bubblewrap: Bool = Agents.bubblewrap, mode: PermissionMode = .bypass, research: Bool = false) -> [String: Any] {
+        // Proven in `codex app-server generate-json-schema --experimental`: Config.web_search is
+        // a nullable WebSearchMode (`disabled`, `cached`, `indexed`, `live`). Search is model-side;
+        // the Mac's sandbox remains network-disabled.
+        let web: [String: Any] = research ? ["web_search": "live"] : [:]
         if bubblewrap {
-            return ["cwd": worktree.path, "sandbox": "danger-full-access", "approvalPolicy": "untrusted", "approvalsReviewer": "user"]
+            var params: [String: Any] = ["cwd": worktree.path, "sandbox": "danger-full-access", "approvalPolicy": "untrusted", "approvalsReviewer": "user"]
+            if !web.isEmpty { params["config"] = web }
+            return params
         }
         if mode == .plan {
-            return ["cwd": worktree.path, "sandbox": "read-only", "approvalPolicy": "untrusted", "approvalsReviewer": "user"]
+            var params: [String: Any] = ["cwd": worktree.path, "sandbox": "read-only", "approvalPolicy": "untrusted", "approvalsReviewer": "user"]
+            if !web.isEmpty { params["config"] = web }
+            return params
         }
         var params: [String: Any] = ["cwd": worktree.path, "sandbox": "workspace-write",
                                      "approvalPolicy": mode == .bypass ? "on-request" : "untrusted", "approvalsReviewer": "user"]
-        if let git {
-            params["config"] = ["sandbox_workspace_write": ["writable_roots": [git], "network_access": false]]
-        }
+        var config = web
+        if let git { config["sandbox_workspace_write"] = ["writable_roots": [git], "network_access": false] }
+        if !config.isEmpty { params["config"] = config }
         return params
     }
 
     /// A thread Codex already has, in the same sandbox: Oby picks it up again to talk to a finished job.
-    static func threadResume(thread: String, worktree: URL, git: String?, mode: PermissionMode = .bypass) -> [String: Any] {
-        threadStart(worktree: worktree, git: git, mode: mode).merging(["threadId": thread]) { $1 }
+    static func threadResume(thread: String, worktree: URL, git: String?, mode: PermissionMode = .bypass, research: Bool = false) -> [String: Any] {
+        threadStart(worktree: worktree, git: git, mode: mode, research: research).merging(["threadId": thread]) { $1 }
     }
 
     /// What a turn carries when the job's mode changed since its thread started: the mode's
@@ -481,7 +493,7 @@ nonisolated enum CodexRPC {
 
     /// Oby's answer to an approval request, through Policy like Claude Code's permission prompts;
     /// nil for requests that aren't approvals.
-    static func answer(_ request: [String: Any], files: [String: [String]], worktree: URL) -> Answer? {
+    static func answer(_ request: [String: Any], files: [String: [String]], worktree: URL, kind: Plan.Kind? = nil) -> Answer? {
         let params = request["params"] as? [String: Any] ?? [:]
         let calls: [(tool: String, input: [String: Any])]
         switch request["method"] as? String {
@@ -496,7 +508,7 @@ nonisolated enum CodexRPC {
         default:
             return nil
         }
-        return calls.lazy.compactMap { Policy.deny(tool: $0.tool, input: $0.input, worktree: worktree) }.first.map(Answer.decline) ?? .accept
+        return calls.lazy.compactMap { Policy.deny(tool: $0.tool, input: $0.input, worktree: worktree, kind: kind) }.first.map(Answer.decline) ?? .accept
     }
 
     /// An approval request as a tool call, for the job's mode and the user's rules: a command is

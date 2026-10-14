@@ -553,7 +553,40 @@ private struct JobPane: View {
                     onMode: { try desk.changeMode(job.id, to: $0) },
                     onPermission: { try desk.answerPermission(job.id, $0, message: $1) },
                     accounts: desk.accounts.accounts,
-                    onStartNow: { try desk.startNow(job.id) }, onUseAnyway: { _ = desk.liftReserve($0, true) })
+                    onStartNow: { try desk.startNow(job.id) }, onUseAnyway: { _ = desk.liftReserve($0, true) },
+                    readReport: {
+                        guard let saved = desk.store.report(job.id) else { throw Shell.Failure(message: "This job has no research report.") }
+                        return ResearchDocument(job: saved.job, commit: saved.commit, markdown: saved.markdown,
+                                                proposals: saved.proposals.map { ResearchProposal(index: $0.index, repo: $0.repo, title: $0.title, body: $0.body, labels: $0.labels, filed: $0.filed, filedAt: $0.filedAt) })
+                    },
+                    fileProposal: { index, start in
+                        guard var saved = desk.store.report(job.id),
+                              let position = saved.proposals.firstIndex(where: { $0.index == index }) else {
+                            throw Shell.Failure(message: "There's no proposed issue with that index.")
+                        }
+                        guard saved.proposals[position].filed == nil else { throw Shell.Failure(message: "This issue was already filed.") }
+                        let proposal = saved.proposals[position]
+                        do {
+                            let findings = try await Publish.scan(texts: [("issue title", proposal.title), ("issue body", proposal.body)])
+                            guard findings.isEmpty else { throw Shell.Failure(message: "The proposed issue didn't pass Oby's secret scan.") }
+                        } catch { throw Shell.Failure(message: "Oby's secret scanner couldn't run or found a secret; nothing was filed.") }
+                        let result = try await Shell.run(["gh", "issue", "create", "-R", proposal.repo, "--title", proposal.title, "--body-file", "-"],
+                                                         input: Data(proposal.body.utf8), as: .app)
+                        guard result.status == 0, let url = URL(string: result.text), url.scheme == "https", url.host == "github.com" else {
+                            throw Shell.Failure(message: result.err.isEmpty ? "GitHub couldn't create the proposed issue." : result.err)
+                        }
+                        let issueURL = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        saved.proposals[position].filed = issueURL
+                        saved.proposals[position].filedAt = .now
+                        desk.store.save(saved)
+                        desk.sent(job.id, Outgoing(action: .issue, repo: proposal.repo, id: issueURL))
+                        let number = url.path.split(separator: "/").last.flatMap { Int($0) }
+                        var started: Job?
+                        if start, let number {
+                            started = try await desk.dispatch(Desk.NewJob(repo: proposal.repo, kind: "build", task: "Work on #\(number): \(proposal.title)", issue: number))
+                        }
+                        return FileProposalResult(issue: issueURL, jobId: started?.id)
+                    })
         } else {
             JobView(job: job, place: feed.name, account: nil,
                     onStop: { Task { if let stopped = try? await feed.about(job.id, { try await $0.stop(job.id) }) { feed.apply(stopped) } } },
@@ -567,7 +600,9 @@ private struct JobPane: View {
                     onPermission: { try await feed.answer(job.id, $0, message: $1) },
                     accounts: feed.accounts,
                     onStartNow: { if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.startNow(job.id) }) } },
-                    onUseAnyway: { account in if let runner = feed.runner { _ = try await runner.liftReserve(account, true) } })
+                    onUseAnyway: { account in if let runner = feed.runner { _ = try await runner.liftReserve(account, true) } },
+                    readReport: { try await feed.about(job.id) { try await $0.report(job.id) } },
+                    fileProposal: { index, start in try await feed.about(job.id) { try await $0.fileProposal(job.id, index: index, start: start) } })
         }
     }
 }

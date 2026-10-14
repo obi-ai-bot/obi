@@ -20,6 +20,8 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// What to call the job (docs/runner-api.md): the brain's short title, else the runner's
     /// fallback. Older runners don't send it.
     var title: String?
+    /// Whether `GET /v1/jobs/{id}/report` has a saved research report.
+    var report: Bool?
     var status: Status
     var step: String
     var summary: String
@@ -105,7 +107,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
-             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting
+             pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
         case stoppedCloud = "cloudNeedsYou"
@@ -813,6 +815,10 @@ nonisolated struct Runner: Sendable {
 
     /// One job, however old: the list has only the latest 50.
     func job(_ id: String) async throws -> Job { try await call("GET", "v1/jobs/\(id)") }
+    func report(_ id: String) async throws -> ResearchDocument { try await call("GET", "v1/jobs/\(id)/report") }
+    func fileProposal(_ id: String, index: Int, start: Bool) async throws -> FileProposalResult {
+        try await call("POST", "v1/jobs/\(id)/proposals/\(index)/file", body: FileProposalBody(start: start))
+    }
 
     /// Settles an inbox item: an answer (one of its options, or the user's words) goes to its job;
     /// `done` lets it go without one; `later` puts it off until then. Send one of them.
@@ -1108,6 +1114,27 @@ nonisolated struct Runner: Sendable {
                           status: http.statusCode)
     }
 }
+
+nonisolated struct ResearchDocument: Codable, Equatable, Sendable {
+    var job: String
+    var commit: String
+    var markdown: String
+    var proposals: [ResearchProposal]
+}
+
+nonisolated struct ResearchProposal: Codable, Equatable, Identifiable, Sendable {
+    var index: Int
+    var repo: String
+    var title: String
+    var body: String
+    var labels: [String]
+    var filed: String?
+    var filedAt: Date?
+    var id: Int { index }
+}
+
+nonisolated struct FileProposalBody: Encodable, Sendable { var start: Bool }
+nonisolated struct FileProposalResult: Decodable, Sendable { var issue: String; var jobId: String? }
 
 /// The job `POST /v1/jobs` sends back. Swift leaves nils out, but a missing check keeps the plan's,
 /// so no check and the usual model go as null.

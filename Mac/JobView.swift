@@ -35,6 +35,8 @@ struct JobView: View {
     /// Lifts an account's weekly reserve, by id, when the job waits for room only reserves hold
     /// back (#278); nil where it can't.
     var onUseAnyway: ((String) async throws -> Void)? = nil
+    var readReport: (() async throws -> ResearchDocument)? = nil
+    var fileProposal: ((Int, Bool) async throws -> FileProposalResult)? = nil
     @State private var busy = false
     @State private var moving = false
     @State private var moveAgent = ""
@@ -49,6 +51,8 @@ struct JobView: View {
     @State private var telling = false
     @State private var noteProblem: String?
     @State private var requestExpanded = false
+    @State private var researchReport: ResearchDocument?
+    @State private var showingReport = false
 
     /// Publishing by hand: what it would do, in the words shown and approved (the runner's own,
     /// for its jobs), and doing exactly that, after Touch ID.
@@ -63,6 +67,21 @@ struct JobView: View {
             decision
             pipeline
             result
+            if job.report == true {
+                Button("Read report", systemImage: "doc.text") {
+                    Task {
+                        do { researchReport = try await readReport?(); showingReport = researchReport != nil }
+                        catch { problem = error.localizedDescription }
+                    }
+                }
+                .buttonStyle(.bordered)
+                .sheet(isPresented: $showingReport) {
+                    if let researchReport {
+                        ReportView(report: researchReport, onFile: fileProposal)
+                            .frame(minWidth: 560, minHeight: 520)
+                    }
+                }
+            }
             DisclosureGroup("What you asked", isExpanded: $requestExpanded) {
                 ReadingText(job.request).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
