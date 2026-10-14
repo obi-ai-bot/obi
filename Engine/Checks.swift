@@ -1134,13 +1134,23 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         process.standardError = file
         final class Ending: @unchecked Sendable {
             let lock = NSLock()
+            let finished = DispatchSemaphore(value: 0)
             var done: CheckedContinuation<Bool, Never>?
             var timedOut = false
+            func timeOut() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                guard done != nil else { return false }
+                timedOut = true
+                return true
+            }
             func finish() {
                 lock.lock()
                 let done = self.done
                 self.done = nil
+                let timedOut = self.timedOut
                 lock.unlock()
+                if done != nil { finished.signal() }
                 done?.resume(returning: timedOut)
             }
         }
@@ -1151,14 +1161,15 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
             // In a process group of its own: what it starts ends with it (Engine/Jobs.swift).
             let group: ProcessGroup
             do { group = try ProcessGroup.run(process) } catch { return ending.finish() }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                guard process.isRunning else { return }
-                ending.lock.lock()
-                ending.timedOut = true
-                ending.lock.unlock()
+            // A heavily loaded test run can exhaust Dispatch's workers. Keep the deadline on
+            // its own thread so a hung step still ends on time while the suite is busy.
+            Thread.detachNewThread {
+                guard ending.finished.wait(timeout: .now() + timeout) == .timedOut else { return }
+                guard process.isRunning, ending.timeOut() else { ending.finish(); return }
                 group.end(after: Halt.dropping)
                 // A process that can't be ended doesn't keep the Mac busy for good.
-                DispatchQueue.global().asyncAfter(deadline: .now() + Halt.dropping + 5) { ending.finish() }
+                _ = ending.finished.wait(timeout: .now() + Halt.dropping + 5)
+                ending.finish()
             }
         }
         let status = process.isRunning ? -1 : process.terminationStatus
