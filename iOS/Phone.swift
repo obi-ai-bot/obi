@@ -164,10 +164,14 @@ final class Phone {
     var thread: [Turn] { conversation.thread(with: ChatThread.pending(echoes, runner: conversation.runnerTurns)) }
 
     var runner: Runner {
-        let client = link.flatMap { link -> E2E.Client? in
-            guard let device = link.deviceID, let gateway = link.publicKey else { return nil }
-            return try? DeviceKey.e2eClient(device: device, gatewayPublicKey: gateway,
-                                             counterKey: "oby.e2e.counter.\(device).\(link.hostname)")
+        guard let link else { return Runner(base: base) }
+        // Legacy links without a pinned gateway key keep working in plaintext until re-paired.
+        guard let gateway = link.publicKey else { return Runner(base: base) }
+        guard let device = link.deviceID,
+              let client = try? DeviceKey.e2eClient(device: device, gatewayPublicKey: gateway,
+                                                     counterKey: "oby.e2e.counter.\(device).\(link.hostname)") else {
+            // Key pinned but client unavailable (e.g. locked): never fall back to plaintext.
+            return Runner(base: base, e2eRequired: true)
         }
         return Runner(base: base, e2e: client)
     }
@@ -557,19 +561,24 @@ final class Phone {
         // `runner` builds its E2E client with `try?`: a missing or broken gateway key must not
         // block publish approval for devices paired before E2E.
         let id = try await runner.register(name: "iPhone", publicKey: try DeviceKey.publicKey())
-        if let link { self.link = MacLink(name: link.name, hostname: link.hostname, deviceID: id, publicKey: link.publicKey) }
+        if let link {
+            let updated = MacLink(name: link.name, hostname: link.hostname, deviceID: id, publicKey: link.publicKey)
+            // Reassigning `link` restarts the connection; only write when something changed.
+            if updated != link { self.link = updated }
+        }
         UserDefaults.standard.set(id, forKey: deviceKey)
         return id
     }
 
-    /// Completes a typed or scanned Mac link before any ordinary device request is sent. The
-    /// pairing endpoint is the only gateway route that is intentionally cleartext; it requires the
-    /// runner's pairing window and a P-256 possession proof, and returns the pinned gateway key.
+    /// Completes a typed or scanned Mac link before any ordinary device request is sent. The body
+    /// is sealed to the gateway key the QR already pinned so the one-time secret never crosses the
+    /// tunnel in plaintext; the runner's pairing window and a P-256 possession proof still apply.
     func pair(_ qr: PairingQR) async throws {
         guard let hostname = MacLink.hostname(from: qr.hostname), qr.secret.isEmpty == false,
               qr.gatewayPublicKey.count == 32 else { throw RunnerError(message: "That pairing QR is invalid.") }
         let base = URL(string: "https://\(hostname)")!
-        let answer = try await Runner(base: base).pair(name: "iPhone", publicKey: try DeviceKey.publicKey(), pairingSecret: qr.secret)
+        let answer = try await Runner(base: base).pair(name: "iPhone", publicKey: try DeviceKey.publicKey(),
+                                                       pairingSecret: qr.secret, gatewayPublicKey: qr.gatewayPublicKey)
         guard answer.publicKey == qr.gatewayPublicKey else {
             throw RunnerError(message: "The Mac's gateway key changed. Scan its pairing QR again.")
         }

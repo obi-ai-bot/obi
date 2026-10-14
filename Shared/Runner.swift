@@ -747,11 +747,15 @@ nonisolated struct Runner: Sendable {
     var base: URL
     var token: String? = nil
     var e2e: E2E.Client?
+    /// When the gateway key is pinned but the E2E client could not be built (key locked, etc.),
+    /// refuse to send rather than falling back to plaintext.
+    var e2eRequired: Bool = false
 
-    init(base: URL, token: String? = nil, e2e: E2E.Client? = nil) {
+    init(base: URL, token: String? = nil, e2e: E2E.Client? = nil, e2eRequired: Bool = false) {
         self.base = base
         self.token = token
         self.e2e = e2e
+        self.e2eRequired = e2eRequired
     }
 
     static let defaultURL = URL(string: "https://tetrix-lab.tail8de49b.ts.net:8443")!
@@ -926,16 +930,17 @@ nonisolated struct Runner: Sendable {
     /// Pairs a watch's key, approved with Face ID, and hands the runner the Access service token
     /// for its vault. Answers the watch's id and the Watch API's address.
     func pairWatch(name: String, publicKey: Data, clientID: String, clientSecret: String, approval: PairingApproval,
-                   e2ePublicKey: Data? = nil) async throws -> (id: String, url: URL) {
+                   e2ePublicKey: Data? = nil) async throws -> (id: String, url: URL, publicKey: Data?) {
         struct Body: Encodable {
             var name: String; var publicKey: String; var accessClientId: String; var accessClientSecret: String
             var approval: PairingApproval; var e2ePublicKey: String?
         }
-        struct Answer: Decodable { var id: String; var url: URL }
+        struct Answer: Decodable { var id: String; var url: URL; var publicKey: String? }
         let answer: Answer = try await call("POST", "v1/watches", body: Body(name: name, publicKey: publicKey.base64EncodedString(),
                                                                           accessClientId: clientID, accessClientSecret: clientSecret, approval: approval,
                                                                           e2ePublicKey: e2ePublicKey?.base64EncodedString()))
-        return (answer.id, answer.url)
+        let gateway = answer.publicKey.flatMap { Data(base64Encoded: $0) }.flatMap { $0.count == 32 ? $0 : nil }
+        return (answer.id, answer.url, gateway)
     }
     #endif
 
@@ -949,13 +954,28 @@ nonisolated struct Runner: Sendable {
     }
 
     #if os(iOS) || os(macOS)
-    func pair(name: String, publicKey: Data, pairingSecret: String) async throws -> (id: String, publicKey: Data) {
+    /// Redeems a one-time pairing secret. The body is sealed to `gatewayPublicKey` from the QR so
+    /// the secret never crosses the tunnel in plaintext; the cleartext answer carries the same key
+    /// for the client to pin before it has a session.
+    func pair(name: String, publicKey: Data, pairingSecret: String, gatewayPublicKey: Data) async throws -> (id: String, publicKey: Data) {
         struct Body: Encodable { var name: String; var publicKey: String; var e2ePublicKey: String; var e2eProof: String; var pairingSecret: String }
         struct Answer: Decodable { var id: String; var publicKey: String }
+        guard gatewayPublicKey.count == 32 else { throw RunnerError(message: "The Mac's gateway key isn't X25519.") }
         let e2e = try DeviceKey.e2ePublicKey()
-        let body = Body(name: name, publicKey: publicKey.base64EncodedString(), e2ePublicKey: e2e.base64EncodedString(),
-                        e2eProof: try DeviceKey.e2eRegistrationProof(publicKey: publicKey, e2ePublicKey: e2e), pairingSecret: pairingSecret)
-        let answer: Answer = try await call("POST", "v1/pairing", body: body)
+        let clear = try Self.encoder.encode(Body(name: name, publicKey: publicKey.base64EncodedString(),
+                                                 e2ePublicKey: e2e.base64EncodedString(),
+                                                 e2eProof: try DeviceKey.e2eRegistrationProof(publicKey: publicKey, e2ePublicKey: e2e),
+                                                 pairingSecret: pairingSecret))
+        var request = URLRequest(url: URL(string: "v1/pairing", relativeTo: base.appending(path: "/"))!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 45
+        let metadata = E2E.Metadata(method: "POST", route: Self.encodedRoute(request.url, fallback: "/v1/pairing"),
+                                    device: E2E.pairingDevice, counter: 1)
+        let sealed = try E2E.seal(clear, to: gatewayPublicKey, metadata: metadata)
+        E2E.apply((sealed, metadata), to: &request)
+        let (data, response) = try await URLSession.shared.data(for: signed(request))
+        try Self.check(response, data)
+        let answer = try Self.decoder.decode(Answer.self, from: data)
         guard let gateway = Data(base64Encoded: answer.publicKey), gateway.count == 32 else {
             throw RunnerError(message: "The runner returned no valid E2E gateway key.")
         }
@@ -985,11 +1005,7 @@ nonisolated struct Runner: Sendable {
 
     /// The commits of an Apple check this Mac took, as a git bundle (empty when they're on GitHub already).
     func bundle(_ id: String) async throws -> Data {
-        var request = URLRequest(url: base.appending(path: "v1/checks/\(id)/bundle"))
-        request.timeoutInterval = 120
-        let (data, response) = try await URLSession.shared.data(for: signed(request))
-        try Self.check(response, data)
-        return data
+        try await send("GET", "v1/checks/\(id)/bundle", timeout: 120)
     }
 
     /// What this Mac found running a check it took.
@@ -1005,15 +1021,15 @@ nonisolated struct Runner: Sendable {
         AsyncThrowingStream { stream in
             let task = Task {
                 do {
+                    if e2eRequired && e2e == nil {
+                        throw RunnerError(message: "End-to-end encryption isn't available right now. Unlock your device and try again.")
+                    }
                     var request = URLRequest(url: base.appending(path: "v1/events"))
                     if let e2e {
                         let route = Self.encodedRoute(request.url, fallback: "/v1/events")
                         let sealed = try e2e.seal(Data(), method: "GET", route: route)
-                        request.httpBody = sealed.body
-                        request.setValue(E2E.version, forHTTPHeaderField: "Oby-E2E-Version")
-                        request.setValue(e2e.device, forHTTPHeaderField: "Oby-E2E-Device")
-                        request.setValue(String(sealed.metadata.counter), forHTTPHeaderField: "Oby-E2E-Counter")
-                        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+                        request.httpMethod = "GET"
+                        E2E.apply(sealed, to: &request)
                     }
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     request.timeoutInterval = 60
@@ -1105,6 +1121,9 @@ nonisolated struct Runner: Sendable {
     /// The answer's body, unread: for a call whose answer says nothing the app needs.
     @discardableResult
     private func send(_ method: String, _ path: String, body: (any Encodable)? = nil, timeout: TimeInterval = 45) async throws -> Data {
+        if e2eRequired && e2e == nil {
+            throw RunnerError(message: "End-to-end encryption isn't available right now. Unlock your device and try again.")
+        }
         var request = URLRequest(url: URL(string: path, relativeTo: base.appending(path: "/"))!)
         request.httpMethod = method
         request.timeoutInterval = timeout
@@ -1113,12 +1132,8 @@ nonisolated struct Runner: Sendable {
             let clear = try body.map { try Self.encoder.encode($0) } ?? Data()
             let route = Self.encodedRoute(request.url, fallback: "/\(path)")
             let sealed = try e2e.seal(clear, method: method, route: route)
-            request.httpBody = sealed.body
             requestCounter = sealed.metadata.counter
-            request.setValue(E2E.version, forHTTPHeaderField: "Oby-E2E-Version")
-            request.setValue(e2e.device, forHTTPHeaderField: "Oby-E2E-Device")
-            request.setValue(String(sealed.metadata.counter), forHTTPHeaderField: "Oby-E2E-Counter")
-            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            E2E.apply(sealed, to: &request)
         } else if let body {
             request.httpBody = try Self.encoder.encode(body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")

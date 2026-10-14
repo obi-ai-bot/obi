@@ -634,6 +634,9 @@ final class API {
             throw APIError(.unauthorized, "That pairing secret is invalid or has already been used.")
         }
         let answer = try register(device)
+        // Always consume: register() only deletes the secret for brand-new devices, not when an
+        // existing device sets its first E2E key through pairing.
+        devices.consumePairing()
         return answer
     }
 
@@ -900,6 +903,7 @@ extension HTTPField.Name {
     static let obyE2EVersion = Self("Oby-E2E-Version")!
     static let obyE2EDevice = Self("Oby-E2E-Device")!
     static let obyE2ECounter = Self("Oby-E2E-Counter")!
+    static let obyE2EEnvelope = Self("Oby-E2E-Envelope")!
 }
 
 /// An answer that isn't what was asked for: a status, and one line a person can read.

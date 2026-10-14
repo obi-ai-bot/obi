@@ -56,11 +56,17 @@ nonisolated struct WatchLink: Sendable {
     /// The watch's static X25519 identity for gateway envelopes, separate from the signing key.
     static func e2ePublicKey() throws -> Data { try e2eKey().publicKey }
 
-    /// Sealed client when this watch pinned the Mac's gateway key at pairing.
-    func e2eClient() -> E2E.Client? {
-        guard let gateway = pairing.gatewayPublicKey, gateway.count == 32 else { return nil }
-        return try? E2E.Client(device: pairing.watch, keys: Self.e2eKey(), gatewayPublicKey: gateway,
-                               counterKey: "oby.e2e.counter.watch.\(pairing.watch)")
+    /// Sealed client when this watch pinned the Watch API runner's gateway key at pairing.
+    func e2eClient() throws -> E2E.Client? {
+        guard let gateway = pairing.gatewayPublicKey else { return nil }
+        guard gateway.count == 32 else { throw RunnerError(message: "The Watch API's gateway key isn't X25519.") }
+        do {
+            return try E2E.Client(device: pairing.watch, keys: Self.e2eKey(), gatewayPublicKey: gateway,
+                                  counterKey: "oby.e2e.counter.watch.\(pairing.watch)")
+        } catch {
+            // Key pinned but unavailable: never fall back to plaintext.
+            throw RunnerError(message: "End-to-end encryption isn't available right now. Unlock your watch and try again.")
+        }
     }
 
     /// The key lives in the Secure Enclave; the keychain keeps the wrapped blob only this
@@ -188,7 +194,7 @@ nonisolated struct WatchLink: Sendable {
                     var parser = EventParser()
                     var line = Data()
                     var framed = Data()
-                    let e2e = e2eClient()
+                    let e2e = try e2eClient()
                     let requestCounter = UInt64(request.value(forHTTPHeaderField: "Oby-E2E-Counter") ?? "0") ?? 0
                     // Newlines only, as the iPhone splits them (Shared/Runner.swift).
                     for try await byte in bytes {
@@ -226,9 +232,7 @@ nonisolated struct WatchLink: Sendable {
         let clear = try body.map { try Runner.encoder.encode($0) } ?? Data()
         var request = try signed(method, target, body: clear)
         request.timeoutInterval = timeout
-        if request.value(forHTTPHeaderField: "Oby-E2E-Version") != nil {
-            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        } else if body != nil {
+        if request.value(forHTTPHeaderField: "Oby-E2E-Version") == nil, body != nil {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         let (answer, response) = try await URLSession.shared.data(for: request)
@@ -239,46 +243,43 @@ nonisolated struct WatchLink: Sendable {
 
     /// A request to `target` (path and query, no leading slash) with the Access service token and
     /// this watch's signature over exactly what the runner will see. When the gateway key is pinned,
-    /// the body is an HPKE envelope and the wire carries `Oby-E2E-*` headers like `Runner.call`.
+    /// GET/HEAD carry the envelope in `Oby-E2E-Envelope` (no body); other methods use the body.
     private func signed(_ method: String, _ target: String, body: Data) throws -> URLRequest {
         guard let url = URL(string: "/" + target, relativeTo: pairing.url)?.absoluteURL,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             throw RunnerError(message: "The Watch API's address isn't right. Pair the watch again on your iPhone.")
         }
         let path = components.percentEncodedPath + (components.percentEncodedQuery.map { "?" + $0 } ?? "")
-        var wire = body
-        var requestCounter: UInt64?
-        if let e2e = e2eClient() {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = 45
+        let e2e = try e2eClient()
+        let signedBody: Data
+        if let e2e {
             let sealed = try e2e.seal(body, method: method, route: path)
-            wire = sealed.body
-            requestCounter = sealed.metadata.counter
+            E2E.apply(sealed, to: &request)
+            // Signature covers the bytes on the wire: body for POST, empty for GET (envelope in header).
+            signedBody = request.httpBody ?? Data()
+        } else {
+            signedBody = body
+            if method != "GET" { request.httpBody = body }
         }
         let time = String(Int(Date.now.timeIntervalSince1970))
         let nonce = UUID().uuidString
-        let hash = SHA256.hash(data: wire).map { String(format: "%02x", $0) }.joined()
+        let hash = SHA256.hash(data: signedBody).map { String(format: "%02x", $0) }.joined()
         let message = Data("oby-watch\n\(method)\n\(path)\n\(time)\n\(nonce)\n\(hash)".utf8)
         let signature = try Self.key().signature(for: message)
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        // Planning waits for the brain, which can take up to about 20 seconds.
-        request.timeoutInterval = 45
-        if method != "GET" || requestCounter != nil { request.httpBody = wire }
         request.setValue(pairing.clientID, forHTTPHeaderField: "CF-Access-Client-Id")
         request.setValue(pairing.clientSecret, forHTTPHeaderField: "CF-Access-Client-Secret")
         request.setValue(pairing.watch, forHTTPHeaderField: "Oby-Watch")
         request.setValue(time, forHTTPHeaderField: "Oby-Time")
         request.setValue(nonce, forHTTPHeaderField: "Oby-Nonce")
         request.setValue(signature.derRepresentation.base64EncodedString(), forHTTPHeaderField: "Oby-Signature")
-        if let requestCounter, let e2e = e2eClient() {
-            request.setValue(E2E.version, forHTTPHeaderField: "Oby-E2E-Version")
-            request.setValue(e2e.device, forHTTPHeaderField: "Oby-E2E-Device")
-            request.setValue(String(requestCounter), forHTTPHeaderField: "Oby-E2E-Counter")
-        }
         return request
     }
 
     private func openResponse(_ data: Data, request: URLRequest, method: String, target: String) throws -> Data {
-        guard let e2e = e2eClient(), request.value(forHTTPHeaderField: "Oby-E2E-Version") != nil else { return data }
+        guard let e2e = try e2eClient(), request.value(forHTTPHeaderField: "Oby-E2E-Version") != nil else { return data }
         guard let url = request.url, let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return data }
         let path = components.percentEncodedPath + (components.percentEncodedQuery.map { "?" + $0 } ?? "")
         let counter = UInt64(request.value(forHTTPHeaderField: "Oby-E2E-Counter") ?? "0") ?? 0

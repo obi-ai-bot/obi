@@ -162,17 +162,28 @@ final class RunnerFeed {
         if local {
             guard let token else { return nil }
             let owner = Runner(base: LocalRunner.url, token: token)
-            if let device, let e2e = device.e2eClient(for: Runner(base: LocalRunner.gatewayURL))
-                ?? device.e2eClient(for: owner) {
-                return Runner(base: LocalRunner.gatewayURL, e2e: e2e)
+            let gateway = Runner(base: LocalRunner.gatewayURL)
+            if let device {
+                if let e2e = device.e2eClient(for: gateway) ?? device.e2eClient(for: owner) {
+                    return Runner(base: LocalRunner.gatewayURL, e2e: e2e)
+                }
+                if device.gatewayPublicKey(on: gateway) != nil || device.gatewayPublicKey(on: owner) != nil {
+                    return Runner(base: LocalRunner.gatewayURL, e2eRequired: true)
+                }
             }
             return owner
         }
         return URL(string: url.trimmingCharacters(in: .whitespaces)).flatMap { base -> Runner? in
             guard base.host() != nil else { return nil }
             let plain = Runner(base: base, token: token)
-            guard let device, let e2e = device.e2eClient(for: plain) else { return plain }
-            return Runner(base: base, token: token, e2e: e2e)
+            guard let device else { return plain }
+            if let e2e = device.e2eClient(for: plain) {
+                return Runner(base: base, token: token, e2e: e2e)
+            }
+            if device.gatewayPublicKey(on: plain) != nil {
+                return Runner(base: base, token: token, e2eRequired: true)
+            }
+            return plain
         }
     }
 
@@ -326,7 +337,8 @@ final class RunnerFeed {
             do {
                 if local {
                     let gateway = Runner(base: LocalRunner.gatewayURL)
-                    if device.e2eClient(for: gateway) != nil || device.id(on: Runner(base: LocalRunner.url)) != nil {
+                    // Re-pair Macs that registered before E2E (id without a pinned gateway key).
+                    if device.e2eClient(for: gateway) != nil {
                         let sealed = self.runner ?? device.sealed(gateway)
                         try await device.register(with: sealed)
                     } else {

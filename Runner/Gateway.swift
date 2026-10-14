@@ -66,14 +66,20 @@ final class Gateway: @unchecked Sendable {
         return clear
     }
 
+    /// Pairing bootstrap: sealed to this gateway's public key before the device is registered.
+    func openPairing(_ body: Data, metadata: E2E.Metadata) throws -> Data {
+        try E2E.open(body, with: keys.privateKey, metadata: metadata)
+    }
+
     func seal(_ body: Data, to publicKey: Data, metadata: E2E.Metadata) throws -> Data {
         try E2E.seal(body, to: publicKey, metadata: metadata, authenticatedBy: keys.privateKey)
     }
 }
 
 /// The remote-device boundary. Every request body is authenticated before API sees it and every
-/// response body is encrypted before it leaves the runner. Pairing and the owner-only API remain
-/// on the ordinary runner port; this middleware is installed on the device gateway port.
+/// response body is encrypted before it leaves the runner. Pairing is sealed to the gateway key
+/// from the QR (base HPKE); other routes need a registered device key. GET/HEAD envelopes may
+/// arrive in `Oby-E2E-Envelope` because URLSession refuses a body on GET.
 struct E2EGate<Context: RequestContext>: RouterMiddleware {
     let gateway: Gateway
     private let bodyLimit = 4 << 20
@@ -81,7 +87,7 @@ struct E2EGate<Context: RequestContext>: RouterMiddleware {
     @concurrent func handle(_ request: Request, context: Context,
                             next: @concurrent (Request, Context) async throws -> Response) async throws -> Response {
         if request.uri.path == "/v1/pairing" {
-            return try await next(request, context)
+            return try await pairing(request, context: context, next: next)
         }
         guard request.headers[.obyE2EVersion] == E2E.version,
               let device = request.headers[.obyE2EDevice], !device.isEmpty,
@@ -92,31 +98,69 @@ struct E2EGate<Context: RequestContext>: RouterMiddleware {
                                     device: device, counter: counter)
         var request = request
         do {
-            let wire = try await request.collectBody(upTo: bodyLimit)
-            let clear = try gateway.open(Data(wire.readableBytesView), metadata: metadata)
+            let wire = try await Self.wire(from: &request, limit: bodyLimit)
+            let clear = try gateway.open(wire, metadata: metadata)
             request.body = .init(buffer: ByteBuffer(bytes: clear))
-            var response: Response
-            do {
-                response = try await next(request, context)
-            } catch let error as APIError {
-                response = error.response
-            } catch let error as HTTPError {
-                response = APIError(error.status, error.body ?? error.status.reasonPhrase).response
-            } catch {
-                response = APIError(.internalServerError, error.localizedDescription).response
-            }
-            guard let publicKey = gateway.devicePublicKey(device) else { throw E2E.Failure.invalidKey }
-            response.headers[.obyE2EVersion] = E2E.version
-            response.headers[.contentType] = "application/octet-stream"
-            response.body = response.body.map { buffer in
-                let responseMetadata = E2E.Metadata(method: metadata.method, route: metadata.route,
-                                                    device: device, counter: metadata.counter, direction: .response)
-                let sealed = try gateway.seal(Data(buffer.readableBytesView), to: publicKey, metadata: responseMetadata)
-                return ByteBuffer(bytes: E2E.frame(sealed))
-            }
-            return response
+            return try await sealResponse(try await run(request, context: context, next: next),
+                                          device: device, metadata: metadata)
         } catch let error as E2E.Failure {
             throw APIError(.unauthorized, "The encrypted device message was rejected (\(String(describing: error))).")
         }
+    }
+
+    /// Pairing is sealed to the gateway public key the QR already pinned; the one-time secret stays
+    /// inside the ciphertext. The device is not registered yet, so this uses base HPKE.
+    private func pairing(_ request: Request, context: Context,
+                         next: @concurrent (Request, Context) async throws -> Response) async throws -> Response {
+        guard request.headers[.obyE2EVersion] == E2E.version,
+              let device = request.headers[.obyE2EDevice], device == E2E.pairingDevice,
+              let counterText = request.headers[.obyE2ECounter], let counter = UInt64(counterText) else {
+            throw APIError(.unauthorized, "Pairing must be sealed to the Mac's gateway key from the QR.")
+        }
+        let metadata = E2E.Metadata(method: request.method.rawValue, route: request.uri.string,
+                                    device: device, counter: counter)
+        var request = request
+        do {
+            let wire = try await Self.wire(from: &request, limit: bodyLimit)
+            let clear = try gateway.openPairing(wire, metadata: metadata)
+            request.body = .init(buffer: ByteBuffer(bytes: clear))
+            // Pairing answers stay cleartext so the client can pin the gateway key before it has a
+            // session; the one-time secret was only in the request.
+            return try await run(request, context: context, next: next)
+        } catch let error as E2E.Failure {
+            throw APIError(.unauthorized, "The encrypted device message was rejected (\(String(describing: error))).")
+        }
+    }
+
+    private func run(_ request: Request, context: Context,
+                     next: @concurrent (Request, Context) async throws -> Response) async throws -> Response {
+        do {
+            return try await next(request, context)
+        } catch let error as APIError {
+            return error.response
+        } catch let error as HTTPError {
+            return APIError(error.status, error.body ?? error.status.reasonPhrase).response
+        } catch {
+            return APIError(.internalServerError, error.localizedDescription).response
+        }
+    }
+
+    private func sealResponse(_ response: Response, device: String, metadata: E2E.Metadata) throws -> Response {
+        guard let publicKey = gateway.devicePublicKey(device) else { throw E2E.Failure.invalidKey }
+        var response = response
+        response.headers[.obyE2EVersion] = E2E.version
+        response.headers[.contentType] = "application/octet-stream"
+        response.body = response.body.map { buffer in
+            let responseMetadata = E2E.Metadata(method: metadata.method, route: metadata.route,
+                                                device: device, counter: metadata.counter, direction: .response)
+            let sealed = try gateway.seal(Data(buffer.readableBytesView), to: publicKey, metadata: responseMetadata)
+            return ByteBuffer(bytes: E2E.frame(sealed))
+        }
+        return response
+    }
+
+    private static func wire(from request: inout Request, limit: Int) async throws -> Data {
+        let body = Data((try await request.collectBody(upTo: limit)).readableBytesView)
+        return try E2E.wire(body: body, envelopeHeaderValue: request.headers[.obyE2EEnvelope])
     }
 }

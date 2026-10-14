@@ -48,8 +48,9 @@ final class WatchPairing {
         var message: [String: Any] = [WatchWire.kind: WatchWire.Kind.paired.rawValue, WatchWire.watch: paired.id,
                                       WatchWire.url: paired.url.absoluteString, WatchWire.clientID: clientID,
                                       WatchWire.clientSecret: clientSecret]
-        // Pin the same gateway key the iPhone already trusts; without it the watch stays on cleartext.
-        if let gateway = phone.link?.publicKey, gateway.count == 32 {
+        // The Watch API runner's own gateway key (not the Mac link's): sealing is only required once
+        // the watch has this key.
+        if let gateway = paired.publicKey, gateway.count == 32 {
             message[WatchWire.gatewayPublicKey] = gateway
         }
         _ = try await ask(message)

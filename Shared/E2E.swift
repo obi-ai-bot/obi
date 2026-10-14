@@ -4,6 +4,9 @@ import CryptoKit
 import Crypto
 #endif
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 #if canImport(Security)
 import Security
 #endif
@@ -15,6 +18,10 @@ import Security
 public enum E2E {
     public static let version = "oby-e2e-1"
     public static let suite = HPKE.Ciphersuite.Curve25519_SHA256_ChachaPoly
+    /// Base64 HPKE envelope for sealed GET/HEAD: URLSession refuses a body on GET (-1103).
+    public static let envelopeHeader = "Oby-E2E-Envelope"
+    /// Device id used while sealing the cleartext pairing bootstrap (not yet registered).
+    public static let pairingDevice = "pairing"
 
     public static func frame(_ envelope: Data) -> Data {
         var length = UInt32(envelope.count).bigEndian
@@ -26,6 +33,33 @@ public enum E2E {
         let length = data.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
         guard data.count == 4 + Int(length) else { throw Failure.invalidMessage }
         return data.dropFirst(4)
+    }
+
+    /// Puts a sealed envelope on `request`. GET and HEAD carry it in `Oby-E2E-Envelope` with no
+    /// `httpBody` (Apple's URLSession refuses those); other methods use the body.
+    public static func apply(_ sealed: (body: Data, metadata: Metadata), to request: inout URLRequest) {
+        request.setValue(version, forHTTPHeaderField: "Oby-E2E-Version")
+        request.setValue(sealed.metadata.device, forHTTPHeaderField: "Oby-E2E-Device")
+        request.setValue(String(sealed.metadata.counter), forHTTPHeaderField: "Oby-E2E-Counter")
+        let method = (request.httpMethod ?? "GET").uppercased()
+        if method == "GET" || method == "HEAD" {
+            request.httpBody = nil
+            request.setValue(sealed.body.base64EncodedString(), forHTTPHeaderField: envelopeHeader)
+            request.setValue(nil, forHTTPHeaderField: "Content-Type")
+        } else {
+            request.httpBody = sealed.body
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            request.setValue(nil, forHTTPHeaderField: envelopeHeader)
+        }
+    }
+
+    /// The wire envelope from a request: the body, or the GET/HEAD header when the body is empty.
+    public static func wire(body: Data, envelopeHeaderValue: String?) throws -> Data {
+        if !body.isEmpty { return body }
+        guard let envelopeHeaderValue, let data = Data(base64Encoded: envelopeHeaderValue), !data.isEmpty else {
+            throw Failure.invalidMessage
+        }
+        return data
     }
 
     public struct KeyPair: Sendable {

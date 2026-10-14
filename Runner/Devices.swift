@@ -97,6 +97,11 @@ final class Devices {
         return saved.trimmingCharacters(in: .whitespacesAndNewlines) == secret
     }
 
+    /// Uses up the one-time pairing secret after a successful `/v1/pairing`.
+    func consumePairing() {
+        try? FileManager.default.removeItem(at: pairing)
+    }
+
     /// Opens pairing for exactly one device. The secret is generated here, beside the device
     /// records, so a stale or user-created marker can never authorize a new device.
     func openPairing() throws -> String {

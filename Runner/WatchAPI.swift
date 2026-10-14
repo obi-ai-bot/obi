@@ -91,12 +91,16 @@ final class WatchAPI {
             throw APIError(.conflict, "Set up the Watch API on the runner first: \(access.file.path) (docs/runner-api.md).")
         }
         try api.devices.checkPairing(new.approval, publicKey: new.publicKey, now: now)
+        // Only pin an E2E key when this runner can hand back the matching gateway public key.
+        let e2e = gateway != nil ? new.e2ePublicKey : nil
         let id = try watches.pair(name: new.name, publicKey: new.publicKey, clientID: new.accessClientId,
-                                  clientSecret: new.accessClientSecret, e2ePublicKey: new.e2ePublicKey, now: now)
-        if let e2e = new.e2ePublicKey, let gateway {
+                                  clientSecret: new.accessClientSecret, e2ePublicKey: e2e, now: now)
+        if let e2e, let gateway {
             try gateway.register(device: id, publicKey: e2e)
         }
-        return API.json(["id": id, "url": config.url.absoluteString], status: .created)
+        var answer: [String: String] = ["id": id, "url": config.url.absoluteString]
+        if let key = gateway?.publicKey.base64EncodedString() { answer["publicKey"] = key }
+        return API.json(answer, status: .created)
     }
 
     func remove(_ id: String) throws -> Response {
@@ -187,9 +191,10 @@ struct WatchGate<Context: RequestContext>: RouterMiddleware {
                 throw APIError(.unauthorized, "Sign the request with a paired Watch's key: Oby-Watch, Oby-Time, Oby-Nonce and Oby-Signature.")
             }
             var request = request
-            let wire = Data((try await request.collectBody(upTo: WatchAPI.bodyLimit)).readableBytesView)
+            let body = Data((try await request.collectBody(upTo: WatchAPI.bodyLimit)).readableBytesView)
+            // Signature covers the HTTP body bytes (empty for sealed GET; envelope is in the header).
             _ = try await api.authorize(Watches.Signed(watch: watch, method: request.method.rawValue, target: request.uri.string,
-                                                       time: time, nonce: nonce, signature: signature, body: wire))
+                                                       time: time, nonce: nonce, signature: signature, body: body))
             let sealed = request.headers[.obyE2EVersion] == E2E.version
             let requires = await api.watches.requiresE2E(watch)
             if requires && !sealed {
@@ -204,11 +209,12 @@ struct WatchGate<Context: RequestContext>: RouterMiddleware {
                 }
                 let metadata = E2E.Metadata(method: request.method.rawValue, route: request.uri.string,
                                             device: device, counter: counter)
+                let wire = try E2E.wire(body: body, envelopeHeaderValue: request.headers[.obyE2EEnvelope])
                 let clear = try gateway.open(wire, metadata: metadata)
                 request.body = .init(buffer: ByteBuffer(bytes: clear))
                 e2eMetadata = metadata
             } else {
-                request.body = .init(buffer: ByteBuffer(bytes: wire))
+                request.body = .init(buffer: ByteBuffer(bytes: body))
             }
             var response: Response
             do {

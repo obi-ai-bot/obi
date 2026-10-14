@@ -126,6 +126,41 @@ struct MacPublishTests {
         #expect(stub.requests[0].json?["publicKey"] == nil)
     }
 
+    /// Sealed GETs put the envelope in `Oby-E2E-Envelope` with no body (URLSession -1103 otherwise).
+    @Test func sealedGetUsesEnvelopeHeaderNotBody() async throws {
+        let mac = E2E.KeyPair()
+        let phone = E2E.KeyPair()
+        let client = try E2E.Client(device: "mac-device", keys: phone, gatewayPublicKey: mac.publicKey,
+                                    counterKey: "oby-test-get-\(UUID().uuidString)")
+        let stub = RunnerStub(dataAnswer: { request in
+            #expect(request.method == "GET")
+            #expect(request.body.isEmpty)
+            #expect(request.headers["Oby-E2E-Envelope"] != nil)
+            let wire = Data(base64Encoded: request.headers["Oby-E2E-Envelope"]!)!
+            let counter = UInt64(request.headers["Oby-E2E-Counter"] ?? "") ?? 0
+            let metadata = E2E.Metadata(method: "GET", route: request.path, device: "mac-device", counter: counter)
+            _ = try! E2E.open(wire, with: mac.privateKey, metadata: metadata, authenticatedBy: phone.privateKey.publicKey)
+            let responseMetadata = E2E.Metadata(method: "GET", route: request.path, device: "mac-device",
+                                                counter: counter, direction: .response)
+            let sealed = try! E2E.seal(Data(#"{"runner":{"host":"test","version":"0"}}"#.utf8), to: phone.publicKey,
+                                       metadata: responseMetadata, authenticatedBy: mac.privateKey)
+            return (200, E2E.frame(sealed))
+        })
+        let runner = Runner(base: stub.runner.base, e2e: client)
+        _ = try await runner.status()
+        #expect(stub.requests.count == 1)
+        #expect(stub.requests[0].body.isEmpty)
+        #expect(stub.requests[0].headers["Oby-E2E-Envelope"] != nil)
+    }
+
+    @Test func pinnedGatewayWithoutClientRefusesPlaintext() async {
+        let stub = RunnerStub { _ in (200, #"{"id":"x"}"#) }
+        let runner = Runner(base: stub.runner.base, e2eRequired: true)
+        let error = await #expect(throws: RunnerError.self) { try await runner.register(name: "Mac", publicKey: Data(repeating: 1, count: 65)) }
+        #expect(error?.message.contains("End-to-end") == true)
+        #expect(stub.requests.isEmpty)
+    }
+
     /// A job older than the latest 50 (an inbox item's Open job, or an alert's Publish) is fetched
     /// by its id, so its screen and its Publish open; one already listed isn't asked for again.
     @Test func olderJobIsFetched() async throws {

@@ -111,9 +111,15 @@ final class MacDevice {
     }
 
     /// A runner that seals every call when this Mac has pinned the gateway key; otherwise `runner`.
+    /// When the key is pinned but the client cannot be built, plaintext is refused.
     func sealed(_ runner: Runner) -> Runner {
-        guard let e2e = e2eClient(for: runner) else { return runner }
-        return Runner(base: runner.base, token: runner.token, e2e: e2e)
+        if let e2e = e2eClient(for: runner) {
+            return Runner(base: runner.base, token: runner.token, e2e: e2e)
+        }
+        if gatewayPublicKey(on: runner) != nil {
+            return Runner(base: runner.base, token: runner.token, e2eRequired: true)
+        }
+        return runner
     }
 
     /// Completes gateway pairing for this Mac: pins the QR/openPairing gateway key, redeems the
@@ -125,7 +131,8 @@ final class MacDevice {
         guard gatewayPublicKey.count == 32 else { throw RunnerError(message: "The Mac's gateway key isn't X25519.") }
         defaults.set(gatewayPublicKey, forKey: Self.gatewayKey(gateway))
         do {
-            let answer = try await gateway.pair(name: name, publicKey: try key.publicKey(), pairingSecret: secret)
+            let answer = try await gateway.pair(name: name, publicKey: try key.publicKey(), pairingSecret: secret,
+                                                gatewayPublicKey: gatewayPublicKey)
             guard answer.publicKey == gatewayPublicKey else {
                 throw RunnerError(message: "The Mac's gateway key changed. Open pairing again.")
             }

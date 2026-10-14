@@ -24,13 +24,15 @@ key, and device registration includes the device's 32-byte X25519 public key as 
 Requests and responses across the gateway use the `oby-e2e-1` envelope from `Shared/E2E.swift`:
 HPKE authenticated mode with RFC 9180 X25519, HKDF-SHA256 and ChaCha20-Poly1305. The HTTP method,
 route, device id and a bounded request counter window remain visible for routing and replay
-checks; all other bytes are ciphertext. The request or response direction is also authenticated
-as HPKE additional data, so a request envelope cannot be reused as a response. Changing an
-allowlisted route or counter makes the body fail authentication. The gateway records a counter
-only after authentication, persists replay state, and refuses requests without the E2E headers;
-legacy plaintext links therefore cannot use the gateway. Plaintext is never passed to a gateway
-log. The owner opens pairing with `POST /v1/pairing/open`; the runner creates a random one-time
-secret in `OBY_HOME/pairing` and returns it with the gateway key. The Mac shows both in a QR. The
+checks; all other bytes are ciphertext. Sealed GET and HEAD put the envelope in the
+`Oby-E2E-Envelope` header (base64) with an empty body — URLSession on Apple platforms refuses a
+GET with a body. The request or response direction is also authenticated as HPKE additional data,
+so a request envelope cannot be reused as a response. Changing an allowlisted route or counter
+makes the body fail authentication. The gateway records a counter only after authentication,
+persists replay state, and refuses requests without the E2E headers; legacy plaintext links
+therefore cannot use the gateway. Plaintext is never passed to a gateway log. The owner opens
+pairing with `POST /v1/pairing/open`; the runner creates a random one-time secret in
+`OBY_HOME/pairing` and returns it with the gateway key. The Mac shows both in a QR. The
 encrypted gateway listens on
 `127.0.0.1:8810` by default (`OBY_GATEWAY_PORT` changes it).
 
@@ -888,12 +890,15 @@ user-created `pairing` file cannot open pairing.
 
 ### `POST /v1/pairing`
 
-The gateway's one cleartext bootstrap route. It is usable only while the Mac app has opened the
-pairing window with `POST /v1/pairing/open`. The device sends the same P-256 publishing key and
-its X25519 key as registration, plus `e2eProof`: an ECDSA signature over
-`oby-e2e-register\n<publicKey>\n<e2ePublicKey>`. The response contains the device id and the gateway's
-X25519 public key. The QR carries the secret and gateway key; the client refuses a response whose
-key differs from the QR and stores neither the one-time secret nor a fetched gateway key.
+The gateway's bootstrap route. It is usable only while the Mac app has opened the pairing window
+with `POST /v1/pairing/open`. The request body is sealed (base HPKE) to the gateway public key the
+QR already carries, with `Oby-E2E-Device: pairing`, so the one-time secret never crosses the tunnel
+in plaintext. Inside the envelope the device sends the same P-256 publishing key and its X25519
+key as registration, plus `e2eProof`: an ECDSA signature over
+`oby-e2e-register\n<publicKey>\n<e2ePublicKey>`. A successful pair always consumes the secret. The
+response is cleartext JSON with the device id and the gateway's X25519 public key. The client
+refuses a response whose key differs from the QR and stores neither the one-time secret nor a
+fetched gateway key.
 
 ### `POST /v1/devices`
 
