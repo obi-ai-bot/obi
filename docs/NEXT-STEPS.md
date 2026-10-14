@@ -1,0 +1,129 @@
+# Next steps: the open-source restructure
+
+For Wellington, from Dmytro. This is the plan for turning this repository into the open-source home of Obi. It lists what is decided, what we want to learn, the target layout, and the work in order. It has no dates on purpose. Order is what matters.
+
+## 1. Why this document exists
+
+Obi is being set up as an open-source experiment. We want to test two hypotheses: engineers want a personal delegate, and teams want those delegates to work together. The code moves into the `obi-ai-bot` org, under the Apache-2.0 license, so anyone can run it and anyone can build an Obi-compatible agent. Tetrix is an optional plug-in. Obi never requires it.
+
+## 2. Decisions already made
+
+| Decision | Choice | Why |
+|---|---|---|
+| Product name | **Obi** (not Oby) | One spelling everywhere: code, docs, store listings, org. |
+| GitHub org | `obi-ai-bot` | A home that belongs to the product, not to Deskree's internal org. |
+| Repositories | Two: `obi` (this monorepo: engine, apps, character, plug-ins) and `obi-sphere` (the Obi-to-Obi spec and the Sphere server) | The protocol must be readable and implementable on its own, by agents that are not Obi. |
+| License | Apache-2.0 in every repo, plus a trademark on the name | Permissive with a patent grant. The trademark keeps "Obi" meaning our product. |
+| Languages | Engine in Rust, UI shells native (Swift on Apple, Kotlin on Android), server in TypeScript | One portable engine for every platform. Native UI where it matters. The server matches the existing Cloudflare control plane. |
+| Oberon | The `deskree-inc/oberon` repo is archived | Its ideas live on in Obi. One product, not two. |
+| Tetrix | One plug-in among equals | Obi works fully on its own. Tetrix adds richer memory for those who want it. |
+| Visibility | Repos stay private until launch | We launch when the Sphere works end to end, not before. |
+| Deskree's pipeline rules | Xcode Cloud, dev-to-main promotion and three-review escalation move to configuration, not product code | They are how Deskree works, not how every team works. |
+
+## 3. The two hypotheses and how we measure them
+
+| Hypothesis | Metric | Source |
+|---|---|---|
+| **H1.** Engineers want a delegate. | Weekly active Obis. | Opt-in ping in the daemon. |
+| | Unattended jobs per Obi per week. | Opt-in ping in the daemon. |
+| | 4-week retention. | Opt-in ping in the daemon; Sphere sign-ups. |
+| **H2.** Teams want delegates that work together. | Share of installs in a Sphere with 2 or more Obis. | Sphere sign-ups. |
+| | Obi-to-Obi requests per Sphere per week. | Sphere server. |
+| | Acceptance rate vs decline rate of those requests. | Sphere server. |
+| **Tetrix pull.** | Share of Obis that enable the Tetrix plug-in. | Opt-in ping in the daemon. |
+| **Interest.** | Stars, forks, issues and outside pull requests. | GitHub. |
+
+Telemetry is off by default. The daemon sends the ping only after the user turns it on.
+
+## 4. Target layout of this repo
+
+```
+obi/
+├── core/            Rust daemon `obid`: goals with acceptance conditions, jobs, worktrees and sandbox, a model-agnostic planner, agent adapters (Claude Code stream-json, Codex app-server, anything over ACP), decision memory ("asked once, remembered"), inbox, publish gate (secret scan, never merges), vault, accounts and usage meters, event sources (GitHub, Slack), local API and event stream, Obi-to-Obi client
+├── apps/
+│   ├── web/         TypeScript universal client, served by the daemon
+│   ├── mac/         Swift: notch, Touch ID, character; a thin client of the daemon
+│   ├── ios/         Swift thin client
+│   ├── watch/       Swift thin client
+│   └── android/     Kotlin thin client, later
+├── character/       The three.js mascot, unchanged
+├── plugins/         Context providers and event sources, each optional; Tetrix is one of them
+├── mcp/             The Obi MCP server
+└── docs/            Documentation
+```
+
+Today's `Engine/` and `Runner/` (Swift) are the specification for `core/`. The existing Mac, iPhone and Watch apps already talk to the runner over the documented API in [`docs/runner-api.md`](runner-api.md). So they keep working while the engine is ported: `core/` serves the same API.
+
+Note: the character lives in `Character/` today. macOS ignores letter case in paths, so rename it to `character/` with `git mv` through a temporary name, not directly.
+
+## 5. Workstreams, in order
+
+Each one has an owner. All owners are TBD.
+
+1. **(a) Name alignment.**
+   - What: Oby to Obi across code, bundle ids, docs and the mascot API. Decide whether to keep `window.oby` (see Open decisions). The GitHub org and repo names already match.
+   - Done when: a search for "Oby" finds only history and the deliberate exceptions; the apps build and run under the new bundle ids.
+   - Owner: TBD.
+2. **(b) Freeze the Swift engine.**
+   - What: no new features in `Engine/` and `Runner/`. Bug fixes only.
+   - Done when: the freeze is written in AGENTS.md and open feature issues on the engine are moved to `core/`.
+   - Owner: TBD.
+3. **(c) Extract the spec.**
+   - What: write `obi-sphere/spec` from [`docs/pipeline-cases.md`](pipeline-cases.md) and the `Plan` schema in `Engine/Brain.swift`.
+   - Done when: the spec defines every typed action, its fields and the receiver's decision rule, and a reader can implement it without reading Swift.
+   - Owner: TBD.
+4. **(d) Port the engine to Rust, behind the existing runner API.**
+   - What: build `core/` adapter by adapter: Claude Code first, then Codex, then Cursor and anything over ACP. Port the API-level tests from `RunnerTests`. Drop the Swift-internal ones. A human reviews every ported module.
+   - Done when: the Mac, iPhone and Watch apps run against `obid` with no change to their code, and the ported API tests pass.
+   - Owner: TBD.
+5. **(e) Sphere server and the Obi-to-Obi client.** This is milestone F12.
+   - What: the server in `obi-sphere/server` (directory, policy, relay, audit, invitations) and the client in `core/`.
+   - Done when: Deskree's own five Obis run on it, and the launch demo works: Ernesto's Obi asks Wellington's Obi for a review over the real protocol.
+   - Owner: TBD.
+6. **(f) Web client inside the daemon.**
+   - What: `apps/web`, served by `obid`, so the launch is not Mac-only.
+   - Done when: a Linux user with no Apple device can set a goal, watch jobs and answer the inbox from a browser.
+   - Owner: TBD.
+7. **(g) Plug-in model.**
+   - What: context providers and event sources become equal plug-ins. Move the Tetrix integration (`Engine/TetrixUse.swift` and the Tetrix memory decisions) behind it.
+   - Done when: Obi runs with no plug-ins enabled, and Tetrix is enabled the same way as any other plug-in.
+   - Owner: TBD.
+8. **(h) Move Deskree-specific pipeline rules to configuration.**
+   - What: Xcode Cloud, dev-to-main promotion, three-review escalation and similar rules become configuration that Deskree sets for its own repos.
+   - Done when: a fresh install has none of them on, and Deskree's repos behave as today with their configuration.
+   - Owner: TBD.
+9. **(i) Launch readiness.**
+   - What: opt-in telemetry, trademark filing, README rewrite, CONTRIBUTING.md, SECURITY.md, Show HN draft.
+   - Done when: each item is merged or filed, and the repos are ready to be made public.
+   - Owner: TBD.
+
+**If scope must be cut:** cut the web client and launch Mac-first. Never cut the Sphere. It is the hypothesis.
+
+## 6. What is NOT in scope
+
+- A chat server. The Sphere is directory, policy, relay and audit. People talk to their own Obi.
+- Replacing Claude Code, Codex or Cursor. Obi dispatches them.
+- Requiring Tetrix.
+- Telemetry on by default.
+- Merging on anyone's behalf.
+
+## 7. Open decisions
+
+For Dmytro and Wellington.
+
+- [ ] Keep the `window.oby` JavaScript API name, or rename it to `window.obi`.
+- [ ] UniFFI, or HTTP only, between the Rust core and the Swift shells.
+- [ ] Whether the Cloudflare control plane (`cloud/control-plane/`) merges into the Sphere or stays in `obi`.
+- [ ] Android timing relative to launch.
+- [ ] Which Deskree repos run on Obi during dogfood.
+- [ ] Trademark attorney.
+
+## 8. Where things are
+
+- This repo: [obi-ai-bot/obi](https://github.com/obi-ai-bot/obi)
+- Spec and Sphere server: [obi-ai-bot/obi-sphere](https://github.com/obi-ai-bot/obi-sphere)
+- Oberon (archived): [deskree-inc/oberon](https://github.com/deskree-inc/oberon)
+- Runner API: [`docs/runner-api.md`](runner-api.md)
+- Pipeline cases: [`docs/pipeline-cases.md`](pipeline-cases.md)
+- Remote access: [`docs/remote-access.md`](remote-access.md)
+- MCP server: [`docs/mcp.md`](mcp.md)
