@@ -264,8 +264,14 @@ fn remote_kind(remote: &str) -> Option<RemoteKind> {
         return rest.starts_with('/').then_some(RemoteKind::File);
     }
     // scp-like: `git@github.com:owner/name.git`. No scheme, a user and host before the colon.
+    // git reads a remote with a `/` before its first `:` as a local path, not ssh
+    // (`/tmp/x@h:p`, `../srv/x@h:r.git`): that is refused here, or it would get round
+    // `allowFileRemotes`. So is `\`, Windows' other separator.
     if !remote.contains("://") {
         if let Some((user_host, path)) = remote.split_once(':') {
+            if user_host.contains(['/', '\\']) {
+                return None;
+            }
             if let Some((user, host)) = user_host.split_once('@') {
                 if user_ok(user) && host_name_ok(host) && !path.is_empty() && !path.starts_with('-')
                 {
@@ -292,14 +298,15 @@ fn url_authority_ok(rest: &str) -> bool {
     host_port_ok(host_port)
 }
 
-/// A user name ssh can't take for an option: not empty, no leading `-`, no spaces, and no `%`,
-/// which git would decode into any of those.
+/// A user name ssh can't take for an option: not empty, no leading `-`, no spaces, no `%`,
+/// which git would decode into any of those, and no `/` or `\\`, which make git read an scp-like
+/// remote as a local path.
 fn user_ok(user: &str) -> bool {
     !user.is_empty()
         && !user.starts_with('-')
         && !user
             .chars()
-            .any(|c| c.is_whitespace() || c == '@' || c == '%')
+            .any(|c| c.is_whitespace() || matches!(c, '@' | '%' | '/' | '\\'))
 }
 
 /// `host`, `host:port`, `[v6]` or `[v6]:port`.
@@ -491,6 +498,15 @@ mod tests {
             ("https://git hub.com/o/r.git", None),
             ("https://github.com/o/r.git\n", None),
             ("ssh://git@github.com\t/o/r.git", None),
+            // Local paths git would clone from the disk, not over ssh: a `/` (or `\\`) before
+            // the first `:` makes git read the remote as a path.
+            ("/tmp/x@h:p", None),
+            ("./x@h:p", None),
+            ("../../srv/other@h:repo.git", None),
+            ("x/y@h:p", None),
+            ("git@github.com/x:o/r.git", None),
+            ("..\\srv\\other@h:repo.git", None),
+            ("git@github.com:o/r.git/", Some(RemoteKind::Ssh)),
         ] {
             assert_eq!(remote_kind(remote), kind, "{remote}");
         }

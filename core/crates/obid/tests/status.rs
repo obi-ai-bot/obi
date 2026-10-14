@@ -551,6 +551,10 @@ fn refuses_what_it_cant_use() {
         "-oProxyCommand=touch /tmp/x@h:p",
         "https://-x/r",
         "ssh://-oProxyCommand=x@github.com/o/r.git",
+        // Local paths dressed as scp-like ssh remotes: git would clone them from the disk.
+        "/tmp/x@h:p",
+        "./x@h:p",
+        "../../srv/other@h:repo.git",
     ] {
         with(
             "repos",
