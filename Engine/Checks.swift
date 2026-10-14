@@ -681,10 +681,10 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         return [
             Command(name: "Runner tests (swift test)", arguments: ["swift", "test", "--scratch-path", cache.appending(path: "swiftpm").path],
                     timeout: 30 * 60),
-            Command(name: "Mac app and MacTests", arguments: ["xcodebuild", "-project", "Oby.xcodeproj", "-scheme", "Oby",
+            Command(name: "Mac app and MacTests", arguments: ["xcodebuild", "-project", "apps/Oby.xcodeproj", "-scheme", "Oby",
                                                                "-destination", "platform=macOS"] + derived + signing + ["test"],
                     timeout: 20 * 60),
-            Command(name: "iPhone app with Watch, and iOSTests", arguments: ["xcodebuild", "-project", "Oby.xcodeproj", "-scheme", "ObyPhone",
+            Command(name: "iPhone app with Watch, and iOSTests", arguments: ["xcodebuild", "-project", "apps/Oby.xcodeproj", "-scheme", "ObyPhone",
                                                                              "-destination", iPhone] + derived + signing + ["test"],
                     timeout: 20 * 60),
         ]
@@ -827,7 +827,7 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         try FileManager.default.createDirectory(at: worktree.deletingLastPathComponent(), withIntermediateDirectories: true)
         try await git(["worktree", "add", "--detach", "--quiet", worktree.path, check.head])
         // The Oby scheme isn't shared yet: CI's copy stands in, as on GitHub (docs/ci.md).
-        let shared = worktree.appending(path: "Oby.xcodeproj/xcshareddata/xcschemes/Oby.xcscheme")
+        let shared = worktree.appending(path: "apps/Oby.xcodeproj/xcshareddata/xcschemes/Oby.xcscheme")
         let ci = worktree.appending(path: ".github/ci/Oby.xcscheme")
         if !FileManager.default.fileExists(atPath: shared.path), FileManager.default.fileExists(atPath: ci.path) {
             try FileManager.default.createDirectory(at: shared.deletingLastPathComponent(), withIntermediateDirectories: true)

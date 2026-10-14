@@ -33,7 +33,7 @@ nonisolated enum AppleCheck {
     private static let tool = Mutex<Tool?>(nil)
 
     /// The folders of the Apple apps' code: a job that touches them is told about the command.
-    static let folders = ["apps/ios/app/", "apps/ios/tests/", "apps/watch/", "apps/mac/app/", "apps/mac/tests/", "apps/shared/", "apps/ios/live-activity/", "Character/", "Engine/", "Oby.xcodeproj"]
+    static let folders = ["apps/ios/app/", "apps/ios/tests/", "apps/watch/", "apps/mac/app/", "apps/mac/tests/", "apps/shared/", "apps/ios/live-activity/", "Character/", "Engine/", "apps/Oby.xcodeproj"]
     /// The narrower set named in the agent prompt. Engine and project-only changes are still
     /// checked before publishing, but agents do not need to be told to run the command for them.
     static let promptedFolders = ["apps/ios/app/", "apps/watch/", "apps/mac/app/", "apps/shared/"]

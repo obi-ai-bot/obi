@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<!-- How scripts/release.sh exports the Oby archive: Developer ID, outside the App Store.
-	     teamID is filled in by the script from OBY_TEAM_ID (Config/Signing.xcconfig), so the team
+	     teamID is filled in by the script from OBY_TEAM_ID (apps/config/Signing.xcconfig), so the team
 	     lives in one place. -->
 	<key>method</key>
 	<string>developer-id</string>
