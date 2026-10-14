@@ -159,8 +159,8 @@ struct Composer: View {
         do {
             let ids = try await Self.uploadAttachmentIDs(attachments, upload: { item in
                 try await phone.runner.uploadAttachment(item.data, name: item.name, source: "iphone").id
-            }, uploaded: { index, id in
-                if phone.attachmentDrafts.indices.contains(index), phone.attachmentDrafts[index].id == attachments[index].id {
+            }, uploaded: { draftID, id in
+                if let index = phone.attachmentDrafts.firstIndex(where: { $0.id == draftID }) {
                     phone.attachmentDrafts[index].uploadedID = id
                 }
             })
@@ -175,12 +175,12 @@ struct Composer: View {
 
     @MainActor static func uploadAttachmentIDs(_ attachments: [PhoneAttachmentDraft],
                                                upload: (PhoneAttachmentDraft) async throws -> String,
-                                               uploaded: (Int, String) -> Void = { _, _ in }) async throws -> [String] {
+                                               uploaded: (UUID, String) -> Void = { _, _ in }) async throws -> [String] {
         var ids: [String] = []
-        for (index, item) in attachments.enumerated() {
+        for item in attachments {
             if let id = item.uploadedID { ids.append(id); continue }
             let id = try await upload(item)
-            uploaded(index, id)
+            uploaded(item.id, id)
             ids.append(id)
         }
         return ids

@@ -603,7 +603,7 @@ struct VaultAgentTests {
             "title": "Staging", "body": "Use \(value) to log in.", "comments": [["author": ["login": "other"], "body": Fake.hex(value)]],
         ])
         let prepared = try Workspace.inputs(work, pullRequest: nil, issue: issue, in: worktree, allowedAttachmentsFolder: directory, vault: vault)
-        #expect(prepared.attachments == [notes.path, shot.path])
+        #expect(prepared.attachments?.map { URL(filePath: $0).lastPathComponent } == ["notes-1a2b3c.txt", "screenshot-1a2b3c.png"])
         for file in ["issue-12.md", "notes-1a2b3c.txt"] {
             let text = try String(contentsOf: worktree.appending(path: ".oby/inputs/\(file)"), encoding: .utf8)
             for copy in copies(of: value) { #expect(!text.contains(copy.text), Comment(rawValue: file)) }

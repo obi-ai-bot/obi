@@ -66,4 +66,26 @@ struct TrayTests {
             #expect(tray.items.count == 1 && tray.items[0].uploadedID == nil)
         }
     }
+
+    @Test func uploadKeysChipsByStableIDNotIndex() async throws {
+        let (folder, tray, desk) = try fixture()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let first = folder.appending(path: "first.txt")
+        let second = folder.appending(path: "second.txt")
+        try Data("one".utf8).write(to: first)
+        try Data("two".utf8).write(to: second)
+        tray.addFiles([first, second])
+        let firstChip = try #require(tray.items.first)
+        let secondChip = try #require(tray.items.last)
+        #expect(firstChip.id != secondChip.id)
+        // Remove the first chip before uploading: the survivor must keep its own identity and
+        // receive the upload id (an index-based write would target the wrong slot or crash).
+        tray.remove(firstChip)
+        let ids = try await tray.uploadIDs(using: nil, desk: desk)
+        #expect(ids.count == 1)
+        #expect(tray.items.map(\.id) == [secondChip.id])
+        #expect(tray.items[0].uploadedID == ids[0])
+        let store = AttachmentStore(root: Workspace.root.appending(path: "attachments", directoryHint: .isDirectory), jobs: desk.store, vault: desk.vault)
+        try store.delete(ids[0])
+    }
 }

@@ -7,10 +7,17 @@ import QuickLook
 /// A file the user attached to their next request: a screenshot, or what they copied.
 struct TrayAttachment: Identifiable, Equatable {
     enum Kind { case screenshot, clipboardImage, clipboardText, file }
+    let id: UUID
     var kind: Kind
     var file: URL
     var uploadedID: String?
-    var id: URL { file }
+
+    init(kind: Kind, file: URL, uploadedID: String? = nil, id: UUID = UUID()) {
+        self.id = id
+        self.kind = kind
+        self.file = file
+        self.uploadedID = uploadedID
+    }
 
     var label: String {
         switch kind {
@@ -72,22 +79,29 @@ final class Tray {
     }
 
     /// Upload each chip to the selected runner, or the local desk's runner-owned store.
+    /// Chips are keyed by their stable id so removing one while an upload is in flight can't
+    /// write into another chip's slot (or crash on a stale index).
     func uploadIDs(using runner: Runner?, desk: Desk) async throws -> [String] {
         var ids: [String] = []
-        for index in items.indices {
-            if let id = items[index].uploadedID { ids.append(id); continue }
-            let attachment = items[index]
-            let data = try Data(contentsOf: attachment.file)
+        let pending = items.map { (id: $0.id, uploadedID: $0.uploadedID, file: $0.file) }
+        for item in pending {
+            guard items.contains(where: { $0.id == item.id }) else { continue }
+            if let id = item.uploadedID { ids.append(id); continue }
+            let data = try Data(contentsOf: item.file)
             let id: String
             if let runner {
-                id = try await runner.uploadAttachment(data, name: attachment.file.lastPathComponent, source: "mac").id
+                id = try await runner.uploadAttachment(data, name: item.file.lastPathComponent, source: "mac").id
             } else {
                 let saved = try AttachmentStore(root: Workspace.root.appending(path: "attachments", directoryHint: .isDirectory), jobs: desk.store, vault: desk.vault)
-                    .upload(data, name: attachment.file.lastPathComponent, source: "mac")
+                    .upload(data, name: item.file.lastPathComponent, source: "mac")
                 id = saved.id
             }
-            items[index].uploadedID = id
-            ids.append(id)
+            if let index = items.firstIndex(where: { $0.id == item.id }) {
+                items[index].uploadedID = id
+                ids.append(id)
+            } else {
+                deleteRemote(id)
+            }
         }
         return ids
     }

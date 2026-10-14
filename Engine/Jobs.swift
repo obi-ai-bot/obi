@@ -1079,6 +1079,21 @@ nonisolated enum Attachments {
     /// from the file.
     static let maxImageBytes = 3_750_000
 
+    /// A unique name under `.oby/inputs`: the display name, with `-2`, `-3`, … when that name is taken.
+    static func uniqueInputName(_ preferred: String, used: inout Set<String>) -> String {
+        let base = URL(filePath: preferred).lastPathComponent
+        let ext = URL(filePath: base).pathExtension
+        let stem = ext.isEmpty ? base : String(base.dropLast(ext.count + 1))
+        var name = base.isEmpty ? "attachment" : base
+        var suffix = 2
+        while used.contains(name) {
+            name = "\(stem)-\(suffix)" + (ext.isEmpty ? "" : ".\(ext)")
+            suffix += 1
+        }
+        used.insert(name)
+        return name
+    }
+
     /// Copies newly attached runner files into an existing job. Returns the images small enough
     /// for an agent's message protocol; every file remains available under `.oby/inputs`.
     static func copy(_ ids: [String], into worktree: URL, store: JobStore, vault: Vault = .shared) throws -> [String] {
@@ -1091,16 +1106,7 @@ nonisolated enum Attachments {
         var images: [String] = []
         for id in ids {
             let (attachment, data) = try attachmentStore.content(id)
-            let base = URL(filePath: attachment.name).lastPathComponent
-            let ext = URL(filePath: base).pathExtension
-            let stem = ext.isEmpty ? base : String(base.dropLast(ext.count + 1))
-            var name = base
-            var suffix = 2
-            while used.contains(name) {
-                name = "\(stem)-\(suffix)" + (ext.isEmpty ? "" : ".\(ext)")
-                suffix += 1
-            }
-            used.insert(name)
+            let name = uniqueInputName(attachment.name, used: &used)
             let target = folder.appending(path: name)
             if let text = String(data: data, encoding: .utf8) {
                 try Data(leaks.redact(text).utf8).write(to: target, options: .atomic)
@@ -1115,10 +1121,10 @@ nonisolated enum Attachments {
         return images
     }
 
-    /// Copies the job's attachments into the worktree's .oby/inputs, under their own names, and
-    /// returns the ones it copied: a file that's gone (kept too long) is left out, not the job.
-    /// Text goes with the vault's secrets taken out; a binary file (a screenshot) can't be, so one
-    /// that holds a secret stops the job, naming it. Throws when the vault can't be read.
+    /// Copies the job's attachments into the worktree's .oby/inputs, under unique display names, and
+    /// returns the destination paths it wrote: a file that's gone (kept too long) is left out, not
+    /// the job. Text goes with the vault's secrets taken out; a binary file (a screenshot) can't
+    /// be, so one that holds a secret stops the job, naming it. Throws when the vault can't be read.
     static func copy(_ job: Job, into worktree: URL, allowedFolder: URL = LocalRunner.attachments, vault: Vault = .shared,
                      jobStore: JobStore? = nil, attachmentRoot: URL = Workspace.root.appending(path: "attachments", directoryHint: .isDirectory)) throws -> [String]? {
         let leaks = try vault.forAgents()
@@ -1136,20 +1142,24 @@ nonisolated enum Attachments {
         }
         let uploadedSet = Set(uploaded)
         _ = try validated(paths.filter { !systemAttachments.contains($0) && !uploadedSet.contains($0) }, in: allowedFolder)
+        let folder = worktree.appending(path: ".oby/inputs", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var used = Set((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
         var copied: [String] = []
         for path in paths {
             let file = URL(filePath: path)
             guard let data = try? Data(contentsOf: file) else { continue }
-            let target = worktree.appending(path: ".oby/inputs/\(uploadedNames[path] ?? file.lastPathComponent)")
+            let name = uniqueInputName(uploadedNames[path] ?? file.lastPathComponent, used: &used)
+            let target = folder.appending(path: name)
             if let text = String(data: data, encoding: .utf8) {
                 try Data(leaks.redact(text).utf8).write(to: target)
             } else {
-                if let name = leaks.hits(in: String(decoding: data, as: UTF8.self)).first?.name {
-                    throw Shell.Failure(message: "The attachment \(file.lastPathComponent) holds the vault secret \(name): it isn't handed to the agent.")
+                if let secret = leaks.hits(in: String(decoding: data, as: UTF8.self)).first?.name {
+                    throw Shell.Failure(message: "The attachment \(file.lastPathComponent) holds the vault secret \(secret): it isn't handed to the agent.")
                 }
                 try data.write(to: target)
             }
-            copied.append(path)
+            copied.append(target.path)
         }
         return copied.isEmpty ? nil : copied
     }
@@ -1168,9 +1178,19 @@ nonisolated enum Attachments {
         return paths
     }
 
-    /// Where the agent finds them, like ".oby/inputs/screenshot-1a2b3c.png".
+    /// Where the agent finds them, like ".oby/inputs/screenshot-1a2b3c.png". Uses the destination
+    /// basenames `copy` wrote into the worktree (unique when two uploads share a name).
     static func inputs(_ job: Job) -> [String] {
         (job.attachments ?? []).map { ".oby/inputs/" + URL(filePath: $0).lastPathComponent }
+    }
+
+    /// The `.oby/inputs/…` paths for opaque upload ids, with the same unique names `copy` uses.
+    static func inputPaths(for ids: [String], store: AttachmentStore) -> [String] {
+        var used = Set<String>()
+        return ids.compactMap { id in
+            guard let name = store.attachment(id)?.name else { return nil }
+            return ".oby/inputs/" + uniqueInputName(name, used: &used)
+        }
     }
 
     /// The image's media type, if it's an image that fits in a message.

@@ -67,10 +67,13 @@ struct AttachmentTests {
         let (worktree, screenshot, clipboard) = try worktree()
         let job = job(attachments: [screenshot.path, clipboard.path])
         let attachmentsFolder = screenshot.deletingLastPathComponent()
-        #expect(try Attachments.copy(job, into: worktree, allowedFolder: attachmentsFolder) == [screenshot.path, clipboard.path])
+        let copied = try #require(try Attachments.copy(job, into: worktree, allowedFolder: attachmentsFolder))
+        #expect(copied.map { URL(filePath: $0).lastPathComponent } == ["screenshot-1a2b3c.png", "clipboard-4d5e6f.txt"])
         #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/screenshot-1a2b3c.png")) == png)
         #expect(FileManager.default.fileExists(atPath: worktree.appending(path: ".oby/inputs/clipboard-4d5e6f.txt").path))
-        #expect(Attachments.inputs(job) == [".oby/inputs/screenshot-1a2b3c.png", ".oby/inputs/clipboard-4d5e6f.txt"])
+        var prepared = job
+        prepared.attachments = copied
+        #expect(Attachments.inputs(prepared) == [".oby/inputs/screenshot-1a2b3c.png", ".oby/inputs/clipboard-4d5e6f.txt"])
     }
 
     @Test func copyRechecksStoredJobAttachments() throws {
@@ -93,7 +96,8 @@ struct AttachmentTests {
         review.reviewOf = "author01"
         review.systemAttachments = [generated.path]
 
-        #expect(try Attachments.copy(review, into: worktree, allowedFolder: screenshot.deletingLastPathComponent()) == [generated.path])
+        let copied = try #require(try Attachments.copy(review, into: worktree, allowedFolder: screenshot.deletingLastPathComponent()))
+        #expect(copied.map { URL(filePath: $0).lastPathComponent } == ["review-context.md"])
         #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/review-context.md")) == Data("Quoted review context".utf8))
     }
 
@@ -167,9 +171,12 @@ struct AttachmentTests {
         defer { try? store.delete(value.id) }
         var attached = job(agent: "codex", attachments: nil)
         attached.attachmentIDs = [value.id]
-        #expect(try Attachments.copy(attached, into: worktree, jobStore: jobs,
-                                     attachmentRoot: root.appending(path: "attachments", directoryHint: .isDirectory)) == [try #require(store.url(value.id)?.path)])
+        let copied = try #require(try Attachments.copy(attached, into: worktree, jobStore: jobs,
+                                                       attachmentRoot: root.appending(path: "attachments", directoryHint: .isDirectory)))
+        #expect(copied.map { URL(filePath: $0).lastPathComponent } == ["passwd.png"])
         #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/passwd.png")) == png)
+        attached.attachments = copied
+        #expect(Attachments.inputs(attached) == [".oby/inputs/passwd.png"])
     }
 
     @Test func dispatchCarriesAttachments() throws {
@@ -210,7 +217,7 @@ struct AttachmentTests {
         first.attachmentIDs = [screenshot.id]
         let firstInputs = try Attachments.copy(first, into: worktree, jobStore: jobs,
                                                attachmentRoot: root.appending(path: "attachments", directoryHint: .isDirectory))
-        #expect(firstInputs == [try #require(store.url(screenshot.id)?.path)])
+        #expect(firstInputs?.map { URL(filePath: $0).lastPathComponent } == ["screen.png"])
 
         var later = job(agent: "codex", attachments: nil)
         later.id = "cd34ef56"
@@ -265,8 +272,30 @@ struct AttachmentTests {
         let (worktree, screenshot, clipboard) = try worktree()
         try FileManager.default.removeItem(at: clipboard)
         let attachmentsFolder = screenshot.deletingLastPathComponent()
-        #expect(try Attachments.copy(job(attachments: [screenshot.path, clipboard.path]), into: worktree, allowedFolder: attachmentsFolder) == [screenshot.path])
+        let copied = try Attachments.copy(job(attachments: [screenshot.path, clipboard.path]), into: worktree, allowedFolder: attachmentsFolder)
+        #expect(copied?.map { URL(filePath: $0).lastPathComponent } == ["screenshot-1a2b3c.png"])
         #expect(try Attachments.copy(job(attachments: [clipboard.path]), into: worktree, allowedFolder: attachmentsFolder) == nil)
+    }
+
+    @Test func copyDedupesMatchingUploadNamesAndPromptUsesThosePaths() throws {
+        let (worktree, _, _) = try worktree()
+        defer { try? FileManager.default.removeItem(at: worktree.deletingLastPathComponent()) }
+        let root = worktree.deletingLastPathComponent().appending(path: "runner")
+        let jobs = JobStore(url: root.appending(path: "oby.sqlite"))
+        let attachmentRoot = root.appending(path: "attachments", directoryHint: .isDirectory)
+        let store = AttachmentStore(root: attachmentRoot, jobs: jobs)
+        let first = try store.upload(png, name: "photo.png", source: "iphone")
+        let second = try store.upload(Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]), name: "photo.png", source: "mac")
+        defer { try? store.delete(first.id); try? store.delete(second.id) }
+        var attached = job(agent: "codex", attachments: nil)
+        attached.attachmentIDs = [first.id, second.id]
+        let copied = try #require(try Attachments.copy(attached, into: worktree, jobStore: jobs, attachmentRoot: attachmentRoot))
+        #expect(copied.map { URL(filePath: $0).lastPathComponent } == ["photo.png", "photo-2.png"])
+        #expect(FileManager.default.fileExists(atPath: worktree.appending(path: ".oby/inputs/photo.png").path))
+        #expect(FileManager.default.fileExists(atPath: worktree.appending(path: ".oby/inputs/photo-2.png").path))
+        attached.attachments = copied
+        #expect(Attachments.inputs(attached) == [".oby/inputs/photo.png", ".oby/inputs/photo-2.png"])
+        #expect(Attachments.inputPaths(for: [first.id, second.id], store: store) == [".oby/inputs/photo.png", ".oby/inputs/photo-2.png"])
     }
 
     @Test func aNewClaudeSessionStartsWithTheImages() throws {

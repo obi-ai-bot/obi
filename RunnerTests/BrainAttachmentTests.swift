@@ -53,4 +53,60 @@ struct BrainAttachmentTests {
         plan.attachments = [1, 1]
         #expect(plan.problems(in: context, canary: "").contains("attachments names each position once"))
     }
+
+    @Test func plannerPassesAttachmentsThroughProtocolExistentials() async throws {
+        final class Recording: BrainAdapter, @unchecked Sendable {
+            let name = "recording"
+            let response: Data
+            private let lock = NSLock()
+            private var seen: [BrainAttachment] = []
+            var attachments: [BrainAttachment] {
+                lock.lock(); defer { lock.unlock() }
+                return seen
+            }
+            init(response: Data) { self.response = response }
+            func complete(system: String, user: String, quoted: String?, schema: Data, timeout: TimeInterval) async throws -> Data {
+                Issue.record("Planner must call the attachments overload, not the word-only one.")
+                return response
+            }
+            func complete(system: String, user: String, quoted: String?, attachments: [BrainAttachment], schema: Data, timeout: TimeInterval) async throws -> Data {
+                lock.lock(); seen = attachments; lock.unlock()
+                return response
+            }
+        }
+        final class RecordingModel: ModelAwareBrainAdapter, @unchecked Sendable {
+            let name = "claude"
+            let response: Data
+            private let lock = NSLock()
+            private var seen: [BrainAttachment] = []
+            var attachments: [BrainAttachment] {
+                lock.lock(); defer { lock.unlock() }
+                return seen
+            }
+            init(response: Data) { self.response = response }
+            func complete(system: String, user: String, quoted: String?, schema: Data, timeout: TimeInterval) async throws -> Data {
+                try await complete(model: "claude-haiku-5-5", system: system, user: user, quoted: quoted, schema: schema, timeout: timeout)
+            }
+            func complete(model: String, system: String, user: String, quoted: String?, schema: Data, timeout: TimeInterval) async throws -> Data {
+                Issue.record("Planner must call the model attachments overload.")
+                return response
+            }
+            func complete(model: String, system: String, user: String, quoted: String?, attachments: [BrainAttachment], schema: Data, timeout: TimeInterval) async throws -> Data {
+                lock.lock(); seen = attachments; lock.unlock()
+                return response
+            }
+        }
+        let plan = Data(#"{"action":"reply_only","reply":"I see the screenshot.","dispatches":[],"question":null,"jobs":null,"all":null,"move":null,"decision":null,"message":null,"mode":null,"setting":null,"item":null,"option":null,"answer":null,"attachments":null}"#.utf8)
+        let context = BrainContext(accounts: ["claude": ["default"]], repos: ["deskree-inc/oby"],
+                                   attachments: [attachment("screen.png")])
+        let recording = Recording(response: plan)
+        let viaAdapter = await Planner(adapters: [recording], fallsBackToRules: false).plan("what's wrong?", context: context)
+        #expect(viaAdapter.by == "recording")
+        #expect(recording.attachments.map(\.name) == ["screen.png"])
+
+        let model = RecordingModel(response: plan)
+        let viaModel = await Planner(adapters: [model], fallsBackToRules: false).plan("what's wrong?", context: context)
+        #expect(viaModel.by == "claude")
+        #expect(model.attachments.map(\.name) == ["screen.png"])
+    }
 }

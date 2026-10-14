@@ -37,4 +37,31 @@ struct ComposerTests {
         #expect(try await sending.value == ["0123456789abcdef"])
         #expect(sent)
     }
+
+    @Test func uploadKeysDraftsByStableIDNotIndex() async throws {
+        let first = PhoneAttachmentDraft(name: "a.jpg", data: Data([1]), uploadedID: nil)
+        let second = PhoneAttachmentDraft(name: "b.jpg", data: Data([2]), uploadedID: nil)
+        var drafts = [first, second]
+        var gate: CheckedContinuation<String, Error>?
+        let uploading = Task { @MainActor in
+            try await Composer.uploadAttachmentIDs(drafts, upload: { item in
+                if item.id == first.id {
+                    return try await withCheckedThrowingContinuation { gate = $0 }
+                }
+                return "bbbbbbbbbbbbbbbb"
+            }, uploaded: { draftID, id in
+                if let index = drafts.firstIndex(where: { $0.id == draftID }) {
+                    drafts[index].uploadedID = id
+                }
+            })
+        }
+        while gate == nil { await Task.yield() }
+        // Remove the first draft while its upload is in flight: the second chip must still get
+        // its own id, not the first upload's (an index write would assign to the wrong draft).
+        drafts.removeAll { $0.id == first.id }
+        gate?.resume(returning: "aaaaaaaaaaaaaaaa")
+        let ids = try await uploading.value
+        #expect(ids == ["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"])
+        #expect(drafts.count == 1 && drafts[0].id == second.id && drafts[0].uploadedID == "bbbbbbbbbbbbbbbb")
+    }
 }

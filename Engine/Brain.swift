@@ -514,6 +514,8 @@ nonisolated protocol BrainAdapter: Sendable {
     /// `quoted` is what agents wrote (Briefing.quoted): it reaches the model as a quoted file it
     /// may read, never in a prompt (AGENTS.md). Nil when there's nothing.
     func complete(system: String, user: String, quoted: String?, schema: Data, timeout: TimeInterval) async throws -> Data
+    /// Turn attachments the brain may look at. Adapters that only plan from words may ignore them.
+    func complete(system: String, user: String, quoted: String?, attachments: [BrainAttachment], schema: Data, timeout: TimeInterval) async throws -> Data
 }
 
 extension BrainAdapter {
@@ -525,6 +527,7 @@ extension BrainAdapter {
 /// Optional model selection keeps older test and runner adapters source-compatible.
 nonisolated protocol ModelAwareBrainAdapter: BrainAdapter {
     func complete(model: String, system: String, user: String, quoted: String?, schema: Data, timeout: TimeInterval) async throws -> Data
+    func complete(model: String, system: String, user: String, quoted: String?, attachments: [BrainAttachment], schema: Data, timeout: TimeInterval) async throws -> Data
 }
 
 extension ModelAwareBrainAdapter {
@@ -596,6 +599,10 @@ nonisolated struct ClaudeBrain: ModelAwareBrainAdapter, SelfRetryingBrainAdapter
 
     func complete(system: String, user: String, quoted: String?, schema: Data, timeout: TimeInterval) async throws -> Data {
         try await complete(model: Self.quickModel, system: system, user: user, quoted: quoted, attachments: [], schema: schema, timeout: timeout)
+    }
+
+    func complete(system: String, user: String, quoted: String?, attachments: [BrainAttachment], schema: Data, timeout: TimeInterval) async throws -> Data {
+        try await complete(model: Self.quickModel, system: system, user: user, quoted: quoted, attachments: attachments, schema: schema, timeout: timeout)
     }
 
     func complete(model: String, system: String, user: String, quoted: String?, schema: Data, timeout: TimeInterval) async throws -> Data {

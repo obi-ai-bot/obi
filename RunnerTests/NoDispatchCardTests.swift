@@ -67,6 +67,23 @@ struct NoDispatchCardTests {
         #expect(desk.turns.last?.jobs?.count == 1 && desk.jobs.count == 3)
     }
 
+    @Test func dispatchGetsOnlyTheSelectedAttachmentSubset() async throws {
+        let store = AttachmentStore(jobs: desk.store, vault: desk.vault)
+        let png = Data([137, 80, 78, 71, 13, 10, 26, 10])
+        let first = try store.upload(png, name: "a.png", source: "mac")
+        let second = try store.upload(png, name: "b.png", source: "mac")
+        defer { try? store.delete(first.id); try? store.delete(second.id) }
+        let selected = #"{"action":"dispatch","reply":"On it.","question":null,"jobs":[],"attachments":[1],"dispatches":[{"agent":"auto","account":"auto","repo":"deskree-inc/oby","base_branch":null,"pr":null,"issue":12,"epic":null,"kind":"fix","title":"Login screen","task":"Fix #12","inputs":[],"rounds":1,"check":null,"complexity":"routine"}]}"#
+        brain.plans = [selected]
+        desk.ask("look at the first screenshot", attachments: [first.id, second.id])
+        try await until("the reply comes") { if case .reply = desk.talk { true } else { false } }
+        let started = (desk.turns.last?.jobs ?? []).compactMap(desk.job)
+        #expect(started.map(\.attachmentIDs) == [[first.id]])
+        #expect(Desk.selectedAttachments([1], from: [first.id, second.id], action: .dispatch) == [first.id])
+        #expect(Desk.selectedAttachments(nil, from: [first.id, second.id], action: .dispatch) == [first.id, second.id])
+        #expect(Desk.selectedAttachments([2], from: [first.id, second.id], action: .messageJob) == [second.id])
+    }
+
     /// A turn cancelled, or given up on, while the plan's jobs were being made (the issues' files
     /// take network time) starts nothing and asks nothing: `live` is checked again right before.
     @Test func aCancelledOrLateTurnStartsNothing() async throws {
