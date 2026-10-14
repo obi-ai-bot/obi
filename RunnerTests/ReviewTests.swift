@@ -204,11 +204,15 @@ struct ReviewTests {
         return try #require(desk.job("author"))
     }
 
-    /// The review job Oby started last for the author, once it runs.
+    /// The review currently recorded on the author, once its agent runs.
     func reviewJob() async throws -> (job: Job, agent: Agent) {
-        try await until("a review job runs") { made.agents.last?.job.reviewOf == "author" && made.agents.last?.job.status == .running }
-        let last = try #require(made.agents.last)
-        return (try #require(desk.job(last.job.id)), last.agent)
+        try await until("a review job runs") {
+            guard let id = desk.job("author")?.reviewing, let review = desk.job(id) else { return false }
+            return review.reviewOf == "author" && review.status == .running && made.agents.contains { $0.job.id == id }
+        }
+        let id = try #require(desk.job("author")?.reviewing)
+        let madeReview = try #require(made.agents.first { $0.job.id == id })
+        return (try #require(desk.job(id)), madeReview.agent)
     }
 
     /// The reviewer ends with `summary`; the verdict lands on the author (its comment posted).
