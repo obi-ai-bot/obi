@@ -5,7 +5,7 @@ import UserNotifications
 import WatchConnectivity
 
 /// The watch can't reach the tailnet, so this phone stands between it and the runner
-/// (Shared/WatchWire.swift says what they tell each other). It keeps the jobs on the watch as the
+/// (apps/shared/WatchWire.swift says what they tell each other). It keeps the jobs on the watch as the
 /// WatchConnectivity application context, on every change, and carries out what the watch asks
 /// (plan, dispatch, publish, a message to a job) as the app itself does. iOS wakes Oby in the
 /// background for a message from the watch, so this works with the phone in a pocket.
@@ -62,7 +62,7 @@ final class WatchRelay: NSObject {
         push(WatchContext(jobs: phone.jobs, accounts: phone.accounts, host: phone.host, sentAt: .now))
     }
 
-    /// Clear done on the phone's Home (iOS/Home.swift): finished jobs up to this time are hidden.
+    /// Clear done on the phone's Home (apps/ios/app/Home.swift): finished jobs up to this time are hidden.
     private var clearedAt: Date { Date(timeIntervalSince1970: UserDefaults.standard.double(forKey: "home.clearedAt")) }
     /// The Clear done time the watch's list was last trimmed with.
     private var pushedClearedAt: Date?
@@ -290,7 +290,7 @@ final class WatchRelay: NSObject {
 
     /// Signs the publish with this phone's Face ID key, as the app does, and tells the watch how
     /// it went. Face ID can't come up while Oby is in the background, so then a notification on
-    /// the phone finishes it: its Publish is the app's own (iOS/Notifications.swift).
+    /// the phone finishes it: its Publish is the app's own (apps/ios/app/Notifications.swift).
     private func publish(_ id: String, action: String) async {
         guard let phone else { return }
         var message: [String: Any] = [WatchWire.kind: WatchWire.Kind.published.rawValue, WatchWire.job: id]
@@ -308,7 +308,7 @@ final class WatchRelay: NSObject {
         _ = await refresh()
     }
 
-    /// The "approve" category is registered at launch with the others (iOS/Notifications.swift),
+    /// The "approve" category is registered at launch with the others (apps/ios/app/Notifications.swift),
     /// so the button is there however long the notification waits.
     private func askOnPhone(_ id: String, action: String) async throws {
         let center = UNUserNotificationCenter.current()

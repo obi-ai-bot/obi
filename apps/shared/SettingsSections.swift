@@ -7,8 +7,8 @@ import UIKit
 import AppKit
 #endif
 
-// Settings' sections the iPhone and the Mac both show, so the two stay alike: iOS/SettingsScreen.swift
-// and Mac/Settings.swift put them in their own forms, next to what only that device has.
+// Settings' sections the iPhone and the Mac both show, so the two stay alike: apps/ios/app/SettingsScreen.swift
+// and apps/mac/app/Settings.swift put them in their own forms, next to what only that device has.
 
 /// Voice: whether Oby reads its replies out loud, and the language it writes down what you say in
 /// (`VoiceSettings`).
@@ -34,7 +34,7 @@ struct VoiceSection: View {
 }
 
 /// Accounts and their usage: a line on the one with the most room, then each tool's accounts, each
-/// with its usage card (Shared/Usage.swift) or the row the device gives it.
+/// with its usage card (apps/shared/Usage.swift) or the row the device gives it.
 struct AccountSections<Item, ID: Hashable, Row: View>: View {
     var title: String
     var items: [Item]

@@ -1,6 +1,6 @@
 import Foundation
 
-// Decisions as Claude Code shows them (#138): one card (Shared/DecisionCard.swift) for a job's
+// Decisions as Claude Code shows them (#138): one card (apps/shared/DecisionCard.swift) for a job's
 // question, a plan to approve, an inbox item, a permission prompt and the brain's question, on the
 // iPhone, the Mac and the Watch. The recommended option comes first, then the others (at most 3 in
 // all), then a line for the user's own words. The permission keys are the runner's (#134,

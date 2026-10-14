@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Home's Inbox, above the jobs: what only you can answer, the longest-waiting first
-/// (docs/pipeline-cases.md, I.1). The first one is open, as a decision card (Shared/DecisionCard.swift):
+/// (docs/pipeline-cases.md, I.1). The first one is open, as a decision card (apps/shared/DecisionCard.swift):
 /// its answers, the recommended one first, and your own words; Later puts it off for an hour, Done
 /// lets it go. Once it's settled, the next one opens. Answered on the Mac, it goes from here too.
 struct InboxSection: View {

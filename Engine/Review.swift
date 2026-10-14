@@ -228,7 +228,7 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     static func securityPath(_ path: String) -> Bool {
         let path = path.lowercased()
         let roots = ["runner/api.swift", "runner/gateway.swift", "runner/devices.swift", "runner/routes.swift",
-                     "runner/auth", "shared/e2e", "engine/vault", "engine/jobs.swift", "engine/publish",
+                     "runner/auth", "apps/shared/e2e", "engine/vault", "engine/jobs.swift", "engine/publish",
                      "cloud/"]
         if roots.contains(where: { path == $0 || path.hasPrefix($0) }) { return true }
         let name = URL(fileURLWithPath: path).lastPathComponent

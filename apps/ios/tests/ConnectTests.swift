@@ -3,7 +3,7 @@ import Security
 import Testing
 @testable import Oby
 
-/// The Connect screen's pairing (#284, iOS/ConnectScreen.swift and iOS/Phone.swift): what the
+/// The Connect screen's pairing (#284, apps/ios/app/ConnectScreen.swift and apps/ios/app/Phone.swift): what the
 /// Mac's QR code carries, how a typed code is read, and that redeeming an invitation keeps the
 /// device token in the keychain with the Mac's link, and keeps nothing when the Mac refuses.
 @MainActor

@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Oby
 
-/// The Chat tab's thread (#11, iOS/Chat.swift and Shared/ConversationModel.swift): the runner's
+/// The Chat tab's thread (#11, apps/ios/app/Chat.swift and apps/shared/ConversationModel.swift): the runner's
 /// conversation read in pages, grouped by day, the jobs its cards resolve to, new turns from the
 /// runner's events, and the composer's send flow: what's sent, and the words shown until the
 /// runner lists them.

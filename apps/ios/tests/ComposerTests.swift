@@ -1,7 +1,7 @@
 import Testing
 @testable import Oby
 
-/// The composer's dictation (#19, iOS/Composer.swift): words heard go after what the field holds.
+/// The composer's dictation (#19, apps/ios/app/Composer.swift): words heard go after what the field holds.
 @MainActor
 struct ComposerTests {
     @Test func dictatedWordsJoinTheDraft() {

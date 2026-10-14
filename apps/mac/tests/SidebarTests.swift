@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Oby
 
-/// The window's sidebar and Live column (#11, Mac/App/Sidebar.swift, Mac/App/LivePanel.swift):
+/// The window's sidebar and Live column (#11, apps/mac/app/App/Sidebar.swift, apps/mac/app/App/LivePanel.swift):
 /// Agents lists what runs and what needs you, Channels and Obys say honestly that they're not
 /// here yet, and the counts match the header's.
 struct SidebarTests {

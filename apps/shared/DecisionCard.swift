@@ -190,7 +190,7 @@ struct DecisionCard: View {
         #endif
     }
 
-    /// Bold, italics, code and links in a line of the plan, as the reading style sets them (Shared/ReadingText.swift).
+    /// Bold, italics, code and links in a line of the plan, as the reading style sets them (apps/shared/ReadingText.swift).
     private func inline(_ text: String) -> AttributedString {
         let reading = Reading.current
         return Reading.markdown(text, code: reading.code(scale: reading.style == nil ? 1 : scale))
@@ -279,7 +279,7 @@ struct DecisionCard: View {
     #endif
 
     /// Each app's look around the text: the Mac's island is dark, the iPhone follows the system.
-    /// Long text itself takes the reading style (Shared/ReadingText.swift).
+    /// Long text itself takes the reading style (apps/shared/ReadingText.swift).
     private enum Style {
         #if os(macOS)
         static let ink = OBYStyle.primary
