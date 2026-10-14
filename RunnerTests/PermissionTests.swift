@@ -70,6 +70,30 @@ final class PermissionTests {
 
     func bash(_ command: String, _ request: String = "r1") -> ToolCall { ToolCall(request: request, tool: "Bash", command: command) }
 
+    // MARK: Cursor (#406)
+
+    /// A tool Oby has no family for asks in every mode, Bypass too, and no saved rule covers it.
+    @Test func unknownToolAsksInBypass() {
+        let call = ToolCall(request: "c1", tool: "Cursor(foo)")
+        for mode in PermissionMode.allCases {
+            #expect(PermissionPolicy.decide(call, mode: mode, rules: [], worktree: worktree) == .ask, "\(mode)")
+        }
+        let rule = PermissionRule(id: "r1", rule: "Cursor(foo)", repo: "deskree-inc/oby", decision: .allow, created: .now)
+        #expect(PermissionPolicy.decide(call, mode: .bypass, rules: [rule], worktree: worktree) == .ask)
+        // Its card offers no "always".
+        #expect(PermissionPolicy.permission(for: call, id: "p1", repo: "deskree-inc/oby", worktree: worktree).rule == nil)
+    }
+
+    /// Cursor's `git push` is refused with Policy's own reason, as `reject_once`.
+    @Test func cursorPushDenied() throws {
+        let publish = try JSONSerialization.jsonObject(with: Data(#"{"id":4,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"c","title":"git push","kind":"execute","rawInput":{"command":"git push origin main"}},"options":[{"optionId":"allow-once","name":"Allow","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}"#.utf8)) as? [String: Any] ?? [:]
+        let call = try #require(ACPRPC.call(publish, tools: [:]))
+        let reason = try #require(ACPRPC.denial(call, worktree: worktree))
+        #expect(reason == Policy.deny(tool: "Bash", input: ["command": "git push origin main"], worktree: worktree))
+        let reply = ACPRPC.answer(.deny(reason), options: ACPRPC.options(publish))
+        #expect(reply.result["outcome"] as? [String: String] == ["outcome": "selected", "optionId": "reject-once"])
+    }
+
     // MARK: The table
 
     @Test func eachModeAllowsOrAsks() {

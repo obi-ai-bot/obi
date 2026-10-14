@@ -108,6 +108,8 @@ nonisolated enum PermissionPolicy {
     static let quiet: Set<String> = ["Read", "Grep", "Glob", "LS", "NotebookRead", "TodoWrite", "Task", "Agent"]
     /// File edits: the worktree's only (Policy), allowed in Accept edits, refused in Plan.
     static let edits: Set<String> = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+    /// How an ACP tool's call that fits no family is named (`ACPRPC.toolCall`).
+    static let unknownPrefix = "Cursor("
     /// What an agent in Plan hears when it tries to change something.
     static let planOnly = "Plan mode: read only, change nothing yet. Finish with your plan; the user approves it before you go on."
     /// Tools whose second word names what they do (`swift test`, `git status`): their rules keep it.
@@ -129,6 +131,8 @@ nonisolated enum PermissionPolicy {
         if let deny = rules.first(where: { $0.decision == .deny && matches($0.rule, call, worktree: worktree, allowing: false) }) {
             return .deny("The user's rule \(deny.rule) refuses this in \(deny.repo). Do it another way, or say in your summary what you'd have done.")
         }
+        // A tool Oby has no family for (Cursor's `Cursor(<title>)`): it asks in every mode, Bypass too, and no rule covers it.
+        if call.tool.hasPrefix(unknownPrefix) { return .ask }
         if mode == .plan, edits.contains(call.tool) { return .deny(planOnly) }
         // Plan changes nothing: a saved allow rule doesn't let a command through while planning
         // (`Bash(touch:*)` would write a file), so everything but reads asks the user.
@@ -269,8 +273,9 @@ nonisolated enum PermissionPolicy {
             case "WebSearch": "Search the web"
             default: "Use \(call.tool)"
             }
-            rule = call.tool
-            what = call.tool
+            // Nothing saves a rule for a tool of no family: it asks every time.
+            rule = call.tool.hasPrefix(unknownPrefix) ? nil : call.tool
+            what = rule
         }
         return Permission(id: id, tool: call.tool, title: title, detail: detail, rule: rule,
                           always: what.map { "Yes, and don't ask again for \($0) in \(repo)" })
