@@ -18,6 +18,7 @@ nonisolated struct CheckRun: Equatable, Sendable {
     var summary: String
 
     static let review = "Oby review"
+    static let securityReview = "Oby security review"
     static let macCheck = "Oby Mac check"
     /// GitHub takes 65,535 characters in a summary.
     static let summaryLimit = 60_000

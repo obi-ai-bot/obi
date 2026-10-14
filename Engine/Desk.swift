@@ -396,6 +396,8 @@ final class Desk {
     /// secret scan, and quotes it as a file for the author's next round. Tests put in their own.
     @ObservationIgnored var postReview: (_ author: Job, _ run: CheckRun) async throws -> URL = CheckRun.post
     @ObservationIgnored var quoteReview: (_ author: Job, _ file: String, _ text: String) throws -> Void = Review.quote
+    /// Reads changed PR paths for the independent security review. Tests can supply a known diff.
+    @ObservationIgnored var securityPaths: (Job) -> [String]? = Review.securityPaths
     /// Answers a waiting permission, or changes the mode of jobs elsewhere (the runner's, on the Mac),
     /// when the brain names one: nil once it went through, else why not.
     @ObservationIgnored var answerElsewhere: (_ job: Job, _ decision: PermissionDecision, _ message: String?) async -> String? = { _, _, _ in

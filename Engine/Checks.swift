@@ -180,6 +180,10 @@ nonisolated struct MacCheck: Codable, Equatable, Sendable {
         if job.status != .done { return "Not merged: the job isn't done." }
         if job.dismissed != nil { return "Not merged: you let the job go." }
         guard job.review?.verdict == .approved, job.reviewing == nil else { return "Not merged: Oby's review hasn't approved it." }
+        if job.securityReviewRequired == true {
+            guard job.generalReview?.verdict == .approved else { return "Not merged: Oby's general review hasn't approved it." }
+            guard job.securityReview?.verdict == .approved, job.securityReviewing == nil else { return "Not merged: Oby's security review hasn't approved it." }
+        }
         if job.pullRequest?.reviewDecision == .changesRequested { return "Not merged: a reviewer requested changes on GitHub." }
         if let state = job.pullRequest?.state, state != .open { return "Not merged: the pull request is \(state == .merged ? "merged" : "closed") already." }
         for base in [check.base, job.base, job.pullRequest?.base] where base != nil && base != into {
