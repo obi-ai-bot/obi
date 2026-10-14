@@ -117,6 +117,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Files the user attached to the request (a screenshot, what they copied), as paths on this
     /// machine. Workspace.prepare copies them into the worktree's .oby/inputs.
     var attachments: [String]?
+    /// Files Oby itself created for an agent, outside the user's attachment folder (review context,
+    /// failure briefs). These are set only by Engine code; request paths stay in `attachments`.
+    var systemAttachments: [String]?
     /// The commit the work started from, recorded by Oby when it set the worktree up: what test
     /// integrity compares with (Engine/Guards.swift). Nil before then, and on older jobs.
     var startCommit: String?
@@ -1058,8 +1061,14 @@ nonisolated enum Attachments {
     /// that holds a secret stops the job, naming it. Throws when the vault can't be read.
     static func copy(_ job: Job, into worktree: URL, allowedFolder: URL = LocalRunner.attachments, vault: Vault = .shared) throws -> [String]? {
         let leaks = try vault.forAgents()
+        let paths = job.attachments ?? []
+        let systemAttachments = Set(job.systemAttachments ?? [])
+        guard systemAttachments.isSubset(of: Set(paths)) else {
+            throw Shell.Failure(message: "Oby's generated attachments don't match the job's attachments.")
+        }
+        _ = try validated(paths.filter { !systemAttachments.contains($0) }, in: allowedFolder)
         var copied: [String] = []
-        for path in try validated(job.attachments ?? [], in: allowedFolder) {
+        for path in paths {
             let file = URL(filePath: path)
             guard let data = try? Data(contentsOf: file) else { continue }
             let target = worktree.appending(path: ".oby/inputs/\(file.lastPathComponent)")

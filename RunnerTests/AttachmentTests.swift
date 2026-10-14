@@ -74,6 +74,18 @@ struct AttachmentTests {
         #expect(!FileManager.default.fileExists(atPath: worktree.appending(path: ".oby/inputs/private.txt").path))
     }
 
+    @Test func copyKeepsObysGeneratedAttachmentsOutsideTheUserFolder() throws {
+        let (worktree, screenshot, _) = try worktree()
+        let generated = worktree.deletingLastPathComponent().appending(path: "review-context.md")
+        try Data("Quoted review context".utf8).write(to: generated)
+        var review = job(attachments: [generated.path])
+        review.reviewOf = "author01"
+        review.systemAttachments = [generated.path]
+
+        #expect(try Attachments.copy(review, into: worktree, allowedFolder: screenshot.deletingLastPathComponent()) == [generated.path])
+        #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/review-context.md")) == Data("Quoted review context".utf8))
+    }
+
     @Test func dispatchAttachmentsMustBeInTheAppsAttachmentFolder() throws {
         let folder = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
