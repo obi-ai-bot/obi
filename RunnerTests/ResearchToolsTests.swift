@@ -13,6 +13,13 @@ struct ResearchToolsTests {
         var value: Int { lock.lock(); defer { lock.unlock() }; return count }
     }
 
+    final class AddressProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [(String, String)] = []
+        func add(host: String, address: String) { lock.lock(); values.append((host, address)); lock.unlock() }
+        var requests: [(String, String)] { lock.lock(); defer { lock.unlock() }; return values }
+    }
+
     final class RecordingBrain: BrainAdapter, @unchecked Sendable {
         let name: String
         var plans: [String]
@@ -115,6 +122,7 @@ struct ResearchToolsTests {
         #expect(problems(Self.research([.init(tool: .listFiles, repo: "deskree-inc/unknown")])).contains { $0.contains("isn't a known repository") })
         #expect(problems(Self.research([.init(tool: .readFile, repo: "deskree-inc/oby", path: "../secrets")])).contains { $0.contains("path must be relative") })
         #expect(problems(Self.research([.init(tool: .readFile, repo: "deskree-inc/oby", path: "file", startLine: 1, endLine: 901)])).contains("read_file range is at most 400 lines"))
+        #expect(problems(Self.research([.init(tool: .readFile, repo: "deskree-inc/oby", path: "file", startLine: 1, endLine: 401)])).contains("read_file range is at most 400 lines"))
         #expect(problems(Self.research(Array(repeating: .init(tool: .listFiles, repo: "deskree-inc/oby"), count: 5))).contains("research needs 1 to 4 lookups"))
         #expect(problems(Self.research([.init(tool: .listFiles, repo: "deskree-inc/oby", ref: "--upload-pack=x")])).contains("ref must be a branch name or 7 to 40 hexadecimal characters"))
         #expect(problems(Self.research([.init(tool: .fetchURL, url: "http://example.com")])).contains("fetch_url needs a public HTTPS URL"))
@@ -146,10 +154,32 @@ struct ResearchToolsTests {
         #expect(brain.prompts[2].contains("already in work.md"))
     }
 
+    @Test func combinedResearchAndEarlierQuotesStayUnderTheTurnCap() async throws {
+        var log = ResearchLog()
+        await log.run([.init(tool: .listFiles, repo: "deskree-inc/oby")], with: desk.researchTools)
+        let combined = try #require(log.quoted(adding: String(repeating: "x", count: 47 * 1024)))
+        #expect(combined.utf8.count <= ResearchLog.size)
+    }
+
     @Test func isPublicURLRefusesPrivateAndTailnetHosts() {
         for url in ["https://localhost", "https://foo", "https://10.0.0.1", "https://x.ts.net", "https://100.100.1.1.nip.io", "https://user:pw@example.com"] {
             #expect(!ResearchTools.isPublicURL(url), "\(url) should be refused")
         }
+    }
+
+    @Test func webRedirectsResolveAgainAndPassThePinnedAddress() async throws {
+        let probe = AddressProbe()
+        let tools = ResearchTools(
+            urlFetch: { url, address in
+                probe.add(host: url.host ?? "", address: address)
+                return .init(statusCode: 302, mimeType: "text/plain", location: "https://internal.example/private", data: Data())
+            },
+            resolveHost: { host in host == "public.example" ? ["8.8.8.8"] : ["127.0.0.1"] }
+        )
+        let result = await tools.run(.init(tool: .fetchURL, url: "https://public.example/"))
+        #expect(result.status == .refused && result.text.contains("private address"))
+        #expect(probe.requests.count == 1)
+        #expect(probe.requests.first?.0 == "public.example" && probe.requests.first?.1 == "8.8.8.8")
     }
 
     @Test func codexBrainGetsTheSameFile() async throws {

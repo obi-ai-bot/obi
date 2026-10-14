@@ -350,7 +350,10 @@ extension Plan {
             if let start = lookup.startLine, start < 1 { problems.append("startLine must be positive") }
             if let end = lookup.endLine, end < 1 { problems.append("endLine must be positive") }
             if let start = lookup.startLine, let end = lookup.endLine, end < start { problems.append("endLine must be at least startLine") }
-            if let start = lookup.startLine, let end = lookup.endLine, end - start > 400 { problems.append("read_file range is at most 400 lines") }
+            let start = lookup.startLine ?? 1
+            if let end = lookup.endLine, end >= start, end - start >= 400 {
+                problems.append("read_file range is at most 400 lines")
+            }
             if lookup.query != nil || lookup.number != nil || lookup.url != nil { problems.append("read_file has only repo, ref, path and line range") }
         case .gitLog:
             if lookup.repo == nil { problems.append("git_log needs repo") }
