@@ -66,14 +66,16 @@ jobs:
 
       # obi-sphere's server keeps copies of this repository's e2e fixtures; they must still match
       # obi's (this checkout). The check is obi-sphere's script and needs only Node (set up above).
-      # Until the server is in obi-sphere's dev (no server/ folder), the step says so and passes.
-      # Once server/ is there, the script must be too: a missing script fails rather than skipping.
+      # obi-sphere's dev has had a server/ folder (a README) since its first commit; the server
+      # itself is there once server/package.json is (the same test the Makefile uses to install
+      # its dependencies). Until then the step says so and passes. Once it is there, the script
+      # must be too: a missing script fails rather than skipping.
       - name: obi-sphere's copies of the e2e fixtures match obi's
         run: |
-          if [ ! -d obi-sphere/server ]; then
-            echo "::notice::obi-sphere/server/ is not in obi-sphere's dev yet: the fixture comparison is skipped."
+          if [ ! -f obi-sphere/server/package.json ]; then
+            echo "::notice::obi-sphere's server (server/package.json) is not in obi-sphere's dev yet: the fixture comparison is skipped."
           elif [ ! -f obi-sphere/server/scripts/check-fixtures.mjs ]; then
-            echo "::error::obi-sphere/server/ is in obi-sphere's dev but server/scripts/check-fixtures.mjs is not: the fixture comparison can't run."
+            echo "::error::obi-sphere's server (server/package.json) is in obi-sphere's dev but server/scripts/check-fixtures.mjs is not: the fixture comparison can't run."
             exit 1
           else
             OBI_DIR=obi node obi-sphere/server/scripts/check-fixtures.mjs
