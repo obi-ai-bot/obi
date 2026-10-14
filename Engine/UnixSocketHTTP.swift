@@ -138,7 +138,7 @@ nonisolated enum UnixSocketHTTP {
     private static func dataBody(for request: URLRequest, path: String) async throws -> (Data, URLResponse) {
         guard let url = request.url else { throw LocalSocketError.noURL }
         let connection = NWConnection(to: .unix(path: path), using: .tcp)
-        try await withTaskCancellationHandler {
+        return try await withTaskCancellationHandler {
             try await ready(connection, queue: "com.deskree.oby.runner-socket")
             try Task.checkCancellation()
             var head = "\(request.httpMethod ?? "GET") \(url.path)\(url.query.map { "?\($0)" } ?? "") HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
