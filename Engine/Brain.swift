@@ -186,8 +186,8 @@ nonisolated struct BrainContext: Sendable {
     var settingAccounts: [String] = []
     /// The jobs whose permission prompt waits for the user, by id: the ones answer_permission may name.
     var permissions: [String] = []
-    /// Pull requests Oby authored and the jobs that own their review lifecycle.
-    var reviewAuthors: [Int: String] = [:]
+    /// Repository-scoped pull requests Oby authored and the jobs that own their review lifecycle.
+    var reviewAuthors: [String: String] = [:]
     /// Routing hints for choosing the brain model; they are not user instructions.
     var turnStep: Int = 0
     var turnLength: Int? = nil
@@ -202,6 +202,9 @@ nonisolated struct BrainContext: Sendable {
 }
 
 extension Plan {
+    /// A pull request number is only unique inside its repository.
+    nonisolated static func reviewKey(repo: String, pr: Int) -> String { "\(repo)#\(pr)" }
+
     /// Why Swift refuses this plan; empty when it's fine.
     nonisolated func problems(in context: BrainContext, canary: String) -> [String] {
         var problems: [String] = []
@@ -427,7 +430,8 @@ extension Plan {
         if dispatch.task.count > 2000 { problems.append("task is longer than 2,000 characters") }
         if let title = dispatch.title, !Plan.isTitle(title) { problems.append("title must be one line of 1 to 60 characters") }
         if let pr = dispatch.pr, pr <= 0 { problems.append("pr must be a positive number") }
-        if dispatch.kind == .review, let pr = dispatch.pr, let author = context.reviewAuthors[pr] {
+        if dispatch.kind == .review, let pr = dispatch.pr,
+           let author = context.reviewAuthors[Self.reviewKey(repo: dispatch.repo, pr: pr)] {
             problems.append("PR #\(pr) has Oby author job \(author); use ask_review_again")
         }
         if let issue = dispatch.issue, issue <= 0 { problems.append("issue must be a positive number") }

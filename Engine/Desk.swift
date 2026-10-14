@@ -595,9 +595,11 @@ final class Desk {
         var choices = ["auto": ["auto"] + known.map(\.name)]
         for (agent, list) in Dictionary(grouping: known, by: \.agent) { choices[agent] = ["auto"] + list.map(\.name) }
         let briefing = briefing(turns: turns)
-        var reviewAuthors: [Int: String] = [:]
+        var reviewAuthors: [String: String] = [:]
         for author in jobs.filter({ $0.reviewOf == nil }).sorted(by: { $0.created < $1.created }) {
-            if let pr = Review.pullRequest(of: author) { reviewAuthors[pr] = author.id }
+            if let pr = Review.pullRequest(of: author) {
+                reviewAuthors[Plan.reviewKey(repo: author.repo, pr: pr)] = author.id
+            }
         }
         // A job may move to any account the briefing knows, here or elsewhere: Swift checks it when it moves.
         var moveAccounts: [String: [String]] = [:]
@@ -1666,7 +1668,7 @@ final class Desk {
         if let why { handoffs[job.id, default: []].append(why) }
         var job = job
         if job.kind == .review, job.reviewOf == nil, let pr = job.pr,
-           var author = jobs.first(where: { $0.reviewOf == nil && Review.pullRequest(of: $0) == pr }),
+           var author = jobs.first(where: { $0.reviewOf == nil && $0.repo == job.repo && Review.pullRequest(of: $0) == pr }),
            author.reviewing == nil {
             job.reviewOf = author.id
             job.review = author.review
