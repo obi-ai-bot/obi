@@ -16,6 +16,7 @@ let package = Package(
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.27.1"),
         .package(url: "https://github.com/apple/swift-http-types.git", from: "1.8.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "5.0.0"),
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.36.0"),
     ],
     targets: [
         // Linux has no SQLite3 module; macOS does.
@@ -36,6 +37,7 @@ let package = Package(
                 .product(name: "HTTPTypes", package: "swift-http-types"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "_CryptoExtras", package: "swift-crypto"),
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
             ],
             path: "Runner",
             // The launchd plist is the Mac app's (Oby.xcodeproj bundles it with the executable, #283).

@@ -745,7 +745,12 @@ nonisolated struct RunnerError: LocalizedError {
 /// sent as `Authorization: Bearer` on every request.
 nonisolated struct Runner: Sendable {
     var base: URL
-    var token: String? = nil
+    var token: String?
+
+    init(base: URL, token: String? = nil) {
+        self.base = base
+        self.token = token
+    }
 
     static let defaultURL = URL(string: "https://tetrix-lab.tail8de49b.ts.net:8443")!
 
@@ -1033,6 +1038,7 @@ nonisolated struct Runner: Sendable {
         var request = URLRequest(url: URL(string: path, relativeTo: base.appending(path: "/"))!)
         request.httpMethod = method
         request.timeoutInterval = timeout
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let body {
             request.httpBody = try Self.encoder.encode(body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
