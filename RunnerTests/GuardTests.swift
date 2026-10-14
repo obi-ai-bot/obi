@@ -418,6 +418,9 @@ struct GuardTests {
         agent.onEvent(.turnEnded(summary: "Green now.", failed: false))
         try await until { desk.job("weaklast")?.isActive == false }
         try expectHeld("weaklast", "the tests are still weakened after 1 round", agent: agent)
+        let heldSummary = try #require(desk.job("weaklast")?.summary)
+        #expect(heldSummary.contains("Test integrity findings:\n- adds a"))
+        #expect(heldSummary.contains("RunnerTests/StopTests.swift") && heldSummary.contains("@Test("))
     }
 
     @Test func theDiffFindsWhatWeakensTheTests() {
@@ -730,6 +733,35 @@ struct IntegrityRepositoryTests {
         #expect(await Integrity.check(worktree: repo, against: "dev") == Integrity.Report())
         #expect(await Integrity.check(worktree: repo, against: start) == weakened)
         #expect(await Integrity.check(worktree: repo, against: "main") == Integrity.Report(problems: ["Oby couldn't compare the tests with main"]))
+    }
+
+    @Test func rebasingOntoDevDoesNotCountDevsTestChangesAsTheJobsWork() async throws {
+        let (repo, git, start) = try await repository()
+
+        // The job has its own commit, then dev deletes a test file before the job is rebased.
+        try "let a = 2\n".write(to: repo.appending(path: "Cart.swift"), atomically: true, encoding: .utf8)
+        _ = try await git("add", ".")
+        _ = try await git("commit", "-q", "-m", "job work")
+        _ = try await git("checkout", "-q", "dev")
+
+        try FileManager.default.removeItem(at: repo.appending(path: "Tests/CartTests.swift"))
+        try "@Test func devReplacement() {}\n".write(to: repo.appending(path: "Tests/DevTests.swift"), atomically: true, encoding: .utf8)
+        _ = try await git("add", "-A")
+        _ = try await git("commit", "-q", "-m", "dev updates tests")
+        let trustedTip = try await git("rev-parse", "dev")
+        _ = try await git("update-ref", "refs/remotes/origin/dev", "dev")
+        _ = try await git("checkout", "-q", "oby/fix-64")
+        _ = try await git("rebase", "dev")
+
+        #expect(await Integrity.check(worktree: repo, against: start, trustedBaseTip: trustedTip) == Integrity.Report())
+
+        // A job can rewrite its remote-tracking ref. Oby's pinned tip still exposes its deletion.
+        try FileManager.default.removeItem(at: repo.appending(path: "Tests/DevTests.swift"))
+        _ = try await git("add", "-A")
+        _ = try await git("commit", "-q", "-m", "job weakens tests")
+        _ = try await git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        let problems = await Integrity.check(worktree: repo, against: start, trustedBaseTip: trustedTip).problems
+        #expect(problems.contains("deletes the test file Tests/DevTests.swift"))
     }
 
     @Test func agentAttributesCantHideTheDiff() async throws {

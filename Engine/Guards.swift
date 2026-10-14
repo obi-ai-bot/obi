@@ -145,12 +145,22 @@ nonisolated enum Integrity {
 
     /// What the worktree's work (committed or not) does to the tests since it left `ref`. Fails
     /// closed: when git can't say, that's the problem.
-    static func check(worktree: URL, against ref: String) async -> Report {
+    static func check(worktree: URL, against ref: String, trustedBaseTip: String? = nil) async -> Report {
         let git = ["git", "-c", "core.quotePath=false", "-C", worktree.path]
-        // A commit recorded when the work started is compared with as it is: a merge base moves
-        // when the agent moves HEAD. A ref (older jobs) is compared from where the branch left it.
+        // The start commit is immutable from the agent's job state. Oby may supply a freshly
+        // fetched base tip to exclude base changes after a rebase; never resolve a mutable ref here.
         let fixed = ref.contains(/^[0-9a-f]{40}$/)
-        guard let base = fixed ? ref : try? await Shell.ok(git + ["merge-base", ref, "HEAD"]) else {
+        let comparisonEnv: [String: String?] = ["GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": "/dev/null"]
+        var comparison: String?
+        if fixed, let trustedBaseTip,
+           let candidate = try? await Shell.ok(git + ["merge-base", "HEAD", trustedBaseTip], env: comparisonEnv),
+           (try? await Shell.ok(git + ["merge-base", "--is-ancestor", ref, candidate], env: comparisonEnv)) != nil {
+            comparison = candidate
+        }
+        if comparison == nil {
+            comparison = fixed ? ref : try? await Shell.ok(git + ["merge-base", ref, "HEAD"])
+        }
+        guard let base = comparison else {
             return Report(problems: ["Oby couldn't compare the tests with \(ref)"])
         }
         // Nothing the agent wrote gets a say in what the diff shows: no replacement objects or

@@ -478,7 +478,10 @@ nonisolated enum Halt {
     static func end(_ target: pid_t, after: TimeInterval) {
         pending.withLock { $0[target] = .now + .seconds(after) }
         _ = kill(target, SIGTERM)
-        DispatchQueue.global().asyncAfter(deadline: .now() + after) {
+        // Process deadlines must not wait for Dispatch's shared worker pool: a busy test run or
+        // a hung process can otherwise delay SIGKILL long past the grace period.
+        Thread.detachNewThread {
+            Thread.sleep(forTimeInterval: after)
             if pending.withLock({ $0.removeValue(forKey: target) }) != nil { _ = kill(target, SIGKILL) }
         }
     }
