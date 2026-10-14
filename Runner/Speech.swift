@@ -302,7 +302,6 @@ private actor WhisperServer {
     }
 
     func start() async throws {
-        if process?.isRunning == true { return }
         guard !busy else { throw APIError(.serviceUnavailable, "This speech model is busy. Try again later.") }
         busy = true
         defer { busy = false }
@@ -311,7 +310,12 @@ private actor WhisperServer {
 
     private func ensureStarted() async throws {
         guard !closed else { throw APIError(.serviceUnavailable, "The speech service is stopping.") }
-        if process?.isRunning == true { return }
+        if process?.isRunning == true {
+            if await ready() { return }
+            // Process.isRunning can lag a child killed outside this actor. A live PID
+            // without our endpoint is not a usable resident server; reap it before relaunching.
+            await stop()
+        }
         guard (1...65535).contains(port), config.threads > 0 else {
             throw APIError(.notImplemented, "Invalid Whisper port or thread count.")
         }
@@ -372,6 +376,7 @@ private actor WhisperServer {
         } catch {
             // Timeout/cancellation must release the model and its audio, including hung inference.
             await stop()
+            if let error = error as? APIError, error.status == .serviceUnavailable { throw error }
             throw APIError(.internalServerError, "Whisper failed or timed out.")
         }
     }
