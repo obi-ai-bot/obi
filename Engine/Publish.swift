@@ -117,7 +117,10 @@ nonisolated enum Publish {
         let texts = outgoing(job, messages: messages, title: title, closes: closes)
         let said: [Finding]
         do {
-            said = try await scan(texts: texts)
+            let nonMessageTexts = texts.filter { $0.name != "commit message" }
+            let otherFindings = try await scan(texts: nonMessageTexts)
+            let messageFindings = try await scanCommitMessages(worktree, base: base, head: head)
+            said = otherFindings + messageFindings
         } catch {
             throw Shell.Failure(message: "Not published: the secret scan couldn't run (\(error.localizedDescription)).")
         }
@@ -453,6 +456,25 @@ nonisolated enum Publish {
         return (found + (try await gitleaks(lines))).filter { seen.insert($0).inserted }
     }
 
+    /// Scans each unpublished commit message separately so a finding can name the commit whose
+    /// message must be rewritten. NUL framing is safe because Git commit messages cannot contain NUL.
+    static func scanCommitMessages(_ worktree: URL, base: String, head: String = "HEAD", vault: Vault = .shared) async throws -> [Finding] {
+        let git = ["git", "-C", worktree.path]
+        let raw = try await Shell.ok(git + ["log", "-z", "--format=%H%x00%B", "refs/remotes/origin/\(base)..\(head)"])
+        let fields = raw.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+        var findings: [Finding] = []
+        for index in stride(from: 0, to: fields.count, by: 2) where index + 1 < fields.count {
+            let commit = fields[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard commit.count == 40, commit.allSatisfy(\.isHexDigit) else { continue }
+            let message = fields[index + 1]
+            for var finding in try await scan(texts: [(name: "commit message", text: message)], vault: vault) {
+                finding.commit = commit
+                findings.append(finding)
+            }
+        }
+        return findings
+    }
+
     /// Scans what publishing would send: each commit up to `head` that isn't on origin/<base>,
     /// and the diff they add up to, for the built-in rules and the vault's secrets. If the scan
     /// can't run, it throws and nothing is published.
@@ -474,12 +496,22 @@ nonisolated enum Publish {
             // A merge as what its author changed from git's own merge of its parents: content a merge
             // brings in that neither side had is pushed too, even if a later commit takes it out.
             let log = try await Shell.ok(git + ["log", "-p", "--diff-merges=remerge", "--format=__OBY_COMMIT__%H"] + options + ["\(since)..\(head)"])
-            commitDiffs = log.components(separatedBy: "__OBY_COMMIT__").dropFirst().compactMap { entry in
-                guard let newline = entry.firstIndex(of: "\n") else { return nil }
-                let commit = String(entry[..<newline]).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard commit.count == 40, commit.allSatisfy(\.isHexDigit) else { return nil }
-                return (commit, String(entry[entry.index(after: newline)...]))
+            var parsed: [(commit: String, diff: String)] = []
+            var currentCommit: String?
+            var currentLines: [String] = []
+            for line in log.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+                let prefix = "__OBY_COMMIT__"
+                let candidate = line.hasPrefix(prefix) ? String(line.dropFirst(prefix.count)) : ""
+                if candidate.count == 40, candidate.allSatisfy(\.isHexDigit) {
+                    if let currentCommit { parsed.append((currentCommit, currentLines.joined(separator: "\n"))) }
+                    currentCommit = candidate
+                    currentLines = []
+                } else if currentCommit != nil {
+                    currentLines.append(line)
+                }
             }
+            if let currentCommit { parsed.append((currentCommit, currentLines.joined(separator: "\n"))) }
+            commitDiffs = parsed
             headDiff = try await Shell.ok(git + ["diff"] + options + ["\(since)...\(head)"])
         } catch {
             throw Shell.Failure(message: "Not published: the secret scan couldn't read the changes (\(error.localizedDescription)).")

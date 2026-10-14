@@ -429,4 +429,30 @@ struct PublishCommitFindingTests {
 
         #expect(try await Publish.scan(repo, base: "dev").isEmpty)
     }
+
+    @Test func delimiterTextInAPatchDoesntHideLaterFindings() async throws {
+        try "let marker = \"__OBY_COMMIT__\"\nlet other = \"\(key)\"\n"
+            .write(to: repo.appending(path: "sample.swift"), atomically: true, encoding: .utf8)
+        try await AlreadyOnBaseTests.git(["add", "sample.swift"], in: repo)
+        try await AlreadyOnBaseTests.git(["commit", "--quiet", "-m", "include delimiter text"], in: repo)
+        let introducing = try await AlreadyOnBaseTests.git(["rev-parse", "HEAD"], in: repo)
+
+        let findings = try await Publish.scan(repo, base: "dev")
+        #expect(findings.contains { $0.commit == introducing && $0.rule == "AWS access key" })
+    }
+
+    @Test func commitMessageFindingNamesCommitAndGetsARewordFixupPrompt() async throws {
+        let key = "AKIA" + "ABCDEFGHIJKLMNOP"
+        try "benign change\n".write(to: repo.appending(path: "message.txt"), atomically: true, encoding: .utf8)
+        try await AlreadyOnBaseTests.git(["add", "message.txt"], in: repo)
+        try await AlreadyOnBaseTests.git(["commit", "--quiet", "-m", "example \(key)"], in: repo)
+        let introducing = try await AlreadyOnBaseTests.git(["rev-parse", "HEAD"], in: repo)
+
+        let findings = try await Publish.scanCommitMessages(repo, base: "dev")
+        let finding = try #require(findings.first { $0.rule == "AWS access key" })
+        #expect(finding.file == "commit message" && finding.commit == introducing)
+        let prompt = Prompts.publishFix(findings, base: "dev")
+        #expect(prompt.contains("git commit --fixup=reword:<commit>"))
+        #expect(prompt.contains("GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/dev"))
+    }
 }
