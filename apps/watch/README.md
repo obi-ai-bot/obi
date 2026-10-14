@@ -22,8 +22,8 @@ To render them again after the character changes:
 
 ```bash
 npx playwright install chromium-headless-shell    # once
-node Watch/Frames/render.mjs "$TMPDIR/oby-watch"
-python3 Watch/Frames/compose.py "$TMPDIR/oby-watch" .   # needs Pillow
+node apps/watch/Frames/render.mjs "$TMPDIR/oby-watch"
+python3 apps/watch/Frames/compose.py "$TMPDIR/oby-watch" .   # needs Pillow
 ```
 
 - `render.mjs` serves `Character/` itself, loads `oby.html?embed` in headless Chromium and drives Oby's clock by hand: every frame is exactly 1/30 s after the last, one in two is kept, and `Math.random` is pinned, so Oby looks straight ahead, blinks on a steady beat, and two runs give the same frames. The loops and reactions, their lengths and the expression each plays are `LOOPS` at the top; a reaction's `poke` is how many clicks land on Oby's drawn body at once (oby.html plays the last one's reaction).
@@ -35,14 +35,14 @@ python3 Watch/Frames/compose.py "$TMPDIR/oby-watch" .   # needs Pillow
 
 - The watch app saves the counts to the app group `group.$(OBY_IPHONE_BUNDLE_ID).watch` (`Glance.swift`, compiled into both) whenever the phone's job list arrives, and reloads the widget only when they changed. The widget never asks for a timeline of its own (`.never`).
 - The list arrives while the app is open, and also in the background: watchOS wakes the app with a `WKWatchConnectivityRefreshBackgroundTask` for the phone's application context, `WatchNotifications` hands it to `Watch`, and the task ends once the session has delivered everything.
-- Both targets share the `Watch` folder. The widget's exceptions list every watch-app file, so **a new file in `Watch/` joins the widget too**: add it to the "Exceptions for "Watch" folder in "ObyWatchWidget" target" (Xcode: uncheck ObyWatchWidget in the file's Target Membership) unless the widget needs it.
+- Both targets share the `Watch` folder. The widget's exceptions list every watch-app file, so **a new file in `apps/watch/` joins the widget too**: add it to the "Exceptions for "Watch" folder in "ObyWatchWidget" target" (Xcode: uncheck ObyWatchWidget in the file's Target Membership) unless the widget needs it.
 
 ## How it reaches the runner
 
 The watch can't reach the tailnet, so the iPhone stands in between (WatchConnectivity):
 
-- `iOS/WatchRelay.swift` is the phone's side. It keeps the jobs on the watch as the application context (what needs you first, then what's running, then what finished in the last two days, trimmed to the 65 KB WatchConnectivity carries): on every change while Oby is open on the phone, when a job ends while it's in the background (the phone's background wake), and whenever the watch asks. With Oby in the background, a running job's steps wait until the watch app comes to the front and refreshes. It carries out what the watch asks as the app itself would, calling the runner (`docs/runner-api.md`). iOS wakes the phone app in the background for a message from the watch, and the relay asks for background time to finish, so it works with the phone in a pocket.
-- `Watch/Watch.swift` is the watch's side: the jobs, and the requests.
+- `apps/ios/app/WatchRelay.swift` is the phone's side. It keeps the jobs on the watch as the application context (what needs you first, then what's running, then what finished in the last two days, trimmed to the 65 KB WatchConnectivity carries): on every change while Oby is open on the phone, when a job ends while it's in the background (the phone's background wake), and whenever the watch asks. With Oby in the background, a running job's steps wait until the watch app comes to the front and refreshes. It carries out what the watch asks as the app itself would, calling the runner (`docs/runner-api.md`). iOS wakes the phone app in the background for a message from the watch, and the relay asks for background time to finish, so it works with the phone in a pocket.
+- `apps/watch/Watch.swift` is the watch's side: the jobs, and the requests.
 - `Shared/WatchWire.swift` is what they say to each other. Fast requests (refresh, dispatch, a message to a job, stop, the publish sentence) are answered in the reply. Planning and publishing take longer than a reply may wait for, so they're acknowledged, and the outcome comes back as a message of its own, queued if the watch app isn't up.
 - **Publish needs the phone's signature.** The runner accepts a publish by hand only with a fresh signature from the iPhone's Secure Enclave key, which signs after Face ID (`Shared/DeviceKey.swift`). The watch asks, and the phone signs: the crown alone never publishes. With Oby open on the phone, Face ID comes up there right away. In the background it can't, so the phone posts a notification, "Publish from your watch", whose **Publish with Face ID** is the app's own; the watch says so. With the phone locked, that alert is mirrored to the watch with no button (on purpose: Face ID is on the phone), so pick the phone up.
 - Spoken requests are transcribed on the iPhone (watchOS has no SpeechAnalyzer). The first time, the phone downloads the speech model for its language and asks the watch to try again in a minute.
@@ -51,9 +51,9 @@ The watch keeps the last application context and the id of the ask it waits for.
 
 ### Without the iPhone
 
-watchOS has no Tailscale or VPN, so a paired watch reaches the runner's Watch API through a Cloudflare Tunnel behind Cloudflare Access (`docs/runner-api.md`, "The Watch API"; setting it up: `Runner/README.md`). `Watch/WatchLink.swift` is that line: plain HTTPS from `URLSession`.
+watchOS has no Tailscale or VPN, so a paired watch reaches the runner's Watch API through a Cloudflare Tunnel behind Cloudflare Access (`docs/runner-api.md`, "The Watch API"; setting it up: `Runner/README.md`). `apps/watch/WatchLink.swift` is that line: plain HTTPS from `URLSession`.
 
-- **Pairing** (`iOS/WatchPairing.swift`, Settings › Apple Watch without iPhone on the phone): the watch makes a P-256 key in its Secure Enclave (CryptoKit) and hands the public half to the phone over WatchConnectivity; Face ID on the phone approves it; the runner keeps the key, and the Access service token in its vault; the watch gets its id, the Watch API's address and the token, kept in the keychain of the app group, so the widget can use them too. Swiping the watch away on the phone unpairs it.
+- **Pairing** (`apps/ios/app/WatchPairing.swift`, Settings › Apple Watch without iPhone on the phone): the watch makes a P-256 key in its Secure Enclave (CryptoKit) and hands the public half to the phone over WatchConnectivity; Face ID on the phone approves it; the runner keeps the key, and the Access service token in its vault; the watch gets its id, the Watch API's address and the token, kept in the keychain of the app group, so the widget can use them too. Swiping the watch away on the phone unpairs it.
 - **Every request** carries the service token (Access lets it through and adds its JWT) and the watch's signature over the method, path, body, time and a fresh nonce, so a replayed request fails.
 - **Which way:** with the phone reachable, the relay as above; otherwise the Watch API, switching back by itself when the phone is in reach. The runner's events stream only while Oby is on screen (`ObyWatchApp` tells `Watch`); otherwise the jobs come with each refresh, push and complication reload.
 - **Publish** without the phone: the crown's full turn sends the runner's sentence back in a request signed by the watch's key; there's no Face ID on the watch, and the watch locks itself off the wrist.
@@ -67,9 +67,9 @@ watchOS has no Tailscale or VPN, so a paired watch reaches the runner's Watch AP
 - **Simulator:** the `ObyWatch` scheme on a watchOS 26 simulator paired with an iPhone simulator running `ObyPhone`. The relay only works with both up; publishing needs a real iPhone (Secure Enclave).
 - **Your watch:** run `ObyPhone` on your iPhone (the watch app is embedded) and Xcode installs it on the paired watch, or run the `ObyWatch` scheme with the watch as the destination.
 - **TestFlight:** the iPhone build carries the watch app. Keep `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` the same on `ObyWatch` and `ObyPhone` (Apple requires it), and raise both for every upload.
-- **Bundle ID:** `$(OBY_IPHONE_BUNDLE_ID).watchkitapp`, and `.watchkitapp.widget` for the complications, so moving to Deskree's team is the same switch as for the iPhone (`iOS/README.md`). Both use the app group `group.$(OBY_IPHONE_BUNDLE_ID).watch` (`Oby.entitlements`, `Widget/ObyWidget.entitlements`); automatic signing registers it.
+- **Bundle ID:** `$(OBY_IPHONE_BUNDLE_ID).watchkitapp`, and `.watchkitapp.widget` for the complications, so moving to Deskree's team is the same switch as for the iPhone (`apps/ios/app/README.md`). Both use the app group `group.$(OBY_IPHONE_BUNDLE_ID).watch` (`Oby.entitlements`, `Widget/ObyWidget.entitlements`); automatic signing registers it.
 - **Complications:** run `ObyWatch`, then long-press the watch face, Edit, and pick Oby in a complication slot; or scroll the Smart Stack.
-- **Tests:** `iOSTests/WatchRelayTests.swift` checks the trimming of the job list and the relayed plan; `iOSTests/PokesTests.swift` checks how taps on Oby count.
+- **Tests:** `apps/ios/tests/WatchRelayTests.swift` checks the trimming of the job list and the relayed plan; `apps/ios/tests/PokesTests.swift` checks how taps on Oby count.
 
 ## Size
 
@@ -99,7 +99,7 @@ The Linux runner can parse Swift syntax and exercise the Watch model with a mock
 - Layout on 41–49 mm watches, including Series 10, clock safe area, all poses, the dot, Dynamic Type and Reduce Motion.
 - Live SpeechAnalyzer results, corrections without duplicate words, finalization on Stop with no plan until Send, language/model availability, PCM conversion and first-use download.
 - Reachable but locked/backgrounded iPhone, disconnection while listening, slow transport, mic denial, system dictation fallback, and queued request dismissal.
-- The microphone reason in `Watch/en.lproj` and `Watch/pt.lproj` (`InfoPlist.strings`) replaces the project's old hold-to-talk wording, as on the iPhone: check that Xcode bundles it (the widget picks the files up too, harmlessly) and that a fresh install shows it.
+- The microphone reason in `apps/watch/en.lproj` and `apps/watch/pt.lproj` (`InfoPlist.strings`) replaces the project's old hold-to-talk wording, as on the iPhone: check that Xcode bundles it (the widget picks the files up too, harmlessly) and that a fresh install shows it.
 - Tap to listen and tap Stop: start/stop haptics, the red Stop, the meter, and the microphone indicator only while listening. Stop, the 60-second limit, the screen turning off, paging to the jobs and a notification all close the mic and keep the words; none sends anything.
 - Live words under Oby through the phone and through the runner, the draft after Stop, Send with one tap, the mic adding more words to a draft, Clear, and a quick tap-stop or silence leaving the draft as it was.
 - Crown scrolling for long drafts/replies/plans (Send scrolls into view), one-tap dispatch, and tapping the mic while planning/dispatch is pending.
@@ -127,4 +127,4 @@ The runner's side (the Watch API, the JWT and signature checks, replays, pairing
 
 ## Coming next
 
-- With the watch app neither open nor woken, a complication shows the counts from the last list it got. Sending the list with `transferCurrentComplicationUserInfo` from `iOS/WatchRelay.swift` when what needs you changes would wake it more often (a daily budget).
+- With the watch app neither open nor woken, a complication shows the counts from the last list it got. Sending the list with `transferCurrentComplicationUserInfo` from `apps/ios/app/WatchRelay.swift` when what needs you changes would wake it more often (a daily budget).

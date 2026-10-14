@@ -12,13 +12,13 @@ Teammates install the DMG once, without a Gatekeeper warning, and from then on t
 | --- | --- | --- |
 | `OBY_TEAM_ID` | `PQKAL8E36D` | Every target's `DEVELOPMENT_TEAM`. Switching every app to the Deskree team is this one line. |
 | `OBY_MAC_BUNDLE_ID` | `com.deskree.oby` | The Mac app (`.tests` for MacTests). |
-| `OBY_IPHONE_BUNDLE_ID` | `dev.wellprado.oby` | The iPhone app (`.activity` for the Live Activity, `.tests` for iOSTests). See [iOS/README.md](../iOS/README.md). |
+| `OBY_IPHONE_BUNDLE_ID` | `dev.wellprado.oby` | The iPhone app (`.activity` for the Live Activity, `.tests` for iOSTests). See [apps/ios/app/README.md](../apps/ios/app/README.md). |
 | `OBY_APPCAST_URL` | `https://downloads.oby.deskree.com/appcast.xml` | Where the Mac app looks for updates (`SUFeedURL`). Hosting is this one setting. |
 | `OBY_SPARKLE_PUBLIC_KEY` | a placeholder of 32 zero bytes | Sparkle's EdDSA public key (`SUPublicEDKey`). With the placeholder, Oby starts fine and accepts no update, and `release.sh` refuses a real release. |
 
 To override any of them on one Mac, write it in `Config/Signing.local.xcconfig` (gitignored, included at the end). CI's command-line flags still win over both ([ci.md, Signing](ci.md#signing)).
 
-The Mac app keeps the hardened runtime on, isn't sandboxed (it runs the user's CLIs, [AGENTS.md](../AGENTS.md)) and has one entitlement, the microphone, in [`Mac/Oby.entitlements`](../Mac/Oby.entitlements). Nothing else it does needs one under the hardened runtime: it runs CLIs as child processes through the login shell, the `oby://` character loads in WebKit's own process, screenshots go through ScreenCaptureKit, and it sends no Apple Events.
+The Mac app keeps the hardened runtime on, isn't sandboxed (it runs the user's CLIs, [AGENTS.md](../AGENTS.md)) and has one entitlement, the microphone, in [`apps/mac/app/Oby.entitlements`](../apps/mac/app/Oby.entitlements). Nothing else it does needs one under the hardened runtime: it runs CLIs as child processes through the login shell, the `oby://` character loads in WebKit's own process, screenshots go through ScreenCaptureKit, and it sends no Apple Events.
 
 ## What Dima does, once
 
@@ -95,7 +95,7 @@ A dry run needs no certificate, key or bucket: it archives with ad hoc signing (
 
 The Mac app only needs `OBY_TEAM_ID`. The iPhone and Watch apps need more, because their identifiers and pushes belong to the account:
 
-1. **Register the App IDs** under the Deskree team: the iPhone app, its Live Activity (`….activity`), the Watch app and its widget, and the **App Group** they share ([iOS/README.md](../iOS/README.md) has today's ids). Either keep `dev.wellprado.oby` as `OBY_IPHONE_BUNDLE_ID`, or set a new one there (an App Store record's bundle id stays with its account, so the real app starts fresh on Deskree's).
+1. **Register the App IDs** under the Deskree team: the iPhone app, its Live Activity (`….activity`), the Watch app and its widget, and the **App Group** they share ([apps/ios/app/README.md](../apps/ios/app/README.md) has today's ids). Either keep `dev.wellprado.oby` as `OBY_IPHONE_BUNDLE_ID`, or set a new one there (an App Store record's bundle id stays with its account, so the real app starts fresh on Deskree's).
 2. **A new APNs key** (Keys › +, Apple Push Notifications service) for the Live Activity pushes. The runner's key `8TP9AXUB64` belongs to the current team and its `.p8` lives on tetrix-lab, so the runner's `apns/apns.json` needs the new Team ID and Key ID, with the new `.p8` beside it ([Runner/README.md](../Runner/README.md), Live Activity push).
 3. **Set `OBY_TEAM_ID`** and commit; every target follows.
 4. **Xcode Cloud**: the workflows for `ObyPhone` and `ObyWatch` move to the Deskree team's App Store Connect, with the new app records.

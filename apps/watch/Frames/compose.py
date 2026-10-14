@@ -1,11 +1,11 @@
 """Turns render.mjs's frames into the watch's asset catalogs.
 
-Usage: python3 Watch/Frames/compose.py <frames-dir> <repo-root>   (needs Pillow)
+Usage: python3 apps/watch/Frames/compose.py <frames-dir> <repo-root>   (needs Pillow)
 
-- Watch/Frames.xcassets: one image set per frame, oby-<loop>-<nnn>, 160 px (80 pt at 2x). Every
+- apps/watch/Frames.xcassets: one image set per frame, oby-<loop>-<nnn>, 160 px (80 pt at 2x). Every
   loop shares one crop, so Oby doesn't jump when the loop changes. The last frames of each loop
   are crossfaded into the calm frames rendered before it, so the end runs into the start.
-- Watch/Widget/Assets.xcassets: the still poses the complications draw, cropped tight.
+- apps/watch/Widget/Assets.xcassets: the still poses the complications draw, cropped tight.
 """
 import json
 import shutil
@@ -68,7 +68,7 @@ def main(frames_dir, repo):
     # size, and a reaction's flourish past it is cut off.
     crop = square(union_box([p for p in every if p.parent.name in CROP_LOOPS]), size, 0.02)
 
-    catalog = repo / "Watch/Frames.xcassets"
+    catalog = repo / "apps/watch/Frames.xcassets"
     shutil.rmtree(catalog, ignore_errors=True)
     catalog.mkdir(parents=True)
     (catalog / "Contents.json").write_text(contents())
@@ -89,7 +89,7 @@ def main(frames_dir, repo):
             write_set(group, f"oby-{loop.name}-{i:03d}", scaled(image, crop, FRAME_PX))
         print(f"{loop.name}: {len(frames)} frames")
 
-    stills = repo / "Watch/Widget/Assets.xcassets"
+    stills = repo / "apps/watch/Widget/Assets.xcassets"
     shutil.rmtree(stills, ignore_errors=True)
     stills.mkdir(parents=True)
     (stills / "Contents.json").write_text(contents())

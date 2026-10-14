@@ -1,8 +1,8 @@
 // Renders Oby's watch loops from Character/oby.html, frame by frame, through headless Chromium's
 // DevTools protocol (the pipeline of Icon/render.mjs, on a stepped clock so every frame is
 // exactly 1/30 s after the last and two runs give the same frames).
-// Usage: node Watch/Frames/render.mjs <out-dir> [css-size] [oby-size]
-// Then: python3 Watch/Frames/compose.py <out-dir> Watch/Frames.xcassets
+// Usage: node apps/watch/Frames/render.mjs <out-dir> [css-size] [oby-size]
+// Then: python3 apps/watch/Frames/compose.py <out-dir> apps/watch/Frames.xcassets
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
 
 const [out = join(tmpdir(), 'oby-watch-frames'), cssSize = '320', obySize = '1.25'] = process.argv.slice(2);
-const characterDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../Character');
+const characterDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../../Character');
 
 // The loops. Oby is simulated at 30 fps and every `every`th frame is kept (15 fps on the watch).
 // `pre` frames of calm come before the loop starts; compose.py crossfades the loop's last frames
