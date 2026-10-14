@@ -71,6 +71,26 @@ final class IslandModel {
     /// else this Mac's.
     var planAccounts: [AccountState] { (feed.local ? feed.accounts : desk.accounts.accounts).filter(\.signedIn) }
     var recentTurns: [Turn] { Array(thread.suffix(4)) }
+
+    func attachmentThumbnail(_ id: String, for turn: Turn) async throws -> Data {
+        if desk.turns.contains(where: { $0.id == turn.id }) {
+            guard let data = try AttachmentStore(jobs: desk.store, vault: desk.vault).thumbnail(id) else {
+                throw RunnerError(message: "No thumbnail is available for this attachment.")
+            }
+            return data
+        }
+        guard let runner = feed.runner else { throw RunnerError(message: "The runner isn't connected.") }
+        return try await runner.attachmentThumbnail(id)
+    }
+
+    func attachmentContent(_ id: String, for turn: Turn) async throws -> Data {
+        if desk.turns.contains(where: { $0.id == turn.id }) {
+            return try AttachmentStore(jobs: desk.store, vault: desk.vault).content(id).1
+        }
+        guard let runner = feed.runner else { throw RunnerError(message: "The runner isn't connected.") }
+        return try await runner.attachmentContent(id)
+    }
+
     var chatWindowVisible = false
     var readReply: String?
     var unreadReply: Bool { thread.last(where: { $0.who == .oby }).map { $0.id != readReply } ?? false }
@@ -1043,6 +1063,8 @@ private struct OpenIsland: View {
                 ForEach(Array(model.recentTurns.enumerated()), id: \.element.id) { index, turn in
                     TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? model.recentTurns[index - 1] : nil),
                             jobs: [], account: { _, _ in "" }, isLocal: { _ in false },
+                            loadAttachmentThumbnail: { id in try await model.attachmentThumbnail(id, for: turn) },
+                            loadAttachmentContent: { id in try await model.attachmentContent(id, for: turn) },
                             onOpenJob: { onOpenWindow((id: $0, local: $1)) }, showTime: false)
                 }
                 switch desk.talk {
