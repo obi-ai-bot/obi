@@ -1063,9 +1063,10 @@ private struct OpenIsland: View {
                 ForEach(Array(model.recentTurns.enumerated()), id: \.element.id) { index, turn in
                     TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? model.recentTurns[index - 1] : nil),
                             jobs: [], account: { _, _ in "" }, isLocal: { _ in false },
+                            onOpenJob: { onOpenWindow((id: $0, local: $1)) },
                             loadAttachmentThumbnail: { id in try await model.attachmentThumbnail(id, for: turn) },
                             loadAttachmentContent: { id in try await model.attachmentContent(id, for: turn) },
-                            onOpenJob: { onOpenWindow((id: $0, local: $1)) }, showTime: false)
+                            showTime: false)
                 }
                 switch desk.talk {
                 case .question(let said, let question):
