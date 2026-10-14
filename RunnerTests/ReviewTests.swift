@@ -621,6 +621,7 @@ struct ReviewTests {
         let (followUp, agent) = try await reviewJob()
         #expect(followUp.review == first)
         let input = try #require(followUp.attachments?.first)
+        #expect(followUp.systemAttachments == followUp.attachments)
         defer { try? FileManager.default.removeItem(at: URL(filePath: input).deletingLastPathComponent()) }
         #expect(URL(filePath: input).lastPathComponent == "review-1.md")
         let quoted = try String(contentsOfFile: input, encoding: .utf8)

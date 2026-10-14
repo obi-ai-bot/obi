@@ -1366,6 +1366,7 @@ final class Failures {
         job.check = "swift test"
         job.rounds = Lead.rounds
         job.attachments = [file.path]
+        job.systemAttachments = [file.path]
         record.fix = jobID
         store.save(record)
         for item in desk.inbox where item.isOpen && item.kind == .failure && item.title == "Oby failure: \(signature)" {

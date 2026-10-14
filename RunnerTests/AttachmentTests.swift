@@ -1,6 +1,10 @@
 import Foundation
+import HTTPTypes
+import Hummingbird
+import HummingbirdTesting
 import Testing
 @testable import ObyEngine
+@testable import oby_runner
 
 /// What the user attaches to a request (a screenshot, what they copied): files in the worktree's
 /// .oby/inputs for every agent, and image content in Claude Code's first message.
@@ -19,7 +23,9 @@ struct AttachmentTests {
         let folder = try temporaryFolder()
         let worktree = folder.appending(path: "jobs/ab12cd34")
         try FileManager.default.createDirectory(at: worktree.appending(path: ".oby/inputs"), withIntermediateDirectories: true)
-        let screenshot = folder.appending(path: "screenshot-1a2b3c.png"), clipboard = folder.appending(path: "clipboard-4d5e6f.txt")
+        let attachments = folder.appending(path: "attachments")
+        try FileManager.default.createDirectory(at: attachments, withIntermediateDirectories: true)
+        let screenshot = attachments.appending(path: "screenshot-1a2b3c.png"), clipboard = attachments.appending(path: "clipboard-4d5e6f.txt")
         try png.write(to: screenshot)
         try Data("Cannot read properties of undefined".utf8).write(to: clipboard)
         return (worktree, screenshot, clipboard)
@@ -49,10 +55,35 @@ struct AttachmentTests {
     @Test func prepareCopiesTheAttachmentsIntoTheInputs() throws {
         let (worktree, screenshot, clipboard) = try worktree()
         let job = job(attachments: [screenshot.path, clipboard.path])
-        #expect(try Attachments.copy(job, into: worktree) == [screenshot.path, clipboard.path])
+        let attachmentsFolder = screenshot.deletingLastPathComponent()
+        #expect(try Attachments.copy(job, into: worktree, allowedFolder: attachmentsFolder) == [screenshot.path, clipboard.path])
         #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/screenshot-1a2b3c.png")) == png)
         #expect(FileManager.default.fileExists(atPath: worktree.appending(path: ".oby/inputs/clipboard-4d5e6f.txt").path))
         #expect(Attachments.inputs(job) == [".oby/inputs/screenshot-1a2b3c.png", ".oby/inputs/clipboard-4d5e6f.txt"])
+    }
+
+    @Test func copyRechecksStoredJobAttachments() throws {
+        let (worktree, screenshot, _) = try worktree()
+        let outside = worktree.deletingLastPathComponent().appending(path: "private.txt")
+        try Data("private".utf8).write(to: outside)
+        let stored = job(attachments: [outside.path])
+
+        #expect(throws: Shell.Failure.self) {
+            try Attachments.copy(stored, into: worktree, allowedFolder: screenshot.deletingLastPathComponent())
+        }
+        #expect(!FileManager.default.fileExists(atPath: worktree.appending(path: ".oby/inputs/private.txt").path))
+    }
+
+    @Test func copyKeepsObysGeneratedAttachmentsOutsideTheUserFolder() throws {
+        let (worktree, screenshot, _) = try worktree()
+        let generated = worktree.deletingLastPathComponent().appending(path: "review-context.md")
+        try Data("Quoted review context".utf8).write(to: generated)
+        var review = job(attachments: [generated.path])
+        review.reviewOf = "author01"
+        review.systemAttachments = [generated.path]
+
+        #expect(try Attachments.copy(review, into: worktree, allowedFolder: screenshot.deletingLastPathComponent()) == [generated.path])
+        #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/review-context.md")) == Data("Quoted review context".utf8))
     }
 
     @Test func dispatchAttachmentsMustBeInTheAppsAttachmentFolder() throws {
@@ -66,19 +97,46 @@ struct AttachmentTests {
         #expect(throws: Shell.Failure.self) {
             try Attachments.validated([folder.appending(path: "private.txt").path], in: attached.deletingLastPathComponent())
         }
+
+        let outside = folder.appending(path: "private.txt")
+        try Data("private".utf8).write(to: outside)
+        let link = attached.deletingLastPathComponent().appending(path: "linked.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        #expect(throws: Shell.Failure.self) {
+            try Attachments.validated([link.path], in: attached.deletingLastPathComponent())
+        }
+    }
+
+    @Test @MainActor func plansRefuseAttachmentsOutsideTheAppsFolder() async throws {
+        let folder = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        let api = API(desk: desk, devices: Devices(file: folder.appending(path: "devices.json")))
+        let app = Application(router: api.router(owner: "well@example.com"))
+
+        try await app.test(.router) { client in
+            let response = try await client.execute(uri: "/v1/plans", method: .post,
+                                                    headers: [.tailscaleUserLogin: "well@example.com"],
+                                                    body: ByteBuffer(string: #"{"said":"fix this","attachments":["/etc/passwd"]}"#)) { response in
+                response.status
+            }
+            #expect(response == .unprocessableContent)
+        }
+        #expect(desk.jobs.isEmpty)
     }
 
     /// A file that's gone (kept too long) leaves the job without it, rather than failing the job.
     @Test func aMissingAttachmentIsLeftOut() throws {
         let (worktree, screenshot, clipboard) = try worktree()
         try FileManager.default.removeItem(at: clipboard)
-        #expect(try Attachments.copy(job(attachments: [screenshot.path, clipboard.path]), into: worktree) == [screenshot.path])
-        #expect(try Attachments.copy(job(attachments: [clipboard.path]), into: worktree) == nil)
+        let attachmentsFolder = screenshot.deletingLastPathComponent()
+        #expect(try Attachments.copy(job(attachments: [screenshot.path, clipboard.path]), into: worktree, allowedFolder: attachmentsFolder) == [screenshot.path])
+        #expect(try Attachments.copy(job(attachments: [clipboard.path]), into: worktree, allowedFolder: attachmentsFolder) == nil)
     }
 
     @Test func aNewClaudeSessionStartsWithTheImages() throws {
         let (worktree, screenshot, clipboard) = try worktree()
-        _ = try Attachments.copy(job(attachments: [screenshot.path, clipboard.path]), into: worktree)
+        _ = try Attachments.copy(job(attachments: [screenshot.path, clipboard.path]), into: worktree, allowedFolder: screenshot.deletingLastPathComponent())
         // The issue's quote is in the inputs too, and isn't an image.
         try Data("# Issue #12, quoted".utf8).write(to: worktree.appending(path: ".oby/inputs/issue-12.md"))
 
