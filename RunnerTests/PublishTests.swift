@@ -454,5 +454,7 @@ struct PublishCommitFindingTests {
         let prompt = Prompts.publishFix(findings, base: "dev")
         #expect(prompt.contains("git commit --fixup=reword:<commit>"))
         #expect(prompt.contains("GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/dev"))
+        #expect(prompt.contains("must be removed by rewriting that message"))
+        #expect(!prompt.contains("removed from that commit's patch"))
     }
 }

@@ -1776,14 +1776,21 @@ nonisolated enum Prompts {
         let places = findings.map { finding in
             "- \(finding.description)\(finding.commit.map { " — commit \($0)" } ?? "")"
         }.joined(separator: "\n")
-        let history = findings.contains(where: \.historyOnly)
-            ? "The flagged value is already gone from the branch tip, but it is still present in the commit history."
-            : "The flagged value was introduced by the listed commit and must be removed from that commit's patch."
+        let contexts = [
+            findings.contains(where: { $0.file != "commit message" })
+                ? (findings.contains(where: \.historyOnly)
+                    ? "The flagged file value is already gone from the branch tip, but it is still present in the commit history."
+                    : "The flagged file value was introduced by the listed commit and must be removed from that commit's patch.")
+                : nil,
+            findings.contains(where: { $0.file == "commit message" })
+                ? "The flagged commit-message value is in the listed commit's message and must be removed by rewriting that message."
+                : nil,
+        ].compactMap { $0 }.joined(separator: " ")
         let fileFix = findings.contains { $0.file != "commit message" }
             ? "For findings in file diffs, make your change with `git commit --fixup=<commit>` for the commit that introduced each finding. " : ""
         let messageFix = findings.contains { $0.file == "commit message" }
             ? "For a commit-message finding, rewrite that commit's message with `git commit --fixup=reword:<commit>`. " : ""
-        return "Oby's secret scan blocked publishing at these locations:\n\n\(places)\n\n\(history) Rewrite the listed commit(s) so no commit on this branch contains the value. \(fileFix)\(messageFix)Then run `GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/\(base)`. Never merge the base into this branch. After rebasing, check `git log -p origin/\(base)..HEAD` no longer shows the finding. Do not include any real secret value in the code, commit message, or summary. Run the checks in the foreground and finish with a short summary."
+        return "Oby's secret scan blocked publishing at these locations:\n\n\(places)\n\n\(contexts) Rewrite the listed commit(s) so no commit on this branch contains the value. \(fileFix)\(messageFix)Then run `GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/\(base)`. Never merge the base into this branch. After rebasing, check `git log -p origin/\(base)..HEAD` no longer shows the finding. Do not include any real secret value in the code, commit message, or summary. Run the checks in the foreground and finish with a short summary."
     }
 
     /// The jobs in flight on the same files, each on its own branch, and what that means for this
