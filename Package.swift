@@ -40,13 +40,13 @@ let package = Package(
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
             ],
             path: "Runner",
-            // The launchd plist is the Mac app's (Oby.xcodeproj bundles it with the executable, #283).
+            // The launchd plist is the Mac app's (apps/Oby.xcodeproj bundles it with the executable, #283).
             exclude: ["CSQLite", "README.md", "oby-runner.service", "com.deskree.oby.runner.plist"],
             swiftSettings: features
         ),
         // Oby's runner as an MCP server over stdio, for Claude Code and other assistants (docs/mcp.md).
         .executableTarget(name: "oby-mcp", path: "mcp/server", swiftSettings: features),
-        // The apps' Shared/ code the runner's tests cover; the rest of Shared/ needs the apps.
+        // The apps/shared/ code the runner's tests cover; the rest of apps/shared/ needs the apps.
         .target(name: "ObyShared", path: "apps/shared", sources: ["Elapsed.swift", "JobList.swift", "RemoteRoute.swift", "Usage.swift", "VoiceSettings.swift", "WidgetToken.swift"], swiftSettings: features),
         .testTarget(
             name: "RunnerTests",

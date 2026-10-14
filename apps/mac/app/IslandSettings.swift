@@ -4,7 +4,7 @@ import UserNotifications
 
 /// The quick settings surface in the notch: one short label per control, grouped in cards with the
 /// same row height and spacing. What needs more words is a tooltip; the full Mac and iPhone settings
-/// (Mac/Settings.swift) are one tap away for anything uncommon.
+/// (apps/mac/app/Settings.swift) are one tap away for anything uncommon.
 struct IslandSettings: View {
     let model: IslandModel
     @AppStorage(Speaker.setting) private var speaks = true
@@ -190,7 +190,7 @@ struct IslandRow<Control: View>: View {
     }
 }
 
-/// The runner's default permission mode and its saved rules, as Settings › Permissions (Shared/PermissionsSection.swift)
+/// The runner's default permission mode and its saved rules, as Settings › Permissions (apps/shared/PermissionsSection.swift)
 /// without the paragraphs: the mode's line is its tooltip.
 private struct IslandPermissions: View {
     var runner: Runner?

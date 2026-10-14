@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// What the window shows in its middle column (Mac/App/ChatWindow.swift).
+/// What the window shows in its middle column (apps/mac/app/App/ChatWindow.swift).
 nonisolated enum ChatSelection: Hashable, Sendable {
     /// The conversation with Oby.
     case oby
@@ -12,7 +12,7 @@ nonisolated enum ChatSelection: Hashable, Sendable {
 }
 
 /// The sidebar's sections, as the window lists them: what each row says, with no view in the
-/// way, so the tests read them (MacTests/SidebarTests.swift).
+/// way, so the tests read them (apps/mac/tests/SidebarTests.swift).
 nonisolated enum SidebarSections {
     /// A job in Agents: running, or needing you, with its dot.
     struct AgentRow: Identifiable, Equatable, Sendable {

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// What the Chat tab works out with no view in the way, so the tests read it (iOSTests/ChatTests.swift).
+/// What the Chat tab works out with no view in the way, so the tests read it (apps/ios/tests/ChatTests.swift).
 nonisolated enum ChatThread {
     /// The words a send carries: trimmed, or nil for nothing to send.
     static func words(_ text: String) -> String? {
@@ -305,7 +305,7 @@ private struct TurnRow: View {
 }
 
 /// A job under Oby's words: its tool's mark, its title, "Claude Code · Deskree · its step", and
-/// the status pill. Tap it for the job's screen (iOS/JobScreen.swift).
+/// the status pill. Tap it for the job's screen (apps/ios/app/JobScreen.swift).
 private struct JobCard: View {
     let job: Job
     let account: String

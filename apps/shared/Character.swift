@@ -2,7 +2,7 @@ import Foundation
 import OSLog
 import WebKit
 
-/// Sangam's character: `Character/oby.html` and three.js, bundled into the app and served
+/// Sangam's character: `character/oby.html` and three.js, bundled into the app and served
 /// from the `oby://` scheme so its ES modules load without file-URL tricks.
 @Observable
 final class ObyCharacter {

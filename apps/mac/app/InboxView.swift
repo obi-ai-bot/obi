@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The island's Inbox, at the top of the list: what only you can answer, from the runner's jobs
 /// and this Mac's, the longest-waiting first (docs/pipeline-cases.md, I.1). The first one is open,
-/// as a decision card (Shared/DecisionCard.swift): its answers are on ⌘1 to ⌘3, your own words
+/// as a decision card (apps/shared/DecisionCard.swift): its answers are on ⌘1 to ⌘3, your own words
 /// go too, Later puts it off for an hour and Done lets it go; Open job opens its job's screen, where
 /// a runner's job publishes too. Every kind the iPhone settles settles here, the same way. Once it's
 /// settled, the next one opens. Answered on the iPhone, it goes from here too.

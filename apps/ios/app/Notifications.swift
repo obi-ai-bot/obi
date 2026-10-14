@@ -10,7 +10,7 @@ final class Notifications: NSObject, UIApplicationDelegate, UNUserNotificationCe
 
     static let publish = "publish"
     static let open = "open"
-    /// A publish the watch asked for while Oby was in the background (iOS/WatchRelay.swift):
+    /// A publish the watch asked for while Oby was in the background (apps/ios/app/WatchRelay.swift):
     /// Face ID can't come up then, so this notification's Publish does it.
     static let approve = "approve"
 
