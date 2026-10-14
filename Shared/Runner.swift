@@ -1003,7 +1003,9 @@ nonisolated struct Runner: Sendable {
                         try Self.check(response, nil)
                         stream.yield(.connected)
                         var parser = EventParser()
-                        var line = Data()                        for try await byte in bytes {
+                        var line = Data()
+                        // Split on newlines only: summaries may hold U+2028, which `lines` would break at.
+                        for try await byte in bytes {
                             guard byte == 0x0A else { line.append(byte); continue }
                             if let event = parser.feed(String(decoding: line, as: UTF8.self)) { stream.yield(event) }
                             line.removeAll(keepingCapacity: true)
