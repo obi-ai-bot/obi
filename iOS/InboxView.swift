@@ -5,6 +5,7 @@ import SwiftUI
 /// its answers, the recommended one first, and your own words; Later puts it off for an hour, Done
 /// lets it go. Once it's settled, the next one opens. Answered on the Mac, it goes from here too.
 struct InboxSection: View {
+    @Environment(\.openURL) private var openURL
     @Environment(Phone.self) private var phone
     /// The item open now, or nil for the longest-waiting one.
     @State private var opened: String?
@@ -49,7 +50,12 @@ struct InboxSection: View {
                          plan: item.kind == "question" ? job?.question?.plan : nil,
                          options: CardOption.inbox(item.options, kind: item.kind, question: job?.question, permission: permission, words: item.words, details: item.details),
                          busy: busy, wordsNote: item.kind == "permission" ? CardOption.denyWords : nil,
-                         onChoose: { settle(item, answer: $0.answer) },
+                         onChoose: { option in
+                             if option.answer == "Open the PR",
+                                let published = phone.jobs.first(where: { $0.id == item.job })?.published,
+                                let url = URL(string: published) { openURL(url) }
+                             else { settle(item, answer: option.answer) }
+                         },
                          onWords: answerWords)
                 .id(item.id)
             HStack(spacing: 18) {

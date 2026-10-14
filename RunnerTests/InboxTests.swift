@@ -378,10 +378,16 @@ final class InboxTests {
         var reviewed = fix
         reviewed.status = .done
         reviewed.published = "https://github.com/deskree-inc/oby/pull/80"
+        let firstHead = String(repeating: "a", count: 40)
+        reviewed.outgoing = [Outgoing(action: .push, repo: reviewed.repo, id: firstHead, branch: reviewed.branch)]
         reviewed.review = Review(verdict: .changesRequested, job: "rev4", agent: "codex", account: "Work", round: 4)
         reviewed.review?.repeated = true
         let review = Inbox.need(of: reviewed)
-        #expect(review?.kind == .review && review?.text == Review.stopLine && review?.options == ["One more round", "Dismiss"])
+        #expect(review?.kind == .review && review?.text == "Oby's reviews are done: review #80 yourself"
+                && review?.options == [Inbox.openPR, "One more round", "Dismiss"])
+        #expect(review?.id.hasSuffix("review-\(firstHead)") == true)
+        reviewed.outgoing?[0].id = String(repeating: "b", count: 40)
+        #expect(Inbox.need(of: reviewed)?.id != review?.id)
         // Nothing for what needs nothing.
         var stopped = failed
         stopped.status = .stopped

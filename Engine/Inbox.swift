@@ -37,7 +37,7 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         var actions: [String] {
             switch self {
             case .question: []
-            case .review: [Inbox.retryReview, Inbox.oneMoreRound, Inbox.dismiss]
+            case .review: [Inbox.openPR, Inbox.retryReview, Inbox.oneMoreRound, Inbox.dismiss]
             case .failed, .limit: [Inbox.tryAgain, Inbox.oneMoreRound, Inbox.dismiss]
             case .merge: [Inbox.oneMoreRound, Inbox.tryAgain, Inbox.dismiss]
             case .audit: [Inbox.addColumn, Inbox.tryAgain, Inbox.ignoreStatus]
@@ -101,6 +101,7 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
 
 nonisolated enum Inbox {
     static let retryReview = "Ask Oby to review again"
+    static let openPR = "Open the PR"
     /// What a failed job's item offers: run it again from where it was, or let it go.
     static let tryAgain = "Try again"
     /// What an Xcode Cloud item offers besides One more round and Dismiss: the author's agent
@@ -180,8 +181,9 @@ nonisolated enum Inbox {
         if job.cloudNeedsYou, let cloud = job.xcodeCloud {
             return item(.failed, "cloud-\(cloud.head.prefix(12))-\(job.currentRound)-\(cloud.stops)", cloud.stopLine, [oneMoreRound, askOby, dismiss])
         }
-        if job.reviewNeedsYou, let review = job.review {
-            return item(.review, "review-\(review.job)", review.stopReason, [oneMoreRound, dismiss])
+        if job.reviewNeedsYou, job.review != nil {
+            let head = String((job.pushedHead ?? "unknown").prefix(40))
+            return item(.review, "review-\(head)", "Oby's reviews are done: review #\(Review.pullRequest(of: job) ?? job.pr ?? 0) yourself", [openPR, oneMoreRound, dismiss])
         }
         if job.mergeNeedsYou, let check = job.macCheck {
             // A merge that failed can be tried again; each try that fails is its own item.
@@ -211,6 +213,7 @@ nonisolated enum Inbox {
     /// Claude Code describes its options); nil when one isn't Oby's.
     static func details(_ options: [String]) -> [String]? {
         let does = [
+            openPR: "Opens the pull request in GitHub.",
             tryAgain: "Runs it again: the job picks up in its session, or the merge or the Mac check goes again.",
             oneMoreRound: "Hands Oby's last word to the agent for one more round.",
             dismiss: "Lets the job go. Its branch stays; nothing more happens.",

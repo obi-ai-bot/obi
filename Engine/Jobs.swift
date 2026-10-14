@@ -215,7 +215,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// (#209): jobs on the same files run side by side, so conflicts are settled this way (#237).
     static let rebasesPerDay = 6
     /// How many times Oby may review its pull request: `Review.maxRounds`, and what the user allowed beyond.
-    var reviewCap: Int { Review.maxRounds + (extraReviews ?? 0) }
+    var reviewCap: Int { Review.escalationRound + (extraReviews ?? 0) }
     /// Its agent asked the user something and waits for the answer: the inbox has it.
     var waitsForAnswer: Bool { question != nil && dismissed == nil && status != .stopped }
     /// Its agent waits for the user's OK on a command or an edit: the inbox has it.
@@ -256,7 +256,9 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// Oby's review requested changes for the last time it may (`Review.stopsHere`: a blocker came
     /// back), and the pull request is still open: a person takes it from here.
     var reviewNeedsYou: Bool {
-        status == .done && published != nil && (review?.stopsHere ?? false) && (pullRequest?.state ?? .open) == .open
+        status == .done && published != nil && review?.verdict == .changesRequested
+            && ((review?.round ?? 0) >= Review.escalationRound || (review?.stopsHere ?? false))
+            && (pullRequest?.state ?? .open) == .open
     }
     /// Done with commits its pull request will never take: it was merged or closed before they
     /// went out (a round that commits after that fails instead, `ending`).

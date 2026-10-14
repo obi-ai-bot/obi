@@ -441,7 +441,7 @@ struct CheckTests {
         author.macCheck?.round = 1
         #expect(author.checkStop == nil && !author.mergeNeedsYou && !author.needsYou && Inbox.need(of: author) == nil)
         // Oby's reviews are used up: a fix could never be reviewed, so a person takes it from here.
-        author.review?.round = Review.maxRounds
+        author.review?.round = Review.escalationRound
         #expect(author.checkStop == MacCheck.reviewsUsedLine && author.mergeNeedsYou)
         #expect(author.pipeline.stages.last?.reason == "1 test failed on Studio: A() " + MacCheck.reviewsUsedLine)
         // A merge that failed can be tried again; dismissed, nothing needs you.
@@ -462,7 +462,7 @@ struct CheckTests {
     @Test func whenObysLastReviewApprovedAFailedCheckStopsInsteadOfARoundNoOneReviews() async throws {
         let check = try await approved()
         var job = try #require(desk.job("author"))
-        job.review?.round = Review.maxRounds
+        job.review?.round = Review.escalationRound
         desk.replace(job)
         _ = desk.nextMacCheck(mac: "Studio")
         var failing = steps
@@ -479,7 +479,7 @@ struct CheckTests {
         // PR #140: the check failed after Oby's last review approved it.
         let check = try await approved()
         var job = try #require(desk.job("author"))
-        job.review?.round = Review.maxRounds
+        job.review?.round = Review.escalationRound
         desk.replace(job)
         _ = desk.nextMacCheck(mac: "Studio")
         var failing = steps
@@ -504,7 +504,7 @@ struct CheckTests {
         _ = try desk.settle(item.id, .answer(Inbox.oneMoreRound))
         try await until("the author runs again") { desk.job("author")?.status == .running && made.agents.count == 3 }
         job = try #require(desk.job("author"))
-        #expect(job.step == "Working on the Mac check" && job.macCheck?.handedOff == true && job.extraReviews == 1 && job.reviewCap == Review.maxRounds + 1)
+        #expect(job.step == "Working on the Mac check" && job.macCheck?.handedOff == true && job.extraReviews == 1 && job.reviewCap == Review.escalationRound + 1)
         #expect(made.quoted.last?.text.contains("> iOSTests/JobRowTests/testTitle(): XCTAssertEqual failed") == true)
         // The fix publishes and gets its one more review.
         made.pushes = [Self.next]
@@ -523,7 +523,7 @@ struct CheckTests {
         #expect(check.fixableFailure)
 
         var capped = author
-        capped.review = Review(verdict: .approved, job: "review", agent: "codex", account: "Work", round: Review.maxRounds)
+        capped.review = Review(verdict: .approved, job: "review", agent: "codex", account: "Work", round: Review.escalationRound)
         capped.macCheck = check
         #expect(capped.checkStop == nil)
 
@@ -540,7 +540,7 @@ struct CheckTests {
         author.status = .done
         author.published = url.absoluteString
         author.outgoing = [Outgoing(action: .push, repo: author.repo, id: Self.head, branch: author.branch)]
-        author.review = Review(verdict: .approved, job: "r", agent: "codex", account: "Work", round: Review.maxRounds)
+        author.review = Review(verdict: .approved, job: "r", agent: "codex", account: "Work", round: Review.escalationRound)
         var check = MacCheck.make(for: author, pr: 80, head: Self.head)
         check.state = .failed
         check.steps = [MacCheck.Step(name: "Mac app and MacTests", passed: false, seconds: 1)]
