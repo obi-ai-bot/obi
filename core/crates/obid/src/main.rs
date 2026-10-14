@@ -49,6 +49,26 @@ fn main() -> ExitCode {
         Command::Serve { config } => config,
     };
 
+    // The runtime, then SIGTERM and SIGINT caught, before anything else: from here on a stop
+    // signal, however early, ends obid with exit 0 (docs/runner-api.md, "obid only").
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("obid: can't start the runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let stop = {
+        let _entered = runtime.enter();
+        match obid::StopSignal::install() {
+            Ok(stop) => stop,
+            Err(e) => {
+                eprintln!("obid: can't catch SIGTERM and SIGINT: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
@@ -78,14 +98,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            eprintln!("obid: can't start the runtime: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let result = runtime.block_on(obid::serve(config, token, obid::stop_signal(), |address| {
+    let result = runtime.block_on(obid::serve(config, token, stop.wait(), |address| {
         // One line on stdout that says where obid answers; never the token.
         println!("obid listening on http://{address}");
         tracing::info!(%address, "obid listening");

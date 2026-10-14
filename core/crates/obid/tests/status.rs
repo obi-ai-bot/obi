@@ -610,3 +610,103 @@ fn exits_0_on_sigterm_and_sigint() {
         assert!(TcpStream::connect(("127.0.0.1", obid.port)).is_err());
     }
 }
+
+/// Waits up to 10 seconds for `child` to exit and gives its status.
+fn exit_within_10_seconds(child: &mut Child, what: &str) -> std::process::ExitStatus {
+    let began = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "{what}: still running after 10 seconds"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The signal handlers are in place before obid says it listens: SIGTERM or SIGINT the moment the
+/// readiness line is out stops obid with exit 0 and never kills it with the signal. The signal is
+/// sent by a shell's built-in `kill` as soon as the shell reads the line, so nothing is spawned in
+/// between, and it is repeated because the window it guards is short.
+#[cfg(unix)]
+#[test]
+fn a_signal_the_moment_obid_says_it_listens_exits_0() {
+    for round in 0..10 {
+        for signal in ["TERM", "INT"] {
+            let folder = Folder::new(&format!("signal-ready-{signal}-{round}"));
+            let port = free_port();
+            let path = folder.0.join("config.json");
+            std::fs::write(&path, config(&folder.0, port).to_string()).unwrap();
+            let mut obid = command(&folder.0, &path)
+                .env("OBID_API_TOKEN", TOKEN)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let line = Command::new("sh")
+                .args([
+                    "-c",
+                    r#"IFS= read -r line; kill -s "$1" "$2"; printf '%s\n' "$line""#,
+                    "sh",
+                    signal,
+                    &obid.id().to_string(),
+                ])
+                .stdin(Stdio::from(obid.stdout.take().unwrap()))
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&line.stdout).trim(),
+                format!("obid listening on http://127.0.0.1:{port}")
+            );
+            let status = exit_within_10_seconds(&mut obid, &format!("SIG{signal}"));
+            assert_eq!(
+                status.code(),
+                Some(0),
+                "SIG{signal}, round {round}: {status:?}"
+            );
+        }
+    }
+}
+
+/// A SIGTERM while obid is still starting (here: measuring a large `home/worktrees`, which it
+/// does before it listens) stops it with exit 0 too. obid writes `home/api-token` before that
+/// measurement, so its appearing says obid is under way.
+#[cfg(unix)]
+#[test]
+fn a_signal_while_obid_starts_exits_0() {
+    let folder = Folder::new("signal-starting");
+    let config = config(&folder.0, free_port());
+    let home = folder.0.join("home");
+    for d in 0..100 {
+        let dir = home.join("worktrees").join(format!("wt-{d}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in 0..200 {
+            std::fs::write(dir.join(format!("f{f}")), b"x").unwrap();
+        }
+    }
+    let path = folder.0.join("config.json");
+    std::fs::write(&path, config.to_string()).unwrap();
+    let mut obid = command(&folder.0, &path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let began = Instant::now();
+    while !home.join("api-token").exists() {
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "obid never wrote its token"
+        );
+        assert!(obid.try_wait().unwrap().is_none(), "obid stopped early");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let sent = Command::new("kill")
+        .args(["-TERM", &obid.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let status = exit_within_10_seconds(&mut obid, "SIGTERM while starting");
+    assert_eq!(status.code(), Some(0), "{status:?}");
+}

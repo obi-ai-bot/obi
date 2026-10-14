@@ -247,7 +247,9 @@ enum RemoteKind {
 /// may read as a command-line option (`ssh://-oProxyCommand=…`, `-oProxyCommand=…@h:p`,
 /// `https://-x/r`): a user or host that starts with `-` is refused, as are a remote that does,
 /// control characters anywhere, and a host that isn't a host name, an IPv4 address or a bracketed
-/// IPv6 one.
+/// IPv6 one. git percent-decodes an `ssh://` or `https://` URL before it uses it, so
+/// `ssh://%2DoProxyCommand=…@h/r` would reach ssh as `-oProxyCommand=…`: a `%` in the user or the
+/// host is refused rather than decoded and checked again.
 fn remote_kind(remote: &str) -> Option<RemoteKind> {
     if remote.starts_with('-') || remote.chars().any(char::is_control) {
         return None;
@@ -290,11 +292,14 @@ fn url_authority_ok(rest: &str) -> bool {
     host_port_ok(host_port)
 }
 
-/// A user name ssh can't take for an option: not empty, no leading `-`, no spaces.
+/// A user name ssh can't take for an option: not empty, no leading `-`, no spaces, and no `%`,
+/// which git would decode into any of those.
 fn user_ok(user: &str) -> bool {
     !user.is_empty()
         && !user.starts_with('-')
-        && !user.chars().any(|c| c.is_whitespace() || c == '@')
+        && !user
+            .chars()
+            .any(|c| c.is_whitespace() || c == '@' || c == '%')
 }
 
 /// `host`, `host:port`, `[v6]` or `[v6]:port`.
@@ -471,6 +476,17 @@ mod tests {
             ("https://-x/r", None),
             ("https://user@github.com/o/r.git", Some(RemoteKind::Https)),
             ("https://-user@github.com/o/r.git", None),
+            // Percent-escapes git decodes before ssh or curl sees the user or host.
+            ("ssh://%2DoProxyCommand=x@github.com/o/r.git", None),
+            ("ssh://%2doProxyCommand=x@github.com/o/r.git", None),
+            ("ssh://git%40x@github.com/o/r.git", None),
+            ("ssh://git@%2DoProxyCommand=x/o/r.git", None),
+            ("ssh://git@github%2Ecom/o/r.git", None),
+            ("https://%2Duser@github.com/o/r.git", None),
+            ("https://github.com%2F@x/o/r.git", None),
+            ("%2Dgit@github.com:o/r.git", None),
+            ("git@%2Dgithub.com:o/r.git", None),
+            ("ssh://git@github.com/o/r%20x.git", Some(RemoteKind::Ssh)),
             ("https://github.com:x/o/r.git", None),
             ("https://git hub.com/o/r.git", None),
             ("https://github.com/o/r.git\n", None),
