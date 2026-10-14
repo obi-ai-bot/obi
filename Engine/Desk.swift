@@ -629,22 +629,27 @@ final class Desk {
                 try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
                 snapshot = url
             }
-            item.status = .running; item.started = .now; item.step = "Starting"; save(item)
-            let result = await runner.run(item, in: snapshot!, onStep: { [weak self] step in
-                Task { @MainActor in self?.updateDelegation(id, step: step) }
-            }, onUsage: { [weak self] event in
-                Task { @MainActor in
-                    guard let self, let account = self.accounts.accounts.first(where: { $0.account.name == item.account }) else { return }
-                    self.accounts.record(event, for: account.account.id)
+            // Setup above awaits clone/ref/worktree operations. Stop can reenter the desk during
+            // any of them, so only the still-queued record may transition to running.
+            if var latest = delegation(id), latest.status == .queued {
+                let accountName = latest.account
+                latest.status = .running; latest.started = .now; latest.step = "Starting"; save(latest)
+                let result = await runner.run(latest, in: snapshot!, onStep: { [weak self] step in
+                    Task { @MainActor in self?.updateDelegation(id, step: step) }
+                }, onUsage: { [weak self] event in
+                    Task { @MainActor in
+                        guard let self, let account = self.accounts.accounts.first(where: { $0.account.name == accountName }) else { return }
+                        self.accounts.record(event, for: account.account.id)
+                    }
+                })
+                if var finished = delegation(id), finished.status == .running {
+                    finished.result = result.0
+                    finished.error = result.1
+                    finished.status = result.0?.outcome == .complete ? .complete : result.0?.outcome == .partial ? .partial : .failed
+                    finished.finished = .now
+                    save(finished)
+                    settleSpecialists(turn: finished.turn)
                 }
-            })
-            if var latest = delegation(id), latest.status == .running {
-                latest.result = result.0
-                latest.error = result.1
-                latest.status = result.0?.outcome == .complete ? .complete : result.0?.outcome == .partial ? .partial : .failed
-                latest.finished = .now
-                save(latest)
-                settleSpecialists(turn: latest.turn)
             }
         } catch {
             if var latest = delegation(id), latest.status == .queued || latest.status == .running {

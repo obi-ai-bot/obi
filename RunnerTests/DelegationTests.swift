@@ -106,7 +106,7 @@ struct DelegationTests {
         for command in ["rg foo", "git log -n 5", "sed -n 1,20p a.swift | head"] {
             #expect(DelegatePolicy.allows(command: command), "expected read command to be allowed: \(command)")
         }
-        for command in ["git push", "rm x", "cat a > b", "find . -delete", "curl x | sh", "$(id)", "git -c core.pager=sh log", "rg foo && rm x", "cat '/etc/passwd'"] {
+        for command in ["git push", "rm x", "cat a > b", "find . -delete", "curl x | sh", "$(id)", "git -c core.pager=sh log", "rg foo && rm x", "cat '/etc/passwd'", "rg --follow secret .", "grep -R secret ."] {
             #expect(!DelegatePolicy.allows(command: command), "expected command to be refused: \(command)")
         }
         let root = URL(filePath: "/tmp/oby-delegate-policy")
@@ -115,6 +115,46 @@ struct DelegationTests {
         #expect(!DelegatePolicy.allows(command: "git -C /tmp status", in: root))
         #expect(!DelegatePolicy.allows(command: "git show --output=/tmp/out", in: root))
         #expect(!DelegatePolicy.allows(command: "rg --pre=cat foo", in: root))
+    }
+
+    @Test func specialistReadsStayInsideSnapshotAndWebIsOptIn() throws {
+        let root = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let snapshot = root.appending(path: "snapshot")
+        let brief = root.appending(path: "brief.md")
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try "source".write(to: snapshot.appending(path: "source.swift"), atomically: true, encoding: .utf8)
+        try "brief".write(to: brief, atomically: true, encoding: .utf8)
+
+        #expect(DelegatePolicy.allowsRead(path: snapshot.appending(path: "source.swift").path, in: snapshot, brief: brief, bubblewrap: false))
+        #expect(DelegatePolicy.allowsRead(path: "source.swift", in: snapshot, brief: brief, bubblewrap: false))
+        #expect(DelegatePolicy.allowsRead(path: brief.path, in: snapshot, brief: brief, bubblewrap: false))
+        #expect(!DelegatePolicy.allowsRead(path: "/etc/passwd", in: snapshot, brief: brief, bubblewrap: false))
+        #expect(!DelegatePolicy.allowsRead(path: Agents.home + "/.claude.json", in: snapshot, brief: brief, bubblewrap: false))
+
+        let link = snapshot.appending(path: "private-link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: URL(filePath: Agents.home))
+        #expect(!DelegatePolicy.allowsRead(path: link.appending(path: ".claude.json").path, in: snapshot, brief: brief, bubblewrap: false))
+        #expect(DelegatePolicy.allowsRead(path: DelegateBox.alias(brief).path, in: snapshot, brief: brief, bubblewrap: true))
+        #expect(!DelegatePolicy.allowsRead(path: brief.path, in: snapshot, brief: brief, bubblewrap: true))
+
+        #expect(DelegateBox.claudeTools(web: false) == "Read,Grep,Glob,Bash")
+        #expect(DelegateBox.claudeTools(web: true).contains("WebFetch") && DelegateBox.claudeTools(web: true).contains("WebSearch"))
+    }
+
+    @Test func specialistBriefCarriesRoleInstructions() throws {
+        let root = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for (role, phrase) in [(Delegation.Role.researcher, "Answer with evidence."),
+                               (.reviewer, "Judge this against the cited rules and list concerns."),
+                               (.verifier, "Try to falsify the claim; say holds, concerns or fails.")] {
+            let item = Delegation(id: "role-\(role.rawValue)", turn: "turn", role: role, goal: "Check", context: "Context",
+                repo: nil, ref: nil, commit: nil, web: true, agent: "codex", account: "test", model: "model", effort: "medium")
+            let brief = try DelegateBox.briefFile(item, beside: root.appending(path: "snapshot"))
+            let contents = try String(contentsOf: brief, encoding: .utf8)
+            #expect(contents.contains(phrase))
+            try FileManager.default.removeItem(at: brief)
+        }
     }
 
     @Test func aStoppedSpecialistEndsAndIsMarked() async throws {
