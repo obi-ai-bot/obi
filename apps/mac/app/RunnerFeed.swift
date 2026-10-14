@@ -107,7 +107,7 @@ final class RunnerFeed {
     /// This Mac's Touch ID key, registered on every connection: with it, the runner's jobs publish from here.
     let device = MacDevice()
     /// The runner's conversation, read in pages and followed over `turn` events, for the window's
-    /// thread (Shared/ConversationModel.swift): one thread for every device (#11).
+    /// thread (apps/shared/ConversationModel.swift): one thread for every device (#11).
     let conversation = ConversationModel()
     /// A job's notice just changed to something that needs the user: the notch's heads-up.
     @ObservationIgnored var onNotice: (Job, Notice) -> Void = { _, _ in }

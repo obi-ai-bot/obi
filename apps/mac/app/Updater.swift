@@ -3,13 +3,13 @@ import Observation
 import Sparkle
 import SwiftUI
 
-/// Updates (#282): Sparkle reads the appcast (Mac/Info.plist, `SUFeedURL`) every 6 hours,
+/// Updates (#282): Sparkle reads the appcast (apps/mac/app/Info.plist, `SUFeedURL`) every 6 hours,
 /// downloads a new version quietly and installs it when Oby quits. Once one is downloaded, Sparkle
 /// hands Oby the installation (`willInstallUpdateOnQuit`), and the island offers "Update ready ·
 /// Restart", which installs it and relaunches Oby now, with no window. Check for Updates… in the
 /// menus asks at once, with Sparkle's own window.
 ///
-/// A relaunch never interrupts a check this Mac runs for the runner (Mac/MacChecks.swift): every
+/// A relaunch never interrupts a check this Mac runs for the runner (apps/mac/app/MacChecks.swift): every
 /// way an update ends in a relaunch, the pill, Sparkle's Install and Relaunch, or an install on
 /// quit, goes through `shouldPostponeRelaunch`, which waits for the check to end.
 ///

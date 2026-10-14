@@ -2,7 +2,7 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
-/// Settings › General: what the iPhone's Settings has too (Shared/SettingsSections.swift),
+/// Settings › General: what the iPhone's Settings has too (apps/shared/SettingsSections.swift),
 /// opening at login, and how much this Mac's own jobs ask.
 struct SettingsView: View {
     /// This Mac's desk: Settings › Permissions' default for the jobs it runs itself (#134). The
@@ -13,7 +13,7 @@ struct SettingsView: View {
     @State private var rules: [PermissionRule] = []
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var problem: String?
-    /// Oby reads its reply out loud when you talked to it (Mac/Speech.swift).
+    /// Oby reads its reply out loud when you talked to it (apps/mac/app/Speech.swift).
     @AppStorage(Speaker.setting) private var speaks = true
 
     var body: some View {
@@ -95,9 +95,9 @@ struct RunnerSettingsView: View {
     @AppStorage("runnerURL") private var runnerURL = ""
     /// "This Mac" (#283): the runner is Oby's login item on this Mac, and Oby follows it on 127.0.0.1.
     @AppStorage(RunnerFeed.thisMacKey) private var onThisMac = false
-    /// The login item, registered with "This Mac" and unregistered with a remote runner (Mac/LoginItem.swift).
+    /// The login item, registered with "This Mac" and unregistered with a remote runner (apps/mac/app/LoginItem.swift).
     @State private var loginItem = RunnerLoginItem()
-    /// Merge checks on this Mac (Mac/MacChecks.swift).
+    /// Merge checks on this Mac (apps/mac/app/MacChecks.swift).
     @AppStorage(MacChecks.setting) private var runMergeChecks = true
     /// Apple checks agents ask for (Engine/AppleChecks.swift).
     @AppStorage(MacChecks.appleSetting) private var runAppleChecks = true
@@ -148,7 +148,7 @@ struct RunnerSettingsView: View {
             } footer: {
                 Text("On power, Oby prevents idle sleep while This Mac is enabled and this setting is on. A running job always keeps this Mac awake.")
             }
-            // As on the iPhone (Shared/PermissionsSection.swift). This Mac's own jobs' default is in General.
+            // As on the iPhone (apps/shared/PermissionsSection.swift). This Mac's own jobs' default is in General.
             PermissionsSection(runner: feed.runner, defaultMode: feed.defaultMode, setDefault: feed.setDefaultMode)
             Section("Checks on this Mac") {
                 Toggle("Run merge checks on this Mac", isOn: $runMergeChecks)
@@ -220,7 +220,7 @@ struct RunnerSettingsView: View {
     }
 }
 
-/// Settings › Remote access: reach this Mac from anywhere (#285, Mac/RemoteAccess.swift). Sign in
+/// Settings › Remote access: reach this Mac from anywhere (#285, apps/mac/app/RemoteAccess.swift). Sign in
 /// to Oby's control plane with a code by email, then turn it on: this Mac gets a hostname of its
 /// own and runs its tunnel. The iPhone connects to the hostname when it's away from home.
 struct RemoteAccessSettingsView: View {
@@ -300,7 +300,7 @@ struct RemoteAccessSettingsView: View {
 }
 
 /// Settings › Accounts: the logins Oby spreads jobs across, who pays for each, and how much each has
-/// used, on this Mac and on the runner, as the iPhone shows them (Shared/SettingsSections.swift).
+/// used, on this Mac and on the runner, as the iPhone shows them (apps/shared/SettingsSections.swift).
 struct AccountsSettingsView: View {
     let store: AccountStore
     let feed: RunnerFeed
@@ -479,7 +479,7 @@ struct VaultSettingsView: View {
 }
 
 /// Settings › Models: which model and effort Claude Code and Codex jobs use, on this Mac and on the
-/// runner (as the iPhone sets them, Shared/SettingsSections.swift).
+/// runner (as the iPhone sets them, apps/shared/SettingsSections.swift).
 struct ModelsSettingsView: View {
     let store: AccountStore
     let feed: RunnerFeed

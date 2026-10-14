@@ -5,10 +5,10 @@ import SwiftUI
 import UIKit
 
 /// Settings › Your Mac (#285, #284): how this iPhone reaches the Mac, at home over the local
-/// network and away through the Mac's tunnel (Shared/RemoteRoute.swift), and how it pairs: the QR
+/// network and away through the Mac's tunnel (apps/shared/RemoteRoute.swift), and how it pairs: the QR
 /// code the Mac's Settings › Runner shows, or its six-digit code typed here with the Mac picked
 /// from those Bonjour finds on this network. Either buys the device token every gateway request
-/// carries (iOS/Phone.swift, GatewayTokenStore). A hostname alone cannot authorize the gateway.
+/// carries (apps/ios/app/Phone.swift, GatewayTokenStore). A hostname alone cannot authorize the gateway.
 struct ConnectScreen: View {
     @Environment(Phone.self) private var phone
     @State private var name = ""
@@ -171,7 +171,7 @@ struct ConnectScreen: View {
     }
 }
 
-/// What the Mac's pairing QR code carries (Mac/PairingView.swift): the gateway's URL, the Mac's
+/// What the Mac's pairing QR code carries (apps/mac/app/PairingView.swift): the gateway's URL, the Mac's
 /// link (its name and tunnel hostname) and the one-time secret.
 struct GatewayEnvelope: Decodable, Equatable {
     var url: URL

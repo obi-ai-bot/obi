@@ -9,7 +9,7 @@ import Security
 /// Secure Enclave key, with a time and a fresh nonce. Compiled into the app and the widget
 /// extension, which fetches the jobs itself when a WidgetKit push asks it to reload.
 nonisolated struct WatchLink: Sendable {
-    /// What pairing left here, from the iPhone (iOS/WatchPairing.swift).
+    /// What pairing left here, from the iPhone (apps/ios/app/WatchPairing.swift).
     struct Pairing: Codable, Equatable, Sendable {
         /// This watch's id on the runner.
         var watch: String
@@ -175,7 +175,7 @@ nonisolated struct WatchLink: Sendable {
                     stream.yield(.connected)
                     var parser = EventParser()
                     var line = Data()
-                    // Newlines only, as the iPhone splits them (Shared/Runner.swift).
+                    // Newlines only, as the iPhone splits them (apps/shared/Runner.swift).
                     for try await byte in bytes {
                         guard byte == 0x0A else { line.append(byte); continue }
                         if let event = parser.feed(String(decoding: line, as: UTF8.self)) { stream.yield(event) }

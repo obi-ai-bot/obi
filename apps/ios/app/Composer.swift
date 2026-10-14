@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The field where you type a task or dictate one, with Send: at the bottom of Home and of Chat,
 /// one and the same. Tap the mic and what you say goes into the field as it's heard; tap Stop and
-/// the words stay there to edit and send (iOS/README.md, "Voice input").
+/// the words stay there to edit and send (apps/ios/app/README.md, "Voice input").
 struct Composer: View {
     @Environment(Phone.self) private var phone
     @Binding var text: String
