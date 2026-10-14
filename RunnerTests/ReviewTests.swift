@@ -88,11 +88,13 @@ struct ReviewTests {
     }
 
     /// Dispatches the author and runs it to its end: it ends done with commits and publishes.
-    func publishAuthor() async throws -> Job {
+    /// `authorAccountFiveHour`: how full the author's own account says it is, as it ends.
+    func publishAuthor(authorAccountFiveHour: Double? = nil) async throws -> Job {
         desk.dispatch(author)
         try await until("the author runs") { desk.job("author")?.status == .running }
         let agent = try #require(made.agents.last?.agent)
         agent.onEvent(.session("e6a24229"))
+        if let used = authorAccountFiveHour { agent.onEvent(.usage(fiveHour: used, sevenDay: 0.2)) }
         agent.onEvent(.turnEnded(summary: "fix(engine): open the PR by itself", failed: false))
         agent.onEvent(.finished(summary: "fix(engine): open the PR by itself", failed: false))
         try await until("the author ends") { desk.job("author")?.isActive == false }
@@ -216,13 +218,93 @@ struct ReviewTests {
     @Test func withNoOtherAccountNothingReviewsAndTheJobSaysSo() async throws {
         accounts.setLabel(nil, for: personal.id)
         accounts.setLabel(nil, for: work.id)
-        let published = try await publishAuthor()
+        let published = try await publishAuthor(authorAccountFiveHour: 0.97)
         try await Task.sleep(for: .milliseconds(50))
         #expect(published.reviewing == nil && published.review == nil)
         #expect(published.reviewError == "No other account is signed in with room to review it.")
         #expect(desk.jobs.count == 1 && made.agents.count == 1)
         #expect(published.pipeline.stages.first { $0.id == .review }?.detail == "Waiting for review · No other account is signed in with room to review it.")
         #expect(!published.needsYou)
+    }
+
+    // MARK: The author's own account, last (#408)
+
+    @Test func withOnlyTheAuthorsAccountUnderTheLimitsTheReviewRunsThereInAFreshSession() async throws {
+        accounts.setLabel(nil, for: personal.id)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
+        let published = try await publishAuthor()
+        #expect(published.session == "e6a24229")
+        let (review, agent) = try await reviewJob()
+        #expect(review.account == author.account && review.agent == "claude" && review.reviewOf == "author")
+        #expect(published.reviewing == review.id && desk.job("author")?.reviewError == nil)
+        // A new session: the author's was never offered, and nothing of it is in the prompt or the job.
+        let made = try #require(made.agents.last)
+        #expect(made.resume == nil && review.session == nil && review.review == nil && review.attachments == nil)
+        for text in [agent.prompt, review.task, review.request] {
+            #expect(!text.contains("e6a24229") && !text.contains("fix(engine): open the PR by itself"))
+        }
+        #expect(agent.prompt.contains("This is a review only: make no commits"))
+        // The verdict says so, on the author's job and in the check run's title.
+        _ = try await self.review("The change does what was asked.\n\nVERDICT: APPROVED")
+        let verdict = try #require(desk.job("author")?.review)
+        #expect(verdict.sameAccount == true && verdict.account == "Default")
+        #expect(verdict.heading == "Oby review · Claude Code · Default (same account as the author): Approved")
+        let run = try #require(self.made.posted.last?.run)
+        #expect(run.title == "Oby review · Claude Code · Default (same account as the author): Approved")
+        #expect(Review.quoted(verdict, summary: "ok", pr: 80).contains("on the Default account (same account as the author)"))
+    }
+
+    @Test func anotherAccountWithRoomIsStillChosenOverTheAuthorsOwn() async throws {
+        _ = try await publishAuthor()
+        let (review, _) = try await reviewJob()
+        #expect(review.account == work.id && review.agent == "codex")
+        _ = try await self.review("The change does what was asked.\n\nVERDICT: APPROVED")
+        let verdict = try #require(desk.job("author")?.review)
+        #expect(verdict.sameAccount == nil && !verdict.heading.contains("same account"))
+    }
+
+    @Test func theAuthorsAccountOverTheLimitsIsNotTheFallbackEither() async throws {
+        accounts.setLabel(nil, for: personal.id)
+        accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
+        let published = try await publishAuthor(authorAccountFiveHour: 0.96)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(published.reviewing == nil && published.waitsForReviewer && made.agents.count == 1)
+    }
+
+    @Test func theSameAccountFallbackIsLastAndNeverForASecondReviewerOnTheSameAccount() {
+        let author = author
+        let mine = AccountState(account: Account(id: "default", agent: "claude", name: "Default", payer: "", home: nil), label: "Max")
+        var personal = AccountState(account: Account(id: "p", agent: "claude", name: "Personal", payer: "", home: nil), label: "Max")
+        let now = Date(timeIntervalSince1970: 1_791_582_173)
+        // `reviewer` (the only one a security review may use) never answers with the author's account;
+        // the fallback does, only when nothing else can.
+        #expect(Review.reviewer([mine], for: author) == nil)
+        #expect(Review.sameAccountReviewer([mine], for: author)?.id == "default")
+        #expect(Review.candidates([mine], for: author).isEmpty)
+        #expect(Review.reviewer([mine, personal], for: author)?.id == "p")
+        // Out of room: 95% of either window, marked full, signed out, or just failed.
+        var busy = mine
+        busy.fiveHour = 0.95
+        #expect(Review.sameAccountReviewer([busy], for: author) == nil)
+        busy = mine
+        busy.sevenDay = 0.96
+        busy.sevenDayResets = now + 3600
+        #expect(Review.sameAccountReviewer([busy], for: author, now: now) == nil)
+        busy = mine
+        busy.fullUntil = now + 600
+        #expect(Review.sameAccountReviewer([busy], for: author, now: now) == nil)
+        busy = mine
+        busy.label = nil
+        #expect(Review.sameAccountReviewer([busy], for: author) == nil)
+        #expect(Review.sameAccountReviewer([mine], for: author, excluding: "default") == nil)
+        // Under 95% of its week, in its reserve: a review may take it, as any account's.
+        busy = mine
+        busy.sevenDay = 0.85
+        busy.sevenDayResets = now + 3600
+        #expect(Review.sameAccountReviewer([busy], for: author, now: now)?.id == "default")
+        // Another account's work never falls back to someone else's account.
+        personal.label = nil
+        #expect(Review.sameAccountReviewer([personal], for: author) == nil)
     }
 
     // MARK: Waiting for an account with room
@@ -232,7 +314,7 @@ struct ReviewTests {
         // An hour off, so a slow machine still sees it wait.
         let later = Date.now.addingTimeInterval(3600)
         accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: later), for: work.id)
-        let published = try await publishAuthor()
+        let published = try await publishAuthor(authorAccountFiveHour: 0.97)
         let line = "Waiting for an account with room (resets \(Limits.clock(later)))"
         #expect(published.reviewing == nil && published.reviewError == line && published.waitsForReviewer)
         let stage = published.pipeline.stages.first { $0.id == .review }
@@ -254,7 +336,7 @@ struct ReviewTests {
     @Test func aReviewThatWaitedBeforeARestartStartsAfterIt() async throws {
         accounts.setLabel(nil, for: personal.id)
         accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
-        _ = try await publishAuthor()
+        _ = try await publishAuthor(authorAccountFiveHour: 0.97)
         #expect(desk.job("author")?.waitsForReviewer == true)
 
         // Oby starts again over the same jobs, and the Work account has room by then.
@@ -278,7 +360,7 @@ struct ReviewTests {
     @Test func aWaitingReviewStartsWhenAJobOnAFullAccountEnds() async throws {
         accounts.setLabel(nil, for: personal.id)
         accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
-        let published = try await publishAuthor()
+        let published = try await publishAuthor(authorAccountFiveHour: 0.97)
         // The tool named no reset time.
         #expect(published.reviewError == "Waiting for an account with room" && published.waitsForReviewer)
 
@@ -331,7 +413,7 @@ struct ReviewTests {
         accounts.setLabel(nil, for: personal.id)
         let resets = Date.now.addingTimeInterval(3600)
         accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2, fiveHourResets: resets), for: work.id)
-        let published = try await publishAuthor()
+        let published = try await publishAuthor(authorAccountFiveHour: 0.97)
         #expect(published.waitsForReviewer && desk.roomWakeAt == resets)
         desk.followed("author", published: url.absoluteString, pushed: 2,
                       status: PullRequestStatus(state: .merged, base: "dev", mergedAt: .now, checkedAt: .now), error: nil)
@@ -347,7 +429,7 @@ struct ReviewTests {
     @Test func aPassedResetSetsNoWakeUp() async throws {
         accounts.setLabel(nil, for: personal.id)
         accounts.record(.usage(fiveHour: 0.97, sevenDay: 0.2), for: work.id)
-        let published = try await publishAuthor()
+        let published = try await publishAuthor(authorAccountFiveHour: 0.97)
         #expect(published.waitsForReviewer && desk.roomWakeAt == nil)
         try desk.message("author", "One more thing.")
         try await until("the author runs again") { desk.job("author")?.status == .running }
