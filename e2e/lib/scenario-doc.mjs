@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FIXTURE } from "./fixture.mjs";
+import { SNAPSHOT_EXCLUDES, excluded } from "./snapshot.mjs";
 import {
   ADMIN_SCOPES, BRIEF, EXPECTED_DECISION, EXPECTED_RESULT, EXPIRES_IN, INBOX_ANSWER, INBOX_OPTIONS,
   OBI_SCOPES, OBIS, POLICY_RULES, SPHERE,
@@ -121,6 +122,33 @@ export function scenarioDocProblems(doc = readFileSync(SCENARIO_MD, "utf8")) {
     if (!text.includes(INBOX_OPTIONS.map((o) => `\`${o}\``).join(", "))) return "the options differ from scenario.mjs";
     if (!text.includes(`The test answers \`${INBOX_ANSWER}\``)) return "the answer differs from scenario.mjs";
     return same(inlineJson(text, '{"type": "review_request"'), EXPECTED_DECISION) ? null : "the decision differs from scenario.mjs";
+  });
+
+  check("the snapshot exclusions", () => {
+    const text = section(doc, '## "No process wrote outside its write root"');
+    const rows = { obi: "The obi checkout", obiSphere: "The obi-sphere checkout", fixture: "`R/fixture/`" };
+    for (const [key, label] of Object.entries(rows)) {
+      const row = text.split("\n").find((l) => l.startsWith(`   | ${label} |`));
+      if (!row) return `no row for ${label} in step 8.4.1's table`;
+      const cell = row.trim().replace(/^\|\s*|\s*\|$/g, "").split(" | ")[1].trim();
+      const listed = cell === "nothing" ? [] : [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+      if (!same(listed, SNAPSHOT_EXCLUDES[key])) return `${label}: SCENARIO.md lists ${JSON.stringify(listed)}, snapshot.mjs ${JSON.stringify(SNAPSHOT_EXCLUDES[key])}`;
+    }
+    // What the patterns mean (step 8.4.1), checked on the matcher snapshot() uses.
+    const cases = [
+      ["server/node_modules", SNAPSHOT_EXCLUDES.obiSphere, true],
+      ["node_modules", SNAPSHOT_EXCLUDES.obiSphere, true],
+      ["spec/node_modules", SNAPSHOT_EXCLUDES.obiSphere, true],
+      ["server/.wrangler", SNAPSHOT_EXCLUDES.obiSphere, true],
+      ["server/my_node_modules", SNAPSHOT_EXCLUDES.obiSphere, false],
+      ["server/.mf", SNAPSHOT_EXCLUDES.obiSphere, false],
+      ["spec/.wrangler", SNAPSHOT_EXCLUDES.obiSphere, false],
+      ["e2e/.git", SNAPSHOT_EXCLUDES.obi, false],
+      ["core/target", SNAPSHOT_EXCLUDES.obi, true],
+      ["core/targets", SNAPSHOT_EXCLUDES.obi, false],
+    ];
+    const wrong = cases.filter(([rel, patterns, want]) => excluded(rel, patterns) !== want);
+    return wrong.length ? `snapshot()'s matcher gets ${wrong.map(([rel, , want]) => `${rel} (${want ? "should skip" : "shouldn't skip"})`).join(", ")} wrong` : null;
   });
 
   check("the expiry", () => (doc.includes(`the requests by \`expiresIn: ${EXPIRES_IN}\``) ? null : `SCENARIO.md doesn't say expiresIn ${EXPIRES_IN}`));

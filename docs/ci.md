@@ -12,7 +12,7 @@ To gate merges on the first two, add them, by these names, as required status ch
 
 ## Where it runs
 
-Both jobs run on GitHub's hosted runners; no machine of ours is involved.
+Every job runs on GitHub's hosted runners; no machine of ours is involved. Runner on Linux and Mac and iPhone are described below; E2E runs `make e2e` once on `ubuntu-26.04` and once on `macos-26` (it builds nothing with Xcode, so it needs no `xcode-27` image).
 
 - **Linux:** `ubuntu-26.04`, the same Ubuntu as tetrix-lab, so bwrap gets its user namespaces from the same AppArmor profile (`bwrap-userns-restrict`) as the runner does. A step checks that `bwrap` runs before the tests: the bubblewrap tests skip themselves when it can't, and here they must run. If AppArmor ever blocks it, that step lifts the restriction for the run (`kernel.apparmor_restrict_unprivileged_userns=0`) and leaves a warning on the run.
 - **macOS:** the project needs Xcode 27. GitHub's `macos-26` and `macos-latest` images stop at Xcode 26.6, but its `xcode-27` image ships Xcode 27.0 (default), 27.1 and 27.2 beta, with iOS 27.0 and watchOS 27.0 simulators ([image readme](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md), image 20261006 checked on 2026-10-10). The workflow pins Xcode 27.0 with `DEVELOPER_DIR`. That image is a **public preview**: no SLA, and jobs can queue while GitHub balances capacity ([actions/runner-images#14404](https://github.com/actions/runner-images/issues/14404)). When Xcode 27 reaches a GA label (`macos-27` or `macos-latest`), switch `runs-on` to it. If the preview turns out unusable, the fallback is a self-hosted Mac labeled `oby-mac` (`runs-on: [self-hosted, oby-mac]`).
@@ -21,7 +21,7 @@ If the repository is private, macOS minutes count ten times against the plan's i
 
 ## How long each job takes
 
-Neither workflow has run on GitHub yet: this pull request is their first run. Replace the estimates below with the times from the first green runs on `dev`.
+The figures below for Runner on Linux and Mac and iPhone were estimated before either workflow first ran on GitHub; replace them with the times of green runs on `dev`. E2E has no figure: it is red by design until Phase 1 makes its steps green (e2e/SCENARIO.md).
 
 **Runner on Linux.** Measured on tetrix-lab (16 cores, Swift 6.4.0) on 2026-10-10:
 

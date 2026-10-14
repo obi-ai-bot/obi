@@ -143,7 +143,7 @@ Turned green by: **the Sphere server**.
 
 1. Start the Sphere: in `$OBI_SPHERE_DIR/server`, `pnpm run local -- --port <sphere port> --persist-to R/sphere/state`, with `SPHERE_OPERATOR_TOKEN`, `HOME=R/sphere/home`, `TMPDIR=R/sphere/tmp`, `WRANGLER_SEND_METRICS=false` and `PATH` (sphere-api.md, "Running a Sphere locally"). Within 60 seconds `GET /v0.1/health` answers `200 {"ok": true, "protocol": "obi/0.1"}`.
 2. `POST /v0.1/spheres` with the operator token: `{"sphere": "e2e", "name": "E2E sphere", "admin": {"owner": "wellington", "owner_key": "<W public>"}}` → `201` with `sphere` `e2e`, `admin_owner` `wellington`, `protocol` `obi/0.1`.
-3. The admin token (how every one is made; see above for when): an owner assertion signed by W, `{"iss": "wellington", "sub": "wellington", "aud": "obi-sphere:e2e", "iat": now, "exp": now + 300, "jti": <uuid>, "scope": "admin directory:read audit:read"}`, exchanged at `POST /v0.1/oauth/token` (`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token`, `subject_token_type=urn:ietf:params:oauth:token-type:jwt`, no actor) → `200`, `token_type` `Bearer`, `scope` `admin directory:read audit:read`.
+3. The admin token (how every one is made; see above for when): an owner assertion signed by W, `{"iss": "wellington", "sub": "wellington", "aud": "obi-sphere:e2e", "iat": now, "exp": now + 300, "jti": <uuid>, "scope": "admin directory:read audit:read"}`, exchanged at `POST /v0.1/oauth/token` (`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token`, `subject_token_type=urn:ietf:params:oauth:token-type:jwt`, no actor) → `200`, `token_type` `Bearer`, `scope` exactly `admin directory:read audit:read` (the spec fixes the order the Sphere writes scopes in: identity.md 4.2, "Canonical order").
 4. `POST /v0.1/spheres/e2e/invitations` (admin token) `{"owner": "wellington", "obi": "obi-wellington", "expires_in": 3600}` → `201` invitation A; the same for `ernesto` / `obi-ernesto` → invitation B. Each has an `invitation_id` and a 43-character `secret`.
 5. `GET /v0.1/spheres/e2e/policy` → `{"version": 0, "rules": [], …}`; `PUT /v0.1/spheres/e2e/policy` `{"expected_version": 0, "rules": [<team-reviews>]}` → `200` with `version` 1 and that rule.
 6. `GET /v0.1/spheres/e2e/audit` → `entries` `[]`, `head` `{"seq": 0, "hash": "000…000"}`.
@@ -176,7 +176,7 @@ Turned green by: **the Rust core** (`obid`'s configuration and join), with **the
 Turned green by: **the Rust core** (Obi-to-Obi client) and **the Sphere server** (send).
 
 1. `POST /v1/obid/sphere/requests` on B: `{"to": "obi-wellington", "type": "review_request", "body": <the brief>, "expiresIn": 3600}` → `202` exchange with `correlationId` **X**, `direction` `outgoing`, `peer` `obi-wellington`, `state` `sent`, and one message: the signed envelope with `seq` 1.
-2. `GET /v0.1/spheres/e2e/audit` (admin token): one entry, `seq` 1, whose envelope deep-equals B's message: `type` `review_request`, `from` `obi-ernesto`, `to` `obi-wellington`, `id` and `correlation_id` X, `key_id` B's key, `body` deep-equal to the brief. The spec's `verifyEnvelope` accepts it with the directory's keys at the harness's clock.
+2. `GET /v0.1/spheres/e2e/audit` (admin token): one entry, `seq` 1, whose envelope deep-equals B's message: `type` `review_request`, `from` `obi-ernesto`, `to` `obi-wellington`, `id` and `correlation_id` X, `key_id` B's key, `body` deep-equal to the brief. The spec's `verifyEnvelope` accepts it with the context `{now: <the harness's clock>, sphere: "e2e", receiver: "obi-wellington", keys: <every member's keys from GET /v0.1/spheres/e2e/members>, seq: 1, seen_ids: []}`, keys given as `{key_id: {obi, public_key, valid_from_seq, valid_until_seq}}`.
 
 ### Step 4: A has no remembered decision: inbox, owner accepts and remembers, review job dispatched
 
@@ -195,7 +195,7 @@ Turned green by: **the Rust core** (the job, the check, finding ids, the publish
 1. `GET /v1/jobs/J1/wait` on A, within 120 seconds: `status` `done`, `publishError` null, `published` null, `outgoing` `[]` (nothing pushed, no pull request, no check run).
 2. J1's worktree: `git rev-parse HEAD` is `6d20146f…`; `git status --porcelain --untracked-files=all` lists nothing outside `.obi/`.
 3. A's exchange X: `state` `done`, `publishScan` `{"ran": true, "clean": true}`.
-4. Within 30 seconds B's exchange X has `state` `done`, and its messages are, in order: the request (sent), an `accept` with an empty body (received), any number of `status` (received), and a `result` (received) whose body is exactly the expected result above. No `status` comes before the `accept`: the protocol would allow one, but obid never sends one (docs/runner-api.md, "What obid sends in an exchange it was asked in"). Every received envelope passes the spec's `verifyEnvelope` with the directory's keys.
+4. Within 30 seconds B's exchange X has `state` `done`, and its messages are, in order: the request (sent), an `accept` with an empty body (received), any number of `status` (received), and a `result` (received) whose body is exactly the expected result above. No `status` comes before the `accept`: the protocol would allow one, but obid never sends one (docs/runner-api.md, "What obid sends in an exchange it was asked in"). Every received envelope passes the spec's `verifyEnvelope` with the context `{now: <the harness's clock>, sphere: "e2e", receiver: "obi-ernesto", keys: <every member's keys, as in step 3.2>, seq: <its seq in B's exchange>, seen_ids: []}`.
 
 ### Step 6: second review_request accepted from the remembered decision, no inbox
 
@@ -231,14 +231,22 @@ Every process the run starts has a **write root**:
 
 | Process | May write in |
 |---|---|
-| The Sphere (`wrangler dev`) | `R/sphere/` (its state, `HOME`, `TMPDIR`) and `$OBI_SPHERE_DIR/server/.wrangler/` (wrangler's scratch) |
+| The Sphere (`wrangler dev`) | `R/sphere/` (its state, `HOME`, `TMPDIR`), `$OBI_SPHERE_DIR/server/.wrangler/` (wrangler's scratch) and the `node_modules/` folders in `$OBI_SPHERE_DIR` (installed packages and their caches, like `server/node_modules/.cache/`; sphere-api.md, "Running a Sphere locally") |
 | obid A, obid B | `R/obid-a/`, `R/obid-b/` (its home, `HOME`, `TMPDIR`) |
-| Each agent (the stub, or Claude Code in live mode), and the repository's check | its job's worktree and the job's own temporary folder (its `HOME` and `TMPDIR`), inside its obid's home; obid's job sandbox enforces it (docs/runner-api.md, "obid only: Obi-to-Obi review jobs"), and the stub writes nothing |
+| Each agent (the stub, or Claude Code in live mode), and the repository's check | its job's worktree, the worktree's own git directory and the job's own temporary folder (its `HOME` and `TMPDIR`), inside its obid's home; obid's job sandbox enforces it (docs/runner-api.md, "The job sandbox"), and the stub writes nothing |
 | The harness | `R/harness/` |
 
 What step 8.4 checks, and fails on with the path:
 
-1. **The checkouts and the fixture.** The harness snapshots (every file's path, size and SHA-256; [`e2e/lib/snapshot.mjs`](lib/snapshot.mjs)) the obi checkout (except `.git/` and `core/target/`), the obi-sphere checkout (except `.git/`, `node_modules/` and `server/.wrangler/`) and `R/fixture/`, after the preflight and before step 1, and again after step 8. Any file added, removed or changed in them fails.
+1. **The checkouts and the fixture.** The harness snapshots (every file's path, size and SHA-256; [`e2e/lib/snapshot.mjs`](lib/snapshot.mjs)) the obi checkout, the obi-sphere checkout and `R/fixture/`, after the preflight and before step 1, and again after step 8. Any file added, removed or changed in them fails, except under these path patterns (`SNAPSHOT_EXCLUDES` in `snapshot.mjs`, which is what `snapshot()` skips). A pattern is a folder path relative to the snapshotted root, ending in `/`: `a/b/` skips the folder `a/b` at that place only, and `**/name/` skips every folder called `name` at any depth, the top level included. Patterns match whole path segments, so `**/node_modules/` doesn't skip `my_node_modules/`.
+
+   | Root | Excluded |
+   |---|---|
+   | The obi checkout | `.git/`, `core/target/` |
+   | The obi-sphere checkout | `.git/`, `**/node_modules/`, `server/.wrangler/` |
+   | `R/fixture/` | nothing |
+
+   Anything else the Sphere writes in its checkout (a `.mf/` folder, say) fails the check: its state belongs under `--persist-to`.
 2. **Obi B ran nothing.** `R/obid-b/home/worktrees/` is empty or missing after step 8: B never accepts work in this scenario.
 3. **The agent's worktree.** Step 5.2: J1's worktree is at `head_sha` with nothing changed outside `.obi/`, and the same for J2 after step 6.
 4. **The person's home and the system's temp folder, by name.** The harness lists the top level of its own `HOME` and of `os.tmpdir()` before step 1 and after step 8. No entry may appear whose name starts with `obid`, `obi-` (other than the run folder itself), `.obi`, `.wrangler`, `wrangler` or `.claude`. Every process gets its own `HOME` and `TMPDIR` inside its write root, which is what keeps them out; this check catches a process that ignores them.
@@ -246,7 +254,7 @@ What step 8.4 checks, and fails on with the path:
 What it does **not** check, and what covers it instead:
 
 - **Writes between write roots inside `R`**: obid A writing into `R/obid-b/` or `R/sphere/`, the Sphere writing into an obid's folder. Every one of them writes inside `R` while the run goes on, so a snapshot can't say who wrote what. Each process is told only its own folders (its config, `HOME`, `TMPDIR`, `--persist-to`); nothing else names another's.
-- **An agent writing elsewhere in its obid's home.** obid itself writes there throughout, so a snapshot can't tell. In stub mode the stub writes nothing (the preflight checks it on a worktree of its own), and it proves the sandbox is there: in each review job it tries to create a file in `home/worktrees/`, beside its worktree, and fails the turn, and so the step, when it can. That proves one folder, not every path: that a real agent and the check can't write anywhere outside the worktree and the job's temporary folder is obid's sandbox's guarantee, tested in `core/` by the Rust core's own tests (docs/ARCHITECTURE.md, "Rust core", done-when).
+- **An agent writing elsewhere in its obid's home.** obid itself writes there throughout, so a snapshot can't tell. In stub mode the stub writes nothing (the preflight checks it on a worktree of its own), and it proves the sandbox is there: in each review job it tries to create a file in `home/worktrees/`, beside its worktree, and fails the turn, and so the step, when it can. That proves one folder, not every path: that a real agent and the check can't write anywhere outside the worktree, its git directory and the job's temporary folder is obid's sandbox's guarantee, tested in `core/` by the Rust core's own tests (docs/ARCHITECTURE.md, "Rust core", done-when).
 - **Anything else on the machine.** Only the top-level names above are looked at.
 
 ## Live mode
