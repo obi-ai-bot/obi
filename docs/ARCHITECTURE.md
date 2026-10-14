@@ -104,7 +104,7 @@ A plug-in adds context or events to Obi. Obi works fully with none: a fresh inst
 | Kind | What it gives | Used when |
 |---|---|---|
 | `context` | Context items for a job: past work, decisions, a code graph's answers. | `obid` dispatches, plans or reviews a job: it asks every enabled context plug-in and quotes the answers to the agent as data. |
-| `events` | Events from outside: a review was requested, an issue was assigned. | Continuously, while enabled: each event becomes an inbox item, or work that a remembered decision of the owner's covers (the same rule as a request from another Obi). |
+| `events` | Events from outside: a review was requested, an issue was assigned. | Continuously, while enabled: each event becomes an inbox item of kind `pluginEvent` for the owner to read (runner-api.md, "obid only: plug-ins"). In this version an event never starts work, and no remembered decision applies to events. |
 | `agent-mcp` | An MCP server the job's agents may call, limited to tools the manifest lists. | Each job: `obid` adds the server to the agent's MCP configuration, and its permission gate refuses every tool not listed. |
 
 Tetrix is an `agent-mcp` plug-in in its first version (its graph reads and `save_session`, as `Engine/TetrixUse.swift` allows today) and may add `context` later. The Swift engine's hard-coded Tetrix handling (`TetrixUse`, the reminders, the `Tetrix-Session` trailer, the account's `tetrix` fields) becomes per-plug-in: `obid` counts each `agent-mcp` plug-in's calls per job the way it counts Tetrix's today, and keeps filling the job's and account's `tetrix` keys from the plug-in with id `tetrix` (null when it isn't enabled), so the apps keep working.
@@ -126,7 +126,6 @@ Each plug-in is a folder with `obi-plugin.json`:
     "server": {"type": "http", "url": "https://mcp.tetrix.example/mcp"},
     "allowedTools": ["search_entities", "get_entity", "code_impact", "save_session"]
   },
-  "events": {"kinds": ["pull_request.review_requested", "issue.assigned"]},
   "network": ["mcp.tetrix.example"],
   "config": {"type": "object", "additionalProperties": false, "properties": {}}
 }
@@ -136,7 +135,7 @@ Each plug-in is a folder with `obi-plugin.json`:
 - `kinds`: one or more of `context`, `events`, `agent-mcp`.
 - `run`: the process to start, relative to the plug-in's folder: needed for `context` and `events`; an `agent-mcp`-only plug-in may leave it out.
 - `agentMcp`: for `agent-mcp`, the server (`{"type": "http", "url"}` or `{"type": "stdio", "command", "args"}`) and the only tools agents may call. A server that needs a secret in its configuration is refused: logins are the server's own (OAuth in its own store), never a vault secret.
-- `events.kinds`: the event kinds it may emit (5.4).
+- `events`: required for an `events` plug-in and refused on any other: `{"kinds": [ … ]}`, the event kinds it may emit (5.4), like `{"kinds": ["pull_request.review_requested", "issue.assigned"]}`. An event of a kind not listed is refused.
 - `network`: the hosts it talks to, shown to the owner before enabling. Declared in this version, not enforced.
 - `config`: a JSON Schema for its settings; the owner's settings must match it.
 
@@ -175,7 +174,7 @@ Requests from the plug-in (only for the kinds it serves):
 
 - `job` in a context query carries typed fields only: no prompt, no summary, no file contents.
 - Context `items` and event `data` are data. `obid` writes context items to `.obi/context/<plugin id>.md` in the job's worktree, fenced and labeled as quoted data, and shows event data to the owner as text. Neither is ever placed in a prompt as an instruction.
-- Event `kind`s in this version: `pull_request.review_requested`, `pull_request.changes_requested`, `issue.assigned`, `check.failed`, `mention`. An event becomes an inbox item (kind `event`) unless a remembered decision of the owner's for `(event kind, plug-in id, repo)` covers it. Events never start work by themselves.
+- Event `kind`s in this version: `pull_request.review_requested`, `pull_request.changes_requested`, `issue.assigned`, `check.failed`, `mention`. Each accepted event becomes one inbox item of kind `pluginEvent` (runner-api.md, "obid only: plug-ins", where its fields and its one answer are defined). Events never start work, and no remembered decision covers them in this version: acting on an event is the owner's step. Remembered decisions for events, and work started from them, are a later version's, specified in runner-api.md before anyone builds them.
 
 ### 5.5 Rust interface
 
@@ -218,7 +217,7 @@ impl PluginHost {
 }
 ```
 
-Until the plug-in crates land, the Rust core codes against these signatures with a host that has no plug-ins; nothing else about plug-ins is the core's to decide.
+The plug-in boundary's first pull request is these two crates with exactly these signatures, `start` finding no plug-ins yet (so `list` is empty, `context` and `agent_mcp_servers` give nothing, and `events` never yields). From then on the Rust core depends on the real crates; it never writes a stand-in of its own. What `obid` does with the host (when it starts and stops it, the two HTTP routes, where context, MCP servers and events go) is the Rust core's; everything behind these signatures is the plug-in boundary's.
 
 ## 6. Phase 1: workstreams and who edits what
 
@@ -227,23 +226,30 @@ Four workstreams run in parallel and don't talk to each other. Each edits only w
 | Workstream | Owns (may edit) | Must not touch |
 |---|---|---|
 | **Sphere server** (obi-sphere) | `obi-sphere/server/**`, the server's own CI workflow | `obi-sphere/spec/**` (changes go to the lead), anything in this repository |
-| **Rust core** (`obid`) | `core/**` except the plug-in crates, `e2e/run.mjs` and `e2e/lib/**` (the step bodies), new endpoints in runner-api.md's "obid only" section, `.github/workflows/core.yml` | `Engine/`, `Runner/`, `RunnerTests/` (frozen), `apps/**`, `plugins/**`, `core/crates/obi-plugin-*`, `e2e/SCENARIO.md`, `e2e/fixtures/**`, `e2e/stub-agent/**` |
+| **Rust core** (`obid`) | `core/**` except the plug-in crates (including wiring `PluginHost` into `obid` and serving `GET` and `PUT /v1/obid/plugins` with it), the step bodies in `e2e/run.mjs` (the `run` of each entry in `steps`) and helper files it adds under `e2e/lib/`, new endpoints in runner-api.md's "obid only" section, `.github/workflows/core.yml` | `Engine/`, `Runner/`, `RunnerTests/` (frozen), `apps/**`, `plugins/**`, `core/crates/obi-plugin-*`, the lead's files below |
 | **Repository restructure** | The moves in section 1 and the path changes they need (`Oby.xcodeproj`, the `path:` of `Package.swift` targets whose folders move, like `MCP/`; paths in `.github/workflows/apple.yml`; scripts and docs links that name moved folders) | `core/`, `plugins/`, `e2e/`, `Makefile`, the contents of `Engine/`, `Runner/` and `RunnerTests/`, anything else in `Package.swift`, runner-api.md |
 | **Plug-in boundary** | `plugins/**`, `core/crates/obi-plugin-api/**`, `core/crates/obi-plugin-host/**` | `core/Cargo.toml` (the `crates/*` glob picks its crates up), the rest of `core/`, `Engine/TetrixUse.swift` (frozen: it is the specification for the Tetrix plug-in) |
-| **Lead** (Phase 0) | This document, `e2e/SCENARIO.md`, `e2e/fixtures/**`, `e2e/stub-agent/**`, `obi-sphere/spec/**` | |
+| **Lead** (Phase 0) | This document, `e2e/SCENARIO.md`, `e2e/fixtures/**`, `e2e/stub-agent/**`, the rest of `e2e/run.mjs` (preflight, the step loop, process handling), `e2e/lib/fixture.mjs`, `e2e/lib/scenario.mjs`, `e2e/lib/scenario-doc.mjs`, `e2e/lib/snapshot.mjs` (the scenario's fixed values and the checks' definitions), the `Makefile`, `.github/workflows/e2e.yml`, `obi-sphere/spec/**` | |
 
 Shared files and how they are shared:
 
 - `core/Cargo.toml` and `core/Cargo.lock`: the Rust core creates them first. The plug-in boundary uses only `[workspace.dependencies]`; when it needs another dependency it asks the core's owner to add it there. A conflict in `Cargo.lock` is settled by regenerating it.
 - runner-api.md: the Rust core adds endpoints to "obid only"; the plug-in endpoints there are already written.
-- `.github/workflows/`: each workstream adds its own file and edits only its own.
+- `.github/workflows/`: each workstream adds its own file and edits only its own. `e2e.yml` and the `Makefile` are the lead's and already build `obid` for `make e2e` (`cargo build --locked -p obid` in `core/` once `core/Cargo.toml` exists, with a stable Rust toolchain in CI), so no workstream needs to edit them to reach its done-when; a change one needs goes to the lead.
+
+What waits on what (everything else runs in parallel):
+
+1. `core/Cargo.toml` (the workspace) comes in the Rust core's first pull request. The plug-in boundary's crates build only inside it, so its first Rust pull request follows that one; until then it works on `plugins/tetrix/` (manifest, docs) and its tests' plug-ins.
+2. The plug-in boundary's first Rust pull request is the two crates with section 5.5's signatures and a host that finds no plug-ins.
+3. The Rust core wires `PluginHost` into `obid` (start and shutdown, `GET` and `PUT /v1/obid/plugins`, context for dispatch, plan and review, agent MCP servers, events into `pluginEvent` inbox items) once (2) is in `dev`, and does everything else before that.
+4. The plug-in boundary's done-when goes through `obid`'s routes, so it is reached once (3) is in `dev`.
 
 ### Order and done-when
 
 **Sphere server.** The protocol types and checks against the conformance suite first (the server's checker passes `run.mjs --impl` for envelopes and cards and produces chains that pass it), then Spheres, tokens, invitations and the directory, then policy, send, deliveries and the audit chain, then `pnpm run local`. Done when steps 1, 3, 5 and 7 of SCENARIO.md pass against it with a scripted client, and the conformance suite passes.
 
-**Rust core.** The runner API skeleton serving `GET /v1/status` and the configuration file first, then jobs, worktrees and the Claude Code adapter (stream-json) running the stub agent, then `obi-protocol` (passing the conformance suite with `--impl`), then Sphere membership, exchanges, the inbox item, decisions and the Obi-to-Obi review job with its publish gate, then the step bodies in `e2e/run.mjs`. Done when `make e2e` passes all eight steps on Linux and macOS, and the ported API-level tests from `RunnerTests` pass.
+**Rust core.** The workspace (`core/Cargo.toml`, `core/Cargo.lock`) and the runner API skeleton serving `GET /v1/status` and the configuration file first, then jobs, worktrees, the sandbox and the Claude Code adapter (stream-json) running the stub agent, then `obi-protocol` (passing the conformance suite with `--impl`), then Sphere membership, exchanges, the inbox item, decisions and the Obi-to-Obi review job with its publish gate, then the step bodies in `e2e/run.mjs`, then the plug-in host's wiring and routes (once the plug-in crates are in `dev`). Done when `make e2e` passes all eight steps on Linux and macOS, the ported API-level tests from `RunnerTests` pass, a test shows an agent and the repository's check can't write outside the job's worktree and temporary folder, nor reach the network for the check, on Linux and on macOS (runner-api.md, "The job sandbox"), and `GET` and `PUT /v1/obid/plugins` answer as runner-api.md says with the host from `obi-plugin-host`.
 
 **Repository restructure.** The moves in section 1, one area per pull request, the case-only renames (`Character/`, `MCP/`) each through a temporary name. Done when the Mac, iPhone and Watch apps build from their new places, `swift test` still passes for the frozen engine, and no folder differs from another only by case.
 
-**Plug-in boundary.** The crates with the types, traits and wire protocol first, then the host (discovery, sandbox, lifecycle, `GET` and `PUT /v1/obid/plugins` behind the interface above), then `plugins/tetrix` as an `agent-mcp` plug-in, disabled. Done when `obid` runs with no plug-ins enabled, Tetrix is enabled and disabled through `PUT /v1/obid/plugins/tetrix` like any plug-in, and a test plug-in of each kind passes the host's tests.
+**Plug-in boundary.** The crates with the types, traits, wire protocol and a host that finds no plug-ins first (exactly section 5.5's signatures), then the host's discovery, sandbox and lifecycle behind them (`list` and `set_enabled` are what the Rust core's `GET` and `PUT /v1/obid/plugins` call), then `plugins/tetrix` as an `agent-mcp` plug-in, disabled. Done when `obid` runs with no plug-ins enabled, Tetrix is enabled and disabled through `PUT /v1/obid/plugins/tetrix` like any plug-in (the route is the Rust core's, the host behind it this workstream's), and a test plug-in of each kind passes the host's tests.

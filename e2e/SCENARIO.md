@@ -17,13 +17,13 @@ make e2e-live     # the real Claude Code adapter: a person runs it on a Mac (see
 | Variable | Default | What |
 |---|---|---|
 | `OBI_SPHERE_DIR` | `../obi-sphere`, next to this repository | The obi-sphere checkout: its `spec/` (schemas, reference verifier) and `server/` (the Sphere). `make` installs both with `pnpm install --frozen-lockfile`. |
-| `OBID_BIN` | `core/target/debug/obid` in this repository | The `obid` binary to run, built beforehand (`cargo build` in `core/`). |
+| `OBID_BIN` | `core/target/debug/obid` in this repository | The `obid` binary to run. With the default, `make e2e` builds it first (`cargo build --locked -p obid` in `core/`, once `core/Cargo.toml` exists) and stops if the build fails; with another value it builds nothing and runs that binary. CI installs a stable Rust toolchain for the build. |
 | `OBI_E2E_RUN_DIR` | a new folder under the system's temp folder | Where the run keeps everything it makes. |
 | `OBI_E2E_KEEP` | unset | `1` keeps the run folder afterwards, for reading the logs. |
 
-Needs: Node 22 or later, pnpm, git. Nothing else: no network beyond 127.0.0.1, no GitHub, no model.
+Needs: Node 22 or later, pnpm, git, and a Rust toolchain (`cargo`) once `core/` exists. Nothing else at run time: no network beyond 127.0.0.1, no GitHub, no model (building obid and installing obi-sphere's packages may fetch dependencies first).
 
-The harness is [`e2e/run.mjs`](run.mjs). It runs five **preflight** checks (Node, git, the fixture repository, the stub agent, the spec examples; these pass today), then the eight **steps** below in order, prints one line per check, and exits 0 only when all of them pass. A step whose body isn't written yet prints `step N (<title>): not implemented`; once steps are written, a failing step marks the later ones `not run`. It kills every process it started when it ends, whatever happened.
+The harness is [`e2e/run.mjs`](run.mjs). It runs five **preflight** checks (Node, git, the fixture repository, the stub agent, and that this document, `e2e/fixtures/messages/` and the harness's values in `e2e/lib/` agree and the messages validate against the spec; these pass today), then the eight **steps** below in order, prints one line per check, and exits 0 only when all of them pass. A step whose body isn't written yet prints `step N (<title>): not implemented`. Every step builds on the ones before it, so a written step after one that failed or isn't written yet prints `not run`, naming that step. Every process the harness starts runs in its own process group, and when the run ends, whatever ended it (a pass, a failure, an exception, SIGINT or SIGTERM), the harness sends each group still running SIGTERM, then SIGKILL 10 seconds later.
 
 ## Processes, folders and ports
 
@@ -54,7 +54,7 @@ The harness picks three free ports on 127.0.0.1: the Sphere's, A's and B's. It g
 
 ### The fixture repository
 
-`obi-e2e/fixture-app`, built at test time by [`e2e/lib/fixture.mjs`](lib/fixture.mjs) from the files in [`e2e/fixtures/repo/`](fixtures/repo/). No `.git` folder is ever committed. Git runs with no user or system settings (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, no hooks, no templates, no signing, `core.autocrlf=false`, `core.fileMode=false`), author and committer `Obi E2E Fixture <fixture@obi-e2e.invalid>`, so the commit ids are the same on every machine:
+`obi-e2e/fixture-app`, built at test time by [`e2e/lib/fixture.mjs`](lib/fixture.mjs) from the files in [`e2e/fixtures/repo/`](fixtures/repo/). No `.git` folder is ever committed. Git runs with no user or system settings (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, no hooks, no templates, no signing, `core.autocrlf=false`, `core.fileMode=false`), SHA-1 objects asked for by name (`git init --object-format=sha1`, so a git whose default is SHA-256 makes the same ids), author and committer `Obi E2E Fixture <fixture@obi-e2e.invalid>`, so the commit ids are the same on every machine:
 
 | Branch | Commit | Date (author and committer) | Message | Files |
 |---|---|---|---|---|
@@ -79,7 +79,7 @@ The "pull request" is the branch `feature/average` into `main`; there is no pull
 }
 ```
 
-The acceptance conditions are "tests pass, no blocker findings", typed. Every message expires 3,600 seconds after it is made (`expiresIn: 3600`).
+The acceptance conditions are "tests pass, no blocker findings", typed. Every message expires 3,600 seconds after it is made: the requests by `expiresIn: 3600`, and obid's replies by its rule (docs/runner-api.md, "Expiry of what obid sends"), which here gives the same.
 
 **The canary.** `OBI-E2E-DATA-CANARY` appears only in the brief's data fields (`goal`, `summary`). It must never reach an agent's prompt (the stub agent fails the turn if it does), an inbox item's `title` or `text` (obid builds those from typed fields only; the data is under `obi.quoted`), or a result.
 
@@ -221,22 +221,33 @@ Turned green by: **both**.
 1. **Findings.** Both results carried the two known findings (steps 5 and 6).
 2. **The inbox was used exactly once.** One `obiRequest` item on A in all (step 6.4); none on B (`GET /v1/inbox` and `?state=done` on B list no `obiRequest` item).
 3. **The audit chain verifies** (step 7).
-4. **No process wrote outside its worktree** (below).
+4. **No process wrote outside its write root, as far as the run can see** (below).
 5. **Nothing was pushed.** `git for-each-ref` in `R/fixture/remote.git` is the same as before step 1: `refs/heads/feature/average 6d20146f…` and `refs/heads/main aeab70f3…`, nothing else.
 6. **Clean exit.** SIGTERM to obid A, obid B and the Sphere: each exits within 10 seconds, the obids with status 0. The harness exits 0.
 
-## "No process wrote outside its worktree"
+## "No process wrote outside its write root"
 
-Every process the run starts has a **write root**, and everything else it can reach is checked unchanged:
+Every process the run starts has a **write root**:
 
 | Process | May write in |
 |---|---|
 | The Sphere (`wrangler dev`) | `R/sphere/` (its state, `HOME`, `TMPDIR`) and `$OBI_SPHERE_DIR/server/.wrangler/` (wrangler's scratch) |
 | obid A, obid B | `R/obid-a/`, `R/obid-b/` (its home, `HOME`, `TMPDIR`) |
-| Each agent (the stub, or Claude Code in live mode) | its job's worktree, inside its obid's home; obid's sandbox enforces it, and the stub writes nothing |
+| Each agent (the stub, or Claude Code in live mode), and the repository's check | its job's worktree and the job's own temporary folder (its `HOME` and `TMPDIR`), inside its obid's home; obid's job sandbox enforces it (docs/runner-api.md, "obid only: Obi-to-Obi review jobs"), and the stub writes nothing |
 | The harness | `R/harness/` |
 
-The check: the harness snapshots (every file's path, size and SHA-256; [`e2e/lib/snapshot.mjs`](lib/snapshot.mjs)) the obi checkout (except `.git/` and `core/target/`), the obi-sphere checkout (except `.git/`, `node_modules/` and `server/.wrangler/`) and `R/fixture/`, after the preflight and before step 1, and again after step 8. Any file added, removed or changed in them fails step 8 with its path. Every process gets its own `HOME` and `TMPDIR` inside its write root, so nothing lands in the person's own home or the system's temp folder either. Within A's home, step 5.2 checks the agent left its worktree as it found it.
+What step 8.4 checks, and fails on with the path:
+
+1. **The checkouts and the fixture.** The harness snapshots (every file's path, size and SHA-256; [`e2e/lib/snapshot.mjs`](lib/snapshot.mjs)) the obi checkout (except `.git/` and `core/target/`), the obi-sphere checkout (except `.git/`, `node_modules/` and `server/.wrangler/`) and `R/fixture/`, after the preflight and before step 1, and again after step 8. Any file added, removed or changed in them fails.
+2. **Obi B ran nothing.** `R/obid-b/home/worktrees/` is empty or missing after step 8: B never accepts work in this scenario.
+3. **The agent's worktree.** Step 5.2: J1's worktree is at `head_sha` with nothing changed outside `.obi/`, and the same for J2 after step 6.
+4. **The person's home and the system's temp folder, by name.** The harness lists the top level of its own `HOME` and of `os.tmpdir()` before step 1 and after step 8. No entry may appear whose name starts with `obid`, `obi-` (other than the run folder itself), `.obi`, `.wrangler`, `wrangler` or `.claude`. Every process gets its own `HOME` and `TMPDIR` inside its write root, which is what keeps them out; this check catches a process that ignores them.
+
+What it does **not** check, and what covers it instead:
+
+- **Writes between write roots inside `R`**: obid A writing into `R/obid-b/` or `R/sphere/`, the Sphere writing into an obid's folder. Every one of them writes inside `R` while the run goes on, so a snapshot can't say who wrote what. Each process is told only its own folders (its config, `HOME`, `TMPDIR`, `--persist-to`); nothing else names another's.
+- **An agent writing elsewhere in its obid's home.** obid itself writes there throughout. In stub mode the agent is the stub, which writes nothing (the preflight checks it on a worktree of its own). That a real agent can't write outside its worktree is obid's sandbox's guarantee, tested in `core/` by the Rust core's own tests, not by this scenario.
+- **Anything else on the machine.** Only the top-level names above are looked at.
 
 ## Live mode
 
@@ -245,7 +256,7 @@ The check: the harness snapshots (every file's path, size and SHA-256; [`e2e/lib
 What changes:
 
 - obid A's config names the real binary and the person's own Claude Code login: `"agents": {"claude": {"bin": "claude", "accounts": [{"id": "default", "name": "Default", "configDir": null}]}}` (obid resolves `claude` from the login shell's `PATH`). obid B keeps the stub (it never runs an agent in this scenario).
-- obid A keeps the person's real `HOME` (Claude Code's login lives there), so the write check covers only the obi and obi-sphere checkouts and `R/fixture/`.
+- obid A keeps the person's real `HOME` (Claude Code's login lives there), so the write check covers the obi and obi-sphere checkouts, `R/fixture/`, B's empty `worktrees/` and the worktrees' state, and not the home's top level (Claude Code writes there by design).
 - The model decides the findings, so step 5.4 and 6.2 check less: the result passes the spec's checks (schema and self-consistency); `tests_pass` is met; among its findings is one at `src/average.js` line 4 and one at `src/greet.js` line 2 (any severity, any title; ids by the same derivation); the outcome is `approved` if no finding is a `blocker`, else `changes_requested`. The second result has the same findings by id and `by_rule` D1.
 - Everything else holds as in stub mode: the canary never in a prompt or an inbox item's text, one inbox item, the remembered decision, the chain, nothing pushed, clean exit.
 
@@ -263,4 +274,4 @@ What changes:
 | 7. Audit chain holds both exchanges and verifies | Sphere server |
 | 8. Final assertions | Both |
 
-The step bodies in `e2e/run.mjs` are written by the Rust core workstream (the harness lives in this repository); the Sphere server workstream proves its half in obi-sphere with its own tests and the conformance suite, against the same calls as steps 1, 3, 5 and 7. This document, `e2e/fixtures/` and the stub agent change only through the lead.
+The step bodies (the `run` of each entry in `steps` in `e2e/run.mjs`) are written by the Rust core workstream, which may add helper files of its own under `e2e/lib/`; the Sphere server workstream proves its half in obi-sphere with its own tests and the conformance suite, against the same calls as steps 1, 3, 5 and 7. Everything else changes only through the lead: this document, `e2e/fixtures/`, the stub agent, the rest of `e2e/run.mjs` (preflight, the step loop, process handling), the lead's files in `e2e/lib/` (`fixture.mjs`, `scenario.mjs`, `scenario-doc.mjs`, `snapshot.mjs`: the scenario's fixed values and the checks' definitions), the `Makefile` and `.github/workflows/e2e.yml`. A step body that needs one of them changed asks the lead.
