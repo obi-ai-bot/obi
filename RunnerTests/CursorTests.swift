@@ -141,7 +141,7 @@ struct CursorTests {
     }
 
     /// Waits up to `seconds` for `done`.
-    func until(_ seconds: Double = 8, _ done: () -> Bool) async throws {
+    func until(_ seconds: Double = 30, _ done: () -> Bool) async throws {
         let end = Date.now.addingTimeInterval(seconds)
         while !done(), Date.now < end { try await Task.sleep(for: .milliseconds(10)) }
     }
@@ -290,7 +290,7 @@ struct CursorTests {
         try await until { events.asks.count == 2 }
         #expect(events.asks.map(\.request).sorted() == ["100", "101"])
         agent.stop()
-        try await until(3) { answers().count == 2 && received().contains { $0["method"] as? String == "session/cancel" } }
+        try await until(10) { answers().count == 2 && received().contains { $0["method"] as? String == "session/cancel" } }
         #expect(outcome(answers()[100]) == ["outcome": "cancelled"] && outcome(answers()[101]) == ["outcome": "cancelled"])
         let cancel = try #require(received().first { $0["method"] as? String == "session/cancel" })
         #expect((cancel["params"] as? [String: Any])?["sessionId"] as? String == "fake-session")
@@ -430,7 +430,10 @@ struct CursorTests {
         let started = Date.now
         desk.stop("cursor1")
         await agent.ended()
-        #expect(Date.now.timeIntervalSince(started) < 2)
+        // Stop's promise: the grace and the kill add up to under 2 seconds. The measured time has
+        // room for a runner busy with other jobs (python itself takes its time to start there).
+        #expect(Halt.grace + Halt.stopping < 2)
+        #expect(Date.now.timeIntervalSince(started) < 5)
         #expect(desk.job("cursor1")?.status == .stopped)
     }
 

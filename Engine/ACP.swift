@@ -522,6 +522,13 @@ final class ACPServer {
         group?.end(after: Halt.stopping)
     }
 
+    /// Ends it `delay` seconds from now unless it ended. Off the main queue: Stop's 2 seconds hold
+    /// however busy the main thread is.
+    func halt(after delay: TimeInterval) {
+        let group = group
+        DispatchQueue.global().asyncAfter(deadline: .now() + delay) { group?.end(after: Halt.stopping) }
+    }
+
     func ended() async {
         await group?.ended()
     }
@@ -816,7 +823,7 @@ final class ACPAgent: AgentRun {
         for (_, waiting) in pending { server.reply(waiting.id, ACPRPC.cancelled()) }
         pending = [:]
         server.end()
-        DispatchQueue.main.asyncAfter(deadline: .now() + Halt.grace) { server.halt() }
+        server.halt(after: Halt.grace)
     }
 
     func kill() {
