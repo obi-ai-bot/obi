@@ -681,9 +681,11 @@ final class ACPAgent: AgentRun {
                 if let mcp, tool.honoursMCP, capabilities.http { servers.append(ACPRPC.broker(mcp)) }
                 var made: String?
                 if let resume, capabilities.loadSession {
-                    _ = try await server.call("session/load", ACPRPC.sessionLoad(session: resume, cwd: worktree.path, mcp: servers))
-                    made = resume
+                    // Its modes and options come with the load, as with a new session: the job's mode
+                    // and model are applied from them. The session's id is the one picked up.
+                    found = ACPRPC.session(try await server.call("session/load", ACPRPC.sessionLoad(session: resume, cwd: worktree.path, mcp: servers)))
                     found.id = resume
+                    made = resume
                 } else {
                     found = ACPRPC.session(try await server.call("session/new", ACPRPC.sessionNew(cwd: worktree.path, mcp: servers)))
                     made = found.id

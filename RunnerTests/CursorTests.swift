@@ -73,7 +73,9 @@ struct CursorTests {
         elif method == "session/new":
             send({"id": mid, "result": {"sessionId": "fake-session",
                   "modes": {"currentModeId": "agent", "availableModes": [{"id": "agent", "name": "Agent"}, {"id": "plan", "name": "Plan"}]}}})
-        elif method in ("session/load", "session/set_mode", "session/set_config_option"):
+        elif method == "session/load":
+            send({"id": mid, "result": {"modes": {"currentModeId": "agent", "availableModes": [{"id": "agent", "name": "Agent"}, {"id": "plan", "name": "Plan"}]}}})
+        elif method in ("session/set_mode", "session/set_config_option"):
             send({"id": mid, "result": {}})
         elif method == "session/cancel":
             finish("cancelled")
@@ -315,6 +317,24 @@ struct CursorTests {
         // One round: the go-ahead was a prompt of its own, and only its end ended the turn.
         #expect(received().filter { $0["method"] as? String == "session/prompt" }.count == 2)
         #expect(events.all.filter { if case .turnEnded = $0 { true } else { false } }.count == 1)
+    }
+
+    /// A resumed session's modes come with `session/load`: the job's mode is applied from them.
+    @Test func aResumedSessionTakesTheJobsMode() async throws {
+        let agent = ACPAgent(tool: try fake("ask"), worktree: worktree, resume: "old-session")
+        agent.mode = .plan
+        agent.approvals = UserDefaults(suiteName: "oby-test-\(UUID().uuidString)") ?? .standard
+        let events = Events()
+        try agent.start(prompt: "Go on") { events.all.append($0) }
+        defer { agent.kill() }
+        try await until { events.all.contains(.session("old-session")) && received().contains { $0["method"] as? String == "session/prompt" } }
+        let load = try #require(received().first { $0["method"] as? String == "session/load" })
+        #expect((load["params"] as? [String: Any])?["sessionId"] as? String == "old-session")
+        let modes = received().filter { $0["method"] as? String == "session/set_mode" }.compactMap { ($0["params"] as? [String: Any])?["modeId"] as? String }
+        #expect(modes == ["plan"])
+        // The prompt goes to the picked-up session.
+        let prompt = try #require(received().first { $0["method"] as? String == "session/prompt" })
+        #expect((prompt["params"] as? [String: Any])?["sessionId"] as? String == "old-session")
     }
 
     @Test func aRejectedPlanSaysWhy() async throws {
