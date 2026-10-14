@@ -54,7 +54,7 @@ obi/
 
 Today's `Engine/` and `Runner/` (Swift) are the specification for `core/`. The existing Mac, iPhone and Watch apps already talk to the runner over the documented API in [`docs/runner-api.md`](runner-api.md). So they keep working while the engine is ported: `core/` serves the same API.
 
-Note: the character lives in `Character/` today. macOS ignores letter case in paths, so rename it to `character/` with `git mv` through a temporary name, not directly.
+Note: the character lives in `character/`. It was renamed from `Character/` with `git mv` through a temporary name, not directly, because macOS ignores letter case in paths.
 
 ## 5. Workstreams, in order
 
