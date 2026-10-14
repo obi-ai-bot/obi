@@ -434,7 +434,7 @@ struct MoveJobTests {
         #expect(try problems(Self.move("ab12cd34", agent: "codex", model: "claude-fable-5-1")) == ["claude-fable-5-1 isn't a model of codex"])
         #expect(try problems(Self.move("ab12cd34", account: "Nobody")) == ["Nobody isn't an account"])
         // A stop can't name a finished job; only move_job has a move.
-        #expect(try problems(ConversationTests.stop(["d0ne0000"])) == ["d0ne0000 isn't a job Oby can stop"])
+        #expect(try problems(ConversationTests.stop(["d0ne0000"])) == ["d0ne0000 isn't a job or specialist Oby can stop"])
         var reply = try Plan.decode(Data(ConversationTests.reply("ok").utf8))
         reply.move = Plan.Move(agent: "claude", account: "auto", model: "auto")
         #expect(reply.problems(in: context, canary: "zq9") == ["only move_job has a move object"])

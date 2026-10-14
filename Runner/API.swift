@@ -46,6 +46,7 @@ final class API {
             self?.push?.changed()
         }
         desk.onInboxChange = { [weak self] item in self?.send("inbox", InboxJSON(item: item)) }
+        desk.onDelegationChange = { [weak self] item in self?.send("delegation", item) }
         desk.onCheckChange = { [weak self, weak desk] check in
             self?.send("check", MacCheckJSON(check: check))
             guard check.state == .failed || check.state == .error else { return }
@@ -79,6 +80,9 @@ final class API {
         }
         router.post("v1/jobs") { request, _ in try await self.dispatch(try await Self.decode(DispatchRequest.self, from: request)) }
         router.get("v1/jobs") { request, _ in await self.jobs(limit: request.uri.queryParameters.get("limit", as: Int.self) ?? 50) }
+        router.get("v1/delegations") { request, _ in await self.delegations(limit: request.uri.queryParameters.get("limit", as: Int.self) ?? 50) }
+        router.get("v1/delegations/:id") { _, context in try await self.delegation(context.parameters.require("id")) }
+        router.post("v1/delegations/:id/stop") { _, context in try await self.stopDelegation(context.parameters.require("id")) }
         router.get("v1/jobs/:id") { _, context in try await self.job(context.parameters.require("id")) }
         router.get("v1/jobs/:id/wait") { _, context in try await self.wait(context.parameters.require("id")) }
         router.post("v1/jobs/:id/stop") { _, context in try await self.stop(context.parameters.require("id")) }
@@ -255,6 +259,20 @@ final class API {
             throw APIError(.notFound, "There's no turn \(before ?? "") in the conversation.")
         }
         return Self.json(turns.map(TurnJSON.init))
+    }
+
+    func delegations(limit: Int) -> Response { Self.json(desk.delegations(limit: limit)) }
+
+    func delegation(_ id: String) throws -> Response {
+        guard let item = desk.delegation(id) else { throw APIError(.notFound, "There's no specialist \(id).") }
+        return Self.json(item)
+    }
+
+    func stopDelegation(_ id: String) throws -> Response {
+        guard let item = desk.delegation(id) else { throw APIError(.notFound, "There's no specialist \(id).") }
+        guard item.status == .queued || item.status == .running else { throw APIError(.conflict, "That specialist has already ended.") }
+        guard let stopped = desk.stopDelegation(id) else { throw APIError(.conflict, "That specialist has already ended.") }
+        return Self.json(stopped)
     }
 
     /// The client's recent turns, checked: at most `Conversation.kept`, each from the user or Oby,
@@ -985,7 +1003,7 @@ struct ClearedJSON: Encodable {
 struct TurnJSON: Encodable {
     var turn: Turn
 
-    private enum Keys: String, CodingKey { case id, who, text, at, jobs, details }
+    private enum Keys: String, CodingKey { case id, who, text, at, jobs, delegations, details }
 
     func encode(to encoder: any Encoder) throws {
         var keys = encoder.container(keyedBy: Keys.self)
@@ -994,6 +1012,7 @@ struct TurnJSON: Encodable {
         try keys.encode(turn.text, forKey: .text)
         try keys.encode(turn.date, forKey: .at)
         try keys.encode(turn.jobs ?? [], forKey: .jobs)
+        try keys.encode(turn.delegations ?? [], forKey: .delegations)
         try keys.encodeIfPresent(turn.details, forKey: .details)
     }
 }

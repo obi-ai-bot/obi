@@ -54,6 +54,33 @@ final class WorktreeCleanup {
         status = Status(lastRun: now, bytes: Self.size(of: URL(filePath: status.path)), path: status.path)
     }
 
+    /// Removes delegation snapshots left by a runner restart or a settled specialist. A live
+    /// process retains its snapshot until its own `run` method removes the worktree.
+    func runDelegations(_ delegations: [Delegation], inUse: Set<String>, root: URL = Workspace.root) async {
+        let folder = root.appending(path: "delegations")
+        guard let entries = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey]) else { return }
+        let byID = Dictionary(delegations.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for entry in entries {
+            let name = entry.lastPathComponent
+            if name.hasPrefix("brief-") {
+                let id = String(name.dropFirst("brief-".count).dropLast(".md".count))
+                if !inUse.contains(id) { try? FileManager.default.removeItem(at: entry) }
+                continue
+            }
+            guard !inUse.contains(name) else { continue }
+            if let repo = byID[name]?.repo {
+                let clone = Workspace.clone(repo)
+                if FileManager.default.fileExists(atPath: clone.appending(path: ".git").path) {
+                    _ = try? await Shell.ok(["git", "-C", clone.path, "worktree", "remove", "--force", entry.path])
+                } else {
+                    try? FileManager.default.removeItem(at: entry)
+                }
+            } else {
+                try? FileManager.default.removeItem(at: entry)
+            }
+        }
+    }
+
     private func shouldRemove(_ job: Job, authors: [String: Job], now: Date) -> Bool {
         if let authorID = job.reviewOf, authors[authorID]?.review?.job == job.id { return true }
         guard let finished = job.finished, finished <= now.addingTimeInterval(-Self.age), !job.isActive, !job.needsYou,

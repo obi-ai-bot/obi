@@ -108,6 +108,8 @@ struct ChatScreen: View {
                             ForEach(day.turns) { turn in
                                 TurnRow(turn: turn, jobs: ConversationModel.jobs(of: turn, among: phone.jobs), account: account,
                                         steps: phone.conversation.steps(under: turn, in: turns),
+                                        specialists: phone.conversation.specialists(for: turn),
+                                        onStopSpecialist: { id in Task { try? await phone.stopSpecialist(id) } },
                                         failure: phone.failures[turn.id],
                                         onRetry: { phone.retry(echo: turn.id) },
                                         onEdit: { text = turn.text; phone.discard(echo: turn.id); typing = true })
@@ -240,6 +242,8 @@ private struct TurnRow: View {
     let account: (Job) -> String
     /// What Oby does for these words, a step at a time (#304): under them, before its answer.
     var steps: [TurnStep] = []
+    var specialists: [Specialist] = []
+    var onStopSpecialist: (String) -> Void = { _ in }
     /// Why the words didn't reach the runner, on an echo whose request failed (Phone.failures).
     var failure: String? = nil
     var onRetry: () -> Void = {}
@@ -295,6 +299,9 @@ private struct TurnRow: View {
                 }
                 ForEach(jobs) { job in
                     JobCard(job: job, account: account(job))
+                }
+                ForEach(specialists) { specialist in
+                    DelegationCard(specialist: specialist, onStop: { onStopSpecialist(specialist.id) })
                 }
             }
             Spacer(minLength: 0)

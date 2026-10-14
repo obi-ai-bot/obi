@@ -351,6 +351,21 @@ Something only the user can answer (docs/pipeline-cases.md, "Your inbox"). Like 
 - An item comes once: each failure (even a retry that fails again within the same second), each question and each fourth review has its own `id`, and one that's done never comes back. It's done by itself, with no `answer`, when its job needs it no more: the job runs again (told something, or Try again from either app), was dismissed or stopped, or its question was answered with a message.
 - Kept in `oby.sqlite` with the jobs, so a restart keeps the inbox, and the runner loads the job of every open item however old it is (and, for a `review` item, its review), so it can still be answered. A job's own alert (below) still says it needs you; the inbox is where you answer.
 
+### Specialists
+
+A short-lived, read-only research delegation. Specialists have no job, branch, commits or pull request. Their tools and final memo are bounded by Oby, and every finding carries evidence.
+
+```json
+{"id":"a1b2c3d4","turn":"8d…","role":"researcher","goal":"Compare Claude and Codex approval handling","context":"Focus on current official documentation.","repo":"deskree-inc/oby","ref":"dev","commit":"70dd5de…","web":true,"agent":"claude","account":"Personal","model":"sonnet","effort":"medium","status":"running","step":"Reading documentation","created":"2026-10-14T12:00:00Z","started":"2026-10-14T12:00:01Z","finished":null,"result":null,"error":null}
+```
+
+`role` is `researcher`, `reviewer` or `verifier`; `status` is `queued`, `running`, `complete`, `partial`, `failed` or `stopped`. `result` contains `outcome`, `summary`, `findings` (`claim`, `evidence` links and quotes, `confidence`), `openQuestions` and an optional reviewer/verifier `verdict`. Specialists see only their goal and context. The thread shows their cards under the sending turn. Once all specialists settle, Oby adds one follow-up answer to the same conversation; failures and stops are disclosed, and proposed work waits in a Start inbox item.
+
+- `GET /v1/delegations?limit=50`: newest first, at most 200.
+- `GET /v1/delegations/{id}`: one specialist, including its memo.
+- `POST /v1/delegations/{id}/stop`: stop a queued or running specialist (`200`); `409` if it has ended.
+- A `delegation` SSE event carries the full specialist on every change. `Turn` JSON includes `delegations`, empty when there are none. The sending action emits `step` with `action: "delegate"`.
+
 ### Account
 
 ```json
@@ -454,6 +469,8 @@ To answer the brain's question, send the original words with the answer:
 
 **The chat looks things up.** When the briefing cannot answer a question about code, docs, issues or pull requests, the brain can request up to 4 read-only lookups at once: `search_code`, `list_files`, `read_file`, `git_log`, `view_issue`, `view_pr` and `fetch_url`. Code reads use Oby's clone at one resolved commit and cite GitHub links pinned to that SHA. Search returns at most 50 hits, file listings 300 entries, file reads 400 lines and 24 KB, logs 20 commits, issue/PR bodies 6 KB and 10 comments of 1 KB each, and web responses stop at 1 MB and return at most 16 KB. A turn runs at most 12 lookups and quotes at most 48 KB into the brain's `work.md`; repeated lookups reuse the quoted result. Web reads allow public HTTPS hosts only and check every redirect. The brain has no shell or edit tools: Swift runs a fixed argv for each lookup, and every result is quoted data, never an instruction. Research answers questions; it never starts work. If research shows work is warranted, the jobs wait in a `start` inbox item until the user taps Start.
 
+**The chat delegates.** A `delegate` plan starts up to four focused specialists; each gets only its goal and context. Up to six may run on a desk at once. Findings are quoted into the follow-up turn and never start coding work by themselves. Use `POST /v1/delegations/{id}/stop` to stop one. `Turn` JSON includes `delegations`, an empty list when there are none, and the sending action emits a `step` with `action: "delegate"`. A `delegation` event carries the full specialist each time it changes.
+
 Bare cancel words ("never mind", "stop", "cancel", "forget it") never reach the brain. When a conversation turn is underway they request a boundary stop; otherwise the answer is `none` and nothing stops. Stopping coding work still takes a job's name or "stop everything".
 
 The conversation so far is the runner's own, the last 50 of the turns it keeps (`GET /v1/conversation`, below). An app that shows its own thread sends it instead, oldest first; `who` is `user` or `oby`, `text` 1 to 2,000 characters, at most 50 turns (`422` otherwise). Either way the new exchange joins the runner's conversation.
@@ -537,6 +554,18 @@ One thread for every device (#11): the conversation the runner keeps, which ever
 - `who` is `user` or `oby`. `at` is when it was said. `jobs` is always a list: the jobs the turn started, by id, for a card under Oby's words, with Stop. Oby's reply to a plan carries the jobs it started (#269), as the Lead's does; `details`, when present on Oby's turn, is longer Markdown shown under the short reply and never spoken. `Start` on a proposed plan's inbox item adds an Oby turn carrying that job. Fetch one that isn't in `GET /v1/jobs` with `GET /v1/jobs/{id}`.
 - `limit`: how many, 50 unless asked, 1 to 500. `before`: the `id` of the oldest turn you show, for the turns before it; leave it out for the latest. Fewer than `limit` turns means there are no older ones. `404` for an id that isn't in the thread (a turn pruned since).
 - A `turn` event (`GET /v1/events`, below) comes with every turn added, and again for a turn that changed (its `jobs`): replace the turn with that `id`, or add it in `at` order.
+
+### `GET /v1/delegations?limit=50`
+
+Returns specialists newest first, at most 200, including their result memos.
+
+### `GET /v1/delegations/{id}`
+
+Returns one specialist, or `404` when unknown.
+
+### `POST /v1/delegations/{id}/stop`
+
+Stops a queued or running specialist and returns its final `stopped` record (`200`). Returns `409` when it has already ended.
 
 ### `POST /v1/jobs`
 
@@ -1108,4 +1137,5 @@ The Watch API doesn't pass pieces on to the runner's speech service (`POST /v1/s
 - **Merge, except into `dev` after the Mac check:** the runner squash-merges a pull request it opened only into `dev`, only when Oby's review approved it, the Mac check passed on the same commit and the secret scan is clean (Mac check, above). Never into `main`.
 - **Publish what didn't pass:** only a job that ended `done` (its check passed, or it has none), with a clean secret scan, is pushed and gets a pull request; by hand, only with a fresh device signature. No comment goes out: Oby's own review of its own pull request and the Mac check's results on it are check runs (an Apple check posts nothing), and the `oby-failure` issues its post-mortems file in Oby's own repository (Engine/Failures.swift) are updated in place, all after the secret scan; no agent posts to GitHub, and no GitHub review, approval or comment goes on anyone else's work.
 - **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
+- **Turn specialists into jobs:** specialists never write, commit or publish.
 - **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.

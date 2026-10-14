@@ -197,7 +197,7 @@ struct ConversationTests {
     @Test func plansNamingJobsAreChecked() throws {
         let context = BrainContext(accounts: ["claude": ["default"]], repos: ["deskree-inc/oby"], briefing: "# What Oby knows", jobs: ["ab12cd34"])
         #expect(try Plan.decode(Data(Self.stop(["ab12cd34"]).utf8)).problems(in: context, canary: "zq9").isEmpty)
-        #expect(try Plan.decode(Data(Self.stop(["zz"]).utf8)).problems(in: context, canary: "zq9") == ["zz isn't a job Oby can stop"])
+        #expect(try Plan.decode(Data(Self.stop(["zz"]).utf8)).problems(in: context, canary: "zq9") == ["zz isn't a job or specialist Oby can stop"])
         var dispatch = try Plan.decode(Data(Self.reply("ok").utf8))
         dispatch.jobs = ["ab12cd34"]
         #expect(dispatch.problems(in: context, canary: "zq9") == ["only stop_agent, move_job, answer_permission and set_mode name jobs"])
@@ -287,7 +287,7 @@ struct ConversationTests {
         // briefing didn't list: Swift refuses that plan.)
         desk.elsewhere = { [] }
         let late = Planner.Result(plan: try Plan.decode(Data(Self.stop(["fa5a5a5a"]).utf8)), by: "fake")
-        #expect(await desk.card(for: late, said: "stop it") == .reply("That job isn't running any more."))
+        #expect(await desk.card(for: late, said: "stop it") == .reply("That job or specialist isn't running any more."))
         // A stop that names nothing and doesn't say everything stops nothing (Swift refuses it
         // from the brain; a plan from elsewhere gets the same answer).
         var bare = try Plan.decode(Data(Self.stop([]).utf8))
@@ -570,7 +570,7 @@ struct ConversationTests {
             #expect(turns.map { $0["id"] as? String } == all)
             #expect(turns.map { $0["text"] as? String } == ["first?", "One.", "second?", "Two.", "third?", "Three.", "review PR 12", "Oby will review PR #12 in oby."])
             #expect(turns.map { $0["who"] as? String } == ["user", "oby", "user", "oby", "user", "oby", "user", "oby"])
-            #expect(turns.allSatisfy { Set($0.keys) == ["id", "who", "text", "at", "jobs"] && ($0["jobs"] as? [String]) != nil })
+            #expect(turns.allSatisfy { Set($0.keys) == ["id", "who", "text", "at", "jobs", "delegations"] && ($0["jobs"] as? [String]) != nil && ($0["delegations"] as? [String])?.isEmpty == true })
             #expect(turns.last?["jobs"] as? [String] == [job.id])
             #expect(try #require(turns.first?["at"] as? String).hasSuffix("Z"))
             // The latest 3, then the 3 before the oldest shown, then what's left.

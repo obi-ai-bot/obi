@@ -254,7 +254,9 @@ private struct ConversationColumn: View {
                                         onOpenJob: onOpenJob,
                                         onStopJob: { model.stopChatJob($0, local: $1) },
                                         showTime: ConversationModel.showsTime(turn, after: index > 0 ? day.turns[index - 1] : nil),
-                                        steps: conversation.steps(under: turn, in: turns))
+                                        steps: conversation.steps(under: turn, in: turns),
+                                        specialists: model.specialists(for: turn),
+                                        onStopSpecialist: model.stopChatSpecialist)
                                     .task(id: turn.jobs ?? []) {
                                         // A runner's job older than its list: fetched, so its card shows.
                                         for id in ConversationModel.missing(of: turn, among: desk.jobs + feed.jobs) { try? await feed.fetch(id) }
@@ -414,6 +416,8 @@ struct TurnRow: View {
     var showTime = true
     /// What Oby does for these words, a step at a time (#304): under the bubble, before its answer.
     var steps: [TurnStep] = []
+    var specialists: [Specialist] = []
+    var onStopSpecialist: ((String) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -442,6 +446,9 @@ struct TurnRow: View {
                 let local = isLocal(job.id)
                 JobChip(job: job, account: account(job, local), onOpen: { onOpenJob(job.id, local) },
                         onStop: onStopJob.map { stop in { stop(job.id, local) } })
+            }
+            ForEach(specialists) { specialist in
+                DelegationCard(specialist: specialist, onStop: { onStopSpecialist?(specialist.id) })
             }
         }
         .accessibilityElement(children: .contain)

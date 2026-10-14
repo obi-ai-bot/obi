@@ -19,6 +19,8 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     /// The jobs this turn started: the ones dispatched from Oby's plan, or the Lead's. The window
     /// shows them as cards under the turn. Nil on the user's turns and on older ones.
     var jobs: [String]?
+    /// Read-only specialists started by this turn, shown as memo cards.
+    var delegations: [String]?
     /// The user said it out loud (the Mac's talk key), so the window says "You, by voice". Nil when
     /// typed, and on turns the runner kept.
     var voice: Bool?
@@ -26,12 +28,13 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     var details: String?
 
     init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String,
-         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil) {
+         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil, delegations: [String]? = nil) {
         self.id = id
         self.date = date
         self.who = who
         self.text = text
         self.jobs = jobs
+        self.delegations = delegations
         self.voice = voice
         self.details = details
     }
@@ -82,6 +85,7 @@ nonisolated struct Briefing: Equatable, Sendable {
     /// The week's failure records, newest first (Engine/Failures.swift), so "why did jobs fail
     /// this week?" has its answer.
     var failures: [FailureRecord] = []
+    var specialists: [Delegation] = []
 
     /// Finished jobs older than this are left out (by their pull request's merge when it merged
     /// later), unless they still need the user or are in review.
@@ -193,6 +197,11 @@ nonisolated struct Briefing: Equatable, Sendable {
         lines += ["", "## Jobs", ""]
         // The count the notch and the window show, first and in so many words: the reply must agree with it.
         lines.append("Working now: " + Self.workingLine(places))
+        let runningSpecialists = specialists.filter { $0.status == .running || $0.status == .queued }
+        lines.append("Specialists working: \(runningSpecialists.count)")
+        for specialist in runningSpecialists {
+            lines.append("- \(specialist.role.rawValue), \(Self.line(specialist.goal, cap: 120)), account \(specialist.account), elapsed \(Self.elapsed(since: specialist.started ?? specialist.created, now: now))")
+        }
         let jobs = self.jobs
         if jobs.isEmpty { lines.append("(No jobs running or finished lately.)") }
         var group: Group?

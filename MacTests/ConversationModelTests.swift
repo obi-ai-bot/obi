@@ -140,6 +140,19 @@ struct ConversationModelTests {
         for line in ["event: turn", "data: \(wire)"] { #expect(parser.feed(line) == nil) }
         #expect(parser.feed("") == .turn(read))
     }
+
+    @Test func delegationCardShowsStatusAndStop() {
+        let delegation = Delegation(id: "a1b2c3d4", turn: "t1", role: .researcher, goal: "Check the design",
+            context: "Read only", repo: nil, ref: nil, commit: nil, web: true, agent: "claude", account: "Max",
+            model: "sonnet", effort: "high", status: .running, step: "Reading sources")
+        let specialist = Specialist(delegation)
+        let model = ConversationModel()
+        model.apply(specialist)
+        let turn = Turn(id: "t1", date: now, who: .oby, text: "Sending a researcher.", delegations: [specialist.id])
+        #expect(model.specialists(for: turn).count == 1)
+        #expect(model.specialists(for: turn).first?.status == "running")
+        #expect(model.specialists(for: turn).first?.step == "Reading sources")
+    }
 }
 
 private extension Turn {

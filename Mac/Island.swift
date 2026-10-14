@@ -87,6 +87,17 @@ final class IslandModel {
         else { Task { if let job = try? await feed.about(id, { try await $0.stop(id) }) { feed.apply(job) } } }
     }
 
+    func specialists(for turn: Turn) -> [Specialist] {
+        (turn.delegations ?? []).compactMap { id in
+            feed.conversation.specialists[id] ?? desk.delegation(id).map(Specialist.init)
+        }
+    }
+
+    func stopChatSpecialist(_ id: String) {
+        if desk.delegation(id) != nil { _ = desk.stopDelegation(id) }
+        else if let runner = feed.runner { Task { if let specialist = try? await runner.stopDelegation(id) { feed.conversation.apply(specialist) } } }
+    }
+
     /// Agents working now, on this Mac and on the runner: not the jobs waiting their turn (#238).
     var working: Int { desk.jobs.count(where: \.isWorking) + feed.working }
     /// Jobs queued behind something, on this Mac and on the runner (`Job.waiting`).
@@ -1035,7 +1046,8 @@ private struct OpenIsland: View {
                 ForEach(Array(model.recentTurns.enumerated()), id: \.element.id) { index, turn in
                     TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? model.recentTurns[index - 1] : nil),
                             jobs: [], account: { _, _ in "" }, isLocal: { _ in false },
-                            onOpenJob: { onOpenWindow((id: $0, local: $1)) }, showTime: false)
+                            onOpenJob: { onOpenWindow((id: $0, local: $1)) }, showTime: false,
+                            specialists: model.specialists(for: turn), onStopSpecialist: model.stopChatSpecialist)
                 }
                 switch desk.talk {
                 case .question(let said, let question):

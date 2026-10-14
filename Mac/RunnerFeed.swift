@@ -241,6 +241,7 @@ final class RunnerFeed {
                         let status = try await runner.status()
                         let (list, extras) = try await runner.jobsWithExtras()
                         let (items, words) = try await runner.inboxWithWords()
+                        let specialists = try? await runner.delegations()
                         // History is an enhancement: an older runner or failed history request must not take chat offline.
                         let history = try? await runner.inboxWithWords(state: "done")
                         // Settings › Runner changed, or the Mac woke, while these were on their way.
@@ -257,6 +258,7 @@ final class RunnerFeed {
                         // Settings › Runner changed while the open jobs were fetched again.
                         try Task.checkCancellation()
                         inbox = items
+                        for specialist in specialists ?? [] { conversation.apply(specialist) }
                         if let (past, pastWords) = history {
                             inboxHistory = past.filter { !$0.isOpen }
                             inboxWords = pastWords.merging(words, uniquingKeysWith: { _, fresh in fresh })
@@ -281,6 +283,7 @@ final class RunnerFeed {
                     case .check(let check): if check.state == .queued { checks.look(runner) }
                     case .turn(let turn): conversation.apply(turn)
                     case .step(let step): conversation.apply(step)
+                    case .delegation(let specialist): conversation.apply(specialist)
                     }
                 }
             } catch {

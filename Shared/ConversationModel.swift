@@ -26,6 +26,7 @@ final class ConversationModel {
     private(set) var steps: [String: [TurnStep]] = [:]
     /// The turn the latest step belongs to.
     private(set) var latestStepTurn: String?
+    private(set) var specialists: [String: Specialist] = [:]
     /// Counts reloads and forgets: a page from before the last one is dropped.
     private var generation = 0
 
@@ -77,6 +78,9 @@ final class ConversationModel {
     func apply(_ turn: Turn) {
         runnerTurns = Self.placed(turn, in: runnerTurns)
     }
+
+    func apply(_ specialist: Specialist) { specialists[specialist.id] = specialist }
+    func specialists(for turn: Turn) -> [Specialist] { (turn.delegations ?? []).compactMap { specialists[$0] } }
 
     /// A `step` event: the step with that turn and index changes, or is added in its place.
     func apply(_ step: TurnStep) {

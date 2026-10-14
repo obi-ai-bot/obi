@@ -52,11 +52,16 @@ final class Desk {
     /// Called with every turn that's added or changes (a job dispatched from it), for the runner's
     /// event stream. Not when a cancelled turn leaves the thread: that happens only on the Mac.
     var onTurnChange: (Turn) -> Void = { _ in }
+    var onDelegationChange: (Delegation) -> Void = { _ in }
     /// The jobs the brain's plan or the Lead just started, for the reply turn that tells of them.
     var onStepChange: (DeskStep) -> Void = { _ in }
     @ObservationIgnored var researchTools = ResearchTools()
     @ObservationIgnored private(set) var replyDetails: String?
     @ObservationIgnored private var researchedThisTurn = false
+    @ObservationIgnored var makeDelegate: (Delegation) -> any DelegateRunner = { _ in UnavailableDelegate() }
+    @ObservationIgnored private var delegateRunners: [String: any DelegateRunner] = [:]
+    @ObservationIgnored private var justDelegated: [String] = []
+    @ObservationIgnored private var followUpScheduled: Set<String> = []
     private var justStarted: [String] = []
     private(set) var jobs: [Job] {
         didSet { accounts.countRunning(jobs) }
@@ -485,6 +490,10 @@ final class Desk {
         self.store = store
         self.cleanup = WorktreeCleanup()
         self.restarts = restarts
+        self.makeDelegate = { [accounts] item in
+            let account = accounts.accounts.first(where: { $0.account.name == item.account })?.account
+            return Desk.delegateRunner(for: item, account: account)
+        }
         // ponytail: every job is read to find the outstanding ones; a column to query when there are many thousands.
         let all = store.recent(-1)
         jobs = Array(all.prefix(Self.listed))
@@ -497,6 +506,14 @@ final class Desk {
         }
         inbox = saved
         turns = store.conversation()
+        var recovered = store.delegations(200)
+        for index in recovered.indices where recovered[index].status == .queued || recovered[index].status == .running {
+            recovered[index].status = .failed
+            recovered[index].error = "The runner restarted before this specialist finished."
+            recovered[index].finished = .now
+            store.save(recovered[index])
+        }
+        delegationsState = recovered
         let byID = Dictionary(all.map { ($0.id, $0) }) { first, _ in first }
         // Every job that still needs something, however old (#223): its pull request is followed,
         // and it can be dismissed or told something, after any number of restarts.
@@ -534,11 +551,150 @@ final class Desk {
             jobs[index].finished = jobs[index].finished ?? .now
             store.save(jobs[index])
         }
-        accounts.countRunning(jobs)
+        accounts.countRunning(jobs, delegations: recovered)
         // A review that was running: its author stops waiting for it.
         for job in jobs where job.reviewOf != nil && job.status == .interrupted { reviewEnded(job) }
         // What the jobs need now, the interrupted ones too.
         for job in jobs { syncInbox(job) }
+    }
+
+    @ObservationIgnored private var delegationsState: [Delegation] = []
+    var delegations: [Delegation] { delegationsState }
+    func delegations(limit: Int) -> [Delegation] { Array(delegationsState.sorted { $0.created > $1.created }.prefix(max(0, min(limit, 200)))) }
+    func delegation(_ id: String) -> Delegation? { delegationsState.first { $0.id == id } }
+
+    private func save(_ delegation: Delegation) {
+        if let index = delegationsState.firstIndex(where: { $0.id == delegation.id }) { delegationsState[index] = delegation }
+        else { delegationsState.append(delegation) }
+        store.save(delegation)
+        accounts.countDelegations(delegationsState)
+        onDelegationChange(delegation)
+    }
+
+    @discardableResult
+    func stopDelegation(_ id: String) -> Delegation? {
+        guard var item = delegation(id), item.status == .queued || item.status == .running else { return nil }
+        delegateRunners[id]?.stop()
+        item.status = .stopped
+        item.error = "Stopped by the user."
+        item.finished = .now
+        save(item)
+        settleSpecialists(turn: item.turn)
+        return item
+    }
+
+    private func startDelegations(_ briefs: [Plan.Brief], turn: String, preferredAgent: String? = nil) -> String? {
+        let running = delegationsState.count(where: { $0.status == .queued || $0.status == .running })
+        guard running + briefs.count <= Delegation.mostRunning else { return "Couldn't send specialists: only \(max(0, Delegation.mostRunning - running)) spaces are available." }
+        var states = accounts.accounts
+        var prepared: [Delegation] = []
+        for brief in briefs {
+            guard let account = AccountStore.route(states, agent: preferredAgent, for: .review) ?? AccountStore.route(states, agent: nil, for: .review) else {
+                return "Couldn't send specialists: no account with room."
+            }
+            if let index = states.firstIndex(where: { $0.account.id == account.id }) { states[index].running += 1 }
+            let id = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8)).lowercased()
+            let item = Delegation(id: id, turn: turn, role: brief.role, goal: brief.goal, context: brief.context, repo: brief.repo,
+                ref: brief.ref, commit: nil, web: brief.web, agent: account.agent, account: account.name,
+                model: account.agent == "claude" ? ClaudeBrain.deepModel : AgentModels.value("codex", "model"),
+                effort: AgentModels.value(account.agent, brief.role == .reviewer ? "complexEffort" : "effort"))
+            prepared.append(item)
+        }
+        for item in prepared {
+            save(item)
+            justDelegated.append(item.id)
+            let runner = makeDelegate(item)
+            delegateRunners[item.id] = runner
+            Task { [weak self] in await self?.runDelegation(item.id, runner: runner) }
+        }
+        return nil
+    }
+
+    private func runDelegation(_ id: String, runner: any DelegateRunner) async {
+        guard var item = delegation(id), item.status == .queued else { return }
+        var snapshot: URL?
+        do {
+            if let repo = item.repo {
+                let clone = try await Workspace.ensureClone(repo)
+                let base = try await Workspace.defaultBase(clone: clone)
+                let ref = item.ref ?? "origin/\(base)"
+                let sha = try await Shell.ok(["git", "-C", clone.path, "rev-parse", "--verify", "\(ref)^{commit}"])
+                item.commit = sha.trimmingCharacters(in: .whitespacesAndNewlines)
+                let url = Workspace.root.appending(path: "delegations/\(id)")
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                _ = try await Shell.ok(["git", "-C", clone.path, "worktree", "add", "--detach", url.path, item.commit!])
+                snapshot = url
+            } else {
+                let url = FileManager.default.temporaryDirectory.appending(path: "oby-delegation-\(id)")
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                snapshot = url
+            }
+            item.status = .running; item.started = .now; item.step = "Starting"; save(item)
+            let result = await runner.run(item, in: snapshot!, onStep: { [weak self] step in
+                Task { @MainActor in self?.updateDelegation(id, step: step) }
+            }, onUsage: { [weak self] event in
+                Task { @MainActor in
+                    guard let self, let account = self.accounts.accounts.first(where: { $0.account.name == item.account }) else { return }
+                    self.accounts.record(event, for: account.account.id)
+                }
+            })
+            if var latest = delegation(id), latest.status == .running {
+                latest.result = result.0
+                latest.error = result.1
+                latest.status = result.0?.outcome == .complete ? .complete : result.0?.outcome == .partial ? .partial : .failed
+                latest.finished = .now
+                save(latest)
+                settleSpecialists(turn: latest.turn)
+            }
+        } catch {
+            if var latest = delegation(id), latest.status == .queued || latest.status == .running {
+                latest.status = .failed; latest.error = error.localizedDescription; latest.finished = .now; save(latest)
+                settleSpecialists(turn: latest.turn)
+            }
+        }
+        if let snapshot {
+            if let repo = item.repo, let clone = try? await Workspace.ensureClone(repo) {
+                _ = try? await Shell.ok(["git", "-C", clone.path, "worktree", "remove", "--force", snapshot.path])
+            } else { try? FileManager.default.removeItem(at: snapshot) }
+        }
+        delegateRunners[id] = nil
+    }
+
+    private func updateDelegation(_ id: String, step: String) {
+        guard var item = delegation(id), item.status == .running else { return }
+        item.step = String(step.prefix(160)); save(item)
+    }
+
+    private func settleSpecialists(turn: String) {
+        let group = delegationsState.filter { $0.turn == turn }
+        guard !group.isEmpty, group.allSatisfy({ [.complete, .partial, .failed, .stopped].contains($0.status) }),
+              followUpScheduled.insert(turn).inserted else { return }
+        // The follow-up is queued once the current user turn has relinquished the conversation.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            while self.pending != nil || self.conversationTurn != nil { try? await Task.sleep(for: .milliseconds(100)) }
+            let quoted = Self.delegatedQuote(group)
+            let original = self.turns.first(where: { $0.id == turn })?.text ?? ""
+            let result = await self.plan(original + "\n\n(Your specialists came back. Their results are quoted in work.md under ‘Delegated’. Answer the user now.)", followUp: true, quoted: quoted)
+            var reply = Self.reply(in: result) ?? "I couldn't combine the specialists' findings into an answer."
+            let incomplete = group.filter { $0.status != .complete }
+            if !incomplete.isEmpty { reply = "\(incomplete.count) of \(group.count) specialists didn't finish. \(reply)" }
+            self.justDelegated = []
+            self.addReply(reply, details: self.replyDetails)
+        }
+    }
+
+    private nonisolated static func delegatedQuote(_ group: [Delegation]) -> String {
+        group.map { item in
+            var text = "# Delegated work, quoted\n\n## \(item.role.rawValue.capitalized): \(item.goal)\n\nSTATUS: \(item.status.rawValue.uppercased())\(item.status == .complete ? "" : ", NOT COMPLETE")\n\n"
+            if let result = item.result {
+                text += result.summary + "\n\n"
+                for finding in result.findings { text += "- \(finding.claim) (\(finding.confidence)): " + finding.evidence.map { "[\($0.link)] \($0.quote)" }.joined(separator: "; ") + "\n" }
+                text += result.openQuestions.map { "- Open question: \($0)\n" }.joined()
+            }
+            if let error = item.error { text += "- Oby: \(error)\n" }
+            return text
+        }.joined(separator: "\n")
     }
 
     var cleanupStatus: WorktreeCleanup.Status { cleanup.status }
@@ -551,6 +707,8 @@ final class Desk {
                 || self.afterTurns[id] != nil || self.committingRound.contains(id) || !self.wrappingUp.isEmpty
                 || [job.macCheck?.state, job.appleCheck?.state].contains(where: { $0 == .queued || $0 == .running })
         }
+        let live = Set(delegationsState.filter { $0.status == .queued || $0.status == .running }.map(\.id)).union(delegateRunners.keys)
+        await cleanup.runDelegations(delegationsState, inUse: live)
     }
 
     var active: [Job] { jobs.filter(\.isActive) }
@@ -607,7 +765,7 @@ final class Desk {
     func briefing(turns: [Turn]) -> Briefing {
         Briefing(turns: turns, places: [Briefing.Place(name: "this Mac", jobs: jobs, inbox: inbox)] + elsewhere(), accounts: accounts.accounts,
                  settingModels: settingModels, settingEfforts: settingEfforts, settingModelEfforts: settingModelEfforts, maxRunning: maxRunning,
-                 failures: failureLog.week())
+                 failures: failureLog.week(), specialists: delegationsState)
     }
 
     // MARK: The conversation
@@ -889,7 +1047,10 @@ final class Desk {
     private func addReply(_ text: String, details: String? = nil) -> Turn {
         let started = justStarted
         justStarted = []
-        let turn = Turn(who: .oby, text: text, jobs: started.isEmpty ? nil : started, details: details ?? replyDetails)
+        let delegated = justDelegated
+        justDelegated = []
+        let turn = Turn(who: .oby, text: text, jobs: started.isEmpty ? nil : started, details: details ?? replyDetails,
+                        delegations: delegated.isEmpty ? nil : delegated)
         add(turn)
         return turn
     }
@@ -921,7 +1082,8 @@ final class Desk {
     /// `live` is asked before anything happens for the plan (a job stopped or started): false once
     /// the turn was cancelled, replaced or given up on, and then nothing does, and the answer is `.none`.
     /// `attachments` go to the jobs the plan starts.
-    func plan(_ said: String, turns given: [Turn]? = nil, attachments: [String] = [], orchestratorContext: String? = nil, live: @escaping () -> Bool = { true }) async -> Talk {
+    func plan(_ said: String, turns given: [Turn]? = nil, attachments: [String] = [], orchestratorContext: String? = nil,
+              followUp: Bool = false, quoted: String? = nil, live: @escaping () -> Bool = { true }) async -> Talk {
         let isOrchestratorTurn = orchestrating && conversationTurn != nil && conversationTurn == orchestratorTurnID
         researchedThisTurn = false
         replyDetails = nil
@@ -944,6 +1106,10 @@ final class Desk {
         for step in 0..<Self.mostSteps {
             var context = brainContext(turns: given ?? turns.filter { $0.id != pending })
             context.orchestrator = isOrchestratorTurn
+            context.followUp = followUp
+            context.runningDelegations = delegationsState.count(where: { $0.status == .queued || $0.status == .running })
+            context.specialists = delegationsState.filter { $0.status == .queued || $0.status == .running }.map(\.id)
+            if let quoted { context.quoted = [context.quoted, quoted].compactMap { $0 }.joined(separator: "\n\n") }
             if isOrchestratorTurn {
                 context.orchestratorContext = orchestratorContext
                 if !done.isEmpty { context.orchestratorContext = (context.orchestratorContext ?? "") + "\n\nOby already did this during this event turn: \(done.joined(separator: " ")). Plan the next allowed action or reply_only."
@@ -1087,6 +1253,22 @@ final class Desk {
                 guard !stopRequested, ContinuousClock.now < deadline else { break }
                 request = research.continued(reads.continued(done.isEmpty ? said : Self.continued(said, done: done)))
                 continue
+            }
+            if result.plan.action == .delegate {
+                let turn = pending ?? conversationTurn ?? turns.last(where: { $0.who == .user })?.id ?? UUID().uuidString.lowercased()
+                let preferred = ["claude", "codex"].contains(result.by) ? result.by : nil
+                if let error = startDelegations(result.plan.delegations ?? [], turn: turn, preferredAgent: preferred) { return Self.after(done, .reply(error)) }
+                return Self.after(done, .reply(result.plan.reply))
+            }
+            if followUp, result.plan.action == .dispatch {
+                var states = accounts.accounts
+                var proposals: [Job] = []
+                for dispatch in result.plan.dispatches {
+                    do { proposals.append(try make(dispatch, said: said, states: &states, files: nil, attachments: [] ).job) }
+                    catch { return Self.after(done, .reply("Couldn't prepare the proposed work: \(error.localizedDescription)")) }
+                }
+                for job in proposals { add(Inbox.proposal(job, account: accountHeading(job.account), why: "research")) }
+                return Self.after(done, .reply(result.plan.reply.isEmpty ? "I left the proposed work in your inbox. Tap Start when you're ready." : result.plan.reply))
             }
             if result.plan.action == .replyOnly || result.plan.action == .askUser { replyDetails = result.plan.details }
             let acting = Self.acting.contains(result.plan.action)
@@ -1372,14 +1554,18 @@ final class Desk {
             let named = plan.jobs ?? []
             guard !named.isEmpty || plan.all == true else { return .reply("Say which job to stop, or “stop everything”.") }
             let others = Dictionary(elsewhere().flatMap(\.jobs).filter(\.isActive).map { ($0.id, $0) }) { first, _ in first }
+            let specialists = delegationsState.filter { $0.status == .queued || $0.status == .running }
             var here: [Job] = []
             var away: [Job] = []
+            var stoppedSpecialists: [Delegation] = []
             if named.isEmpty {
                 here = active
                 away = others.values.sorted { $0.created > $1.created }
+                for item in specialists { if let stopped = stopDelegation(item.id) { stoppedSpecialists.append(stopped) } }
             } else {
                 for id in named {
                     if let job = job(id), job.isActive { here.append(job) } else if let job = others[id] { away.append(job) }
+                    else if let stopped = stopDelegation(id) { stoppedSpecialists.append(stopped) }
                 }
             }
             for job in here { stop(job.id) }
@@ -1387,9 +1573,15 @@ final class Desk {
             let stopped = here + away.filter { failed[$0.id] == nil }
             var reply: String
             if named.isEmpty {
-                reply = stopped.isEmpty ? "Nothing is running." : "Stopped \(stopped.count) job\(stopped.count == 1 ? "" : "s")."
+                let count = stopped.count + stoppedSpecialists.count
+                if stoppedSpecialists.isEmpty {
+                    reply = stopped.isEmpty ? "Nothing is running." : "Stopped \(stopped.count) job\(stopped.count == 1 ? "" : "s")."
+                } else {
+                    reply = count == 0 ? "Nothing is running." : "Stopped \(count) item\(count == 1 ? "" : "s")."
+                }
             } else {
-                reply = stopped.isEmpty && failed.isEmpty ? "That job isn't running any more." : stopped.isEmpty ? "" : "Stopped \(stopped.map(\.heading).joined(separator: ", "))."
+                let labels = stopped.map(\.heading) + stoppedSpecialists.map { "\($0.role.rawValue) specialist \($0.id)" }
+                reply = labels.isEmpty && failed.isEmpty ? "That job or specialist isn't running any more." : labels.isEmpty ? "" : "Stopped \(labels.joined(separator: ", "))."
             }
             for job in away where failed[job.id] != nil {
                 reply += (reply.isEmpty ? "" : " ") + "Couldn't stop \(job.heading): \(failed[job.id] ?? "")"
@@ -1440,6 +1632,8 @@ final class Desk {
             return .none
         case .research:
             // Research runs in `plan` and feeds its quoted results into the next brain step.
+            return .none
+        case .delegate:
             return .none
         case .setSetting:
             return .reply(await applySetting(plan.setting))
@@ -2170,6 +2364,10 @@ final class Desk {
             return codex
         default: return nil
         }
+    }
+
+    static func delegateRunner(for delegation: Delegation, account: Account?) -> any DelegateRunner {
+        DelegateFactory.make(delegation, account: account)
     }
 
     private func handle(_ event: AgentEvent, job id: String) {

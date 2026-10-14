@@ -20,7 +20,7 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
         case retryJob = "retry_job", dismissJob = "dismiss_job", answerInbox = "answer_inbox", startNow = "start_now"
         case messageJob = "message_job", fixFailure = "fix_failure", askReviewAgain = "ask_review_again"
         /// Read-only context gathering for a question before the chat answers or proposes work.
-        case research
+        case research, delegate
     }
     enum Kind: String, Codable, CaseIterable, Sendable { case review, fix, build, test, investigate }
     /// How hard the work looks: a complex job gets a stronger model offered, never applied on its own.
@@ -114,6 +114,15 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
         var url: String? = nil
     }
 
+    struct Brief: Codable, Equatable, Sendable {
+        var role: Delegation.Role
+        var goal: String
+        var context: String
+        var repo: String?
+        var ref: String?
+        var web: Bool
+    }
+
     var action: Action
     var reply: String
     /// One job per independent piece of work, up to 10; empty unless the action is dispatch.
@@ -139,6 +148,8 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
     var answer: String? = nil
     /// The read-only lookups for a research step.
     var lookups: [Lookup]? = nil
+    /// Focused read-only specialist requests, at most four per user action.
+    var delegations: [Brief]? = nil
     /// Markdown that accompanies a short spoken reply.
     var details: String? = nil
 
@@ -188,6 +199,10 @@ nonisolated struct BrainContext: Sendable {
     var orchestrator: Bool = false
     /// Oby-authored event data and policy. This is not part of the user's conversation.
     var orchestratorContext: String? = nil
+    /// Follow-up turns after delegated work have a deliberately narrow action set.
+    var followUp: Bool = false
+    var runningDelegations: Int = 0
+    var specialists: [String] = []
 }
 
 extension Plan {
@@ -225,10 +240,33 @@ extension Plan {
             if question != nil { problems.append("research has no question") }
             if !(jobs ?? []).isEmpty { problems.append("research has no jobs") }
             for lookup in lookups { problems += Self.problems(of: lookup, in: context) }
+        case .delegate:
+            let briefs = delegations ?? []
+            if !(1...4).contains(briefs.count) { problems.append("delegate needs 1 to 4 briefs") }
+            if !dispatches.isEmpty { problems.append("delegate has no dispatches") }
+            if question != nil { problems.append("delegate has no question") }
+            if !(jobs ?? []).isEmpty { problems.append("delegate has no jobs") }
+            if !(lookups ?? []).isEmpty { problems.append("delegate has no lookups") }
+            if context.orchestrator { problems.append("delegate is unavailable in orchestrator turns") }
+            if context.followUp { problems.append("delegate is unavailable in a follow-up turn") }
+            if context.runningDelegations + briefs.count > Delegation.mostRunning {
+                problems.append("the desk has only \(max(0, Delegation.mostRunning - context.runningDelegations)) specialist spaces available")
+            }
+            for brief in briefs {
+                if brief.goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || brief.goal.count > 600 { problems.append("each specialist goal must be 1 to 600 characters") }
+                if brief.context.count > 4000 { problems.append("specialist context exceeds 4,000 characters") }
+                if let repo = brief.repo, !context.repos.contains(repo) { problems.append("specialist repository is not in the briefing") }
+                if brief.repo == nil && !brief.web { problems.append("a specialist needs a known repository or web access") }
+                if let ref = brief.ref, !Plan.isBranchName(ref) && ref.wholeMatch(of: /[0-9a-fA-F]{7,40}/) == nil { problems.append("specialist ref must be a branch name or 7 to 40 hexadecimal characters") }
+            }
         case .replyOnly, .stopAgent, .moveJob, .ignore, .answerPermission, .setMode, .readJob, .setSetting, .retryJob, .dismissJob, .answerInbox, .startNow, .messageJob, .fixFailure, .askReviewAgain:
             if !dispatches.isEmpty || question != nil { problems.append("\(action.rawValue) has no dispatches or question object") }
         }
         if action != .research, !(lookups ?? []).isEmpty { problems.append("only research has lookups") }
+        if action != .delegate, !(delegations ?? []).isEmpty { problems.append("only delegate has delegations") }
+        if context.followUp && ![.replyOnly, .askUser, .research, .readJob, .ignore, .dispatch].contains(action) {
+            problems.append("\(action.rawValue) is not allowed in a specialist follow-up")
+        }
         if let details {
             if details.count > 4000 { problems.append("details is longer than 4,000 characters") }
             if action != .replyOnly && action != .askUser { problems.append("details is only for reply_only and ask_user") }
@@ -239,7 +277,7 @@ extension Plan {
         let named = jobs ?? []
         switch action {
         case .stopAgent:
-            for id in named where !context.jobs.contains(id) { problems.append("\(id) isn't a job Oby can stop") }
+            for id in named where !context.jobs.contains(id) && !context.specialists.contains(id) { problems.append("\(id) isn't a job or specialist Oby can stop") }
             if named.isEmpty, all != true { problems.append("stop_agent names the jobs to stop, or all is true for everything") }
             if !named.isEmpty, all == true { problems.append("stop_agent names jobs or stops all, not both") }
         case .moveJob:
@@ -540,9 +578,21 @@ extension Plan {
                 "number": ["type": ["integer", "null"], "minimum": 1], "url": ["type": ["string", "null"]],
             ],
         ]
+        let delegation: [String: Any] = [
+            "type": "object", "additionalProperties": false,
+            "required": ["role", "goal", "context", "repo", "ref", "web"],
+            "properties": [
+                "role": ["enum": Delegation.Role.allCases.map(\.rawValue)],
+                "goal": ["type": "string", "minLength": 1, "maxLength": 600],
+                "context": ["type": "string", "maxLength": 4000],
+                "repo": nullable(["enum": context.repos]),
+                "ref": ["type": ["string", "null"], "maxLength": 300],
+                "web": ["type": "boolean"],
+            ],
+        ]
         // The jobs stop_agent, move_job, answer_permission and set_mode may name, the briefing's order kept.
         var named = context.jobs
-        for id in context.movable + context.permissions where !named.contains(id) { named.append(id) }
+        for id in context.movable + context.permissions + context.specialists where !named.contains(id) { named.append(id) }
         let move: [String: Any] = [
             "type": "object", "additionalProperties": false, "required": ["agent", "account", "model"],
             "properties": [
@@ -553,14 +603,14 @@ extension Plan {
         ]
         let schema: [String: Any] = [
             "type": "object", "additionalProperties": false,
-            "required": ["action", "reply", "dispatches", "question", "jobs", "all", "move", "decision", "message", "mode", "setting", "item", "option", "answer", "lookups", "details"],
+            "required": ["action", "reply", "dispatches", "question", "jobs", "all", "move", "decision", "message", "mode", "setting", "item", "option", "answer", "lookups", "delegations", "details"],
             "properties": [
-                "action": ["enum": ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore", "answer_permission", "set_mode", "read_job", "set_setting", "retry_job", "dismiss_job", "answer_inbox", "start_now"] + (context.orchestrator ? [] : ["research"])
+                "action": ["enum": (context.followUp ? ["dispatch", "ask_user", "reply_only", "ignore", "research", "read_job"] : ["dispatch", "ask_user", "reply_only", "stop_agent", "move_job", "ignore", "answer_permission", "set_mode", "read_job", "set_setting", "retry_job", "dismiss_job", "answer_inbox", "start_now"] + (context.orchestrator ? [] : ["research", "delegate"]))
                     + (context.orchestrator ? ["message_job", "fix_failure", "ask_review_again"] : [])],
                 "reply": ["type": "string", "maxLength": replyLength],
                 "dispatches": ["type": "array", "items": dispatch, "maxItems": 10],
                 "question": nullable(question),
-                "jobs": named.isEmpty ? ["type": "array", "maxItems": 0] : ["type": "array", "items": ["enum": named], "maxItems": 10],
+                "jobs": named.isEmpty ? ["type": "array", "items": ["type": "string"], "maxItems": 0] : ["type": "array", "items": ["enum": named], "maxItems": 10],
                 "all": ["type": "boolean"],
                 "move": nullable(move),
                 "decision": nullable(["enum": PermissionDecision.allCases.map(\.rawValue)]),
@@ -571,6 +621,7 @@ extension Plan {
                 "option": ["type": ["integer", "null"], "minimum": 1, "maximum": 20],
                 "answer": ["type": ["string", "null"], "maxLength": 2000],
                 "lookups": ["type": "array", "items": lookup, "maxItems": 4],
+                "delegations": ["type": "array", "items": delegation, "maxItems": 4],
                 "details": ["type": ["string", "null"], "maxLength": 4000],
             ],
         ]
@@ -841,7 +892,7 @@ nonisolated struct Planner: Sendable {
         - dispatch: coding work in one of the schema's repositories: reviewing, fixing, building, testing, investigating, or running the repository's own commands and scripts. The user may name a repository by its short name ("oby" is deskree-inc/oby when only one repository is called that); when several names are close, pick the exact match. `task` restates the work for the agent in the user's terms. `title` names the job in 3 to 6 words, like "Mac runner notifications" or "Job progress screen": no repository name, no issue number, no ending period. `pr` is the pull request number when the user says PR or pull request; `issue` is the issue number when the user says issue, or gives a bare number like #42 for work other than a review. Both only when the user wants an issue's work picked up from an existing pull request ("finish #19 from PR #124", "pick up issue 20 from pull request 128"): then `issue` is the issue, `pr` the pull request whose head the work starts from, and `kind` is fix, build or test; Oby publishes a pull request of its own. `base_branch` only if the user named a branch to start from. `rounds` is 1, or 5 when the user wants the agent to keep going until it's done ("until the tests pass", "keep going", "loop"). `check` is a one-line shell command that must succeed for the work to count as done, only when the user named one; otherwise null. `dispatches` holds one job per independent piece of work: "work on oby #12, #15 and #18" is three jobs, each with its own issue; usually it's one. `epic` is the epic's number when the user asks to work on an epic (then `issue` and `pr` are null): Oby makes one job per open sub-issue. `complexity` is "complex" for large or multi-system changes, architecture, hard bugs and epics, otherwise "routine". `agent` and `account` are "auto" unless the user names a tool or an account; Oby then picks the least busy one. `start_when` is empty unless the user wants the job to start later, when something happens; then it lists what must all happen first: {"job": an id from the briefing, "is": "done", "merged" (its pull request merged), "published" or "ended"} ("after the cards job merges"); {"pr": a pull request's number in the same repository, "is": "merged" or "closed"} ("once #205 is merged"); {"account": an account's name, "window": "fiveHour" or "sevenDay", "under": null} when the account's window resets or has room ("on Codex when it resets", "when Personal has room"), with "under" a share like 0.5 only when the user names one ("when Codex is under half"); {"account": an account's name, "on_pace": true} ("once Codex is back on its weekly pace"); {"at": an ISO 8601 time with the offset the briefing's "Now is" gives} ("tomorrow at 9", "at 18:00"). A job that waits on an account runs on it: its `account` is that one. The work starts as soon as you plan it, with nothing to confirm: `reply` is one short line in Oby's voice saying what's starting, like "On it. Reviewing PR #482 in tetrix-front-end." or "On it: fixing #12 in oby on Codex once it resets.", never "Oby will…" or a question whether to start. A job that's already running or queued for the same issue or pull request isn't dispatched again: say so with reply_only.
         - ask_user: the repository or the work is unclear. `question` has the question and up to 3 short options, the one you recommend first with `recommended` 0 (null when you recommend none); the user may also answer in words of their own.
         - reply_only: a question or a remark about the work ("how are the jobs going?", "what did the #12 job change?", "what's in my inbox?", "how long until Codex resets?"): answer from the briefing in `reply`, in one to three short sentences a person can listen to, with the facts (a job's stage and result, how long until a limit resets, in hours and minutes). Also anything that isn't coding work, or something Oby never does (merging, pushing, approving, publishing, deleting repositories): say so in `reply`.
-        - stop_agent: the user wants running work stopped. `jobs` names the jobs to stop, by id from the briefing ("cancel it", "stop the vault job"). `all` is true only when the user clearly asks for all the work to stop ("stop everything", "stop all jobs"), with `jobs` empty. A bare "stop" or "cancel" that names no job while several run is ask_user: which one, or everything. `reply` is empty: Oby says what it stopped.
+        - stop_agent: the user wants running work stopped. `jobs` names jobs or specialists by id from the briefing ("cancel it", "stop the vault job", "stop the researchers"). `all` is true only when the user clearly asks for all the work to stop ("stop everything", "stop all jobs"), with `jobs` empty. A bare "stop" or "cancel" that names no work while several run is ask_user: which one, or everything. `reply` is empty: Oby says what it stopped.
         - move_job: the user wants jobs moved, or re-routed, to another coding tool, account or model ("move the vault job to Claude", "use Fable for that one", "put the Watch job on Codex", "Deskree is full, re-route its jobs to Personal and Codex"), whether they're running, queued, failed or finished. `jobs` names the jobs that go to the same place, by id from the briefing (1 to 10): the jobs whose title, issue or pull request the user names, the one just talked about ("that one", "it"), or every job on an account the user names ("its jobs", "everything on Deskree": the briefing says which account each job is on), leaving out jobs that are done, merged or dismissed. To spread jobs over several places, move some now and the rest in the next step, alternating so each place gets a fair share. A job that failed or was cut off starts again where it goes. `move` says where: `agent` is "claude" for Claude Code or "codex" for Codex, `account` an account's name from the briefing, `model` a model's id (claude-fable-5-1 is Fable, claude-opus-5-5 Opus, claude-sonnet-5-5 Sonnet, claude-haiku-5-5 Haiku; gpt-6-astra is GPT-6-Astra); each is "auto" unless the user named it. A new job the user wants run on a tool or model is dispatch, not move_job. `reply` is empty: Oby says where it moved.
         - answer_permission: the user answers a job's permission prompt, one the briefing's inbox lists as waiting for their OK: "allow it", "yes, run it" is `decision` allow; "always allow that", "don't ask again for that" is always; "no", "don't", "no, run only the runner tests" is deny, with what the user tells the agent instead in `message` (null when they said only no). `jobs` names that one job by id. `reply` is empty: Oby says what it did.
         - set_mode: the user changes how much running jobs ask: "stop asking on the Watch job" is bypass, "ask me before anything" is ask, "let it edit but ask before commands" is acceptEdits, "plan first for the vault job" is plan. `jobs` names the jobs by id, `mode` the mode. `reply` is empty. New work that should plan first ("build the vault, plan first") is a dispatch whose `mode` is plan; a dispatch's `mode` is null unless the user said how the job should ask.
@@ -889,6 +940,7 @@ nonisolated struct BrainTurn: Codable, Equatable, Sendable {
         }
         if let question = plan.question { parts.append("asks \(question.text.debugDescription) \(question.options)") }
         if plan.action == .research { parts.append("researches " + (plan.lookups ?? []).map { "\($0.tool.rawValue) \($0.repo ?? $0.url ?? "") \($0.query ?? $0.path ?? $0.number.map(String.init) ?? "")" }.joined(separator: ", ")) }
+        if plan.action == .delegate { parts.append("delegates to " + (plan.delegations ?? []).map(\.goal).joined(separator: ", ")) }
         if let jobs = plan.jobs, !jobs.isEmpty {
             let verb = switch plan.action {
             case .moveJob: "moves"
@@ -896,6 +948,7 @@ nonisolated struct BrainTurn: Codable, Equatable, Sendable {
             case .setMode: "sets \(plan.mode?.rawValue ?? "?") on"
             case .readJob: "reads"
             case .research: "researches"
+            case .delegate: "delegates"
             case .retryJob, .dismissJob, .startNow, .messageJob, .askReviewAgain: "\(plan.action.rawValue) for"
             case .fixFailure: "fix_failure"
             default: "stops"

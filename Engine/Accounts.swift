@@ -108,6 +108,8 @@ nonisolated struct AccountState: Equatable, Sendable {
 @Observable
 final class AccountStore {
     private(set) var accounts: [AccountState]
+    private var runningJobs: [String: Int] = [:]
+    private var runningDelegations: [String: Int] = [:]
     private let file: URL
     /// What Oby last knew of each account's usage, by id, in `usage.json`: a restart keeps it, so
     /// a job waiting for an account's room doesn't start early (#216). Claude Code reports usage
@@ -239,9 +241,31 @@ final class AccountStore {
     /// Counts each account's active jobs, and its recent ones that used Tetrix; `Job.account`
     /// holds the account's id. A job waiting for its `startWhen` (#216) isn't on it yet.
     func countRunning(_ jobs: [Job]) {
+        runningJobs = Dictionary(grouping: jobs.filter { $0.isActive && !$0.waitsToStart }, by: \.account).mapValues(\.count)
+        updateRunningCounts()
         for index in accounts.indices {
-            accounts[index].running = jobs.filter { $0.isActive && !$0.waitsToStart && $0.account == accounts[index].account.id }.count
             (accounts[index].tetrixJobs, accounts[index].tetrixUsed) = TetrixUse.share(jobs, account: accounts[index].account.id)
+        }
+    }
+
+    func countRunning(_ jobs: [Job], delegations: [Delegation]) {
+        runningJobs = Dictionary(grouping: jobs.filter { $0.isActive && !$0.waitsToStart }, by: \.account).mapValues(\.count)
+        runningDelegations = Dictionary(grouping: delegations.filter { $0.status == .queued || $0.status == .running }, by: \.account).mapValues(\.count)
+        updateRunningCounts()
+        for index in accounts.indices {
+            (accounts[index].tetrixJobs, accounts[index].tetrixUsed) = TetrixUse.share(jobs, account: accounts[index].account.id)
+        }
+    }
+
+    func countDelegations(_ delegations: [Delegation]) {
+        runningDelegations = Dictionary(grouping: delegations.filter { $0.status == .queued || $0.status == .running }, by: \.account).mapValues(\.count)
+        updateRunningCounts()
+    }
+
+    private func updateRunningCounts() {
+        for index in accounts.indices {
+            let id = accounts[index].account.id
+            accounts[index].running = runningJobs[id, default: 0] + runningDelegations[id, default: 0]
         }
     }
 

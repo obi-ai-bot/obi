@@ -245,13 +245,17 @@ final class CodexServer {
     var isRunning: Bool { process.isRunning }
 
     /// `mcp`: the broker, as Codex's `oby` MCP server, its token in the environment.
-    init(home: URL?, in directory: URL?, log: URL?, mcp: AgentMCP? = nil) throws {
+    init(home: URL?, in directory: URL?, log: URL?, mcp: AgentMCP? = nil, reading: [String] = [],
+         environment: [String: String?] = [:], chdir: String? = nil, worktreeReadOnly: Bool = false) throws {
         process.executableURL = URL(filePath: "/usr/bin/env")
-        process.arguments = Agents.sandboxed(Agents.niced(["codex"] + (mcp?.codexArguments ?? []) + ["app-server"]), in: directory, own: home?.path ?? "\(Agents.home)/.codex")
+        process.arguments = Agents.sandboxed(Agents.niced(["codex"] + (mcp?.codexArguments ?? []) + ["app-server"]), in: directory,
+                                              own: home?.path ?? "\(Agents.home)/.codex", reading: reading, chdir: chdir,
+                                              worktreeReadOnly: worktreeReadOnly)
         process.currentDirectoryURL = directory
         process.environment = try Agents.environment(AppleCheck.environment(worktree: directory)
             .merging(directory.map { Agents.swiftEnvironment(worktree: $0) } ?? [:]) { $1 }
-            .merging(["CODEX_HOME": home?.path, AgentMCP.tokenVariable: mcp?.token]) { $1 })
+            .merging(["CODEX_HOME": home?.path, AgentMCP.tokenVariable: mcp?.token]) { $1 }
+            .merging(environment) { $1 })
         process.standardInput = input
         process.standardOutput = output
         process.standardError = log.flatMap { try? FileHandle(forWritingTo: $0) } ?? FileHandle.nullDevice

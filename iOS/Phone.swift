@@ -279,6 +279,7 @@ final class Phone {
         defaultMode = RunnerMode(status.permissions?.mode)
         await take(try await runner.jobs())
         inbox = try await runner.inbox()
+        for specialist in (try? await runner.delegations()) ?? [] { conversation.apply(specialist) }
         // The thread's latest page every time: what was said on the Mac while the connection was
         // down is in it.
         await conversation.reload()
@@ -311,6 +312,7 @@ final class Phone {
         do {
             await take(try await runner.jobs())
             inbox = try await runner.inbox()
+            for specialist in (try? await runner.delegations()) ?? [] { conversation.apply(specialist) }
             loaded = true
         } catch {
             Logger.phone.error("reloading jobs failed: \(error.localizedDescription, privacy: .public)")
@@ -344,6 +346,8 @@ final class Phone {
             settleEchoes()
         case .step(let step):
             conversation.apply(step)
+        case .delegation(let specialist):
+            conversation.apply(specialist)
         }
     }
 
@@ -555,6 +559,10 @@ final class Phone {
 
     func stop(_ id: String) async throws {
         apply(.job(try await runner.stop(id)))
+    }
+
+    func stopSpecialist(_ id: String) async throws {
+        conversation.apply(try await runner.stopDelegation(id))
     }
 
     /// Stop all: every job on the runner stops now, and shows here as stopped.

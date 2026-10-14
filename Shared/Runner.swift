@@ -523,6 +523,55 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     case turn(Turn)
     /// One step of Oby's turn began, went on or ended (#304). Runners from before the step event never send it.
     case step(TurnStep)
+    case delegation(Specialist)
+}
+
+/// The shared, tolerant runner representation of a read-only specialist memo.
+nonisolated struct Specialist: Codable, Identifiable, Equatable, Sendable {
+    struct Evidence: Codable, Equatable, Sendable { var link: String; var quote: String }
+    struct Finding: Codable, Equatable, Sendable { var claim: String; var evidence: [Evidence]; var confidence: String }
+    struct Result: Codable, Equatable, Sendable {
+        var outcome: String
+        var summary: String
+        var findings: [Finding]
+        var openQuestions: [String]
+        var verdict: String?
+    }
+    var id: String
+    var turn: String
+    var role: String
+    var goal: String
+    var context: String
+    var repo: String?
+    var ref: String?
+    var commit: String?
+    var web: Bool
+    var agent: String
+    var account: String
+    var model: String
+    var effort: String
+    var status: String
+    var step: String
+    var created: Date
+    var started: Date?
+    var finished: Date?
+    var result: Result?
+    var error: String?
+
+    #if os(macOS)
+    init(_ delegation: Delegation) {
+        id = delegation.id; turn = delegation.turn; role = delegation.role.rawValue; goal = delegation.goal; context = delegation.context
+        repo = delegation.repo; ref = delegation.ref; commit = delegation.commit; web = delegation.web
+        agent = delegation.agent; account = delegation.account; model = delegation.model; effort = delegation.effort
+        status = delegation.status.rawValue; step = delegation.step; created = delegation.created; started = delegation.started
+        finished = delegation.finished; error = delegation.error
+        result = delegation.result.map { result in
+            Result(outcome: result.outcome.rawValue, summary: result.summary,
+                   findings: result.findings.map { Finding(claim: $0.claim, evidence: $0.evidence.map { Evidence(link: $0.link, quote: $0.quote) }, confidence: $0.confidence) },
+                   openQuestions: result.openQuestions, verdict: result.verdict)
+        }
+    }
+    #endif
 }
 
 #if os(iOS) || os(watchOS)
@@ -537,6 +586,7 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     var text: String
     /// The jobs this turn started, for a card under Oby's words. Nil on the user's turns and on older ones.
     var jobs: [String]?
+    var delegations: [String]?
     /// The user said it out loud (the iPhone's mic), so the thread says "You, by voice". Nil when
     /// typed, and on turns the runner kept.
     var voice: Bool?
@@ -544,12 +594,13 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     var details: String?
 
     init(id: String = UUID().uuidString.lowercased(), date: Date = .now, who: Who, text: String,
-         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil) {
+         jobs: [String]? = nil, voice: Bool? = nil, details: String? = nil, delegations: [String]? = nil) {
         self.id = id
         self.date = date
         self.who = who
         self.text = text
         self.jobs = jobs
+        self.delegations = delegations
         self.voice = voice
         self.details = details
     }
@@ -564,11 +615,12 @@ nonisolated struct RunnerTurn: Decodable, Sendable {
     var text: String
     var at: Date
     var jobs: [String]?
+    var delegations: [String]?
     var details: String?
 
     var turn: Turn {
         Turn(id: id, date: at, who: Turn.Who(rawValue: who) ?? .oby, text: text,
-             jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details)
+             jobs: (jobs ?? []).isEmpty ? nil : jobs, details: details, delegations: (delegations ?? []).isEmpty ? nil : delegations)
     }
 }
 
@@ -782,6 +834,8 @@ nonisolated struct Runner: Sendable {
 
     func status() async throws -> RunnerStatus { try await call("GET", "v1/status") }
     func jobs() async throws -> [Job] { try await call("GET", "v1/jobs?limit=50") }
+    func delegations(limit: Int = 50) async throws -> [Specialist] { try await call("GET", "v1/delegations?limit=\(max(1, min(limit, 200)))") }
+    func stopDelegation(_ id: String) async throws -> Specialist { try await call("POST", "v1/delegations/\(id)/stop") }
     func stop(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/stop") }
     /// Stop all: every queued and running job on the runner stops now.
     func stopAll() async throws -> StoppedJobs { try await call("POST", "v1/stop-all") }
@@ -1188,6 +1242,7 @@ nonisolated struct EventParser {
             #endif
             case "turn": return (try? Runner.decoder.decode(RunnerTurn.self, from: json)).map { RunnerEvent.turn($0.turn) }
             case "step": return (try? Runner.decoder.decode(TurnStep.self, from: json)).map(RunnerEvent.step)
+            case "delegation": return (try? Runner.decoder.decode(Specialist.self, from: json)).map(RunnerEvent.delegation)
             default: return nil
             }
         }

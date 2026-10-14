@@ -1463,7 +1463,7 @@ nonisolated enum Agents {
     // hidden, nothing else is) and the runner's API on 127.0.0.1 stay reachable; a Unix user of its
     // own for agents is the upgrade.
     static func sandboxed(_ argv: [String], in worktree: URL?, own: String?, reading: [String] = [], bubblewrap: Bool = Agents.bubblewrap,
-                          apple: AppleCheck.Tool? = AppleCheck.installed) -> [String] {
+                          apple: AppleCheck.Tool? = AppleCheck.installed, chdir: String? = nil, worktreeReadOnly: Bool = false) -> [String] {
         guard bubblewrap else { return argv }
         let exists = { (path: String) in FileManager.default.fileExists(atPath: path) }
         // Never --die-with-parent: its death signal follows the thread that started bwrap, and Foundation
@@ -1474,6 +1474,11 @@ nonisolated enum Agents {
                     "--tmpfs", "/tmp", "--tmpfs", home]
         for folder in tools.map({ "\(home)/\($0)" }) where exists(folder) { args += ["--overlay-src", folder, "--tmp-overlay", folder] }
         for settings in [".gitconfig", ".config/git"] { args += ["--ro-bind-try", "\(home)/\(settings)", "\(home)/\(settings)"] }
+        // Preserve an OBY_HOME snapshot at a private path before masking all of OBY_HOME.
+        for folder in reading where exists(folder) && (folder == Workspace.root.path || folder.hasPrefix(Workspace.root.path + "/")) {
+            let mapped = "/tmp/oby-read-\(URL(filePath: folder).lastPathComponent)"
+            args += ["--dir", mapped, "--ro-bind", folder, mapped]
+        }
         args += ["--tmpfs", Workspace.root.path]
         // Outside home, / is read-only, so only what exists: systemd's user bus, docker.
         for folder in ["/run/user/\(getuid())"] where exists(folder) { args += ["--tmpfs", folder] }
@@ -1485,7 +1490,7 @@ nonisolated enum Agents {
             // git finds a config (.git, commondir) are read-only. A real packed-refs can't be replaced,
             // so `git pack-refs` fails rather than drop the loose refs it would have packed.
             let path = worktree.path
-            args += ["--bind", path, path, "--ro-bind", "\(path)/.git", "\(path)/.git"]
+            args += [worktreeReadOnly ? "--ro-bind" : "--bind", path, path, "--ro-bind", "\(path)/.git", "\(path)/.git"]
             if let pointer = try? String(contentsOfFile: "\(path)/.git", encoding: .utf8), pointer.hasPrefix("gitdir: ") {
                 // An absolute path, as `git worktree add` writes it.
                 let admin = String(pointer.dropFirst("gitdir: ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1494,11 +1499,18 @@ nonisolated enum Agents {
                 // directories separately. Binding the directory refreshes packed-refs after
                 // an outside rename; binding the file itself would pin its old inode.
                 args += ["--ro-bind", common, common]
-                for real in ["objects", "refs", "logs"] { args += ["--bind-try", "\(common)/\(real)", "\(common)/\(real)"] }
-                args += ["--bind", admin, admin, "--ro-bind", "\(admin)/commondir", "\(admin)/commondir"]
+                for real in ["objects", "refs", "logs"] {
+                    let option = worktreeReadOnly ? "--ro-bind-try" : "--bind-try"
+                    args += [option, "\(common)/\(real)", "\(common)/\(real)"]
+                }
+                args += [worktreeReadOnly ? "--ro-bind" : "--bind", admin, admin, "--ro-bind", "\(admin)/commondir", "\(admin)/commondir"]
             }
         }
-        for folder in reading where exists(folder) { args += ["--ro-bind", folder, folder] }
+        // Delegation snapshots live under OBY_HOME, which is hidden above. Bind those snapshots
+        // read-only at a private /tmp path before hiding OBY_HOME, then direct the CLI there.
+        for folder in reading where exists(folder) && folder != Workspace.root.path && !folder.hasPrefix(Workspace.root.path + "/") {
+            args += ["--ro-bind", folder, folder]
+        }
         if worktree != nil, let apple { args += apple.binds }
         if let own { args += ["--bind", own, own] }
         // The default Claude account keeps ~/.claude.json with ~/.claude.
@@ -1508,7 +1520,7 @@ nonisolated enum Agents {
         if ([worktree?.path, own].compactMap { $0 } + reading).contains(where: { vault == $0 || vault.hasPrefix($0 + "/") }) {
             args += ["--tmpfs", vault]
         }
-        return args + ["--"] + argv
+        return args + (chdir.map { ["--chdir", $0] } ?? []) + ["--"] + argv
     }
 }
 
@@ -1922,6 +1934,7 @@ nonisolated final class JobStore {
         // The inbox (Engine/Inbox.swift) and the conversation (Engine/Conversation.swift), the same way.
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS conversation (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
+        sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS delegations (id TEXT PRIMARY KEY, created REAL NOT NULL, body TEXT NOT NULL)", nil, nil, nil)
         // Settings › Permissions and the saved rules (Engine/Permissions.swift).
         createPermissionTables()
     }
@@ -1938,6 +1951,41 @@ nonisolated final class JobStore {
         sqlite3_bind_double(statement, 2, job.created.timeIntervalSince1970)
         sqlite3_bind_text(statement, 3, String(decoding: body, as: UTF8.self), -1, transient)
         if sqlite3_step(statement) != SQLITE_DONE { Logger.jobs.error("saving job \(job.id, privacy: .public) failed") }
+    }
+
+    func save(_ delegation: Delegation) {
+        guard let body = try? JSONEncoder().encode(delegation) else { return }
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO delegations (id, created, body) VALUES (?, ?, ?)", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(statement, 1, delegation.id, -1, transient)
+        sqlite3_bind_double(statement, 2, delegation.created.timeIntervalSince1970)
+        sqlite3_bind_text(statement, 3, String(decoding: body, as: UTF8.self), -1, transient)
+        if sqlite3_step(statement) != SQLITE_DONE { Logger.jobs.error("saving delegation \(delegation.id, privacy: .public) failed") }
+        sqlite3_exec(db, "DELETE FROM delegations WHERE rowid NOT IN (SELECT rowid FROM delegations ORDER BY created DESC, rowid DESC LIMIT 200)", nil, nil, nil)
+    }
+
+    func delegation(_ id: String) -> Delegation? {
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT body FROM delegations WHERE id = ?", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, id, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { return nil }
+        return try? JSONDecoder().decode(Delegation.self, from: Data(String(cString: text).utf8))
+    }
+
+    func delegations(_ limit: Int = 50) -> [Delegation] {
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT body FROM delegations ORDER BY created DESC, rowid DESC LIMIT ?", -1, &statement, nil)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(max(0, min(limit, 200))))
+        var rows: [Delegation] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let text = sqlite3_column_text(statement, 0), let row = try? JSONDecoder().decode(Delegation.self, from: Data(String(cString: text).utf8)) else { continue }
+            rows.append(row)
+        }
+        return rows
     }
 
     /// The newest `limit` jobs, newest first; every job for -1.
