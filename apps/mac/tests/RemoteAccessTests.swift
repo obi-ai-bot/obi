@@ -4,7 +4,7 @@ import Testing
 
 /// Remote access (#285): the cloudflared bundled with Oby, and this Mac's side of turning it on.
 struct RemoteAccessTests {
-    /// cloudflared ships inside Oby.app (Mac/Tools/bundle-cloudflared.sh): the pinned release,
+    /// cloudflared ships inside Oby.app (apps/mac/app/Tools/bundle-cloudflared.sh): the pinned release,
     /// universal, signed with the app's identity and the hardened runtime.
     @Test func cloudflaredIsBundledAndSigned() throws {
         let binary = try #require(TunnelRunner.bundled)

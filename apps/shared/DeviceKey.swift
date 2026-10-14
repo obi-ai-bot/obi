@@ -1,4 +1,4 @@
-// The watch publishes through the iPhone, or with its own pairing key (Watch/WatchLink.swift).
+// The watch publishes through the iPhone, or with its own pairing key (apps/watch/WatchLink.swift).
 #if os(iOS) || os(macOS)
 import CryptoKit
 import Foundation

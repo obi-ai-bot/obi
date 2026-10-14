@@ -214,7 +214,7 @@ final class RemoteAccess {
     }
 }
 
-/// `cloudflared tunnel run`, bundled with Oby (Mac/Tools/bundle-cloudflared.sh), as a child of
+/// `cloudflared tunnel run`, bundled with Oby (apps/mac/app/Tools/bundle-cloudflared.sh), as a child of
 /// the app: it starts when remote access is on and again after it exits, waiting a little longer
 /// each time. The token goes in its environment (`TUNNEL_TOKEN`), never in its arguments, so the
 /// process list doesn't show it.

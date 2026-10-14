@@ -22,11 +22,11 @@ final class IslandModel {
     let desk: Desk
     let feed: RunnerFeed
     let availability: MacAvailability
-    /// The update waiting to be installed, if any (Mac/Updater.swift): the open island's pill.
+    /// The update waiting to be installed, if any (apps/mac/app/Updater.swift): the open island's pill.
     let updater: Updater
     /// What you say while you hold fn.
     let voice = Voice()
-    /// Oby's reply, spoken, when you talked (Mac/Speech.swift).
+    /// Oby's reply, spoken, when you talked (apps/mac/app/Speech.swift).
     let speaker = Speaker()
     /// What goes with the next request: screenshots, what you copied.
     let tray = Tray()
@@ -100,7 +100,7 @@ final class IslandModel {
     /// Clear done would take the job from the island (`Job.settled`).
     func clears(_ job: Job) -> Bool { job.clearable(among: desk.jobs + feed.jobs) }
 
-    /// The one line the iPhone's Home says too (Shared/JobList.swift): who's working, and what
+    /// The one line the iPhone's Home says too (apps/shared/JobList.swift): who's working, and what
     /// needs you among the jobs listed.
     var summary: String {
         Summary.line(working: working, waiting: waiting, needs: NeedsYou.line((desk.jobs + feed.jobs).filter { lists($0) }))
@@ -109,7 +109,7 @@ final class IslandModel {
     /// What peeking shows next to Oby's name: a job that just ended, else the summary.
     var peekLine: String { notice ?? summary }
 
-    /// Where everything sits inside the island now (Mac/IslandLayout.swift).
+    /// Where everything sits inside the island now (apps/mac/app/IslandLayout.swift).
     var layout: IslandLayout {
         IslandLayout.of(state, screenWidth: screenWidth, notch: notch, barHeight: barHeight, line: peekLine, openHeight: openHeight)
     }
@@ -122,7 +122,7 @@ final class IslandModel {
 final class IslandController {
     let desk = Desk()
     let feed = RunnerFeed()
-    /// Sparkle, and the island's "Update ready · Restart" (Mac/Updater.swift).
+    /// Sparkle, and the island's "Update ready · Restart" (apps/mac/app/Updater.swift).
     let updater = Updater()
     /// Reach this Mac from anywhere (#285): Settings › Remote access and the tunnel it runs.
     let remote = RemoteAccess()
@@ -142,7 +142,7 @@ final class IslandController {
     private var repos: [String] = []
     /// The last words sent were hands-free (fn + Space): once Oby has spoken its reply, it listens again.
     private var handsFreeAsk = false
-    /// Opens the Oby window (Mac/App/ChatWindow.swift), on a job's screen when one is named: the
+    /// Opens the Oby window (apps/mac/app/App/ChatWindow.swift), on a job's screen when one is named: the
     /// app sets it. The island's "Open Chat" button goes there.
     var openWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
 
@@ -513,7 +513,7 @@ struct IslandView: View {
     let character: ObyCharacter
     let onOpen: () -> Void
     let onClose: () -> Void
-    /// Opens the Oby window, on a job when one is named (Mac/App/ChatWindow.swift).
+    /// Opens the Oby window, on a job when one is named (apps/mac/app/App/ChatWindow.swift).
     var onOpenWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
 
     private var mood: String {
@@ -667,7 +667,7 @@ private struct OpenIsland: View {
     /// From the island's edges (IslandLayout): the words start below the camera.
     let insets: EdgeInsets
     let onClose: () -> Void
-    /// Opens the Oby window (Mac/App/ChatWindow.swift), on a job when one is named.
+    /// Opens the Oby window (apps/mac/app/App/ChatWindow.swift), on a job when one is named.
     var onOpenWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
     @State private var text = ""
     @FocusState private var typing: Bool
@@ -698,7 +698,7 @@ private struct OpenIsland: View {
             HStack(alignment: .top) {
                 header.padding(.leading, characterWidth - 20)
                 Spacer(minLength: 12)
-                // An update is downloaded (Mac/Updater.swift): Restart installs it and relaunches,
+                // An update is downloaded (apps/mac/app/Updater.swift): Restart installs it and relaunches,
                 // after this Mac's check if one runs.
                 if let pill = model.updater.pill {
                     Button { model.updater.install() } label: {
@@ -915,7 +915,7 @@ private struct OpenIsland: View {
 
     /// The job's screen, with the same stages as the iPhone's. Both kinds publish here after Touch
     /// ID: this Mac's own jobs with Oby's sentence, the runner's with the runner's, signed by this
-    /// Mac's key (Mac/MacDevice.swift). A Mac without Touch ID leaves the runner's to the iPhone.
+    /// Mac's key (apps/mac/app/MacDevice.swift). A Mac without Touch ID leaves the runner's to the iPhone.
     @ViewBuilder private func screen(_ row: Row) -> some View {
         if let host = row.host {
             let id = row.job.id
@@ -989,7 +989,7 @@ private struct OpenIsland: View {
         }
     }
 
-    /// The jobs in one line, as the iPhone's Home and the closed notch say it (Shared/JobList.swift).
+    /// The jobs in one line, as the iPhone's Home and the closed notch say it (apps/shared/JobList.swift).
     /// What you said and what Oby answered are in the thread below.
     @ViewBuilder private var header: some View {
         VStack(alignment: .leading, spacing: 4) {

@@ -5,7 +5,7 @@ import Foundation
 nonisolated enum XcodeBuild {
     static let prefix = "oby-build/"
     static let interval: Duration = .seconds(2 * 60 * 60)
-    static let paths = ["iOS/", "iOSTests/", "Shared/", "Watch/", "LiveActivity/", "Character/", "Icon/", "Oby.xcodeproj"]
+    static let paths = ["apps/ios/app/", "apps/ios/tests/", "apps/shared/", "apps/watch/", "apps/ios/live-activity/", "Character/", "apps/icon/", "apps/Oby.xcodeproj"]
 
     static func includes(_ path: String) -> Bool {
         paths.contains { candidate in

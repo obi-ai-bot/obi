@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// One job, opened from the island's list: the same screen as the iPhone's (iOS/JobScreen.swift),
+/// One job, opened from the island's list: the same screen as the iPhone's (apps/ios/app/JobScreen.swift),
 /// in the island's own style. What its agent waits for (a decision card), its stages, the result
 /// (Publish after Touch ID, Dismiss for one that needs you), what you asked, its details, what you
 /// told the agent, Move to…, Stop, and a line to tell the agent more. A runner's job has a Mode menu too.
