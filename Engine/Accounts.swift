@@ -495,6 +495,10 @@ final class AccountStore {
         // On a machine with no browser (the runner) Cursor prints a link to open on any device.
         let headless = account.agent == "cursor" && headless
         var lines = ["#!/bin/sh", account.home.map { "export \(variable)=\(quote($0))" } ?? "unset \(variable)"]
+        // Cursor's login is a file under XDG_CONFIG_HOME: a login of the account's own takes its HOME too.
+        if account.agent == "cursor", let home = account.home {
+            lines += ["export XDG_CONFIG_HOME=\(quote(home + "/.config"))", "export HOME=\(quote(home))"]
+        }
         if headless { lines.append("export NO_OPEN_BROWSER=1") }
         lines.append("echo \(quote("Oby: sign in to the account for \(who)."))")
         if headless { lines.append("echo 'Open the link on any device.'") }

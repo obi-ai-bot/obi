@@ -46,6 +46,23 @@ struct LoopbackTests {
         #expect(refusal(request("/v1/agent/apple-check", host: "evil.example"), access)?.status == .forbidden)
     }
 
+    /// Cursor asks the broker for OAuth discovery after it POSTs to it (the probe, 2026-10-14): the
+    /// answer is a plain 404, not an unauthorized, whoever asks and without a token.
+    @Test func oauthDiscoveryIs404() {
+        let paths = ["/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server",
+                     "/.well-known/openid-configuration", "/.well-known/oauth-protected-resource/v1/agent/mcp/abc", "/register"]
+        for path in paths {
+            for access in [access, Access.tailnet(owner: "well@example.com")] {
+                let error = refusal(request(path, host: "127.0.0.1"), access)
+                #expect(error?.status == .notFound, "\(path)")
+            }
+        }
+        // A wrong Host is still refused first on a Mac, and everything else still needs its token.
+        #expect(refusal(request("/.well-known/openid-configuration", host: "evil.example"), access)?.status == .forbidden)
+        #expect(refusal(request("/v1/status", host: "127.0.0.1"), access)?.status == .unauthorized)
+        #expect(refusal(request("/v1/agent/mcp/abc", host: "127.0.0.1"), access) == nil)
+    }
+
     @Test func letsLoopbackHostsInWithTheToken() {
         for host in ["127.0.0.1", "127.0.0.1:7777", "localhost", "localhost:7777", "LOCALHOST", "[::1]", "[::1]:7777", " 127.0.0.1 "] {
             #expect(refusal(request(host: host, headers: bearer), access) == nil, Comment(rawValue: host))

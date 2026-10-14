@@ -54,8 +54,12 @@ struct RoutingTests {
         _ = try store.add(agent: "claude", name: "Second", payer: "")
         _ = try store.add(agent: "cursor", name: "Home", payer: "", separateLogins: true)
         #expect(store.accounts.filter { $0.account.agent == "cursor" }.count == 2)
-        // Until the probe says otherwise, the committed fact is the safe one.
-        #expect(CursorFacts.separateLogins == false)
+        // The probe on tetrix-lab proved separate logins per HOME + XDG_CONFIG_HOME + CURSOR_CONFIG_DIR.
+        #expect(CursorFacts.separateLogins == true)
+        let more = AccountStore(root: try temporaryFolder())
+        _ = try more.add(agent: "cursor", name: "One", payer: "")
+        _ = try more.add(agent: "cursor", name: "Two", payer: "")
+        #expect(more.accounts.filter { $0.account.agent == "cursor" }.count == 2)
     }
 }
 
@@ -66,14 +70,19 @@ struct CursorAccountTests {
         #expect(CursorStatus.parse("\u{1B}[32mLogged in as name@example.com\u{1B}[0m\n") == .signedIn("name@example.com"))
         #expect(CursorStatus.parse("Not logged in") == .signedOut)
         #expect(CursorStatus.parse("Authentication tokens stored securely") == .unknown)
-        #expect(CursorStatus.environment(home: "/h")["CURSOR_CONFIG_DIR"] == "/h")
-        #expect(CursorStatus.environment(home: "/h").keys.contains("CURSOR_API_KEY"))
+        let env = CursorStatus.environment(home: "/h")
+        #expect(env["CURSOR_CONFIG_DIR"] == "/h" && env["XDG_CONFIG_HOME"] == "/h/.config" && env["HOME"] == "/h")
+        #expect(env.keys.contains("CURSOR_API_KEY") && env.keys.contains("CURSOR_AUTH_TOKEN"))
+        // No home of Oby's: Cursor's own, and no variable of its logins.
+        #expect(CursorStatus.environment(home: nil)["HOME"] == nil && CursorStatus.environment(home: nil).keys.contains("CURSOR_API_KEY"))
     }
 
     @Test func signInScriptRunsCursorsLoginOnItsHome() {
         let account = Account(id: "c", agent: "cursor", name: "Work", payer: "Deskree", home: "/Users/x/accounts/c")
         let mac = AccountStore.signInScript(for: account, headless: false)
         #expect(mac.contains("export CURSOR_CONFIG_DIR='/Users/x/accounts/c'\n") && mac.contains("\ncursor-agent login\n"))
+        // Its login is a file under XDG_CONFIG_HOME: the account's folders hold it.
+        #expect(mac.contains("export XDG_CONFIG_HOME='/Users/x/accounts/c/.config'\n") && mac.contains("export HOME='/Users/x/accounts/c'\n"))
         #expect(!mac.contains("NO_OPEN_BROWSER") && !mac.contains("Open the link"))
         let runner = AccountStore.signInScript(for: account, headless: true)
         #expect(runner.contains("export NO_OPEN_BROWSER=1\n") && runner.contains("Open the link on any device."))
@@ -85,6 +94,7 @@ struct CursorAccountTests {
     @Test func tetrixSignInForCursorUsesItsMCPLogin() {
         let script = TetrixUse.signInScript(for: Account(id: "c", agent: "cursor", name: "Work", payer: "", home: "/h"))
         #expect(script.contains("export CURSOR_CONFIG_DIR='/h'") && script.contains("cursor-agent mcp login tetrix"))
+        #expect(script.contains("export XDG_CONFIG_HOME='/h/.config'") && script.contains("export HOME='/h'"))
         #expect(TetrixUse.cursorList("tetrix: ready\nother: needs login") == true)
         #expect(TetrixUse.cursorList("tetrix: needs authentication") == false)
         #expect(TetrixUse.cursorList("") == false)

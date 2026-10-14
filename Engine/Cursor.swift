@@ -1,25 +1,32 @@
 import Foundation
 
-/// What only a signed-in Cursor can tell (#406, spike #24): the probe's signed-in half
-/// (scripts/cursor-probe.sh, docs/cursor.md) decides each one, and its report is committed here.
-/// Until then each holds the safe value: what Oby does is true whichever way Cursor behaves.
+/// What only a signed-in Cursor can tell (#406, spike #24), as the probe on tetrix-lab proved it
+/// (cursor-agent 2026.10.12-d47ca18, scripts/cursor-probe.sh, docs/cursor.md).
 nonisolated enum CursorFacts {
-    /// Two Cursor accounts keep separate logins under their own `CURSOR_CONFIG_DIR`. False: Settings
-    /// allows one Cursor account per machine and says why.
-    static let separateLogins = false
-    /// An edit in `--sandbox disabled` comes to Oby as a permission request. False: a Cursor job in
-    /// Ask mode behaves as Accept edits, and the mode picker and the job's card say so.
+    /// Two Cursor accounts keep separate logins, but only when each runs with a `HOME` and an
+    /// `XDG_CONFIG_HOME` of its own as well as its own `CURSOR_CONFIG_DIR`: the login is a plain file
+    /// in `$XDG_CONFIG_HOME/cursor/auth.json`, and with `CURSOR_CONFIG_DIR` alone both homes showed the
+    /// user's real login (`CursorStatus.environment`). Proven 2026-10-14: account A signed in, B
+    /// stayed signed out.
+    static let separateLogins = true
+    /// An edit in `--sandbox disabled` comes to Oby as a permission request. It doesn't: with every
+    /// permission rejected, Cursor wrote the file without a `session/request_permission`. Edits can't
+    /// be gated through ACP, so a Cursor job in Ask mode behaves as Accept edits, and what holds them
+    /// is the job's worktree and, on Linux, bubblewrap. Commands do ask (kind `execute`).
     static let editsAsk = false
-    /// Cursor takes the MCP servers `session/new` carries. False: no server is handed over, and the
-    /// job's report says connected apps aren't available to Cursor jobs yet.
-    static let honoursMcpServers = false
-    /// Cursor offers its model as a `model` config option, set after `session/new`. False: `--model`.
-    static let modelOption = false
+    /// Cursor takes the MCP servers `session/new` carries: it POSTed to the server given, then tried
+    /// OAuth discovery (`/.well-known/oauth-protected-resource`, `oauth-authorization-server`,
+    /// `openid-configuration`, `POST /register`), which the runner answers `404` (Gate).
+    static let honoursMcpServers = true
+    /// Cursor offers its model as a `model` config option (values like
+    /// `gpt-5.6-luna[context=272k,reasoning=medium,fast=false]`, `default[]` for Auto), set after
+    /// `session/new`: `--model` is dropped.
+    static let modelOption = true
 
-    /// Why Settings allows one Cursor account.
+    /// Why a Cursor account of one machine is alone (not used while `separateLogins` holds).
     static let oneLogin = "Cursor keeps one login per Mac user"
-    /// What a Cursor job in Ask mode and its mode picker say when Cursor writes without asking.
-    static let askActsAsAcceptEdits = "Cursor edits files without asking Oby, so Ask works as Accept edits for Cursor jobs"
+    /// What a Cursor job in Ask mode and its mode picker say, since Cursor writes files without asking.
+    static let askActsAsAcceptEdits = "Cursor edits files without asking Oby, so Ask works as Accept edits for Cursor jobs: the job's worktree is what holds them"
     static let noConnectedApps = "Connected apps aren't available to Cursor jobs yet"
 }
 
@@ -30,20 +37,24 @@ extension ACPTool {
     /// - `--model`: its model from Settings › Models, left out for `auto` (Cursor picks) and when
     ///   Cursor sets its model as an option (`CursorFacts.modelOption`).
     /// - The environment keeps Cursor's login out of the agent's reach: no `CURSOR_API_KEY` or
-    ///   `CURSOR_AUTH_TOKEN`, and `CURSOR_CONFIG_DIR` is the account's.
+    ///   `CURSOR_AUTH_TOKEN`, and `CURSOR_CONFIG_DIR`, `XDG_CONFIG_HOME` and `HOME` are the
+    ///   account's: its login lives under them (`CursorFacts.separateLogins`).
     /// On Linux it runs in bubblewrap with `own: home` (`Agents.sandboxed`).
     static func cursor(worktree: URL, home: URL?, model: String, bubblewrap: Bool = Agents.bubblewrap,
+                       modelOption: Bool = CursorFacts.modelOption, honoursMCP: Bool = CursorFacts.honoursMcpServers,
                        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> ACPTool {
         let picked = model.trimmingCharacters(in: .whitespacesAndNewlines)
         let asks = picked.isEmpty || picked == "auto" ? nil : picked
         var command = ["cursor-agent", "--sandbox", "disabled"]
-        if let asks, !CursorFacts.modelOption { command += ["--model", asks] }
+        if let asks, !modelOption { command += ["--model", asks] }
         command.append("acp")
         var tool = ACPTool(id: "cursor", name: "Cursor",
                            arguments: Agents.sandboxed(Agents.niced(command), in: worktree, own: home?.path, bubblewrap: bubblewrap, exists: exists))
-        tool.environment = ["CURSOR_CONFIG_DIR": home?.path, "CURSOR_API_KEY": nil, "CURSOR_AUTH_TOKEN": nil]
+        tool.environment = CursorStatus.environment(home: home?.path)
         tool.model = asks
-        tool.honoursMCP = CursorFacts.honoursMcpServers
+        tool.honoursMCP = honoursMCP
+        // The account's own MCP servers (Tetrix), with only what's needed to start them.
+        tool.mcpFile = home?.appending(path: "mcp.json")
         if let home {
             tool.prepare = { try CursorConfig.rewrite(home: home) }
         } else {
@@ -120,9 +131,17 @@ nonisolated enum CursorStatus {
         case unknown
     }
 
-    /// The account's own config directory, and none of the logins an agent's environment never has.
+    /// The account's own folders, and none of the logins an agent's environment never has. The login
+    /// is a file under `XDG_CONFIG_HOME` (`~/.config/cursor/auth.json`), so an account's isolation
+    /// takes its `HOME` and `XDG_CONFIG_HOME` as well as `CURSOR_CONFIG_DIR`: the combination the
+    /// probe proved (`CursorFacts.separateLogins`). Without a home of its own, Cursor's defaults.
     static func environment(home: String?) -> [String: String?] {
-        ["CURSOR_CONFIG_DIR": home, "CURSOR_API_KEY": nil, "CURSOR_AUTH_TOKEN": nil]
+        var environment: [String: String?] = ["CURSOR_API_KEY": nil, "CURSOR_AUTH_TOKEN": nil]
+        guard let home else { return environment }
+        environment["CURSOR_CONFIG_DIR"] = home
+        environment["HOME"] = home
+        environment["XDG_CONFIG_HOME"] = home + "/.config"
+        return environment
     }
 
     /// "Logged in as name@example.com" is signed in, with that as its label; "Not logged in" is not.

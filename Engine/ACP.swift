@@ -111,6 +111,37 @@ nonisolated enum ACPRPC {
          "headers": [["name": "Authorization", "value": "Bearer \(mcp.token)"]]]
     }
 
+    /// The account's MCP servers as `session/new` takes them, from an `mcp.json`'s contents: a
+    /// server with a URL is HTTP (`http` when the tool takes it), one with a command is stdio. Only
+    /// `ClaudeAgent.mcpKeys` of each: one that needs a header or an environment variable is left
+    /// out, and one signed in with OAuth keeps its login in the account's own store.
+    static func accountServers(_ config: Data?, http: Bool) -> [[String: Any]] {
+        guard let config, let object = try? JSONSerialization.jsonObject(with: config) as? [String: Any],
+              let servers = object["mcpServers"] as? [String: Any] else { return [] }
+        return servers.keys.sorted().compactMap { name in
+            guard let server = servers[name] as? [String: Any], server["headers"] == nil, server["env"] == nil else { return nil }
+            let kept = server.filter { ClaudeAgent.mcpKeys.contains($0.key) }
+            if let url = kept["url"] as? String {
+                // `type: "sse"` is the old transport: not offered.
+                guard http, kept["type"] as? String ?? "http" == "http" else { return nil }
+                return ["type": "http", "name": name, "url": url, "headers": [[String: String]]()]
+            }
+            guard let command = kept["command"] as? String else { return nil }
+            return ["name": name, "command": command, "args": kept["args"] as? [String] ?? [], "env": [[String: String]]()]
+        }
+    }
+
+    /// The `model` option's value for the model Settings names: the value itself, or the first one
+    /// that starts with it and its parameters (`gpt-5.6-luna[context=272k,…]`), its current value
+    /// first. Nil for Auto (Cursor picks) and for a model the option doesn't offer.
+    static func modelValue(_ model: String, in values: [String], current: String?) -> String? {
+        guard !model.isEmpty, model != "auto" else { return nil }
+        if values.contains(model) { return model }
+        let variants = values.filter { $0.hasPrefix(model + "[") }
+        if let current, variants.contains(current) { return current }
+        return variants.first
+    }
+
     /// What `session/new` and `session/load` answered, as Oby needs it.
     nonisolated struct Session: Equatable, Sendable {
         var id: String?
@@ -437,6 +468,9 @@ nonisolated struct ACPTool: Sendable {
     var model: String?
     /// Whether the broker's MCP server may go to it in `session/new` (once the tool is known to take it).
     var honoursMCP = true
+    /// The account's own MCP servers (`{"mcpServers": {…}}`, Cursor's `mcp.json`), which go along
+    /// with only the keys that start them (`ClaudeAgent.mcpKeys`: never a header or an env value).
+    var mcpFile: URL?
     /// Runs before the process starts (a config file Oby owns).
     var prepare: (@Sendable () throws -> Void)?
     /// Why it can't start at all, or nil.
@@ -678,7 +712,10 @@ final class ACPAgent: AgentRun {
                 let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
                 capabilities = ACPRPC.capabilities(try await server.call("initialize", ACPRPC.initialize(version: version)))
                 var servers: [[String: Any]] = []
-                if let mcp, tool.honoursMCP, capabilities.http { servers.append(ACPRPC.broker(mcp)) }
+                if tool.honoursMCP {
+                    if let mcp, capabilities.http { servers.append(ACPRPC.broker(mcp)) }
+                    servers += ACPRPC.accountServers(tool.mcpFile.flatMap { try? Data(contentsOf: $0) }, http: capabilities.http)
+                }
                 var made: String?
                 if let resume, capabilities.loadSession {
                     // Its modes and options come with the load, as with a new session: the job's mode
@@ -712,8 +749,15 @@ final class ACPAgent: AgentRun {
     /// Sets the model it offers as an option, and the mode the job is in.
     private func settle() async {
         guard let server, let session else { return }
-        if let option = found.modelOption, let model = tool.model, !model.isEmpty, model != found.model, found.models.contains(model) {
-            _ = try? await server.call("session/set_config_option", ACPRPC.setConfigOption(session: session, option: option, value: model))
+        if let model = tool.model, !model.isEmpty {
+            if let option = found.modelOption, let value = ACPRPC.modelValue(model, in: found.models, current: found.model) {
+                if value != found.model {
+                    _ = try? await server.call("session/set_config_option", ACPRPC.setConfigOption(session: session, option: option, value: value))
+                }
+            } else {
+                // Said, never silent: Cursor goes on with its own.
+                onEvent(.step("\(tool.name) doesn't offer \(model): it uses its own model"))
+            }
         }
         await switchMode(to: target(for: mode))
     }

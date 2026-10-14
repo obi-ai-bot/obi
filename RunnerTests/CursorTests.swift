@@ -72,7 +72,11 @@ struct CursorTests {
             send({"id": mid, "error": {"code": -32000, "message": "Authentication required"}})
         elif method == "session/new":
             send({"id": mid, "result": {"sessionId": "fake-session",
-                  "modes": {"currentModeId": "agent", "availableModes": [{"id": "agent", "name": "Agent"}, {"id": "plan", "name": "Plan"}]}}})
+                  "modes": {"currentModeId": "agent", "availableModes": [{"id": "agent", "name": "Agent"}, {"id": "plan", "name": "Plan"}]},
+                  "configOptions": [{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "default[]",
+                                     "options": [{"value": "default[]", "name": "Auto"},
+                                                 {"value": "gpt-5.6-luna[context=272k,reasoning=medium,fast=false]", "name": "GPT-5.6 Luna"},
+                                                 {"value": "gpt-5[]", "name": "GPT-5"}]}]}})
         elif method == "session/load":
             send({"id": mid, "result": {"modes": {"currentModeId": "agent", "availableModes": [{"id": "agent", "name": "Agent"}, {"id": "plan", "name": "Plan"}]}}})
         elif method in ("session/set_mode", "session/set_config_option"):
@@ -171,17 +175,23 @@ struct CursorTests {
 
     @Test func launch() throws {
         let home = URL(filePath: "/tmp/oby/accounts/c1")
-        let tool = ACPTool.cursor(worktree: worktree, home: home, model: "gpt-5", bubblewrap: false)
+        let tool = ACPTool.cursor(worktree: worktree, home: home, model: "gpt-5", bubblewrap: false, modelOption: false)
         let argv = tool.arguments
         #expect(argv.suffix(5) == ["--sandbox", "disabled", "--model", "gpt-5", "acp"], "\(argv)")
         #expect(argv.contains("cursor-agent") && !argv.contains("agent"))
         let env = try ACPServer.environment(for: tool, worktree: nil, base: ["PATH": "/usr/bin", "CURSOR_API_KEY": "key", "CURSOR_AUTH_TOKEN": "token"])
         #expect(env["CURSOR_CONFIG_DIR"] == "/tmp/oby/accounts/c1")
+        // The login is a file under XDG_CONFIG_HOME: the account's own folders hold it (the probe's isolation).
+        #expect(env["XDG_CONFIG_HOME"] == "/tmp/oby/accounts/c1/.config" && env["HOME"] == "/tmp/oby/accounts/c1")
         #expect(env["CURSOR_API_KEY"] == nil && env["CURSOR_AUTH_TOKEN"] == nil)
         // Cursor picks its own model for auto, and Oby never says so.
-        let auto = ACPTool.cursor(worktree: worktree, home: home, model: "auto", bubblewrap: false)
+        let auto = ACPTool.cursor(worktree: worktree, home: home, model: "auto", bubblewrap: false, modelOption: false)
         #expect(!auto.arguments.contains("--model"))
-        #expect(!ACPTool.cursor(worktree: worktree, home: home, model: "", bubblewrap: false).arguments.contains("--model"))
+        #expect(!ACPTool.cursor(worktree: worktree, home: home, model: "", bubblewrap: false, modelOption: false).arguments.contains("--model"))
+        // Cursor offers its model as an option (the probe): `--model` is dropped, and the option sets it.
+        #expect(CursorFacts.modelOption)
+        let option = ACPTool.cursor(worktree: worktree, home: home, model: "gpt-5", bubblewrap: false)
+        #expect(!option.arguments.contains("--model") && option.model == "gpt-5")
     }
 
     @Test func onBubblewrapTheCLIFolderIsAnOverlayAndTheHomeIsBound() {
@@ -335,6 +345,34 @@ struct CursorTests {
         // The prompt goes to the picked-up session.
         let prompt = try #require(received().first { $0["method"] as? String == "session/prompt" })
         #expect((prompt["params"] as? [String: Any])?["sessionId"] as? String == "old-session")
+    }
+
+    /// Cursor's model is an option of the session (values carry parameters), and its accounts' own
+    /// MCP servers go along with the broker.
+    @Test func theModelAndTheMCPServersGoWithTheSession() async throws {
+        var tool = try fake("ask")
+        tool.model = "gpt-5.6-luna"
+        let mcp = folder.appending(path: "mcp.json")
+        try #"{"mcpServers":{"tetrix":{"url":"https://tetrix.example/mcp","headers":{"Authorization":"x"}},"graph":{"url":"https://graph.example/mcp"},"local":{"command":"npx","args":["-y","thing"],"env":{"K":"v"}}}}"#
+            .write(to: mcp, atomically: true, encoding: .utf8)
+        tool.mcpFile = mcp
+        let agent = ACPAgent(tool: tool, worktree: worktree)
+        agent.mode = .ask
+        agent.mcp = AgentMCP(url: "http://127.0.0.1:8787/v1/agent/mcp/abc", token: "job-token")
+        agent.approvals = UserDefaults(suiteName: "oby-test-\(UUID().uuidString)") ?? .standard
+        try agent.start(prompt: "Build it") { _ in }
+        defer { agent.kill() }
+        try await until { received().contains { $0["method"] as? String == "session/prompt" } }
+        let set = try #require(received().first { $0["method"] as? String == "session/set_config_option" })
+        let params = set["params"] as? [String: Any]
+        #expect(params?["configId"] as? String == "model")
+        #expect(params?["value"] as? String == "gpt-5.6-luna[context=272k,reasoning=medium,fast=false]")
+        let new = try #require(received().first { $0["method"] as? String == "session/new" })
+        let servers = (new["params"] as? [String: Any])?["mcpServers"] as? [[String: Any]] ?? []
+        // The broker with the job's token, and the account's server that needs no header or env value.
+        #expect(servers.map { $0["name"] as? String } == ["oby", "graph"])
+        #expect((servers.first?["headers"] as? [[String: String]])?.first?["value"] == "Bearer job-token")
+        #expect(servers.last?["type"] as? String == "http" && servers.last?["url"] as? String == "https://graph.example/mcp")
     }
 
     @Test func aRejectedPlanSaysWhy() async throws {

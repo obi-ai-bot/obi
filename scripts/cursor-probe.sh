@@ -247,6 +247,16 @@ def signed_in():
         show(f"models for {name}", code, text)
     different = labels["A"] != labels["B"] and all(labels.values())
     say(f"separate logins (per HOME + XDG_CONFIG_HOME + CURSOR_CONFIG_DIR): {'yes' if different else 'NO'}")
+    say("## 2b. The same without HOME: only XDG_CONFIG_HOME + CURSOR_CONFIG_DIR of their own")
+    xdg_only = {}
+    for name, (home, config) in homes.items():
+        env = base_env(REAL_HOME, config)
+        env["XDG_CONFIG_HOME"] = os.path.join(home, ".config")
+        code, text = identity(env)
+        xdg_only[name] = text
+        show(f"status for {name}, XDG_CONFIG_HOME + CURSOR_CONFIG_DIR only", code, text)
+    say(f"separate logins without HOME: {'yes' if xdg_only['A'] != xdg_only['B'] and all(xdg_only.values()) else 'NO'}")
+    say()
     say("Files each home holds (names only):")
     for name, (home, config) in homes.items():
         say(f"  {name}: " + ", ".join(tree(home) + ["cursor:" + n for n in tree(config)]))

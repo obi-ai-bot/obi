@@ -234,9 +234,11 @@ nonisolated struct TetrixUse: Codable, Equatable, Sendable {
                 claude
                 """)
         }
+        // Cursor's login is a file under XDG_CONFIG_HOME: the account's own takes its HOME too.
+        let own = account.agent == "cursor" ? account.home.map { "\nexport XDG_CONFIG_HOME=\(quote($0 + "/.config"))\nexport HOME=\(quote($0))" } ?? "" : ""
         return """
         #!/bin/sh
-        \(account.home.map { "export \(variable)=\(quote($0))" } ?? "unset \(variable)")
+        \(account.home.map { "export \(variable)=\(quote($0))" } ?? "unset \(variable)")\(own)
         echo \(quote("Oby: sign \(account.name)'s agents in to Tetrix."))
         \(steps)
         echo

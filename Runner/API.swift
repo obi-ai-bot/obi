@@ -883,6 +883,13 @@ struct Gate<Context: RequestContext>: RouterMiddleware {
     /// agent's own requests (`API.appleCheck`) carry its job's token instead of the owner's login
     /// or the runner's token.
     nonisolated static func admit(_ request: Request, access: Access) throws {
+        // A tool's OAuth discovery for an MCP server (Cursor asks after it POSTs to the broker):
+        // there's none, and the plain 404 says so without an unauthorized to read as a login to do.
+        // The same answer to anyone, so it tells nothing; on a Mac the Host is checked first.
+        if case .local = access, !LocalRunner.isLoopback(host: request.head.authority) {
+            throw APIError(.forbidden, "This runner answers only on 127.0.0.1.")
+        }
+        if isOAuthDiscovery(request.uri.path) { throw APIError(.notFound, "Not found.") }
         switch access {
         case .tailnet(let owner):
             guard request.uri.path.hasPrefix("/v1/agent/") || request.headers[values: .tailscaleUserLogin] == [owner] else {
@@ -896,6 +903,12 @@ struct Gate<Context: RequestContext>: RouterMiddleware {
                 throw APIError(.unauthorized, "This runner answers only Oby on this Mac.")
             }
         }
+    }
+
+    /// The paths an OAuth client asks for: the well-known documents (also with the resource's path
+    /// after them) and the registration, authorization and token endpoints.
+    nonisolated static func isOAuthDiscovery(_ path: String) -> Bool {
+        path.hasPrefix("/.well-known/") || ["/register", "/authorize", "/token"].contains(path)
     }
 
     /// The token in `Authorization: Bearer <token>`, or nil.

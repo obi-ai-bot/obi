@@ -58,6 +58,27 @@ struct ACPTests {
         #expect(ACPRPC.capabilities([:]) == ACPRPC.Capabilities())
     }
 
+    @Test func accountServersKeepOnlyWhatStartsThem() {
+        let config = #"{"mcpServers":{"tetrix":{"url":"https://t.example/mcp","type":"http"},"authed":{"url":"https://a.example","headers":{"Authorization":"x"}},"sse":{"url":"https://s.example","type":"sse"},"local":{"command":"npx","args":["-y","x"],"cwd":"/secret"},"keyed":{"command":"x","env":{"K":"v"}}}}"#
+        let servers = ACPRPC.accountServers(Data(config.utf8), http: true)
+        #expect(servers.map { $0["name"] as? String } == ["local", "tetrix"])
+        #expect(servers[0]["command"] as? String == "npx" && servers[0]["args"] as? [String] == ["-y", "x"] && servers[0]["cwd"] == nil)
+        #expect(servers[1]["type"] as? String == "http" && (servers[1]["headers"] as? [Any])?.isEmpty == true)
+        // A tool without HTTP MCP gets the stdio ones only; no file, none.
+        #expect(ACPRPC.accountServers(Data(config.utf8), http: false).map { $0["name"] as? String } == ["local"])
+        #expect(ACPRPC.accountServers(nil, http: true).isEmpty)
+    }
+
+    @Test func modelValueFindsTheVariantWithItsParameters() {
+        let values = ["default[]", "gpt-5.6-luna[context=272k,reasoning=medium,fast=false]", "gpt-5.6-luna[context=1m,reasoning=high,fast=false]", "gpt-5[]"]
+        #expect(ACPRPC.modelValue("gpt-5.6-luna", in: values, current: nil) == values[1])
+        #expect(ACPRPC.modelValue("gpt-5.6-luna", in: values, current: values[2]) == values[2])
+        #expect(ACPRPC.modelValue("gpt-5", in: values, current: "default[]") == "gpt-5[]")
+        #expect(ACPRPC.modelValue("gpt-5[]", in: values, current: nil) == "gpt-5[]")
+        // Auto lets Cursor pick, and a model it doesn't offer is none.
+        #expect(ACPRPC.modelValue("auto", in: values, current: nil) == nil && ACPRPC.modelValue("claude-x", in: values, current: nil) == nil)
+    }
+
     // MARK: Permissions
 
     @Test func permissionMapsToBash() {
