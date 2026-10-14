@@ -13,7 +13,7 @@ struct ObyApp: App {
             // The same keys work from any app (Mac/StopAllKey.swift).
             Button("Stop All Jobs") { app.island.stopAll() }
                 .keyboardShortcut(".", modifiers: [.control, .option, .command])
-            SettingsLink { Text("Settings…") }
+            Button("Settings…") { SettingsSelection.open(.general) }
                 .keyboardShortcut(",")
             Button("Show First Launch…") { app.firstLaunch.show() }
             Divider()
@@ -29,13 +29,12 @@ struct ObyApp: App {
         }
         // The app menu, when a window of Oby's is up: Check for Updates… under About.
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { SettingsSelection.open(.general) }.keyboardShortcut(",")
+            }
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { app.island.updater.check() }
             }
-        }
-
-        Settings {
-            SettingsTabs(app: app)
         }
     }
 }
@@ -63,6 +62,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     lazy var firstLaunch = FirstLaunch(island: island)
     /// The Oby window: the conversation, Agents and Live (#11).
     lazy var chat = ChatWindow(island: island)
+    private var settingsWindow: NSWindow?
+
+    /// The chat and notch use an explicit window: showSettingsWindow: no longer opens SwiftUI Settings.
+    func showSettings() {
+        if let settingsWindow {
+            settingsWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 640),
+                              styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        window.title = "Oby Settings"
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: SettingsTabs(app: self))
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        settingsWindow = window
+    }
 
     override init() {
         UserDefaults.standard.register(defaults: AgentModels.defaults)
@@ -73,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // Hosting the unit tests: no island, and no fight with the Oby that's already running.
         guard NSClassFromString("XCTestCase") == nil else { return }
         // A pipe to an agent that just exited must not take Oby down with it.
+        SettingsSelection.shared.show = { [weak self] in self?.showSettings() }
         signal(SIGPIPE, SIG_IGN)
         Task.detached { _ = Shell.environment }
         // One Oby at a time: a second launch quietly leaves the first one in charge.

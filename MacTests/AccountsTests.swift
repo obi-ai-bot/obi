@@ -139,3 +139,48 @@ struct AccountsTests {
         #expect(AccountStore(root: root).accounts.isEmpty)
     }
 }
+
+struct RunnerAccountTerminalTests {
+    @Test func sshRejectsOptionsAndShellSyntax() {
+        for host in ["-oProxyCommand=evil", "host;id", "host\ncommand", "$(id)", ""] {
+            #expect(throws: (any Error).self) { try RunnerAccountTerminal.validate(host) }
+        }
+        #expect(throws: Never.self) { try RunnerAccountTerminal.validate("user@tetrix-lab.tail8de49b.ts.net") }
+    }
+
+    @Test func sshKeepsNamesAndHomesQuotedAndDoesNotRunLoginLocally() async throws {
+        let marker = FileManager.default.temporaryDirectory.appending(path: "oby-must-not-execute-\(UUID().uuidString)")
+        let account = Account(id: "test", agent: "claude", name: "Daniel's $(touch \(marker.path))", payer: "",
+                              home: "/srv/Oby's accounts/test")
+        let login = AccountLogin(account: account, path: "/home/user/.local/bin:/usr/bin:/bin")
+        let script = try RunnerAccountTerminal.script(login, host: "tetrix-lab")
+        let parsed = try await Shell.run(["/bin/sh", "-n"], input: Data(script.utf8))
+        #expect(parsed.status == 0)
+        // Substitute only SSH with an argv dumper to verify both quoting levels without connecting.
+        let stub = script.replacingOccurrences(of: "/usr/bin/ssh", with: "/usr/bin/printf '%s\\n'")
+        let outer = try await Shell.run(["/bin/sh"], input: Data(stub.utf8))
+        #expect(outer.status == 0)
+        #expect(outer.text.hasPrefix("-t\n--\ntetrix-lab\nexport PATH="))
+        let remote = String(outer.text.split(separator: "\n", maxSplits: 3)[3])
+        let inner = try await Shell.run(["/bin/sh", "-n"], input: Data(remote.utf8))
+        #expect(inner.status == 0)
+        #expect(remote.contains("\nclaude auth login\n"))
+        #expect(remote.contains("export CLAUDE_CONFIG_DIR="))
+        let withoutLogin = remote.replacingOccurrences(of: "\nclaude auth login\n", with: "\nprintf '%s' \"$CLAUDE_CONFIG_DIR\"\n")
+        let result = try await Shell.run(["/bin/sh"], input: Data(withoutLogin.utf8))
+        #expect(result.status == 0)
+        #expect(result.text.contains("/srv/Oby's accounts/test"))
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    @MainActor @Test func settingsSelectionOpensTheRequestedTab() {
+        let state = SettingsSelection.shared
+        let savedTab = state.tab, savedShow = state.show
+        defer { state.tab = savedTab; state.show = savedShow }
+        var opened: [SettingsTab] = []
+        state.show = { opened.append(state.tab) }
+        SettingsSelection.open(.accounts)
+        SettingsSelection.open(.runner)
+        #expect(opened == [.accounts, .runner])
+    }
+}

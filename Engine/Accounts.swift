@@ -170,12 +170,22 @@ final class AccountStore {
         if agent == "cursor", !separateLogins, accounts.contains(where: { $0.account.agent == "cursor" }) {
             throw Shell.Failure(message: CursorFacts.oneLogin + ": it has one Cursor account already.")
         }
+        // Never replace an unreadable account list with the default profile when adding one.
+        if FileManager.default.fileExists(atPath: file.path) {
+            do { _ = try JSONDecoder().decode([Account].self, from: Data(contentsOf: file)) }
+            catch { throw Shell.Failure(message: "Couldn't read the saved accounts. Restore accounts.json before adding an account; nothing was changed.") }
+        }
         let id = UUID().uuidString.lowercased()
         let home = homes.appending(path: id)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let account = Account(id: id, agent: agent, name: name, payer: payer, home: home.path)
         accounts.append(AccountState(account: account))
-        try save()
+        do { try save() }
+        catch {
+            accounts.removeAll { $0.account.id == id }
+            try? FileManager.default.removeItem(at: home)
+            throw error
+        }
         return account
     }
 
@@ -510,4 +520,10 @@ final class AccountStore {
         let root = homes.standardizedFileURL.resolvingSymlinksInPath().path + "/"
         return URL(filePath: path).standardizedFileURL.resolvingSymlinksInPath().path.hasPrefix(root)
     }
+}
+
+/// Login metadata for the owner's Terminal. No credentials or provider output cross the API.
+nonisolated struct AccountLogin: Codable, Sendable {
+    var account: Account
+    var path: String
 }

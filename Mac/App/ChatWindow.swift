@@ -10,12 +10,13 @@ nonisolated enum SettingsTab: String, CaseIterable, Sendable { case general, run
 final class SettingsSelection {
     static let shared = SettingsSelection()
     var tab = SettingsTab.general
+    var show: (() -> Void)?
 
     /// Opens Settings on `tab`.
     static func open(_ tab: SettingsTab) {
         shared.tab = tab
         NSApp.activate()
-        _ = NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        shared.show?()
     }
 }
 

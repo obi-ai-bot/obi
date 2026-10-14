@@ -667,6 +667,14 @@ Changes what a job that hasn't started waits for:
 
 The list replaces the job's (Start when); `[]` starts it now. A condition on an account moves the job to that account. A job waiting to be asked about a condition that can't hold stops asking. Returns the job. `404` for an unknown job; `422` with why for a job that started already, one of Oby's own reviews, or conditions that can't be.
 
+### Account setup from macOS
+
+`POST /v1/accounts` creates a signed-out profile on this runner. Body: `{"agent":"claude","name":"Daniel Claude","payer":""}`. Tools are `claude` and `codex`; the trimmed name must have 1–100 characters and payer at most 100. Returns `201` with `{"account":{"id":"<uuid>","agent":"claude","name":"Daniel Claude","payer":"","home":"<runner account directory>"},"path":"<runner login PATH>"}`. Invalid input is `422`. The new profile is saved before it is returned and appears in the `accounts` event. No credentials are accepted or returned.
+
+`POST /v1/accounts/{id}/sign-in` returns the same login metadata for an existing profile (`404` if absent, `422` for an unsupported tool). The Mac builds a quoted SSH command from that metadata and opens Terminal on the tool's own login, with its account directory and the runner's PATH. The owner chooses an SSH host and must have SSH access. Claude's link can be opened in the Mac browser; credentials stay with Claude Code on the runner. Oby never captures the login's input or output. Existing signed-out profiles offer Sign In again if Terminal was closed or SSH failed.
+
+`POST /v1/accounts/refresh` asks the tools who is signed in, then returns the account list and emits changed `accounts` events. The Mac calls it when returning from Terminal. These endpoints use the same owner authentication as the rest of the API; agent broker tokens cannot call them. An older runner answers `404`, and the Mac asks the owner to update it.
+
 ### `POST /v1/accounts/{id}/reserve`
 
 Lifts an account's weekly reserve, or puts it back (#278):

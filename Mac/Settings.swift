@@ -309,16 +309,28 @@ struct AccountsSettingsView: View {
     @State private var payer = ""
     @State private var removing: Account?
     @State private var problem: String?
+    @State private var onRunner = true
+    @State private var sshHost = ""
+    @State private var connecting = false
+    @State private var refreshing = false
+    private var remote: Bool { feed.runner != nil && !feed.local }
+    private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
         Form {
             AccountSections("Accounts on this Mac", items: store.accounts, id: \.account.id, usage: \.usage,
                             place: "on this Mac", row: row)
             Section("Add an account") {
+                if remote {
+                    Picker("Run tasks on", selection: $onRunner) {
+                        Text(feed.name).tag(true)
+                        Text("This Mac").tag(false)
+                    }
+                }
                 Picker("Tool", selection: $agent) {
                     Text("Claude Code").tag("claude")
                     Text("Codex").tag("codex")
-                    Text("Cursor").tag("cursor")
+                    if !remote || !onRunner { Text("Cursor").tag("cursor") }
                 }
                 if agent == "cursor", !CursorFacts.separateLogins {
                     // Why a second one is refused.
@@ -326,14 +338,19 @@ struct AccountsSettingsView: View {
                 }
                 TextField("Name", text: $name, prompt: Text("Personal"))
                 TextField("Paid by", text: $payer, prompt: Text("Wellington"))
-                Button("Add Account") {
-                    attempt {
-                        try store.add(agent: agent, name: name.trimmingCharacters(in: .whitespaces), payer: payer.trimmingCharacters(in: .whitespaces))
-                        name = ""
-                        payer = ""
-                    }
+                Button(connecting ? "Connecting…" : "Add Account & Sign In…") {
+                    Task { await connect() }
                 }
-                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(trimmedName.isEmpty || connecting || (remote && onRunner && sshHost.isEmpty))
+            }
+            .disabled(connecting)
+            if remote {
+                Section("Runner sign-in") {
+                    TextField("SSH host", text: $sshHost, prompt: Text("tetrix-lab"))
+                        .disabled(connecting)
+                    Text("Sign in in Terminal over SSH. Open the tool's sign-in link in your Mac's browser; the login stays on the runner. After completing sign-in, refresh accounts below.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             if let problem {
                 Text(problem).font(.caption).foregroundStyle(.red)
@@ -348,6 +365,10 @@ struct AccountsSettingsView: View {
                             guard let runner = feed.runner else { throw RunnerError(message: "Set the runner's URL in Settings first.") }
                             _ = try await runner.liftReserve(state.account.id, lift)
                         }
+                        if !feed.local, ["claude", "codex"].contains(state.account.agent), !state.signedIn {
+                            Button("Sign In…") { Task { await signInOnRunner(state.account.id) } }
+                                .disabled(connecting || sshHost.isEmpty)
+                        }
                         if state.signedIn {
                             Text(Usage.tetrix(state.tetrix, jobs: state.tetrixJobs, used: state.tetrixUsed))
                                 .font(.caption).foregroundStyle(state.tetrix == false ? Color.orange : Color.secondary)
@@ -355,13 +376,23 @@ struct AccountsSettingsView: View {
                     }
                 }
             }
+            Section {
+                Button(refreshing ? "Refreshing…" : "Refresh Accounts") { Task { await refresh() } }
+                    .disabled(refreshing || connecting)
+            }
         }
         .formStyle(.grouped)
         .frame(width: 460)
-        .task { await store.refresh() }
+        .task {
+            sshHost = feed.runner?.base.host() ?? ""
+            await refresh()
+        }
+        .onChange(of: onRunner) { _, on in
+            if on && remote && agent == "cursor" { agent = "claude" }
+        }
         // Back from signing in, in Terminal.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            Task { await store.refresh() }
+            Task { await refresh() }
         }
         .confirmationDialog("Remove \(removing?.name ?? "this account")?",
                             isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
@@ -399,6 +430,64 @@ struct AccountsSettingsView: View {
                 Button("Remove", role: .destructive) { removing = state.account }
             }
             .padding(.top, 4)
+        }
+    }
+
+    private func connect() async {
+        guard !connecting else { return }
+        connecting = true
+        defer { connecting = false }
+        let host = sshHost
+        do {
+            if remote && onRunner, let runner = feed.runner {
+                // Validate SSH before making a profile, so a typo doesn't leave one behind.
+                try RunnerAccountTerminal.validate(host)
+                let login = try await runner.addAccount(agent: agent, name: trimmedName, payer: payer)
+                // A profile now exists even if Terminal can't open: retry from its Sign In button.
+                name = ""
+                payer = ""
+                try RunnerAccountTerminal.open(login, host: host)
+            } else {
+                let account = try store.add(agent: agent, name: trimmedName, payer: payer.trimmingCharacters(in: .whitespacesAndNewlines))
+                try store.signIn(account)
+            }
+            name = ""
+            payer = ""
+            problem = nil
+        } catch { problem = connectionProblem(error) }
+    }
+
+    private func signInOnRunner(_ id: String) async {
+        guard !connecting else { return }
+        connecting = true
+        defer { connecting = false }
+        let host = sshHost
+        do {
+            guard let runner = feed.runner else { return }
+            try RunnerAccountTerminal.validate(host)
+            let login = try await runner.accountLogin(id)
+            try RunnerAccountTerminal.open(login, host: host)
+            problem = nil
+        } catch { problem = connectionProblem(error) }
+    }
+
+    private func connectionProblem(_ error: Error) -> String {
+        if let error = error as? RunnerError, error.status == 404 {
+            return "Update Oby's runner to connect accounts from this Mac. This runner doesn't support account setup yet."
+        }
+        return error.localizedDescription
+    }
+
+    private func refresh() async {
+        guard !refreshing else { return }
+        refreshing = true
+        defer { refreshing = false }
+        await store.refresh()
+        if remote, let runner = feed.runner {
+            // SSE brings the refreshed accounts back to the UI.
+            do { _ = try await runner.refreshAccounts() }
+            catch let error as RunnerError where error.status == 404 { /* Older runner. */ }
+            catch { problem = error.localizedDescription }
         }
     }
 
@@ -593,5 +682,36 @@ extension AccountStore {
         try (tetrix ? TetrixUse.signInScript(for: account) : Self.signInScript(for: account)).write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
         guard NSWorkspace.shared.open(script) else { throw Shell.Failure(message: "Couldn't open Terminal to sign in.") }
+    }
+}
+
+/// Builds the SSH command locally from typed metadata. No remote shell text is executed verbatim.
+nonisolated enum RunnerAccountTerminal {
+    static func quote(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: #"'\''"#) + "'" }
+
+    static func validate(_ host: String) throws {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_@:")
+        guard !host.isEmpty, !host.hasPrefix("-"), host.unicodeScalars.allSatisfy(allowed.contains) else {
+            throw Shell.Failure(message: "Enter the runner's SSH host, such as tetrix-lab or user@tetrix-lab.")
+        }
+    }
+
+    static func script(_ login: AccountLogin, host: String) throws -> String {
+        try validate(host)
+        guard ["claude", "codex"].contains(login.account.agent) else {
+            throw Shell.Failure(message: "Connect this tool on the runner itself.")
+        }
+        // No stdin/stdout pipes around the provider: Terminal owns the login end to end.
+        let signIn = AccountStore.signInScript(for: login.account)
+            .replacingOccurrences(of: "\ncodex login\n", with: "\ncodex login --device-auth\n")
+        let remote = "export PATH=\(quote(login.path))\ncd /tmp || exit 1\n" + signIn
+        return "#!/bin/sh\n/usr/bin/ssh -t -- \(quote(host)) \(quote(remote))\n"
+    }
+
+    @MainActor static func open(_ login: AccountLogin, host: String) throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "oby-runner-sign-in-\(UUID().uuidString).command")
+        try script(login, host: host).write(to: file, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: file.path)
+        guard NSWorkspace.shared.open(file) else { throw Shell.Failure(message: "Couldn't open Terminal to sign in.") }
     }
 }

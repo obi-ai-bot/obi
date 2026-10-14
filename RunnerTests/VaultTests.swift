@@ -333,7 +333,9 @@ struct VaultScanTests {
         let titled = await #expect(throws: Shell.Failure.self) {
             try await MacCheck.scan(("fix: \(Fake.aws) (#4)", "* fix: the login"), vault: vault)
         }
-        #expect(titled?.message == "possible secret in squash commit title:1 (AWS access key).")
+        // An installed gitleaks can report this key too; the built-in finding must remain.
+        #expect(titled?.message.hasPrefix("possible secret in squash commit title:1 (AWS access key)") == true)
+        #expect(titled?.message.contains(Fake.aws) == false)
         // A secret the vault learned after publishing.
         let later = secret()
         try vault.add(later, as: "later-token")

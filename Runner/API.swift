@@ -109,6 +109,15 @@ final class API {
             try await self.publish(context.parameters.require("id"), try await Self.decode(Approval.self, from: request))
         }
         router.post("v1/clear") { _, _ in try await self.clear() }
+        router.post("v1/accounts") { request, _ in
+            try await self.addAccount(try await Self.decode(NewAccount.self, from: request))
+        }
+        router.post("v1/accounts/refresh") { _, _ in
+            await self.refreshAccounts()
+        }
+        router.post("v1/accounts/:id/sign-in") { _, context in
+            try await self.accountLogin(context.parameters.require("id"))
+        }
         router.post("v1/accounts/:id/reserve") { request, context in
             try await self.reserve(context.parameters.require("id"), try await Self.decode(ReserveRequest.self, from: request))
         }
@@ -419,6 +428,33 @@ final class API {
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
+    }
+
+    struct NewAccount: Decodable { var agent: String; var name: String; var payer: String }
+
+    func addAccount(_ request: NewAccount) throws -> Response {
+        let name = request.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ["claude", "codex"].contains(request.agent), !name.isEmpty, name.count <= 100, request.payer.count <= 100 else {
+            throw APIError(.unprocessableContent, "Choose Claude Code or Codex and a name of 1–100 characters.")
+        }
+        // The app and a local runner may share this file. Keep profiles added since our last refresh.
+        desk.accounts.reloadSaved()
+        do {
+            let account = try desk.accounts.add(agent: request.agent, name: name, payer: request.payer.trimmingCharacters(in: .whitespacesAndNewlines))
+            return Self.json(AccountLogin(account: account, path: Shell.environment["PATH"] ?? "/usr/bin:/bin"), status: .created)
+        } catch { throw APIError(.unprocessableContent, error.localizedDescription) }
+    }
+
+    func accountLogin(_ id: String) throws -> Response {
+        guard let account = desk.accounts.state(id)?.account else { throw APIError(.notFound, "There's no account \(id).") }
+        guard ["claude", "codex"].contains(account.agent) else { throw APIError(.unprocessableContent, "Connect this tool on the runner itself.") }
+        return Self.json(AccountLogin(account: account, path: Shell.environment["PATH"] ?? "/usr/bin:/bin"))
+    }
+
+    func refreshAccounts() async -> Response {
+        desk.accounts.reloadSaved()
+        await desk.accounts.refresh()
+        return Self.json(accounts)
     }
 
     /// "Use anyway" (#278): the account takes automatic work past its weekly reserve until its

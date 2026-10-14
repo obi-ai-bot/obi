@@ -833,6 +833,21 @@ nonisolated struct Runner: Sendable {
         try await call("POST", "v1/jobs/\(id)/move", body: MoveBody(agent: agent, account: account, model: model, why: why))
     }
 
+    #if os(macOS)
+    func addAccount(agent: String, name: String, payer: String) async throws -> AccountLogin {
+        struct Body: Encodable { var agent: String; var name: String; var payer: String }
+        return try await call("POST", "v1/accounts", body: Body(agent: agent, name: name, payer: payer))
+    }
+
+    func accountLogin(_ id: String) async throws -> AccountLogin {
+        try await call("POST", "v1/accounts/\(id)/sign-in")
+    }
+
+    func refreshAccounts() async throws -> [RunnerAccount] {
+        try await call("POST", "v1/accounts/refresh", timeout: 180)
+    }
+    #endif
+
     /// "Use anyway" (#278): the account takes automatic work past its weekly reserve until its
     /// week resets, or with `lift` false is reserved again. The runner answers with the account.
     func liftReserve(_ id: String, _ lift: Bool) async throws -> RunnerAccount {
