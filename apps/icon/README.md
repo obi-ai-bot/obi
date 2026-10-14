@@ -32,11 +32,11 @@ python3 -m http.server 8770 --bind 127.0.0.1 --directory dist/oby
 In another terminal:
 
 ```bash
-node Icon/render.mjs "$TMPDIR/oby-render" 2048 1 4
+node apps/icon/render.mjs "$TMPDIR/oby-render" 2048 1 4
 ```
 
 ```bash
-swift Icon/compose.swift "$TMPDIR/oby-render-0.png" Icon
+swift apps/icon/compose.swift "$TMPDIR/oby-render-0.png" apps/icon
 ```
 
 `render.mjs` takes four frames of Oby calm and looking ahead, at 4096 px, using Playwright's Chromium. Pick one with the eyes open (`-0` usually is). `compose.swift` crops Oby, scales it down with high-quality resampling (about 2.6×, so the edges stay clean) and writes every icon.

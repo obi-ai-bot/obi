@@ -2,7 +2,7 @@
 # Bundles cloudflared with Oby (#285): Contents/MacOS/cloudflared, universal, signed with the app's
 # identity and the hardened runtime, so it's notarized with the app. The release is pinned and
 # checked against its SHA-256; the download is cached under ~/Library/Caches, never in the
-# repository. Run by the "Bundle cloudflared" build phase of the Oby target (Oby.xcodeproj).
+# repository. Run by the "Bundle cloudflared" build phase of the Oby target (apps/Oby.xcodeproj).
 set -euo pipefail
 
 VERSION=2026.10.0

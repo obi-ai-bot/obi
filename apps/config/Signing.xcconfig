@@ -1,8 +1,8 @@
-// One signing config for every target, Debug and Release (#282). Oby.xcodeproj reads it at the
+// One signing config for every target, Debug and Release (#282). apps/Oby.xcodeproj reads it at the
 // project level: every DEVELOPMENT_TEAM is $(OBY_TEAM_ID) and the bundle ids come from here.
 // Switching every app to another team is this one line.
 //
-// To override any of these on one Mac, write them in Config/Signing.local.xcconfig (gitignored).
+// To override any of these on one Mac, write them in apps/config/Signing.local.xcconfig (gitignored).
 // CI's ad hoc flags (docs/ci.md) still win: command-line settings beat every xcconfig.
 
 OBY_TEAM_ID = PQKAL8E36D
@@ -10,11 +10,11 @@ OBY_TEAM_ID = PQKAL8E36D
 OBY_MAC_BUNDLE_ID = com.deskree.oby
 OBY_IPHONE_BUNDLE_ID = dev.wellprado.oby
 
-// Where the Mac app looks for updates (Mac/Info.plist, SUFeedURL): the appcast scripts/release.sh
+// Where the Mac app looks for updates (apps/mac/app/Info.plist, SUFeedURL): the appcast scripts/release.sh
 // writes and uploads. "//" starts a comment in an xcconfig, so the empty $() keeps the URL whole.
 OBY_APPCAST_URL = https:/$()/downloads.oby.deskree.com/appcast.xml
 
-// Sparkle's EdDSA public key (Mac/Info.plist, SUPublicEDKey): the one `generate_keys` prints
+// Sparkle's EdDSA public key (apps/mac/app/Info.plist, SUPublicEDKey): the one `generate_keys` prints
 // (docs/release.md, Sparkle keys). Until it's generated, a placeholder of 32 zero bytes: Sparkle
 // starts (an empty or malformed key is a fatal error at launch) and accepts no update, since
 // nothing signs with it. scripts/release.sh refuses a real release while it's here.

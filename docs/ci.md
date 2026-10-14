@@ -39,13 +39,13 @@ A hosted Linux runner has 4 cores, so the build takes roughly 2.5–3.5 times as
 ## Caching
 
 - **Linux:** `.build` and `~/.cache/org.swift.swiftpm`, keyed by the runner's architecture, the Swift version and `Package.resolved`; a run with a new `Package.resolved` starts from the newest cache for the same Swift. That keeps the dependencies' checkouts and builds; Oby's own targets rebuild from source.
-- **macOS:** nothing. `Oby.xcodeproj`'s one Swift package dependency, Sparkle (the Mac app's updater, #282), is a prebuilt binary that resolves in seconds.
+- **macOS:** nothing. `apps/Oby.xcodeproj`'s one Swift package dependency, Sparkle (the Mac app's updater, #282), is a prebuilt binary that resolves in seconds.
 
 ## Signing
 
 CI has no certificates. Both Apple builds pass `CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=`, so they're signed ad hoc with no team or profile, and `ENABLE_HARDENED_RUNTIME=NO`, so the ad-hoc-signed Mac test host can load the test bundle. Hardened runtime matters only for notarized builds, which CI doesn't make: [`scripts/release.sh`](../scripts/release.sh) makes them on a Mac ([release.md](release.md)).
 
-Every target's team and bundle id come from [`Config/Signing.xcconfig`](../Config/Signing.xcconfig) (`OBY_TEAM_ID`, `OBY_MAC_BUNDLE_ID`, `OBY_IPHONE_BUNDLE_ID`), which the project reads as its base configuration. Settings on the command line beat an xcconfig, so CI's flags above still win.
+Every target's team and bundle id come from [`apps/config/Signing.xcconfig`](../apps/config/Signing.xcconfig) (`OBY_TEAM_ID`, `OBY_MAC_BUNDLE_ID`, `OBY_IPHONE_BUNDLE_ID`), which the project reads as its base configuration. Settings on the command line beat an xcconfig, so CI's flags above still win.
 
 ## The `Oby` scheme
 

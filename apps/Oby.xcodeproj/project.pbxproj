@@ -95,11 +95,11 @@
 		0B1E0C0A00000000000000A1 /* MacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		0B1E0C0A000000000000CD /* Oby.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Oby.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0B1E0C0A000000000000D5 /* iOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		0B1E0C0A000000000000E1 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; name = AppIcon.icon; path = Icon/AppIcon.icon; sourceTree = "<group>"; };
+		0B1E0C0A000000000000E1 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; name = AppIcon.icon; path = icon/AppIcon.icon; sourceTree = "<group>"; };
 		0B1E0C0A0000000000AC0001 /* ObyActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ObyActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		0B1E0C0A0000000000AD0001 /* ObyWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ObyWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0B1E0C0A0000000000AE0001 /* ObyWatchWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ObyWatchWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		0B1E0C0A0000000000AF0001 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Signing.xcconfig; path = Config/Signing.xcconfig; sourceTree = "<group>"; };
+		0B1E0C0A0000000000AF0001 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Signing.xcconfig; path = config/Signing.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -197,17 +197,17 @@
 			exceptions = (
 				0B1E0C0A0000000000AF0005 /* Exceptions for "Mac" folder in "Oby" target */,
 			);
-			path = apps/mac/app;
+			path = mac/app;
 			sourceTree = "<group>";
 		};
 		0B1E0C0A00000000000000A2 /* MacTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = apps/mac/tests;
+			path = mac/tests;
 			sourceTree = "<group>";
 		};
 		0B1E0C0A00000000000000B1 /* Engine */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Engine;
+			path = ../Engine;
 			sourceTree = "<group>";
 		};
 		0B1E0C0A000000000000C1 /* Shared */ = {
@@ -216,7 +216,7 @@
 				0B1E0C0A0000000000AD0006 /* Exceptions for "Shared" folder in "ObyWatch" target */,
 				0B1E0C0A0000000000AE0006 /* Exceptions for "Shared" folder in "ObyWatchWidget" target */,
 			);
-			path = apps/shared;
+			path = shared;
 			sourceTree = "<group>";
 		};
 		0B1E0C0A000000000000C2 /* iOS */ = {
@@ -224,12 +224,12 @@
 			exceptions = (
 				0B1E0C0A000000000000C4 /* Exceptions for "iOS" folder in "ObyPhone" target */,
 			);
-			path = apps/ios/app;
+			path = ios/app;
 			sourceTree = "<group>";
 		};
 		0B1E0C0A000000000000C3 /* iOSTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = apps/ios/tests;
+			path = ios/tests;
 			sourceTree = "<group>";
 		};
 		0B1E0C0A0000000000AC0004 /* LiveActivity */ = {
@@ -238,7 +238,7 @@
 				0B1E0C0A0000000000AC0005 /* Exceptions for "LiveActivity" folder in "ObyPhone" target */,
 				0B1E0C0A0000000000AC0006 /* Exceptions for "LiveActivity" folder in "ObyActivity" target */,
 			);
-			path = apps/ios/live-activity;
+			path = ios/live-activity;
 			sourceTree = "<group>";
 		};
 		0B1E0C0A0000000000AD0004 /* Watch */ = {
@@ -247,7 +247,7 @@
 				0B1E0C0A0000000000AD0005 /* Exceptions for "Watch" folder in "ObyWatch" target */,
 				0B1E0C0A0000000000AE0005 /* Exceptions for "Watch" folder in "ObyWatchWidget" target */,
 			);
-			path = apps/watch;
+			path = watch;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -599,7 +599,7 @@
 			inputFileListPaths = (
 			);
 			inputPaths = (
-				"$(SRCROOT)/apps/mac/app/Tools/bundle-cloudflared.sh",
+				"$(SRCROOT)/mac/app/Tools/bundle-cloudflared.sh",
 			);
 			name = "Bundle cloudflared";
 			outputFileListPaths = (
@@ -609,7 +609,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
-			shellScript = "set -e\n# Download (once, into the cache), bundle and sign cloudflared (#285): apps/mac/app/Tools/bundle-cloudflared.sh.\nzsh \"$SRCROOT/apps/mac/app/Tools/bundle-cloudflared.sh\"\n";
+			shellScript = "set -e\n# Download (once, into the cache), bundle and sign cloudflared (#285): apps/mac/app/Tools/bundle-cloudflared.sh.\nzsh \"$SRCROOT/mac/app/Tools/bundle-cloudflared.sh\"\n";
 		};
 		0B1E0C0A00000000000000F1 /* Bundle the character */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -628,7 +628,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
-			shellScript = "set -e\n# Build the clean copy of the character (no playground) and bundle it as Resources/Character.\nzsh \"$SRCROOT/Character/package/build.sh\" > /dev/null\ndest=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/Character\"\nrm -rf \"$dest\"\nmkdir -p \"$dest/vendor\"\ncp \"$SRCROOT/dist/oby/oby.html\" \"$dest/\"\ncp \"$SRCROOT/dist/oby/vendor/three.module.js\" \"$dest/vendor/\"\n";
+			shellScript = "set -e\n# Build the clean copy of the character (no playground) and bundle it as Resources/Character.\nzsh \"$SRCROOT/../Character/package/build.sh\" > /dev/null\ndest=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/Character\"\nrm -rf \"$dest\"\nmkdir -p \"$dest/vendor\"\ncp \"$SRCROOT/../dist/oby/oby.html\" \"$dest/\"\ncp \"$SRCROOT/../dist/oby/vendor/three.module.js\" \"$dest/vendor/\"\n";
 		};
 		0B1E0C0A00000000000000F3 /* Bundle the runner */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -647,7 +647,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
-			shellScript = "set -e\n# The runner on this Mac (#283): build oby-runner (Package.swift) and bundle it as the login item's program,\n# Contents/Helpers/oby-runner, with its launchd plist at Contents/Library/LaunchAgents (apps/mac/app/LoginItem.swift).\n# Xcode's build variables would point SwiftPM at the wrong SDK, so it builds in a clean environment.\nswift=(env -i HOME=\"$HOME\" PATH=\"/usr/bin:/bin:/usr/sbin:/sbin\" /usr/bin/xcrun swift build -c release --product oby-runner --package-path \"$SRCROOT\")\n\"${swift[@]}\" > /dev/null\nbin=\"$(\"${swift[@]}\" --show-bin-path)\"\nhelpers=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers\"\nagents=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchAgents\"\nmkdir -p \"$helpers\" \"$agents\"\ncp \"$bin/oby-runner\" \"$helpers/oby-runner\"\nchmod 755 \"$helpers/oby-runner\"\ncp \"$SRCROOT/Runner/com.deskree.oby.runner.plist\" \"$agents/com.deskree.oby.runner.plist\"\n# Signed as the app is: Xcode signs only the app itself after this phase.\nif [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ]; then\n  /usr/bin/codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --options runtime \"$helpers/oby-runner\"\nfi\n";
+			shellScript = "set -e\n# The runner on this Mac (#283): build oby-runner (Package.swift) and bundle it as the login item's program,\n# Contents/Helpers/oby-runner, with its launchd plist at Contents/Library/LaunchAgents (apps/mac/app/LoginItem.swift).\n# Xcode's build variables would point SwiftPM at the wrong SDK, so it builds in a clean environment.\nswift=(env -i HOME=\"$HOME\" PATH=\"/usr/bin:/bin:/usr/sbin:/sbin\" /usr/bin/xcrun swift build -c release --product oby-runner --package-path \"$SRCROOT/..\")\n\"${swift[@]}\" > /dev/null\nbin=\"$(\"${swift[@]}\" --show-bin-path)\"\nhelpers=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers\"\nagents=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchAgents\"\nmkdir -p \"$helpers\" \"$agents\"\ncp \"$bin/oby-runner\" \"$helpers/oby-runner\"\nchmod 755 \"$helpers/oby-runner\"\ncp \"$SRCROOT/../Runner/com.deskree.oby.runner.plist\" \"$agents/com.deskree.oby.runner.plist\"\n# Signed as the app is: Xcode signs only the app itself after this phase.\nif [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ]; then\n  /usr/bin/codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --options runtime \"$helpers/oby-runner\"\nfi\n";
 		};
 		0B1E0C0A000000000000C9 /* Bundle the character */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -666,7 +666,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/zsh;
-			shellScript = "set -e\n# Build the clean copy of the character (no playground) and bundle it as Resources/Character.\nzsh \"$SRCROOT/Character/package/build.sh\" > /dev/null\ndest=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/Character\"\nrm -rf \"$dest\"\nmkdir -p \"$dest/vendor\"\ncp \"$SRCROOT/dist/oby/oby.html\" \"$dest/\"\ncp \"$SRCROOT/dist/oby/vendor/three.module.js\" \"$dest/vendor/\"\n";
+			shellScript = "set -e\n# Build the clean copy of the character (no playground) and bundle it as Resources/Character.\nzsh \"$SRCROOT/../Character/package/build.sh\" > /dev/null\ndest=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/Character\"\nrm -rf \"$dest\"\nmkdir -p \"$dest/vendor\"\ncp \"$SRCROOT/../dist/oby/oby.html\" \"$dest/\"\ncp \"$SRCROOT/../dist/oby/vendor/three.module.js\" \"$dest/vendor/\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -860,7 +860,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = apps/mac/app/Oby.entitlements;
+				CODE_SIGN_ENTITLEMENTS = mac/app/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
@@ -870,7 +870,7 @@
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = apps/mac/app/Info.plist;
+				INFOPLIST_FILE = mac/app/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens only while you hold fn, and writes down what you say on this Mac.";
@@ -897,7 +897,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = apps/mac/app/Oby.entitlements;
+				CODE_SIGN_ENTITLEMENTS = mac/app/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
@@ -907,7 +907,7 @@
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = apps/mac/app/Info.plist;
+				INFOPLIST_FILE = mac/app/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens only while you hold fn, and writes down what you say on this Mac.";
@@ -978,7 +978,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = apps/ios/app/Oby.entitlements;
+				CODE_SIGN_ENTITLEMENTS = ios/app/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
@@ -986,7 +986,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
-				INFOPLIST_FILE = apps/ios/app/Info.plist;
+				INFOPLIST_FILE = ios/app/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Oby asks for Face ID before it publishes anything for you.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens when you tap the mic to dictate, until you tap stop or for up to 60 seconds.";
@@ -1022,7 +1022,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = apps/ios/app/Oby.entitlements;
+				CODE_SIGN_ENTITLEMENTS = ios/app/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
@@ -1030,7 +1030,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
-				INFOPLIST_FILE = apps/ios/app/Info.plist;
+				INFOPLIST_FILE = ios/app/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Oby asks for Face ID before it publishes anything for you.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens when you tap the mic to dictate, until you tap stop or for up to 60 seconds.";
@@ -1114,7 +1114,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = apps/ios/live-activity/Info.plist;
+				INFOPLIST_FILE = ios/live-activity/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1145,7 +1145,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = apps/ios/live-activity/Info.plist;
+				INFOPLIST_FILE = ios/live-activity/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1173,13 +1173,13 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = apps/watch/Oby.entitlements;
+				CODE_SIGN_ENTITLEMENTS = watch/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = apps/watch/Info.plist;
+				INFOPLIST_FILE = watch/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens while you hold the mic button or slide up to lock listening, for up to 60 seconds. Your iPhone writes down your request.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
@@ -1209,13 +1209,13 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = apps/watch/Oby.entitlements;
+				CODE_SIGN_ENTITLEMENTS = watch/Oby.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = apps/watch/Info.plist;
+				INFOPLIST_FILE = watch/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens while you hold the mic button or slide up to lock listening, for up to 60 seconds. Your iPhone writes down your request.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
@@ -1244,13 +1244,13 @@
 		0B1E0C0A0000000000AE000C /* Debug configuration for PBXNativeTarget "ObyWatchWidget" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = apps/watch/Widget/ObyWidget.entitlements;
+				CODE_SIGN_ENTITLEMENTS = watch/Widget/ObyWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = apps/watch/Widget/Info.plist;
+				INFOPLIST_FILE = watch/Widget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1275,13 +1275,13 @@
 		0B1E0C0A0000000000AE000D /* Release configuration for PBXNativeTarget "ObyWatchWidget" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = apps/watch/Widget/ObyWidget.entitlements;
+				CODE_SIGN_ENTITLEMENTS = watch/Widget/ObyWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "$(OBY_TEAM_ID)";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = apps/watch/Widget/Info.plist;
+				INFOPLIST_FILE = watch/Widget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Oby;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
