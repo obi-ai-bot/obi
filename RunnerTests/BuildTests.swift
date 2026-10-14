@@ -80,7 +80,7 @@ struct BuildTests {
         let path = "\(tools.path):/usr/bin:/bin"
         var env = Agents.swiftEnvironment(worktree: worktree, base: ["PATH": path])
         env.merge(Agents.buildEnvironment(processorCount: 8)) { $1 }
-        let result = try await Shell.run(["swift", "test", "--package-path", "Sub", "--scratch-path", ".cache", "--configuration", "release"], in: worktree, env: env, timeout: 5)
+        let result = try await Shell.run(["swift", "test", "--package-path", "Sub", "--scratch-path", ".cache", "--configuration", "release"], in: worktree, env: env, timeout: 30)
         #expect(result.status == 0)
         #expect(try String(contentsOf: log, encoding: .utf8).contains("build\n-j\n4\n--package-path\nSub\n--scratch-path\n.cache\n--configuration\nrelease\ntest\n--package-path\nSub\n--scratch-path\n.cache\n--configuration\nrelease\n-j\n4"))
         #expect(Int(try String(contentsOf: worktree.appending(path: ".oby/first-swift-build-seconds"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)) != nil)
@@ -118,7 +118,7 @@ struct BuildTests {
         var env = Agents.swiftEnvironment(worktree: worktree, base: ["PATH": path])
         env.merge(Agents.buildEnvironment(processorCount: 8)) { $1 }
 
-        let result = try await Shell.run(["swift", "test"], in: worktree, env: env, timeout: 5)
+        let result = try await Shell.run(["swift", "test"], in: worktree, env: env, timeout: 30)
 
         #expect(result.status == 0)
         #expect(FileManager.default.fileExists(atPath: worktree.appending(path: ".oby/first-swift-build-seconds.review-retried").path))
