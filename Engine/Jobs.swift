@@ -440,8 +440,11 @@ nonisolated enum AgentEvent: Equatable, Sendable {
 /// A coding agent working on one job in its worktree: Claude Code or Codex.
 protocol AgentRun: AnyObject {
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws
+    func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void, imagePaths: [String]) throws
     /// Another turn in the same session.
     func send(_ text: String)
+    /// Another turn with runner-owned images copied into the job's worktree.
+    func send(_ text: String, imagePaths: [String])
     /// No more turns: the agent finishes what it's doing and ends.
     func end()
     /// Asks the agent to stop, then ends it.
@@ -458,6 +461,10 @@ protocol AgentRun: AnyObject {
 }
 
 extension AgentRun {
+    func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void, imagePaths: [String]) throws {
+        try start(prompt: prompt, onEvent: onEvent)
+    }
+    func send(_ text: String, imagePaths: [String]) { send(text) }
     /// One without a process of its own (a test's) has nothing to wait for.
     func ended() async {}
     func answer(_ call: ToolCall, _ answer: ToolAnswer) {}
@@ -752,6 +759,10 @@ final class ClaudeAgent: AgentRun {
     }
 
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
+        try start(prompt: prompt, onEvent: onEvent, imagePaths: [])
+    }
+
+    func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void, imagePaths: [String]) throws {
         self.onEvent = onEvent
         process.executableURL = URL(filePath: "/usr/bin/env")
         // Before the command line: the box shows the file only when it exists.
@@ -799,7 +810,7 @@ final class ClaudeAgent: AgentRun {
         // After the reader, so Claude Code's output never waits on a message it's still taking in.
         sent += 1
         waiting = true
-        send(Self.firstMessage(prompt, worktree: worktree, resume: resume))
+        send(Self.firstMessage(prompt, worktree: worktree, resume: resume, imagePaths: imagePaths))
     }
 
     /// How a process ended, once it has: "exit status 1", or "killed by signal 9 (SIGKILL)".
@@ -826,10 +837,20 @@ final class ClaudeAgent: AgentRun {
         send(StreamJSON.user(text))
     }
 
+    func send(_ text: String, imagePaths: [String]) {
+        sent += 1
+        waiting = true
+        let images = imagePaths.compactMap { path -> (data: Data, mediaType: String)? in
+            guard let data = try? Data(contentsOf: URL(filePath: path)), let type = Attachments.fits(path) else { return nil }
+            return (data, type)
+        }
+        send(StreamJSON.user(text, images: images))
+    }
+
     /// The message a session starts with: a new one carries the images the user attached, which
     /// Workspace.prepare put in .oby/inputs. A session picked up again has seen them already.
-    nonisolated static func firstMessage(_ prompt: String, worktree: URL, resume: String?) -> [String: Any] {
-        StreamJSON.user(prompt, images: resume == nil ? Attachments.images(in: worktree) : [])
+    nonisolated static func firstMessage(_ prompt: String, worktree: URL, resume: String?, imagePaths: [String] = []) -> [String: Any] {
+        StreamJSON.user(prompt, images: resume == nil ? Attachments.images(in: worktree) : Attachments.images(at: imagePaths))
     }
 
     /// No more input, so Claude Code exits once it's idle. It may still be waiting on work it
@@ -1058,13 +1079,50 @@ nonisolated enum Attachments {
     /// from the file.
     static let maxImageBytes = 3_750_000
 
+    /// Copies newly attached runner files into an existing job. Returns the images small enough
+    /// for an agent's message protocol; every file remains available under `.oby/inputs`.
+    static func copy(_ ids: [String], into worktree: URL, store: JobStore, vault: Vault = .shared) throws -> [String] {
+        guard !ids.isEmpty else { return [] }
+        let folder = worktree.appending(path: ".oby/inputs", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let attachmentStore = AttachmentStore(jobs: store, vault: vault)
+        let leaks = try vault.forAgents()
+        var used = Set((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
+        var images: [String] = []
+        for id in ids {
+            let (attachment, data) = try attachmentStore.content(id)
+            let base = URL(filePath: attachment.name).lastPathComponent
+            let ext = URL(filePath: base).pathExtension
+            let stem = ext.isEmpty ? base : String(base.dropLast(ext.count + 1))
+            var name = base
+            var suffix = 2
+            while used.contains(name) {
+                name = "\(stem)-\(suffix)" + (ext.isEmpty ? "" : ".\(ext)")
+                suffix += 1
+            }
+            used.insert(name)
+            let target = folder.appending(path: name)
+            if let text = String(data: data, encoding: .utf8) {
+                try Data(leaks.redact(text).utf8).write(to: target, options: .atomic)
+            } else {
+                if let hit = leaks.hits(in: String(decoding: data, as: UTF8.self)).first {
+                    throw Shell.Failure(message: "The attachment \(attachment.name) holds the vault secret \(hit.name): it isn't handed to the agent.")
+                }
+                try data.write(to: target, options: .atomic)
+            }
+            if fits(target.path) != nil { images.append(target.path) }
+        }
+        return images
+    }
+
     /// Copies the job's attachments into the worktree's .oby/inputs, under their own names, and
     /// returns the ones it copied: a file that's gone (kept too long) is left out, not the job.
     /// Text goes with the vault's secrets taken out; a binary file (a screenshot) can't be, so one
     /// that holds a secret stops the job, naming it. Throws when the vault can't be read.
-    static func copy(_ job: Job, into worktree: URL, allowedFolder: URL = LocalRunner.attachments, vault: Vault = .shared) throws -> [String]? {
+    static func copy(_ job: Job, into worktree: URL, allowedFolder: URL = LocalRunner.attachments, vault: Vault = .shared,
+                     jobStore: JobStore? = nil, attachmentRoot: URL = Workspace.root.appending(path: "attachments", directoryHint: .isDirectory)) throws -> [String]? {
         let leaks = try vault.forAgents()
-        let store = AttachmentStore(jobs: JobStore(url: Workspace.root.appending(path: "oby.sqlite")), vault: vault)
+        let store = AttachmentStore(root: attachmentRoot, jobs: jobStore ?? JobStore(url: Workspace.root.appending(path: "oby.sqlite")), vault: vault)
         var uploadedNames: [String: String] = [:]
         let uploaded = try (job.attachmentIDs ?? []).map { id -> String in
             guard let path = store.url(id)?.path, let attachment = store.attachment(id) else { throw AttachmentStoreError.unknown }
@@ -1129,6 +1187,13 @@ nonisolated enum Attachments {
         return names.compactMap { name in
             let file = folder.appending(path: name)
             guard let type = fits(file.path), let data = try? Data(contentsOf: file) else { return nil }
+            return (data, type)
+        }
+    }
+
+    static func images(at paths: [String]) -> [(data: Data, mediaType: String)] {
+        paths.compactMap { path in
+            guard let type = fits(path), let data = try? Data(contentsOf: URL(filePath: path)) else { return nil }
             return (data, type)
         }
     }

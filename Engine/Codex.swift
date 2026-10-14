@@ -43,6 +43,10 @@ final class CodexAgent: AgentRun {
     }
 
     func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void) throws {
+        try start(prompt: prompt, onEvent: onEvent, imagePaths: [])
+    }
+
+    func start(prompt: String, onEvent: @escaping (AgentEvent) -> Void, imagePaths: [String]) throws {
         self.onEvent = onEvent
         let log = worktree.appending(path: ".oby/agent.log")
         _ = FileManager.default.createFile(atPath: log.path, contents: nil)
@@ -71,7 +75,7 @@ final class CodexAgent: AgentRun {
                 onEvent(.session(thread))
                 // Whether Tetrix is connected (Engine/TetrixUse.swift), alongside the turn: an older Codex doesn't say.
                 Task { if let on = (try? await server.call("mcpServerStatus/list", [:])).flatMap(TetrixUse.codexStatus) { onEvent(.tetrix(.connected(on))) } }
-                let images = resume == nil ? Attachments.imagePaths(in: worktree) : []
+                let images = resume == nil ? Attachments.imagePaths(in: worktree) : imagePaths
                 let turn = try await server.call("turn/start", CodexRPC.turnStart(thread: thread, prompt: prompt,
                                                                                  model: model ?? AgentModels.value("codex", "model"),
                                                                                  effort: effort ?? AgentModels.value("codex", "effort"), images: images))
@@ -87,11 +91,15 @@ final class CodexAgent: AgentRun {
     // ponytail: a steer that crosses its turn's end falls back to a new turn, but the ended turn
     // has already reported; count steers in flight if that window ever bites.
     func send(_ text: String) {
+        send(text, imagePaths: [])
+    }
+
+    func send(_ text: String, imagePaths: [String]) {
         guard let server, let thread else { return }
         Task {
-            if let turn, (try? await server.call("turn/steer", CodexRPC.steer(thread: thread, turn: turn, text: text))) != nil { return }
+            if let turn, (try? await server.call("turn/steer", CodexRPC.steer(thread: thread, turn: turn, text: text, images: imagePaths))) != nil { return }
             var params = CodexRPC.turnStart(thread: thread, prompt: text, model: model ?? AgentModels.value("codex", "model"),
-                                            effort: effort ?? AgentModels.value("codex", "effort"))
+                                            effort: effort ?? AgentModels.value("codex", "effort"), images: imagePaths)
             // The mode changed since the thread started (a plan approved): this turn runs with the new one.
             if mode != started { params.merge(CodexRPC.turnOverrides(mode: mode, git: git)) { $1 } }
             let turn = try? await server.call("turn/start", params)
@@ -383,8 +391,8 @@ nonisolated enum CodexRPC {
     }
 
     /// Words for the turn under way; Codex refuses them once that turn has ended.
-    static func steer(thread: String, turn: String, text: String) -> [String: Any] {
-        ["threadId": thread, "expectedTurnId": turn, "input": [Self.text(text)]]
+    static func steer(thread: String, turn: String, text: String, images: [String] = []) -> [String: Any] {
+        ["threadId": thread, "expectedTurnId": turn, "input": [Self.text(text)] + images.map { ["type": "localImage", "path": $0] }]
     }
 
     /// The task, with the model and effort chosen in Settings › Models (empty means Codex's own default).

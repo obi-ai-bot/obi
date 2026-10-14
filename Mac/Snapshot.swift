@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import ScreenCaptureKit
 import SwiftUI
+import QuickLook
 
 /// A file the user attached to their next request: a screenshot, or what they copied.
 struct Attachment: Identifiable, Equatable {
@@ -44,15 +45,17 @@ final class Tray {
     private(set) var capturing = false
     @ObservationIgnored var deleteRemote: (String) -> Void = { _ in }
 
-    /// Where attachments wait for their jobs: Workspace.prepare copies them into the job's worktree.
+    /// Where the app stages attachments by default. Tests may inject an isolated folder.
     static let folder = LocalRunner.attachments
+    let folder: URL
 
-    init() {
+    init(folder: URL = Tray.folder) {
+        self.folder = folder
         // ponytail: a job copies its attachments when its worktree is ready, so they're kept a day
         // rather than tracked (the clipboard can hold secrets); a plan dispatched later than that
         // goes without them.
         let old = Date.now.addingTimeInterval(-24 * 3600)
-        let files = (try? FileManager.default.contentsOfDirectory(at: Self.folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
         for file in files where ((try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .now) < old {
             try? FileManager.default.removeItem(at: file)
         }
@@ -149,10 +152,23 @@ final class Tray {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
         guard panel.runModal() == .OK else { return }
+        addFiles(panel.urls)
+    }
+
+    /// Copies files a user picked or dropped into the private attachment staging folder.
+    func addFiles(_ sources: [URL]) {
         do {
-            try FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
-            for source in panel.urls {
-                let target = Self.folder.appending(path: "\(UUID().uuidString)-\(source.lastPathComponent)")
+            guard items.count + sources.count <= 10 else { throw Shell.Failure(message: "A message can have at most 10 attachments.") }
+            var total = items.reduce(0) { $0 + ((try? $1.file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            for source in sources {
+                let accessed = source.startAccessingSecurityScopedResource()
+                defer { if accessed { source.stopAccessingSecurityScopedResource() } }
+                let size = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                guard size <= AttachmentStore.maxBytes else { throw Shell.Failure(message: "Each attachment must be 25 MB or smaller.") }
+                total += size
+                guard total <= 50 * 1024 * 1024 else { throw Shell.Failure(message: "Attachments in one message must total 50 MB or less.") }
+                let target = folder.appending(path: "\(UUID().uuidString)-\(source.lastPathComponent)")
                 try FileManager.default.copyItem(at: source, to: target)
                 items.append(Attachment(kind: .file, file: target, uploadedID: nil))
             }
@@ -168,9 +184,9 @@ final class Tray {
     }
 
     private func add(_ kind: Attachment.Kind, data: Data, extension ext: String) throws {
-        try FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let name = kind == .screenshot ? "screenshot" : "clipboard"
-        let file = Self.folder.appending(path: "\(name)-\(UUID().uuidString.prefix(6).lowercased()).\(ext)")
+        let file = folder.appending(path: "\(name)-\(UUID().uuidString.prefix(6).lowercased()).\(ext)")
         try data.write(to: file)
         items.append(Attachment(kind: kind, file: file, uploadedID: nil))
         problem = nil
@@ -338,6 +354,7 @@ private final class SelectionView: NSView {
 /// Recording, how to turn it on.
 struct TrayRow: View {
     let tray: Tray
+    @State private var previewURL: URL?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -345,8 +362,14 @@ struct TrayRow: View {
                 HStack(spacing: 8) {
                     ForEach(tray.items) { item in
                         HStack(spacing: 6) {
-                            Image(systemName: item.icon)
-                            Text(item.label)
+                            Button { previewURL = item.file } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: item.icon)
+                                    Text(item.label)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Preview \(item.label)")
                             Button { tray.remove(item) } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Remove \(item.label)")
@@ -379,5 +402,6 @@ struct TrayRow: View {
                 EmptyView()
             }
         }
+        .quickLookPreview($previewURL)
     }
 }

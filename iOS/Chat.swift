@@ -235,6 +235,7 @@ private struct DaySeparator: View {
 /// why it didn't go through with Try again and Edit when it didn't; Oby's on the left with its
 /// face, "Oby" and the time, its words, and a card for each job it started.
 private struct TurnRow: View {
+    @Environment(Phone.self) private var phone
     let turn: Turn
     let jobs: [Job]
     let account: (Job) -> String
@@ -274,6 +275,12 @@ private struct TurnRow: View {
             .accessibilityElement(children: failure == nil ? .combine : .contain)
             .accessibilityLabel(failure.map { "You, \(ConversationModel.clock(turn.date)): \(turn.text). Didn't reach Oby: \($0)" }
                                 ?? "You, \(ConversationModel.clock(turn.date)): \(turn.text)")
+            if let attachments = turn.attachments, !attachments.isEmpty {
+                AttachmentStrip(attachments: attachments,
+                                loadThumbnail: { try await phone.runner.attachmentThumbnail($0) },
+                                loadContent: { try await phone.runner.attachmentContent($0) })
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
             // What Oby does for these words, before its answer (#304).
             if !steps.isEmpty {
                 StepList(steps: steps).padding(.leading, 4)

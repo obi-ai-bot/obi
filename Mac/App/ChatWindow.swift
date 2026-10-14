@@ -251,6 +251,8 @@ private struct ConversationColumn: View {
                                 TurnRow(turn: turn, grouped: ConversationModel.grouped(turn, after: index > 0 ? day.turns[index - 1] : nil), jobs: ConversationModel.jobs(of: turn, among: desk.jobs + feed.jobs),
                                         account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
                                         isLocal: { id in desk.jobs.contains { $0.id == id } },
+                                        loadAttachmentThumbnail: { id in try await attachmentThumbnail(id, for: turn) },
+                                        loadAttachmentContent: { id in try await attachmentContent(id, for: turn) },
                                         onOpenJob: onOpenJob,
                                         onStopJob: { model.stopChatJob($0, local: $1) },
                                         showTime: ConversationModel.showsTime(turn, after: index > 0 ? day.turns[index - 1] : nil),
@@ -300,6 +302,25 @@ private struct ConversationColumn: View {
                            typing = true
                        })
             .id(entry.id)
+    }
+
+    private func attachmentThumbnail(_ id: String, for turn: Turn) async throws -> Data {
+        if desk.turns.contains(where: { $0.id == turn.id }) {
+            guard let data = try AttachmentStore(jobs: desk.store, vault: desk.vault).thumbnail(id) else {
+                throw RunnerError(message: "No thumbnail is available for this attachment.")
+            }
+            return data
+        }
+        guard let runner = feed.runner else { throw RunnerError(message: "The runner isn't connected.") }
+        return try await runner.attachmentThumbnail(id)
+    }
+
+    private func attachmentContent(_ id: String, for turn: Turn) async throws -> Data {
+        if desk.turns.contains(where: { $0.id == turn.id }) {
+            return try AttachmentStore(jobs: desk.store, vault: desk.vault).content(id).1
+        }
+        guard let runner = feed.runner else { throw RunnerError(message: "The runner isn't connected.") }
+        return try await runner.attachmentContent(id)
     }
 
     private func permission(_ record: RunnerFeed.PermissionRecord, active: Bool) -> some View {
@@ -414,6 +435,8 @@ struct TurnRow: View {
     var showTime = true
     /// What Oby does for these words, a step at a time (#304): under the bubble, before its answer.
     var steps: [TurnStep] = []
+    var loadAttachmentThumbnail: (String) async throws -> Data
+    var loadAttachmentContent: (String) async throws -> Data
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -428,6 +451,10 @@ struct TurnRow: View {
                     .padding(.horizontal, OBYStyle.Space.lg).padding(.vertical, 14)
                     .background(turn.who == .user ? OBYStyle.userBubble : OBYStyle.assistantBubble,
                                 in: RoundedRectangle(cornerRadius: OBYStyle.bubble, style: .continuous))
+            }
+            if let attachments = turn.attachments, !attachments.isEmpty {
+                AttachmentStrip(attachments: attachments, loadThumbnail: loadAttachmentThumbnail, loadContent: loadAttachmentContent)
+                    .frame(maxWidth: .infinity, alignment: turn.who == .user ? .trailing : .leading)
             }
             if !steps.isEmpty {
                 StepList(steps: steps).padding(.horizontal, OBYStyle.Space.sm)

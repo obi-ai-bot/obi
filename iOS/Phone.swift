@@ -4,6 +4,13 @@ import OSLog
 /// The app's tabs (#11): Home is the glance, Chat the thread with Oby, Settings the runner and its accounts.
 nonisolated enum PhoneTab: String, Hashable, Sendable { case home, chat, settings }
 
+struct PhoneAttachmentDraft: Identifiable {
+    let id = UUID()
+    var name: String
+    var data: Data
+    var uploadedID: String?
+}
+
 /// The phone's view of the runner: its jobs and accounts, kept live while the app is open, and
 /// the conversation that turns words into a plan.
 @Observable
@@ -19,6 +26,8 @@ final class Phone {
     }
 
     let voice = PhoneVoice()
+    /// Attachment drafts live with the phone model so switching Home and Chat doesn't discard them.
+    var attachmentDrafts: [PhoneAttachmentDraft] = []
     /// The tab in front; a notification's job opens on Home.
     var tab = PhoneTab.home
     /// The runner's conversation, read in pages and followed over `turn` events, for the Chat
@@ -87,6 +96,7 @@ final class Phone {
             failures = [:]
             requests = [:]
             pending = nil
+            attachmentDrafts = []
             restoreQueuedMessages(for: offlineQueueTarget)
             start()
         }
@@ -101,6 +111,7 @@ final class Phone {
                 failures = [:]
                 requests = [:]
                 pending = nil
+                attachmentDrafts = []
             }
             if let link, let data = try? link.encoded() {
                 UserDefaults.standard.set(data, forKey: "mac.link")

@@ -1,11 +1,15 @@
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
+import UIKit
 
 /// The field where you type a task or dictate one, with Send: at the bottom of Home and of Chat,
 /// one and the same. Tap the mic and what you say goes into the field as it's heard; tap Stop and
 /// the words stay there to edit and send (iOS/README.md, "Voice input").
 struct Composer: View {
+    static let maxAttachmentCount = 10
+    static let maxAttachmentBytes = 25 * 1024 * 1024
+    static let maxMessageBytes = 50 * 1024 * 1024
     @Environment(Phone.self) private var phone
     @Binding var text: String
     var prompt = "Type a task, like “Review oby PR #12”"
@@ -21,18 +25,14 @@ struct Composer: View {
     @State private var written: String?
     @State private var photos: [PhotosPickerItem] = []
     @State private var importingFiles = false
-    @State private var attachments: [DraftAttachment] = []
+    @State private var capturingPhoto = false
+    @State private var previewURL: URL?
     @State private var attachmentProblem: String?
     @State private var uploading = false
 
     private var sendable: Bool { ChatThread.words(text) != nil }
 
-    private struct DraftAttachment: Identifiable {
-        let id = UUID()
-        var name: String
-        var data: Data
-        var uploadedID: String?
-    }
+    private var attachments: [PhoneAttachmentDraft] { phone.attachmentDrafts }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -44,16 +44,29 @@ struct Composer: View {
                 Text(problem).font(.footnote).foregroundStyle(.red).padding(.horizontal, 12)
             }
             if let attachmentProblem {
-                Text(attachmentProblem).font(.footnote).foregroundStyle(.red).padding(.horizontal, 12)
+                HStack(spacing: 8) {
+                    Text(attachmentProblem).font(.footnote).foregroundStyle(.red)
+                    if !attachments.isEmpty {
+                        Button("Retry upload") { Task { await send() } }.font(.footnote.weight(.semibold))
+                    }
+                }.padding(.horizontal, 12)
             }
             if !attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(attachments) { item in
                             HStack(spacing: 6) {
-                                Image(systemName: item.name.lowercased().hasSuffix(".pdf") ? "doc.richtext" : "photo")
-                                Text(item.name).lineLimit(1).frame(maxWidth: 120)
-                                Button { attachments.removeAll { $0.id == item.id } } label: {
+                                Button { preview(item) } label: {
+                                    HStack(spacing: 6) {
+                                        if let image = UIImage(data: item.data) {
+                                            Image(uiImage: image).resizable().scaledToFill().frame(width: 24, height: 24).clipShape(RoundedRectangle(cornerRadius: 4))
+                                        } else {
+                                            Image(systemName: item.name.lowercased().hasSuffix(".pdf") ? "doc.richtext" : "doc")
+                                        }
+                                        Text(item.name).lineLimit(1).frame(maxWidth: 120)
+                                    }
+                                }.buttonStyle(.plain).accessibilityLabel("Preview \(item.name)")
+                                Button { phone.attachmentDrafts.removeAll { $0.id == item.id } } label: {
                                     Image(systemName: "xmark.circle.fill")
                                 }.accessibilityLabel("Remove \(item.name)")
                             }
@@ -66,9 +79,11 @@ struct Composer: View {
             }
             HStack(spacing: 8) {
                 Menu {
-                    PhotosPicker(selection: $photos, maxSelectionCount: max(1, 10 - attachments.count), matching: .images) {
+                    PhotosPicker(selection: $photos, maxSelectionCount: max(1, Self.maxAttachmentCount - attachments.count), matching: .images) {
                         Label("Photos", systemImage: "photo.on.rectangle")
                     }
+                    Button { capturingPhoto = true } label: { Label("Take Photo", systemImage: "camera") }
+                        .disabled(!UIImagePickerController.isSourceTypeAvailable(.camera))
                     Button { importingFiles = true } label: { Label("Files", systemImage: "folder") }
                 } label: {
                     Image(systemName: "plus.circle.fill").font(.title2).foregroundStyle(.secondary)
@@ -121,6 +136,15 @@ struct Composer: View {
                 }
             } catch { attachmentProblem = error.localizedDescription }
         }
+        .sheet(isPresented: $capturingPhoto) {
+            CameraCapture { image in
+                guard let data = image.jpegData(compressionQuality: 0.9) else { return }
+                do { try add(data, name: "photo-\(attachments.count + 1).jpg") }
+                catch { attachmentProblem = error.localizedDescription }
+            }
+            .ignoresSafeArea()
+        }
+        .quickLookPreview($previewURL)
     }
 
     private func send() async {
@@ -132,47 +156,70 @@ struct Composer: View {
         uploading = true
         defer { uploading = false }
         do {
-            var ids: [String] = []
-            for index in attachments.indices {
-                if let existing = attachments[index].uploadedID { ids.append(existing); continue }
-                let item = attachments[index]
-                let uploaded = try await phone.runner.uploadAttachment(item.data, name: item.name, source: "iphone")
-                attachments[index].uploadedID = uploaded.id
-                ids.append(uploaded.id)
-            }
+            let ids = try await Self.uploadAttachmentIDs(attachments, upload: { item in
+                try await phone.runner.uploadAttachment(item.data, name: item.name, source: "iphone").id
+            }, uploaded: { index, id in
+                if phone.attachmentDrafts.indices.contains(index), phone.attachmentDrafts[index].id == attachments[index].id {
+                    phone.attachmentDrafts[index].uploadedID = id
+                }
+            })
             onSend(dictated, ids)
             text = ""
-            attachments = []
+            phone.attachmentDrafts = []
             attachmentProblem = nil
         } catch {
             attachmentProblem = "Upload failed. Nothing was sent. \(error.localizedDescription)"
         }
     }
 
+    @MainActor static func uploadAttachmentIDs(_ attachments: [PhoneAttachmentDraft],
+                                               upload: (PhoneAttachmentDraft) async throws -> String,
+                                               uploaded: (Int, String) -> Void = { _, _ in }) async throws -> [String] {
+        var ids: [String] = []
+        for (index, item) in attachments.enumerated() {
+            if let id = item.uploadedID { ids.append(id); continue }
+            let id = try await upload(item)
+            uploaded(index, id)
+            ids.append(id)
+        }
+        return ids
+    }
+
     private func addPhotos(_ items: [PhotosPickerItem]) async {
-        for item in items where attachments.count < 10 {
+        for item in items where attachments.count < Self.maxAttachmentCount {
             do {
                 guard let data = try await item.loadTransferable(type: Data.self) else { continue }
-                try add(data, name: "photo-\(attachments.count + 1).jpg")
+                guard let image = UIImage(data: data), let jpeg = image.jpegData(compressionQuality: 0.9) else {
+                    throw AttachmentDraftError.invalidImage
+                }
+                try add(jpeg, name: "photo-\(attachments.count + 1).jpg")
             } catch { attachmentProblem = error.localizedDescription }
         }
     }
 
+    private func preview(_ item: PhoneAttachmentDraft) {
+        let safeName = URL(filePath: item.name).lastPathComponent
+        let file = FileManager.default.temporaryDirectory.appending(path: "oby-draft-preview-\(item.id.uuidString)-\(safeName)")
+        do { try item.data.write(to: file, options: .atomic); previewURL = file }
+        catch { attachmentProblem = "Couldn't preview \(item.name): \(error.localizedDescription)" }
+    }
+
     private func add(_ data: Data, name: String) throws {
-        guard data.count <= 25 * 1024 * 1024 else { throw AttachmentDraftError.tooLarge }
-        guard attachments.count < 10 else { throw AttachmentDraftError.tooMany }
-        guard attachments.reduce(data.count, { $0 + $1.data.count }) <= 50 * 1024 * 1024 else { throw AttachmentDraftError.messageTooLarge }
-        attachments.append(DraftAttachment(name: name, data: data, uploadedID: nil))
+        guard data.count <= Self.maxAttachmentBytes else { throw AttachmentDraftError.tooLarge }
+        guard attachments.count < Self.maxAttachmentCount else { throw AttachmentDraftError.tooMany }
+        guard attachments.reduce(data.count, { $0 + $1.data.count }) <= Self.maxMessageBytes else { throw AttachmentDraftError.messageTooLarge }
+        phone.attachmentDrafts.append(PhoneAttachmentDraft(name: name, data: data, uploadedID: nil))
         attachmentProblem = nil
     }
 
     private enum AttachmentDraftError: LocalizedError {
-        case tooLarge, tooMany, messageTooLarge
+        case tooLarge, tooMany, messageTooLarge, invalidImage
         var errorDescription: String? {
             switch self {
             case .tooLarge: "Each file must be 25 MB or smaller."
             case .tooMany: "A message can have at most 10 files."
             case .messageTooLarge: "Attachments in one message must total 50 MB or less."
+            case .invalidImage: "Oby couldn't read that photo. Choose another image."
             }
         }
     }
@@ -198,6 +245,31 @@ struct Composer: View {
             dictated = true
             selection = TextSelection(insertionPoint: text.endIndex)
         }
+    }
+}
+
+private struct CameraCapture: UIViewControllerRepresentable {
+    let onImage: (UIImage) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ controller: UIImagePickerController, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        let parent: CameraCapture
+        init(_ parent: CameraCapture) { self.parent = parent }
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            if let image = info[.originalImage] as? UIImage { parent.onImage(image) }
+            parent.dismiss()
+        }
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { parent.dismiss() }
     }
 }
 

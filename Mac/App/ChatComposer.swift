@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The text's layout controls growth, including wrapped and pasted lines; the viewport caps it.
 nonisolated enum ComposerMetrics {
@@ -43,6 +44,7 @@ struct ChatComposer: View {
     let onScreenshot: () -> Void
     let onStop: () -> Bool
     @State private var width: CGFloat = 300
+    @State private var dropTargeted = false
 
     private var lines: Int { ComposerMetrics.lines(text, width: width) }
     private var editorHeight: CGFloat { ComposerMetrics.height(lines: lines, maximum: maximumHeight - 2 * ComposerMetrics.textInset) }
@@ -63,7 +65,8 @@ struct ChatComposer: View {
                 .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
                 .padding(.bottom, ComposerMetrics.buttonInset)
                 .accessibilityLabel("Add attachment")
-                ComposerEditor(text: $text, focused: $focused, focusRequest: focusRequest, onSend: onSend, onStop: onStop)
+                ComposerEditor(text: $text, focused: $focused, focusRequest: focusRequest, onSend: onSend, onStop: onStop,
+                               onPasteAttachment: { pasteAttachment(from: $0) })
                     .frame(height: editorHeight)
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
                     .overlay(alignment: .topLeading) {
@@ -92,6 +95,34 @@ struct ChatComposer: View {
             .frame(minHeight: ComposerMetrics.rowHeight)
             .background(OBYStyle.composer, in: RoundedRectangle(cornerRadius: lines > 1 ? OBYStyle.expandedComposer : 26))
         }
+        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $dropTargeted) { providers in
+            let files = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+            guard !files.isEmpty else { return false }
+            for provider in files {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                    let url = item as? URL ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+                    guard let url else { return }
+                    DispatchQueue.main.async { tray.addFiles([url]) }
+                }
+            }
+            return true
+        }
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 18).stroke(OBYStyle.userBubble, style: StrokeStyle(lineWidth: 2, dash: [6]))
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private func pasteAttachment(from pasteboard: NSPasteboard) -> Bool {
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+            tray.addFiles(urls)
+            return true
+        }
+        guard pasteboard.canReadObject(forClasses: [NSImage.self], options: nil) else { return false }
+        tray.pasteClipboard()
+        return true
     }
 }
 
@@ -101,10 +132,12 @@ struct ComposerEditor: NSViewRepresentable {
     var focusRequest = 0
     let onSend: () -> Void
     let onStop: () -> Bool
+    let onPasteAttachment: (NSPasteboard) -> Bool
 
     final class Editor: NSTextView {
         var send: () -> Void = {}
         var stop: () -> Bool = { false }
+        var pasteAttachment: (NSPasteboard) -> Bool = { _ in false }
         var wantsFocus: () -> Bool = { false }
         var focusWhenAttached = false
 
@@ -128,6 +161,11 @@ struct ComposerEditor: NSViewRepresentable {
             if event.keyCode == 36, !hasMarkedText(), !event.modifierFlags.contains(.shift) { send(); return }
             if event.keyCode == 53, !hasMarkedText(), stop() { return }
             super.keyDown(with: event)
+        }
+
+        override func paste(_ sender: Any?) {
+            if pasteAttachment(.general) { return }
+            super.paste(sender)
         }
     }
 
@@ -177,6 +215,7 @@ struct ComposerEditor: NSViewRepresentable {
         context.coordinator.parent = self
         editor.send = onSend
         editor.stop = onStop
+        editor.pasteAttachment = onPasteAttachment
         editor.wantsFocus = { context.coordinator.parent.focused }
         if editor.string != text {
             editor.string = text

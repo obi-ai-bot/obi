@@ -847,9 +847,9 @@ nonisolated struct Runner: Sendable {
     func startNow(_ id: String) async throws -> Job { try await call("POST", "v1/jobs/\(id)/start") }
 
     /// Tells the job's agent something. A finished job picks its session up again.
-    func tell(_ id: String, _ text: String) async throws -> Job {
-        struct Body: Encodable { var text: String }
-        return try await call("POST", "v1/jobs/\(id)/messages", body: Body(text: text))
+    func tell(_ id: String, _ text: String, attachmentIDs: [String] = []) async throws -> Job {
+        struct Body: Encodable { var text: String; var attachmentIds: [String] }
+        return try await call("POST", "v1/jobs/\(id)/messages", body: Body(text: text, attachmentIds: attachmentIDs))
     }
     func models() async throws -> ModelSettings { try await call("GET", "v1/settings/models") }
     func modelOptions() async throws -> ModelOptions { try await call("GET", "v1/settings/models/options") }
@@ -882,6 +882,13 @@ nonisolated struct Runner: Sendable {
 
     func attachmentContent(_ id: String) async throws -> Data {
         let request = URLRequest(url: URL(string: "v1/attachments/\(id)/content", relativeTo: base.appending(path: "/"))!)
+        let (body, response) = try await URLSession.shared.data(for: signed(request))
+        try Self.check(response, body)
+        return body
+    }
+
+    func attachmentThumbnail(_ id: String) async throws -> Data {
+        let request = URLRequest(url: URL(string: "v1/attachments/\(id)/thumbnail", relativeTo: base.appending(path: "/"))!)
         let (body, response) = try await URLSession.shared.data(for: signed(request))
         try Self.check(response, body)
         return body

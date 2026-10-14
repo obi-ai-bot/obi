@@ -430,7 +430,7 @@ One turn of the conversation with Oby: words become work that starts, a question
 {"said": "Review oby PR #33"}
 ```
 
-`attachmentIds`, when present, is a list of up to 10 opaque ids returned by `POST /v1/attachments`. The ids must belong to this runner and must not already be linked to a turn (`422` otherwise). The old `attachments` path field returns `410`: `Update Oby: attachments are uploaded now.`
+`attachmentIds`, when present, is a list of up to 10 opaque ids returned by `POST /v1/attachments`. The ids must belong to this runner and must not already be linked to a turn (`422` otherwise). The old `attachments` path field returns `410`: `Update Oby: attachments are uploaded now.` The brain can select a subset for a dispatch or `message_job` with one-based `attachments` positions in the current turn's ordered list; Swift refuses out-of-range positions and actions that cannot use attachments.
 
 ### Attachments
 
@@ -672,6 +672,8 @@ Tells the job's agent something:
 - **Running:** the agent hears it now, in the turn under way or as the next one (Claude Code: another message; Codex: it steers the turn).
 - **Finished** (`done`, `failed`, `stopped` or `interrupted`): the runner picks the agent's session up again in the same worktree and branch (a job moved since its last round starts a new session on its new choice instead: `POST /v1/jobs/{id}/move`). The job keeps its `id`, goes back to `running` and gets a new `round`; when `rounds` is above 1 it grows by one too, so a loop still has a round for this. A dismissed job is dismissed no more. It ends as usual, except that this round may end `done` with nothing committed: your words decide what it should do.
 - The text is saved in `notes`, and `step` shows `"You: …"` until the agent moves on.
+
+`attachmentIds` may also name up to 10 unlinked uploads. The runner copies them into the job's `.oby/inputs/`, checks secrets again, links them to the job, and sends fitting images with the message to Claude Code or Codex. Paths are never accepted.
 
 Returns the job. `404` for an unknown job. `422` when the text isn't 1 to 2,000 characters, or the job can't take it: still getting ready, wrapping up its only turn (try again once it's done), or never started (no `session`, and never moved).
 

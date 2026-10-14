@@ -989,6 +989,7 @@
 				INFOPLIST_FILE = iOS/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Oby asks for Face ID before it publishes anything for you.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Oby uses the camera only when you choose Take Photo to attach an image.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens when you tap the mic to dictate, until you tap stop or for up to 60 seconds.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Oby writes down your iPhone and Apple Watch speech on this iPhone to plan your request.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
@@ -1033,6 +1034,7 @@
 				INFOPLIST_FILE = iOS/Info.plist;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Oby asks for Face ID before it publishes anything for you.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Oby uses the camera only when you choose Take Photo to attach an image.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Oby listens when you tap the mic to dictate, until you tap stop or for up to 60 seconds.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Oby writes down your iPhone and Apple Watch speech on this iPhone to plan your request.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;

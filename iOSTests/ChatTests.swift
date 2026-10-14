@@ -110,6 +110,15 @@ struct ChatTests {
         #expect(model.runnerTurns.count == 6 && model.runnerTurns.last?.jobs == ["9f08fd10"])
     }
 
+    @Test func turnShowsAttachmentThumbnails() throws {
+        let json = #"{"id":"turn-1","who":"user","text":"What is this?","at":"2026-10-14T09:12:04Z","jobs":[],"attachments":[{"id":"0123456789abcdef","name":"whiteboard.png","type":"image/png","bytes":2048,"width":800,"height":600}]}"#
+        let turn = try Runner.decoder.decode(RunnerTurn.self, from: Data(json.utf8)).turn
+        let refs = try #require(turn.attachments)
+        #expect(refs.count == 1 && refs[0].name == "whiteboard.png" && refs[0].width == 800)
+        let strip = AttachmentStrip(attachments: refs, loadThumbnail: { _ in Data() }, loadContent: { _ in Data() })
+        #expect(strip.attachments == refs)
+    }
+
     /// Send: the words go trimmed, nothing goes for a blank field, and what was said shows in the
     /// thread from the send until the runner lists it with Oby's answer.
     @Test func theComposerSendsAndEchoes() async throws {

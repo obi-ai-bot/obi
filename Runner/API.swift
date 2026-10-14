@@ -405,8 +405,11 @@ final class API {
     /// Words for the job's agent: a running job hears them now, a finished one runs again.
     func message(_ id: String, _ message: NewMessage) throws -> Response {
         _ = try known(id)
+        let attachmentIDs: [String]
+        do { attachmentIDs = try attachmentStore.validate(message.attachmentIds ?? []).map(\.id) }
+        catch { throw APIError(.unprocessableContent, error.localizedDescription) }
         do {
-            try desk.message(id, message.text)
+            try desk.message(id, message.text, attachmentIDs: attachmentIDs)
         } catch {
             throw APIError(.unprocessableContent, error.localizedDescription)
         }
@@ -1461,4 +1464,5 @@ struct MoveRequest: Decodable {
 
 struct NewMessage: Decodable {
     var text: String
+    var attachmentIds: [String]?
 }

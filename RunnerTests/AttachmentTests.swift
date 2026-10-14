@@ -31,7 +31,7 @@ struct AttachmentTests {
         return (worktree, screenshot, clipboard)
     }
 
-    @Test func aMessageWithAnImageCarriesItAsImageContent() throws {
+    @Test func claudeMessageCarriesImages() throws {
         let message = StreamJSON.user("Fix this.", images: [(png, "image/png")])
         let data = try JSONSerialization.data(withJSONObject: message)
         let line = object(data)
@@ -50,6 +50,17 @@ struct AttachmentTests {
     @Test func aMessageWithoutImagesIsJustText() {
         let body = StreamJSON.user("Keep going.")["message"] as? [String: Any]
         #expect(body?["content"] as? String == "Keep going.")
+    }
+
+    @Test func codexFirstTurnCarriesLocalImage() throws {
+        let worktree = URL(filePath: "/tmp/oby-worktree")
+        let parameters = CodexRPC.turnStart(thread: "thread", prompt: "Fix this.", model: "gpt-6.1-sol",
+                                            effort: "high", images: [worktree.appending(path: ".oby/inputs/screen.png").path])
+        let input = try #require(parameters["input"] as? [[String: Any]])
+        #expect(input.count == 2)
+        #expect(input[0]["type"] as? String == "text" && input[0]["text"] as? String == "Fix this.")
+        #expect(input[1]["type"] as? String == "localImage")
+        #expect(input[1]["path"] as? String == "/tmp/oby-worktree/.oby/inputs/screen.png")
     }
 
     @Test func prepareCopiesTheAttachmentsIntoTheInputs() throws {
@@ -149,14 +160,68 @@ struct AttachmentTests {
     @Test func attachmentsCopyResolvesOpaqueIdsAndSanitizesNames() throws {
         let (worktree, _, _) = try worktree()
         defer { try? FileManager.default.removeItem(at: worktree.deletingLastPathComponent()) }
-        let jobs = JobStore(url: Workspace.root.appending(path: "oby.sqlite"))
-        let store = AttachmentStore(jobs: jobs)
+        let root = worktree.deletingLastPathComponent().appending(path: "runner")
+        let jobs = JobStore(url: root.appending(path: "oby.sqlite"))
+        let store = AttachmentStore(root: root.appending(path: "attachments", directoryHint: .isDirectory), jobs: jobs)
         let value = try store.upload(png, name: "../../etc/passwd.png", source: "iphone")
         defer { try? store.delete(value.id) }
         var attached = job(agent: "codex", attachments: nil)
         attached.attachmentIDs = [value.id]
-        #expect(try Attachments.copy(attached, into: worktree) == [try #require(store.url(value.id)?.path)])
+        #expect(try Attachments.copy(attached, into: worktree, jobStore: jobs,
+                                     attachmentRoot: root.appending(path: "attachments", directoryHint: .isDirectory)) == [try #require(store.url(value.id)?.path)])
         #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/passwd.png")) == png)
+    }
+
+    @Test func dispatchCarriesAttachments() throws {
+        let (worktree, _, _) = try worktree()
+        defer { try? FileManager.default.removeItem(at: worktree.deletingLastPathComponent()) }
+        let root = worktree.deletingLastPathComponent().appending(path: "runner")
+        let jobs = JobStore(url: root.appending(path: "oby.sqlite"))
+        let attachmentRoot = root.appending(path: "attachments", directoryHint: .isDirectory)
+        let store = AttachmentStore(root: attachmentRoot, jobs: jobs)
+        let first = try store.upload(png, name: "../../screens/first.png", source: "iphone")
+        let second = try store.upload(png, name: "second.png", source: "iphone")
+        defer { try? store.delete(first.id); try? store.delete(second.id) }
+        let body = try JSONSerialization.data(withJSONObject: ["job": [
+            "repo": "deskree-inc/oby", "kind": "build", "task": "Inspect the images",
+            "attachmentIds": [first.id, second.id],
+        ]])
+        let request = try JSONDecoder().decode(DispatchRequest.self, from: body)
+        let new = try #require(request.job.new)
+        #expect(new.attachmentIDs == [first.id, second.id])
+
+        var dispatched = job(agent: "codex", attachments: nil)
+        dispatched.attachmentIDs = new.attachmentIDs
+        #expect(try Attachments.copy(dispatched, into: worktree, jobStore: jobs, attachmentRoot: attachmentRoot)?.count == 2)
+        #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/first.png")) == png)
+        #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/second.png")) == png)
+    }
+
+    @Test func onlyTheStartingTurnsJobsGetThem() throws {
+        let (worktree, _, _) = try worktree()
+        defer { try? FileManager.default.removeItem(at: worktree.deletingLastPathComponent()) }
+        let root = worktree.deletingLastPathComponent().appending(path: "runner")
+        let jobs = JobStore(url: root.appending(path: "oby.sqlite"))
+        let store = AttachmentStore(root: root.appending(path: "attachments", directoryHint: .isDirectory), jobs: jobs)
+        let screenshot = try store.upload(png, name: "screen.png", source: "mac")
+        defer { try? store.delete(screenshot.id) }
+
+        var first = job(agent: "claude", attachments: nil)
+        first.attachmentIDs = [screenshot.id]
+        let firstInputs = try Attachments.copy(first, into: worktree, jobStore: jobs,
+                                               attachmentRoot: root.appending(path: "attachments", directoryHint: .isDirectory))
+        #expect(firstInputs == [try #require(store.url(screenshot.id)?.path)])
+
+        var later = job(agent: "codex", attachments: nil)
+        later.id = "cd34ef56"
+        later.attachmentIDs = nil
+        let laterWorktree = worktree.deletingLastPathComponent().appending(path: "jobs/cd34ef56")
+        try FileManager.default.createDirectory(at: laterWorktree.appending(path: ".oby/inputs"), withIntermediateDirectories: true)
+        #expect(try Attachments.copy(later, into: laterWorktree, jobStore: jobs,
+                                     attachmentRoot: root.appending(path: "attachments", directoryHint: .isDirectory)) == nil)
+        #expect(later.attachmentIDs == nil)
+        #expect(Attachments.inputs(later).isEmpty)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: laterWorktree.appending(path: ".oby/inputs").path).isEmpty)
     }
 
     @Test @MainActor func attachmentAPIStoresAndReadsOpaqueUploads() async throws {
