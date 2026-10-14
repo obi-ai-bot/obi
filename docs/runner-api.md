@@ -4,6 +4,8 @@ The runner is Oby's engine without the notch: the brain and the Lead, Oby's own 
 
 This document is the contract between the runner and its clients. Change it in the same pull request as the code on either side.
 
+The Rust daemon `obid` (`core/`) serves this same API, so the apps run against it unchanged, plus the endpoints in [obid only](#obid-only) at the end; the Swift runner is frozen and never implements those.
+
 ## Reaching it
 
 ## LAN gateway (#284)
@@ -1122,3 +1124,192 @@ The Watch API doesn't pass pieces on to the runner's speech service (`POST /v1/s
 - **Research jobs never commit or publish.** Proposed issues are filed only after the user taps to file them.
 - **Touch the user's credentials:** it never reads, stores or forwards agent credentials, and each tool signs in through its own login on the runner.
 - **Read outside text as instructions:** text from GitHub or other people reaches agents only as quoted files.
+
+## obid only
+
+The Rust daemon `obid` (`core/`, docs/ARCHITECTURE.md) serves this whole API, so the apps keep working against it unchanged, and also the endpoints in this section. **The Swift runner is frozen and never implements them.** They are what Obi-to-Obi work and the end-to-end scenario (e2e/SCENARIO.md) need. JSON keys are camelCase as everywhere in this API; objects of the Obi-to-Obi protocol (envelopes, agent cards, action bodies) appear exactly as the protocol defines them, in snake_case (obi-ai-bot/obi-sphere, `spec/`). None of these endpoints is on the gateway's allowlist (Runner/Routes.swift): they are managed on the machine itself. A phone answers an Obi-to-Obi request through the inbox endpoints it already has.
+
+### obid only: configuration
+
+```sh
+obid serve --config /path/to/config.json
+```
+
+```json
+{"listen": "127.0.0.1:7811",
+ "home": "/abs/path/obid-home",
+ "owner": "wellington",
+ "agents": {"claude": {"bin": "claude", "accounts": [{"id": "default", "name": "Default", "configDir": null}]}},
+ "repos": [{"repo": "obi-e2e/fixture-app", "remote": "file:///abs/path/remote.git", "defaultBranch": "main", "check": "node --test"}],
+ "allowFileRemotes": false,
+ "telemetry": false}
+```
+
+- `listen` (required): an address on 127.0.0.1. obid binds only that, and refuses with `403` every request whose `Host` isn't `127.0.0.1`, `localhost` or `[::1]` (with or without a port), as a Mac runner does.
+- `home` (required, absolute): everything obid keeps, and the only place it writes besides its `HOME` and `TMPDIR`: its database, the Obi key (`keys/`, 0600), clones (`clones/<owner>/<name>`), job worktrees (`worktrees/<job id>`), plug-ins (`plugins/`, `plugin-data/`).
+- `owner` (required): the owner's id, as their Sphere knows them.
+- `agents.claude.bin`: the Claude Code adapter's binary, a path or a command name found on the login shell's `PATH` (AGENTS.md, "PATH"). `accounts`: each `{id, name, configDir}`; `configDir` becomes `CLAUDE_CONFIG_DIR` for that account's agents, or null for the tool's own default login. A listed account is usable until one of its jobs fails on its login, which marks it signed out. Codex and Cursor take the same shape when their adapters land (`CODEX_HOME`, `CURSOR_CONFIG_DIR`).
+- `repos`: the repositories jobs may work in. `remote` is an `https://` or `ssh` URL, or a `file://` URL only when `allowFileRemotes` is true (the e2e test's fixture). `check` is the one-line command that decides `tests_pass` and serves as the job's check.
+- `telemetry`: false unless the owner turns it on. obid sends nothing to anyone otherwise.
+
+The API token is `OBID_API_TOKEN` from the environment (at least 32 characters) or, when that is unset, one obid makes on first start and keeps in `home/api-token` (0600), which the shells on the same machine read. Every request sends `Authorization: Bearer <token>`; anything else is `401`. `GET /v1/status` adds `"engine": "obid"` to `runner`. On SIGTERM or SIGINT obid stops taking requests, leaves its jobs as a restart would (After any restart, above) and exits 0 within 10 seconds.
+
+### obid only: Sphere membership
+
+The Obi's place in one Sphere: its key, its owner-signed agent card, its owner's delegation, and the token it exchanges them for (spec `identity.md`). One Sphere per obid in this version.
+
+**`GET /v1/obid/sphere`** answers the membership:
+
+```json
+{"state": "joined", "url": "http://127.0.0.1:8787", "sphere": "e2e", "obiId": "obi-wellington", "owner": "wellington",
+ "keyId": "ed25519:…", "publicKey": "…", "card": { …the signed agent card… },
+ "tokenExpiresAt": "2026-10-14T13:00:05Z", "lastPoll": "2026-10-14T12:00:40Z", "lastError": null}
+```
+
+`state` is `none` (no Sphere yet; the other keys null, except `owner`, and `keyId`/`publicKey` once the key exists), `joined` or `revoked` (the Sphere refused its token as revoked). `lastError` is the last thing that went wrong talking to the Sphere, one line, or null.
+
+**`POST /v1/obid/sphere/key`**, no body: makes the Obi's Ed25519 key if there is none, and answers `{"keyId": "ed25519:…", "publicKey": "<base64url>"}`, the same every time after. The private key never appears in an answer, an event, a log or an agent's reach.
+
+**`POST /v1/obid/sphere/card`**: the card the owner is to sign, built by obid around its own key:
+
+```json
+{"url": "http://127.0.0.1:8787", "sphere": "e2e", "obiId": "obi-wellington", "name": "Wellington's Obi",
+ "ownerKey": "<owner public key, base64url>", "accepts": ["review_request"]}
+```
+
+`description` is optional (one line; else `A personal delegate for an engineer.`). Answers `{"card": { …the agent card without signatures… }}`: `url` is `<url>/v0.1/spheres/<sphere>/members/<obiId>`, `version` obid's, `card_seq` 1 (one more than the current card's when it has one), `issued_at` now, `skills` one per accepted type. The owner signs it as the spec says (identity.md 2.1); obid never holds the owner key. `409` before the key exists, `422` for a field that isn't valid.
+
+**`POST /v1/obid/sphere/join`**: joins with an invitation:
+
+```json
+{"url": "http://127.0.0.1:8787", "sphere": "e2e",
+ "invitation": {"id": "<invitation_id>", "secret": "<secret>"},
+ "card": { …the card, signed by the owner… },
+ "delegation": "<owner assertion JWT with may_act>"}
+```
+
+obid checks the card (identity.md 2.2, checks 1 to 5 and 7), that it carries obid's own `key_id` and `public_key`, `sphere` and `obiId` as given and `owner` its configured owner; and the delegation (signed by the card's `owner_key`, `iss` and `sub` the owner, `aud` `obi-sphere:<sphere>`, `may_act.sub` its `obi_id`, `exp` ahead, `scope` including `receive` and `reply`). Then it redeems the invitation (`POST /v0.1/spheres/{sphere}/invitations/{id}/redeem`), exchanges the delegation and an actor assertion of its own for a token (`POST /v0.1/oauth/token`), reads the directory, and starts following its deliveries (`GET …/deliveries?wait=25`, again as soon as each answers; a new token when less than 60 seconds are left; after an error, again after 1 second, doubling to 30). It keeps the card and the delegation in `home` (0600) and never shows the delegation again. Answers `200` with the membership, `state` `joined`.
+
+`409` when already joined; `422` with why for a card or delegation that fails a check; `502` `{"error": "The Sphere refused it: invitation_invalid: …"}` when the Sphere answers an error (its `code` and `message`, quoted); `504` when the Sphere can't be reached.
+
+### obid only: Obi-to-Obi exchanges
+
+An **exchange** is one request and its replies (spec `protocol.md`, "Exchanges"), as this Obi sees it.
+
+**`POST /v1/obid/sphere/requests`**: the owner's Obi asks another Obi:
+
+```json
+{"to": "obi-wellington", "type": "review_request", "body": { …the action body… }, "expiresIn": 3600}
+```
+
+`type` is `review_request`, `question` or `handoff`; `body` must match the spec's schema for it; `to` must be an active member whose card accepts `type`; `expiresIn` is 60 to 2,592,000 seconds. obid builds the envelope (a new UUID for `id` and `correlation_id`, `created_at` now, `expires_at` now + `expiresIn`, its `key_id`), signs it and sends it (`POST /v0.1/spheres/{sphere}/messages`). Answers `202` with the exchange, `state` `sent`. `422` with why for a body, recipient or expiry that isn't valid (nothing sent); `409` when not joined; `502` with the Sphere's code and message when it refuses (`policy_denied`, …), and no exchange is kept.
+
+Only the owner sends requests, through this endpoint (from the apps, or the e2e harness). Agents can't reach it: their tokens answer only `/v1/agent/…`.
+
+**`GET /v1/obid/sphere/exchanges?limit=50`** lists exchanges, the latest first (`limit` 1 to 500). **`GET /v1/obid/sphere/exchanges/{correlationId}`** answers one, `404` for one obid doesn't have:
+
+```json
+{"correlationId": "5f0e8c1a-…", "direction": "incoming", "type": "review_request",
+ "peer": "obi-ernesto", "peerOwner": "ernesto", "state": "done",
+ "decidedBy": "inbox", "rule": null, "inboxItem": "obi-5f0e8c1a-…", "job": "9f08fd10",
+ "publishScan": {"ran": true, "clean": true},
+ "messages": [
+   {"direction": "received", "seq": 1, "at": "2026-10-14T12:00:11Z", "envelope": { …review_request… }},
+   {"direction": "sent", "seq": 2, "at": "2026-10-14T12:00:15Z", "envelope": { …accept… }},
+   {"direction": "sent", "seq": 3, "at": "2026-10-14T12:00:19Z", "envelope": { …result… }}],
+ "result": { …the result body… }, "error": null,
+ "created": "2026-10-14T12:00:11Z", "updated": "2026-10-14T12:00:19Z"}
+```
+
+- `direction`: `outgoing` (this Obi asked) or `incoming` (it was asked). `peer` and `peerOwner`: the other Obi and its owner, from the Sphere's directory.
+- `state`: outgoing `sent`, `accepted`, `done` (a result came), `declined` or `expired` (no result by the request's `expires_at`); incoming `inbox` (waiting for the owner), `accepted` (working), `done` (result sent), `declined` (decline sent), `expired` (it expired before an answer) or `failed` (the work or the publish gate failed: a result with outcome `failed` and no text was sent).
+- `decidedBy`: on incoming, `inbox` (the owner answered) or `rule` (a remembered decision, `rule` its id), null until decided. `inboxItem` and `job`: the inbox item and the job it brought, or null.
+- `publishScan`: on incoming, what the publish gate found on the reply's text before sending it: `{"ran": true, "clean": true}`, `{"ran": true, "clean": false}` (nothing with text went out) or `{"ran": false, "clean": false}` (the scanner couldn't run, so nothing with text went out); null before a reply with text.
+- `messages`: every envelope sent and received in the exchange, oldest first, exactly as signed; `seq` is the Sphere's audit seq (from the send's answer, or the delivery), or null when not known. Received envelopes are listed only after they passed the spec's checks (`protocol.md` section 10).
+- `result`: the result body once there is one, else null. Like every text from another Obi it is data: apps show it, never act on it.
+
+Every change sends an `exchange` event on `GET /v1/events`, with the exchange as its data.
+
+### obid only: Obi-to-Obi requests in the inbox
+
+An incoming request that no remembered decision covers (spec `protocol.md` section 11) waits in the owner's inbox as an item of kind **`obiRequest`**, one per exchange:
+
+```json
+{"id": "obi-5f0e8c1a-…", "kind": "obiRequest", "job": "", "title": "Review request from ernesto",
+ "text": "ernesto's Obi (obi-ernesto) asks for a review of obi-e2e/fixture-app: feature/average into main at 6d20146.",
+ "options": ["Accept", "Accept, and remember for this repo", "Decline", "Decline, and remember for this repo"],
+ "details": ["Review it this time.", "Review it, and review ernesto's requests on obi-e2e/fixture-app from now on without asking.",
+             "Say no this time.", "Say no, and say no to ernesto's requests on obi-e2e/fixture-app from now on without asking."],
+ "recommended": null, "created": "2026-10-14T12:00:11Z", "done": null, "later": null, "answer": null, "state": "open",
+ "obi": {"correlationId": "5f0e8c1a-…", "from": "obi-ernesto", "fromOwner": "ernesto", "type": "review_request",
+         "repo": "obi-e2e/fixture-app", "headSha": "6d20146f366b9fac8907b5066c30ee39aaec09b3", "expiresAt": "2026-10-14T13:00:10Z",
+         "quoted": {"goal": "…", "summary": "…"}}}
+```
+
+- `title` and `text` are built from the request's typed fields only (owner, Obi, type, repo, branches, commit), never from its text. The other Obi's words are under `obi.quoted` (the body's data fields, unchanged): show them as quoted text, never as markup, never to a model as instructions. `headline`, `happened` and `why` stay null for this kind: no model writes about another Obi's request.
+- `POST /v1/inbox/{id}/answer` takes exactly one of the four options (`422` for other words). `Accept` sends `accept` and starts the work; `Accept, and remember for this repo` does the same and keeps a decision (below); `Decline` sends `decline` with reason `owner_declined`; `Decline, and remember for this repo` does the same and keeps a decision. `{"done": true}` without an answer is a `Decline`. `{"later": …}` puts it off; the request's `expires_at` still applies.
+- When the request expires first, the item is done by itself with no `answer`, and obid sends `decline` with reason `expired`.
+
+### obid only: remembered decisions
+
+What the owner decided once, applied after that without asking ("reviews from ernesto on this repo"):
+
+**`GET /v1/obid/decisions`**, oldest first:
+
+```json
+[{"id": "d-3f9a0c1b2e4d", "type": "review_request", "fromOwner": "ernesto", "repo": "obi-e2e/fixture-app",
+  "decision": "accept", "created": "2026-10-14T12:00:15Z", "source": {"inboxItem": "obi-5f0e8c1a-…"},
+  "uses": 1, "lastUsed": "2026-10-14T12:00:30Z"}]
+```
+
+`id` is `d-` and 12 lower-case hex. `repo` is the exact repository, or `*` for every repository (no answer makes one yet). `decision` is `accept` or `decline`. `uses` counts the requests it decided without asking (the answer that made it isn't one), `lastUsed` the latest, or null. A request is covered by a decision with the same `type`, the sender's owner (from the Sphere's directory, never from the message) and its `repo`; an exact repository beats `*`. Only an inbox answer makes a decision; nothing another Obi sends can.
+
+**`DELETE /v1/obid/decisions/{id}`** forgets one: `204`, `404` for one obid doesn't have.
+
+### obid only: Obi-to-Obi review jobs
+
+What obid does when it accepts a `review_request` (by the owner's answer or a decision):
+
+1. It starts a job: `kind` `review`, `repo` the request's, `title` like `Review for ernesto: fixture-app`, and two keys only obid sends on jobs: `obi` (`{"correlationId", "from", "fromOwner", "requestId"}`, null on other jobs) and `worktree` (the job's worktree, an absolute path, null before it exists; the gateway nulls it). It runs on an account Routing picks.
+2. It fetches `head_branch` and `head_sha` from the repository's `remote` into its clone (whose push URL is invalid, as the runner's is), and makes a fresh worktree, `home/worktrees/<job id>`, detached at `head_sha`. When `head_sha` can't be fetched, the job fails.
+3. It writes the request as data to `.obi/inputs/obi-request.json` in the worktree, `{"from", "from_owner", "type", "body"}` with `body` exactly as received, and excludes `.obi/` in the worktree's `info/exclude`.
+4. It runs the agent in the worktree with a fixed prompt that names only typed values (repository, branches, commit) and the file, never a data field; with the account's binary and `-p --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --permission-mode default --setting-sources "" --json-schema <the review output schema>`, the environment cleaned as for any Claude Code job (no `CLAUDECODE`, `CLAUDE_CODE_*`, `ANTHROPIC_*`, `GH_TOKEN`, `GITHUB_TOKEN`), and the usual sandbox. It closes the agent's stdin after the turn's `result` line. A review job that makes a commit fails.
+5. It reads `structured_output` from the `result` line; when that is missing, the last fenced code block labeled `obi-review` in `result`, holding the same JSON. Neither, or one that doesn't match the schema, fails the job.
+6. It runs the repository's `check` in the worktree (the test-run limit applies): `tests_pass` is met when it exits 0. Without a `check`, `tests_pass` is not met.
+7. It builds the result body (spec `protocol.md` 5.7): each finding gets the spec's recommended id (`f-` + 16 hex of SHA-256 of `file\nline\ntitle`; exact duplicates are dropped), each acceptance condition its `met` (`custom` conditions are not judged by obid yet: not met), and `outcome` is `approved` when every condition is met, else `changes_requested`; a job that failed gives `failed` with no findings.
+8. **Publish gate.** Every text field of the reply (finding titles and details, the summary) goes through the secret scan Publish uses (its rules, the vault's secrets, their encoded copies). Clean: it sends the `result`. A finding, or a scanner that can't run: it sends a `result` with `outcome` `failed`, `findings` `[]` and no text, and records that in the exchange's `publishScan`.
+9. The job ends `done` (or `failed`) and publishes nothing: no push, no pull request, no check run, no comment, `outgoing` stays `[]`. Its worktree stays until the usual cleanup.
+
+The review output schema obid passes with `--json-schema`:
+
+```json
+{"type": "object", "additionalProperties": false, "required": ["summary", "findings"],
+ "properties": {
+   "summary": {"type": "string", "maxLength": 4000},
+   "findings": {"type": "array", "maxItems": 50, "items": {
+     "type": "object", "additionalProperties": false, "required": ["severity", "file", "line", "title", "detail"],
+     "properties": {
+       "severity": {"enum": ["blocker", "major", "minor", "nit"]},
+       "file": {"type": "string", "maxLength": 500},
+       "line": {"type": "integer", "minimum": 1},
+       "end_line": {"type": "integer", "minimum": 1},
+       "title": {"type": "string", "maxLength": 200},
+       "detail": {"type": "string", "maxLength": 4000}}}}}}
+```
+
+Whatever the agent wrote must still pass the spec's schema for findings (paths, one-line titles, no control characters) before it is sent; a finding that doesn't is dropped and the summary says how many were.
+
+### obid only: plug-ins
+
+Context providers and event sources (docs/ARCHITECTURE.md, "Plug-ins"). None is enabled until the owner enables it.
+
+**`GET /v1/obid/plugins`**: every plug-in obid found, enabled or not:
+
+```json
+[{"id": "tetrix", "name": "Tetrix", "version": "0.1.0", "kinds": ["agent-mcp"], "enabled": false,
+  "state": "disabled", "lastError": null}]
+```
+
+`state` is `disabled`, `starting`, `ready` or `failed` (it crashed three times in a row; enabling it again starts it again).
+
+**`PUT /v1/obid/plugins/{id}`**: `{"enabled": true}` or `{"enabled": false}`, optionally with `"config": { … }` matching the manifest's `config` schema. Answers the plug-in. Kept in `home/plugins.json`. `404` for an unknown plug-in, `422` for a config that doesn't match.

@@ -1,13 +1,14 @@
 # CI
 
-Two workflows run on every pull request into `dev` and on every push to `dev`, so a merge into `dev` can wait for them (#66). Nothing else triggers them. A newer push to the same pull request, or to `dev`, cancels the run it supersedes.
+Three workflows run on every pull request into `dev` and on every push to `dev`, so a merge into `dev` can wait for them (#66). Nothing else triggers them. A newer push to the same pull request, or to `dev`, cancels the run it supersedes.
 
 | Check | Workflow | What it does | Where it runs | How long |
 | --- | --- | --- | --- | --- |
 | **Runner on Linux** | [`runner-linux.yml`](../.github/workflows/runner-linux.yml) | Installs bubblewrap and SQLite's headers, sets up Swift 6.4.0 with swiftly, then `swift build --build-tests` and `swift test` for the runner package (`Package.swift`: `Engine/`, `Runner/`, `RunnerTests/`). | Hosted, `ubuntu-26.04` (tetrix-lab's Ubuntu) | About 9–13 min with an empty cache, 7–9 min with one (estimated, see below) |
 | **Mac and iPhone** | [`apple.yml`](../.github/workflows/apple.yml) | Builds the Mac app and runs `MacTests`, then builds `ObyPhone` (with `ObyWatch` and `ObyActivity` embedded) and runs `iOSTests` on an iPhone 17 simulator. Signed ad hoc. | Hosted, `xcode-27` (Xcode 27.0 on macOS 27, Apple silicon) | About 10–16 min (estimated, see below) |
+| **E2E** | [`e2e.yml`](../.github/workflows/e2e.yml) | Checks out obi-ai-bot/obi-sphere's `dev` next to this repository (it is private: the job needs the repository secret `OBI_SPHERE_READ_TOKEN`, a token with read access to it, and fails saying so without it), then `make e2e`: the preflight and the eight steps of [e2e/SCENARIO.md](../e2e/SCENARIO.md) with stub agents. Red until Phase 1 makes every step green; the log says which step fails and why. | Hosted, `ubuntu-26.04` and `macos-26` | Not measured yet |
 
-To gate merges on them, add both checks, by these names, as required status checks in `dev`'s branch rules (Settings › Rules).
+To gate merges on the first two, add them, by these names, as required status checks in `dev`'s branch rules (Settings › Rules).
 
 ## Where it runs
 
