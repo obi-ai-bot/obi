@@ -242,12 +242,21 @@ enum RemoteKind {
 }
 
 /// `https://host/…`, `ssh://…` or scp-like `user@host:path`, `file:///abs/path`; nothing else.
+///
+/// git hands a remote's user and host to ssh, and a remote to its own transports, so none of them
+/// may read as a command-line option (`ssh://-oProxyCommand=…`, `-oProxyCommand=…@h:p`,
+/// `https://-x/r`): a user or host that starts with `-` is refused, as are a remote that does,
+/// control characters anywhere, and a host that isn't a host name, an IPv4 address or a bracketed
+/// IPv6 one.
 fn remote_kind(remote: &str) -> Option<RemoteKind> {
+    if remote.starts_with('-') || remote.chars().any(char::is_control) {
+        return None;
+    }
     if let Some(rest) = remote.strip_prefix("https://") {
-        return (!rest.is_empty() && !rest.starts_with('/')).then_some(RemoteKind::Https);
+        return url_authority_ok(rest).then_some(RemoteKind::Https);
     }
     if let Some(rest) = remote.strip_prefix("ssh://") {
-        return (!rest.is_empty() && !rest.starts_with('/')).then_some(RemoteKind::Ssh);
+        return url_authority_ok(rest).then_some(RemoteKind::Ssh);
     }
     if let Some(rest) = remote.strip_prefix("file://") {
         return rest.starts_with('/').then_some(RemoteKind::File);
@@ -256,13 +265,65 @@ fn remote_kind(remote: &str) -> Option<RemoteKind> {
     if !remote.contains("://") {
         if let Some((user_host, path)) = remote.split_once(':') {
             if let Some((user, host)) = user_host.split_once('@') {
-                if !user.is_empty() && !host.is_empty() && !path.is_empty() && !host.contains('/') {
+                if user_ok(user) && host_name_ok(host) && !path.is_empty() && !path.starts_with('-')
+                {
                     return Some(RemoteKind::Ssh);
                 }
             }
         }
     }
     None
+}
+
+/// What follows `https://` or `ssh://`: `[user@]host[:port]`, then a path.
+fn url_authority_ok(rest: &str) -> bool {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = match authority.rsplit_once('@') {
+        Some((user, host_port)) => {
+            if !user_ok(user) {
+                return false;
+            }
+            host_port
+        }
+        None => authority,
+    };
+    host_port_ok(host_port)
+}
+
+/// A user name ssh can't take for an option: not empty, no leading `-`, no spaces.
+fn user_ok(user: &str) -> bool {
+    !user.is_empty()
+        && !user.starts_with('-')
+        && !user.chars().any(|c| c.is_whitespace() || c == '@')
+}
+
+/// `host`, `host:port`, `[v6]` or `[v6]:port`.
+fn host_port_ok(host_port: &str) -> bool {
+    let port_ok =
+        |port: &str| (1..=5).contains(&port.len()) && port.bytes().all(|b| b.is_ascii_digit());
+    if let Some(rest) = host_port.strip_prefix('[') {
+        let Some((inside, after)) = rest.split_once(']') else {
+            return false;
+        };
+        let after_ok = after.is_empty() || after.strip_prefix(':').is_some_and(port_ok);
+        return after_ok
+            && !inside.is_empty()
+            && inside
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.');
+    }
+    match host_port.split_once(':') {
+        Some((host, port)) => host_name_ok(host) && port_ok(port),
+        None => host_name_ok(host_port),
+    }
+}
+
+/// A DNS name or IPv4 address: letters, digits, `-`, `_` and `.`, starting with a letter or digit.
+fn host_name_ok(host: &str) -> bool {
+    host.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 fn is_repo_name(name: &str) -> bool {
@@ -393,6 +454,27 @@ mod tests {
             ("ext::sh -c touch% /tmp/pwned", None),
             ("https://", None),
             ("", None),
+            ("https://github.com:443/o/r.git", Some(RemoteKind::Https)),
+            ("ssh://git@github.com:22/o/r.git", Some(RemoteKind::Ssh)),
+            ("ssh://git@[::1]:22/o/r.git", Some(RemoteKind::Ssh)),
+            ("ssh://192.168.1.2/o/r.git", Some(RemoteKind::Ssh)),
+            ("git@192.168.1.2:o/r.git", Some(RemoteKind::Ssh)),
+            // Users and hosts git or ssh would read as options.
+            ("ssh://-oProxyCommand=touch /tmp/pwned/x", None),
+            ("ssh://-oProxyCommand=touch%20/tmp/pwned/x/o/r.git", None),
+            ("ssh://git@-oProxyCommand=x/o/r.git", None),
+            ("ssh://-oProxyCommand=x@github.com/o/r.git", None),
+            ("-oProxyCommand=touch /tmp/x@h:p", None),
+            ("git@-oProxyCommand=x:o/r.git", None),
+            ("-git@github.com:o/r.git", None),
+            ("git@github.com:-o/r.git", None),
+            ("https://-x/r", None),
+            ("https://user@github.com/o/r.git", Some(RemoteKind::Https)),
+            ("https://-user@github.com/o/r.git", None),
+            ("https://github.com:x/o/r.git", None),
+            ("https://git hub.com/o/r.git", None),
+            ("https://github.com/o/r.git\n", None),
+            ("ssh://git@github.com\t/o/r.git", None),
         ] {
             assert_eq!(remote_kind(remote), kind, "{remote}");
         }

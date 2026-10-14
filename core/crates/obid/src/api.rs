@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -24,6 +25,35 @@ pub struct Shared {
     pub config: Config,
     pub token: String,
     pub host: String,
+    pub cleanup: Cleanup,
+}
+
+/// What `status.cleanup` says: the job worktrees' folder and the disk space it took when last
+/// measured. As Engine/Cleanup.swift, it's measured when obid starts and again after each cleanup
+/// pass, never per request: a walk of every worktree, `node_modules` and all, on each status poll
+/// from each app would cost far more than the number is worth.
+pub struct Cleanup {
+    pub path: PathBuf,
+    bytes: AtomicU64,
+}
+
+impl Cleanup {
+    /// Measures `home/worktrees` now. It walks the whole tree, so call it off the async threads.
+    pub fn measure(home: &Path) -> Cleanup {
+        let path = worktrees(home);
+        let bytes = AtomicU64::new(disk_usage(&path));
+        Cleanup { path, bytes }
+    }
+
+    /// The disk space as last measured.
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
+    }
+
+    /// Measures again, as a cleanup pass does when it ends. Walks the whole tree, like `measure`.
+    pub fn remeasure(&self) {
+        self.bytes.store(disk_usage(&self.path), Ordering::Relaxed);
+    }
 }
 
 /// The router: every endpoint, behind the gate.
@@ -66,8 +96,9 @@ pub const NO_TOKEN: &str = "This runner answers only requests with its API token
 
 /// Every request, before anything else: its `Host` must be a loopback name (`403` otherwise, so a
 /// web page can't reach obid through a name that resolves to 127.0.0.1), then it must carry the
-/// API token (`401` otherwise). As a Mac runner's gate (Runner/API.swift, `Gate.admit`), a tool's
-/// OAuth discovery gets a plain `404` after the host check, without a token.
+/// API token (`401` otherwise). Unlike a Mac runner's gate (Runner/API.swift, `Gate.admit`), OAuth
+/// discovery paths get no exception: runner-api.md, "obid only: configuration", says anything
+/// without the token is `401`, so they are `401` without it and `404` with it.
 async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -> Response {
     match admit(request.uri(), request.headers(), &shared.token) {
         Ok(()) => next.run(request).await,
@@ -79,9 +110,6 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
 pub fn admit(uri: &axum::http::Uri, headers: &HeaderMap, token: &str) -> Result<(), ApiError> {
     if !loopback_request(uri, headers) {
         return Err(ApiError::new(StatusCode::FORBIDDEN, NOT_LOOPBACK));
-    }
-    if is_oauth_discovery(uri.path()) {
-        return Err(ApiError::new(StatusCode::NOT_FOUND, "Not found."));
     }
     let mut values = headers.get_all(header::AUTHORIZATION).iter();
     let given = match (values.next(), values.next()) {
@@ -141,12 +169,6 @@ pub fn is_loopback(header: &str) -> bool {
 /// A port: one to five digits.
 fn is_port(text: &str) -> bool {
     (1..=5).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_digit())
-}
-
-/// The paths an OAuth client asks for: the well-known documents and the registration,
-/// authorization and token endpoints.
-fn is_oauth_discovery(path: &str) -> bool {
-    path.starts_with("/.well-known/") || matches!(path, "/register" | "/authorize" | "/token")
 }
 
 /// The token in `Authorization: Bearer <token>`, or none.
@@ -277,11 +299,6 @@ pub fn worktrees(home: &Path) -> PathBuf {
 }
 
 async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>, ApiError> {
-    let path = worktrees(&shared.config.home);
-    let measured = path.clone();
-    let bytes = tokio::task::spawn_blocking(move || disk_usage(&measured))
-        .await
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let accounts = shared
         .config
         .agents
@@ -325,8 +342,9 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         // Settings › Permissions: bypass until the owner picks another (Engine/Permissions.swift).
         permissions: ModeJson { mode: "bypass" },
         cleanup: CleanupJson {
-            path: path.to_string_lossy().into_owned(),
-            bytes,
+            path: shared.cleanup.path.to_string_lossy().into_owned(),
+            bytes: shared.cleanup.bytes(),
+            // obid has no cleanup pass yet; when it does, it sets this and calls `remeasure`.
             last_run: None,
         },
     }))

@@ -392,18 +392,33 @@ fn refuses_without_the_token() {
     assert!(answer.body["error"].is_string());
 }
 
-/// LoopbackTests.oauthDiscoveryIs404: a plain 404 without a token, after the host check.
+/// LoopbackTests.oauthDiscoveryIs404 gives a Mac runner's OAuth discovery paths a plain 404
+/// without a token. obid's contract (runner-api.md, "obid only: configuration") has no such
+/// exception: anything without the token is 401, these paths included, and with the token they
+/// are endpoints obid doesn't have, 404. A host that isn't loopback is 403 before either.
 #[test]
-fn oauth_discovery_is_404() {
+fn oauth_discovery_needs_the_token() {
     let folder = Folder::new("oauth");
     let obid = start(&folder.0, &config(&folder.0, free_port()), Some(TOKEN));
+    let bearer = format!("Bearer {TOKEN}");
     for path in [
         "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/v1/status",
         "/.well-known/oauth-authorization-server",
         "/.well-known/openid-configuration",
         "/register",
+        "/authorize",
+        "/token",
     ] {
         let answer = request(obid.port, "GET", path, &[("Host", "127.0.0.1")]);
+        assert_eq!(answer.status, 401, "{path}");
+        assert!(answer_contains(&answer.body, "API token"), "{path}");
+        let answer = request(
+            obid.port,
+            "GET",
+            path,
+            &[("Host", "127.0.0.1"), ("Authorization", &bearer)],
+        );
         assert_eq!(answer.status, 404, "{path}");
     }
     let answer = request(
@@ -413,6 +428,53 @@ fn oauth_discovery_is_404() {
         &[("Host", "evil.example")],
     );
     assert_eq!(answer.status, 403);
+}
+
+/// status.cleanup.bytes is measured when obid starts (and, once obid cleans up, after each pass),
+/// as Engine/Cleanup.swift does, never on each request: what lands in the worktrees afterwards
+/// doesn't change it until then.
+#[test]
+fn cleanup_bytes_are_measured_at_start_not_per_request() {
+    let folder = Folder::new("cleanup-bytes");
+    let worktrees = folder.0.join("home").join("worktrees");
+    std::fs::create_dir_all(worktrees.join("job-1")).unwrap();
+    std::fs::write(worktrees.join("job-1").join("file"), vec![7u8; 256 * 1024]).unwrap();
+    let obid = start(&folder.0, &config(&folder.0, free_port()), Some(TOKEN));
+    let first = get_status(&obid, "127.0.0.1", TOKEN);
+    assert_eq!(first.status, 200);
+    let bytes = first.body["cleanup"]["bytes"].as_u64().unwrap();
+    assert!(bytes >= 256 * 1024, "measured at start: {bytes}");
+
+    std::fs::create_dir_all(worktrees.join("job-2")).unwrap();
+    std::fs::write(worktrees.join("job-2").join("file"), vec![7u8; 1024 * 1024]).unwrap();
+    for _ in 0..3 {
+        let again = get_status(&obid, "127.0.0.1", TOKEN);
+        assert_eq!(again.body["cleanup"]["bytes"].as_u64(), Some(bytes));
+    }
+}
+
+/// home holds the token, keys, clones and the database: obid makes it 0700, and tightens one that
+/// is there already with group or world access.
+#[cfg(unix)]
+#[test]
+fn home_is_the_owners_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+    let folder = Folder::new("home-mode-new");
+    let config = config(&folder.0, free_port());
+    drop(start(&folder.0, &config, None));
+    assert_eq!(mode(&folder.0.join("home")), 0o700);
+
+    let folder = Folder::new("home-mode-open");
+    let home = folder.0.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config = self::config(&folder.0, free_port());
+    let obid = start(&folder.0, &config, None);
+    assert_eq!(mode(&home), 0o700);
+    assert_eq!(mode(&home.join("api-token")), 0o600);
+    assert_eq!(get_status(&obid, "127.0.0.1", TOKEN).status, 401);
 }
 
 /// Without OBID_API_TOKEN, obid makes a token on first start, keeps it in home/api-token (0600),
@@ -468,6 +530,19 @@ fn refuses_what_it_cant_use() {
     with("owner", Value::Null, "owner");
     with("allowFileRemotes", json!(false), "allowFileRemotes");
     with("telemetri", json!(true), "telemetri");
+    // Remotes git or ssh would read as options are refused before anything clones them.
+    for remote in [
+        "ssh://-oProxyCommand=touch /tmp/pwned/x",
+        "-oProxyCommand=touch /tmp/x@h:p",
+        "https://-x/r",
+        "ssh://-oProxyCommand=x@github.com/o/r.git",
+    ] {
+        with(
+            "repos",
+            json!([{"repo": "obi-e2e/fixture-app", "remote": remote, "defaultBranch": "main", "check": "node --test"}]),
+            "isn't an https://, ssh or file:// URL",
+        );
+    }
     cases.push((good.clone(), Some("too-short"), "OBID_API_TOKEN"));
 
     for (config, token, says) in cases {

@@ -35,7 +35,9 @@ pub enum StartError {
     Serve(std::io::Error),
 }
 
-/// Makes `home` if it isn't there yet, readable by its owner only.
+/// Makes `home` if it isn't there yet, and keeps it its owner's alone (0700): it holds the API
+/// token, the Obi key, clones and the database. A home that is there already with group or
+/// world access is tightened to 0700, the way `home/api-token` is to 0600.
 pub fn prepare_home(config: &Config) -> Result<(), StartError> {
     let home = &config.home;
     let err = |source| StartError::Home {
@@ -43,7 +45,7 @@ pub fn prepare_home(config: &Config) -> Result<(), StartError> {
         source,
     };
     if home.is_dir() {
-        return Ok(());
+        return keep_private(home).map_err(err);
     }
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
@@ -52,7 +54,30 @@ pub fn prepare_home(config: &Config) -> Result<(), StartError> {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    builder.create(home).map_err(err)
+    builder.create(home).map_err(err)?;
+    // `recursive` makes missing parents with the umask's mode; `home` itself gets 0700 even
+    // when it raced into existence another way.
+    keep_private(home).map_err(err)
+}
+
+/// A folder its group or others can reach is made its owner's alone again.
+fn keep_private(folder: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(folder)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                "{} was mode {:o}: making it 0700",
+                folder.display(),
+                mode & 0o777
+            );
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = folder;
+    Ok(())
 }
 
 /// Serves the API on `config.listen` until `stop` resolves, then lets requests under way finish
@@ -71,10 +96,15 @@ pub async fn serve(
         .local_addr()
         .map_err(|source| StartError::Listen { address, source })?;
     let host = gethostname::gethostname().to_string_lossy().into_owned();
+    let home = config.home.clone();
+    let cleanup = tokio::task::spawn_blocking(move || api::Cleanup::measure(&home))
+        .await
+        .map_err(|e| StartError::Serve(std::io::Error::other(e)))?;
     let shared = Arc::new(api::Shared {
         config,
         token,
         host,
+        cleanup,
     });
     let app = api::router(shared);
 
