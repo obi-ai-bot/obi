@@ -17,7 +17,7 @@ struct RunnerAPI: Sendable {
     var base: String
     var send: Send
 
-    /// The Mac app's bundle id and its Settings › Runner key (Mac/Settings.swift).
+    /// The Mac app's bundle id and its Settings › Runner key (apps/mac/app/Settings.swift).
     static let macApp = "com.deskree.oby"
     static let defaultURL = "https://tetrix-lab.tail8de49b.ts.net:8443"
 
