@@ -6,8 +6,8 @@ import HTTPTypes
 /// API.router(): adding a runner endpoint never silently makes it available to a phone.
 ///
 /// Kept off on purpose:
-/// - `/v1/checks/…`: the Mac's own Apple checks, run by the app on the same Mac over loopback.
-/// - `/v1/agent/…`: an agent's own calls from its sandbox, with its job's token, on loopback.
+/// - `/v1/checks/…`: the Mac's own Apple checks, run by the app on the same Mac over the owner socket.
+/// - `/v1/agent/…`: an agent's own calls from its sandbox, with its job's token, on agent TCP.
 /// - `/v1/connections…`: the Mac app manages connected apps; the phone has no screen for them.
 /// - `/v1/speech`: the runner's transcription, which the Watch reaches through its own API
 ///   (Runner/WatchAPI.swift) and the iPhone does on its own CPU.

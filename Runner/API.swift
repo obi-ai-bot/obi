@@ -63,9 +63,21 @@ final class API {
     nonisolated func router(owner: String) -> Router<BasicRequestContext> { router(access: .tailnet(owner: owner)) }
 
     /// Every endpoint, behind `Gate`.
-    nonisolated func router(access: Access) -> Router<BasicRequestContext> {
+    nonisolated func router(access: Access, agentsOnly: Bool = false) -> Router<BasicRequestContext> {
         let router = Router()
         router.add(middleware: Gate(access: access))
+        if agentsOnly {
+            router.post("v1/agent/apple-check") { request, _ in try await self.appleCheck(request.headers[.authorization], ask: true) }
+            router.get("v1/agent/apple-check") { request, _ in try await self.appleCheck(request.headers[.authorization], ask: false) }
+            router.post("v1/agent/mcp/:job") { request, context in
+                var request = request
+                let body = try await request.collectBody(upTo: 4 << 20)
+                return try await self.mcp(context.parameters.require("job"), request.headers[.authorization], body)
+            }
+            router.get("v1/agent/mcp/:job") { _, _ in Response(status: .methodNotAllowed) }
+            router.delete("v1/agent/mcp/:job") { _, _ in Response(status: .methodNotAllowed) }
+            return router
+        }
         router.post("v1/speech") { request, _ in
             try await Self.json(self.speech.handle(request, repos: self.desk.repos))
         }
@@ -851,8 +863,11 @@ final class API {
 enum Access: Sendable {
     /// On the tailnet: the owner, whose login `tailscale serve` puts in every request.
     case tailnet(owner: String)
-    /// On a Mac (#283): the Oby app on the same Mac, with the runner's own token
-    /// (Engine/LocalRunner.swift), on `127.0.0.1` only.
+    /// The loopback TCP listener is reachable inside agents' boxes. It exposes only job-token
+    /// routes and never accepts the proxy identity header.
+    case agentTCP
+    /// On a Mac (#283): the Oby app (and the LAN gateway) on the same Mac, with the runner's own
+    /// token (Engine/LocalRunner.swift), over the owner Unix socket.
     case local(token: String)
 }
 
@@ -894,6 +909,14 @@ struct Gate<Context: RequestContext>: RouterMiddleware {
         case .tailnet(let owner):
             guard request.uri.path.hasPrefix("/v1/agent/") || request.headers[values: .tailscaleUserLogin] == [owner] else {
                 throw APIError(.unauthorized, "This runner answers only its owner.")
+            }
+        case .agentTCP:
+            if request.headers[.tailscaleUserLogin] != nil {
+                Logger.runner.error("Rejected Tailscale-User-Login on the agent TCP listener.")
+                throw APIError(.forbidden, "Tailscale identity is accepted only over the owner socket.")
+            }
+            guard request.uri.path.hasPrefix("/v1/agent/") else {
+                throw APIError(.notFound, "There is no route here.")
             }
         case .local(let token):
             guard LocalRunner.isLoopback(host: request.head.authority) else {

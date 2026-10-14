@@ -7,16 +7,21 @@ import NIOCore
 @testable import ObyEngine
 
 /// The LAN boundary for a Mac's runner (#284). The gateway owns device authentication and route
-/// policy, then forwards an allowed request to the loopback API with the runner's own token. The
-/// API stays loopback-only. Invitations are made there, never here (`POST /v1/pairing/invite`,
-/// Runner/API.swift): a phone reaching the gateway can redeem one, not mint one.
+/// policy, then forwards an allowed request to the owner Unix socket with the runner's own token.
+/// Invitations are made on that owner API, never here (`POST /v1/pairing/invite`, Runner/API.swift):
+/// a phone reaching the gateway can redeem one, not mint one. It never talks to the agent TCP
+/// listener.
 @MainActor
 final class Gateway {
     struct RedeemRequest: Decodable { var credential: String; var name: String? }
 
     let devices: Devices
     let pairing: Pairing
+    /// TCP upstream for tests that stub the owner API. Production on a Mac uses `upstreamSocket`.
     let upstream: URL
+    /// The owner Unix socket (`$OBY_HOME/run/owner.sock`). When set, forwarded requests use it
+    /// instead of `upstream`.
+    let upstreamSocket: String?
     let owner: String
     /// The runner's own token (Engine/LocalRunner.swift), sent as `Authorization: Bearer` on every
     /// forwarded request: a Mac runner answers nothing without it. Nil for a tailnet runner, whose
@@ -27,11 +32,13 @@ final class Gateway {
     private let homes: @MainActor () -> [String]
     private let client: HTTPClient
 
-    init(devices: Devices, pairing: Pairing? = nil, upstream: URL = URL(string: "http://127.0.0.1:7777")!, owner: String = "owner",
+    init(devices: Devices, pairing: Pairing? = nil, upstream: URL = URL(string: "http://127.0.0.1:7777")!,
+         upstreamSocket: String? = nil, owner: String = "owner",
          upstreamToken: String? = nil, homes: @escaping @MainActor () -> [String] = { [] }, client: HTTPClient = .init(), vault: Vault = .shared) {
         self.devices = devices
         self.pairing = pairing ?? Pairing()
         self.upstream = upstream
+        self.upstreamSocket = upstreamSocket
         self.owner = owner
         self.upstreamToken = upstreamToken
         self.homes = homes
@@ -94,10 +101,23 @@ final class Gateway {
 
         var request = request
         let body = try await request.collectBody(upTo: 4 << 20)
-        var components = URLComponents(url: upstream.appending(path: String(path.dropFirst())), resolvingAgainstBaseURL: false)!
-        components.percentEncodedQuery = request.uri.query
-        let url = components.url!
+        let url: String
+        if let upstreamSocket {
+            guard let encoded = upstreamSocket.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) else {
+                throw APIError(.internalServerError, "The owner socket path can't be encoded.")
+            }
+            var target = "http+unix://\(encoded)\(path)"
+            if let query = request.uri.query { target += "?\(query)" }
+            url = target
+        } else {
+            var components = URLComponents(url: upstream.appending(path: String(path.dropFirst())), resolvingAgainstBaseURL: false)!
+            components.percentEncodedQuery = request.uri.query
+            url = components.url!.absoluteString
+        }
         var headers = NIOHTTP1.HTTPHeaders()
+        // Unix-socket upstreams put the socket path in the URL host; the Mac gate still requires a
+        // loopback Host, so set it explicitly for every forwarded request.
+        headers.add(name: "host", value: "127.0.0.1")
         if let contentType = request.headers[.contentType] { headers.add(name: "content-type", value: String(contentType)) }
         // The runner's gate: its own token on a Mac, the owner's login on the tailnet.
         if let upstreamToken {

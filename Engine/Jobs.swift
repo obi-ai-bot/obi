@@ -1459,9 +1459,9 @@ nonisolated enum Agents {
     /// `apple`: `oby-check apple`'s script and the runner it runs, shown read-only to a process in a
     /// worktree (Engine/AppleChecks.swift).
     /// On the Mac, `argv` as it is: gh's login is in the keychain, and agents have no credential helper.
-    // ponytail: one Unix user, hidden by path. Sockets that run commands for this user (docker is
-    // hidden, nothing else is) and the runner's API on 127.0.0.1 stay reachable; a Unix user of its
-    // own for agents is the upgrade.
+    // ponytail: one Unix user. Sockets that run commands for this user (docker is hidden, nothing
+    // else is) stay reachable. The owner API socket is under Workspace.root and remains hidden by
+    // the tmpfs below; only job-token routes are exposed on loopback TCP.
     static func sandboxed(_ argv: [String], in worktree: URL?, own: String?, reading: [String] = [], bubblewrap: Bool = Agents.bubblewrap,
                           apple: AppleCheck.Tool? = AppleCheck.installed,
                           exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> [String] {
@@ -1498,7 +1498,12 @@ nonisolated enum Agents {
                 args += ["--bind", admin, admin, "--ro-bind", "\(admin)/commondir", "\(admin)/commondir"]
             }
         }
-        for folder in reading where exists(folder) { args += ["--ro-bind", folder, folder] }
+        let privateRun = Workspace.root.appending(path: "run").standardizedFileURL.path
+        for folder in reading where exists(folder) {
+            let path = URL(fileURLWithPath: folder).standardizedFileURL.path
+            guard path != privateRun && !path.hasPrefix(privateRun + "/") else { continue }
+            args += ["--ro-bind", folder, folder]
+        }
         if worktree != nil, let apple { args += apple.binds }
         if let own { args += ["--bind", own, own] }
         // The default Claude account keeps ~/.claude.json with ~/.claude.

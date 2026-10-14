@@ -109,11 +109,13 @@ With an APNs key, the runner keeps the iPhone's Live Activity current while the 
 
 ## Put it on the tailnet
 
-The runner listens on `127.0.0.1` only. `tailscale serve` publishes it on the tailnet with a real HTTPS certificate, and tells the runner who is asking:
+The runner's full owner API listens on `$OBY_HOME/run/owner.sock`, a runner-owned socket in a `0700` directory, with socket mode `0600`. `tailscale serve` forwards tailnet HTTPS traffic to that socket and adds the identity header there:
 
 ```sh
-tailscale serve --bg --https=8443 http://127.0.0.1:7777
+tailscale serve --bg --https=8443 --set-path / unix:/srv/nvme/oby/run/owner.sock
 ```
+
+Loopback TCP on `127.0.0.1:7777` remains available to agents inside bubblewrap, but serves only `/v1/agent/apple-check` and `/v1/agent/mcp/{job}` with the job's bearer token. Every other path returns `404`; sending `Tailscale-User-Login` to TCP is logged and returns `403`. Bubblewrap hides all of `OBY_HOME`, including `run/owner.sock`.
 
 On `tetrix-lab`, port 443 belongs to the Tetrix stack, so the runner is on 8443: the iPhone app's base URL is `https://tetrix-lab.tail8de49b.ts.net:8443`. Nothing on the tailnet API is reachable from the internet.
 
@@ -143,6 +145,9 @@ The log lists the registered phones at startup, and every turn of the brain: the
 ## Run it by hand
 
 ```sh
-OBY_HOME=$(mktemp -d) OBY_OWNER=test OBY_PORT=7790 .build/release/oby-runner
-curl -s -H 'Tailscale-User-Login: test' localhost:7790/v1/status
+export OBY_HOME=$(mktemp -d) OBY_OWNER=test OBY_PORT=7790
+.build/release/oby-runner
+# In another terminal:
+curl --unix-socket "$OBY_HOME/run/owner.sock" -H 'Host: localhost' -H 'Tailscale-User-Login: test' http://localhost/v1/status
+curl -i -H 'Tailscale-User-Login: test' http://127.0.0.1:7790/v1/jobs
 ```

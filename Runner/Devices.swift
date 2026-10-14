@@ -123,9 +123,8 @@ final class Devices {
     /// Adds a phone's publishing key and returns its id. A key it already knows keeps its id, so the
     /// app can register every time it connects and always holds an id this runner knows.
     /// A new key needs pairing open: `pairing` touched in the last 10 minutes, and that key uses it up.
-    /// The tailnet header can't be the gate: agents share the runner's machine, so through its tailnet
-    /// address they arrive as the owner. They can't touch `pairing`: OBY_HOME is empty in their bubblewrap.
-    // ponytail: only as strong as that bubblewrap, so Linux only; a runner on a Mac needs its agents boxed too.
+    /// The owner socket can't be reached from agent boxes: their whole `OBY_HOME` is hidden by
+    /// bubblewrap, and loopback TCP exposes only per-job agent routes.
     func register(name: String, publicKey: String, now: Date = .now) throws -> String {
         guard Self.key(publicKey) != nil else {
             throw APIError(.unprocessableContent, "publicKey isn't a P-256 public key (X9.63, base64).")

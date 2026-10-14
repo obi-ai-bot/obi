@@ -5,14 +5,12 @@ import Security
 #endif
 
 /// The runner on the user's own Mac (#283): where it keeps its files, and the token that lets the
-/// Oby app on the same Mac into its loopback API. Nothing on a Mac vouches for who's asking the
+/// Oby app on the same Mac into its owner Unix socket. Nothing on a Mac vouches for who's asking the
 /// way `tailscale serve` does on tetrix-lab, so the runner makes a token of its own when it first
 /// starts and keeps it in the keychain (`keychainService`), never in a file: agents on a Mac run as
 /// the user, outside bubblewrap, and could read any file of theirs, while another program reading
 /// the keychain item is one the user is asked about. The app reads it there and sends it as
-/// `Authorization: Bearer`. The runner answers only on `127.0.0.1`, and only requests whose `Host`
-/// is a loopback name: a web page the user opens can't have their browser reach it through a name
-/// that resolves to 127.0.0.1 (DNS rebinding).
+/// `Authorization: Bearer` on the owner socket. Loopback TCP serves only agent endpoints.
 nonisolated enum LocalRunner {
     static let port = 7777
     /// Where the Mac app follows the runner on this Mac.
@@ -32,6 +30,9 @@ nonisolated enum LocalRunner {
     /// What the runner's `OBY_HOME` defaults to on a Mac: `~/Library/Application Support/Oby/Runner`,
     /// inside the app's own folder but never the same: each has its own `oby.sqlite`, clones and worktrees.
     static var home: URL { appRoot.appending(path: "Runner", directoryHint: .isDirectory) }
+
+    /// The private listener the app uses for owner API calls.
+    static var socket: URL { home.appending(path: "run/owner.sock") }
 
     /// Where the app keeps what the user attached to a request (the tray's screenshots and clipboard):
     /// the only files a dispatch may attach to a job (`Attachments.validated`).

@@ -149,7 +149,9 @@ final class RunnerFeed {
     /// A runner at `url`; one on this Mac (`local`) only with its `token`, which every request carries.
     static func runner(_ url: String, token: String? = nil, local: Bool = false) -> Runner? {
         if local, token == nil { return nil }
-        return URL(string: url.trimmingCharacters(in: .whitespaces)).flatMap { $0.host() == nil ? nil : Runner(base: $0, token: token) }
+        return URL(string: url.trimmingCharacters(in: .whitespaces)).flatMap {
+            $0.host() == nil ? nil : Runner(base: $0, token: token, unixSocket: local ? LocalRunner.socket.path : nil)
+        }
     }
 
     init() {

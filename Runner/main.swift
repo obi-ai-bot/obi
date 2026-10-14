@@ -238,20 +238,29 @@ Task {
 
 let watchAPI = WatchAPI(api: api, watches: Watches(file: Workspace.root.appending(path: "watches.json")),
                         access: AccessFile(file: Workspace.root.appending(path: "watch.json")))
-let router = api.router(access: access)
-watchAPI.pairing(on: router)
-// 127.0.0.1 only, on either machine: the tailnet reaches it through `tailscale serve`, and a Mac's
-// other devices through the gateway, never the runner itself.
-let app = Application(router: router,
+let agentRouter = api.router(access: .agentTCP, agentsOnly: true)
+let ownerRouter = api.router(access: access)
+watchAPI.pairing(on: ownerRouter)
+// TCP is reachable from an agent's bubblewrap. It serves only the job-token routes. Owner routes
+// use this private socket instead; tailscale serve is the only network path to it on Linux.
+let agentApp = Application(router: agentRouter,
                       configuration: .init(address: .hostname("127.0.0.1", port: port), serverName: "oby-runner"))
+let runDirectory = Workspace.root.appending(path: "run", directoryHint: .isDirectory)
+try FileManager.default.createDirectory(at: runDirectory, withIntermediateDirectories: true,
+                                        attributes: [.posixPermissions: 0o700])
+try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: runDirectory.path)
+let ownerSocket = runDirectory.appending(path: "owner.sock")
+let ownerApp = Application(router: ownerRouter,
+                           configuration: .init(address: .unixDomainSocket(path: ownerSocket.path), serverName: "oby-runner"),
+                           onServerRunning: { _ in _ = chmod(ownerSocket.path, 0o600) })
 // Always up, so writing watch.json is enough; without it, it answers 503 to everything.
 let watchApp = Application(router: watchAPI.router(),
                            configuration: .init(address: .hostname("127.0.0.1", port: watchPort), serverName: "oby-runner"))
 // The LAN gateway (#284), on a Mac only: the one listener on every interface, for paired phones
-// on the local network, forwarding to the loopback API with the runner's own token and
+// on the local network, forwarding to the owner Unix socket with the runner's own token and
 // advertised over Bonjour. A tailnet runner has `tailscale serve` instead and binds nothing else.
 let gateway: Gateway? = if case .local(let token) = access {
-    Gateway(devices: api.devices, pairing: api.pairing, upstream: URL(string: "http://127.0.0.1:\(port)")!, owner: owner, upstreamToken: token,
+    Gateway(devices: api.devices, pairing: api.pairing, upstreamSocket: ownerSocket.path, owner: owner, upstreamToken: token,
             homes: { [desk.accounts.homes.path] + desk.accounts.accounts.compactMap(\.account.home) })
 } else {
     nil
@@ -263,7 +272,8 @@ let bonjour = Bonjour()
 if gatewayApp != nil { bonjour.start(port: gatewayPort) }
 Logger.runner.notice("Oby's runner \(API.version, privacy: .public) in \(Workspace.root.path, privacy: .public), for \(owner, privacy: .public)")
 try await withThrowingDiscardingTaskGroup { group in
-    group.addTask { try await app.runService(gracefulShutdownSignals: []) }
+    group.addTask { try await ownerApp.runService(gracefulShutdownSignals: []) }
+    group.addTask { try await agentApp.runService(gracefulShutdownSignals: []) }
     group.addTask { try await watchApp.runService(gracefulShutdownSignals: []) }
     if let gatewayApp { group.addTask { try await gatewayApp.runService(gracefulShutdownSignals: []) } }
 }
