@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // stub-agent: a deterministic stand-in for Claude Code in the end-to-end test (e2e/SCENARIO.md,
 // "The stub agent"). obid runs it exactly as it runs `claude`: the same flags, stream-json in and
-// out, in the job's worktree. It needs no model and no credentials, writes nothing, and reviews
+// out, in the job's worktree. It needs no model and no credentials, writes nothing (one probe aside, below, which a working sandbox refuses), and reviews
 // the fixture repository by fixed rules, so the same worktree always gives the same two findings.
 //
 // It also checks the parts of obid's side of the contract it can see, and fails the turn (an
@@ -9,12 +9,16 @@
 //   - the prompt is not empty and holds no data text from the request (the canary);
 //   - the request reached it as a quoted file, .obi/inputs/obi-request.json, holding the canary;
 //   - the worktree's HEAD is the request's head_sha;
-//   - no CLAUDECODE, CLAUDE_CODE_*, ANTHROPIC_*, GH_TOKEN or GITHUB_TOKEN in its environment.
+//   - no CLAUDECODE, CLAUDE_CODE_*, ANTHROPIC_*, GH_TOKEN or GITHUB_TOKEN in its environment;
+//   - it runs in obid's job sandbox: creating a file in the folder that holds its worktree (obid's
+//     home/worktrees/) fails. If it succeeds, the stub removes the file at once and fails the turn.
+//     OBI_STUB_NO_SANDBOX=1 skips this one check; only the harness's preflight sets it, when it runs
+//     the stub alone with no sandbox. The harness never gives it to obid, so obid's agents never have it.
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 const VERSION = "0.1.0 (stub-agent; Claude Code stream-json compatible)";
@@ -64,6 +68,20 @@ function problems(prompt, request) {
   if (prompt.includes(CANARY)) found.push("data text from the request is in the prompt (it must only be in .obi/inputs/obi-request.json)");
   for (const name of Object.keys(process.env)) {
     if (name === "CLAUDECODE" || name.startsWith("CLAUDE_CODE_") || name.startsWith("ANTHROPIC_") || name === "GH_TOKEN" || name === "GITHUB_TOKEN") found.push(`${name} is in the agent's environment`);
+  }
+  if (process.env.OBI_STUB_NO_SANDBOX !== "1") {
+    const probe = join(dirname(cwd), `.obi-stub-sandbox-probe-${process.pid}`);
+    let wrote = false;
+    try {
+      writeFileSync(probe, "", { flag: "wx" });
+      wrote = true;
+    } catch {}
+    if (wrote) {
+      try {
+        unlinkSync(probe);
+      } catch {}
+      found.push(`the agent could write outside its worktree (${dirname(cwd)}): no job sandbox`);
+    }
   }
   if (!request) {
     found.push(".obi/inputs/obi-request.json is missing or isn't JSON");

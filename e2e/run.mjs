@@ -20,7 +20,7 @@
 // the rest of this file, and e2e/lib/{fixture,scenario,scenario-doc,snapshot}.mjs, are the lead's.
 
 import { spawn, execFileSync } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -58,9 +58,15 @@ const ctx = { runDir: RUN_DIR, live: LIVE, env, processes: [] };
 // so stopping it also stops what it started (pnpm starts wrangler, which starts workerd).
 
 // Starts `command` with exactly `env` (nothing inherited), its stdout and stderr appended to `log`.
+// `env` is required: Node's spawn gives a child the whole of process.env when it has none, which
+// would hand the person's tokens and real HOME to obid, wrangler or an agent, so a call without
+// one throws instead. Pass {} for an empty environment.
 // Returns the child, with `exited` (a promise of {code, signal}) and `name`.
 function start(name, command, args, { cwd, env: childEnv, log, stdio } = {}) {
-  const child = spawn(command, args, { cwd, env: childEnv, detached: true, stdio: stdio ?? ["ignore", "pipe", "pipe"] });
+  if (childEnv === null || typeof childEnv !== "object" || Array.isArray(childEnv)) {
+    throw new Error(`start(${name}): no env given; every process gets exactly the environment it is passed, nothing inherited`);
+  }
+  const child = spawn(command, args, { cwd, env: { ...childEnv }, detached: true, stdio: stdio ?? ["ignore", "pipe", "pipe"] });
   child.name = name;
   child.exited = new Promise((resolveExit) => child.on("exit", (code, signal) => resolveExit({ code, signal })));
   child.on("error", (e) => (child.spawnError = e));
@@ -114,11 +120,13 @@ for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
 // ---------------------------------------------------------------------------------------------
 // Preflight: what can be checked before anything runs. These may pass today.
 
-function runStub(worktree, prompt) {
+// Runs the stub agent alone, with no job sandbox; `sandboxProbe: false` tells it so
+// (OBI_STUB_NO_SANDBOX=1), and only the preflight ever does that.
+function runStub(worktree, prompt, { sandboxProbe = false } = {}) {
   return new Promise((resolvePromise) => {
     const child = start("stub-agent", env.STUB_AGENT, AGENT_FLAGS, {
       cwd: worktree,
-      env: { PATH: process.env.PATH, HOME: worktree, LANG: "C.UTF-8" },
+      env: { PATH: process.env.PATH, HOME: worktree, LANG: "C.UTF-8", ...(sandboxProbe ? {} : { OBI_STUB_NO_SANDBOX: "1" }) },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let out = "";
@@ -172,7 +180,7 @@ const preflight = [
     },
   },
   {
-    title: "stub agent reviews the fixture with the two known findings, and refuses data in its prompt",
+    title: "stub agent reviews the fixture with the two known findings, refuses data in its prompt, and refuses to run without a sandbox",
     run: async () => {
       assert(ctx.fixture, "needs the fixture repository (the check before)");
       const worktree = join(RUN_DIR, "stub-check");
@@ -188,9 +196,15 @@ const preflight = [
       assert(same(result.structured_output.findings, want), `findings differ from SCENARIO.md: ${JSON.stringify(result.structured_output.findings)}`);
       const leaked = await runStub(worktree, `${STUB_PROMPT}\nGoal: ${BRIEF.goal}`);
       assert(leaked.code === 3 && leaked.lines.at(-1)?.is_error, "stub-agent accepted a prompt that carried the request's data text");
+      // Unsandboxed, with its probe on (as under obid): it must notice it can write outside its
+      // worktree, fail the turn, and leave nothing behind.
+      const loose = await runStub(worktree, STUB_PROMPT, { sandboxProbe: true });
+      assert(loose.code === 3 && loose.lines.at(-1)?.is_error && /outside its worktree/.test(loose.lines.at(-1)?.result ?? ""), "stub-agent ran with no job sandbox and didn't notice");
+      const probes = readdirSync(dirname(worktree)).filter((n) => n.startsWith(".obi-stub-sandbox-probe-"));
+      assert(probes.length === 0, `stub-agent left its sandbox probe behind: ${probes.join(", ")}`);
       const dirty = git(worktree, ["status", "--porcelain", "--untracked-files=all"]).split("\n").filter((l) => l && !l.includes(".obi/"));
       assert(dirty.length === 0, `stub-agent changed the worktree: ${dirty.join(", ")}`);
-      return "2 findings; canary in the prompt refused; worktree untouched";
+      return "2 findings; canary in the prompt refused; no sandbox noticed; worktree untouched";
     },
   },
   {
