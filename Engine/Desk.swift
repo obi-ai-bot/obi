@@ -595,6 +595,10 @@ final class Desk {
         var choices = ["auto": ["auto"] + known.map(\.name)]
         for (agent, list) in Dictionary(grouping: known, by: \.agent) { choices[agent] = ["auto"] + list.map(\.name) }
         let briefing = briefing(turns: turns)
+        var reviewAuthors: [Int: String] = [:]
+        for author in jobs.filter({ $0.reviewOf == nil }).sorted(by: { $0.created < $1.created }) {
+            if let pr = Review.pullRequest(of: author) { reviewAuthors[pr] = author.id }
+        }
         // A job may move to any account the briefing knows, here or elsewhere: Swift checks it when it moves.
         var moveAccounts: [String: [String]] = [:]
         for state in accounts.accounts + elsewhere().flatMap(\.accounts) where !(moveAccounts[state.account.agent] ?? []).contains(state.account.name) {
@@ -605,6 +609,7 @@ final class Desk {
                             settingModels: settingModels, settingEfforts: settingEfforts,
                             settingModelEfforts: settingModelEfforts,
                             settingAccounts: moveAccounts.values.flatMap { $0 }, permissions: briefing.permissions,
+                            reviewAuthors: reviewAuthors,
                             inbox: briefing.waiting.map(\.item.id),
                             fixableFailures: store.failures().compactMap { record in
                                 guard let postMortem = record.postMortem, postMortem.obyCouldHandle,
@@ -1474,9 +1479,13 @@ final class Desk {
             do { let job = try failureLog.fix(id); return .reply("Started a fix for failure \(id) as job \(job.id).") }
             catch { return .reply("Couldn't start the fix: \(error.localizedDescription)") }
         case .askReviewAgain:
-            guard let id = plan.jobs?.first, let author = job(id), let error = author.reviewError,
-                  !error.hasPrefix("Oby reviewed it"), author.reviewing == nil else {
-                return .reply("Couldn't ask for another review: the job no longer has a review error.")
+            guard let id = plan.jobs?.first, var author = job(id), author.reviewing == nil,
+                  Review.pullRequest(of: author) != nil else {
+                return .reply("Couldn't ask for another review: the job no longer has an open pull request.")
+            }
+            if (author.review?.round ?? 0) >= Review.escalationRound {
+                author.extraReviews = max(author.extraReviews ?? 0, max(1, (author.review?.round ?? 0) + 1 - Review.escalationRound))
+                replace(author)
             }
             reviewPublished(author)
             if let latest = job(id), latest.reviewing != nil { return .reply("I asked for another review of \(latest.heading).") }
@@ -1656,6 +1665,18 @@ final class Desk {
     func enqueue(_ job: Job, why: String? = nil) -> Job {
         if let why { handoffs[job.id, default: []].append(why) }
         var job = job
+        if job.kind == .review, job.reviewOf == nil, let pr = job.pr,
+           var author = jobs.first(where: { $0.reviewOf == nil && Review.pullRequest(of: $0) == pr }),
+           author.reviewing == nil {
+            job.reviewOf = author.id
+            job.review = author.review
+            job.task = author.task
+            job.notes = author.notes
+            job.base = author.base
+            author.reviewing = job.id
+            author.reviewError = nil
+            replace(author)
+        }
         // Settings › Permissions' default, unless the plan or the user chose one.
         job.mode = job.mode ?? defaultMode
         job.phase = .prepare
@@ -2638,6 +2659,10 @@ final class Desk {
             let from = job.pr ?? job.fromPR
             let made = from == nil ? commits : await countCommits(id, "refs/oby/pr-\(from ?? 0)")
             let pushed = await stillPushed(job, base: base, commits: commits)
+            if job.kind == .review, (made ?? 0) > 0 {
+                await end(id, .failed, "A review made commits; nothing was published", commits: 0, pushed: pushed, made: 0)
+                return
+            }
             // Nothing committed: what it left uncommitted is why (#220).
             let dirty = made == 0 && Job.committing.contains(job.kind) ? await changedFiles(id) : []
             await noteTetrixStamps(id)

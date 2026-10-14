@@ -148,6 +148,7 @@ nonisolated enum Publish {
 
     /// Why Oby won't publish this job, or nil to go ahead.
     static func refusal(_ job: Job, base: String, defaultBranch: String?) -> String? {
+        if job.kind == .review { return "A review made commits; nothing was published." }
         let branch = job.branch
         if !branch.hasPrefix("oby/") || !Plan.isBranchName(branch) { return "Oby only publishes its own oby/ branches, not \(branch)." }
         if !Plan.isBranchName(base) { return "\(base) isn't a branch name." }

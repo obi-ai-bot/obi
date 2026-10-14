@@ -480,6 +480,7 @@ final class PushTests {
         quiet.commits = 0
         quiet.base = "dev"
         ready.status = .done
+        ready.kind = .fix
         ready.base = "dev"
         ready.commits = 2
         failed.status = .failed
@@ -506,6 +507,7 @@ final class PushTests {
     @Test func laterRoundsCommitsCanBePublished() throws {
         var done = job
         done.status = .done
+        done.kind = .fix
         done.base = "dev"
         done.commits = 2
         #expect(done.canPublish && done.unpublished == 2 && done.needsYou)

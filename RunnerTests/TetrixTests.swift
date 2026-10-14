@@ -152,7 +152,7 @@ struct TetrixTests {
             made.agents.append((job, agent))
             return agent
         }
-        desk.countCommits = { _, _ in 2 }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 2 }
         desk.readStamps = { [made] _, _ in made.stamps }
         desk.publishOnItsOwn = { _, _, _ in URL(string: "https://github.com/deskree-inc/oby/pull/131")! }
         desk.postReview = { _, _ in URL(string: "https://github.com/deskree-inc/oby/runs/1")! }

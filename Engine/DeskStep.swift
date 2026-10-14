@@ -47,6 +47,7 @@ extension Desk {
             switch plan.action {
             case .retryJob: return "Trying \(what) again"
             case .dismissJob: return "Letting \(what) go"
+            case .askReviewAgain: return "Asking for another review of \(what)"
             default: return "Starting \(what) now"
             }
         case .answerInbox: return "Answering an inbox item"
