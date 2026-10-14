@@ -4,8 +4,8 @@ import Foundation
 /// Settings › Assistants points Claude Code and Codex at this path, never a copy.
 enum MCPHelper {
     static let helperPath = "Contents/Helpers/oby-mcp"
-    /// Sidecar the bundle phase writes next to the binary (MCP/BuildInfo.swift reads it).
-    static let commitPath = "Contents/Helpers/oby-mcp.commit"
+    /// Sidecar the bundle phase writes under Resources (Helpers may only hold code; MCP/BuildInfo reads it).
+    static let commitPath = "Contents/Resources/oby-mcp.commit"
 
     static var url: URL { Bundle.main.bundleURL.appending(path: helperPath) }
     static var path: String { url.path }

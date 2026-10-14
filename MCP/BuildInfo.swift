@@ -8,16 +8,21 @@ enum BuildInfo {
     static let sidecarName = "oby-mcp.commit"
     static let staleLine = "oby-mcp is older than the runner: update Oby or rebuild it."
 
-    /// `OBY_MCP_COMMIT`, else the sidecar beside the executable, else `"unknown"`.
+    /// `OBY_MCP_COMMIT`, else a sidecar beside the executable, else
+    /// `Contents/Resources/oby-mcp.commit` when bundled in Oby.app (Helpers may only hold code),
+    /// else `"unknown"`.
     static func commit(environment: [String: String] = ProcessInfo.processInfo.environment,
                        executable: URL = URL(filePath: CommandLine.arguments[0])) -> String {
         if let env = environment["OBY_MCP_COMMIT"]?.trimmingCharacters(in: .whitespacesAndNewlines), !env.isEmpty {
             return env
         }
-        let sidecar = executable.deletingLastPathComponent().appending(path: sidecarName)
-        if let text = try? String(contentsOf: sidecar, encoding: .utf8) {
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
+        let helpers = executable.deletingLastPathComponent()
+        for url in [helpers.appending(path: sidecarName),
+                    helpers.deletingLastPathComponent().appending(path: "Resources").appending(path: sidecarName)] {
+            if let text = try? String(contentsOf: url, encoding: .utf8) {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            }
         }
         return "unknown"
     }

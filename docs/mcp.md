@@ -6,7 +6,7 @@
 
 On the Mac, Oby bundles `oby-mcp` at `Contents/Helpers/oby-mcp` (#385), so Sparkle updates it with the app. Settings › Assistants has **Add to Claude Code** (`claude mcp add --scope user oby -- <bundled path>`) and **Add to Codex** (`codex mcp add oby -- <bundled path>`): each shows the command, then runs it. Point at the bundled path, never a copy.
 
-`initialize` sends the binary's build commit as `serverInfo.version` (from `Contents/Helpers/oby-mcp.commit`, or `OBY_MCP_COMMIT`). The first tool call of a session compares that with the runner's `GET /v1/status` `runner.update.commit`; when they differ, the first tool result starts with one line: `oby-mcp is older than the runner: update Oby or rebuild it.` Later calls in that session are quiet.
+`initialize` sends the binary's build commit as `serverInfo.version` (from `Contents/Resources/oby-mcp.commit` in the app, a sidecar beside a hand-built binary, or `OBY_MCP_COMMIT`). The first tool call of a session compares that with the runner's `GET /v1/status` `runner.update.commit`; when they differ, the first tool result starts with one line: `oby-mcp is older than the runner: update Oby or rebuild it.` Later calls in that session are quiet.
 
 ## Build and add it
 
