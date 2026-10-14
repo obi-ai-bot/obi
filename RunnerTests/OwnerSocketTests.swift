@@ -27,6 +27,18 @@ struct OwnerSocketTests {
         }
     }
 
+    @Test func readGrantsCannotReopenTheOwnerSocketDirectory() {
+        let workspace = Workspace.root.standardizedFileURL
+        let grants = [workspace.appending(path: "run").path, workspace.path, workspace.deletingLastPathComponent().path]
+        for grant in grants {
+            let args = Agents.sandboxed(["true"], in: nil, own: nil, reading: [grant], bubblewrap: true)
+            let exposesGrant = args.indices.contains { index in
+                index + 2 < args.count && args[index] == "--ro-bind" && args[index + 1] == grant && args[index + 2] == grant
+            }
+            #expect(!exposesGrant, "read grant exposed private run data: \(grant)")
+        }
+    }
+
     @Test func ownerLoginWorksOnlyOverTheUnixSocket() async throws {
         let root = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: root) }

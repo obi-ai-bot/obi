@@ -1498,10 +1498,13 @@ nonisolated enum Agents {
                 args += ["--bind", admin, admin, "--ro-bind", "\(admin)/commondir", "\(admin)/commondir"]
             }
         }
-        let privateRun = Workspace.root.appending(path: "run").standardizedFileURL.path
+        let privateRun = Workspace.root.appending(path: "run").resolvingSymlinksInPath().standardizedFileURL.path
         for folder in reading where exists(folder) {
-            let path = URL(fileURLWithPath: folder).standardizedFileURL.path
-            guard path != privateRun && !path.hasPrefix(privateRun + "/") else { continue }
+            let path = URL(fileURLWithPath: folder).resolvingSymlinksInPath().standardizedFileURL.path
+            let runPrefix = privateRun.hasSuffix("/") ? privateRun : privateRun + "/"
+            let pathPrefix = path.hasSuffix("/") ? path : path + "/"
+            let overlapsPrivateRun = path == privateRun || path.hasPrefix(runPrefix) || privateRun.hasPrefix(pathPrefix)
+            guard !overlapsPrivateRun else { continue }
             args += ["--ro-bind", folder, folder]
         }
         if worktree != nil, let apple { args += apple.binds }
