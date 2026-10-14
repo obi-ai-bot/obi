@@ -36,6 +36,7 @@ This document is the contract between the runner and its clients. Change it in t
   "status": "running",
   "step": "Running pnpm test",
   "summary": "",
+  "attachmentCount": 0,
   "session": "e6a24229-3d3b-417b-a610-691c636b4c49",
   "created": "2026-10-09T21:42:53Z",
   "started": "2026-10-09T21:42:55Z",
@@ -98,6 +99,7 @@ This document is the contract between the runner and its clients. Change it in t
 
 - `agent`: `claude` or `codex`. `account`: an account `id`. `kind`: `review`, `fix`, `build`, `test` or `investigate`.
 - `status`: `queued`, `running`, `done`, `failed`, `stopped` or `interrupted`.
+- `attachmentCount`: number of user-supplied files carried by the job. The Watch shows this as a paperclip count and gets no attachment content or routes; older runners omit the field.
 - `step`: what it's doing now, while queued or running. `summary`: the agent's final message; its first line is the one-line notice.
 - A `build`, `fix` or `test` job that ends with no commits of its own is `failed`, and its `summary` starts with `Nothing committed: ` followed by the agent's first line. Not a round the user started with `POST /v1/jobs/{id}/messages`: their words say what it should do (reset the branch, drop the work), so that round ending with nothing committed is `done`.
 - When the job's account hits its usage limit mid-round (Codex: "You've hit your usage limit… try again at 10:45 PM"; Claude Code: a `rate_limit_event` at 100%, or a usage-limit result), the runner marks the account full until the reset time it named (an hour when it named none), and the job does that round over on the next account with room, the same tool first, then another tool, in the same worktree and branch with a new session: `account`, `agent` and `session` change, and `step` says so. Its `summary` then ends with a line like `Codex · Deskree hit its limit (resets 10:45 PM); continued on Claude Code · Personal.` When no account has room, the job is `failed`, and its `summary` says when the first one resets. An account marked full isn't picked for a new job before its reset (`fullUntil`).
@@ -430,7 +432,7 @@ One turn of the conversation with Oby: words become work that starts, a question
 {"said": "Review oby PR #33"}
 ```
 
-`attachmentIds`, when present, is a list of up to 10 opaque ids returned by `POST /v1/attachments`. The ids must belong to this runner and must not already be linked to a turn (`422` otherwise). The old `attachments` path field returns `410`: `Update Oby: attachments are uploaded now.` The brain can select a subset for a dispatch or `message_job` with one-based `attachments` positions in the current turn's ordered list; Swift refuses out-of-range positions and actions that cannot use attachments.
+`attachmentIds`, when present, is a list of up to 10 opaque ids returned by `POST /v1/attachments`, totaling at most 50 MB. The ids must belong to this runner and must not already be linked to a turn (`422` otherwise); a total over 50 MB also returns `422`. The old `attachments` path field returns `410`: `Update Oby: attachments are uploaded now.` The brain can select a subset for a dispatch or `message_job` with one-based `attachments` positions in the current turn's ordered list; Swift refuses out-of-range positions and actions that cannot use attachments.
 
 ### Attachments
 
@@ -673,7 +675,7 @@ Tells the job's agent something:
 - **Finished** (`done`, `failed`, `stopped` or `interrupted`): the runner picks the agent's session up again in the same worktree and branch (a job moved since its last round starts a new session on its new choice instead: `POST /v1/jobs/{id}/move`). The job keeps its `id`, goes back to `running` and gets a new `round`; when `rounds` is above 1 it grows by one too, so a loop still has a round for this. A dismissed job is dismissed no more. It ends as usual, except that this round may end `done` with nothing committed: your words decide what it should do.
 - The text is saved in `notes`, and `step` shows `"You: …"` until the agent moves on.
 
-`attachmentIds` may also name up to 10 unlinked uploads. The runner copies them into the job's `.oby/inputs/`, checks secrets again, links them to the job, and sends fitting images with the message to Claude Code or Codex. Paths are never accepted.
+`attachmentIds` may also name up to 10 unlinked uploads, totaling at most 50 MB. The runner copies them into the job's `.oby/inputs/`, checks secrets again, links them to the job, and sends fitting images with the message to Claude Code or Codex. Paths are never accepted; a total over 50 MB returns `422`.
 
 Returns the job. `404` for an unknown job. `422` when the text isn't 1 to 2,000 characters, or the job can't take it: still getting ready, wrapping up its only turn (try again once it's done), or never started (no `session`, and never moved).
 

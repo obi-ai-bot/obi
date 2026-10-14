@@ -1072,7 +1072,7 @@ struct JobJSON: Encodable {
 
     private enum Nullable: String, CodingKey { case base, pr, session, started, finished, commits, published, pushed, publishError, summaries, issue, fromPR, rounds, round, check, model, effort, complexity, notes, pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, files, lead, claim, outgoing, question, limit, startCommit, firstSwiftBuildSeconds, macCheck, mergeError, appleCheck, appleRan, tetrix, moves, xcodeCloud, xcodeCloudError, startWhen, waiting, mode, permission, connectionUses }
 
-    private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou }
+    private enum Derived: String, CodingKey { case pipeline, title, mergeNeedsYou, reviewNeedsYou, cloudNeedsYou, attachmentCount }
 
     func encode(to encoder: any Encoder) throws {
         // Oby's own review makes no commits; the ones in its worktree are the pull request's. Saying 0
@@ -1086,6 +1086,7 @@ struct JobJSON: Encodable {
         try derived.encode(job.mergeNeedsYou, forKey: .mergeNeedsYou)
         try derived.encode(job.reviewNeedsYou, forKey: .reviewNeedsYou)
         try derived.encode(job.cloudNeedsYou, forKey: .cloudNeedsYou)
+        try derived.encode(max(job.attachments?.count ?? 0, job.attachmentIDs?.count ?? 0), forKey: .attachmentCount)
         var nulls = encoder.container(keyedBy: Nullable.self)
         if job.base == nil { try nulls.encodeNil(forKey: .base) }
         if job.pr == nil { try nulls.encodeNil(forKey: .pr) }

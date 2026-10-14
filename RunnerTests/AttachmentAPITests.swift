@@ -67,4 +67,11 @@ struct AttachmentAPITests {
         #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/screen.png")) == png)
         #expect(try Data(contentsOf: worktree.appending(path: ".oby/inputs/diagram.png")) == png)
     }
+
+    @Test func jobJSONIncludesOnlyAnAttachmentCountForWatchClients() throws {
+        var value = job
+        value.attachmentIDs = ["0123456789abcdef", "fedcba9876543210"]
+        let json = object(try API.encode(JobJSON(job: value)))
+        #expect(json["attachmentCount"] as? Int == 2)
+    }
 }

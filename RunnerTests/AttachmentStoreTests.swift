@@ -52,6 +52,31 @@ struct AttachmentStoreTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: store.root.path).isEmpty)
     }
 
+    @Test func attachmentsHaveAFiftyMegabyteAggregateLimit() throws {
+        let (folder, jobs, store) = try fixture()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let values = try (0..<3).map { index in
+            try store.upload(Data([UInt8(index)]), name: "file-\(index).bin", source: "iphone")
+        }
+        for (index, value) in values.enumerated() {
+            var metadata = try #require(store.attachment(value.id))
+            metadata.bytes = index < 2 ? AttachmentStore.maxBytes : 1
+            jobs.save(metadata)
+        }
+        #expect(try store.validate(Array(values.prefix(2)).map(\.id)).count == 2)
+        #expect(throws: AttachmentStoreError.self) { try store.validate(values.map(\.id)) }
+    }
+
+    @Test func compressedObjectStreamsCountPDFPages() throws {
+        let (folder, _, store) = try fixture()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let base64 = "JVBERi0xLjUKNSAwIG9iago8PCAvVHlwZSAvT2JqU3RtIC9OIDMgL0ZpcnN0IDE0IC9MZW5ndGggNzcgL0ZpbHRlciAvRmxhdGVEZWNvZGUgPj4Kc3RyZWFtCnicM1QwUDBSMLFQMFawMFCwsVHQD6ksSFXQD0hMTy1W0HfOL80rASrQ985MKVaINgKqDgIqBZKxCnZ2aOpBZFEqUL0hWBkR8gDjeSCeCmVuZHN0cmVhbQplbmRvYmoKJSVFT0Y="
+        let pdf = try #require(Data(base64Encoded: base64))
+        let attachment = try store.upload(pdf, name: "compressed.pdf", source: "iphone")
+        #expect(attachment.type == "application/pdf")
+        #expect(attachment.pages == 2)
+    }
+
     @Test func survivesRestart() throws {
         let (folder, jobs, store) = try fixture()
         defer { try? FileManager.default.removeItem(at: folder) }

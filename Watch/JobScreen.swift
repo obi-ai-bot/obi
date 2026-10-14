@@ -19,6 +19,10 @@ struct JobScreen: View {
                     Text(job.heading).font(.headline).accessibilityAddTraits(.isHeader)
                     let (status, color) = JobStatus.of(job)
                     Text(status).font(.caption.weight(.semibold)).foregroundStyle(color)
+                    if let count = job.attachmentCount, count > 0 {
+                        Label("\(count)", systemImage: "paperclip").font(.caption2).foregroundStyle(.secondary)
+                            .accessibilityLabel("\(count) attachments")
+                    }
                     if let moved = job.movedLine { Text(moved).font(.caption2).foregroundStyle(.secondary) }
                     decision(job)
                     stages(job)

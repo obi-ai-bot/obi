@@ -309,7 +309,8 @@ final class APITests {
         for key in ["base", "session", "finished", "commits", "published", "pushed", "publishError", "summaries", "issue", "fromPR", "check", "model", "effort", "complexity", "notes", "pullRequest", "pullRequestError",
                     "dismissed", "reviewing", "review", "reviewError", "reviewOf", "files", "lead", "claim", "question", "limit", "startCommit", "firstSwiftBuildSeconds", "macCheck", "mergeError", "appleCheck", "appleRan", "tetrix", "xcodeCloud", "xcodeCloudError", "startWhen", "waiting", "permission"] { #expect(json.contains("\"\(key)\":null"), "\(key)") }
         let decoded = object(Data(json.utf8))
-        #expect(decoded.count == 64)
+        #expect(decoded.count == 65)
+        #expect(decoded["attachmentCount"] as? Int == 0)
         #expect(decoded["cloudNeedsYou"] as? Bool == false)
         // A job from before modes ran as Bypass does.
         #expect(decoded["mode"] as? String == "bypass")

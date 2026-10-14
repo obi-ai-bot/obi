@@ -8,6 +8,85 @@ import Darwin
 import Glibc
 #endif
 
+/// The stable public prefix of zlib's `z_stream`, loaded dynamically so Engine stays buildable in
+/// both SwiftPM and the Xcode project without adding a platform-specific compression dependency.
+private nonisolated struct PDFZStream {
+    var nextIn: UnsafeMutablePointer<UInt8>?
+    var availIn: UInt32 = 0
+    var totalIn: UInt = 0
+    var nextOut: UnsafeMutablePointer<UInt8>?
+    var availOut: UInt32 = 0
+    var totalOut: UInt = 0
+    var message: UnsafePointer<CChar>?
+    var state: UnsafeMutableRawPointer?
+    var allocate: UnsafeMutableRawPointer?
+    var release: UnsafeMutableRawPointer?
+    var opaque: UnsafeMutableRawPointer?
+    var dataType: Int32 = 0
+    var adler: UInt = 0
+    var reserved: UInt = 0
+}
+
+private nonisolated enum PDFFlate {
+    nonisolated static func inflate(_ input: [UInt8], maximumOutput: Int) -> [UInt8]? {
+        guard !input.isEmpty else { return nil }
+        #if os(Linux)
+        let candidates = ["libz.so.1", "libz.so"]
+        #else
+        let candidates = ["libz.dylib", "/usr/lib/libz.1.dylib"]
+        #endif
+        let library = candidates.lazy.compactMap { name -> UnsafeMutableRawPointer? in
+            name.withCString { dlopen($0, RTLD_NOW) }
+        }.first
+        guard let library else { return nil }
+        defer { dlclose(library) }
+
+        typealias Version = @convention(c) () -> UnsafePointer<CChar>?
+        typealias Initialize = @convention(c) (UnsafeMutableRawPointer?, Int32, UnsafePointer<CChar>?, Int32) -> Int32
+        typealias Inflate = @convention(c) (UnsafeMutableRawPointer?, Int32) -> Int32
+        typealias Finish = @convention(c) (UnsafeMutableRawPointer?) -> Int32
+        guard let versionSymbol = dlsym(library, "zlibVersion"),
+              let initializeSymbol = dlsym(library, "inflateInit2_"),
+              let inflateSymbol = dlsym(library, "inflate"),
+              let finishSymbol = dlsym(library, "inflateEnd") else { return nil }
+        let version = unsafeBitCast(versionSymbol, to: Version.self)
+        let initialize = unsafeBitCast(initializeSymbol, to: Initialize.self)
+        let inflate = unsafeBitCast(inflateSymbol, to: Inflate.self)
+        let finish = unsafeBitCast(finishSymbol, to: Finish.self)
+
+        var stream = PDFZStream()
+        return withUnsafeMutablePointer(to: &stream) { pointer in
+            let rawStream = UnsafeMutableRawPointer(pointer)
+            guard initialize(rawStream, 15, version(), Int32(MemoryLayout<PDFZStream>.size)) == 0 else { return nil }
+            defer { _ = finish(rawStream) }
+            return input.withUnsafeBufferPointer { source in
+                pointer.pointee.nextIn = UnsafeMutablePointer(mutating: source.baseAddress)
+                pointer.pointee.availIn = UInt32(source.count)
+                var decoded: [UInt8] = []
+                var chunk = [UInt8](repeating: 0, count: 16 * 1024)
+                while true {
+                    let previousInput = pointer.pointee.availIn
+                    var status: Int32 = 0
+                    var produced = 0
+                    chunk.withUnsafeMutableBufferPointer { destination in
+                        pointer.pointee.nextOut = destination.baseAddress
+                        pointer.pointee.availOut = UInt32(destination.count)
+                        status = inflate(rawStream, 0) // Z_NO_FLUSH
+                        produced = destination.count - Int(pointer.pointee.availOut)
+                        if decoded.count + produced <= maximumOutput {
+                            decoded.append(contentsOf: destination.prefix(produced))
+                        } else {
+                            status = -3 // Z_MEM_ERROR: refuse an excessive expansion.
+                        }
+                    }
+                    if status == 1 { return decoded } // Z_STREAM_END
+                    guard status == 0, produced > 0 || pointer.pointee.availIn < previousInput else { return nil }
+                }
+            }
+        }
+    }
+}
+
 /// A file owned by this runner. Its opaque id is the only identifier clients can use.
 nonisolated struct Attachment: Codable, Equatable, Sendable, Identifiable {
     var id: String
@@ -41,6 +120,7 @@ nonisolated struct AttachmentRef: Codable, Equatable, Sendable, Identifiable {
 
 nonisolated enum AttachmentStoreError: Error, LocalizedError {
     case tooLarge
+    case messageTooLarge
     case empty
     case secret(String)
     case unknown
@@ -50,6 +130,7 @@ nonisolated enum AttachmentStoreError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .tooLarge: "An attachment may be at most 25 MB."
+        case .messageTooLarge: "Attachments in one message may total 50 MB."
         case .empty: "An attachment can't be empty."
         case .secret(let name): "This file holds the vault secret \(name), so it wasn't uploaded."
         case .unknown: "There's no attachment with that id."
@@ -62,6 +143,7 @@ nonisolated enum AttachmentStoreError: Error, LocalizedError {
 /// Runner-owned attachment bytes and their durable metadata.
 nonisolated final class AttachmentStore {
     static let maxBytes = 25 * 1024 * 1024
+    static let maxMessageBytes = 50 * 1024 * 1024
     let root: URL
     let jobs: JobStore
     let vault: Vault
@@ -125,11 +207,16 @@ nonisolated final class AttachmentStore {
     func validate(_ ids: [String], limit: Int = 10) throws -> [Attachment] {
         guard ids.count <= limit, Set(ids).count == ids.count else { throw AttachmentStoreError.invalid("attachmentIds holds at most \(limit) distinct ids.") }
         var result: [Attachment] = []
+        var totalBytes = 0
         for id in ids {
             guard let value = attachment(id), FileManager.default.fileExists(atPath: root.appending(path: id).path) else {
                 throw AttachmentStoreError.invalid("Unknown attachment id \(id).")
             }
             guard value.turn == nil else { throw AttachmentStoreError.invalid("Attachment \(id) is already linked to a turn.") }
+            guard value.bytes >= 0, totalBytes <= Self.maxMessageBytes - value.bytes else {
+                throw AttachmentStoreError.messageTooLarge
+            }
+            totalBytes += value.bytes
             result.append(value)
         }
         return result
@@ -238,10 +325,86 @@ nonisolated final class AttachmentStore {
     }
 
     private static func pdfPages(_ data: Data) -> Int? {
-        guard let text = String(data: data, encoding: .isoLatin1) else { return nil }
+        guard var text = String(data: data, encoding: .isoLatin1) else { return nil }
+        var decodedBytes = 0
+        for stream in pdfObjectStreams([UInt8](data)) {
+            guard let decoded = PDFFlate.inflate(stream, maximumOutput: 50 * 1024 * 1024),
+                  decodedBytes <= 50 * 1024 * 1024 - decoded.count,
+                  let decodedText = String(data: Data(decoded), encoding: .isoLatin1) else { continue }
+            decodedBytes += decoded.count
+            text += decodedText
+        }
         let count = text.matches(of: /\/Type\s*\/Page(?!s)/).count
         return count > 0 ? count : nil
     }
+
+    /// PDF 1.5 object streams hold page dictionaries compressed with FlateDecode. Expand those
+    /// streams before counting `/Type /Page`; otherwise a valid compressed PDF looks like it has
+    /// no pages and the brain incorrectly treats it as over the 100-page limit.
+    private static func pdfObjectStreams(_ bytes: [UInt8]) -> [[UInt8]] {
+        let streamToken = Array("stream".utf8)
+        let endToken = Array("endstream".utf8)
+        var output: [[UInt8]] = []
+        var cursor = 0
+        while let marker = find(streamToken, in: bytes, from: cursor) {
+            cursor = marker.upperBound
+            guard marker.lowerBound > 0, isWhitespace(bytes[marker.lowerBound - 1]),
+                  marker.upperBound < bytes.count else { continue }
+            var start = marker.upperBound
+            if bytes[start] == 13 {
+                start += 1
+                if start < bytes.count, bytes[start] == 10 { start += 1 }
+            } else if bytes[start] == 10 {
+                start += 1
+            } else { continue }
+
+            guard let dictionaryEnd = lastRange(Array(">>".utf8), in: bytes, before: marker.lowerBound),
+                  bytes[dictionaryEnd.upperBound..<marker.lowerBound].allSatisfy(isWhitespace),
+                  let dictionaryStart = lastRange(Array("<<".utf8), in: bytes, before: dictionaryEnd.lowerBound) else { continue }
+            let dictionary = String(decoding: bytes[dictionaryStart.lowerBound..<dictionaryEnd.upperBound], as: UTF8.self)
+            guard dictionary.contains(/\/Type\s*\/ObjStm\b/),
+                  dictionary.contains(/\/Filter\s*(?:\[\s*)?\/(?:FlateDecode|Fl)\b/) else { continue }
+
+            var end: Int?
+            if let match = dictionary.firstMatch(of: /\/Length\s+(\d+)\b/),
+               let length = Int(match.1), start <= bytes.count - length {
+                let exactEnd = start + length
+                var trailing = exactEnd
+                while trailing < bytes.count, isWhitespace(bytes[trailing]) { trailing += 1 }
+                if starts(with: endToken, in: bytes, at: trailing) { end = exactEnd }
+            }
+            if end == nil, let endMarker = find(endToken, in: bytes, from: start) {
+                var candidate = endMarker.lowerBound
+                while candidate > start, bytes[candidate - 1] == 10 || bytes[candidate - 1] == 13 { candidate -= 1 }
+                end = candidate
+            }
+            if let end, end >= start { output.append(Array(bytes[start..<end])) }
+        }
+        return output
+    }
+
+    private static func find(_ needle: [UInt8], in bytes: [UInt8], from start: Int) -> Range<Int>? {
+        guard !needle.isEmpty, start >= 0, start <= bytes.count - needle.count else { return nil }
+        for index in start...(bytes.count - needle.count) where bytes[index..<(index + needle.count)].elementsEqual(needle) {
+            return index..<(index + needle.count)
+        }
+        return nil
+    }
+
+    private static func lastRange(_ needle: [UInt8], in bytes: [UInt8], before end: Int) -> Range<Int>? {
+        guard !needle.isEmpty, end >= needle.count else { return nil }
+        for index in stride(from: end - needle.count, through: 0, by: -1)
+        where bytes[index..<(index + needle.count)].elementsEqual(needle) {
+            return index..<(index + needle.count)
+        }
+        return nil
+    }
+
+    private static func starts(with needle: [UInt8], in bytes: [UInt8], at index: Int) -> Bool {
+        index >= 0 && index <= bytes.count - needle.count && bytes[index..<(index + needle.count)].elementsEqual(needle)
+    }
+
+    private static func isWhitespace(_ byte: UInt8) -> Bool { [0, 9, 10, 12, 13, 32].contains(byte) }
 
     private static func sha256(_ data: Data) -> String {
         let constants: [UInt32] = [
