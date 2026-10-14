@@ -46,7 +46,7 @@ struct ReviewRestartTests {
             made.agents.append((job, agent, resume))
             return agent
         }
-        desk.countCommits = { _, _ in 2 }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 2 }
         desk.publishOnItsOwn = { [url, head] job, _, hooks in
             hooks.sent(Outgoing(action: .push, repo: job.repo, id: head, branch: job.branch))
             return url

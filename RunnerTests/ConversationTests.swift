@@ -505,6 +505,24 @@ struct ConversationTests {
         #expect(brain.prompts.last?.contains("User: review PR 12\nOby: Which repository?\n\n## Jobs") == true)
     }
 
+    @Test func reviewingAnObyAuthoredPullRequestAgainNamesItsAuthorJob() throws {
+        let context = BrainContext(accounts: ["claude": ["default"]], repos: ["deskree-inc/oby", "deskree-inc/another"],
+                                  movable: ["author"], reviewAuthors: ["deskree-inc/oby#80": "author"])
+        let again = Plan(action: .askReviewAgain, reply: "", dispatches: [], question: nil, jobs: ["author"])
+        #expect(again.problems(in: context, canary: "zq9").isEmpty)
+
+        let dispatch = Plan.Dispatch(agent: "claude", account: "default", repo: "deskree-inc/oby", baseBranch: nil,
+                                     pr: 80, issue: nil, epic: nil, kind: .review, title: nil, task: "Review PR #80",
+                                     inputs: [], rounds: 1, check: nil, complexity: .routine, startWhen: nil, mode: nil)
+        let standalone = Plan(action: .dispatch, reply: "", dispatches: [dispatch], question: nil)
+        #expect(standalone.problems(in: context, canary: "zq9") == ["PR #80 has Oby author job author; use ask_review_again"])
+
+        var otherRepository = dispatch
+        otherRepository.repo = "deskree-inc/another"
+        let separatePR = Plan(action: .dispatch, reply: "", dispatches: [otherRepository], question: nil)
+        #expect(separatePR.problems(in: context, canary: "zq9").isEmpty)
+    }
+
     // MARK: The store
 
     @Test func theConversationIsKeptInTheDatabase() throws {

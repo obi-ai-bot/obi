@@ -61,7 +61,7 @@ struct CheckTests {
             made.agents.append((job, agent, resume))
             return agent
         }
-        desk.countCommits = { _, _ in 2 }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 2 }
         desk.publishOnItsOwn = { [made, url] job, _, hooks in
             let head = made.pushes.isEmpty ? CheckTests.head : made.pushes.removeFirst()
             hooks.sent(Outgoing(action: .push, repo: job.repo, id: head, branch: job.branch))
@@ -248,7 +248,7 @@ struct CheckTests {
         try await until("the author takes up the review") { desk.job("author")?.status == .running && made.agents.last?.job.id == "author" }
         #expect(desk.job("author")?.review?.verdict == .changesRequested)
         made.pushes = [Self.next]
-        desk.countCommits = { _, _ in 3 }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 3 }
         try await endRound(try #require(made.agents.last?.agent), "Fixed the off-by-one.")
         try await approve("The blocking finding is fixed.\n\nBlocking:\n(none)\n\nWorth doing later:\n- Add coverage\n\nVERDICT: APPROVED")
         try await until("the approval queues a Mac check") { desk.job("author")?.macCheck != nil }
@@ -387,7 +387,7 @@ struct CheckTests {
 
         // The round publishes its fix; the review approves it; the new commit gets its own check.
         made.pushes = [Self.next]
-        desk.countCommits = { _, _ in 3 }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 3 }
         try await endRound(round.agent, "fix(engine): the secret test passes")
         try await approve()
         try await until("the new commit's check is queued") { desk.job("author")?.macCheck?.head == Self.next }
@@ -508,7 +508,7 @@ struct CheckTests {
         #expect(made.quoted.last?.text.contains("> iOSTests/JobRowTests/testTitle(): XCTAssertEqual failed") == true)
         // The fix publishes and gets its one more review.
         made.pushes = [Self.next]
-        desk.countCommits = { _, _ in 3 }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 3 }
         try await endRound(try #require(made.agents.last?.agent), "fix(ios): the title test passes")
         try await until("a review job runs") { made.agents.last?.job.reviewOf == "author" }
         #expect(desk.job("author")?.reviewError == nil)

@@ -158,7 +158,7 @@ struct ReviewTests {
             made.agents.append((job, agent, resume))
             return agent
         }
-        desk.countCommits = { _, _ in 2 }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 2 }
         desk.publishOnItsOwn = { [made, url] job, _, hooks in
             made.published.append(job)
             hooks.sent(Outgoing(action: .push, repo: job.repo, id: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", branch: job.branch))
@@ -231,6 +231,54 @@ struct ReviewTests {
                 : author.reviewing == nil && author.reviewError != nil
         }
         return try #require(desk.job("author"))
+    }
+
+    @Test func reviewCommitsFailAndAreNeverPublished() async throws {
+        _ = try await publishAuthor()
+        let (review, agent) = try await reviewJob()
+        desk.countCommits = { _, since in since == "refs/oby/pr-80" ? 1 : 2 }
+        agent.onEvent(.turnEnded(summary: "I fixed the pull request", failed: false))
+        agent.onEvent(.finished(summary: "I fixed the pull request", failed: false))
+        try await until("the review with commits fails") { desk.job(review.id)?.status == .failed }
+        let ended = try #require(desk.job(review.id))
+        #expect(ended.summary == "A review made commits; nothing was published")
+        #expect(ended.commits == 0 && made.published.count == 1)
+        #expect(desk.job("author")?.reviewError == "Oby's review failed: A review made commits; nothing was published")
+        #expect(Publish.refusal(review, base: "dev", defaultBranch: "main") == "A review made commits; nothing was published.")
+    }
+
+    /// A chat-dispatched standalone review of an Oby PR must attach to the author job (#411).
+    @Test func aStandaloneReviewLinksToItsAuthorAndApprovalQueuesTheMacCheck() async throws {
+        let head = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        desk.queuesMacChecks = true
+        desk.reviewedHead = { _ in head }
+        // No other signed-in account: publish leaves reviewing nil so a later enqueue can link.
+        accounts.setLabel(nil, for: personal.id)
+        accounts.setLabel(nil, for: work.id)
+        let published = try await publishAuthor(authorAccountFiveHour: 0.97)
+        #expect(published.reviewing == nil && published.pushedHead == head)
+
+        accounts.setLabel("Plus · work@example.com", for: work.id)
+        let standalone = Job(id: "solo", request: "Review oby #80", agent: "codex", account: work.id,
+                             repo: "deskree-inc/oby", branch: "oby/review-80-solo", base: "dev",
+                             pr: 80, kind: .review, task: "Review pull request #80.")
+        #expect(standalone.reviewOf == nil)
+        let linked = desk.enqueue(standalone)
+        #expect(linked.reviewOf == "author" && desk.job("author")?.reviewing == linked.id)
+
+        try await until("the linked review runs") {
+            made.agents.last?.job.id == linked.id && desk.job(linked.id)?.status == .running
+        }
+        let agent = try #require(made.agents.last?.agent)
+        agent.onEvent(.turnEnded(summary: "Looks good.\n\nVERDICT: APPROVED", failed: false))
+        agent.onEvent(.finished(summary: "Looks good.\n\nVERDICT: APPROVED", failed: false))
+        try await until("the verdict reaches the author") {
+            desk.job("author")?.review?.verdict == .approved && desk.job("author")?.review?.job == linked.id
+        }
+        try await until("approval queues the Mac check") { desk.job("author")?.macCheck != nil }
+        let author = try #require(desk.job("author"))
+        #expect(author.macCheck?.state == .queued && author.macCheck?.head == head && author.macCheck?.job == "author")
+        #expect(author.reviewing == nil && author.reviewError == nil)
     }
 
     /// Older integration fixtures predate the verified-blocker contract. Give their blocking
@@ -567,7 +615,7 @@ struct ReviewTests {
         try desk.message("author", "One more thing.")
         try await until("the author runs again") { desk.job("author")?.status == .running }
         let round = try #require(made.agents.last)
-        desk.countCommits = { _, _ in 3 }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 3 }
         round.agent.onEvent(.turnEnded(summary: "fix: one more thing", failed: false))
         round.agent.onEvent(.finished(summary: "fix: one more thing", failed: false))
         try await until("the author ends") { desk.job("author")?.isActive == false }
@@ -685,7 +733,7 @@ struct ReviewTests {
         #expect(again.pipeline.number == 2)
 
         // The round publishes its new commit, and the review runs again.
-        desk.countCommits = { _, _ in 3 }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 3 }
         round.agent.onEvent(.turnEnded(summary: "fix(engine): both fixed", failed: false))
         round.agent.onEvent(.finished(summary: "fix(engine): both fixed", failed: false))
         try await until("the author publishes again") { made.published.count == 2 }
@@ -727,7 +775,7 @@ struct ReviewTests {
         try await until("the author runs again") { desk.job("author")?.status == .running && made.agents.count == 3 }
         let round = try #require(made.agents.last)
         #expect(round.agent.prompt.contains("Fix what it lists as blocking") && round.agent.prompt.contains("Oby keeps those as follow-ups"))
-        desk.countCommits = { _, _ in 3 }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 3 }
         round.agent.onEvent(.turnEnded(summary: "fix(engine): keep the last round", failed: false))
         round.agent.onEvent(.finished(summary: "fix(engine): keep the last round", failed: false))
 
@@ -764,7 +812,7 @@ struct ReviewTests {
     func roundPublishes(after round: Int) async throws {
         try await until("round \(round + 1) runs") { desk.job("author")?.status == .running && made.agents.count == 2 * round + 1 }
         let again = try #require(made.agents.last)
-        desk.countCommits = { _, _ in 2 + round }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 2 + round }
         again.agent.onEvent(.turnEnded(summary: "fix: again", failed: false))
         again.agent.onEvent(.finished(summary: "fix: again", failed: false))
         try await until("the author publishes again") { made.published.count == round + 1 }
@@ -816,7 +864,7 @@ struct ReviewTests {
         _ = try desk.settle(asked.id, .answer(Inbox.oneMoreRound))
         try await until("the author runs for the user") { desk.job("author")?.status == .running }
         let last = try #require(made.agents.last)
-        desk.countCommits = { _, _ in 9 }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 9 }
         last.agent.onEvent(.turnEnded(summary: "fix: signal the group", failed: false))
         last.agent.onEvent(.finished(summary: "fix: signal the group", failed: false))
         try await until("the author publishes") { made.published.count == 5 }
@@ -967,7 +1015,7 @@ struct ReviewTests {
         try desk.message("author", "Try again.")
         try await until("the author runs") { desk.job("author")?.status == .running }
         let again = try #require(made.agents.last)
-        desk.countCommits = { _, _ in 3 }
+        desk.countCommits = { _, since in since.hasPrefix("refs/oby/pr-") ? 0 : 3 }
         again.agent.onEvent(.turnEnded(summary: "fix: again", failed: false))
         again.agent.onEvent(.finished(summary: "fix: again", failed: false))
         let (review, _) = try await reviewJob()

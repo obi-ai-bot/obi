@@ -266,7 +266,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
     /// jobs (a review makes no commits), and never once its pull request was merged or closed: the
     /// branch has nowhere to go.
     var canPublish: Bool {
-        status == .done && kind != .research && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
+        status == .done && kind != .research && kind != .review && base != nil && unpublished > 0 && dismissed == nil && reviewOf == nil
             && (pullRequest?.state ?? .open) == .open
     }
     /// Oby's review requested changes for the last time it may (`Review.stopsHere`: a blocker came
