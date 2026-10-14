@@ -13,8 +13,10 @@ import Testing
 /// can never hold.
 @MainActor
 struct StartWhenTests {
-    /// The time the desk checks conditions at, moved by the tests.
-    final class Clock { var now = Date(timeIntervalSince1970: 1_791_000_000) }
+    /// The time the desk checks conditions at, moved by the tests: 9 AM on a fixed day in the time
+    /// zone the tests run in, so a wait an hour or two later ends that same day and reads as a time
+    /// ("11:00 AM"), never the next day's weekday and date, wherever the Mac is.
+    final class Clock { var now = Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: 2, hour: 9))! }
     /// Pull requests' states as GitHub would answer, by `repo#number`.
     final class GitHub { var states: [String: PullRequestStatus.State] = [:] }
     final class Made { var agents: [(job: Job, prompt: String)] = [] }

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 @testable import ObyEngine
 @testable import oby_runner
@@ -323,30 +324,56 @@ struct VaultScanTests {
         #expect(error?.message.hasPrefix("Not published: the secret scan couldn't read the vault") == true)
     }
 
+    /// gitleaks as the scan runs it, standing in for whatever this Mac has installed (its version,
+    /// its rules): it keeps the text it was given to scan and finds nothing of its own.
+    final class Gitleaks: Sendable {
+        let scanned = Mutex<[String]>([])
+
+        var stand: Shell.Stand {
+            Shell.Stand { [self] arguments, _ in
+                guard arguments.first == "gitleaks", let dir = arguments.firstIndex(of: "dir"), arguments.indices.contains(dir + 1) else {
+                    throw Shell.Failure(message: "Unexpected command \(arguments.first ?? "")")
+                }
+                let text = try String(contentsOf: URL(filePath: arguments[dir + 1]), encoding: .utf8)
+                scanned.withLock { $0.append(text) }
+                return Shell.Output(status: 0, out: Data(), err: "")
+            }
+        }
+    }
+
     /// The squash commit Oby writes is scanned right before the merge, with the vault as it is then,
-    /// and the merge stops when the scan finds something or can't run.
+    /// and the merge stops when the scan finds something or can't run. gitleaks stands in, so the
+    /// findings are the built-in rules' and the vault's whichever gitleaks this Mac has, and it
+    /// still has to be given the squash commit's title and message.
     @Test func theSquashCommitIsScannedBeforeTheMerge() async throws {
         let (vault, store, folder) = scratch()
         defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
-        try await MacCheck.scan(("fix: the login (#3) (#4)", "* fix: the login (#3)"), vault: vault)
-        // A title someone edited on GitHub after publishing.
-        let titled = await #expect(throws: Shell.Failure.self) {
-            try await MacCheck.scan(("fix: \(Fake.aws) (#4)", "* fix: the login"), vault: vault)
+        let gitleaks = Gitleaks()
+        try await Shell.$stand.withValue(gitleaks.stand) {
+            try await MacCheck.scan(("fix: the login (#3) (#4)", "* fix: the login (#3)"), vault: vault)
+            // A title someone edited on GitHub after publishing.
+            let titled = await #expect(throws: Shell.Failure.self) {
+                try await MacCheck.scan(("fix: \(Fake.aws) (#4)", "* fix: the login"), vault: vault)
+            }
+            #expect(titled?.message == "possible secret in squash commit title:1 (AWS access key).")
+            // A secret the vault learned after publishing.
+            let later = secret()
+            try vault.add(later, as: "later-token")
+            let messaged = await #expect(throws: Shell.Failure.self) {
+                try await MacCheck.scan(("fix: the login (#4)", "* fix: the login\n\nUsed \(later)"), vault: vault)
+            }
+            #expect(messaged?.message == "possible secret in squash commit message:3 (vault secret later-token).")
+            #expect(messaged?.message.contains(later) == false)
+            // gitleaks was given each squash commit's title and message.
+            #expect(gitleaks.scanned.withLock { $0 } == ["fix: the login (#3) (#4)\n* fix: the login (#3)",
+                                                         "fix: \(Fake.aws) (#4)\n* fix: the login",
+                                                         "fix: the login (#4)\n* fix: the login\n\nUsed \(later)"])
+            // A vault the scan can't read.
+            chmod(store.file.path, 0o640)
+            let unread = await #expect(throws: Shell.Failure.self) { try await MacCheck.scan(("fix: the login (#4)", ""), vault: vault) }
+            #expect(unread?.message.hasPrefix("the secret scan of the squash commit couldn't run") == true)
+            chmod(store.file.path, 0o600)
         }
-        #expect(titled?.message == "possible secret in squash commit title:1 (AWS access key).")
-        // A secret the vault learned after publishing.
-        let later = secret()
-        try vault.add(later, as: "later-token")
-        let messaged = await #expect(throws: Shell.Failure.self) {
-            try await MacCheck.scan(("fix: the login (#4)", "* fix: the login\n\nUsed \(later)"), vault: vault)
-        }
-        #expect(messaged?.message == "possible secret in squash commit message:3 (vault secret later-token).")
-        #expect(messaged?.message.contains(later) == false)
-        // A vault the scan can't read.
-        chmod(store.file.path, 0o640)
-        let unread = await #expect(throws: Shell.Failure.self) { try await MacCheck.scan(("fix: the login (#4)", ""), vault: vault) }
-        #expect(unread?.message.hasPrefix("the secret scan of the squash commit couldn't run") == true)
-        chmod(store.file.path, 0o600)
     }
 
     /// Wherever a base64 run starts, the value's own characters are in it.
