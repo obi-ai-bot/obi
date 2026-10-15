@@ -1,7 +1,8 @@
 # The Rust core (core/: obid and its crates) on Linux and macOS: formatting, clippy with warnings
-# as errors, and the tests, against the committed Cargo.lock. The tests run the job sandbox for
-# real (bubblewrap on Linux, sandbox-exec on macOS) and the e2e stub agent (Node). This file
-# belongs to the Rust core (docs/ARCHITECTURE.md, section 6).
+# as errors, and the tests, against the committed Cargo.lock; and a build with the oldest Rust the
+# workspace declares (`rust-version`). The tests run the job sandbox for real (bubblewrap on Linux,
+# sandbox-exec on macOS) and the e2e stub agent (Node). This file belongs to the Rust core
+# (docs/ARCHITECTURE.md, section 6).
 name: Core
 
 on:
@@ -82,3 +83,32 @@ jobs:
 
       - name: cargo test --locked
         run: cargo test --workspace --locked
+
+  # The oldest Rust the workspace says it builds with (`rust-version` in core/Cargo.toml): the
+  # workspace and its tests build with exactly that toolchain, against the committed Cargo.lock.
+  msrv:
+    name: Core rust-version (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain at rust-version
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$msrv"
+          rustup toolchain install "$msrv" --profile minimal
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+          cargo +"$msrv" --version
+
+      - name: cargo build at rust-version
+        run: cargo +"$MSRV" build --workspace --all-targets --locked
