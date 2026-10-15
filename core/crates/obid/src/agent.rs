@@ -1,20 +1,58 @@
-//! The Claude Code adapter: one turn of `claude -p --input-format stream-json --output-format
-//! stream-json --verbose --permission-prompt-tool stdio`, in the job sandbox (AGENTS.md, "Claude
-//! Code headless"). obid writes the user's message as one JSON line, answers every permission
-//! prompt (`control_request` `can_use_tool`) itself, follows the agent's steps, and closes stdin
-//! after the turn's `result` line, so the agent exits. Output is split on `\n` only: a JSON string
-//! may hold U+2028.
+//! What every agent adapter shares (what to run, obid's answer to a permission, what the agent did,
+//! how a turn ended), and the Claude Code adapter: one turn of `claude -p --input-format
+//! stream-json --output-format stream-json --verbose --permission-prompt-tool stdio`, in the job
+//! sandbox (AGENTS.md, "Claude Code headless"). obid writes the user's message as one JSON line,
+//! answers every permission prompt (`control_request` `can_use_tool`) itself, follows the agent's
+//! steps, and closes stdin after the turn's `result` line, so the agent exits. Codex's app-server
+//! adapter is `codex`, the Agent Client Protocol's (Cursor) `acp`.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 
+use crate::conn::Conn;
 use crate::process;
+
+/// The coding tools obid runs jobs on, each through its own adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    /// Claude Code, stream-json (this module).
+    Claude,
+    /// Codex, `codex app-server` (`crate::codex`).
+    Codex,
+    /// Cursor, `cursor-agent acp` (`crate::acp`).
+    Cursor,
+}
+
+impl Tool {
+    /// In the order routing tries them when a job names no tool.
+    pub const ALL: [Tool; 3] = [Tool::Claude, Tool::Codex, Tool::Cursor];
+
+    /// The id jobs, accounts and the configuration name it by: `claude`, `codex`, `cursor`.
+    pub fn id(self) -> &'static str {
+        match self {
+            Tool::Claude => "claude",
+            Tool::Codex => "codex",
+            Tool::Cursor => "cursor",
+        }
+    }
+
+    /// How reports say it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Tool::Claude => "Claude Code",
+            Tool::Codex => "Codex",
+            Tool::Cursor => "Cursor",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Tool> {
+        Tool::ALL.into_iter().find(|tool| tool.id() == id)
+    }
+}
 
 /// What to run: the command line (already wrapped in the sandbox), its environment and working
 /// directory, and where its stderr goes.
@@ -43,10 +81,12 @@ pub enum Event {
     Denied(String),
 }
 
-/// How a turn ended.
-#[derive(Debug, Clone, PartialEq)]
+/// How a turn ended, for every adapter.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Turn {
-    /// The `result` line, when one came.
+    /// The turn's result, when it ended with one, in the shape of Claude Code's `result` line:
+    /// `is_error`, `subtype`, `result` (the agent's last words), and `structured_output` when the
+    /// agent gave one. Codex's and ACP's adapters make it from their own end of turn.
     pub result: Option<Value>,
     pub session: Option<String>,
     /// How the process ended: `exit status 0`, `killed by signal 9`.
@@ -55,6 +95,9 @@ pub struct Turn {
     pub timed_out: bool,
     /// obid was told to stop it.
     pub stopped: bool,
+    /// What the agent should hear at the start of its next prompt: what obid declined this turn
+    /// and why, for a tool whose answer to a permission carries no words (ACP).
+    pub notes: Vec<String>,
 }
 
 impl Turn {
@@ -79,6 +122,13 @@ impl Turn {
     }
 }
 
+/// A turn's result in the shape of Claude Code's `result` line: what the agent said last, and
+/// whether the turn failed.
+pub fn result(text: &str, failed: bool, session: Option<&str>) -> Value {
+    json!({"type": "result", "subtype": if failed { "error_during_execution" } else { "success" },
+           "is_error": failed, "result": text, "session_id": session})
+}
+
 /// The user message line for `text`.
 pub fn user_message(text: &str) -> Value {
     json!({"type": "user", "message": {"role": "user", "content": text}})
@@ -91,157 +141,77 @@ pub async fn run_turn(
     launch: Launch,
     prompt: &str,
     limit: Duration,
-    mut stop: watch::Receiver<process::Signal>,
+    stop: watch::Receiver<process::Signal>,
     decide: impl Fn(&str, &Value) -> Answer,
     mut on_event: impl FnMut(Event),
 ) -> std::io::Result<Turn> {
-    // The agent's stderr goes to obid, which writes it to the log: a file of obid's home would be
-    // one the sandbox hides from the agent, and some tools refuse to start with such a stderr.
-    let mut log = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&launch.stderr)
-        .await?;
-    let (program, args) = launch
-        .argv
-        .split_first()
-        .ok_or_else(|| std::io::Error::other("nothing to run"))?;
-    let mut command = tokio::process::Command::new(program);
-    command
-        .args(args)
-        .env_clear()
-        .envs(launch.env.iter().map(|(k, v)| (k, v)))
-        .current_dir(&launch.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true);
-    let mut child = command.spawn()?;
-    let pgid = child.id().unwrap_or(0);
-    let mut stdin = child.stdin.take();
-    let copying = child.stderr.take().map(|mut stderr| {
-        tokio::spawn(async move {
-            let _ = tokio::io::copy(&mut stderr, &mut log).await;
-        })
-    });
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| std::io::Error::other("no stdout"))?;
-    let mut lines = BufReader::new(stdout);
+    let mut conn = Conn::spawn(&launch, limit, stop, false).await?;
+    conn.send(&user_message(prompt)).await;
 
-    let mut first = serde_json::to_vec(&user_message(prompt)).map_err(std::io::Error::other)?;
-    first.push(b'\n');
-    if let Some(input) = stdin.as_mut() {
-        // An agent that exits before reading says so through its exit, below.
-        let _ = input.write_all(&first).await;
-        let _ = input.flush().await;
-    }
-
-    let mut turn = Turn {
-        result: None,
-        session: None,
-        exit: String::new(),
-        timed_out: false,
-        stopped: false,
-    };
-    if *stop.borrow() != process::Signal::Run {
-        turn.stopped = true;
-    }
-    let give_up_at = tokio::time::sleep(limit);
-    tokio::pin!(give_up_at);
-    let mut buffer = Vec::new();
-    while !turn.stopped {
-        buffer.clear();
-        tokio::select! {
-            read = lines.read_until(b'\n', &mut buffer) => {
-                match read {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
+    let mut turn = Turn::default();
+    loop {
+        let message = match conn.next().await {
+            Ok(message) => message,
+            Err(_) => break,
+        };
+        match message.get("type").and_then(Value::as_str) {
+            Some("control_request") => {
+                let request = &message["request"];
+                let id = message.get("request_id").cloned().unwrap_or(Value::Null);
+                if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool") {
+                    continue;
                 }
-                let Ok(message) = serde_json::from_slice::<Value>(&buffer) else { continue };
-                match message.get("type").and_then(Value::as_str) {
-                    Some("control_request") => {
-                        let request = &message["request"];
-                        let id = message.get("request_id").cloned().unwrap_or(Value::Null);
-                        if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool") {
-                            continue;
-                        }
-                        let tool = request.get("tool_name").and_then(Value::as_str).unwrap_or("");
-                        let input = request.get("input").cloned().unwrap_or_else(|| json!({}));
-                        let response = match decide(tool, &input) {
-                            Answer::Allow => json!({"behavior": "allow", "updatedInput": input}),
-                            Answer::Deny(why) => {
-                                on_event(Event::Denied(why.clone()));
-                                json!({"behavior": "deny", "message": why})
-                            }
-                        };
-                        let line = json!({"type": "control_response",
-                                          "response": {"subtype": "success", "request_id": id, "response": response}});
-                        if let Some(input) = stdin.as_mut() {
-                            let mut bytes = serde_json::to_vec(&line).map_err(std::io::Error::other)?;
-                            bytes.push(b'\n');
-                            let _ = input.write_all(&bytes).await;
-                            let _ = input.flush().await;
-                        }
+                let tool = request
+                    .get("tool_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let input = request.get("input").cloned().unwrap_or_else(|| json!({}));
+                let response = match decide(tool, &input) {
+                    Answer::Allow => json!({"behavior": "allow", "updatedInput": input}),
+                    Answer::Deny(why) => {
+                        on_event(Event::Denied(why.clone()));
+                        json!({"behavior": "deny", "message": why})
                     }
-                    Some("system") if message.get("subtype").and_then(Value::as_str) == Some("init") => {
-                        if let Some(session) = message.get("session_id").and_then(Value::as_str) {
-                            turn.session = Some(session.to_owned());
-                            on_event(Event::Session(session.to_owned()));
-                        }
-                    }
-                    Some("assistant") => {
-                        for block in message["message"]["content"].as_array().into_iter().flatten() {
-                            if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                                let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-                                on_event(Event::Step(step(name, block.get("input").unwrap_or(&Value::Null))));
-                            }
-                        }
-                    }
-                    Some("result") => {
-                        if let Some(session) = message.get("session_id").and_then(Value::as_str) {
-                            turn.session.get_or_insert_with(|| session.to_owned());
-                        }
-                        turn.result = Some(message);
-                        // The turn is over: no more input, so the agent exits once it's idle.
-                        drop(stdin.take());
-                    }
-                    _ => {}
+                };
+                conn.send(&json!({"type": "control_response",
+                                  "response": {"subtype": "success", "request_id": id, "response": response}}))
+                    .await;
+            }
+            Some("system") if message.get("subtype").and_then(Value::as_str) == Some("init") => {
+                if let Some(session) = message.get("session_id").and_then(Value::as_str) {
+                    turn.session = Some(session.to_owned());
+                    on_event(Event::Session(session.to_owned()));
                 }
             }
-            () = &mut give_up_at => {
-                turn.timed_out = true;
-                break;
-            }
-            changed = stop.changed() => {
-                if changed.is_err() || *stop.borrow() != process::Signal::Run {
-                    turn.stopped = true;
-                    break;
+            Some("assistant") => {
+                for block in message["message"]["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                {
+                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                        let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                        on_event(Event::Step(step(
+                            name,
+                            block.get("input").unwrap_or(&Value::Null),
+                        )));
+                    }
                 }
             }
+            Some("result") => {
+                if let Some(session) = message.get("session_id").and_then(Value::as_str) {
+                    turn.session.get_or_insert_with(|| session.to_owned());
+                }
+                turn.result = Some(message);
+                // The turn is over: no more input, so the agent exits once it's idle.
+                conn.close_input();
+            }
+            _ => {}
         }
     }
-    drop(stdin.take());
-    if turn.timed_out || turn.stopped {
-        process::end_group(pgid, process::STOPPING).await;
-    }
-    // The output ended: the agent is exiting. Give it a moment, then end what's left of its group.
-    let status = match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
-        Ok(status) => status.ok(),
-        Err(_) => {
-            process::end_group(pgid, process::STOPPING).await;
-            child.wait().await.ok()
-        }
-    };
-    process::signal_group(pgid, nix::sys::signal::Signal::SIGKILL);
-    if let Some(copying) = copying {
-        let _ = tokio::time::timeout(Duration::from_secs(5), copying).await;
-    }
-    turn.exit = status
-        .map(process::describe)
-        .unwrap_or_else(|| "ended".into());
+    turn.timed_out = conn.timed_out;
+    turn.stopped = conn.stopped;
+    turn.exit = conn.finish().await;
     Ok(turn)
 }
 

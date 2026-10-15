@@ -501,9 +501,74 @@ pub fn tool_roots(path: &std::ffi::OsStr, hidden: &[PathBuf], never: &[PathBuf])
     roots
 }
 
+/// The folder an agent's binary is installed in, when the sandbox hides it and the binary needs
+/// what is beside it: where `bin` leads (through its symbolic links), that file's folder. Cursor's
+/// `~/.local/bin/cursor-agent` leads to `~/.local/share/cursor-agent/versions/<v>/cursor-agent`,
+/// which runs the `index.js` and `node` beside it. `None` when that folder isn't hidden, is or holds
+/// a hidden folder (a binary straight in the home shows nothing more), or is inside `never`.
+pub fn install_root(bin: &Path, hidden: &[PathBuf], never: &[PathBuf]) -> Option<PathBuf> {
+    let both = |paths: &[PathBuf]| -> Vec<PathBuf> {
+        paths
+            .iter()
+            .flat_map(|p| [p.clone(), p.canonicalize().unwrap_or_else(|_| p.clone())])
+            .collect()
+    };
+    let (hidden, never) = (both(hidden), both(never));
+    let root = bin.canonicalize().ok()?.parent()?.to_path_buf();
+    let inside = hidden.iter().any(|h| root.starts_with(h) && &root != h);
+    if !inside
+        || hidden.iter().any(|h| h.starts_with(&root))
+        || never
+            .iter()
+            .any(|n| root.starts_with(n) || n.starts_with(&root))
+    {
+        return None;
+    }
+    Some(root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_installed_in_a_hidden_home_brings_its_own_folder_only() {
+        let root = std::env::temp_dir().join(format!("obid-install-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home/w");
+        let version = home.join(".local/share/cursor-agent/versions/1");
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::write(version.join("cursor-agent"), "").unwrap();
+        std::os::unix::fs::symlink(
+            version.join("cursor-agent"),
+            home.join(".local/bin/cursor-agent"),
+        )
+        .unwrap();
+        std::fs::write(home.join("tool"), "").unwrap();
+        std::fs::create_dir_all(root.join("obid/bin")).unwrap();
+        std::fs::write(root.join("obid/bin/agent"), "").unwrap();
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        std::fs::write(root.join("usr/bin/agent"), "").unwrap();
+        let hidden = [home.clone(), root.join("obid")];
+        let never = [root.join("obid")];
+        let real = |p: PathBuf| p.canonicalize().unwrap();
+        assert_eq!(
+            install_root(&home.join(".local/bin/cursor-agent"), &hidden, &never),
+            Some(real(version.clone()))
+        );
+        assert_eq!(install_root(&home.join("tool"), &hidden, &never), None);
+        assert_eq!(
+            install_root(&root.join("obid/bin/agent"), &hidden, &never),
+            None
+        );
+        assert_eq!(
+            install_root(&root.join("usr/bin/agent"), &hidden, &never),
+            None
+        );
+        assert_eq!(install_root(&home.join("missing"), &hidden, &never), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn tools_in_a_hidden_home_come_back_with_their_libraries_only() {

@@ -304,7 +304,7 @@ fn dispatch_takes_only_whole_jobs() {
             json!({"task": "x".repeat(2001)}),
             "task is 1 to 2,000 characters",
         ),
-        (json!({"agent": "codex"}), "no codex adapter"),
+        (json!({"agent": "codex"}), "names no agents.codex"),
         (json!({"account": "nobody"}), "There's no account nobody"),
         (json!({"branch": "--upload-pack=sh"}), "isn't a branch name"),
         (json!({"branch": "oby/review 33"}), "isn't a branch name"),

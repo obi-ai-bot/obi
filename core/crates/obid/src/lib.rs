@@ -5,10 +5,13 @@
 // The job's JSON (`job::Job::to_json`) has every key the apps expect, in one `json!`.
 #![recursion_limit = "256"]
 
+pub mod acp;
 pub mod agent;
 pub mod api;
 pub mod clear;
+pub mod codex;
 pub mod config;
+pub mod conn;
 pub mod events;
 pub mod git;
 pub mod job;

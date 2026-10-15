@@ -17,14 +17,14 @@ use obi_protocol::types::ReviewRequest;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 
-use crate::agent::{self, Event as AgentEvent, Launch};
+use crate::agent::{self, Event as AgentEvent, Launch, Tool};
 use crate::config::{Config, Repo};
 use crate::events::Events;
 use crate::job::{Job, ObiRef, Phase, Status, Waiting};
 use crate::process::{self, Signal};
 use crate::sandbox::{self, Sandbox, Spec};
 use crate::store::{self, Store};
-use crate::{git, policy, review};
+use crate::{acp, codex, git, policy, review};
 
 /// How long one round's turn may take (docs/runner-api.md, "limit").
 pub const ROUND_LIMIT: Duration = Duration::from_secs(45 * 60);
@@ -236,25 +236,98 @@ impl Jobs {
         }
     }
 
-    /// The account a job runs on: the one named (by id or name), or the first one Claude Code has.
-    fn account(&self, named: Option<&str>) -> Result<crate::config::Account, Refused> {
-        let Some(claude) = &self.config.agents.claude else {
-            return Err(Refused(
-                "obid has no agent set up: its configuration names no agents.claude.".into(),
-            ));
-        };
-        let accounts = claude_accounts(claude);
-        match named
-            .map(str::trim)
-            .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("auto"))
-        {
-            None => Ok(accounts[0].clone()),
-            Some(named) => accounts
-                .iter()
-                .find(|a| a.id == named || a.name == named)
-                .cloned()
-                .ok_or_else(|| Refused(format!("There's no account {named}."))),
+    /// The configuration of `tool`'s adapter, when obid has one.
+    fn agent_config(&self, tool: Tool) -> Option<&crate::config::Agent> {
+        match tool {
+            Tool::Claude => self.config.agents.claude.as_ref(),
+            Tool::Codex => self.config.agents.codex.as_ref(),
+            Tool::Cursor => self.config.agents.cursor.as_ref(),
         }
+    }
+
+    /// `tool`'s accounts: the configured ones, or its own default login (Claude Code's and
+    /// Codex's; a Cursor account always has a folder of its own).
+    fn accounts(&self, tool: Tool) -> Vec<crate::config::Account> {
+        let Some(agent) = self.agent_config(tool) else {
+            return Vec::new();
+        };
+        match tool {
+            Tool::Claude => claude_accounts(agent),
+            Tool::Codex if agent.accounts.is_empty() => vec![crate::config::Account {
+                id: "codex".into(),
+                name: "Codex".into(),
+                config_dir: None,
+            }],
+            _ => agent.accounts.clone(),
+        }
+    }
+
+    /// The tool and account a job runs on: the tool named (`claude`, `codex`, `cursor`; `auto` or
+    /// none for any), and the account named (by id or name), or the first account of the first
+    /// tool obid has (Claude Code, then Codex, then Cursor).
+    fn pick(
+        &self,
+        agent: Option<&str>,
+        named: Option<&str>,
+    ) -> Result<(Tool, crate::config::Account), Refused> {
+        let tools: Vec<Tool> = match agent
+            .map(str::trim)
+            .filter(|a| !a.is_empty() && !a.eq_ignore_ascii_case("auto"))
+        {
+            None => Tool::ALL
+                .into_iter()
+                .filter(|t| self.agent_config(*t).is_some())
+                .collect(),
+            Some(id) => {
+                let tool = Tool::from_id(id).ok_or_else(|| {
+                    Refused(format!("agent is claude, codex or cursor, not {id}."))
+                })?;
+                if self.agent_config(tool).is_none() {
+                    return Err(Refused(format!(
+                        "obid has no {} set up: its configuration names no agents.{id}.",
+                        tool.name()
+                    )));
+                }
+                vec![tool]
+            }
+        };
+        if tools.is_empty() {
+            return Err(Refused(
+                "obid has no agent set up: its configuration names no agents.claude, agents.codex or agents.cursor.".into(),
+            ));
+        }
+        let named = named
+            .map(str::trim)
+            .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("auto"));
+        for tool in &tools {
+            let accounts = self.accounts(*tool);
+            let found = match named {
+                None => accounts.into_iter().next(),
+                Some(named) => accounts
+                    .into_iter()
+                    .find(|a| a.id == named || a.name == named),
+            };
+            if let Some(account) = found {
+                return Ok((*tool, account));
+            }
+        }
+        Err(Refused(match (named, tools.as_slice()) {
+            (Some(named), _) => format!("There's no account {named}."),
+            (None, [tool]) => format!(
+                "obid has no {} account: agents.{}.accounts names none.",
+                tool.name(),
+                tool.id()
+            ),
+            (None, _) => "obid has no account to run the job on.".into(),
+        }))
+    }
+
+    /// The tool and account a job was made for.
+    fn job_account(&self, job: &Job) -> Result<(Tool, crate::config::Account), String> {
+        let tool = Tool::from_id(&job.agent)
+            .ok_or_else(|| format!("obid has no adapter for {}.", job.agent))?;
+        self.pick(Some(tool.id()), Some(&job.account))
+            .map_err(|e| e.0)
     }
 
     fn repo(&self, repo: &str) -> Option<&Repo> {
@@ -282,20 +355,7 @@ impl Jobs {
         {
             return Err(Refused("title is one line of 1 to 60 characters.".into()));
         }
-        match new.agent.as_deref().map(str::trim) {
-            None | Some("" | "auto" | "claude") => {}
-            Some(other @ ("codex" | "cursor")) => {
-                return Err(Refused(format!(
-                    "obid has no {other} adapter yet: only claude."
-                )));
-            }
-            Some(other) => {
-                return Err(Refused(format!(
-                    "agent is claude, codex or cursor, not {other}."
-                )));
-            }
-        }
-        let account = self.account(new.account.as_deref())?;
+        let (tool, account) = self.pick(new.agent.as_deref(), new.account.as_deref())?;
         if let Some(rounds) = new.rounds
             && !(1..=10).contains(&rounds)
         {
@@ -323,7 +383,10 @@ impl Jobs {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_')))
         {
-            return Err(Refused(format!("{model} isn't a model of Claude Code.")));
+            return Err(Refused(format!(
+                "{model} isn't a model of {}.",
+                tool.name()
+            )));
         }
         let id = self.new_id();
         let mut job = Job::new(
@@ -331,7 +394,7 @@ impl Jobs {
             new.repo.clone(),
             new.kind.clone(),
             new.task.clone(),
-            "claude".into(),
+            tool.id().into(),
             account.id.clone(),
         );
         job.request = new
@@ -382,7 +445,8 @@ impl Jobs {
                 body.repo
             )));
         }
-        let account = self.account(None)?;
+        // Claude Code's: the review's answer is its structured output (`--json-schema`).
+        let (_, account) = self.pick(Some(Tool::Claude.id()), None)?;
         let id = self.new_id();
         let repo_name = body
             .repo
@@ -663,7 +727,7 @@ impl Jobs {
         common: &Path,
         temp: &Path,
         commits: bool,
-        network: bool,
+        tool: Tool,
     ) -> Spec {
         let mut hidden = vec![self.config.home.clone()];
         hidden.extend(person_homes());
@@ -672,7 +736,12 @@ impl Jobs {
             &hidden,
             std::slice::from_ref(&self.config.home),
         );
-        if let Some(bin) = self.agent_bin() {
+        if let Some(bin) = self.agent_bin(tool) {
+            read_only.extend(sandbox::install_root(
+                &bin,
+                &hidden,
+                std::slice::from_ref(&self.config.home),
+            ));
             read_only.push(bin);
         }
         Spec {
@@ -684,23 +753,23 @@ impl Jobs {
             accounts: Vec::new(),
             read_only,
             hidden,
-            network,
+            // An agent keeps the network any agent has (its model's API); the check gets none.
+            network: true,
         }
     }
 
-    fn agent_bin(&self) -> Option<PathBuf> {
-        self.config
-            .agents
-            .claude
-            .as_ref()
-            .and_then(|claude| process::resolve_bin(&claude.bin))
+    fn agent_bin(&self, tool: Tool) -> Option<PathBuf> {
+        self.agent_config(tool)
+            .and_then(|agent| process::resolve_bin(&agent.bin))
     }
 
-    /// The agent's command line and environment for one turn on `account`.
+    /// The agent's command line and environment for one turn of `tool` on `account`. `flags`
+    /// follow Claude Code's binary; Codex and Cursor take their adapters' own.
     fn launch(
         &self,
         job: &Job,
         spec: &Spec,
+        tool: Tool,
         flags: Vec<OsString>,
         account: &crate::config::Account,
     ) -> Result<Launch, String> {
@@ -708,20 +777,17 @@ impl Jobs {
             .sandbox
             .as_ref()
             .map_err(|why| format!("obid can't run this job's agent: {why}"))?;
-        let bin = self.agent_bin().ok_or_else(|| {
+        let bin = self.agent_bin(tool).ok_or_else(|| {
             let named = self
-                .config
-                .agents
-                .claude
-                .as_ref()
+                .agent_config(tool)
                 .map(|c| c.bin.clone())
                 .unwrap_or_default();
-            format!("obid can't find Claude Code's binary ({named}).")
+            format!("obid can't find {}'s binary ({named}).", tool.name())
         })?;
         let mut spec = spec.clone();
         let mut extra: Vec<(&str, OsString)> = Vec::new();
-        match &account.config_dir {
-            Some(dir) => {
+        match (&account.config_dir, tool) {
+            (Some(dir), _) => {
                 std::fs::create_dir_all(dir).map_err(|e| {
                     format!(
                         "obid can't make the account's folder {}: {e}",
@@ -729,13 +795,36 @@ impl Jobs {
                     )
                 })?;
                 spec.accounts.push(dir.clone());
-                extra.push(("CLAUDE_CONFIG_DIR", dir.clone().into_os_string()));
+                match tool {
+                    Tool::Claude => extra.push(("CLAUDE_CONFIG_DIR", dir.clone().into_os_string())),
+                    Tool::Codex => extra.push(("CODEX_HOME", dir.clone().into_os_string())),
+                    Tool::Cursor => {
+                        acp::cursor::warn_if_long(dir);
+                        acp::cursor::rewrite_config(dir).map_err(|e| {
+                            format!(
+                                "obid can't write Cursor's settings in {}: {e}",
+                                dir.display()
+                            )
+                        })?;
+                        extra.extend(acp::cursor::environment(dir));
+                    }
+                }
             }
-            None => {
+            (None, Tool::Cursor) => {
+                return Err(format!(
+                    "Cursor · {} has no folder of its own (configDir), so Cursor didn't start.",
+                    account.name
+                ));
+            }
+            (None, _) => {
                 // The tool's own login, in the person's home: shown to the agent through its
                 // temporary HOME, and nothing else of that home.
+                let names: &[&str] = match tool {
+                    Tool::Codex => &[".codex"],
+                    _ => &[".claude", ".claude.json"],
+                };
                 for home in person_homes().into_iter().take(1) {
-                    for name in [".claude", ".claude.json"] {
+                    for name in names {
                         let real = home.join(name);
                         if real.exists() {
                             let link = spec.temp.join(name);
@@ -757,8 +846,15 @@ impl Jobs {
                 extra.push((key, email.into()));
             }
         }
-        let mut argv: Vec<OsString> = vec![bin.into_os_string()];
-        argv.extend(flags);
+        let argv = match tool {
+            Tool::Claude => {
+                let mut argv: Vec<OsString> = vec![bin.into_os_string()];
+                argv.extend(flags);
+                argv
+            }
+            Tool::Codex => codex::argv(bin),
+            Tool::Cursor => acp::cursor::argv(bin),
+        };
         Ok(Launch {
             argv: sandbox.wrap(&spec, &argv),
             env: process::sandbox_env(&process::tools_path(), &spec.temp, &extra),
@@ -767,34 +863,85 @@ impl Jobs {
         })
     }
 
-    /// Runs one turn and follows it on the job: its session and steps.
+    /// Runs one turn of the job's tool and follows it on the job: its session and steps.
     async fn turn(
         &self,
         id: &str,
+        tool: Tool,
         launch: Launch,
         prompt: &str,
         signal: &watch::Receiver<Signal>,
         obi_review: bool,
     ) -> Result<agent::Turn, String> {
         let worktree = launch.cwd.clone();
+        let job = self.get(id).ok_or("the job is gone")?;
         let jobs = self;
-        agent::run_turn(
-            launch,
-            prompt,
-            ROUND_LIMIT,
-            signal.clone(),
-            |tool, input| policy::decide(tool, input, &worktree, obi_review),
-            |event| match event {
-                AgentEvent::Session(session) => {
-                    jobs.update(id, |job| job.session = Some(session));
-                }
-                AgentEvent::Step(step) | AgentEvent::Denied(step) => {
-                    jobs.update(id, |job| job.step = step);
-                }
-            },
-        )
-        .await
-        .map_err(|e| format!("obid couldn't start Claude Code: {e}"))
+        let decide = |name: &str, input: &Value| policy::decide(name, input, &worktree, obi_review);
+        let on_event = |event| match event {
+            AgentEvent::Session(session) => {
+                jobs.update(id, |job| job.session = Some(session));
+            }
+            AgentEvent::Step(step) | AgentEvent::Denied(step) => {
+                jobs.update(id, |job| job.step = step);
+            }
+        };
+        let plan = job.mode.as_deref() == Some("plan");
+        let ran = match tool {
+            Tool::Claude => {
+                agent::run_turn(
+                    launch,
+                    prompt,
+                    ROUND_LIMIT,
+                    signal.clone(),
+                    decide,
+                    on_event,
+                )
+                .await
+            }
+            Tool::Codex => {
+                let options = codex::Options {
+                    resume: job.session.clone(),
+                    model: job.model.clone(),
+                    plan,
+                };
+                codex::run_turn(
+                    launch,
+                    prompt,
+                    &options,
+                    ROUND_LIMIT,
+                    signal.clone(),
+                    decide,
+                    on_event,
+                )
+                .await
+            }
+            Tool::Cursor => {
+                let account = self
+                    .job_account(&job)
+                    .map(|(_, a)| a.name)
+                    .unwrap_or_default();
+                let options = acp::Options {
+                    tool: tool.name().into(),
+                    account,
+                    resume: job.session.clone(),
+                    model: job.model.clone(),
+                    plan,
+                    plan_mode: "plan".into(),
+                    agent_mode: "agent".into(),
+                };
+                acp::run_turn(
+                    launch,
+                    prompt,
+                    &options,
+                    ROUND_LIMIT,
+                    signal.clone(),
+                    decide,
+                    on_event,
+                )
+                .await
+            }
+        };
+        ran.map_err(|e| format!("obid couldn't start {}: {e}", tool.name()))
     }
 
     /// Runs the repository's check in the job sandbox, with no network at all.
@@ -962,8 +1109,8 @@ impl Jobs {
             .await
             .map_err(|e| e.to_string())?;
         let temp = self.temp_path(id);
-        let spec = self.spec(&worktree, &admin, &common, &temp, false, true);
-        let account = self.account(Some(&job.account)).map_err(|e| e.0)?;
+        let (tool, account) = self.job_account(&job)?;
+        let spec = self.spec(&worktree, &admin, &common, &temp, false, tool);
         let flags: Vec<OsString> = [
             "-p",
             "--input-format",
@@ -983,13 +1130,13 @@ impl Jobs {
         .iter()
         .map(OsString::from)
         .collect();
-        let launch = self.launch(&job, &spec, flags, &account)?;
+        let launch = self.launch(&job, &spec, tool, flags, &account)?;
         self.update(id, |job| {
             job.phase = Some(Phase::Work);
             job.step = "Reviewing".into();
         });
         let turn = self
-            .turn(id, launch, &review::prompt(&request), signal, true)
+            .turn(id, tool, launch, &review::prompt(&request), signal, true)
             .await?;
         if *signal.borrow() != Signal::Run {
             return Ok(());
@@ -1154,8 +1301,17 @@ impl Jobs {
             .await
             .map_err(|e| e.to_string())?;
         let temp = self.temp_path(id);
-        let spec = self.spec(&worktree, &admin, &common, &temp, true, true);
-        let account = self.account(Some(&job.account)).map_err(|e| e.0)?;
+        let (tool, account) = self.job_account(&job)?;
+        let spec = self.spec(&worktree, &admin, &common, &temp, true, tool);
+        if tool == Tool::Cursor {
+            let allowed = acp::cursor::repository_allowlist(&worktree);
+            if !allowed.is_empty() {
+                return Err(format!(
+                    "Cursor didn't start: this repository's .cursor/cli.json lets it run {} without asking obid, and obid can't ask you about that yet.",
+                    allowed.join(", ")
+                ));
+            }
+        }
 
         let mut message = owner_prompt(&job);
         if job.session.is_some() {
@@ -1196,12 +1352,12 @@ impl Jobs {
             if let Some(session) = &job.session {
                 flags.extend(["--resume".into(), session.into()]);
             }
-            let launch = self.launch(&job, &spec, flags, &account)?;
+            let launch = self.launch(&job, &spec, tool, flags, &account)?;
             self.update(id, |job| {
                 job.phase = Some(Phase::Work);
-                job.step = "Starting Claude Code".into();
+                job.step = format!("Starting {}", tool.name());
             });
-            let turn = self.turn(id, launch, &message, signal, false).await?;
+            let turn = self.turn(id, tool, launch, &message, signal, false).await?;
             if *signal.borrow() != Signal::Run {
                 return Ok(());
             }
@@ -1215,7 +1371,7 @@ impl Jobs {
             if !turn.succeeded() {
                 let first = said.lines().next().unwrap_or("").trim().to_owned();
                 return Err(if first.is_empty() {
-                    format!("Claude Code stopped without finishing ({}).", turn.exit)
+                    format!("{} stopped without finishing ({}).", tool.name(), turn.exit)
                 } else {
                     first
                 });
@@ -1264,6 +1420,10 @@ impl Jobs {
                 message = "Your last line didn't say `GOAL MET`: carry on with what's left, then end with `GOAL MET` or `GOAL NOT MET: <what's left>`.".into();
             } else {
                 break;
+            }
+            // What obid declined last round, for a tool whose answers carry no words (ACP).
+            if !turn.notes.is_empty() {
+                message = format!("{}\n\n{message}", turn.notes.join("\n"));
             }
             self.update(id, |job| job.round = Some(round + 1));
         }

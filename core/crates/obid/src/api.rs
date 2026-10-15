@@ -351,32 +351,39 @@ pub fn worktrees(home: &Path) -> PathBuf {
 }
 
 async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>, ApiError> {
-    let accounts = shared
-        .config
-        .agents
-        .claude
-        .iter()
-        .flat_map(|claude| &claude.accounts)
-        .map(|account| AccountJson {
-            id: account.id.clone(),
-            agent: "claude",
-            name: account.name.clone(),
-            label: None,
-            // A listed account is usable until one of its jobs fails on its login.
-            signed_in: true,
-            five_hour: None,
-            seven_day: None,
-            five_hour_resets: None,
-            seven_day_resets: None,
-            running: shared.jobs.running_on(&account.id) as u32,
-            full_until: None,
-            tetrix: None,
-            tetrix_jobs: 0,
-            tetrix_used: 0,
-            reserved: false,
-            reserve_lifted_until: None,
-        })
-        .collect();
+    let agents = &shared.config.agents;
+    let accounts = [
+        ("claude", &agents.claude),
+        ("codex", &agents.codex),
+        ("cursor", &agents.cursor),
+    ]
+    .into_iter()
+    .flat_map(|(agent, configured)| {
+        configured
+            .iter()
+            .flat_map(|tool| &tool.accounts)
+            .map(move |account| (agent, account))
+    })
+    .map(|(agent, account)| AccountJson {
+        id: account.id.clone(),
+        agent,
+        name: account.name.clone(),
+        label: None,
+        // A listed account is usable until one of its jobs fails on its login.
+        signed_in: true,
+        five_hour: None,
+        seven_day: None,
+        five_hour_resets: None,
+        seven_day_resets: None,
+        running: shared.jobs.running_on(&account.id) as u32,
+        full_until: None,
+        tetrix: None,
+        tetrix_jobs: 0,
+        tetrix_used: 0,
+        reserved: false,
+        reserve_lifted_until: None,
+    })
+    .collect();
     Ok(axum::Json(Status {
         runner: RunnerJson {
             version: API_VERSION,

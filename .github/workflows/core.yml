@@ -39,8 +39,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # The stub agent (e2e/stub-agent) and the tests' own stand-in agent are Node scripts, and the
-      # tests build the e2e fixture with e2e/lib/fixture.mjs.
+      # The stub agent (e2e/stub-agent) and the tests' stand-ins for Claude Code, Codex and Cursor
+      # (core/crates/obid/tests/agents) are Node scripts, and the tests build the e2e fixture with
+      # e2e/lib/fixture.mjs.
       - uses: actions/setup-node@v6
         with:
           node-version: 22
