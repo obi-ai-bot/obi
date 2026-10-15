@@ -235,65 +235,67 @@ const preflight = [
 // e2e/SCENARIO.md describes it; set `implemented: true` once its body does that.
 
 const steps = [
+  // Each body is in e2e/lib/scenario-steps.mjs (the Rust core's helper file), loaded when the
+  // first step runs, so the preflight never depends on it.
   {
     n: 1,
     title: "Sphere up, team created, two Obis invited",
     by: "Sphere server",
-    implemented: false,
+    implemented: true,
     // Start the Sphere locally (`pnpm run local`), create Sphere "e2e" with wellington as admin,
     // get the admin token, invite obi-wellington and obi-ernesto, write the policy.
-    run: notImplemented,
+    run: async (c) => (await import("./lib/scenario-steps.mjs")).runStep(1, c),
   },
   {
     n: 2,
     title: "two obids up with stub agents, and paired",
     by: "Rust core + Sphere server",
-    implemented: false,
+    implemented: true,
     // Start obid A (wellington) and obid B (ernesto) with the stub agent; for each: make its key,
     // get its card, sign card and delegation as its owner, join with its invitation.
-    run: notImplemented,
+    run: async (c) => (await import("./lib/scenario-steps.mjs")).runStep(2, c),
   },
   {
     n: 3,
     title: "B sends review_request via relay",
     by: "Rust core + Sphere server",
-    implemented: false,
-    run: notImplemented,
+    implemented: true,
+    run: async (c) => (await import("./lib/scenario-steps.mjs")).runStep(3, c),
   },
   {
     n: 4,
     title: "A has no remembered decision: inbox, owner accepts and remembers, review job dispatched",
     by: "Rust core",
-    implemented: false,
-    run: notImplemented,
+    implemented: true,
+    run: async (c) => (await import("./lib/scenario-steps.mjs")).runStep(4, c),
   },
   {
     n: 5,
     title: "job finishes, publish gate scan is clean, typed result returned via relay",
     by: "Rust core + Sphere server",
-    implemented: false,
-    run: notImplemented,
+    implemented: true,
+    run: async (c) => (await import("./lib/scenario-steps.mjs")).runStep(5, c),
   },
   {
     n: 6,
     title: "second review_request accepted from the remembered decision, no inbox",
     by: "Rust core",
-    implemented: false,
-    run: notImplemented,
+    implemented: true,
+    run: async (c) => (await import("./lib/scenario-steps.mjs")).runStep(6, c),
   },
   {
     n: 7,
     title: "audit chain holds both exchanges, signed by their senders, and verifies",
     by: "Sphere server",
-    implemented: false,
-    run: notImplemented,
+    implemented: true,
+    run: async (c) => (await import("./lib/scenario-steps.mjs")).runStep(7, c),
   },
   {
     n: 8,
     title: "final assertions: findings, inbox once, chain, writes, nothing pushed, clean exit",
     by: "Rust core + Sphere server",
-    implemented: false,
-    run: notImplemented,
+    implemented: true,
+    run: async (c) => (await import("./lib/scenario-steps.mjs")).runStep(8, c),
   },
 ];
 

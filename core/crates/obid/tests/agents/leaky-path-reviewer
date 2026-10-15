@@ -1,0 +1,28 @@
+#!/usr/bin/env node
+// A reviewer whose review holds what looks like a secret, for obid's publish gate tests: it
+// answers an Obi-to-Obi review (stream-json, --json-schema) with one finding whose file (a path, not prose) holds
+// an AWS access key id. The key is made up here, at run time, in two halves, so this file holds no
+// value a secret scanner would flag.
+import { createInterface } from "node:readline";
+
+const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
+const session = "00000000-0000-4000-8000-000000000002";
+const looksLikeAKey = "AKIA" + "Q".repeat(4) + "WXYZ".repeat(3);
+
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", (line) => {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (message.type !== "user") return;
+  emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Read"], mcp_servers: [], model: "leaky", permissionMode: "default", apiKeySource: "none" });
+  const review = {
+    summary: "One finding.",
+    findings: [{ severity: "minor", file: `src/${looksLikeAKey}/average.js`, line: 4, title: "A path in the code", detail: "The path names a folder." }],
+  };
+  emit({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: "Reviewed.", session_id: session, total_cost_usd: 0, structured_output: review });
+  rl.close();
+});

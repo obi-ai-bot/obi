@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/obi-ai-bot/obi-sphere/raw/main/spec/schemas/v0.1/wire/deliveries.response.schema.json",
+  "title": "GET /v0.1/spheres/{sphere}/deliveries answer",
+  "description": "Messages waiting for the calling Obi, oldest first, until it acknowledges them.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "deliveries"
+  ],
+  "properties": {
+    "deliveries": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "delivery_id",
+          "seq",
+          "relayed_at",
+          "envelope"
+        ],
+        "properties": {
+          "delivery_id": {
+            "$ref": "../common.schema.json#/$defs/uuid"
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "relayed_at": {
+            "$ref": "../common.schema.json#/$defs/timestamp"
+          },
+          "envelope": {
+            "$ref": "../envelope.schema.json"
+          }
+        }
+      }
+    }
+  }
+}

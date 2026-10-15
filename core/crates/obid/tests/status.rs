@@ -90,16 +90,36 @@ fn command(folder: &Path, config_path: &Path) -> Command {
     command
 }
 
+/// Puts `token` in obid's `home/api-token` (0600, in a 0700 `home`), where obid takes its token
+/// from: never from its environment (docs/runner-api.md, "obid only: configuration").
+fn put_token(config: &Value, token: &str) {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let home = Path::new(config["home"].as_str().expect("home"));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(home)
+        .unwrap();
+    let path = home.join("api-token");
+    let _ = std::fs::remove_file(&path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, format!("{token}\n").as_bytes()).unwrap();
+}
+
 /// Starts obid with `config` (written to `folder/config.json`) and waits for it to listen.
 fn start(folder: &Path, config: &Value, token: Option<&str>) -> Obid {
     let path = folder.join("config.json");
     std::fs::write(&path, config.to_string()).unwrap();
     let stderr = folder.join("obid.stderr");
-    let mut command = command(folder, &path);
     if let Some(token) = token {
-        command.env("OBID_API_TOKEN", token);
+        put_token(config, token);
     }
-    let mut child = command
+    let mut child = command(folder, &path)
         .stdout(Stdio::piped())
         .stderr(std::fs::File::create(&stderr).unwrap())
         .spawn()
@@ -254,8 +274,11 @@ fn status_answers_with_engine_obid() {
         json!({"path": worktrees.to_string_lossy(), "bytes": 0, "lastRun": null})
     );
 
-    // The token given in the environment is never written to home, nor said anywhere.
-    assert!(!folder.0.join("home").join("api-token").exists());
+    // The token put in home/api-token is taken as it is, never rewritten, nor said anywhere.
+    assert_eq!(
+        std::fs::read_to_string(folder.0.join("home").join("api-token")).unwrap(),
+        format!("{TOKEN}\n")
+    );
     assert!(!answer_contains(&status, TOKEN));
     assert!(
         !std::fs::read_to_string(&obid.stderr)
@@ -492,7 +515,7 @@ fn home_is_the_owners_alone() {
     assert_eq!(get_status(&obid, "127.0.0.1", TOKEN).status, 401);
 }
 
-/// Without OBID_API_TOKEN, obid makes a token on first start, keeps it in home/api-token (0600),
+/// With no token in home/api-token, obid makes one on first start, keeps it in home/api-token (0600),
 /// answers only to it, and uses the same one when it starts again.
 #[test]
 fn makes_and_keeps_its_own_token() {
@@ -540,7 +563,10 @@ fn refuses_what_it_cant_use() {
         cases.push((config, Some(TOKEN), says));
     };
     with("listen", json!(format!("0.0.0.0:{port}")), "listen");
-    with("listen", Value::Null, "listen");
+    // Without `listen`: required but on macOS, where obid listens on 127.0.0.1:7777 (config.rs).
+    if !cfg!(target_os = "macos") {
+        with("listen", Value::Null, "listen");
+    }
     with("home", json!("relative/home"), "absolute");
     with("owner", Value::Null, "owner");
     with("allowFileRemotes", json!(false), "allowFileRemotes");
@@ -562,14 +588,22 @@ fn refuses_what_it_cant_use() {
             "isn't an https://, ssh or file:// URL",
         );
     }
-    cases.push((good.clone(), Some("too-short"), "OBID_API_TOKEN"));
+    // A token in obid's environment, where other processes could read it, even a good one.
+    cases.push((good.clone(), Some(TOKEN), "OBID_API_TOKEN is set"));
+    // A token file that holds no usable token.
+    cases.push((good.clone(), Some("too-short"), "no usable token"));
 
     for (config, token, says) in cases {
         let path = folder.0.join("config.json");
         std::fs::write(&path, config.to_string()).unwrap();
         let mut command = command(&folder.0, &path);
-        if let Some(token) = token {
-            command.env("OBID_API_TOKEN", token);
+        match token {
+            Some(token) if says == "OBID_API_TOKEN is set" => {
+                put_token(&good, TOKEN);
+                command.env("OBID_API_TOKEN", token);
+            }
+            Some(token) => put_token(&good, token),
+            None => {}
         }
         let output = command.output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -664,8 +698,8 @@ fn a_signal_the_moment_obid_says_it_listens_exits_0() {
             let folder = Folder::new(&format!("signal-ready-{signal}-{round}"));
             let path = folder.0.join("config.json");
             std::fs::write(&path, config(&folder.0, 0).to_string()).unwrap();
+            put_token(&config(&folder.0, 0), TOKEN);
             let mut obid = command(&folder.0, &path)
-                .env("OBID_API_TOKEN", TOKEN)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()

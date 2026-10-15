@@ -1,0 +1,228 @@
+#!/usr/bin/env node
+// A stand-in for `cursor-agent --sandbox disabled acp` in obid's tests: the Agent Client Protocol,
+// newline-delimited JSON-RPC 2.0 over stdio, as docs/cursor.md describes what the probe saw.
+// It is signed in when $XDG_CONFIG_HOME/cursor/auth.json exists, as Cursor's login is; sessions are
+// kept in $CURSOR_CONFIG_DIR/sessions, so `session/load` works across processes. Like the real one,
+// it edits files without asking and asks before every command. What a prompt does comes from the
+// session's first prompt (the job's task):
+//   COMMIT: <file>   writes the file (no request), then asks to commit, and commits when allowed
+//   ASK: <command>   asks to run the command and says which option obid chose
+//   PLAN             in plan mode, sends its plan (`cursor/create_plan`) and says what came back
+//   QUESTION         asks a question (`cursor/ask_question`) and says what came back
+//   FS               asks obid to read a file (`fs/read_text_file`) and says what came back
+//   ESCAPE           writes a file outside the worktree without asking, and says how that went
+//   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is cancelled
+//   FAIL             answers the prompt with an error
+//   REFUSE           ends with stopReason `refusal`
+//   TWICE            round one asks to push and is told no; round two writes .obi/twice and says
+//                    what its prompt started with
+//   ENV              says its HOME, XDG_CONFIG_HOME, CURSOR_CONFIG_DIR, model, mode and settings
+//   anything else    "Nothing to do."
+// It fails the prompt when its environment holds a Claude Code, Anthropic, GitHub or Cursor login
+// variable, or obid's token.
+
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { randomUUID } from "node:crypto";
+
+if (process.argv.slice(2).join(" ") !== "--sandbox disabled acp") {
+  process.stderr.write(`fake-cursor: run as \`fake-cursor --sandbox disabled acp\`, not ${process.argv.slice(2).join(" ")}\n`);
+  process.exit(2);
+}
+
+const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
+const config = process.env.CURSOR_CONFIG_DIR || join(process.env.HOME || "/nonexistent", ".cursor");
+const sessions = join(config, "sessions");
+const signedIn = existsSync(join(process.env.XDG_CONFIG_HOME || "/nonexistent", "cursor", "auth.json"));
+const leaked = Object.keys(process.env).filter((name) =>
+  name === "CLAUDECODE" || name.startsWith("CLAUDE_CODE_") || name.startsWith("ANTHROPIC_") ||
+  name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN" ||
+  name === "CURSOR_API_KEY" || name === "CURSOR_AUTH_TOKEN");
+const options = [
+  { optionId: "allow-always", name: "Always", kind: "allow_always" },
+  { optionId: "allow-once", name: "Once", kind: "allow_once" },
+  { optionId: "reject-once", name: "No", kind: "reject_once" },
+];
+
+let nextId = 100;
+const waiting = new Map();
+const ask = (method, params) => new Promise((done) => {
+  const id = nextId++;
+  waiting.set(id, done);
+  send({ id, method, params });
+});
+let session = null;
+let state = null;
+let cancelled = null;
+
+const save = () => writeFileSync(join(sessions, `${session}.json`), JSON.stringify(state));
+const update = (u) => send({ method: "session/update", params: { sessionId: session, update: u } });
+const say = (text) => update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+const chosen = (answer) => answer?.outcome?.outcome === "selected" ? answer.outcome.optionId : answer?.outcome?.outcome ?? JSON.stringify(answer);
+const answered = (id, stopReason = "end_turn") => send({ id, result: { stopReason } });
+
+function sessionAnswer() {
+  return {
+    sessionId: session,
+    modes: { availableModes: [{ id: "agent", name: "Agent" }, { id: "plan", name: "Plan" }, { id: "ask", name: "Ask" }], currentModeId: state.mode },
+    configOptions: [{ id: "model", name: "Model", category: "model", type: "select", currentValue: state.model,
+      options: [{ value: "default[]", name: "Auto" }, { value: "gpt-5.6-luna[context=272k,reasoning=medium]", name: "GPT-5.6 Luna" }] }],
+  };
+}
+
+async function prompt(id, text) {
+  if (leaked.length) return send({ id, error: { code: -32603, message: `leaked: ${leaked.join(", ")}` } });
+  if (state.task === null) {
+    state.task = text;
+    save();
+  }
+  const task = state.task;
+  const commit = task.match(/COMMIT: (\S+)/);
+  const command = task.match(/ASK: (.+)$/m);
+  if (commit) {
+    update({ sessionUpdate: "tool_call", toolCallId: "e1", title: `Edit ${commit[1]}`, kind: "edit", status: "pending", locations: [{ path: join(process.cwd(), commit[1]) }] });
+    writeFileSync(commit[1], "hello\n");
+    say("I'll commit it.");
+    update({ sessionUpdate: "tool_call", toolCallId: "x1", title: "git commit", kind: "execute", status: "pending", rawInput: { command: ["git", "commit", "-m", `Add ${commit[1]}`] } });
+    const answer = await ask("session/request_permission", { sessionId: session, toolCall: { toolCallId: "x1" }, options });
+    if (chosen(answer) !== "allow-once") {
+      say(`commit: ${chosen(answer)}`);
+      return answered(id);
+    }
+    execFileSync("git", ["add", commit[1]]);
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add ${commit[1]}`]);
+    update({ sessionUpdate: "tool_call_update", toolCallId: "x1", status: "completed" });
+    say(`Added ${commit[1]}.`);
+    return answered(id);
+  }
+  if (command && !task.includes("TWICE")) {
+    update({ sessionUpdate: "tool_call", toolCallId: "x2", title: command[1], kind: "execute", status: "pending", rawInput: { command: command[1] } });
+    const answer = await ask("session/request_permission", { sessionId: session, toolCall: { toolCallId: "x2" }, options });
+    say(`answer: ${chosen(answer)}`);
+    return answered(id);
+  }
+  if (task.includes("TWICE")) {
+    state.rounds = (state.rounds || 0) + 1;
+    save();
+    if (state.rounds === 1) {
+      update({ sessionUpdate: "tool_call", toolCallId: "x3", title: "git push", kind: "execute", rawInput: { command: "git push origin HEAD" } });
+      const answer = await ask("session/request_permission", { sessionId: session, toolCall: { toolCallId: "x3" }, options });
+      say(`push: ${chosen(answer)}`);
+      return answered(id);
+    }
+    mkdirSync(".obi", { recursive: true });
+    writeFileSync(".obi/twice", "");
+    say(`heard: ${text.split("\n")[0]}\nGOAL MET`);
+    return answered(id);
+  }
+  if (task.includes("PLAN")) {
+    if (state.planned) {
+      say(`mode ${state.mode}: ${text}`);
+      return answered(id);
+    }
+    state.planned = true;
+    save();
+    const answer = await ask("cursor/create_plan", { sessionId: session, name: "The plan", overview: "Do it", plan: "1. Do it." });
+    say(`plan: ${answer?.outcome?.outcome} in mode ${state.mode}`);
+    return answered(id);
+  }
+  if (task.includes("QUESTION")) {
+    const answer = await ask("cursor/ask_question", { sessionId: session, questions: [{ id: "q", prompt: "Which?", options: ["a", "b"] }] });
+    say(`question: ${answer?.outcome?.outcome}`);
+    return answered(id);
+  }
+  if (task.includes("FS")) {
+    const answer = await ask("fs/read_text_file", { sessionId: session, path: "/etc/hosts" });
+    say(`fs: ${answer.error ? `error ${answer.error.code}` : "read"}`);
+    return answered(id);
+  }
+  if (task.includes("SLEEP")) {
+    mkdirSync(".obi", { recursive: true });
+    let beats = 0;
+    writeFileSync(".obi/beat", String(beats));
+    setInterval(() => writeFileSync(".obi/beat", String(++beats)), 50);
+    cancelled = () => answered(id, "cancelled");
+    return;
+  }
+  if (task.includes("ESCAPE")) {
+    // An edit Cursor makes without asking, outside the worktree: only the sandbox holds it.
+    try {
+      writeFileSync(join(process.cwd(), "../escaped.txt"), "escaped\n");
+      say("escape: written");
+    } catch (error) {
+      say(`escape: ${error.code}`);
+    }
+    return answered(id);
+  }
+  if (task.includes("FAIL")) return send({ id, error: { code: -32603, message: "it broke" } });
+  if (task.includes("REFUSE")) return answered(id, "refusal");
+  if (task.includes("ENV")) {
+    const settings = JSON.parse(readFileSync(join(config, "cli-config.json"), "utf8"));
+    say([`HOME=${process.env.HOME}`, `XDG_CONFIG_HOME=${process.env.XDG_CONFIG_HOME}`, `CURSOR_CONFIG_DIR=${process.env.CURSOR_CONFIG_DIR}`,
+         `model=${state.model}`, `mode=${state.mode}`, `approvalMode=${settings.approvalMode}`, `allow=${JSON.stringify(settings.permissions.allow)}`,
+         `kept=${settings.authInfo?.email ?? "none"}`].join("\n"));
+    return answered(id);
+  }
+  say("Nothing to do.");
+  return answered(id);
+}
+
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", (line) => {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (message.method === undefined) {
+    const done = waiting.get(message.id);
+    waiting.delete(message.id);
+    done?.(message.error ? { error: message.error } : message.result);
+    return;
+  }
+  const { id, method, params } = message;
+  switch (method) {
+    case "initialize":
+      return send({ id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: false }, mcpCapabilities: { http: true } }, authMethods: [] } });
+    case "session/new":
+    case "session/load": {
+      if (!signedIn) return send({ id, error: { code: -32000, message: "Authentication required" } });
+      mkdirSync(sessions, { recursive: true });
+      if (params.mcpServers?.length) return send({ id, error: { code: -32602, message: "obid gave MCP servers" } });
+      if (method === "session/load") {
+        const file = join(sessions, `${params.sessionId}.json`);
+        if (!existsSync(file)) return send({ id, error: { code: -32602, message: `no session ${params.sessionId}` } });
+        session = params.sessionId;
+        state = JSON.parse(readFileSync(file, "utf8"));
+        state.mode = "agent";
+        save();
+        return send({ id, result: sessionAnswer() });
+      }
+      session = randomUUID();
+      state = { task: null, mode: "agent", model: "default[]" };
+      save();
+      return send({ id, result: sessionAnswer() });
+    }
+    case "session/set_config_option":
+      if (params.configId === "model") state.model = params.value;
+      else return send({ id, error: { code: -32602, message: `no option ${params.configId}` } });
+      save();
+      return send({ id, result: { configOptions: sessionAnswer().configOptions } });
+    case "session/set_mode":
+      state.mode = params.modeId;
+      save();
+      return send({ id, result: {} });
+    case "session/prompt":
+      prompt(id, params.prompt.map((b) => b.text).join("\n"));
+      return;
+    case "session/cancel":
+      cancelled?.();
+      return;
+    default:
+      return send({ id, error: { code: -32601, message: `fake-cursor doesn't know ${method}` } });
+  }
+});
+rl.on("close", () => process.exit(0));
