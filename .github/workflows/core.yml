@@ -1,6 +1,7 @@
 # The Rust core (core/: obid and its crates) on Linux and macOS: formatting, clippy with warnings
-# as errors, and the tests, against the committed Cargo.lock. This file belongs to the Rust core
-# (docs/ARCHITECTURE.md, section 6).
+# as errors, and the tests, against the committed Cargo.lock. The tests run the job sandbox for
+# real (bubblewrap on Linux, sandbox-exec on macOS) and the e2e stub agent (Node). This file
+# belongs to the Rust core (docs/ARCHITECTURE.md, section 6).
 name: Core
 
 on:
@@ -35,6 +36,24 @@ jobs:
         working-directory: core
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The stub agent (e2e/stub-agent) and the tests' own stand-in agent are Node scripts, and the
+      # tests build the e2e fixture with e2e/lib/fixture.mjs.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      # The job sandbox on Linux. Ubuntu's AppArmor profile for bwrap (bwrap-userns-restrict)
+      # gives it the user namespaces unprivileged processes otherwise don't get.
+      - name: bubblewrap
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          bwrap --version
+          bwrap --unshare-pid --ro-bind / / --dev /dev --proc /proc -- true
 
       - name: Rust toolchain
         run: |

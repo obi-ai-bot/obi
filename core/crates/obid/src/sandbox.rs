@@ -131,8 +131,11 @@ impl Spec {
         let real = |p: &PathBuf| p.canonicalize().unwrap_or_else(|_| p.clone());
         let mut read_only: Vec<PathBuf> = Vec::new();
         for path in &self.read_only {
-            // Both the path as named and where it leads: exec and lookups go through the name.
-            for candidate in [path.clone(), real(path)] {
+            // The path as named, where it leads, and every symbolic link on the way there: exec
+            // and lookups go through the name, and a Seatbelt profile matches what each link is.
+            let mut candidates = vec![path.clone(), real(path)];
+            candidates.extend(symlinks_on_the_way(path));
+            for candidate in candidates {
                 if !read_only.contains(&candidate) {
                     read_only.push(candidate);
                 }
@@ -349,6 +352,53 @@ fn sbpl_string(path: &Path) -> String {
     out
 }
 
+/// Every symbolic link a lookup of `path` goes through, as the links themselves (not where they
+/// lead), at most 40 of them.
+pub fn symlinks_on_the_way(path: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut queue: std::collections::VecDeque<std::ffi::OsString> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(name) => Some(name.to_os_string()),
+            std::path::Component::ParentDir => Some("..".into()),
+            _ => None,
+        })
+        .collect();
+    let mut current = PathBuf::from("/");
+    while let Some(part) = queue.pop_front() {
+        if part == ".." {
+            current.pop();
+            continue;
+        }
+        let next = current.join(&part);
+        match std::fs::symlink_metadata(&next) {
+            Ok(meta) if meta.file_type().is_symlink() && found.len() < 40 => {
+                let Ok(target) = std::fs::read_link(&next) else {
+                    current = next;
+                    continue;
+                };
+                found.push(next);
+                if target.is_absolute() {
+                    current = PathBuf::from("/");
+                }
+                let parts: Vec<std::ffi::OsString> = target
+                    .components()
+                    .filter_map(|c| match c {
+                        std::path::Component::Normal(name) => Some(name.to_os_string()),
+                        std::path::Component::ParentDir => Some("..".into()),
+                        _ => None,
+                    })
+                    .collect();
+                for part in parts.into_iter().rev() {
+                    queue.push_front(part);
+                }
+            }
+            _ => current = next,
+        }
+    }
+    found
+}
+
 /// `name` found on obid's own `PATH`, or `None`.
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -371,9 +421,9 @@ pub fn is_executable(path: &Path) -> bool {
 }
 
 /// The folders of the tools on `path` that a sandbox hiding `hidden` must still let a process
-/// read: each `PATH` entry inside a hidden folder (and, for one named `bin`, the installation it
-/// belongs to, so its `lib/` comes along), never a hidden folder itself or one above it, and
-/// nothing inside `never` (obid's home).
+/// read: each `PATH` entry inside a hidden folder (and, for one named `bin`, the `lib` and
+/// `libexec` beside it), never a hidden folder itself or one above it, and nothing inside `never`
+/// (obid's home).
 pub fn tool_roots(path: &std::ffi::OsStr, hidden: &[PathBuf], never: &[PathBuf]) -> Vec<PathBuf> {
     let never: Vec<PathBuf> = never
         .iter()
@@ -397,14 +447,24 @@ pub fn tool_roots(path: &std::ffi::OsStr, hidden: &[PathBuf], never: &[PathBuf])
             {
                 continue;
             }
-            let root = match dir.parent() {
-                Some(parent) if dir.file_name().is_some_and(|n| n == "bin") && inside(parent) => {
-                    parent.to_path_buf()
+            let mut found = vec![dir.clone()];
+            // A `bin` of an installation brings the libraries beside it, not the rest of what is
+            // there: `~/.local/bin` must not show all of `~/.local`.
+            if let Some(parent) = dir.parent()
+                && dir.file_name().is_some_and(|n| n == "bin")
+                && inside(parent)
+            {
+                found.extend(
+                    ["lib", "libexec"]
+                        .map(|d| parent.join(d))
+                        .into_iter()
+                        .filter(|d| d.is_dir()),
+                );
+            }
+            for root in found {
+                if !roots.contains(&root) {
+                    roots.push(root);
                 }
-                _ => dir.clone(),
-            };
-            if !roots.contains(&root) {
-                roots.push(root);
             }
         }
     }
@@ -416,20 +476,85 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tools_in_a_hidden_home_come_back_by_their_installation() {
-        let hidden = vec![PathBuf::from("/home/w"), PathBuf::from("/home/w/obid")];
+    fn tools_in_a_hidden_home_come_back_with_their_libraries_only() {
+        let root = std::env::temp_dir().join(format!("obid-tool-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home/w");
+        for dir in [
+            ".local/share/fnm/v22/bin",
+            ".local/share/fnm/v22/lib",
+            ".local/bin",
+            ".local/lib",
+            "bin",
+            "obid/x",
+        ] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        let path = std::env::join_paths([
+            PathBuf::from("/usr/bin"),
+            home.join(".local/share/fnm/v22/bin"),
+            home.join(".local/bin"),
+            home.join("bin"),
+            home.clone(),
+            root.join("home"),
+            PathBuf::from("relative"),
+            home.join("obid/x"),
+        ])
+        .unwrap();
         let roots = tool_roots(
-            std::ffi::OsStr::new(
-                "/usr/bin:/home/w/.local/share/fnm/v22/bin:/home/w/bin:/home/w:/home:relative:/home/w/obid/x",
-            ),
-            &hidden,
-            &[PathBuf::from("/home/w/obid")],
+            &path,
+            &[home.clone(), home.join("obid")],
+            &[home.join("obid")],
         );
+        let _ = std::fs::remove_dir_all(&root);
+        let real = |p: &str| home.canonicalize().unwrap_or_else(|_| home.clone()).join(p);
+        let roots: Vec<PathBuf> = roots
+            .into_iter()
+            .filter(|r| {
+                r.starts_with(home.canonicalize().unwrap_or_else(|_| home.clone()))
+                    || r.starts_with(&home)
+            })
+            .collect();
+        for expected in [
+            ".local/share/fnm/v22/bin",
+            ".local/share/fnm/v22/lib",
+            ".local/bin",
+            ".local/lib",
+            "bin",
+        ] {
+            assert!(
+                roots.contains(&home.join(expected)) || roots.contains(&real(expected)),
+                "{expected}: {roots:?}"
+            );
+        }
+        for never in [".local", ".local/share", "obid/x", ""] {
+            assert!(
+                !roots.contains(&home.join(never)) && !roots.contains(&real(never)),
+                "{never}: {roots:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn symlinks_on_the_way_are_found() {
+        let root = std::env::temp_dir().join(format!("obid-symlinks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("share/v22/bin")).unwrap();
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        std::os::unix::fs::symlink("../share/v22", root.join("state/default")).unwrap();
+        std::os::unix::fs::symlink(root.join("state/default"), root.join("state/shell")).unwrap();
+        let root_real = root.canonicalize().unwrap();
+        let found: Vec<PathBuf> = symlinks_on_the_way(&root_real.join("state/shell/bin"))
+            .into_iter()
+            // macOS's /var, on the way to the temporary folder the absolute link names, too.
+            .filter(|p| p.starts_with(&root_real))
+            .collect();
+        let _ = std::fs::remove_dir_all(&root);
         assert_eq!(
-            roots,
+            found,
             vec![
-                PathBuf::from("/home/w/.local/share/fnm/v22"),
-                PathBuf::from("/home/w/bin")
+                root_real.join("state/shell"),
+                root_real.join("state/default")
             ]
         );
     }

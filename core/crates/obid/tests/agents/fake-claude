@@ -1,0 +1,64 @@
+#!/usr/bin/env node
+// A stand-in for Claude Code in obid's tests: stream-json in and out, as obid runs `claude`. What
+// it does comes from the prompt (the job's task):
+//   COMMIT: <file>   writes the file in the worktree and commits it
+//   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is ended
+//   FAIL             ends the turn with an error result
+//   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
+//   anything else    ends the turn with "Nothing to do."
+// It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
+
+import { execFileSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+
+const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
+const session = "00000000-0000-4000-8000-000000000001";
+const result = (text, error = false) =>
+  emit({ type: "result", subtype: error ? "error_during_execution" : "success", is_error: error, num_turns: 1, result: text, session_id: session, total_cost_usd: 0 });
+
+const leaked = Object.keys(process.env).filter((name) =>
+  name === "CLAUDECODE" || name.startsWith("CLAUDE_CODE_") || name.startsWith("ANTHROPIC_") || name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN");
+
+let asked = null;
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", (line) => {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (message.type === "control_response" && asked) {
+    const behavior = message.response?.response?.behavior;
+    result(`answer: ${behavior}`);
+    asked = null;
+    return;
+  }
+  if (message.type !== "user") return;
+  const prompt = typeof message.message.content === "string" ? message.message.content : "";
+  emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Bash", "Read", "Edit"], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
+  if (leaked.length) return result(`leaked: ${leaked.join(", ")}`, true);
+  const commit = prompt.match(/COMMIT: (\S+)/);
+  const ask = prompt.match(/ASK: (\{.*\})/);
+  if (commit) {
+    writeFileSync(commit[1], "hello\n");
+    execFileSync("git", ["add", commit[1]]);
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add ${commit[1]}`]);
+    emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Write", input: { file_path: commit[1] } }] } });
+    result(`Added ${commit[1]}.`);
+  } else if (prompt.includes("SLEEP")) {
+    mkdirSync(".obi", { recursive: true });
+    let beats = 0;
+    writeFileSync(".obi/beat", String(beats));
+    setInterval(() => writeFileSync(".obi/beat", String(++beats)), 50);
+  } else if (prompt.includes("FAIL")) {
+    result("it broke", true);
+  } else if (ask) {
+    const { tool, input } = JSON.parse(ask[1]);
+    asked = tool;
+    emit({ type: "control_request", request_id: "r1", request: { subtype: "can_use_tool", tool_name: tool, input } });
+  } else {
+    result("Nothing to do.");
+  }
+});

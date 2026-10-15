@@ -93,6 +93,9 @@ pub struct Jobs {
     max_running: usize,
     shutting_down: std::sync::atomic::AtomicBool,
     identity: (String, String),
+    /// One preparation at a time per repository (Engine/Desk.swift, `setups`): its clone is
+    /// fetched and its worktrees added one after the other, never at once.
+    preparing: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Jobs {
@@ -128,6 +131,7 @@ impl Jobs {
             max_running: crate::api::MAX_RUNNING as usize,
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             identity,
+            preparing: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -538,6 +542,16 @@ impl Jobs {
         .await;
     }
 
+    /// The lock that orders the preparations of `repo`.
+    fn preparing(&self, repo: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.preparing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(repo.to_owned())
+            .or_default()
+            .clone()
+    }
+
     fn worktree_path(&self, id: &str) -> PathBuf {
         crate::api::worktrees(&self.config.home).join(id)
     }
@@ -792,6 +806,8 @@ impl Jobs {
         self.update(id, |job| {
             job.step = format!("Fetching {}", request.head_branch)
         });
+        let preparing = self.preparing(&repo.repo);
+        let prepared = preparing.lock().await;
         let head_ref = format!(
             "+refs/heads/{0}:refs/remotes/origin/{0}",
             request.head_branch
@@ -879,6 +895,7 @@ impl Jobs {
         )
         .await
         .map_err(|e| format!("obid couldn't make the job's worktree: {e}"))?;
+        drop(prepared);
         let worktree_text = worktree.to_string_lossy().into_owned();
         self.update(id, |job| {
             job.worktree = Some(worktree_text);
@@ -1023,6 +1040,8 @@ impl Jobs {
             .unwrap_or_else(|| repo.default_branch.clone());
         let worktree = self.worktree_path(id);
 
+        let preparing = self.preparing(&repo.repo);
+        let prepared = preparing.lock().await;
         if !worktree.join(".git").exists() {
             let mut refspecs = vec![format!("+refs/heads/{base}:refs/remotes/origin/{base}")];
             if let Some(pr) = job.pr {
@@ -1076,6 +1095,7 @@ impl Jobs {
                 job.base = Some(base.clone());
             });
         }
+        drop(prepared);
         let job = self.get(id).ok_or("the job is gone")?;
         let start_commit = job.start_commit.clone().unwrap_or_default();
         let (admin, common) = git::worktree_dirs(&worktree)
