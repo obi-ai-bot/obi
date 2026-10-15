@@ -2372,6 +2372,7 @@ async fn sandboxed_output(
     dir: &Path,
     input: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
+    clear_recorded_exit(env);
     use tokio::io::AsyncWriteExt;
     let mut child = tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
@@ -2397,12 +2398,41 @@ async fn sandboxed_output(
         .await
         .map_err(|_| "git in the job's sandbox took more than 600 seconds".to_owned())?
         .map_err(|e| format!("git in the job's sandbox failed: {e}"))?;
-    if !output.status.success() {
+    if !sandbox_succeeded(&output.status, env) {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let line = stderr.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("");
-        return Err(format!("git in the job's sandbox failed: {}", line.trim()));
+        let line = stderr
+            .lines()
+            .rfind(|l| !l.trim().is_empty())
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .or_else(|| recorded_exit(env).map(|code| format!("exit status {code}")))
+            .unwrap_or_else(|| "it was killed".into());
+        return Err(format!("git in the job's sandbox failed: {line}"));
     }
     Ok(output.stdout)
+}
+
+/// The macOS watcher writes the program's exit code, then kills the sandbox, itself included.
+fn recorded_exit(env: &[(OsString, OsString)]) -> Option<i32> {
+    let (_, dir) = env.iter().find(|(key, _)| key == "TMPDIR")?;
+    let text = std::fs::read_to_string(Path::new(dir).join(".obid-status")).ok()?;
+    text.trim().parse().ok()
+}
+
+fn clear_recorded_exit(env: &[(OsString, OsString)]) {
+    if let Some((_, dir)) = env.iter().find(|(key, _)| key == "TMPDIR") {
+        let _ = std::fs::remove_file(Path::new(dir).join(".obid-status"));
+    }
+}
+
+/// A sandboxed command that exited 0, including one the macOS watcher then killed.
+fn sandbox_succeeded(status: &std::process::ExitStatus, env: &[(OsString, OsString)]) -> bool {
+    if status.success() {
+        return true;
+    }
+    std::os::unix::process::ExitStatusExt::signal(status) == Some(9)
+        && recorded_exit(env) == Some(0)
 }
 
 /// Where the tool's own login is: the `HOME` obid was started with, as the tool itself would look
@@ -2667,15 +2697,7 @@ pub async fn run_check(
     mut signal: watch::Receiver<Signal>,
 ) -> std::io::Result<CheckRun> {
     let (reader, writer) = std::io::pipe()?;
-    // The macOS watcher records the program's real exit code here, then kills every
-    // process in the sandbox, itself included.
-    let status_file = env
-        .iter()
-        .find(|(key, _)| key == "TMPDIR")
-        .map(|(_, dir)| PathBuf::from(dir).join(".obid-status"));
-    if let Some(file) = &status_file {
-        let _ = std::fs::remove_file(file);
-    }
+    clear_recorded_exit(env);
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| std::io::Error::other("nothing to run"))?;
@@ -2742,15 +2764,7 @@ pub async fn run_check(
         }
         output.push_str(CHECK_TOO_LONG);
     }
-    let passed = !timed_out
-        && status.is_some_and(|ended| {
-            ended.success()
-                || std::os::unix::process::ExitStatusExt::signal(&ended) == Some(9)
-                    && status_file
-                        .as_ref()
-                        .and_then(|file| std::fs::read_to_string(file).ok())
-                        .is_some_and(|text| text.trim() == "0")
-        });
+    let passed = !timed_out && status.is_some_and(|ended| sandbox_succeeded(&ended, env));
     Ok(CheckRun { passed, output })
 }
 
