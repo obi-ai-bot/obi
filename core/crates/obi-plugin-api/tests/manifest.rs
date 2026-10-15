@@ -404,6 +404,22 @@ fn urls_in_stdio_args_follow_the_http_url_rule() {
     for args in accepted {
         assert!(parse(&stdio(args)).is_ok(), "{args:?}");
     }
+    // A login the raw text hides, and the shell or the escape decoder puts back (#462).
+    let hidden: [&[&str]; 2] = [
+        &["mcp-remote", "https://user:pass\"@\"mcp.example/mcp"],
+        &["mcp-remote", "https://user:pass\\u0040mcp.example/mcp"],
+    ];
+    for args in hidden {
+        assert!(refused(&stdio(args)).contains("login"), "{args:?}");
+    }
+}
+
+#[test]
+fn a_credential_later_in_a_comma_separated_assignment_is_refused() {
+    let args = ["Accept=text/html,TOKEN=abc"];
+    assert!(refused(&stdio(&args)).contains("credential"), "{args:?}");
+    let first = ["TOKEN=abc,Accept=text/html"];
+    assert!(refused(&stdio(&first)).contains("credential"), "{first:?}");
 }
 
 #[test]
