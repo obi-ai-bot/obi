@@ -21,9 +21,9 @@
 //!   resolver's and its own: each of those would run something outside the sandbox for it.
 //! - **On macOS, no preferences, pasteboard or keychain**: cfprefsd would read and write the
 //!   person's preferences for it, whatever its file rules (so a job has no preferences at all), the
-//!   pasteboard server would read and write the person's pasteboard, and securityd would hand it
-//!   the secrets of a keychain whose file it can read. None of them answers it; trustd, which
-//!   checks a server's certificate, does.
+//!   pasteboard server would read and write the person's pasteboard, and secd would read and write
+//!   the data protection keychain for it. None of them answers it. A file-based keychain (the
+//!   person's login keychain) is a file in the person's hidden home, so it can't read it either.
 //!
 //! When the sandbox can't be made on this machine, nothing runs: [`Sandbox::detect`] says why, and
 //! the job fails saying so.
@@ -417,9 +417,9 @@ fn seatbelt_profile(spec: &Spec) -> String {
     // And those who read or write for the job what its file rules keep from it: cfprefsd, which
     // reads and writes the person's preferences for whoever asks, whatever the asker's `HOME` or
     // file rules (so a job has no preferences at all: CoreFoundation's writes fail, its reads find
-    // only what the job may read as files); the pasteboard; securityd, which holds the keychains'
-    // secrets (a keychain's file says nothing without it). trustd, which checks a server's
-    // certificate, stays.
+    // only what the job may read as files); the pasteboard; secd, which reads and writes the data
+    // protection keychain for whoever asks, and SecurityAgent ([`KEYCHAIN`]). The file-based
+    // keychains' securityd and trustd stay: the system's root certificates come through them.
     profile.push_str("(deny user-preference-read user-preference-write)\n");
     profile.push_str("(deny mach-lookup");
     for service in WINDOW_SERVER
@@ -477,11 +477,15 @@ const PASTEBOARD: [&str; 2] = [
     "com.apple.coreservices.uauseractivitypasteboardclient.xpc",
 ];
 
-/// securityd on macOS: the file-based keychains' secrets (`com.apple.SecurityServer`, the login
-/// keychain among them), the data protection keychain (secd's services), the system keychain, and
-/// the agent that asks the person for a keychain's password.
-const KEYCHAIN: [&str; 12] = [
-    "com.apple.SecurityServer",
+/// The keychain's services on macOS that would hand a job secrets its file rules don't: secd, which
+/// reads and writes the data protection keychain (and iCloud Keychain) for whoever asks; the system
+/// keychain's securityd; SecurityAgent, which would ask the person for a keychain's password for
+/// it. Not `com.apple.SecurityServer`, the file-based keychains' securityd: a client reads those
+/// keychains' files itself (the person's login keychain is in their home, which is hidden), and
+/// without it Node can't read the system's root certificates and crashes
+/// (`node::crypto::ReadMacOSKeychainCertificates`), so a Node agent using them (Cursor's
+/// `cursor-agent`) couldn't start.
+const KEYCHAIN: [&str; 11] = [
     "com.apple.securityd.xpc",
     "com.apple.securityd.general",
     "com.apple.securityd.ckks",
@@ -494,6 +498,11 @@ const KEYCHAIN: [&str; 12] = [
     "com.apple.security.agent",
     "com.apple.security.KeychainStasher",
 ];
+
+/// The keychain's services a job keeps on macOS: the file-based keychains' securityd (see
+/// [`KEYCHAIN`]) and trustd, which checks a server's certificate.
+#[cfg(test)]
+const KEYCHAIN_KEPT: [&str; 2] = ["com.apple.SecurityServer", "com.apple.trustd.agent"];
 
 /// A path as an SBPL string literal.
 fn sbpl_string(path: &Path) -> String {
@@ -810,8 +819,8 @@ mod tests {
             "(deny user-preference-read user-preference-write)",
             "(global-name \"com.apple.cfprefsd.agent\")",
             "(global-name \"com.apple.pasteboard.1\")",
-            "(global-name \"com.apple.SecurityServer\")",
             "(global-name \"com.apple.securityd.xpc\")",
+            "(global-name \"com.apple.security.agent\")",
             "(deny network-outbound (remote unix-socket))",
             "(remote unix-socket (path-literal \"/private/var/run/mDNSResponder\"))",
             "(remote unix-socket (subpath \"/h/tmp/j1\"))",
@@ -819,7 +828,9 @@ mod tests {
             assert!(profile.contains(rule), "{rule}\n{profile}");
         }
         assert!(!profile.contains("/dev/tty"), "{profile}");
-        assert!(!profile.contains("trustd"), "{profile}");
+        for kept in KEYCHAIN_KEPT {
+            assert!(!profile.contains(kept), "{kept}\n{profile}");
+        }
         assert_eq!(sbpl_string(Path::new("/a \"b\\")), "\"/a \\\"b\\\\\"");
     }
 

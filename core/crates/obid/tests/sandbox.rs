@@ -683,23 +683,29 @@ impl Drop for Throwaway {
 }
 
 /// The services a sandboxed process could ask, on macOS, to read or write for it what its file
-/// rules keep it from: preferences (cfprefsd), the pasteboard, the keychain (securityd). And one
-/// it keeps: trustd, which checks a server's certificate (an agent's HTTPS to its model's API).
+/// rules keep it from: preferences (cfprefsd), the pasteboard, the data protection keychain (secd),
+/// SecurityAgent.
 #[cfg(target_os = "macos")]
-const MACH_DENIED: [&str; 7] = [
+const MACH_DENIED: [&str; 6] = [
     "com.apple.cfprefsd.daemon",
     "com.apple.cfprefsd.agent",
     "com.apple.pasteboard.1",
-    "com.apple.SecurityServer",
     "com.apple.securityd.xpc",
     "com.apple.securityd.general",
     "com.apple.security.agent",
 ];
 
+/// And those it keeps: the file-based keychains' securityd, through which Node reads the system's
+/// root certificates (a client reads a keychain's file itself, so the file rules hold those
+/// keychains back), and trustd, which checks a server's certificate (an agent's HTTPS).
+#[cfg(target_os = "macos")]
+const MACH_KEPT: [&str; 2] = ["com.apple.SecurityServer", "com.apple.trustd.agent"];
+
 /// On macOS, a job reads and writes no preferences through cfprefsd (which reads and writes the
 /// person's for whoever asks, whatever the asker's file rules), reads or writes no pasteboard, and
-/// reaches no keychain through securityd (a keychain's file can be read, its secrets only through
-/// securityd): for the check and for an agent (docs/runner-api.md, "The job sandbox").
+/// reads no keychain of the person's: not a file-based one in their home (the login keychain),
+/// unlocked, whose item `security` itself may read; and secd, the data protection keychain's,
+/// doesn't answer. For the check and for an agent (docs/runner-api.md, "The job sandbox").
 #[cfg(target_os = "macos")]
 #[test]
 fn a_job_reaches_no_preferences_pasteboard_or_keychain() {
@@ -717,7 +723,8 @@ fn a_job_reaches_no_preferences_pasteboard_or_keychain() {
     let write_domain = format!("obi.test.{nonce}.write");
     let own_domain = format!("obi.test.{nonce}.own");
     let secret = format!("the-person-{nonce}");
-    let keychain = world.outside.join("probe.keychain-db");
+    // In the person's home, as their login keychain is.
+    let keychain = world.person.join("probe.keychain-db");
     let _cleanup = Throwaway {
         domains: vec![
             read_domain.clone(),
@@ -782,8 +789,7 @@ fn a_job_reaches_no_preferences_pasteboard_or_keychain() {
         keychain_arg,
     ]);
     assert_eq!(String::from_utf8_lossy(&outside.stdout).trim(), secret);
-    // The keychain is where the job may read the file (outside both homes): only securityd holds
-    // its secrets back. It is unlocked, and the item lets `security` read it, so nothing asks.
+    // It is unlocked, and the item lets `security` read it, so nothing asks.
     let readable = keychain.clone();
     let mach = "import ctypes, sys\n\
          lib = ctypes.CDLL('/usr/lib/libSystem.B.dylib')\n\
@@ -794,8 +800,8 @@ fn a_job_reaches_no_preferences_pasteboard_or_keychain() {
          \x20   print('mach ' + name + (' ok' if kr == 0 else ' no'))\n";
     let services: Vec<&str> = MACH_DENIED
         .iter()
+        .chain(MACH_KEPT.iter())
         .copied()
-        .chain(["com.apple.trustd.agent"])
         .collect();
     let probe = format!(
         "python3 -c \"$MACH\" {services} || echo 'mach python-failed'\n\
@@ -874,10 +880,12 @@ fn a_job_reaches_no_preferences_pasteboard_or_keychain() {
             !own.status.success(),
             "the job's own preference reached the person's\n{printed}"
         );
-        // And the services themselves: none answers the job, but trustd.
+        // And the services themselves: none answers the job, but those it keeps.
         for service in MACH_DENIED {
             assert!(has(&format!("mach {service} no")), "{service}\n{printed}");
         }
-        assert!(has("mach com.apple.trustd.agent ok"), "trustd\n{printed}");
+        for service in MACH_KEPT {
+            assert!(has(&format!("mach {service} ok")), "{service}\n{printed}");
+        }
     }
 }
