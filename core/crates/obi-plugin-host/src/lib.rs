@@ -18,7 +18,8 @@
 //! - **Running.** `ping` every 60 seconds. A plug-in that doesn't answer `initialize` or a ping
 //!   within its time, or exits, is restarted after 1, 2, then 4 seconds; when the third
 //!   restart fails too, its `state` is `failed` and it stays stopped until the owner enables it
-//!   again. A ping answered starts the count again.
+//!   again, across `obid` restarts too: `home/plugins.json` keeps that it failed. A ping
+//!   answered starts the count again.
 //! - **Stopped.** On disable and at shutdown: `shutdown`, then stdin closes; a plug-in still
 //!   running 5 seconds after `shutdown` was sent is killed, with every process it started.
 //!
@@ -27,8 +28,10 @@
 //! [`PluginHost::list`].
 //!
 //! `home/plugins.json` holds one entry per plug-in the owner enabled or disabled:
-//! `{"tetrix": {"enabled": true, "config": {}}}`. Entries for plug-ins that aren't installed
-//! are kept as they are.
+//! `{"tetrix": {"enabled": true, "config": {}}}`, and `"failed": "<reason>"` in the entry of an
+//! enabled plug-in that failed, which [`PluginHost::start`] then lists as `failed` without
+//! starting it. Enabling or disabling it takes `failed` out. Entries for plug-ins that aren't
+//! installed are kept as they are.
 
 mod conn;
 mod sandbox;
@@ -206,6 +209,7 @@ impl PluginHost {
         let mut map = BTreeMap::new();
         for (id, found) in plugins {
             let (enabled, config) = settings.entry(&id);
+            let failed_before = settings.failed(&id).filter(|_| enabled);
             let kinds = match &found {
                 Found::Valid(manifest) => manifest.kinds.clone(),
                 Found::Invalid { .. } => Vec::new(),
@@ -220,7 +224,11 @@ impl PluginHost {
             };
             let (state, last_error) = match &found {
                 Found::Invalid { reason, .. } => (PluginState::Failed, Some(reason.clone())),
-                Found::Valid(_) => (PluginState::Disabled, None),
+                // It failed when obid last ran: it stays stopped until the owner enables it.
+                Found::Valid(_) => match failed_before {
+                    Some(reason) => (PluginState::Failed, Some(reason)),
+                    None => (PluginState::Disabled, None),
+                },
             };
             let plugin = Plugin {
                 dir: home.join("plugins").join(id.as_str()),
@@ -257,8 +265,11 @@ impl PluginHost {
             closed: AtomicBool::new(false),
         });
         for plugin in inner.plugins.values() {
-            let enabled = lock(&plugin.live).enabled;
-            if enabled && matches!(plugin.found, Found::Valid(_)) {
+            let (enabled, failed) = {
+                let live = lock(&plugin.live);
+                (live.enabled, live.state == PluginState::Failed)
+            };
+            if enabled && !failed && matches!(plugin.found, Found::Valid(_)) {
                 let config = lock(&plugin.live).config.clone();
                 match plugin.check_config(&config) {
                     Ok(()) => inner.launch(plugin).await,
@@ -698,11 +709,34 @@ async fn supervise(
                 }
             }
         });
-        let Some(delay) = delay else { return };
+        let Some(delay) = delay else {
+            // Kept apart from this task: enabling or disabling it waits for this task to end
+            // while holding the settings.
+            let resolved = lock(&plugin.live).resolved;
+            tokio::spawn(remember_failed(inner.clone(), plugin.clone(), resolved));
+            return;
+        };
         tokio::select! {
             _ = stopped(&mut stop) => return,
             _ = tokio::time::sleep(delay) => {}
         }
+    }
+}
+
+/// Keeps in `home/plugins.json` that `plugin` failed, so that the next `obid` start leaves it
+/// stopped too, unless the owner enabled or disabled it since (`resolved` is how many starts
+/// had ended when it failed).
+async fn remember_failed(inner: Arc<Inner>, plugin: Arc<Plugin>, resolved: u64) {
+    let mut settings = inner.settings.lock().await;
+    let reason = {
+        let live = lock(&plugin.live);
+        if !live.enabled || live.state != PluginState::Failed || live.resolved != resolved {
+            return;
+        }
+        live.last_error.clone().unwrap_or_default()
+    };
+    if let Err(error) = settings.mark_failed(&plugin.id, &reason) {
+        tracing::warn!(target: "obi_plugin", plugin = %plugin.id, "can't keep that it failed in plugins.json: {error}");
     }
 }
 
@@ -986,8 +1020,16 @@ impl Settings {
         (enabled, config)
     }
 
-    /// Keeps `id`'s choice and settings, writing the file whole (a new file renamed over the
-    /// old one, readable by its owner only).
+    /// Why `id` failed when it last ran, when it did and hasn't been enabled or disabled since.
+    fn failed(&self, id: &PluginId) -> Option<String> {
+        self.entries
+            .get(id.as_str())?
+            .get("failed")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    /// Keeps `id`'s choice and settings, without `failed`.
     fn set(
         &mut self,
         id: &PluginId,
@@ -1001,6 +1043,24 @@ impl Settings {
         }
         let mut entries = self.entries.clone();
         entries.insert(id.as_str().to_owned(), Value::Object(entry));
+        self.write(entries)
+    }
+
+    /// Keeps that `id` failed, and why, beside its choice and settings.
+    fn mark_failed(&mut self, id: &PluginId, reason: &str) -> Result<(), PluginError> {
+        let mut entries = self.entries.clone();
+        let entry = entries
+            .entry(id.as_str().to_owned())
+            .or_insert_with(|| json!({"enabled": true}));
+        if let Value::Object(entry) = entry {
+            entry.insert("failed".into(), Value::String(reason.to_owned()));
+        }
+        self.write(entries)
+    }
+
+    /// Writes the file whole (a new file renamed over the old one, readable by its owner
+    /// only), then keeps `entries` as what it holds.
+    fn write(&mut self, entries: serde_json::Map<String, Value>) -> Result<(), PluginError> {
         let mut text = serde_json::to_string_pretty(&Value::Object(entries.clone()))
             .map_err(|error| PluginError::Io(error.to_string()))?;
         text.push('\n');

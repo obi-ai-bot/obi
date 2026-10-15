@@ -1,6 +1,6 @@
 //! The lifecycle of a plug-in with a process (docs/ARCHITECTURE.md 5.3, steps 3 to 6): started
 //! in its sandbox, initialized, pinged, restarted after 1, 2 then 4 seconds (shortened here),
-//! `failed` when the third restart fails too, and stopped with `shutdown`, then killed with
+//! `failed` when the third restart fails too (and still `failed` when `obid` starts again), and stopped with `shutdown`, then killed with
 //! everything it started when it doesn't stop.
 
 mod common;
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use common::{Home, beats, id, options, sandbox_made, status, wait_for_state, wait_until};
-use obi_plugin_host::api::{Kind, PluginState};
+use obi_plugin_api::{Kind, PluginState};
 use obi_plugin_host::{Options, PluginHost};
 use serde_json::{Value, json};
 
@@ -100,6 +100,86 @@ async fn a_plugin_that_exits_is_restarted_and_failed_when_the_third_restart_fail
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(status(&host, "context-test").state, PluginState::Ready);
     assert_eq!(home.starts("context-test"), 6);
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failed_plugin_stays_stopped_when_obid_starts_again() {
+    let home = Home::new("failedkept");
+    home.install("context-test", "context-test");
+    let host = host_with(&home, options()).await;
+    let first = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({"afterReady": "exit"})),
+        )
+        .await
+        .unwrap();
+    if !sandbox_made(&first) {
+        return;
+    }
+    let failed = wait_for_state(&host, "context-test", PluginState::Failed, LONG).await;
+    let reason = failed.last_error.unwrap();
+    let kept = || {
+        home.settings()
+            .and_then(|s| s["context-test"]["failed"].as_str().map(str::to_owned))
+    };
+    assert!(
+        wait_until(LONG, || kept().is_some()).await,
+        "{:?}",
+        home.settings()
+    );
+    assert_eq!(kept().as_deref(), Some(reason.as_str()));
+    host.shutdown().await;
+    assert_eq!(home.starts("context-test"), 4);
+
+    // obid starts again: it is listed as failed, with its reason, and not started.
+    let host = host_with(&home, options()).await;
+    let listed = status(&host, "context-test");
+    assert_eq!(listed.state, PluginState::Failed);
+    assert!(listed.enabled);
+    assert_eq!(listed.last_error.as_deref(), Some(reason.as_str()));
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(home.starts("context-test"), 4);
+    assert_eq!(status(&host, "context-test").state, PluginState::Failed);
+
+    // Until the owner enables it again (its fifth start answers, and stays).
+    let again = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({"afterReady": "exit", "failStarts": 4})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.state, PluginState::Ready, "{again:?}");
+    assert_eq!(home.starts("context-test"), 5);
+    assert_eq!(kept(), None);
+    assert_eq!(
+        home.settings().unwrap()["context-test"]["enabled"],
+        json!(true)
+    );
+    host.shutdown().await;
+
+    // Disabling it also takes `failed` out, and a disabled plug-in is listed as disabled.
+    let home = Home::new("faileddisabled");
+    home.install("context-test", "context-test");
+    std::fs::write(
+        home.path.join("plugins.json"),
+        r#"{"context-test": {"enabled": false, "failed": "an old reason"}}"#,
+    )
+    .unwrap();
+    let host = host_with(&home, options()).await;
+    assert_eq!(status(&host, "context-test").state, PluginState::Disabled);
+    assert_eq!(status(&host, "context-test").last_error, None);
+    host.set_enabled(&id("context-test"), false, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        home.settings().unwrap(),
+        json!({"context-test": {"enabled": false}})
+    );
     host.shutdown().await;
 }
 
