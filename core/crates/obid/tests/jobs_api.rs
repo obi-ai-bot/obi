@@ -218,13 +218,16 @@ fn wait(obid: &Obid, id: &str) -> Value {
 
 /// Polls `GET /v1/jobs/{id}` until `ready` holds, for at most 30 seconds.
 fn until(obid: &Obid, id: &str, ready: impl Fn(&Value) -> bool) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let give_up_at = Instant::now() + Duration::from_secs(30);
     loop {
         let job = request(obid, "GET", &format!("/v1/jobs/{id}"), None).body;
         if ready(&job) {
             return job;
         }
-        assert!(Instant::now() < deadline, "the job never got there: {job}");
+        assert!(
+            Instant::now() < give_up_at,
+            "the job never got there: {job}"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -234,14 +237,14 @@ fn until(obid: &Obid, id: &str, ready: impl Fn(&Value) -> bool) -> Value {
 /// sees it run.
 fn beat(obid: &Obid, id: &str) -> u64 {
     let path = obid.home.join("worktrees").join(id).join(".obi/beat");
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let give_up_at = Instant::now() + Duration::from_secs(30);
     loop {
         if let Ok(text) = std::fs::read_to_string(&path)
             && let Ok(count) = text.trim().parse()
         {
             return count;
         }
-        assert!(Instant::now() < deadline, "the agent never started");
+        assert!(Instant::now() < give_up_at, "the agent never started");
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -696,9 +699,9 @@ fn events_follow_every_change() {
         .unwrap()
         .to_owned();
     let mut seen_done = false;
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let give_up_at = Instant::now() + Duration::from_secs(30);
     let mut event = String::new();
-    while !seen_done && Instant::now() < deadline {
+    while !seen_done && Instant::now() < give_up_at {
         line.clear();
         if reader.read_line(&mut line).unwrap() == 0 {
             break;

@@ -184,7 +184,7 @@ pub async fn serve(
             jobs.shutdown(JOBS_GRACE).await;
         })
     };
-    let deadline = {
+    let give_up_at = {
         let mut stopping = stopping_rx;
         async move {
             while !*stopping.borrow() {
@@ -197,7 +197,7 @@ pub async fn serve(
     };
     let result = tokio::select! {
         result = server => result.map_err(StartError::Serve),
-        () = deadline => {
+        () = give_up_at => {
             tracing::warn!("requests still under way {}s after the stop; exiting anyway", SHUTDOWN_GRACE.as_secs());
             Ok(())
         }

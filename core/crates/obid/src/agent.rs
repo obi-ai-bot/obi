@@ -149,8 +149,8 @@ pub async fn run_turn(
     if *stop.borrow() != process::Signal::Run {
         turn.stopped = true;
     }
-    let deadline = tokio::time::sleep(limit);
-    tokio::pin!(deadline);
+    let give_up_at = tokio::time::sleep(limit);
+    tokio::pin!(give_up_at);
     let mut buffer = Vec::new();
     while !turn.stopped {
         buffer.clear();
@@ -211,7 +211,7 @@ pub async fn run_turn(
                     _ => {}
                 }
             }
-            () = &mut deadline => {
+            () = &mut give_up_at => {
                 turn.timed_out = true;
                 break;
             }

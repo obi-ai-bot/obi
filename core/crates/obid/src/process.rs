@@ -131,11 +131,11 @@ fn login_shell_path() -> Vec<PathBuf> {
     let Ok(mut child) = child else {
         return Vec::new();
     };
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let give_up_at = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() < deadline => {
+            Ok(None) if std::time::Instant::now() < give_up_at => {
                 std::thread::sleep(Duration::from_millis(20))
             }
             _ => {
