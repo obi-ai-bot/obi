@@ -334,10 +334,9 @@ fn the_copy_matches_obi_sphere_when_given_one() {
             }
         }
     }
-    for file in ["conformance/jcs-vectors.json"] {
-        if std::fs::read(spec().join(file)).unwrap() != std::fs::read(theirs.join(file)).unwrap() {
-            differ.push(file.to_owned());
-        }
+    let file = "conformance/jcs-vectors.json";
+    if std::fs::read(spec().join(file)).unwrap() != std::fs::read(theirs.join(file)).unwrap() {
+        differ.push(file.to_owned());
     }
     // The test keys derive from their seed strings as the spec's keys.json says.
     let keys: Value = serde_json::from_str(

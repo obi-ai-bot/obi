@@ -90,6 +90,15 @@ jobs:
           rustup default stable
           cargo --version
 
+      # The job sandbox on Linux. Without bubblewrap, step 4 fails and the log does not say why.
+      - name: bubblewrap
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          bwrap --version
+          bwrap --unshare-pid --ro-bind / / --dev /dev --proc /proc -- true
+
       # OBI_SPHERE_DIR defaults to ../obi-sphere, which is where it was checked out.
       - name: make e2e
         run: make -C obi e2e
