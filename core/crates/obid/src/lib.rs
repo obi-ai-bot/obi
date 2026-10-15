@@ -17,13 +17,17 @@ pub mod events;
 pub mod git;
 pub mod job;
 pub mod jobs;
+pub mod logs;
+pub mod obi_dir;
 pub mod permissions;
+pub mod plugins;
 pub mod policy;
 pub mod process;
 pub mod review;
 pub mod routes;
 pub mod sandbox;
 pub mod scan;
+pub mod secrets;
 pub mod settings;
 pub mod sphere;
 pub mod store;
@@ -43,6 +47,11 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(6);
 
 /// How long the jobs' agents and checks get to end when obid stops.
 pub const JOBS_GRACE: Duration = Duration::from_secs(2);
+
+/// How long after the stop obid waits, at most, for its plug-ins to have stopped (each gets 5
+/// seconds after `shutdown` before it is killed, docs/ARCHITECTURE.md 5.3, step 6; they stop at
+/// once, side by side with the jobs, from the moment obid is told to stop).
+pub const PLUGINS_GRACE: Duration = Duration::from_secs(8);
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
@@ -149,6 +158,8 @@ pub async fn serve(
         }
         measured = measuring => measured.map_err(|e| StartError::Serve(std::io::Error::other(e)))?,
     };
+    // The API token is a secret obid's log layer takes out of plug-ins' lines (crate::logs).
+    secrets::known().learn("api-token", &token);
     let events = events::Events::new();
     let sandbox = std::env::current_exe()
         .map_err(|e| format!("obid can't find its own executable: {e}"))
@@ -173,6 +184,10 @@ pub async fn serve(
         path: config.home.join("exchanges"),
         source,
     })?;
+    // The plug-ins obid ships, installed where missing (disabled), then the host, which starts
+    // the ones the owner enabled without waiting for them.
+    let plugins = Arc::new(plugins::Plugins::start(&config).await);
+    jobs.use_plugins(plugins.clone());
     let cleared = clear::Cleared::open(&config.home);
     let devices = devices::Devices::open(&config.home);
     let shared = Arc::new(api::Shared {
@@ -185,6 +200,7 @@ pub async fn serve(
         jobs: jobs.clone(),
         events,
         link: link.clone(),
+        plugins: plugins.clone(),
         stopping: stopping_rx.clone(),
     });
     let app = api::router(shared);
@@ -197,10 +213,24 @@ pub async fn serve(
     // Jobs that were queued or running when obid last stopped carry on, and so does its Sphere.
     jobs.resume();
     link.start();
+    // Every event a plug-in emits becomes a `pluginEvent` inbox item. The receiver ends once
+    // the host has shut down.
+    if let Some(mut events) = plugins.take_events() {
+        let link = link.clone();
+        tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                link.plugin_event(event);
+            }
+        });
+    }
     // Once told to stop: every agent and check ends now, and its job stays as it is for the next
-    // start; the event streams and waits end, so the server's connections close.
+    // start; every plug-in stops, with everything it started; the event streams and waits end,
+    // so the server's connections close.
+    let stopped_at = Arc::new(std::sync::OnceLock::new());
     let ending = {
         let jobs = jobs.clone();
+        let plugins = plugins.clone();
+        let stopped_at = stopped_at.clone();
         let mut stopping = stopping_rx.clone();
         tokio::spawn(async move {
             while !*stopping.borrow() {
@@ -208,7 +238,8 @@ pub async fn serve(
                     return;
                 }
             }
-            jobs.shutdown(JOBS_GRACE).await;
+            let _ = stopped_at.set(tokio::time::Instant::now());
+            tokio::join!(jobs.shutdown(JOBS_GRACE), plugins.shutdown());
         })
     };
     let give_up_at = {
@@ -229,7 +260,18 @@ pub async fn serve(
             Ok(())
         }
     };
-    let _ = tokio::time::timeout(JOBS_GRACE, ending).await;
+    // Within PLUGINS_GRACE of the stop, whatever the server took.
+    let deadline = stopped_at
+        .get()
+        .copied()
+        .unwrap_or_else(tokio::time::Instant::now)
+        + PLUGINS_GRACE;
+    if tokio::time::timeout_at(deadline, ending).await.is_err() {
+        tracing::warn!(
+            "plug-ins or jobs still stopping {}s after the stop; exiting anyway",
+            PLUGINS_GRACE.as_secs()
+        );
+    }
     result
 }
 

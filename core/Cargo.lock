@@ -1244,6 +1244,8 @@ dependencies = [
  "hex",
  "jsonschema",
  "nix",
+ "obi-plugin-api",
+ "obi-plugin-host",
  "obi-protocol",
  "p256",
  "regex",

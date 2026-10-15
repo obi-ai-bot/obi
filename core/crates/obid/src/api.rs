@@ -38,6 +38,8 @@ pub struct Shared {
     pub events: Events,
     /// Its Sphere: membership, exchanges, the inbox and decisions.
     pub link: Arc<crate::sphere::Link>,
+    /// The plug-in host (`GET` and `PUT /v1/obid/plugins`).
+    pub plugins: Arc<crate::plugins::Plugins>,
     /// True once obid is stopping: streams end.
     pub stopping: tokio::sync::watch::Receiver<bool>,
 }
@@ -133,6 +135,11 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route(
             "/v1/obid/sphere/exchanges/{id}",
             get(crate::sphere::routes::exchange),
+        )
+        .route("/v1/obid/plugins", get(crate::plugins::list))
+        .route(
+            "/v1/obid/plugins/{id}",
+            axum::routing::put(crate::plugins::set),
         )
         .route("/v1/obid/decisions", get(crate::sphere::routes::decisions))
         .route(
