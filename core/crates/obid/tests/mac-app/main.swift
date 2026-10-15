@@ -1,9 +1,10 @@
-// The Mac app following a runner, as Mac/RunnerFeed.swift does it, compiled from the app's own
-// client code: tests/mac_app.rs builds this file with Shared/Runner.swift, Shared/Decisions.swift,
-// Shared/JobList.swift, Shared/Elapsed.swift, Shared/DeviceKey.swift and Engine/, the files the
-// Oby target compiles them from, and runs it against a running obid. Nothing here talks HTTP
-// itself: every request is the app's `Runner` (Shared/Runner.swift), every answer is read into
-// the app's own types. What it saw goes to stdout, one line each; the test reads them.
+// The Mac app following a runner, as apps/mac/app/RunnerFeed.swift does it, compiled from the
+// app's own client code: tests/mac_app.rs builds this file with apps/shared/Runner.swift,
+// apps/shared/Decisions.swift, apps/shared/JobList.swift, apps/shared/Elapsed.swift,
+// apps/shared/DeviceKey.swift and Engine/, the files the Oby target compiles them from, and runs
+// it against a running obid. Nothing here talks HTTP itself: every request is the app's `Runner`
+// (apps/shared/Runner.swift), every answer is read into the app's own types. What it saw goes to
+// stdout, one line each; the test reads them.
 //
 // OBID_URL is obid's address and OBID_TOKEN its API token. The Mac app reads the token of the
 // runner on this Mac from its keychain item (Engine/LocalRunner.swift, `token(from:)`); here the
@@ -89,7 +90,7 @@ do {
             say("event job \(job.id) \(job.status.rawValue)")
             if following == nil, job.status == .running {
                 following = job.id
-                // Stop all, from the island (Mac/Island.swift).
+                // Stop all, from the island (apps/mac/app/Island.swift).
                 let stopped = try await runner.stopAll()
                 say("stop-all \(stopped.stopped) \(stopped.jobs.map(\.id).joined(separator: ","))")
             }
