@@ -19,6 +19,11 @@
 //!   shell); on macOS it can't have LaunchServices open an app, send Apple events, submit a launchd
 //!   job, post input events through the window server, or connect to a Unix socket but the DNS
 //!   resolver's and its own: each of those would run something outside the sandbox for it.
+//! - **On macOS, no preferences, pasteboard or keychain**: cfprefsd would read and write the
+//!   person's preferences for it, whatever its file rules (so a job has no preferences at all), the
+//!   pasteboard server would read and write the person's pasteboard, and securityd would hand it
+//!   the secrets of a keychain whose file it can read. None of them answers it; trustd, which
+//!   checks a server's certificate, does.
 //!
 //! When the sandbox can't be made on this machine, nothing runs: [`Sandbox::detect`] says why, and
 //! the job fails saying so.
@@ -409,8 +414,20 @@ fn seatbelt_profile(spec: &Spec) -> String {
     profile.push_str(
         "(deny lsopen)\n(deny appleevent-send)\n(deny job-creation)\n(deny hid-control)\n",
     );
+    // And those who read or write for the job what its file rules keep from it: cfprefsd, which
+    // reads and writes the person's preferences for whoever asks, whatever the asker's `HOME` or
+    // file rules (so a job has no preferences at all: CoreFoundation's writes fail, its reads find
+    // only what the job may read as files); the pasteboard; securityd, which holds the keychains'
+    // secrets (a keychain's file says nothing without it). trustd, which checks a server's
+    // certificate, stays.
+    profile.push_str("(deny user-preference-read user-preference-write)\n");
     profile.push_str("(deny mach-lookup");
-    for service in WINDOW_SERVER {
+    for service in WINDOW_SERVER
+        .iter()
+        .chain(PREFERENCES.iter())
+        .chain(PASTEBOARD.iter())
+        .chain(KEYCHAIN.iter())
+    {
         profile.push_str(&format!(" (global-name {})", sbpl_text(service)));
     }
     profile.push_str(")\n");
@@ -448,6 +465,35 @@ const RESOLVER_SOCKETS: [&str; 2] = ["/private/var/run/mDNSResponder", "/var/run
 /// The window server's services on macOS, which post input events (keystrokes into the person's
 /// terminal) for whoever asks with the right to.
 const WINDOW_SERVER: [&str; 2] = ["com.apple.windowserver.active", "com.apple.windowserver"];
+
+/// cfprefsd on macOS, the system's and the person's: it reads and writes preferences for whoever
+/// asks, in the person's `~/Library/Preferences`, whatever the asker's file rules say.
+const PREFERENCES: [&str; 2] = ["com.apple.cfprefsd.daemon", "com.apple.cfprefsd.agent"];
+
+/// The pasteboard server on macOS (the general, find, font and ruler pasteboards), and the one that
+/// hands the pasteboard to other devices (Universal Clipboard).
+const PASTEBOARD: [&str; 2] = [
+    "com.apple.pasteboard.1",
+    "com.apple.coreservices.uauseractivitypasteboardclient.xpc",
+];
+
+/// securityd on macOS: the file-based keychains' secrets (`com.apple.SecurityServer`, the login
+/// keychain among them), the data protection keychain (secd's services), the system keychain, and
+/// the agent that asks the person for a keychain's password.
+const KEYCHAIN: [&str; 12] = [
+    "com.apple.SecurityServer",
+    "com.apple.securityd.xpc",
+    "com.apple.securityd.general",
+    "com.apple.securityd.ckks",
+    "com.apple.securityd.sos",
+    "com.apple.securityd.aps",
+    "com.apple.security.octagon",
+    "com.apple.security.kcsharing",
+    "com.apple.security.escrow-update",
+    "com.apple.securityd.systemkeychain",
+    "com.apple.security.agent",
+    "com.apple.security.KeychainStasher",
+];
 
 /// A path as an SBPL string literal.
 fn sbpl_string(path: &Path) -> String {
@@ -761,6 +807,11 @@ mod tests {
             "(deny appleevent-send)",
             "(deny job-creation)",
             "(deny mach-lookup (global-name \"com.apple.windowserver.active\")",
+            "(deny user-preference-read user-preference-write)",
+            "(global-name \"com.apple.cfprefsd.agent\")",
+            "(global-name \"com.apple.pasteboard.1\")",
+            "(global-name \"com.apple.SecurityServer\")",
+            "(global-name \"com.apple.securityd.xpc\")",
             "(deny network-outbound (remote unix-socket))",
             "(remote unix-socket (path-literal \"/private/var/run/mDNSResponder\"))",
             "(remote unix-socket (subpath \"/h/tmp/j1\"))",
@@ -768,6 +819,7 @@ mod tests {
             assert!(profile.contains(rule), "{rule}\n{profile}");
         }
         assert!(!profile.contains("/dev/tty"), "{profile}");
+        assert!(!profile.contains("trustd"), "{profile}");
         assert_eq!(sbpl_string(Path::new("/a \"b\\")), "\"/a \\\"b\\\\\"");
     }
 

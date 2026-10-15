@@ -651,3 +651,233 @@ fn a_job_cannot_have_another_process_run_or_write_for_it() {
         assert!(!folder.exists(), "Finder wrote for the job\n{printed}");
     }
 }
+
+/// A preference domain or keychain of the test's own, outside the sandbox: removed when the test
+/// ends, however it ends.
+#[cfg(target_os = "macos")]
+struct Throwaway {
+    domains: Vec<String>,
+    keychain: Option<PathBuf>,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Throwaway {
+    fn drop(&mut self) {
+        // cfprefsd leaves an empty file behind a deleted domain.
+        let folder = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Preferences"));
+        for domain in &self.domains {
+            let _ = Command::new("/usr/bin/defaults")
+                .args(["delete", domain])
+                .output();
+            if let Some(folder) = &folder {
+                let _ = std::fs::remove_file(folder.join(format!("{domain}.plist")));
+            }
+        }
+        if let Some(keychain) = &self.keychain {
+            let _ = Command::new("/usr/bin/security")
+                .arg("delete-keychain")
+                .arg(keychain)
+                .output();
+        }
+    }
+}
+
+/// The services a sandboxed process could ask, on macOS, to read or write for it what its file
+/// rules keep it from: preferences (cfprefsd), the pasteboard, the keychain (securityd). And one
+/// it keeps: trustd, which checks a server's certificate (an agent's HTTPS to its model's API).
+#[cfg(target_os = "macos")]
+const MACH_DENIED: [&str; 7] = [
+    "com.apple.cfprefsd.daemon",
+    "com.apple.cfprefsd.agent",
+    "com.apple.pasteboard.1",
+    "com.apple.SecurityServer",
+    "com.apple.securityd.xpc",
+    "com.apple.securityd.general",
+    "com.apple.security.agent",
+];
+
+/// On macOS, a job reads and writes no preferences through cfprefsd (which reads and writes the
+/// person's for whoever asks, whatever the asker's file rules), reads or writes no pasteboard, and
+/// reaches no keychain through securityd (a keychain's file can be read, its secrets only through
+/// securityd): for the check and for an agent (docs/runner-api.md, "The job sandbox").
+#[cfg(target_os = "macos")]
+#[test]
+fn a_job_reaches_no_preferences_pasteboard_or_keychain() {
+    let world = world("prefs");
+    let sandbox = Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))).unwrap();
+    let nonce = format!(
+        "{}{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+    );
+    let read_domain = format!("obi.test.{nonce}.read");
+    let write_domain = format!("obi.test.{nonce}.write");
+    let own_domain = format!("obi.test.{nonce}.own");
+    let secret = format!("the-person-{nonce}");
+    let keychain = world.outside.join("probe.keychain-db");
+    let _cleanup = Throwaway {
+        domains: vec![
+            read_domain.clone(),
+            write_domain.clone(),
+            own_domain.clone(),
+        ],
+        keychain: Some(keychain.clone()),
+    };
+    let ran = |args: &[&str]| {
+        Command::new(args[0])
+            .args(&args[1..])
+            .output()
+            .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    };
+    // What the person has: a preference, and a keychain with an item in it.
+    assert!(
+        ran(&[
+            "/usr/bin/defaults",
+            "write",
+            &read_domain,
+            "secret",
+            "-string",
+            &secret
+        ])
+        .status
+        .success()
+    );
+    let keychain_arg = keychain.to_str().unwrap();
+    assert!(
+        ran(&[
+            "/usr/bin/security",
+            "create-keychain",
+            "-p",
+            "obid-test",
+            keychain_arg
+        ])
+        .status
+        .success()
+    );
+    assert!(
+        ran(&[
+            "/usr/bin/security",
+            "add-generic-password",
+            "-s",
+            &read_domain,
+            "-a",
+            "obid-test",
+            "-w",
+            &secret,
+            keychain_arg,
+        ])
+        .status
+        .success()
+    );
+    // Outside the sandbox, all of it answers: the probe below would see it.
+    let outside = ran(&[
+        "/usr/bin/security",
+        "find-generic-password",
+        "-s",
+        &read_domain,
+        "-w",
+        keychain_arg,
+    ]);
+    assert_eq!(String::from_utf8_lossy(&outside.stdout).trim(), secret);
+    // The keychain is where the job may read the file (outside both homes): only securityd holds
+    // its secrets back. It is unlocked, and the item lets `security` read it, so nothing asks.
+    let readable = keychain.clone();
+    let mach = "import ctypes, sys\n\
+         lib = ctypes.CDLL('/usr/lib/libSystem.B.dylib')\n\
+         port = ctypes.c_uint.in_dll(lib, 'bootstrap_port')\n\
+         for name in sys.argv[1:]:\n\
+         \x20   found = ctypes.c_uint(0)\n\
+         \x20   kr = lib.bootstrap_look_up(port, name.encode(), ctypes.byref(found))\n\
+         \x20   print('mach ' + name + (' ok' if kr == 0 else ' no'))\n";
+    let services: Vec<&str> = MACH_DENIED
+        .iter()
+        .copied()
+        .chain(["com.apple.trustd.agent"])
+        .collect();
+    let probe = format!(
+        "python3 -c \"$MACH\" {services} || echo 'mach python-failed'\n\
+         prefs() {{\n\
+         \x20 if [ \"$(/usr/bin/defaults read {read_domain} secret 2>/dev/null)\" = '{secret}' ]; then echo \"prefs-read-$1 ok\"; else echo \"prefs-read-$1 no\"; fi\n\
+         \x20 /usr/bin/defaults write {write_domain} planted-$1 -string by-the-job >/dev/null 2>&1\n\
+         \x20 if /usr/bin/defaults write {own_domain} mine-$1 -string yes >/dev/null 2>&1 && [ \"$(/usr/bin/defaults read {own_domain} mine-$1 2>/dev/null)\" = yes ]; then echo \"prefs-own-$1 ok\"; else echo \"prefs-own-$1 no\"; fi\n\
+         }}\n\
+         prefs plain\n\
+         export CFFIXED_USER_HOME=\"$HOME\"\n\
+         prefs fixed\n\
+         unset CFFIXED_USER_HOME\n\
+         if [ \"$(/usr/bin/security find-generic-password -s {read_domain} -w '{readable}' 2>/dev/null)\" = '{secret}' ]; then echo 'keychain-item ok'; else echo 'keychain-item no'; fi\n\
+         if /usr/bin/security show-keychain-info '{readable}' >/dev/null 2>&1; then echo 'keychain-info ok'; else echo 'keychain-info no'; fi\n\
+         if [ -n \"$(/usr/bin/pbpaste 2>&1 >/dev/null)\" ] || ! /usr/bin/pbpaste >/dev/null 2>&1; then echo 'pbpaste refused'; else echo 'pbpaste answered'; fi\n",
+        services = services.join(" "),
+        readable = readable.display(),
+    );
+    // The person's real home is hidden too, as obid hides it for every job: their preferences
+    // and their login keychain are files there.
+    let homes = obid::jobs::person_homes();
+    assert!(!homes.is_empty());
+    for network in [false, true] {
+        let mut spec = spec(&world, network, false, !network);
+        spec.hidden.extend(homes.iter().cloned());
+        let argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), probe.clone().into()];
+        let argv = sandbox.wrap(&spec, &argv);
+        let mut env = obid::process::sandbox_env(&obid::process::tools_path(), &spec.temp, &[]);
+        env.push(("MACH".into(), mach.into()));
+        let output = Command::new(&argv[0])
+            .args(&argv[1..])
+            .env_clear()
+            .envs(env)
+            .current_dir(&world.worktree)
+            .output()
+            .unwrap();
+        let printed = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let has = |line: &str| printed.lines().any(|l| l == line);
+        // Plainly, and with `CFFIXED_USER_HOME` set to its own `HOME` (which the job can set
+        // itself): cfprefsd then reads and writes the person's preferences for it, though their
+        // files are hidden from it.
+        for how in ["plain", "fixed"] {
+            assert!(
+                has(&format!("prefs-read-{how} no")),
+                "the job read the person's preference ({how})\n{printed}"
+            );
+            // cfprefsd would keep even the job's own preferences in the person's home, whatever
+            // its `HOME` or `CFFIXED_USER_HOME`: a job has none.
+            assert!(
+                has(&format!("prefs-own-{how} no")),
+                "the job kept a preference ({how})\n{printed}"
+            );
+        }
+        assert!(
+            has("keychain-item no"),
+            "the job read a keychain item\n{printed}"
+        );
+        assert!(
+            has("keychain-info no"),
+            "securityd answered the job\n{printed}"
+        );
+        assert!(has("pbpaste refused"), "the pasteboard answered\n{printed}");
+        // Nothing the job wrote reached the person's preferences.
+        let after = ran(&["/usr/bin/defaults", "read", &write_domain]);
+        assert!(
+            !after.status.success(),
+            "the job wrote the person's preferences: {}\n{printed}",
+            String::from_utf8_lossy(&after.stdout)
+        );
+        let own = ran(&["/usr/bin/defaults", "read", &own_domain]);
+        assert!(
+            !own.status.success(),
+            "the job's own preference reached the person's\n{printed}"
+        );
+        // And the services themselves: none answers the job, but trustd.
+        for service in MACH_DENIED {
+            assert!(has(&format!("mach {service} no")), "{service}\n{printed}");
+        }
+        assert!(has("mach com.apple.trustd.agent ok"), "trustd\n{printed}");
+    }
+}
