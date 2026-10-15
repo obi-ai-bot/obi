@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/obi-ai-bot/obi-sphere/raw/main/spec/schemas/v0.1/actions/question.schema.json",
+  "title": "question body",
+  "description": "Ask another Obi something its owner knows or has decided.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["goal", "question"],
+  "properties": {
+    "goal": { "$ref": "../common.schema.json#/$defs/line_text", "x-obi-text": "data", "minLength": 1, "maxLength": 200, "description": "Why the question is asked, one line." },
+    "question": { "$ref": "../common.schema.json#/$defs/block_text", "x-obi-text": "data", "minLength": 1, "maxLength": 2000 },
+    "choices": {
+      "description": "Allowed answers, when it is multiple choice.",
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "$ref": "../common.schema.json#/$defs/line_text", "x-obi-text": "data", "minLength": 1, "maxLength": 100 }
+    },
+    "repo": { "$ref": "../common.schema.json#/$defs/repo" },
+    "pr": { "$ref": "../common.schema.json#/$defs/pr_number" }
+  }
+}

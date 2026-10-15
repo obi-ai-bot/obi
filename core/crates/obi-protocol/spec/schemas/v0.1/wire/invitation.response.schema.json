@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/obi-ai-bot/obi-sphere/raw/main/spec/schemas/v0.1/wire/invitation.response.schema.json",
+  "title": "POST /v0.1/spheres/{sphere}/invitations answer",
+  "description": "The invitation. `secret` is shown once; the Sphere keeps only its SHA-256.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "invitation_id",
+    "sphere",
+    "owner",
+    "obi",
+    "secret",
+    "expires_at"
+  ],
+  "properties": {
+    "invitation_id": {
+      "$ref": "../common.schema.json#/$defs/uuid"
+    },
+    "sphere": {
+      "$ref": "../common.schema.json#/$defs/sphere_id"
+    },
+    "owner": {
+      "$ref": "../common.schema.json#/$defs/owner_id"
+    },
+    "obi": {
+      "$ref": "../common.schema.json#/$defs/obi_id"
+    },
+    "secret": {
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 43,
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "expires_at": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    }
+  }
+}

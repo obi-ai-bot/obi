@@ -2,8 +2,31 @@
 //! so the Mac, iPhone and Watch apps run against it unchanged, plus the endpoints in that
 //! document's "obid only" section. docs/ARCHITECTURE.md says how it fits with the rest.
 
+// The job's JSON (`job::Job::to_json`) has every key the apps expect, in one `json!`.
+#![recursion_limit = "256"]
+
+pub mod acp;
+pub mod agent;
 pub mod api;
+pub mod clear;
+pub mod codex;
 pub mod config;
+pub mod conn;
+pub mod devices;
+pub mod events;
+pub mod git;
+pub mod job;
+pub mod jobs;
+pub mod permissions;
+pub mod policy;
+pub mod process;
+pub mod review;
+pub mod routes;
+pub mod sandbox;
+pub mod scan;
+pub mod settings;
+pub mod sphere;
+pub mod store;
 pub mod token;
 
 use std::future::Future;
@@ -16,7 +39,10 @@ use config::Config;
 
 /// How long obid waits for requests under way after SIGTERM or SIGINT before it exits anyway.
 /// The contract is "exits 0 within 10 seconds".
-pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(8);
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(6);
+
+/// How long the jobs' agents and checks get to end when obid stops.
+pub const JOBS_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
@@ -34,6 +60,11 @@ pub enum StartError {
     },
     #[error("the server stopped: {0}")]
     Serve(std::io::Error),
+    #[error("can't open the jobs in {path}: {source}")]
+    Jobs {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
 }
 
 /// Makes `home` if it isn't there yet, and keeps it its owner's alone (0700): it holds the API
@@ -118,34 +149,88 @@ pub async fn serve(
         }
         measured = measuring => measured.map_err(|e| StartError::Serve(std::io::Error::other(e)))?,
     };
+    let events = events::Events::new();
+    let sandbox = std::env::current_exe()
+        .map_err(|e| format!("obid can't find its own executable: {e}"))
+        .and_then(|obid| sandbox::Sandbox::detect(&obid));
+    if let Err(why) = &sandbox {
+        tracing::warn!("no job sandbox, so no job will run: {why}");
+    }
+    let jobs = jobs::Jobs::open(config.clone(), events.clone(), sandbox).map_err(|source| {
+        StartError::Jobs {
+            path: config.home.join("jobs"),
+            source,
+        }
+    })?;
+    let (stopping_tx, stopping_rx) = tokio::sync::watch::channel(false);
+    let link = sphere::Link::open(
+        config.clone(),
+        jobs.clone(),
+        events.clone(),
+        stopping_rx.clone(),
+    )
+    .map_err(|source| StartError::Jobs {
+        path: config.home.join("exchanges"),
+        source,
+    })?;
+    let cleared = clear::Cleared::open(&config.home);
+    let devices = devices::Devices::open(&config.home);
     let shared = Arc::new(api::Shared {
         config,
         token,
         host,
         cleanup,
+        cleared,
+        devices,
+        jobs: jobs.clone(),
+        events,
+        link: link.clone(),
+        stopping: stopping_rx.clone(),
     });
     let app = api::router(shared);
 
-    let (stopping_tx, stopping_rx) = tokio::sync::oneshot::channel::<()>();
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         stop.await;
-        let _ = stopping_tx.send(());
+        let _ = stopping_tx.send(true);
     });
     ready(bound);
-    let deadline = async move {
-        if stopping_rx.await.is_ok() {
+    // Jobs that were queued or running when obid last stopped carry on, and so does its Sphere.
+    jobs.resume();
+    link.start();
+    // Once told to stop: every agent and check ends now, and its job stays as it is for the next
+    // start; the event streams and waits end, so the server's connections close.
+    let ending = {
+        let jobs = jobs.clone();
+        let mut stopping = stopping_rx.clone();
+        tokio::spawn(async move {
+            while !*stopping.borrow() {
+                if stopping.changed().await.is_err() {
+                    return;
+                }
+            }
+            jobs.shutdown(JOBS_GRACE).await;
+        })
+    };
+    let give_up_at = {
+        let mut stopping = stopping_rx;
+        async move {
+            while !*stopping.borrow() {
+                if stopping.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
             tokio::time::sleep(SHUTDOWN_GRACE).await;
-        } else {
-            std::future::pending::<()>().await;
         }
     };
-    tokio::select! {
+    let result = tokio::select! {
         result = server => result.map_err(StartError::Serve),
-        () = deadline => {
+        () = give_up_at => {
             tracing::warn!("requests still under way {}s after the stop; exiting anyway", SHUTDOWN_GRACE.as_secs());
             Ok(())
         }
-    }
+    };
+    let _ = tokio::time::timeout(JOBS_GRACE, ending).await;
+    result
 }
 
 /// SIGTERM and SIGINT, caught. [`StopSignal::install`] replaces their default action (end the
