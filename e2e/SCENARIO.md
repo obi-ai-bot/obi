@@ -39,7 +39,7 @@ The run folder (`R` below) holds:
 | `R/obid-b/` | Obi B, the same. |
 | `R/harness/` | The harness's own logs. |
 
-The harness picks three free ports on 127.0.0.1: the Sphere's, A's and B's. It generates per run, in memory, never on disk: the Sphere's operator token (32 random bytes, base64url), each obid's API token (32 random bytes, hex), and the two owner keys (Ed25519): **W** for wellington, **E** for ernesto.
+The harness picks three free ports on 127.0.0.1: the Sphere's, A's and B's. It generates per run, in memory, never on disk: the Sphere's operator token (32 random bytes, base64url) and the two owner keys (Ed25519): **W** for wellington, **E** for ernesto. It also generates each obid's API token (32 random bytes, hex), which goes on disk in one place only, that obid's `home/api-token` (0600), because obid takes its token from nowhere else: never from its environment or arguments (docs/runner-api.md, "obid only: configuration").
 
 ## The fixed values
 
@@ -163,7 +163,7 @@ Turned green by: **the Rust core** (`obid`'s configuration and join), with **the
    ```
 
    and `R/obid-b/config.json` the same with B's port, home and `"owner": "ernesto"` (absolute paths in both).
-2. Start each: `$OBID_BIN serve --config R/obid-x/config.json`, with `OBID_API_TOKEN`, `HOME=R/obid-x/env-home`, `TMPDIR=R/obid-x/tmp` and `PATH`; stdout and stderr to `R/obid-x/obid.log`. Within 30 seconds `GET /v1/status` answers `200` with `runner.engine` `obid`.
+2. Write each obid's API token to `R/obid-x/home/api-token` (0600). Start each: `$OBID_BIN serve --config R/obid-x/config.json`, with `HOME=R/obid-x/env-home`, `TMPDIR=R/obid-x/tmp` and `PATH`, and no token in its environment or arguments; stdout and stderr to `R/obid-x/obid.log`. Within 30 seconds `GET /v1/status` answers `200` with `runner.engine` `obid`.
 3. For each Obi (A with W and invitation A, B with E and invitation B):
    1. `POST /v1/obid/sphere/key` → `200 {"keyId", "publicKey"}`.
    2. `POST /v1/obid/sphere/card` `{"url": "http://127.0.0.1:<sphere port>", "sphere": "e2e", "obiId": "obi-wellington", "name": "Wellington's Obi", "ownerKey": "<W public>", "accepts": ["review_request"]}` → `200 {"card": { …the card without signatures… }}`, whose Obi extension carries obid's `keyId` and `publicKey`.

@@ -1,0 +1,40 @@
+{
+  "manifest": "obi-plugin/0.1",
+  "id": "tetrix",
+  "name": "Tetrix",
+  "version": "0.1.0",
+  "description": "A code graph and memory for agents: its graph reads, earlier sessions' digests, and saving the agent's own session.",
+  "kinds": ["agent-mcp"],
+  "agentMcp": {
+    "server": {"type": "http", "urlFromConfig": "url"},
+    "allowedTools": [
+      "graph_summary",
+      "search_entities",
+      "get_entity",
+      "operational_context",
+      "impact_radius",
+      "service_topology",
+      "code_impact",
+      "query_graph",
+      "session_digest",
+      "session_context",
+      "repo_sessions",
+      "list_sessions",
+      "save_session"
+    ]
+  },
+  "network": [],
+  "config": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["url"],
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "Tetrix's MCP server URL: http or https, with no login, query string or fragment.",
+        "minLength": 8,
+        "maxLength": 2048
+      }
+    }
+  }
+}
