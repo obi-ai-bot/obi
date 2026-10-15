@@ -1,0 +1,155 @@
+# The repository restructure (docs/ARCHITECTURE.md, section 6) is done when the Mac, iPhone and
+# Watch apps build from their new places, `swift test` still passes for the frozen engine, and no
+# folder differs from another only by case. This workflow checks the first and the last on every
+# pull request that moves or touches those folders: it builds the three apps unsigned from wherever
+# the project is (Oby.xcodeproj at the root before the move, apps/Oby.xcodeproj after it), builds
+# the Mac and iPhone test targets (MacTests, iOSTests) with `build-for-testing` so a moved test
+# folder still compiles, checks that the Mac and iPhone apps bundle the character, builds the Swift
+# package with its tests (`swift build --build-tests`: the targets whose `path:` moves still
+# compile), and lists folders that differ only by case. It runs no tests. The workflows that do,
+# apple.yml (the apps' tests) and runner-linux.yml (`swift test`), are disabled in this
+# repository's Actions, so no CI runs the apps' tests or `swift test`: they are run locally.
+# This file belongs to the repository restructure workstream.
+name: Restructure
+
+on:
+  pull_request:
+    branches: [dev]
+    paths:
+      - "apps/**"
+      - "Oby.xcodeproj/**"
+      - "Mac/**"
+      - "MacTests/**"
+      - "iOS/**"
+      - "iOSTests/**"
+      - "Watch/**"
+      - "LiveActivity/**"
+      - "Shared/**"
+      - "Config/**"
+      - "Icon/**"
+      - "Android/**"
+      - "Character/**"
+      - "character/**"
+      - "MCP/**"
+      - "MCPTests/**"
+      - "mcp/**"
+      - "Engine/**"
+      - "Package.swift"
+      - ".github/workflows/restructure.yml"
+  workflow_dispatch:
+
+# A newer push to the same pull request cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  layout:
+    name: No folders differ only by case
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Folders that differ only by case
+        run: |
+          # Every folder git tracks, then the lowercased names that occur more than once.
+          git ls-files | awk -F/ '{ p = ""; for (i = 1; i < NF; i++) { p = (p == "" ? $i : p "/" $i); print p } }' \
+            | sort -u > folders.txt
+          tr '[:upper:]' '[:lower:]' < folders.txt | sort | uniq -d > clashes.txt
+          echo "$(wc -l < folders.txt) folders tracked"
+          if [ -s clashes.txt ]; then
+            echo "::error::Folders that differ only by case:"
+            grep -i -x -F -f clashes.txt folders.txt
+            exit 1
+          fi
+          echo "No two folders differ only by case."
+
+  package:
+    name: Swift package builds
+    runs-on: xcode-27
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: swift build --build-tests
+        run: |
+          swift --version
+          swift build --build-tests
+
+  apps:
+    name: Mac, iPhone and Watch build
+    # GitHub's hosted image with Xcode 27 (public preview, macOS 27 on Apple silicon), as in apple.yml.
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Where the project is
+        run: |
+          xcodebuild -version
+          if [ -d apps/Oby.xcodeproj ]; then project=apps/Oby.xcodeproj; else project=Oby.xcodeproj; fi
+          echo "PROJECT=$project" >> "$GITHUB_ENV"
+          echo "Project: $project"
+          xcodebuild -project "$project" -list
+
+      - name: Mac app (Oby)
+        run: |
+          set -o pipefail
+          xcodebuild -project "$PROJECT" -scheme Oby -destination 'generic/platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO build | xcbeautify --renderer github-actions
+
+      - name: iPhone app (ObyPhone)
+        run: |
+          set -o pipefail
+          xcodebuild -project "$PROJECT" -scheme ObyPhone -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO build | xcbeautify --renderer github-actions
+
+      - name: Watch app (ObyWatch)
+        run: |
+          set -o pipefail
+          xcodebuild -project "$PROJECT" -scheme ObyWatch -destination 'generic/platform=watchOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO build | xcbeautify --renderer github-actions
+
+      - name: Mac test target (MacTests) compiles
+        run: |
+          set -o pipefail
+          xcodebuild -project "$PROJECT" -scheme Oby -destination 'generic/platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO build-for-testing | xcbeautify --renderer github-actions
+
+      - name: iPhone test target (iOSTests) compiles
+        run: |
+          set -o pipefail
+          xcodebuild -project "$PROJECT" -scheme ObyPhone -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO build-for-testing | xcbeautify --renderer github-actions
+
+      - name: The Mac and iPhone apps bundle the character
+        run: |
+          products="$RUNNER_TEMP/dd/Build/Products"
+          find "$products" -maxdepth 2 -name '*.app' -print
+          status=0
+          # The "Bundle the character" build phase copies the packaged character into each app.
+          for dir in "Debug/*.app/Contents/Resources" "Debug-iphonesimulator/*.app"; do
+            for file in Character/oby.html Character/vendor/three.module.js; do
+              found=$(ls -d $products/$dir/$file 2>/dev/null | head -1)
+              if [ -n "$found" ] && [ -s "$found" ]; then
+                echo "ok: $found ($(wc -c < "$found") bytes)"
+              else
+                echo "::error::missing: $products/$dir/$file"; status=1
+              fi
+            done
+          done
+          mac=$(ls -d $products/Debug/*.app/Contents/Resources/Character/oby.html 2>/dev/null | head -1)
+          if [ -n "$mac" ] && grep -q 'window\.oby' "$mac"; then
+            echo "ok: the Mac app's character defines window.oby"
+          else
+            echo "::error::the Mac app's character has no window.oby"; status=1
+          fi
+          exit $status

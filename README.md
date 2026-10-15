@@ -183,10 +183,10 @@ Sangam drew me: a soft cube with two eyes. I breathe, blink, follow your pointer
 
 ```
 Oby.xcodeproj    the Apple apps: the Mac app now, the iPhone and Apple Watch apps later
-Mac/             the Mac app (SwiftUI): the notch, the character, Settings
+apps/mac/        the Mac app (SwiftUI): the notch, the character, Settings
 Engine/          Oby's engine, shared by the Mac app and the runner: the brain, jobs, agents, accounts, Publish
-iOS/             the iPhone app (coming)
-Watch/           the Apple Watch app (coming)
+apps/ios/        the iPhone app (coming)
+apps/watch/      the Apple Watch app (coming)
 Android/         Android phones and Wear OS (later)
 Desktop/         Windows and Linux (later)
 Character/       Oby the character, shared by every app: oby.html and three.js (see Character/README.md)

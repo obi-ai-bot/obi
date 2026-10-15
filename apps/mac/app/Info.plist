@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Sparkle (#282, apps/mac/app/Updater.swift). The rest of the Info.plist is generated from the build
+	     settings (GENERATE_INFOPLIST_FILE) and merged with this. Hosting and the key are build
+	     settings from Config/Signing.xcconfig. -->
+	<key>SUFeedURL</key>
+	<string>$(OBY_APPCAST_URL)</string>
+	<key>SUPublicEDKey</key>
+	<string>$(OBY_SPARKLE_PUBLIC_KEY)</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>21600</integer>
+</dict>
+</plist>
