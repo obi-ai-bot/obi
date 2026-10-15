@@ -1,15 +1,18 @@
 //! The API token every request carries (docs/runner-api.md, "obid only: configuration").
 //!
-//! It is `OBID_API_TOKEN` from the environment (at least 32 characters) or, when that is unset,
-//! one obid makes on first start and keeps in `home/api-token` (0600), which the shells on the same
-//! machine read. The token never appears in an answer, an event or a log.
+//! It is the one in `home/api-token` (0600), which the shells on the same machine read: obid makes
+//! it on first start, or takes the one put there before. Never from obid's environment or its
+//! arguments, where any process of the same user can read it (on macOS through `KERN_PROCARGS2`,
+//! which no sandbox holds back): obid refuses to start when `OBID_API_TOKEN` is set. The token
+//! never appears in an answer, an event or a log.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// The environment variable that gives obid its token.
+/// The environment variable that once gave obid its token: obid refuses to start while it is set,
+/// and never passes it on.
 pub const ENV: &str = "OBID_API_TOKEN";
-/// The file under `home` that keeps the token obid made, when the environment gives none.
+/// The file under `home` that keeps the token.
 pub const FILE: &str = "api-token";
 /// The shortest token obid accepts.
 pub const MIN_LEN: usize = 32;
@@ -17,9 +20,9 @@ pub const MIN_LEN: usize = 32;
 #[derive(Debug, thiserror::Error)]
 pub enum TokenError {
     #[error(
-        "{ENV} is set but has fewer than {MIN_LEN} characters, or has spaces or control characters."
+        "{ENV} is set: obid takes its token only from {path} (0600), never from its environment, where other processes can read it. Unset it; to choose the token, put it in that file."
     )]
-    WeakEnv,
+    InEnvironment { path: PathBuf },
     #[error(
         "{path} has no usable token (at least {MIN_LEN} characters, no spaces): remove it and obid makes a new one."
     )]
@@ -33,16 +36,18 @@ pub enum TokenError {
     Random(String),
 }
 
-/// The token to answer to: `from_env` when given, else the one in `home/api-token`, made there now
-/// when there is none.
-pub fn load(home: &Path, from_env: Option<String>) -> Result<String, TokenError> {
-    if let Some(token) = from_env {
-        return if usable(&token) {
-            Ok(token)
-        } else {
-            Err(TokenError::WeakEnv)
-        };
+/// Refuses a token in obid's environment (`in_env`: whether [`ENV`] is set).
+pub fn refuse_environment(home: &Path, in_env: bool) -> Result<(), TokenError> {
+    if in_env {
+        return Err(TokenError::InEnvironment {
+            path: home.join(FILE),
+        });
     }
+    Ok(())
+}
+
+/// The token to answer to: the one in `home/api-token`, made there now when there is none.
+pub fn load(home: &Path) -> Result<String, TokenError> {
     let path = home.join(FILE);
     let io = |source| TokenError::Io {
         path: path.clone(),
@@ -130,27 +135,31 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_wins_and_nothing_is_written() {
+    fn a_token_in_the_environment_is_refused_and_nothing_is_written() {
         let home = folder("env");
-        let token = "x".repeat(32);
-        assert_eq!(load(&home, Some(token.clone())).unwrap(), token);
+        assert!(matches!(
+            refuse_environment(&home, true),
+            Err(TokenError::InEnvironment { .. })
+        ));
+        assert!(refuse_environment(&home, false).is_ok());
         assert!(!home.join(FILE).exists());
         std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
-    fn a_short_environment_token_is_refused() {
-        let home = folder("short");
-        for token in [
+    fn a_token_put_in_the_file_is_taken_and_a_short_one_refused() {
+        let home = folder("given");
+        let token = "x".repeat(32);
+        std::fs::write(home.join(FILE), format!("{token}\n")).unwrap();
+        assert_eq!(load(&home).unwrap(), token);
+        for short in [
             "",
             "short",
             &"x".repeat(31),
-            &format!("{} ", "x".repeat(32)),
+            &format!("{} x", "x".repeat(32)),
         ] {
-            assert!(matches!(
-                load(&home, Some(token.to_string())),
-                Err(TokenError::WeakEnv)
-            ));
+            std::fs::write(home.join(FILE), short).unwrap();
+            assert!(matches!(load(&home), Err(TokenError::WeakFile { .. })));
         }
         std::fs::remove_dir_all(home).unwrap();
     }
@@ -158,7 +167,7 @@ mod tests {
     #[test]
     fn makes_one_on_first_start_and_keeps_it() {
         let home = folder("make");
-        let first = load(&home, None).unwrap();
+        let first = load(&home).unwrap();
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|b| b.is_ascii_hexdigit()));
         #[cfg(unix)]
@@ -170,7 +179,7 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        assert_eq!(load(&home, None).unwrap(), first);
+        assert_eq!(load(&home).unwrap(), first);
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -178,10 +187,7 @@ mod tests {
     fn a_broken_token_file_is_an_error_not_a_new_token() {
         let home = folder("broken");
         std::fs::write(home.join(FILE), "short\n").unwrap();
-        assert!(matches!(
-            load(&home, None),
-            Err(TokenError::WeakFile { .. })
-        ));
+        assert!(matches!(load(&home), Err(TokenError::WeakFile { .. })));
         assert_eq!(std::fs::read_to_string(home.join(FILE)).unwrap(), "short\n");
         std::fs::remove_dir_all(home).unwrap();
     }

@@ -149,15 +149,15 @@ fn validate_at(schema: &Value, value: &Value, at: &str, depth: usize) -> Result<
             return fail(&format!("is not {}", names.join(" or ")));
         }
     }
-    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
-        if !values.iter().any(|allowed| equal(allowed, value)) {
-            return fail("is not one of the values the schema lists");
-        }
+    if let Some(values) = schema.get("enum").and_then(Value::as_array)
+        && !values.iter().any(|allowed| equal(allowed, value))
+    {
+        return fail("is not one of the values the schema lists");
     }
-    if let Some(allowed) = schema.get("const") {
-        if !equal(allowed, value) {
-            return fail("is not the value the schema requires");
-        }
+    if let Some(allowed) = schema.get("const")
+        && !equal(allowed, value)
+    {
+        return fail("is not the value the schema requires");
     }
 
     match value {

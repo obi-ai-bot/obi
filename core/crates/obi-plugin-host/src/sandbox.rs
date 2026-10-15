@@ -454,10 +454,9 @@ fn resolver_folders() -> Vec<PathBuf> {
         .ok()
         .and_then(|file| file.parent().map(Path::to_path_buf))
         .filter(|folder| folder.starts_with("/run") && folder != Path::new("/run"))
+        && !kept.iter().any(|path| folder.starts_with(path))
     {
-        if !kept.iter().any(|path| folder.starts_with(path)) {
-            kept.push(folder);
-        }
+        kept.push(folder);
     }
     kept
 }

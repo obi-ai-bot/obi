@@ -1,0 +1,183 @@
+#!/usr/bin/env node
+// A stand-in for `codex app-server` in obid's tests: JSON-RPC over stdio, as AGENTS.md ("Codex")
+// and Engine/Codex.swift describe it. Run as `fake-codex app-server`. Threads are kept in
+// $CODEX_HOME/threads, so `thread/resume` works across processes as Codex's own do. What a turn
+// does comes from the thread's first prompt (the job's task):
+//   COMMIT: <file>   asks to write the file (a file change), writes it, asks to commit, commits
+//   ASK: <command>   asks to run the command and says what obid answered, and what it heard after
+//   OUTSIDE          asks to write a file outside the worktree
+//   UNKNOWN          sends a request obid doesn't know and says what came back
+//   ESCAPE           writes a file outside the worktree without asking, and says how that went
+//   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is ended
+//   FAIL             the turn fails with the API's error inside its message
+//   TWICE            round one says it isn't done; round two (a resumed thread) writes .obi/twice
+//   ENV              says its CODEX_HOME and HOME
+//   anything else    "Nothing to do."
+// It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable, or
+// obid's token, and when obid starts a thread anywhere but in a sandbox it has to ask about.
+
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { createInterface } from "node:readline";
+import { randomUUID } from "node:crypto";
+
+if (process.argv[2] !== "app-server") {
+  process.stderr.write("fake-codex: run as `fake-codex app-server`\n");
+  process.exit(2);
+}
+
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+const home = process.env.CODEX_HOME || join(process.env.HOME || "/nonexistent", ".codex");
+const threads = join(home, "threads");
+const leaked = Object.keys(process.env).filter((name) =>
+  name === "CLAUDECODE" || name.startsWith("CLAUDE_CODE_") || name.startsWith("ANTHROPIC_") ||
+  name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN");
+
+let nextId = 100;
+const waiting = new Map();
+const ask = (method, params) => new Promise((done) => {
+  const id = nextId++;
+  waiting.set(id, done);
+  send({ id, method, params });
+});
+let steered = [];
+let thread = null;
+let state = null;
+
+const save = () => writeFileSync(join(threads, `${thread}.json`), JSON.stringify(state));
+const item = (type, fields) => ({ type, id: randomUUID(), ...fields });
+const complete = (turnId, text, status = "completed", error = null) =>
+  send({ method: "turn/completed", params: { threadId: thread, turn: { id: turnId, status, error, items: text == null ? [] : [{ type: "agentMessage", id: "m1", text }] } } });
+
+async function runTurn(turnId, prompt) {
+  if (leaked.length) return complete(turnId, null, "failed", { message: `leaked: ${leaked.join(", ")}` });
+  if (state.sandbox !== "danger-full-access" || state.approvalPolicy !== "untrusted")
+    return complete(turnId, null, "failed", { message: `started with ${state.sandbox} / ${state.approvalPolicy}` });
+  const task = state.task;
+  const commit = task.match(/COMMIT: (\S+)/);
+  const command = task.match(/ASK: (.+)$/m);
+  if (commit) {
+    const file = resolve(commit[1]);
+    const change = item("fileChange", { changes: [{ path: file, kind: { type: "add" } }], status: "inProgress" });
+    send({ method: "item/started", params: { threadId: thread, turnId, item: change } });
+    const edit = await ask("item/fileChange/requestApproval", { threadId: thread, turnId, itemId: change.id });
+    if (edit.decision !== "accept") return complete(turnId, `edit: ${edit.decision}`);
+    writeFileSync(file, "hello\n");
+    const run = "/bin/zsh -lc 'git add -A && git commit -q -m add'";
+    send({ method: "item/started", params: { threadId: thread, turnId, item: item("commandExecution", { command: run, commandActions: [] }) } });
+    const commitAnswer = await ask("item/commandExecution/requestApproval", { threadId: thread, turnId, itemId: "c1", command: run });
+    if (commitAnswer.decision !== "accept") return complete(turnId, `commit: ${commitAnswer.decision}`);
+    execFileSync("git", ["add", commit[1]]);
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add ${commit[1]}`]);
+    return complete(turnId, `Added ${commit[1]}.`);
+  }
+  if (command) {
+    const answer = await ask("item/commandExecution/requestApproval", { threadId: thread, turnId, itemId: "c1", command: command[1] });
+    if (answer.decision === "decline") await new Promise((r) => setTimeout(r, 300));
+    return complete(turnId, `answer: ${answer.decision}${steered.length ? `\nheard: ${steered.join(" | ")}` : ""}`);
+  }
+  if (task.includes("OUTSIDE")) {
+    const change = item("fileChange", { changes: [{ path: resolve("../outside.txt") }] });
+    send({ method: "item/fileChange/patchUpdated", params: { threadId: thread, turnId, itemId: change.id, changes: change.changes } });
+    const answer = await ask("item/fileChange/requestApproval", { threadId: thread, turnId, itemId: change.id });
+    if (answer.decision === "accept") writeFileSync(resolve("../outside.txt"), "escaped\n");
+    await new Promise((r) => setTimeout(r, 300));
+    return complete(turnId, `answer: ${answer.decision}${steered.length ? `\nheard: ${steered.join(" | ")}` : ""}`);
+  }
+  if (task.includes("UNKNOWN")) {
+    const id = nextId++;
+    const answered = new Promise((done) => waiting.set(id, done));
+    send({ id, method: "item/tool/requestUserInput", params: { threadId: thread, turnId, questions: [] } });
+    const answer = await answered;
+    return complete(turnId, `unknown: ${JSON.stringify(answer)}`);
+  }
+  if (task.includes("SLEEP")) {
+    mkdirSync(".obi", { recursive: true });
+    let beats = 0;
+    writeFileSync(".obi/beat", String(beats));
+    setInterval(() => writeFileSync(".obi/beat", String(++beats)), 50);
+    return;
+  }
+  if (task.includes("ESCAPE")) {
+    // Codex runs danger-full-access: a write it doesn't ask about is held by obid's sandbox alone.
+    try {
+      writeFileSync(resolve("../escaped.txt"), "escaped\n");
+      return complete(turnId, "escape: written");
+    } catch (error) {
+      return complete(turnId, `escape: ${error.code}`);
+    }
+  }
+  if (task.includes("FAIL")) return complete(turnId, null, "failed", { message: JSON.stringify({ error: { message: "it broke" } }) });
+  if (task.includes("TWICE")) {
+    state.rounds = (state.rounds || 0) + 1;
+    save();
+    if (state.rounds === 1) return complete(turnId, "First round.");
+    mkdirSync(".obi", { recursive: true });
+    writeFileSync(".obi/twice", "");
+    return complete(turnId, `Round ${state.rounds} on thread ${thread}, which remembers: ${task}\nGOAL MET`);
+  }
+  if (task.includes("ENV")) return complete(turnId, `CODEX_HOME=${process.env.CODEX_HOME}\nHOME=${process.env.HOME}`);
+  // Only `item/completed` carries the words: Codex's newer turns leave `items` empty.
+  send({ method: "item/completed", params: { threadId: thread, turnId, item: { type: "agentMessage", id: "m0", text: "Nothing to do." } } });
+  return complete(turnId, null);
+}
+
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", (line) => {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (message.method === undefined) {
+    const done = waiting.get(message.id);
+    waiting.delete(message.id);
+    done?.(message.error ? { error: message.error } : message.result);
+    return;
+  }
+  const { id, method, params } = message;
+  switch (method) {
+    case "initialize":
+      return send({ id, result: { userAgent: "fake-codex/0.0.0" } });
+    case "initialized":
+      return;
+    case "thread/start":
+    case "thread/resume": {
+      mkdirSync(threads, { recursive: true });
+      if (method === "thread/resume") {
+        const file = join(threads, `${params.threadId}.json`);
+        if (!existsSync(file)) return send({ id, error: { code: -32600, message: `no thread ${params.threadId}` } });
+        thread = params.threadId;
+        state = JSON.parse(readFileSync(file, "utf8"));
+      } else {
+        thread = randomUUID();
+        state = { task: null };
+      }
+      state.sandbox = params.sandbox;
+      state.approvalPolicy = params.approvalPolicy;
+      save();
+      return send({ id, result: { thread: { id: thread } } });
+    }
+    case "turn/start": {
+      const turnId = randomUUID();
+      const text = params.input.map((i) => i.text).join("\n");
+      if (state.task === null) state.task = text;
+      state.model = params.model ?? null;
+      save();
+      send({ id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
+      send({ method: "turn/started", params: { threadId: thread, turn: { id: turnId } } });
+      runTurn(turnId, text);
+      return;
+    }
+    case "turn/steer":
+      steered.push(params.input.map((i) => i.text).join(" "));
+      return send({ id, result: { turnId: params.expectedTurnId } });
+    case "turn/interrupt":
+      return send({ id, result: {} });
+    default:
+      return send({ id, error: { code: -32601, message: `fake-codex doesn't know ${method}` } });
+  }
+});
+rl.on("close", () => process.exit(0));

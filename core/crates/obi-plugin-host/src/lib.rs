@@ -529,10 +529,10 @@ impl Drop for PluginHost {
     /// processes end with the runtime at the latest (they are killed on drop).
     fn drop(&mut self) {
         for plugin in self.inner.plugins.values() {
-            if let Ok(supervisor) = plugin.supervisor.try_lock() {
-                if let Some(supervisor) = supervisor.as_ref() {
-                    let _ = supervisor.stop.send(true);
-                }
+            if let Ok(supervisor) = plugin.supervisor.try_lock()
+                && let Some(supervisor) = supervisor.as_ref()
+            {
+                let _ = supervisor.stop.send(true);
             }
         }
     }
