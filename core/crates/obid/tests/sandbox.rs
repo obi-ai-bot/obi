@@ -889,3 +889,119 @@ fn a_job_reaches_no_preferences_pasteboard_or_keychain() {
         }
     }
 }
+
+/// A descendant that called `setsid` (and was orphaned onto launchd) ends when the job's
+/// program exits, and when the job is stopped (#460).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_setsid_process_ends_with_the_job() {
+    let world = world("setsid");
+    let spec = spec(&world, true, false, false);
+    let sandbox = Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))).unwrap();
+    let pidfile = world.temp.join("detached.pid");
+    let detach = r#"
+use POSIX ();
+my $path = $ARGV[0];
+my $pid = fork();
+die "fork: $!\n" unless defined $pid;
+if ($pid) { waitpid($pid, 0); exit 0; }
+POSIX::setsid();
+$pid = fork();
+die "fork2: $!\n" unless defined $pid;
+exit 0 if $pid;
+open(my $f, ">", $path) or die "open: $!\n";
+print $f $$;
+close $f;
+exec "/bin/sleep", "30";
+"#;
+    let env = obid::process::sandbox_env(&obid::process::tools_path(), &spec.temp, &[]);
+    let argv = sandbox.wrap(
+        &spec,
+        &[
+            "/usr/bin/perl".into(),
+            "-e".into(),
+            detach.into(),
+            pidfile.clone().into(),
+        ],
+    );
+    let output = Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .envs(env.clone())
+        .current_dir(&world.worktree)
+        .output()
+        .unwrap();
+    let ended_ok = output.status.success()
+        || std::os::unix::process::ExitStatusExt::signal(&output.status) == Some(9);
+    assert!(
+        ended_ok,
+        "job ended {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ended =
+        std::fs::read_to_string(&pidfile).expect("the detached process never wrote its pid");
+    assert!(
+        !running(ended.trim()),
+        "setsid process {ended} still running after the job ended"
+    );
+
+    let _ = std::fs::remove_file(&pidfile);
+    let hold = r#"
+use POSIX ();
+my $pid = fork();
+if ($pid == 0) {
+  POSIX::setsid();
+  exit 0 if fork;
+  open(my $f, ">", $ARGV[0]) or exit 1;
+  print $f $$;
+  close $f;
+  exec "/bin/sleep", "120";
+}
+waitpid($pid, 0);
+sleep 120;
+"#;
+    let argv = sandbox.wrap(
+        &spec,
+        &[
+            "/usr/bin/perl".into(),
+            "-e".into(),
+            hold.into(),
+            pidfile.clone().into(),
+        ],
+    );
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .envs(env)
+        .current_dir(&world.worktree)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pgid = child.id();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !pidfile.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let stopped = std::fs::read_to_string(&pidfile).expect("the detached process never started");
+    obid::process::signal_group(pgid, nix::sys::signal::Signal::SIGTERM);
+    std::thread::sleep(Duration::from_secs(2));
+    obid::process::signal_group(pgid, nix::sys::signal::Signal::SIGKILL);
+    let _ = child.wait();
+    assert!(
+        !running(stopped.trim()),
+        "setsid process {stopped} still running after the job was stopped"
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn running(pid: &str) -> bool {
+    Command::new("/bin/kill")
+        .args(["-0", pid])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}

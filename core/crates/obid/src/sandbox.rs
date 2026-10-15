@@ -166,6 +166,22 @@ impl Sandbox {
                 out.push(sandbox_exec.clone().into());
                 out.push("-p".into());
                 out.push(seatbelt_profile(&spec).into());
+                // The watcher is the session leader. When the job's program exits, or obid
+                // signals the group, it kills every process in the sandbox, including one
+                // that called setsid and left the group. kill -1 is safe only because the
+                // profile lets a process signal only its own sandbox, and only after the
+                // watcher has checked that a hidden path is really hidden.
+                out.push("/bin/sh".into());
+                out.push("-c".into());
+                out.push(WATCHER.into());
+                out.push("watcher".into());
+                out.push(
+                    spec.hidden
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| PathBuf::from("/"))
+                        .into(),
+                );
             }
         }
         out.extend(argv.iter().cloned());
@@ -457,8 +473,32 @@ fn seatbelt_profile(spec: &Spec) -> String {
     if !spec.network {
         profile.push_str("(deny network*)\n");
     }
+    // A process signals only others in this sandbox. The watcher's `kill -1` then reaches a
+    // descendant that called setsid, and nothing of the person's outside the sandbox.
+    profile.push_str("(deny signal)\n(allow signal (target same-sandbox))\n");
     profile
 }
+
+/// The first process inside a macOS job sandbox. It runs the job's program and, when that
+/// exits or this process is signalled, kills every process in the sandbox.
+const WATCHER: &str = r#"probe=$1; shift
+reap() {
+  # Not sandboxed: the probe is readable, and `kill -1` would reach the person's processes.
+  # Inside the sandbox a signal is allowed only to this sandbox, so `kill -1` is exactly
+  # what the job started, including a process that called setsid. It kills this process too.
+  /bin/ls "$probe" >/dev/null 2>&1 && return
+  kill -KILL -1 2>/dev/null
+}
+trap 'reap; exit 143' TERM
+exec 3<&0
+"$@" <&3 3<&- &
+child=$!
+exec 0</dev/null 1>/dev/null 2>&1 3<&-
+wait "$child"
+status=$?
+reap
+exit "$status"
+"#;
 
 /// Where Docker's socket is.
 const DOCKER_SOCKETS: [&str; 2] = ["/run/docker.sock", "/var/run/docker.sock"];
@@ -848,7 +888,8 @@ mod tests {
         assert!(profile.contains("(deny file-read* (subpath \"/h\") (subpath \"/Users/w\"))"));
         assert!(profile.contains("(literal \"/h/worktrees\")"));
         assert!(!profile.contains("(subpath \"/h/clones/o/n/.git/objects\")"));
-        assert!(profile.ends_with("(deny network*)\n"));
+        assert!(profile.contains("(deny network*)\n"));
+        assert!(profile.contains("(deny signal)\n(allow signal (target same-sandbox))\n"));
         for rule in [
             "(deny lsopen)",
             "(deny appleevent-send)",
