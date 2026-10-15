@@ -1774,11 +1774,16 @@ impl Jobs {
         });
 
         // 3. The request, as data, in the worktree.
-        let inputs = worktree.join(".obi").join("inputs");
-        std::fs::create_dir_all(&inputs)
+        // The worktree holds what the other Obi's branch commits: a `.obi` or `.obi/inputs` that
+        // is a link out of it fails the job, and nothing is written (crate::obi_dir).
+        let inputs = crate::obi_dir::folder(&worktree, "inputs")
             .map_err(|e| format!("obid can't make .obi/inputs: {e}"))?;
         let text = serde_json::to_vec_pretty(&quoted).map_err(|e| e.to_string())?;
-        std::fs::write(worktree.join(review::REQUEST_FILE), text)
+        let file = Path::new(review::REQUEST_FILE)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the request file has a name");
+        crate::obi_dir::write_new(&inputs, file, &text)
             .map_err(|e| format!("obid can't write the request: {e}"))?;
 
         // 4. The agent, with a fixed prompt, in the sandbox.

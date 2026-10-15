@@ -499,10 +499,15 @@ fn a_plugin_process_gives_quoted_context_inbox_events_and_a_redacted_log() {
         assert!(!log.contains(form.as_str()), "{form} is in obid's log");
     }
     assert!(!log.contains(TOKEN), "the token is in obid's log");
-    assert!(
-        log.matches("[redacted: api-token]").count() >= forms.len(),
-        "{log}"
-    );
+    // Each line whole, with nothing of an encoded run left around the marker.
+    let leaked: Vec<&str> = log.lines().filter(|l| l.contains("LEAK-LINE")).collect();
+    assert!(leaked.len() >= forms.len(), "{log}");
+    for line in leaked {
+        assert!(
+            line.contains("LEAK-LINE [redacted: api-token] end"),
+            "{line}"
+        );
+    }
     // Its environment holds no secret either.
     let env = std::fs::read_to_string(obid.home.join("plugin-data/notes/env.txt")).unwrap();
     assert!(!env.contains(TOKEN), "{env}");
@@ -584,4 +589,183 @@ fn a_plugin_process_gives_quoted_context_inbox_events_and_a_redacted_log() {
     // obid stops: the plug-in, and everything it started, with it.
     assert!(obid.stop().success());
     beats_stop(&obid);
+}
+
+/// The plug-ins an obid of these tests ships: the notes plug-in (tests/plugins/notes), alone.
+fn bundle_notes(folder: &Path) -> PathBuf {
+    let bundled = folder.join("bundled");
+    let notes = bundled.join("notes");
+    std::fs::create_dir_all(notes.join("bin")).unwrap();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/plugins/notes");
+    for file in ["obi-plugin.json", "bin/notes"] {
+        std::fs::copy(source.join(file), notes.join(file)).unwrap();
+    }
+    bundled
+}
+
+/// Past 100 open `pluginEvent` items of one plug-in, the oldest open ones are settled by
+/// themselves, in the order the events came: also when they all came in the same second.
+#[test]
+fn past_100_open_events_the_oldest_are_settled() {
+    let folder = Folder::new("plugins-burst");
+    let remote = fixture(&folder.0.join("fixture"));
+    let bundled = bundle_notes(&folder.0);
+    let mut obid = start(
+        &folder.0,
+        &plugin_config(&folder.0, &remote, Some(&bundled)),
+        None,
+    );
+    // review-12, assigned-7 (and review-12 again), then burst-1 to burst-105: 107 events.
+    let enabled = call(
+        &obid,
+        "PUT",
+        "/v1/obid/plugins/notes",
+        Some(&json!({"enabled": true, "config": {"burst": 105}})),
+    );
+    assert_eq!(enabled.body["state"], "ready", "{}", enabled.text);
+    let open = within(30, "107 events in the inbox", || {
+        let open = plugin_events(&obid, false);
+        let done = plugin_events(&obid, true);
+        (open.len() + done.len() >= 107).then_some(open)
+    });
+    let done = plugin_events(&obid, true);
+    let id = |event: &str| json!(event_item_id("notes", event));
+    let settled: Vec<Value> = done.iter().map(|i| i["id"].clone()).collect();
+    let mut oldest: Vec<Value> = vec![id("review-12"), id("assigned-7")];
+    oldest.extend((1..=5).map(|n| id(&format!("burst-{n}"))));
+    assert_eq!(settled.len(), 7, "{settled:?}");
+    for item in &oldest {
+        assert!(settled.contains(item), "{item} isn't settled: {settled:?}");
+    }
+    assert!(done.iter().all(|i| i["answer"].is_null()));
+    assert_eq!(open.len(), 100);
+    let open_ids: Vec<Value> = open.iter().map(|i| i["id"].clone()).collect();
+    for n in 6..=105 {
+        assert!(open_ids.contains(&id(&format!("burst-{n}"))), "burst-{n}");
+    }
+    // The inbox lists open items oldest first: in the order they came.
+    assert_eq!(open[0]["id"], id("burst-6"));
+    assert_eq!(open[99]["id"], id("burst-105"));
+    assert!(obid.stop().success());
+}
+
+/// Runs git in `dir`, and gives what it printed.
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// A folder outside every worktree, with what a job must never touch: `context/` and `inputs/`
+/// each holding a file.
+fn victim(folder: &Path) -> PathBuf {
+    let victim = folder.join("victim");
+    for sub in ["context", "inputs"] {
+        std::fs::create_dir_all(victim.join(sub)).unwrap();
+        std::fs::write(victim.join(sub).join("keep.md"), "the victim's own").unwrap();
+    }
+    victim
+}
+
+/// Every file under `dir`, relative, with its contents.
+fn tree(dir: &Path) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        for entry in std::fs::read_dir(&at).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let name = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                files.push((name, std::fs::read_to_string(&path).unwrap_or_default()));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// A repository that commits `.obi` as a link out of the worktree can't make obid delete or
+/// write anything there: with no plug-in enabled obid doesn't touch `.obi/` at all, and with a
+/// context plug-in that answers, it gives the agent no context (the job goes on) rather than
+/// write through the link.
+#[test]
+fn a_committed_obi_link_never_lets_context_out_of_the_worktree() {
+    let folder = Folder::new("plugins-obi-link");
+    let remote = fixture(&folder.0.join("fixture"));
+    let victim = victim(&folder.0);
+    let before = tree(&victim);
+    // The repository's main commits `.obi -> <victim>`.
+    let work = folder.0.join("work");
+    git_in(
+        &folder.0,
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            work.to_str().unwrap(),
+        ],
+    );
+    std::os::unix::fs::symlink(&victim, work.join(".obi")).unwrap();
+    git_in(&work, &["add", ".obi"]);
+    git_in(&work, &["commit", "-q", "-m", "Link .obi out"]);
+    git_in(&work, &["push", "-q", "origin", "HEAD:main"]);
+
+    let bundled = bundle_notes(&folder.0);
+    let mut obid = start(
+        &folder.0,
+        &plugin_config(&folder.0, &remote, Some(&bundled)),
+        None,
+    );
+    // No plug-in enabled.
+    let (job, _) = run_job(&obid, "investigate", "Look around.", None);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(tree(&victim), before);
+    // A context plug-in that answers.
+    let enabled = call(
+        &obid,
+        "PUT",
+        "/v1/obid/plugins/notes",
+        Some(&json!({"enabled": true})),
+    );
+    assert_eq!(enabled.body["state"], "ready", "{}", enabled.text);
+    let (job, _) = run_job(&obid, "investigate", "Look around.", None);
+    assert_eq!(job["status"], "done", "{job}");
+    let requests =
+        std::fs::read_to_string(obid.home.join("plugin-data/notes/requests.log")).unwrap();
+    assert!(requests.contains("context/query"), "the plug-in was asked");
+    assert_eq!(
+        tree(&victim),
+        before,
+        "something was written or removed through .obi"
+    );
+    // The link is the repository's, left as it is.
+    let worktree = obid
+        .home
+        .join("worktrees")
+        .join(job["id"].as_str().unwrap());
+    assert_eq!(std::fs::read_link(worktree.join(".obi")).unwrap(), victim);
+    assert!(obid.log().contains("isn't a folder"), "{}", obid.log());
+    assert!(obid.stop().success());
 }

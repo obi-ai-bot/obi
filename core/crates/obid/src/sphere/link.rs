@@ -89,6 +89,14 @@ const OBI_KEY_SECRET: &str = "obi-key";
 const DELEGATION_SECRET: &str = "sphere-delegation";
 const SPHERE_TOKEN_SECRET: &str = "sphere-token";
 
+/// The Obi key, as obid's log layer takes it out: its hex text (`keys/obi.key`) and its 32
+/// bytes, each in every common encoding (crate::secrets).
+fn learn_key(key: &Keypair) {
+    let seed = key.seed();
+    let text = hex::encode(seed);
+    crate::secrets::known().learn_forms(OBI_KEY_SECRET, &[text.as_bytes(), &seed]);
+}
+
 /// The link. One per obid; one Sphere per obid in this version.
 pub struct Link {
     config: Config,
@@ -220,7 +228,7 @@ impl Link {
         // What obid's log layer takes out of plug-ins' lines (crate::logs).
         let secrets = crate::secrets::known();
         if let Some(key) = &key {
-            secrets.learn(OBI_KEY_SECRET, hex::encode(key.seed()));
+            learn_key(key);
         }
         if let Some(delegation) = &delegation {
             secrets.learn(DELEGATION_SECRET, delegation);
@@ -409,7 +417,8 @@ impl Link {
                 return;
             }
             let plugin = event.plugin.as_str();
-            let mut open: Vec<(i64, String)> = state
+            // Oldest first, in the order they arrived (not by id: ids are hashes).
+            let mut open: Vec<(u64, String)> = state
                 .inbox
                 .values()
                 .filter(|i| {
@@ -417,7 +426,7 @@ impl Link {
                         && i.done.is_none()
                         && i.plugin.as_ref().and_then(|p| p["id"].as_str()) == Some(plugin)
                 })
-                .map(|i| (i.created, i.id.clone()))
+                .map(|i| (i.arrival_order(), i.id.clone()))
                 .collect();
             open.sort();
             let over = (open.len() + 1).saturating_sub(inbox::MAX_OPEN_EVENTS);
@@ -569,7 +578,7 @@ impl Link {
                         format!("obid couldn't keep its key: {e}"),
                     )
                 })?);
-                crate::secrets::known().learn(OBI_KEY_SECRET, hex::encode(key.seed()));
+                learn_key(&key);
                 self.lock().key = Some(key.clone());
                 key
             }
@@ -1814,7 +1823,12 @@ impl Link {
             items.sort_by(|a, b| b.done.cmp(&a.done).then_with(|| b.id.cmp(&a.id)));
             items.truncate(limit);
         } else {
-            items.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)));
+            // The order they came in, also within one second (Item::arrival_order).
+            items.sort_by(|a, b| {
+                a.arrival_order()
+                    .cmp(&b.arrival_order())
+                    .then_with(|| a.id.cmp(&b.id))
+            });
         }
         Value::Array(items.into_iter().map(Item::to_json).collect())
     }

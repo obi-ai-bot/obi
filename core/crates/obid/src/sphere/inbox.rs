@@ -45,6 +45,38 @@ pub struct Item {
     /// On a `pluginEvent`: the event, typed fields and quoted data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin: Option<Value>,
+    /// On a `pluginEvent`: when it arrived, in nanoseconds since the epoch, strictly after every
+    /// item obid made before it ([`arrival`]), so the oldest open one is known also among items
+    /// made in the same second. Kept, never shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrived: Option<u64>,
+}
+
+/// Now in nanoseconds since the epoch, strictly later than any earlier answer in this process:
+/// the order items arrived in, even within one second or when the clock steps back.
+pub fn arrival() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let mut last = LAST.load(Ordering::Relaxed);
+    loop {
+        let next = now.max(last + 1);
+        match LAST.compare_exchange_weak(last, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(seen) => last = seen,
+        }
+    }
+}
+
+impl Item {
+    /// The order items arrived in: `arrived`, or for an item without it the start of its second.
+    pub fn arrival_order(&self) -> u64 {
+        self.arrived
+            .unwrap_or_else(|| u64::try_from(self.created.max(0)).unwrap_or(0) * 1_000_000_000)
+    }
 }
 
 impl Item {
@@ -209,6 +241,7 @@ pub fn review_request_item(
             },
         })),
         plugin: None,
+        arrived: None,
     }
 }
 
@@ -241,6 +274,7 @@ pub fn permission_item(
         answer: None,
         obi: None,
         plugin: None,
+        arrived: None,
     }
 }
 
@@ -309,6 +343,7 @@ pub fn plugin_event_item(event: &obi_plugin_api::PluginEvent, now: i64) -> Item 
             "headSha": subject.head_sha,
             "quoted": {"actor": ev.actor, "title": ev.data.title, "url": ev.data.url},
         })),
+        arrived: Some(arrival()),
     }
 }
 

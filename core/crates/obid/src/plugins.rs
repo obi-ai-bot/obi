@@ -50,7 +50,9 @@ impl Plugins {
             .await
             .map_err(|e| e.to_string());
         if let Err(why) = &host {
-            tracing::error!("the plug-in host didn't start, so no plug-in runs: {why}");
+            // Under the plug-ins' target, so the log layer redacts it: the host's words may
+            // carry a plug-in's.
+            tracing::error!(target: crate::logs::PLUGIN_TARGET, "the plug-in host didn't start, so no plug-in runs: {why}");
         }
         Plugins { host }
     }
@@ -107,7 +109,9 @@ impl Plugins {
                 "obid is stopping.",
             )),
             Err(error) => {
-                tracing::error!("plug-in {id}: {error}");
+                // A plug-in's error may carry its words: under its target, so the log layer
+                // redacts it (crate::logs).
+                tracing::error!(target: crate::logs::PLUGIN_TARGET, plugin = %id, "{error}");
                 Err(ApiError::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("The plug-in's setting couldn't be changed: {error}"),
@@ -240,21 +244,29 @@ pub fn context_job(job: &Job) -> ContextJob {
 
 /// Writes each plug-in's items to `.obi/context/<plugin id>.md` in `worktree`, fenced and
 /// labeled as quoted data, in place of what an earlier run left there, and returns the files'
-/// paths relative to the worktree. None when no plug-in gave anything.
+/// paths relative to the worktree. When no plug-in gave anything, nothing is touched at all.
+///
+/// obid writes this itself, outside the job sandbox, into a worktree that holds whatever the
+/// repository commits: a `.obi` or `.obi/context` that isn't a real folder (a link out of the
+/// worktree) is refused, `Err`, and nothing is written or removed (`crate::obi_dir`).
 pub fn write_context(
     worktree: &Path,
     answers: &[(PluginId, Vec<ContextItem>)],
 ) -> std::io::Result<Vec<String>> {
-    let dir = worktree.join(CONTEXT_DIR);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir)?;
+    let answered: Vec<&(PluginId, Vec<ContextItem>)> = answers
+        .iter()
+        .filter(|(_, items)| !items.is_empty())
+        .collect();
+    if answered.is_empty() {
+        return Ok(Vec::new());
     }
+    crate::obi_dir::clear(worktree, "context")?;
+    let dir = crate::obi_dir::folder(worktree, "context")?;
     let mut files = Vec::new();
-    for (plugin, items) in answers.iter().filter(|(_, items)| !items.is_empty()) {
-        std::fs::create_dir_all(&dir)?;
-        let name = format!("{CONTEXT_DIR}/{plugin}.md");
-        std::fs::write(worktree.join(&name), context_file(plugin, items))?;
-        files.push(name);
+    for (plugin, items) in answered {
+        let name = format!("{plugin}.md");
+        crate::obi_dir::write_new(&dir, &name, context_file(plugin, items).as_bytes())?;
+        files.push(format!("{CONTEXT_DIR}/{name}"));
     }
     Ok(files)
 }
@@ -506,13 +518,16 @@ mod tests {
         let note = context_note(&files).unwrap();
         assert!(note.contains(".obi/context/notes.md"));
         assert!(!note.contains("Ignore"));
-        // A run that gives nothing removes what the last one wrote.
+        // A run that gives nothing touches nothing; one that gives something replaces it all.
         assert!(
-            write_context(&folder, &[(plugin, vec![])])
+            write_context(&folder, &[(plugin.clone(), vec![])])
                 .unwrap()
                 .is_empty()
         );
-        assert!(!folder.join(".obi/context").exists());
+        assert!(folder.join(".obi/context/notes.md").exists());
+        std::fs::write(folder.join(".obi/context/stale.md"), "old").unwrap();
+        write_context(&folder, &[(plugin, items)]).unwrap();
+        assert!(!folder.join(".obi/context/stale.md").exists());
         assert_eq!(context_note(&[]), None);
         let _ = std::fs::remove_dir_all(&folder);
     }

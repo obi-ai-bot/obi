@@ -32,7 +32,8 @@ pub struct Secrets {
 
 #[derive(Default)]
 struct Learned {
-    values: BTreeMap<String, Vec<u8>>,
+    /// Each name's value, in the forms it is kept in (the Obi key: its hex text and its bytes).
+    values: BTreeMap<String, Vec<Vec<u8>>>,
     needles: Vec<Needle>,
 }
 
@@ -43,18 +44,32 @@ struct Needle {
     text: String,
     /// Hex and URL-encoding read the same in either case: matched without regard to it.
     any_case: bool,
+    /// A base64 form: what is taken out is the whole base64 run that holds it, so no character
+    /// of the run around it (which encodes part of the value too) is left.
+    run: bool,
 }
 
 impl Secrets {
     /// Learns `value` as `name`, in place of what `name` held before. A value shorter than
     /// [`SHORTEST`] bytes is not learned (and the one held before under `name` is forgotten).
     pub fn learn(&self, name: &str, value: impl AsRef<[u8]>) {
-        let value = value.as_ref();
+        self.learn_forms(name, &[value.as_ref()]);
+    }
+
+    /// Learns one secret kept in several forms as `name`, each taken out in all its encodings:
+    /// the Obi key is both its hex text (`keys/obi.key`) and the 32 bytes that text spells. Forms
+    /// shorter than [`SHORTEST`] bytes are left out; with none left, `name` is forgotten.
+    pub fn learn_forms(&self, name: &str, forms: &[&[u8]]) {
+        let forms: Vec<Vec<u8>> = forms
+            .iter()
+            .filter(|form| form.len() >= SHORTEST)
+            .map(|form| form.to_vec())
+            .collect();
         let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        if value.len() < SHORTEST {
+        if forms.is_empty() {
             inner.values.remove(name);
         } else {
-            inner.values.insert(name.to_owned(), value.to_vec());
+            inner.values.insert(name.to_owned(), forms);
         }
         inner.needles = needles_of(&inner.values);
     }
@@ -109,23 +124,42 @@ fn marker(names: &[String]) -> String {
     format!("[redacted: {}]", names.join(", "))
 }
 
-/// `text` with every copy of `needle` replaced by its marker.
+/// A character a base64 run (standard or URL-safe) is made of, padding aside.
+fn is_base64_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_')
+}
+
+/// `text` with every copy of `needle` replaced by its marker; for a base64 form, the whole run
+/// of base64 characters (and its padding) around each copy.
 fn replace(text: &str, needle: &Needle) -> String {
     let marker = marker(std::slice::from_ref(&needle.name));
-    if !needle.any_case {
-        return text.replace(&needle.text, &marker);
-    }
     // ASCII lower case keeps every byte where it was, so positions found in the lower-cased
     // copy are the same in `text`.
-    let lower = text.to_ascii_lowercase();
-    let wanted = needle.text.to_ascii_lowercase();
+    let (haystack, wanted) = if needle.any_case {
+        (text.to_ascii_lowercase(), needle.text.to_ascii_lowercase())
+    } else {
+        (text.to_owned(), needle.text.clone())
+    };
+    let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    while let Some(found) = lower[at..].find(&wanted) {
-        let start = at + found;
+    while let Some(found) = haystack[at..].find(&wanted) {
+        let mut start = at + found;
+        let mut end = start + wanted.len();
+        if needle.run {
+            while start > at && is_base64_char(bytes[start - 1]) {
+                start -= 1;
+            }
+            while end < bytes.len() && is_base64_char(bytes[end]) {
+                end += 1;
+            }
+            while end < bytes.len() && bytes[end] == b'=' {
+                end += 1;
+            }
+        }
         out.push_str(&text[at..start]);
         out.push_str(&marker);
-        at = start + wanted.len();
+        at = end;
     }
     out.push_str(&text[at..]);
     out
@@ -220,10 +254,10 @@ fn runs() -> &'static [Regex] {
 
 /// Every form of every value, longest first, so a value goes before the parts that would match
 /// inside it.
-fn needles_of(values: &BTreeMap<String, Vec<u8>>) -> Vec<Needle> {
+fn needles_of(values: &BTreeMap<String, Vec<Vec<u8>>>) -> Vec<Needle> {
     let mut needles: Vec<Needle> = values
         .iter()
-        .flat_map(|(name, value)| needles_for(name, value))
+        .flat_map(|(name, forms)| forms.iter().flat_map(|form| needles_for(name, form)))
         .collect();
     needles.sort_by_key(|needle| std::cmp::Reverse(needle.text.len()));
     needles
@@ -234,10 +268,13 @@ fn needles_for(name: &str, bytes: &[u8]) -> Vec<Needle> {
         name: name.to_owned(),
         text,
         any_case,
+        run: false,
     };
     let mut needles = Vec::new();
     if let Ok(value) = std::str::from_utf8(bytes) {
-        needles.push(needle(value.to_owned(), false));
+        // A value that is hex text (a key file's) reads the same in either case.
+        let hex_text = value.bytes().all(|b| b.is_ascii_hexdigit());
+        needles.push(needle(value.to_owned(), hex_text));
         // A key or certificate over several lines: each long line on its own, the value with
         // Windows line ends, and the value as one line of a log writes its line breaks (`\n`).
         if value.contains('\n') {
@@ -266,9 +303,15 @@ fn needles_for(name: &str, bytes: &[u8]) -> Vec<Needle> {
     for run in base64_runs(bytes) {
         let safe = run.replace('+', "-").replace('/', "_");
         if safe != run {
-            needles.push(needle(safe, false));
+            needles.push(Needle {
+                run: true,
+                ..needle(safe, false)
+            });
         }
-        needles.push(needle(run, false));
+        needles.push(Needle {
+            run: true,
+            ..needle(run, false)
+        });
     }
     needles.push(needle(hex::encode(bytes), true));
     needles.push(needle(
@@ -360,6 +403,50 @@ mod tests {
                 redacted.starts_with("plugin=x the value is <"),
                 "{redacted}"
             );
+        }
+    }
+
+    /// No character of the base64 run that holds a value is left: each encodes part of it.
+    #[test]
+    fn the_whole_base64_run_goes() {
+        let secrets = secrets();
+        for text in [
+            b64(TOKEN.as_bytes()),
+            b64(format!("token={TOKEN}").as_bytes()),
+            b64(format!("xy{TOKEN}").as_bytes()),
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!("a{TOKEN}bc")),
+        ] {
+            assert_eq!(
+                secrets.redact(&format!("LEAK {text} end")),
+                "LEAK [redacted: api-token] end",
+                "{text}"
+            );
+        }
+    }
+
+    /// The Obi key, kept as hex text and as its 32 bytes: every common encoding of either.
+    #[test]
+    fn a_key_is_taken_out_in_every_common_encoding() {
+        let secrets = Secrets::default();
+        let seed: Vec<u8> = (0u8..32)
+            .map(|b| b.wrapping_mul(37).wrapping_add(11))
+            .collect();
+        let hex_text = hex::encode(&seed);
+        secrets.learn_forms("obi-key", &[hex_text.as_bytes(), &seed]);
+        let engines = [
+            base64::engine::general_purpose::STANDARD,
+            base64::engine::general_purpose::STANDARD_NO_PAD,
+            base64::engine::general_purpose::URL_SAFE,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        ];
+        let mut forms = vec![hex_text.clone(), hex_text.to_ascii_uppercase()];
+        for engine in engines {
+            forms.push(engine.encode(&seed));
+            forms.push(engine.encode(hex_text.as_bytes()));
+        }
+        for form in forms {
+            let redacted = secrets.redact(&format!("key: {form} end"));
+            assert_eq!(redacted, "key: [redacted: obi-key] end", "{form}");
         }
     }
 

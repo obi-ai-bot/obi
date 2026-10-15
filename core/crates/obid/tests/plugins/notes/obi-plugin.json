@@ -8,5 +8,6 @@
   "run": {"command": "bin/notes", "args": []},
   "events": {"kinds": ["pull_request.review_requested", "issue.assigned"]},
   "network": [],
-  "config": {"type": "object", "additionalProperties": false, "properties": {}}
+  "config": {"type": "object", "additionalProperties": false,
+             "properties": {"burst": {"type": "integer", "minimum": 0, "maximum": 500}}}
 }
