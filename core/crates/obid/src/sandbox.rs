@@ -496,6 +496,9 @@ child=$!
 exec 0</dev/null 1>/dev/null 2>&1 3<&-
 wait "$child"
 status=$?
+# `reap` kills this process too. The exit code is recorded first so a check that
+# passed is not reported as killed.
+echo "$status" > "$TMPDIR/.obid-status"
 reap
 exit "$status"
 "#;

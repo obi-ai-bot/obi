@@ -2667,6 +2667,15 @@ pub async fn run_check(
     mut signal: watch::Receiver<Signal>,
 ) -> std::io::Result<CheckRun> {
     let (reader, writer) = std::io::pipe()?;
+    // The macOS watcher records the program's real exit code here, then kills every
+    // process in the sandbox, itself included.
+    let status_file = env
+        .iter()
+        .find(|(key, _)| key == "TMPDIR")
+        .map(|(_, dir)| PathBuf::from(dir).join(".obid-status"));
+    if let Some(file) = &status_file {
+        let _ = std::fs::remove_file(file);
+    }
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| std::io::Error::other("nothing to run"))?;
@@ -2733,10 +2742,16 @@ pub async fn run_check(
         }
         output.push_str(CHECK_TOO_LONG);
     }
-    Ok(CheckRun {
-        passed: !timed_out && status.is_some_and(|s| s.success()),
-        output,
-    })
+    let passed = !timed_out
+        && status.is_some_and(|ended| {
+            ended.success()
+                || std::os::unix::process::ExitStatusExt::signal(&ended) == Some(9)
+                    && status_file
+                        .as_ref()
+                        .and_then(|file| std::fs::read_to_string(file).ok())
+                        .is_some_and(|text| text.trim() == "0")
+        });
+    Ok(CheckRun { passed, output })
 }
 
 #[cfg(test)]

@@ -941,6 +941,13 @@ exec "/bin/sleep", "30";
     );
     let ended =
         std::fs::read_to_string(&pidfile).expect("the detached process never wrote its pid");
+    let recorded = std::fs::read_to_string(world.temp.join(".obid-status"))
+        .expect("the watcher didn't record the program's exit code");
+    assert_eq!(
+        recorded.trim(),
+        "0",
+        "a finished program must not look killed"
+    );
     assert!(
         !running(ended.trim()),
         "setsid process {ended} still running after the job ended"
