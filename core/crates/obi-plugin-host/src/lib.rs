@@ -48,7 +48,6 @@ use tokio::process::Child;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-pub use obi_plugin_api as api;
 use obi_plugin_api::rpc::{self, Empty, InitializeParams, InitializeResult, method};
 use obi_plugin_api::{
     ContextItem, ContextRequest, Kind, MANIFEST_FILE, Manifest, McpServerSpec, PROTOCOL,
@@ -66,42 +65,55 @@ const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 /// The largest `plugins.json` the host reads.
 const MAX_SETTINGS_BYTES: u64 = 4 << 20;
 
-/// The lifecycle's times and the sandbox tool. [`Options::default`] is docs/ARCHITECTURE.md
-/// 5.3 and 5.4, which is what [`PluginHost::start`] uses; tests shorten the times.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Options {
-    /// How long a plug-in has to answer `initialize`: 10 seconds.
-    pub initialize_timeout: Duration,
-    /// How often a ready plug-in is pinged: every 60 seconds.
-    pub ping_interval: Duration,
-    /// How long it has to answer a ping: 5 seconds.
-    pub ping_timeout: Duration,
-    /// How long it has to answer `context/query`: 5 seconds.
-    pub context_timeout: Duration,
-    /// The waits before each restart in a row: 1, 2, then 4 seconds. A failure with no wait
-    /// left makes the plug-in `failed`.
-    pub restart_delays: Vec<Duration>,
-    /// How long after `shutdown` a plug-in still running is killed: 5 seconds.
-    pub stop_grace: Duration,
-    /// The sandbox tool, when not the system's: `None` is `/usr/bin/sandbox-exec` on macOS and
-    /// `bwrap` on `PATH` on Linux.
-    pub sandbox_program: Option<PathBuf>,
-}
+#[cfg(feature = "test-support")]
+pub use options::Options;
+#[cfg(not(feature = "test-support"))]
+use options::Options;
 
-impl Default for Options {
-    fn default() -> Options {
-        Options {
-            initialize_timeout: Duration::from_secs(10),
-            ping_interval: Duration::from_secs(60),
-            ping_timeout: Duration::from_secs(5),
-            context_timeout: Duration::from_secs(5),
-            restart_delays: vec![
-                Duration::from_secs(1),
-                Duration::from_secs(2),
-                Duration::from_secs(4),
-            ],
-            stop_grace: Duration::from_secs(5),
-            sandbox_program: None,
+mod options {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    /// The lifecycle's times and the sandbox tool. [`Options::default`] is docs/ARCHITECTURE.md
+    /// 5.3 and 5.4, which is what [`PluginHost::start`](crate::PluginHost::start) uses. Only the
+    /// host's own tests use others (shorter times, a missing sandbox tool), through the
+    /// `test-support` feature: `obid` has no way to change them, and none to pick another sandbox
+    /// tool.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Options {
+        /// How long a plug-in has to answer `initialize`: 10 seconds.
+        pub initialize_timeout: Duration,
+        /// How often a ready plug-in is pinged: every 60 seconds.
+        pub ping_interval: Duration,
+        /// How long it has to answer a ping: 5 seconds.
+        pub ping_timeout: Duration,
+        /// How long it has to answer `context/query`: 5 seconds.
+        pub context_timeout: Duration,
+        /// The waits before each restart in a row: 1, 2, then 4 seconds. A failure with no wait
+        /// left makes the plug-in `failed`.
+        pub restart_delays: Vec<Duration>,
+        /// How long after `shutdown` a plug-in still running is killed: 5 seconds.
+        pub stop_grace: Duration,
+        /// The sandbox tool, when not the system's: `None` is `/usr/bin/sandbox-exec` on macOS and
+        /// `bwrap` on `PATH` on Linux.
+        pub sandbox_program: Option<PathBuf>,
+    }
+
+    impl Default for Options {
+        fn default() -> Options {
+            Options {
+                initialize_timeout: Duration::from_secs(10),
+                ping_interval: Duration::from_secs(60),
+                ping_timeout: Duration::from_secs(5),
+                context_timeout: Duration::from_secs(5),
+                restart_delays: vec![
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                    Duration::from_secs(4),
+                ],
+                stop_grace: Duration::from_secs(5),
+                sandbox_program: None,
+            }
         }
     }
 }
@@ -189,13 +201,20 @@ struct Supervisor {
 
 impl PluginHost {
     /// Discovers the plug-ins in `home/plugins/` and starts the enabled ones, without waiting
-    /// for them to be ready. Uses [`Options::default`].
+    /// for them to be ready, with docs/ARCHITECTURE.md 5.3's and 5.4's times and the system's
+    /// sandbox tool.
     pub async fn start(home: &Path) -> Result<PluginHost, PluginError> {
-        PluginHost::start_with(home, Options::default()).await
+        PluginHost::start_options(home, Options::default()).await
     }
 
-    /// [`PluginHost::start`] with other times or another sandbox tool.
+    /// [`PluginHost::start`] with other times or another sandbox tool: for the host's own tests
+    /// only (the `test-support` feature), not part of docs/ARCHITECTURE.md 5.5.
+    #[cfg(feature = "test-support")]
     pub async fn start_with(home: &Path, options: Options) -> Result<PluginHost, PluginError> {
+        PluginHost::start_options(home, options).await
+    }
+
+    async fn start_options(home: &Path, options: Options) -> Result<PluginHost, PluginError> {
         let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
         let real_home = std::env::var_os("HOME")
             .map(PathBuf::from)

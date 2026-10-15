@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use obi_plugin_host::api::{ContextJob, ContextRequest, DEFAULT_MAX_BYTES, PluginError, Purpose};
+use obi_plugin_api::{ContextJob, ContextRequest, DEFAULT_MAX_BYTES, PluginError, Purpose};
 use obi_plugin_host::{PluginHost, PluginId};
 use serde_json::json;
 

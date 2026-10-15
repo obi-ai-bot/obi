@@ -15,6 +15,15 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[features]
+# `PluginHost::start_with` and `Options`: other times and another sandbox tool, for the host's
+# own tests only. Not part of docs/ARCHITECTURE.md 5.5; `obid` doesn't turn it on.
+test-support = []
+
+[dev-dependencies]
+# The host's tests turn `test-support` on for themselves.
+obi-plugin-host = { path = ".", features = ["test-support"] }
+
 # The plug-in the host's tests run, one of each kind (tests/plugins/): it speaks obi-plugin/0.1
 # and does what its settings say. Only the tests use it.
 [[bin]]

@@ -8,10 +8,10 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use common::{Home, id, options, sandbox_made, status, wait_until};
-use obi_plugin_host::PluginHost;
-use obi_plugin_host::api::{
+use obi_plugin_api::{
     ContextJob, ContextRequest, DEFAULT_MAX_BYTES, EventKind, McpServerSpec, PluginState, Purpose,
 };
+use obi_plugin_host::PluginHost;
 use serde_json::{Value, json};
 
 fn request() -> ContextRequest {

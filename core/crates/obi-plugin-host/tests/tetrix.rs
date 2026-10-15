@@ -8,10 +8,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use common::{Home, id, options, status};
+use obi_plugin_api::{Kind, MANIFEST_FILE, Manifest, McpServerSpec, PluginError, PluginState};
 use obi_plugin_host::PluginHost;
-use obi_plugin_host::api::{
-    Kind, MANIFEST_FILE, Manifest, McpServerSpec, PluginError, PluginState,
-};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};

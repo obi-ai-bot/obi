@@ -7,8 +7,8 @@ mod common;
 use std::time::Duration;
 
 use common::{Home, id, options, status};
+use obi_plugin_api::{Kind, PluginError, PluginState};
 use obi_plugin_host::PluginHost;
-use obi_plugin_host::api::{Kind, PluginError, PluginState};
 use serde_json::{Value, json};
 
 /// An `agent-mcp` plug-in with no process, so nothing here needs the sandbox.

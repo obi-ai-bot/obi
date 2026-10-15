@@ -349,6 +349,7 @@ name = "obi-plugin-host"
 version = "0.1.0"
 dependencies = [
  "obi-plugin-api",
+ "obi-plugin-host",
  "serde",
  "serde_json",
  "tokio",
