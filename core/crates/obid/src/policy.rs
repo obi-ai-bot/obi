@@ -15,11 +15,69 @@ use crate::agent::Answer;
 /// (`crate::review::DIFF_FILE`), so reading is all it needs.
 pub const REVIEW_TOOLS: [&str; 1] = ["Read"];
 
-/// Whether `command` publishes: a push, a remote changed, the GitHub CLI posting or calling the API.
+/// Git commands an owner job may run. Anything else (`git ship`, `git send-pack`) is treated as
+/// a publish: an alias or a transport command reads the same as `git push` from the words alone.
+const GIT_LOCAL: &[&str] = &[
+    "add",
+    "am",
+    "apply",
+    "archive",
+    "bisect",
+    "blame",
+    "branch",
+    "checkout",
+    "cherry-pick",
+    "clean",
+    "commit",
+    "commit-tree",
+    "describe",
+    "diff",
+    "difftool",
+    "fetch",
+    "for-each-ref",
+    "grep",
+    "hash-object",
+    "init",
+    "log",
+    "ls-files",
+    "ls-remote",
+    "ls-tree",
+    "merge",
+    "mv",
+    "notes",
+    "pull",
+    "range-diff",
+    "read-tree",
+    "rebase",
+    "reflog",
+    "reset",
+    "restore",
+    "rev-list",
+    "rev-parse",
+    "revert",
+    "rm",
+    "shortlog",
+    "show",
+    "stash",
+    "status",
+    "switch",
+    "tag",
+    "update-index",
+    "update-ref",
+    "version",
+    "whatchanged",
+    "worktree",
+    "write-tree",
+];
+
+/// Whether `command` publishes. Matching words is best-effort: the job sandbox is what holds a
+/// publish back (an invalid push URL, no code-host credentials). This still denies the forms a
+/// model tries first, including a shell wrapper, a git alias, a transport command and a REST merge.
 fn publishes(command: &str) -> bool {
-    let words: Vec<&str> = command.split_whitespace().collect();
-    let lower = command.to_ascii_lowercase();
-    if lower.contains("pushurl") {
+    let flat = command.replace(['\'', '"', '`'], " ");
+    let words: Vec<&str> = flat.split_whitespace().collect();
+    let lower = flat.to_ascii_lowercase();
+    if lower.contains("pushurl") || posts_to_a_code_host(&flat, &words) {
         return true;
     }
     for (i, word) in words.iter().enumerate() {
@@ -34,9 +92,27 @@ fn publishes(command: &str) -> bool {
                     1
                 };
             }
-            match (words.get(j), words.get(j + 1)) {
-                (Some(&"push"), _) => return true,
-                (Some(&"remote"), Some(&("set-url" | "add"))) => return true,
+            match words.get(j).copied() {
+                Some("push" | "send-pack" | "receive-pack" | "upload-pack" | "http-push") => {
+                    return true;
+                }
+                Some("remote") => {
+                    if matches!(
+                        words.get(j + 1).copied(),
+                        Some("set-url" | "add" | "remove" | "rm" | "rename")
+                    ) {
+                        return true;
+                    }
+                }
+                Some("config") => {
+                    if words[j + 1..].iter().any(|w| {
+                        let w = w.to_ascii_lowercase();
+                        w.contains("alias") || w.contains("pushurl") || w.contains(".url")
+                    }) {
+                        return true;
+                    }
+                }
+                Some(cmd) if !cmd.starts_with('-') && !GIT_LOCAL.contains(&cmd) => return true,
                 _ => {}
             }
         }
@@ -63,6 +139,39 @@ fn publishes(command: &str) -> bool {
         }
     }
     false
+}
+
+/// A direct REST write to a code host: `curl -X PUT https://api.github.com/…/merge`.
+fn posts_to_a_code_host(flat: &str, words: &[&str]) -> bool {
+    let client = words.iter().any(|w| {
+        matches!(
+            w.rsplit('/').next().unwrap_or(w),
+            "curl" | "wget" | "httpie" | "xh"
+        )
+    });
+    if !client {
+        return false;
+    }
+    let lower = flat.to_ascii_lowercase();
+    let host = [
+        "api.github.com",
+        "gitlab.com/api",
+        "api.bitbucket.org",
+        "bitbucket.org/2.0",
+    ]
+    .iter()
+    .any(|h| lower.contains(h));
+    if !host {
+        return false;
+    }
+    let method = words.windows(2).any(|pair| {
+        (pair[0].eq_ignore_ascii_case("-X") || pair[0].eq_ignore_ascii_case("--request"))
+            && matches!(
+                pair[1].to_ascii_lowercase().as_str(),
+                "put" | "post" | "patch" | "delete"
+            )
+    });
+    method || lower.contains("merge")
 }
 
 /// `path` with `.` and `..` taken out, without touching the disk.
@@ -269,14 +378,25 @@ mod tests {
             "gh pr create --fill",
             "gh api repos/x",
             "git config remote.origin.pushurl x",
+            // A shell wrapper, an alias, a transport command, a REST merge (#477).
+            "bash -c 'git push origin HEAD'",
+            "sh -c \"git push\"",
+            "git ship",
+            "git config alias.ship push",
+            "git -c alias.ship=push ship",
+            "git send-pack origin HEAD",
+            "curl -X PUT https://api.github.com/repos/o/r/pulls/1/merge",
         ] {
             assert!(publishes(command), "{command}");
         }
         for command in [
             "git status",
             "git log --oneline",
+            "git commit -m hello",
+            "bash -c 'git status'",
             "gh pr view 3",
             "echo push",
+            "curl https://example.com/merge",
         ] {
             assert!(!publishes(command), "{command}");
         }
