@@ -188,7 +188,7 @@ Engine/             Oby's engine, shared by the Mac app and the runner: the brai
 apps/ios/           the iPhone app (coming)
 apps/watch/         the Apple Watch app (coming)
 apps/shared/        Swift code the Apple apps share
-Android/            Android phones and Wear OS (later)
+apps/android/       Android phones and Wear OS (later)
 Desktop/            Windows and Linux (later)
 Character/          Oby the character, shared by every app: oby.html and three.js (see Character/README.md)
 docs/               the runner's API (docs/runner-api.md) and the pictures on this page
