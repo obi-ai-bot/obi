@@ -941,3 +941,290 @@ fn publish_by_hand_is_off_a_dismissed_job() {
         404
     );
 }
+
+/// A job's agent that asks for each of `calls` in turn (tests/agents/fake-claude, `ASKS:`).
+fn asking(obid: &Obid, mode: &str, calls: Value) -> String {
+    dispatch(
+        obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "mode": mode,
+               "task": format!("ASKS: {calls}")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn bash(command: &str) -> Value {
+    json!({"tool": "Bash", "input": {"command": command}})
+}
+
+/// The job once its agent waits for the owner's OK on a permission titled `title`.
+fn waiting_for(obid: &Obid, id: &str, title: &str) -> Value {
+    within(60, &format!("{id} waits for its OK on {title}"), || {
+        let body = job(obid, id);
+        (body["permission"]["title"] == title).then_some(body)
+    })
+}
+
+/// The open inbox items of job `id`.
+fn open_items(obid: &Obid, id: &str) -> Vec<Value> {
+    call(obid, "GET", "/v1/inbox", None)
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["job"] == id)
+        .cloned()
+        .collect()
+}
+
+/// PermissionTests.theAPIAnswersPermissionsAndModes, with the inbox's side of
+/// aPermissionWaitsInTheInboxAndAlwaysSavesARuleTheNextPromptUses and
+/// denyReachesTheAgentWithTheWords: in `ask` a command waits for the owner, on the job (its card,
+/// with the rule "always" saves) and in the inbox; `POST /v1/jobs/{id}/permission` answers it
+/// (422 for another decision, 409 for a permission that isn't the one waiting, 404 for an unknown
+/// job); always saves the rule, which answers the next prompt it covers by itself; words in the
+/// inbox are a no that reaches the agent; the job's mode changes; Settings › Permissions' default
+/// changes what new jobs get; rules are listed and forgotten.
+#[test]
+fn the_api_answers_permissions_and_modes() {
+    let folder = Folder::new("permissions");
+    let (obid, _) = obid(&folder);
+    let id = asking(
+        &obid,
+        "ask",
+        json!([
+            bash("swift test"),
+            bash("swift test --filter X"),
+            bash("make lint")
+        ]),
+    );
+    let waiting = waiting_for(&obid, &id, "Run swift test");
+    assert_eq!(waiting["mode"], "ask");
+    assert_eq!(waiting["status"], "running");
+    assert_eq!(waiting["step"], "Waiting for your OK");
+    let card = &waiting["permission"];
+    assert_eq!(card["rule"], "Bash(swift test:*)");
+    assert_eq!(
+        card["always"],
+        "Yes, and don't ask again for swift test in obi-e2e/fixture-app"
+    );
+    assert_eq!(card["detail"], "swift test");
+    assert_eq!(card["tool"], "Bash");
+    let permission = card["id"].as_str().unwrap().to_owned();
+    assert!(
+        permission.starts_with('p') && permission.len() == 7,
+        "{card}"
+    );
+    let items = open_items(&obid, &id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["kind"], "permission");
+    assert_eq!(items[0]["id"], format!("{id}-permission-{permission}"));
+    assert_eq!(items[0]["text"], "Run swift test");
+    assert_eq!(
+        items[0]["options"],
+        json!(["Allow", "Always allow", "Deny"])
+    );
+
+    let answer = |job: &str, body: Value| {
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{job}/permission"),
+            Some(&body),
+        )
+    };
+    assert_eq!(
+        answer(&id, json!({"id": permission, "decision": "maybe"})).status,
+        422
+    );
+    assert_eq!(
+        answer(&id, json!({"id": "p000000", "decision": "allow"})).status,
+        409
+    );
+    assert_eq!(
+        answer("nope", json!({"id": "p1", "decision": "allow"})).status,
+        404
+    );
+    assert_eq!(
+        answer(
+            &id,
+            json!({"id": permission, "decision": "deny", "message": "x".repeat(2001)})
+        )
+        .status,
+        422
+    );
+    let always = answer(&id, json!({"id": permission, "decision": "always"}));
+    assert_eq!(always.status, 200, "{}", always.text);
+    // The rule saved answers `swift test --filter X` by itself; `make lint` asks.
+    let next = waiting_for(&obid, &id, "Run make lint");
+    assert_eq!(next["permission"]["rule"], "Bash(make lint:*)");
+    let rules = call(&obid, "GET", "/v1/permissions/rules", None).body;
+    let rule = rules[0].as_object().unwrap();
+    assert_eq!(rules.as_array().unwrap().len(), 1, "{rules}");
+    let mut keys: Vec<&str> = rule.keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(keys, ["created", "decision", "id", "repo", "rule"]);
+    assert_eq!(rule["rule"], "Bash(swift test:*)");
+    assert_eq!(rule["repo"], "obi-e2e/fixture-app");
+    assert_eq!(rule["decision"], "allow");
+    let done = call(&obid, "GET", "/v1/inbox?state=done", None).body;
+    let first = done
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == format!("{id}-permission-{permission}"))
+        .cloned()
+        .unwrap_or_else(|| panic!("{done}"));
+    assert_eq!(first["answer"], "Always allow");
+
+    // Words of the owner's own, in the inbox, are a no that reaches the agent.
+    let items = open_items(&obid, &id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    let said = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{}/answer", items[0]["id"].as_str().unwrap()),
+        Some(&json!({"answer": "No, run only the tests"})),
+    );
+    assert_eq!(said.status, 200, "{}", said.text);
+    assert_eq!(said.body["answer"], "No, run only the tests");
+    assert_eq!(said.body["state"], "done");
+    let ended = ended(&obid, &id);
+    assert_eq!(ended["status"], "done", "{ended}");
+    assert_eq!(
+        ended["summary"],
+        "answers: allow, allow, deny: No, run only the tests"
+    );
+    assert_eq!(ended["notes"], json!(["No, run only the tests"]));
+    assert!(ended["permission"].is_null());
+
+    let mode = |body: Value| call(&obid, "POST", &format!("/v1/jobs/{id}/mode"), Some(&body));
+    assert_eq!(mode(json!({"mode": "sometimes"})).status, 422);
+    let changed = mode(json!({"mode": "acceptEdits"}));
+    assert_eq!(changed.status, 200, "{}", changed.text);
+    assert_eq!(changed.body["mode"], "acceptEdits");
+    assert_eq!(
+        call(
+            &obid,
+            "POST",
+            "/v1/jobs/nope/mode",
+            Some(&json!({"mode": "ask"}))
+        )
+        .status,
+        404
+    );
+
+    assert_eq!(
+        call(&obid, "GET", "/v1/status", None).body["permissions"]["mode"],
+        "bypass"
+    );
+    assert_eq!(
+        call(
+            &obid,
+            "PUT",
+            "/v1/settings/permissions",
+            Some(&json!({"mode": "never"}))
+        )
+        .status,
+        422
+    );
+    let set = call(
+        &obid,
+        "PUT",
+        "/v1/settings/permissions",
+        Some(&json!({"mode": "ask"})),
+    );
+    assert_eq!(set.body, json!({"mode": "ask"}));
+    assert_eq!(
+        call(&obid, "GET", "/v1/settings/permissions", None).body,
+        json!({"mode": "ask"})
+    );
+    assert_eq!(
+        call(&obid, "GET", "/v1/status", None).body["permissions"]["mode"],
+        "ask"
+    );
+    let defaulted = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Look around"}),
+    );
+    assert_eq!(defaulted["mode"], "ask");
+    ended_ok(&obid, defaulted["id"].as_str().unwrap());
+
+    let rule_id = rule["id"].as_str().unwrap();
+    let forgot = call(
+        &obid,
+        "DELETE",
+        &format!("/v1/permissions/rules/{rule_id}"),
+        None,
+    );
+    assert_eq!(forgot.status, 200, "{}", forgot.text);
+    assert_eq!(forgot.body, json!([]));
+    assert_eq!(
+        call(&obid, "DELETE", "/v1/permissions/rules/nope", None).status,
+        404
+    );
+}
+
+fn ended_ok(obid: &Obid, id: &str) {
+    let job = ended(obid, id);
+    assert_eq!(job["status"], "done", "{job}");
+}
+
+/// A waiting permission the job's new mode allows is answered at once (`POST /v1/jobs/{id}/mode`);
+/// words told to the job while one waits are a no with those words (`POST /v1/jobs/{id}/messages`);
+/// stopping a waiting job drops its permission and settles its inbox item; in `acceptEdits` a
+/// file edit in the worktree goes through and a command asks; in `plan` an edit is refused.
+#[test]
+fn modes_answer_what_they_allow_and_stopping_drops_the_permission() {
+    let folder = Folder::new("modes");
+    let (obid, _) = obid(&folder);
+
+    let moved = asking(&obid, "ask", json!([bash("swift test")]));
+    waiting_for(&obid, &moved, "Run swift test");
+    let bypass = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{moved}/mode"),
+        Some(&json!({"mode": "bypass"})),
+    );
+    assert_eq!(bypass.status, 200, "{}", bypass.text);
+    assert_eq!(ended(&obid, &moved)["summary"], "answers: allow");
+
+    let told = asking(&obid, "ask", json!([bash("make")]));
+    waiting_for(&obid, &told, "Run make");
+    let words = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{told}/messages"),
+        Some(&json!({"text": "use swift build instead"})),
+    );
+    assert_eq!(words.status, 200, "{}", words.text);
+    assert_eq!(
+        ended(&obid, &told)["summary"],
+        "answers: deny: use swift build instead"
+    );
+
+    let edits = asking(
+        &obid,
+        "acceptEdits",
+        json!([{"tool": "Edit", "input": {"file_path": "src/a.js"}}, bash("rm -rf build")]),
+    );
+    waiting_for(&obid, &edits, "Run rm");
+    let stopped = call(&obid, "POST", &format!("/v1/jobs/{edits}/stop"), None);
+    assert_eq!(stopped.body["status"], "stopped");
+    assert!(stopped.body["permission"].is_null(), "{}", stopped.text);
+    assert!(open_items(&obid, &edits).is_empty());
+
+    let planning = asking(
+        &obid,
+        "plan",
+        json!([{"tool": "Edit", "input": {"file_path": "src/a.js"}}, {"tool": "Read", "input": {"file_path": "src/a.js"}}]),
+    );
+    let planned = ended(&obid, &planning);
+    let summary = planned["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("answers: deny: Plan mode: read only") && summary.ends_with(", allow"),
+        "{planned}"
+    );
+}

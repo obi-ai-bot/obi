@@ -19,7 +19,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::agent::{self, Answer, Event, Launch, Turn};
+use crate::agent::{self, Answer, Event, Launch, Ruling, Turn};
 use crate::conn::{self, Conn, Cut, RpcError};
 use crate::process;
 
@@ -50,7 +50,7 @@ pub async fn run_turn(
     options: &Options,
     limit: Duration,
     stop: watch::Receiver<process::Signal>,
-    decide: impl Fn(&str, &Value) -> Answer,
+    decide: impl Fn(&str, &Value) -> Ruling,
     on_event: impl FnMut(Event),
 ) -> std::io::Result<Turn> {
     let conn = Conn::spawn(&launch, limit, stop, true).await?;
@@ -423,7 +423,7 @@ struct Run<D, E> {
     plan_approved: bool,
 }
 
-impl<D: Fn(&str, &Value) -> Answer, E: FnMut(Event)> Run<D, E> {
+impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
     fn signed_out(&self) -> String {
         format!(
             "{} · {} is signed out: sign in with {}'s own login on this account's folder (its configDir).",
@@ -689,11 +689,22 @@ impl<D: Fn(&str, &Value) -> Answer, E: FnMut(Event)> Run<D, E> {
                     Some(calls) if calls.is_empty() => {
                         Answer::Deny("obid couldn't see which files this change writes.".into())
                     }
-                    Some(calls) => calls
-                        .iter()
-                        .map(|(tool, input)| (self.decide)(tool, input))
-                        .find(|a| matches!(a, Answer::Deny(_)))
-                        .unwrap_or(Answer::Allow),
+                    Some(calls) => {
+                        let mut answer = Answer::Allow;
+                        for (tool, input) in &calls {
+                            let ruling = (self.decide)(tool, input);
+                            match self.conn.settle(ruling).await {
+                                Ok(Answer::Allow) => {}
+                                Ok(deny) => {
+                                    answer = deny;
+                                    break;
+                                }
+                                // Stopped while the owner was asked: nothing more is answered.
+                                Err(_) => return,
+                            }
+                        }
+                        answer
+                    }
                 };
                 let reply = match answer {
                     Answer::Allow => match option(request, "allow_once") {
@@ -720,7 +731,11 @@ impl<D: Fn(&str, &Value) -> Answer, E: FnMut(Event)> Run<D, E> {
             Some("cursor/create_plan") => {
                 // The plan, as Claude Code's ExitPlanMode: the job's rule decides.
                 let plan = params["plan"].as_str().unwrap_or("");
-                let reply = match (self.decide)("ExitPlanMode", &json!({ "plan": plan })) {
+                let ruling = (self.decide)("ExitPlanMode", &json!({ "plan": plan }));
+                let Ok(answer) = self.conn.settle(ruling).await else {
+                    return;
+                };
+                let reply = match answer {
                     Answer::Allow => {
                         self.plan_approved =
                             self.applied.as_deref() == Some(self.options.plan_mode.as_str());

@@ -16,7 +16,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::agent::{self, Answer, Event, Launch, Turn};
+use crate::agent::{self, Answer, Event, Launch, Ruling, Turn};
 use crate::conn::{self, Conn, Cut, RpcError};
 use crate::process;
 
@@ -45,7 +45,7 @@ pub async fn run_turn(
     options: &Options,
     limit: Duration,
     stop: watch::Receiver<process::Signal>,
-    decide: impl Fn(&str, &Value) -> Answer,
+    decide: impl Fn(&str, &Value) -> Ruling,
     on_event: impl FnMut(Event),
 ) -> std::io::Result<Turn> {
     let conn = Conn::spawn(&launch, limit, stop, false).await?;
@@ -122,7 +122,7 @@ struct Run<D, E> {
     ended: Option<(String, bool)>,
 }
 
-impl<D: Fn(&str, &Value) -> Answer, E: FnMut(Event)> Run<D, E> {
+impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
     async fn turn(&mut self, prompt: &str, options: &Options) -> Result<(), Stop> {
         let version = env!("CARGO_PKG_VERSION");
         self.call(
@@ -257,8 +257,12 @@ impl<D: Fn(&str, &Value) -> Answer, E: FnMut(Event)> Run<D, E> {
             _ => return self.conn.refuse(&id).await,
         };
         for (tool, input) in &calls {
-            if let Answer::Deny(why) = (self.decide)(tool, input) {
-                return self.decline(&id, params, why).await;
+            let ruling = (self.decide)(tool, input);
+            match self.conn.settle(ruling).await {
+                Ok(Answer::Allow) => {}
+                Ok(Answer::Deny(why)) => return self.decline(&id, params, why).await,
+                // Stopped while the owner was asked: the turn ends.
+                Err(_) => return,
             }
         }
         self.conn.reply(&id, json!({"decision": "accept"})).await;

@@ -421,3 +421,134 @@ pub async fn publish_action(
     };
     Err(ApiError::new(StatusCode::CONFLICT, why))
 }
+
+/// `POST /v1/jobs/{id}/permission`: `{"id", "decision": "allow" | "always" | "deny", "message"}`,
+/// the owner's answer to the job's waiting permission. Returns the job, with the next waiting one
+/// or null.
+pub async fn permission(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    if shared.jobs.get(&id).is_none() {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB));
+    }
+    let value: Value = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "That isn't JSON."))?;
+    let shape =
+        "The body is {\"id\", \"decision\": \"allow\" | \"always\" | \"deny\", \"message\"}.";
+    let permission = value
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, shape))?;
+    let decision = value
+        .get("decision")
+        .and_then(Value::as_str)
+        .and_then(crate::permissions::Decision::parse)
+        .ok_or_else(|| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, shape))?;
+    let message = match value.get("message") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text.as_str()),
+        Some(_) => return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, shape)),
+    };
+    use crate::jobs::PermissionRefused;
+    match shared
+        .jobs
+        .answer_permission(&id, permission, decision, message)
+    {
+        Ok(job) => Ok(json(StatusCode::OK, job.to_json())),
+        Err(PermissionRefused::NoJob) => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+        Err(PermissionRefused::NotWaiting(why)) => Err(ApiError::new(StatusCode::CONFLICT, why)),
+        Err(PermissionRefused::Refused(why)) => {
+            Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, why))
+        }
+    }
+}
+
+/// The mode a body names: `{"mode": "ask" | "acceptEdits" | "plan" | "bypass"}`.
+fn mode_of(body: &Bytes) -> Result<crate::permissions::Mode, ApiError> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "That isn't JSON."))?;
+    value
+        .get("mode")
+        .and_then(Value::as_str)
+        .and_then(crate::permissions::Mode::parse)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "mode is ask, acceptEdits, plan or bypass.",
+            )
+        })
+}
+
+/// `POST /v1/jobs/{id}/mode`: how much the job asks, from now on.
+pub async fn mode(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    if shared.jobs.get(&id).is_none() {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB));
+    }
+    let mode = mode_of(&body)?;
+    let job = shared
+        .jobs
+        .set_mode(&id, mode)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, NO_JOB))?;
+    Ok(json(StatusCode::OK, job.to_json()))
+}
+
+/// `GET /v1/settings/permissions`: the mode new jobs get.
+pub async fn permission_settings(State(shared): State<Arc<Shared>>) -> Response {
+    json(
+        StatusCode::OK,
+        json!({"mode": shared.jobs.default_mode().as_str()}),
+    )
+}
+
+/// `PUT /v1/settings/permissions`: `{"mode"}`, the mode new jobs get, kept across restarts. Jobs
+/// already made keep theirs.
+pub async fn set_permission_settings(
+    State(shared): State<Arc<Shared>>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let mode = mode_of(&body)?;
+    shared.jobs.set_default_mode(mode).map_err(|e| {
+        tracing::error!("can't keep the permission mode: {e}");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The setting couldn't be kept.",
+        )
+    })?;
+    Ok(json(StatusCode::OK, json!({"mode": mode.as_str()})))
+}
+
+/// `GET /v1/permissions/rules`: the saved rules, oldest first.
+pub async fn permission_rules(State(shared): State<Arc<Shared>>) -> Response {
+    let rules: Vec<Value> = shared.jobs.rules().iter().map(|r| r.to_json()).collect();
+    json(StatusCode::OK, Value::Array(rules))
+}
+
+/// `DELETE /v1/permissions/rules/{id}`: forgets one, and answers with the rules left.
+pub async fn forget_permission_rule(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    match shared.jobs.forget_rule(&id) {
+        None => Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "There's no such rule.",
+        )),
+        Some(Err(e)) => {
+            tracing::error!("can't keep the permission rules: {e}");
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The rules couldn't be kept.",
+            ))
+        }
+        Some(Ok(left)) => Ok(json(
+            StatusCode::OK,
+            Value::Array(left.iter().map(|r| r.to_json()).collect()),
+        )),
+    }
+}

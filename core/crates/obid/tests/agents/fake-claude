@@ -5,6 +5,8 @@
 //   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is ended
 //   FAIL             ends the turn with an error result
 //   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
+//   ASKS: <json>     asks for each of a list of {"tool", "input"} in turn, then ends the turn with
+//                    "answers: allow, deny: <why>, …"
 //   LOGIN: <home>    reads its login in its HOME, writes a hook into its ~/.claude/settings.json
 //                    and its ~/.claude.json, and tries the same in the person's real <home>
 //   ECHO             ends the turn with "heard: <the prompt> resume=<the session it resumed, or none>"
@@ -25,6 +27,14 @@ const leaked = Object.keys(process.env).filter((name) =>
   name === "CLAUDECODE" || name.startsWith("CLAUDE_CODE_") || name.startsWith("ANTHROPIC_") || name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN");
 
 let asked = null;
+let queue = [];
+let listing = false;
+const said = [];
+const askNext = () => {
+  const { tool, input } = queue.shift();
+  asked = tool;
+  emit({ type: "control_request", request_id: `r${said.length + 1}`, request: { subtype: "can_use_tool", tool_name: tool, input } });
+};
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", (line) => {
   let message;
@@ -34,9 +44,14 @@ rl.on("line", (line) => {
     return;
   }
   if (message.type === "control_response" && asked) {
-    const behavior = message.response?.response?.behavior;
-    result(`answer: ${behavior}`);
+    const answer = message.response?.response ?? {};
     asked = null;
+    if (listing) {
+      said.push(answer.behavior === "deny" ? `deny: ${answer.message}` : answer.behavior);
+      if (queue.length) return askNext();
+      return result(`answers: ${said.join(", ")}`);
+    }
+    result(`answer: ${answer.behavior}`);
     return;
   }
   if (message.type !== "user") return;
@@ -45,6 +60,7 @@ rl.on("line", (line) => {
   if (leaked.length) return result(`leaked: ${leaked.join(", ")}`, true);
   const commit = prompt.match(/COMMIT: (\S+)/);
   const ask = prompt.match(/ASK: (\{.*\})/);
+  const asks = prompt.match(/ASKS: (\[.*\])/);
   const login = prompt.match(/LOGIN: (\S+)/);
   if (commit) {
     writeFileSync(commit[1], "hello\n");
@@ -84,6 +100,11 @@ rl.on("line", (line) => {
     setInterval(() => writeFileSync(".obi/beat", String(++beats)), 50);
   } else if (prompt.includes("FAIL")) {
     result("it broke", true);
+  } else if (asks) {
+    queue.push(...JSON.parse(asks[1]));
+    said.length = 0;
+    listing = true;
+    askNext();
   } else if (ask) {
     const { tool, input } = JSON.parse(ask[1]);
     asked = tool;

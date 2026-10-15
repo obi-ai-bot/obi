@@ -144,6 +144,41 @@ impl Conn {
         }
     }
 
+    /// The answer `ruling` comes to: now, or once the owner gives it. While obid waits for them the
+    /// turn's clock stands still (its time limit moves on by the wait), and a stop ends the wait.
+    /// A question nobody will answer any more (obid dropped it) is a no.
+    pub async fn settle(
+        &mut self,
+        ruling: crate::agent::Ruling,
+    ) -> Result<crate::agent::Answer, Cut> {
+        use crate::agent::{Answer, Ruling};
+        let mut asked = match ruling {
+            Ruling::Now(answer) => return Ok(answer),
+            Ruling::Ask(asked) => asked,
+        };
+        let deadline = self.give_up_at.deadline();
+        let since = tokio::time::Instant::now();
+        let answer = loop {
+            if self.stopped {
+                return Err(Cut::Stopped);
+            }
+            tokio::select! {
+                answer = &mut asked => {
+                    break answer.unwrap_or_else(|_| Answer::Deny(
+                        "Nobody answered that: obid let the question go.".into(),
+                    ));
+                }
+                changed = self.stop.changed() => {
+                    if changed.is_err() || *self.stop.borrow() != process::Signal::Run {
+                        self.stopped = true;
+                    }
+                }
+            }
+        };
+        self.give_up_at.as_mut().reset(deadline + since.elapsed());
+        Ok(answer)
+    }
+
     /// Writes one message as a line. An agent that stopped reading says so through its exit.
     pub async fn send(&mut self, message: &Value) {
         let mut message = message.clone();

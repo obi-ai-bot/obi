@@ -512,3 +512,38 @@ fn the_real_cursor_agent_signed_out_says_so() {
             .unwrap_or_default()
     );
 }
+
+/// In `ask`, Codex's and Cursor's commands wait for the owner like Claude Code's
+/// (docs/runner-api.md, "Permission modes"): the job shows the permission, and the owner's answer
+/// reaches the tool as its own decision (Codex's `accept` or `decline`, Cursor's `allow-once` or
+/// `reject-once`).
+#[test]
+fn codex_and_cursor_ask_the_owner_in_ask_mode() {
+    let folder = Folder::new("ask-tools");
+    let obid = obid(&folder, false);
+    let codex = dispatch(
+        &obid,
+        json!({"agent": "codex", "task": "ASK: node --test", "mode": "ask"}),
+    );
+    let cursor = dispatch(
+        &obid,
+        json!({"agent": "cursor", "task": "ASK: node --test", "mode": "ask"}),
+    );
+    let answer = |id: &str, decision: &str| {
+        let job = within(60, "the tool waits for the owner", || {
+            let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+            (job["permission"]["title"] == "Run node --test").then_some(job)
+        });
+        let answered = call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/permission"),
+            Some(&json!({"id": job["permission"]["id"], "decision": decision})),
+        );
+        assert_eq!(answered.status, 200, "{}", answered.text);
+    };
+    answer(&codex, "allow");
+    answer(&cursor, "deny");
+    assert_eq!(summary(&ended(&obid, &codex)), "answer: accept");
+    assert_eq!(summary(&ended(&obid, &cursor)), "answer: reject-once");
+}

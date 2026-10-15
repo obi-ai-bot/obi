@@ -70,6 +70,20 @@ pub enum Answer {
     Deny(String),
 }
 
+/// obid's ruling on a permission prompt: an answer now, or one the owner gives later (the job's
+/// mode asks them: `crate::permissions`), which the adapter waits for ([`Conn::settle`]).
+#[derive(Debug)]
+pub enum Ruling {
+    Now(Answer),
+    Ask(tokio::sync::oneshot::Receiver<Answer>),
+}
+
+impl From<Answer> for Ruling {
+    fn from(answer: Answer) -> Ruling {
+        Ruling::Now(answer)
+    }
+}
+
 /// What the agent did that the job shows as it goes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -142,7 +156,7 @@ pub async fn run_turn(
     prompt: &str,
     limit: Duration,
     stop: watch::Receiver<process::Signal>,
-    decide: impl Fn(&str, &Value) -> Answer,
+    decide: impl Fn(&str, &Value) -> Ruling,
     mut on_event: impl FnMut(Event),
 ) -> std::io::Result<Turn> {
     let mut conn = Conn::spawn(&launch, limit, stop, false).await?;
@@ -166,7 +180,11 @@ pub async fn run_turn(
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 let input = request.get("input").cloned().unwrap_or_else(|| json!({}));
-                let response = match decide(tool, &input) {
+                // The owner's answer may take a while: the turn's clock stands still meanwhile.
+                let Ok(answer) = conn.settle(decide(tool, &input)).await else {
+                    break;
+                };
+                let response = match answer {
                     Answer::Allow => json!({"behavior": "allow", "updatedInput": input}),
                     Answer::Deny(why) => {
                         on_event(Event::Denied(why.clone()));

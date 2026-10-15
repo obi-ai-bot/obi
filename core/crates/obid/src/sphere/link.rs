@@ -221,10 +221,21 @@ impl Link {
             seen.extend(exchange.envelope_ids().map(str::to_owned));
             by_id.insert(exchange.correlation_id.clone(), exchange);
         }
+        let now = time::now();
         let items = inbox
             .load_all()
             .into_iter()
-            .map(|i| (i.id.clone(), i))
+            .map(|mut i| {
+                // A permission waited on an agent that ended with obid: its job's agent asks again
+                // when it runs, so the old item is done by itself.
+                if i.kind == "permission" && i.done.is_none() {
+                    i.done = Some(now);
+                    if let Err(e) = inbox.save(&i) {
+                        tracing::error!("can't keep inbox item {}: {e}", i.id);
+                    }
+                }
+                (i.id.clone(), i)
+            })
             .collect();
         let client = membership
             .as_ref()
@@ -261,6 +272,15 @@ impl Link {
             following: AtomicBool::new(false),
             stopping,
         });
+        // The inbox hears of the permissions jobs wait on. Jobs tells it with none of its own
+        // locks held, and never while this Link's state is locked (only `start_obi_review` is
+        // called under it, and an Obi-to-Obi review never asks the owner).
+        let hook = Arc::downgrade(&link);
+        link.jobs.on_permission(Arc::new(move |note| {
+            if let Some(link) = hook.upgrade() {
+                link.permission_note(note);
+            }
+        }));
         let hook = Arc::downgrade(&link);
         link.jobs.on_review_end(Arc::new(move |job, done| {
             let link = hook.upgrade();
@@ -317,6 +337,92 @@ impl Link {
                 tokio::spawn(async move { link.reply_failed(&cid, None).await });
             }
         }
+    }
+
+    /// A permission waits for the owner: its item, which settles any other open item of the job's
+    /// (one open item per job). Or one stopped waiting: its item is done, with the owner's answer
+    /// or none.
+    fn permission_note(&self, note: crate::jobs::PermissionNote) {
+        use crate::jobs::PermissionNote;
+        let now = time::now();
+        let mut changed = Vec::new();
+        {
+            let mut state = self.lock();
+            match note {
+                PermissionNote::Waiting(job, permission) => {
+                    let item = inbox::permission_item(&job, &permission, now);
+                    for other in state.inbox.values_mut() {
+                        if other.job == job.id && other.done.is_none() && other.id != item.id {
+                            other.done = Some(now);
+                            changed.push(other.clone());
+                        }
+                    }
+                    if !state.inbox.contains_key(&item.id) {
+                        state.inbox.insert(item.id.clone(), item.clone());
+                        changed.push(item);
+                    }
+                }
+                PermissionNote::Settled {
+                    job,
+                    permission,
+                    answer,
+                } => {
+                    let id = inbox::permission_item_id(&job, &permission);
+                    if let Some(item) = state.inbox.get_mut(&id).filter(|i| i.done.is_none()) {
+                        item.done = Some(now);
+                        item.answer = answer;
+                        changed.push(item.clone());
+                    }
+                }
+            }
+        }
+        for item in &changed {
+            self.save_item(item);
+        }
+    }
+
+    /// `POST /v1/inbox/{id}/answer` on a `permission` item: the owner's answer goes to the job (an
+    /// answer of their own words is a no, with those words for the agent); done or later only
+    /// settles or puts off the item.
+    fn answer_permission_item(
+        &self,
+        item: Item,
+        answer: Option<String>,
+        later: Option<i64>,
+    ) -> Result<Value, ApiError> {
+        let now = time::now();
+        let Some(answer) = answer else {
+            let mut item = item;
+            match later {
+                Some(at) => item.later = Some(at),
+                None => item.done = Some(now),
+            }
+            self.lock().inbox.insert(item.id.clone(), item.clone());
+            self.save_item(&item);
+            return Ok(item.to_json());
+        };
+        let permission = item
+            .id
+            .strip_prefix(&format!("{}-permission-", item.job))
+            .unwrap_or("")
+            .to_owned();
+        let (decision, words) = crate::permissions::inbox_decision(&answer);
+        use crate::jobs::PermissionRefused;
+        match self
+            .jobs
+            .answer_permission(&item.job, &permission, decision, words.as_deref())
+        {
+            Ok(_) => {}
+            Err(PermissionRefused::NoJob) => {
+                return Err(api(StatusCode::CONFLICT, "Its job is gone."));
+            }
+            Err(PermissionRefused::NotWaiting(why)) => return Err(api(StatusCode::CONFLICT, why)),
+            Err(PermissionRefused::Refused(why)) => {
+                return Err(api(StatusCode::UNPROCESSABLE_ENTITY, why));
+            }
+        }
+        let settled = self.lock().inbox.get(&item.id).cloned().unwrap_or(item);
+        Ok(settled.to_json())
     }
 
     fn save_exchange(&self, exchange: &Exchange) {
@@ -1672,6 +1778,14 @@ impl Link {
                 .ok_or_else(|| api(StatusCode::NOT_FOUND, "There's no such inbox item."))?;
             if item.done.is_some() {
                 return Err(api(StatusCode::CONFLICT, "That item is done already."));
+            }
+            if item.kind == "permission" {
+                drop(state);
+                return match given {
+                    Given::Answer(answer) => self.answer_permission_item(item, Some(answer), None),
+                    Given::Done => self.answer_permission_item(item, None, None),
+                    Given::Later(at) => self.answer_permission_item(item, None, Some(at)),
+                };
             }
             if let Given::Later(at) = &given {
                 let mut item = item;

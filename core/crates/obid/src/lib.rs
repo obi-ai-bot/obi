@@ -17,6 +17,7 @@ pub mod events;
 pub mod git;
 pub mod job;
 pub mod jobs;
+pub mod permissions;
 pub mod policy;
 pub mod process;
 pub mod review;

@@ -121,6 +121,10 @@ pub struct Job {
     /// body}`, the body exactly as received. Data, never in a prompt. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obi_request: Option<Value>,
+    /// The permission its agent waits on now, for the owner's OK (docs/runner-api.md, "Permission
+    /// modes").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<crate::permissions::Permission>,
     /// The owner's words (`POST /v1/jobs/{id}/messages`) the agent hasn't heard yet: its next
     /// turn's prompt. Never in the API's job (`notes` has them all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -181,6 +185,7 @@ impl Job {
             obi: None,
             review_result: None,
             obi_request: None,
+            permission: None,
             heard: Vec::new(),
             asked: false,
         }
@@ -305,7 +310,7 @@ impl Job {
             "startWhen": null,
             "waiting": self.waiting.as_ref().filter(|_| self.status == Status::Queued),
             "mode": self.mode.as_deref().unwrap_or("bypass"),
-            "permission": null,
+            "permission": self.permission,
             "connectionUses": [],
             "pipeline": self.pipeline(),
             "title": self.short_title(),

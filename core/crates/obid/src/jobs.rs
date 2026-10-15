@@ -7,7 +7,7 @@
 //! ([`Jobs::start_obi_review`]): a fresh worktree detached at the request's commit, the request
 //! quoted as data, the agent reading only, the check in the sandbox, a typed result body.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -17,10 +17,11 @@ use obi_protocol::types::ReviewRequest;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 
-use crate::agent::{self, Event as AgentEvent, Launch, Tool};
+use crate::agent::{self, Answer, Event as AgentEvent, Launch, Ruling, Tool};
 use crate::config::{Config, Repo};
 use crate::events::Events;
 use crate::job::{Job, ObiRef, Phase, Status, Waiting};
+use crate::permissions::{self, Call, Decision, Mode, Permission, Rule};
 use crate::process::{self, Signal};
 use crate::sandbox::{self, Sandbox, Spec};
 use crate::store::{self, Store};
@@ -79,6 +80,39 @@ pub type ReviewHook = Arc<
         + Sync,
 >;
 
+/// What the inbox hears about permissions: one waits for the owner now, or one stopped waiting
+/// (answered, with the words the owner gave, or let go).
+#[derive(Debug, Clone)]
+pub enum PermissionNote {
+    Waiting(Box<Job>, Permission),
+    Settled {
+        job: String,
+        permission: String,
+        answer: Option<String>,
+    },
+}
+
+/// Who is told about permissions (the inbox: `crate::sphere::Link`).
+pub type PermissionHook = Arc<dyn Fn(PermissionNote) + Send + Sync>;
+
+/// A prompt waiting for the owner: the agent's call, its card, and where the answer goes.
+struct Ask {
+    call: Call,
+    permission: Permission,
+    reply: tokio::sync::oneshot::Sender<Answer>,
+}
+
+/// Why a permission wasn't answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionRefused {
+    /// `404`.
+    NoJob,
+    /// `409`: it isn't the permission waiting now.
+    NotWaiting(String),
+    /// `422`.
+    Refused(String),
+}
+
 /// Why a setting wasn't changed: a value out of range (`422`), or one obid couldn't keep (`500`).
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
@@ -99,6 +133,8 @@ struct State {
     workers: HashMap<String, watch::Sender<Signal>>,
     /// The jobs whose agent had its last turn: they take no more words until they end.
     wrapping: std::collections::HashSet<String>,
+    /// Each job's prompts waiting for the owner, the one shown first.
+    asks: HashMap<String, VecDeque<Ask>>,
 }
 
 /// Every job obid has, and the workers running them.
@@ -118,6 +154,10 @@ pub struct Jobs {
     preparing: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Told when an Obi-to-Obi review ends.
     review_hook: std::sync::OnceLock<ReviewHook>,
+    /// Told when a permission waits for the owner, and when it stops waiting.
+    permission_hook: std::sync::OnceLock<PermissionHook>,
+    /// Settings › Permissions' default mode and the saved rules (`home/permissions.json`).
+    permissions: Mutex<permissions::Kept>,
 }
 
 impl Jobs {
@@ -131,6 +171,8 @@ impl Jobs {
         let store = Store::open(&config.home)?;
         let mut jobs = HashMap::new();
         for mut job in store.load_all() {
+            // A permission waited on an agent that is gone: the agent asks again.
+            job.permission = None;
             if job.status == Status::Running {
                 job.status = Status::Queued;
                 job.step = "obid restarted while this ran: starting it again".into();
@@ -141,6 +183,7 @@ impl Jobs {
         }
         let identity = commit_identity(&config.owner);
         let max_running = crate::settings::load(&config.home).max_running as usize;
+        let kept = permissions::load(&config.home);
         Ok(Arc::new(Jobs {
             config,
             store,
@@ -150,6 +193,7 @@ impl Jobs {
                 jobs,
                 workers: HashMap::new(),
                 wrapping: std::collections::HashSet::new(),
+                asks: HashMap::new(),
             }),
             changed: Notify::new(),
             max_running: std::sync::atomic::AtomicUsize::new(max_running),
@@ -157,6 +201,8 @@ impl Jobs {
             identity,
             preparing: Mutex::new(HashMap::new()),
             review_hook: std::sync::OnceLock::new(),
+            permission_hook: std::sync::OnceLock::new(),
+            permissions: Mutex::new(kept),
         }))
     }
 
@@ -447,7 +493,10 @@ impl Jobs {
             .filter(|c| !c.trim().is_empty());
         job.model = new.model.map(|m| m.trim().to_owned());
         job.files = files;
-        job.mode = Some(new.mode.unwrap_or_else(|| "bypass".into()));
+        job.mode = Some(
+            new.mode
+                .unwrap_or_else(|| self.default_mode().as_str().to_owned()),
+        );
         job.base = Some(new.base.unwrap_or_else(|| repo.default_branch.clone()));
         job.branch = match new
             .branch
@@ -599,6 +648,7 @@ impl Jobs {
             }
             None => false,
         };
+        self.drop_asks(id);
         let stopped = self.update(id, |job| {
             job.status = Status::Stopped;
             job.step = String::new();
@@ -648,6 +698,24 @@ impl Jobs {
         let tool = Tool::from_id(&job.agent)
             .map(Tool::name)
             .unwrap_or("The agent");
+        // A waiting permission takes the words as its no: the agent hears nothing else until it's
+        // answered.
+        let waiting = self
+            .lock()
+            .asks
+            .get(id)
+            .and_then(|asks| asks.front().map(|a| a.permission.id.clone()));
+        if let Some(permission) = waiting {
+            return Some(
+                self.answer_permission(id, &permission, Decision::Deny, Some(text))
+                    .map_err(|e| match e {
+                        PermissionRefused::NoJob => Refused("There's no such job.".into()),
+                        PermissionRefused::NotWaiting(why) | PermissionRefused::Refused(why) => {
+                            Refused(why)
+                        }
+                    }),
+            );
+        }
         let heard = |job: &mut Job| {
             job.notes.get_or_insert_with(Vec::new).push(text.to_owned());
             job.heard.push(text.to_owned());
@@ -729,6 +797,311 @@ impl Jobs {
             self.update(id, |_| {});
         }
         words
+    }
+
+    /// Who is told about permissions (once; a second call changes nothing).
+    pub fn on_permission(&self, hook: PermissionHook) {
+        let _ = self.permission_hook.set(hook);
+    }
+
+    fn note(&self, note: PermissionNote) {
+        if let Some(hook) = self.permission_hook.get() {
+            hook(note);
+        }
+    }
+
+    fn kept(&self) -> std::sync::MutexGuard<'_, permissions::Kept> {
+        self.permissions.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Settings › Permissions: the mode new jobs get.
+    pub fn default_mode(&self) -> Mode {
+        self.kept().default_mode()
+    }
+
+    /// Changes the mode new jobs get, and keeps it. Jobs already made keep theirs.
+    pub fn set_default_mode(&self, mode: Mode) -> std::io::Result<()> {
+        let mut kept = self.kept();
+        let mut changed = kept.clone();
+        changed.mode = Some(mode.as_str().to_owned());
+        permissions::save(&self.config.home, &changed)?;
+        *kept = changed;
+        Ok(())
+    }
+
+    /// The saved rules, oldest first.
+    pub fn rules(&self) -> Vec<Rule> {
+        self.kept().rules.clone()
+    }
+
+    /// Forgets a rule: the rules left, or `None` for a rule obid doesn't have.
+    pub fn forget_rule(&self, id: &str) -> Option<std::io::Result<Vec<Rule>>> {
+        let mut kept = self.kept();
+        if !kept.rules.iter().any(|r| r.id == id) {
+            return None;
+        }
+        let mut changed = kept.clone();
+        changed.rules.retain(|r| r.id != id);
+        if let Err(e) = permissions::save(&self.config.home, &changed) {
+            return Some(Err(e));
+        }
+        *kept = changed;
+        Some(Ok(kept.rules.clone()))
+    }
+
+    /// Saves an allow rule for a repository, once; the prompts waiting now, in every job, follow it.
+    fn save_rule(&self, rule: &str, repo: &str) {
+        {
+            let mut kept = self.kept();
+            if kept
+                .rules
+                .iter()
+                .any(|r| r.rule == rule && r.repo == repo && r.decision == "allow")
+            {
+                return;
+            }
+            let mut changed = kept.clone();
+            changed.rules.push(Rule {
+                id: permissions::new_rule_id(),
+                rule: rule.to_owned(),
+                repo: repo.to_owned(),
+                decision: "allow".into(),
+                created: obi_protocol::time::now(),
+            });
+            if let Err(e) = permissions::save(&self.config.home, &changed) {
+                tracing::error!("can't keep the permission rule {rule}: {e}");
+                return;
+            }
+            *kept = changed;
+        }
+        let waiting: Vec<String> = self.lock().asks.keys().cloned().collect();
+        for id in waiting {
+            self.reconsider(&id);
+        }
+    }
+
+    /// The rules for one repository.
+    fn rules_for(&self, repo: &str) -> Vec<Rule> {
+        self.kept()
+            .rules
+            .iter()
+            .filter(|r| r.repo == repo)
+            .cloned()
+            .collect()
+    }
+
+    /// The job's mode, as it names it.
+    fn mode_of(job: &Job) -> Mode {
+        job.mode
+            .as_deref()
+            .and_then(Mode::parse)
+            .unwrap_or(Mode::Bypass)
+    }
+
+    /// A prompt obid's fixed rules let through: the job's mode and its repository's rules allow or
+    /// refuse it now, or it waits for the owner, shown on the job and in the inbox.
+    fn rule_on(&self, id: &str, tool: &str, input: &Value, worktree: &Path) -> Ruling {
+        let Some(job) = self.get(id) else {
+            return Ruling::Now(Answer::Deny("The job is gone.".into()));
+        };
+        let call = Call::new(tool, input);
+        match permissions::decide(
+            &call,
+            Self::mode_of(&job),
+            &self.rules_for(&job.repo),
+            worktree,
+        ) {
+            permissions::Verdict::Allow => Ruling::Now(Answer::Allow),
+            permissions::Verdict::Deny(why) => Ruling::Now(Answer::Deny(why)),
+            permissions::Verdict::Ask => {
+                let permission =
+                    permissions::card(&call, &permissions::new_id(), &job.repo, worktree);
+                let (reply, answer) = tokio::sync::oneshot::channel();
+                let first = {
+                    let mut state = self.lock();
+                    let asks = state.asks.entry(id.to_owned()).or_default();
+                    asks.push_back(Ask {
+                        call,
+                        permission,
+                        reply,
+                    });
+                    asks.len() == 1
+                };
+                if first {
+                    self.show(id, None);
+                }
+                Ruling::Ask(answer)
+            }
+        }
+    }
+
+    /// The job shows its first waiting permission, or, with none left, goes on, its step saying
+    /// what happened. The inbox hears of it.
+    fn show(&self, id: &str, step: Option<String>) {
+        let first = self
+            .lock()
+            .asks
+            .get(id)
+            .and_then(|asks| asks.front().map(|a| a.permission.clone()));
+        let shown = self.get(id).and_then(|j| j.permission);
+        if first.as_ref().map(|p| &p.id) == shown.as_ref().map(|p| &p.id) {
+            if let Some(step) = step {
+                self.update(id, |job| job.step = step);
+            }
+            return;
+        }
+        // The inbox has it before the job shows it: whoever sees the one finds the other.
+        if let (Some(job), Some(permission)) = (self.get(id), first.clone()) {
+            self.note(PermissionNote::Waiting(Box::new(job), permission));
+        }
+        self.update(id, |job| {
+            job.permission = first.clone();
+            if first.is_some() {
+                job.step = "Waiting for your OK".into();
+            } else if let Some(step) = step {
+                job.step = step;
+            }
+        });
+    }
+
+    /// The job's waiting prompts after its mode or the rules changed: what's allowed or refused
+    /// now is answered, the rest keep waiting.
+    fn reconsider(&self, id: &str) {
+        let Some(job) = self.get(id) else { return };
+        let worktree = self.worktree_path(id);
+        let rules = self.rules_for(&job.repo);
+        let mode = Self::mode_of(&job);
+        let mut answered: Vec<(Ask, Answer)> = Vec::new();
+        {
+            let mut state = self.lock();
+            let Some(asks) = state.asks.get_mut(id) else {
+                return;
+            };
+            let mut kept = VecDeque::new();
+            while let Some(ask) = asks.pop_front() {
+                match permissions::decide(&ask.call, mode, &rules, &worktree) {
+                    permissions::Verdict::Allow => answered.push((ask, Answer::Allow)),
+                    permissions::Verdict::Deny(why) => answered.push((ask, Answer::Deny(why))),
+                    permissions::Verdict::Ask => kept.push_back(ask),
+                }
+            }
+            *asks = kept;
+        }
+        if answered.is_empty() {
+            return;
+        }
+        let step = answered.first().map(|(ask, answer)| match answer {
+            Answer::Allow => format!("Allowed: {}", ask.permission.title),
+            Answer::Deny(_) => format!("Refused: {}", ask.permission.title),
+        });
+        for (ask, answer) in answered {
+            self.note(PermissionNote::Settled {
+                job: id.to_owned(),
+                permission: ask.permission.id.clone(),
+                answer: None,
+            });
+            let _ = ask.reply.send(answer);
+        }
+        self.show(id, step);
+    }
+
+    /// The owner answers the job's waiting permission: allow it once, always (a rule for the
+    /// repository), or no, with their words for the agent.
+    pub fn answer_permission(
+        &self,
+        id: &str,
+        permission: &str,
+        decision: Decision,
+        message: Option<&str>,
+    ) -> Result<Job, PermissionRefused> {
+        let job = self.get(id).ok_or(PermissionRefused::NoJob)?;
+        let words = message.map(str::trim).filter(|w| !w.is_empty());
+        if words.is_some_and(|w| w.chars().count() > 2000) {
+            return Err(PermissionRefused::Refused(
+                "Tell the agent something of up to 2,000 characters.".into(),
+            ));
+        }
+        let ask = {
+            let mut state = self.lock();
+            let asks = state.asks.get_mut(id);
+            let Some(asks) =
+                asks.filter(|a| a.front().is_some_and(|a| a.permission.id == permission))
+            else {
+                return Err(PermissionRefused::NotWaiting(
+                    "That permission isn't waiting any more.".into(),
+                ));
+            };
+            if decision == Decision::Always
+                && asks.front().is_some_and(|a| a.permission.rule.is_none())
+            {
+                return Err(PermissionRefused::Refused(
+                    "This one has no rule to save: allow it once instead.".into(),
+                ));
+            }
+            asks.pop_front().expect("one waits")
+        };
+        let said = match decision {
+            Decision::Allow => permissions::ALLOW.to_owned(),
+            Decision::Always => permissions::ALWAYS_ALLOW.to_owned(),
+            Decision::Deny => words.unwrap_or(permissions::DENY).to_owned(),
+        };
+        let answer = match decision {
+            Decision::Deny => Answer::Deny(words.unwrap_or(permissions::SAID_NO).to_owned()),
+            _ => Answer::Allow,
+        };
+        let title = ask.permission.title.clone();
+        // Its item settles, and its words are noted, before the agent hears the answer (and asks
+        // its next).
+        self.note(PermissionNote::Settled {
+            job: id.to_owned(),
+            permission: permission.to_owned(),
+            answer: Some(said),
+        });
+        if let Some(words) = words {
+            self.update(id, |job| {
+                job.notes
+                    .get_or_insert_with(Vec::new)
+                    .push(words.to_owned());
+            });
+        }
+        let _ = ask.reply.send(answer);
+        if decision == Decision::Always
+            && let Some(rule) = &ask.permission.rule
+        {
+            self.save_rule(rule, &job.repo);
+        }
+        self.show(
+            id,
+            Some(if decision == Decision::Deny {
+                format!("You said no: {title}")
+            } else {
+                format!("Allowed: {title}")
+            }),
+        );
+        Ok(self.get(id).unwrap_or(job))
+    }
+
+    /// Changes how much the job asks, from now on: the prompts waiting now that the new mode
+    /// allows are answered. A finished job keeps the mode for when it runs again.
+    pub fn set_mode(&self, id: &str, mode: Mode) -> Option<Job> {
+        self.update(id, |job| job.mode = Some(mode.as_str().to_owned()))?;
+        self.reconsider(id);
+        self.get(id)
+    }
+
+    /// The job's waiting prompts go: nobody will answer them (it was stopped, or ended).
+    fn drop_asks(&self, id: &str) {
+        let dropped = self.lock().asks.remove(id).unwrap_or_default();
+        for ask in &dropped {
+            self.note(PermissionNote::Settled {
+                job: id.to_owned(),
+                permission: ask.permission.id.clone(),
+                answer: None,
+            });
+        }
+        if self.get(id).is_some_and(|j| j.permission.is_some()) {
+            self.update(id, |job| job.permission = None);
+        }
     }
 
     /// Lets go of a job that needs the owner. `Err` when it doesn't need them.
@@ -924,6 +1297,7 @@ impl Jobs {
         };
         let _ = std::fs::remove_dir_all(&temp);
         forget_login_secrets(&self.login_path(id));
+        self.drop_asks(id);
         let stopped = *signal.borrow() != Signal::Run;
         match outcome {
             // The owner stopped it: its exchange gets a failed result. A shutdown leaves it be.
@@ -1114,7 +1488,16 @@ impl Jobs {
         let worktree = launch.cwd.clone();
         let job = self.get(id).ok_or("the job is gone")?;
         let jobs = self;
-        let decide = |name: &str, input: &Value| policy::decide(name, input, &worktree, obi_review);
+        // obid's fixed rules first, in every mode; then, for the owner's own jobs, the job's mode
+        // and the repository's saved rules, which may ask the owner. A review another Obi asked
+        // for only reads, and never asks.
+        let decide = |name: &str, input: &Value| -> Ruling {
+            match policy::decide(name, input, &worktree, obi_review) {
+                Answer::Deny(why) => Ruling::Now(Answer::Deny(why)),
+                Answer::Allow if obi_review => Ruling::Now(Answer::Allow),
+                Answer::Allow => jobs.rule_on(id, name, input, &worktree),
+            }
+        };
         let on_event = |event| match event {
             AgentEvent::Session(session) => {
                 jobs.update(id, |job| job.session = Some(session));

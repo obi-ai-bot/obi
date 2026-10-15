@@ -89,6 +89,20 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/jobs/{id}/stop", post(crate::routes::stop))
         .route("/v1/jobs/{id}/dismiss", post(crate::routes::dismiss))
         .route("/v1/jobs/{id}/messages", post(crate::routes::message))
+        .route("/v1/jobs/{id}/permission", post(crate::routes::permission))
+        .route("/v1/jobs/{id}/mode", post(crate::routes::mode))
+        .route(
+            "/v1/settings/permissions",
+            get(crate::routes::permission_settings).put(crate::routes::set_permission_settings),
+        )
+        .route(
+            "/v1/permissions/rules",
+            get(crate::routes::permission_rules),
+        )
+        .route(
+            "/v1/permissions/rules/{id}",
+            axum::routing::delete(crate::routes::forget_permission_rule),
+        )
         .route(
             "/v1/jobs/{id}/publish",
             get(crate::routes::publish_action).post(crate::routes::publish_action),
@@ -412,7 +426,9 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         github: "owner",
         checks: "no app",
         // Settings › Permissions: bypass until the owner picks another (Engine/Permissions.swift).
-        permissions: ModeJson { mode: "bypass" },
+        permissions: ModeJson {
+            mode: shared.jobs.default_mode().as_str(),
+        },
         cleanup: CleanupJson {
             path: shared.cleanup.path.to_string_lossy().into_owned(),
             bytes: shared.cleanup.bytes(),

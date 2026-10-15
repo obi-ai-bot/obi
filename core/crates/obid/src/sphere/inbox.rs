@@ -1,7 +1,8 @@
 //! The owner's inbox (docs/runner-api.md, "Inbox item", `GET /v1/inbox`, `POST /v1/inbox/{id}/answer`)
-//! as obid keeps it: one file per item in `home/inbox/` (0600). obid makes one kind so far,
-//! `obiRequest` (runner-api.md, "obid only: Obi-to-Obi requests in the inbox"): a request from
-//! another Obi that no remembered decision covers.
+//! as obid keeps it: one file per item in `home/inbox/` (0600). obid makes two kinds so far:
+//! `obiRequest` (runner-api.md, "obid only: Obi-to-Obi requests in the inbox"), a request from
+//! another Obi that no remembered decision covers; and `permission`, a job's agent waiting for the
+//! owner's OK (runner-api.md, "Permission modes").
 //!
 //! An item's `title` and `text` are built from the request's typed fields only; every data field of
 //! the request is quoted, unchanged, under `obi.quoted`.
@@ -202,6 +203,42 @@ pub fn review_request_item(
     }
 }
 
+/// The `permission` item for a permission the job's agent waits on (docs/runner-api.md, "Inbox
+/// item"): its title the job's, its text the permission's, and Allow, Always allow (only with a
+/// rule to save) and Deny. Words of the owner's own are a no, and reach the agent.
+pub fn permission_item(
+    job: &crate::job::Job,
+    permission: &crate::permissions::Permission,
+    now: i64,
+) -> Item {
+    use crate::permissions::{ALLOW, ALWAYS_ALLOW, DENY};
+    let options: Vec<String> = if permission.always.is_some() {
+        vec![ALLOW.into(), ALWAYS_ALLOW.into(), DENY.into()]
+    } else {
+        vec![ALLOW.into(), DENY.into()]
+    };
+    Item {
+        id: permission_item_id(&job.id, &permission.id),
+        kind: "permission".into(),
+        job: job.id.clone(),
+        title: job.short_title(),
+        text: permission.title.clone(),
+        options,
+        details: None,
+        recommended: None,
+        created: now,
+        done: None,
+        later: None,
+        answer: None,
+        obi: None,
+    }
+}
+
+/// A permission item's id: `<job>-permission-<permission>`.
+pub fn permission_item_id(job: &str, permission: &str) -> String {
+    format!("{job}-permission-{permission}")
+}
+
 /// Where the inbox is kept.
 pub struct Inbox {
     dir: PathBuf,
@@ -214,7 +251,7 @@ impl Inbox {
         Ok(Inbox { dir })
     }
 
-    /// Item ids obid makes are `obi-<uuid>`: safe as a file name.
+    /// Item ids obid makes are `obi-<uuid>` and `<job>-permission-<p…>`: safe as a file name.
     pub fn save(&self, item: &Item) -> std::io::Result<()> {
         let text = serde_json::to_vec_pretty(item).map_err(std::io::Error::other)?;
         store::write_private(&self.dir.join(format!("{}.json", item.id)), &text)
