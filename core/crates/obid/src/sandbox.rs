@@ -296,10 +296,14 @@ fn bubblewrap_args(spec: &Spec) -> Vec<OsString> {
     if runtime.is_dir() {
         push(&["--tmpfs".as_ref(), runtime.as_os_str()]);
     }
-    for socket in DOCKER_SOCKETS {
-        if Path::new(socket).exists() {
-            push(&["--ro-bind".as_ref(), "/dev/null".as_ref(), socket.as_ref()]);
-        }
+    // `/var/run` is a symlink to `/run`. Binding over the symlink path makes bwrap
+    // exit before the agent starts (`Can't create file at /var/run/docker.sock`).
+    for socket in docker_sockets_to_mask() {
+        push(&[
+            "--ro-bind".as_ref(),
+            "/dev/null".as_ref(),
+            socket.as_os_str(),
+        ]);
     }
     for path in &spec.read_only {
         if path.exists() {
@@ -458,6 +462,40 @@ fn seatbelt_profile(spec: &Spec) -> String {
 
 /// Where Docker's socket is.
 const DOCKER_SOCKETS: [&str; 2] = ["/run/docker.sock", "/var/run/docker.sock"];
+
+/// Socket paths bubblewrap can mask with `--ro-bind /dev/null`. A symlink path is replaced by
+/// the file it names: binding over `/var/run/docker.sock` when `/var/run` points at `/run`
+/// makes bwrap exit (`Can't create file at /var/run/docker.sock`).
+fn docker_sockets_to_mask() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for socket in DOCKER_SOCKETS {
+        let Some(target) = maskable_socket(Path::new(socket)) else {
+            continue;
+        };
+        if !out.contains(&target) {
+            out.push(target);
+        }
+    }
+    out
+}
+
+/// The real file `path` names, when its parent is a directory and not itself a symlink.
+fn maskable_socket(path: &Path) -> Option<PathBuf> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let target = if meta.file_type().is_symlink() {
+        std::fs::canonicalize(path).ok()?
+    } else if path.exists() {
+        path.to_path_buf()
+    } else {
+        return None;
+    };
+    let parent = target.parent()?;
+    let parent_meta = std::fs::symlink_metadata(parent).ok()?;
+    if !parent_meta.file_type().is_dir() || parent_meta.file_type().is_symlink() {
+        return None;
+    }
+    Some(target)
+}
 
 /// The DNS resolver's socket on macOS (mDNSResponder): every host name lookup goes through it.
 const RESOLVER_SOCKETS: [&str; 2] = ["/private/var/run/mDNSResponder", "/var/run/mDNSResponder"];
@@ -856,5 +894,25 @@ mod tests {
             args[args.len() - 2..],
             ["--chdir".to_owned(), "/h/worktrees/j1".to_owned()]
         );
+    }
+
+    #[test]
+    fn a_symlink_socket_path_is_masked_at_its_target() {
+        let root = std::env::temp_dir().join(format!("obid-sock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let run = root.join("run");
+        let var_run = root.join("var/run");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::create_dir_all(root.join("var")).unwrap();
+        let real = run.join("docker.sock");
+        std::fs::write(&real, "").unwrap();
+        std::os::unix::fs::symlink(&run, &var_run).unwrap();
+        let via = var_run.join("docker.sock");
+        assert!(
+            maskable_socket(&via).is_none(),
+            "a path under a symlink is not bindable"
+        );
+        assert_eq!(maskable_socket(&real).unwrap(), real);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
