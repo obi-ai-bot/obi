@@ -81,10 +81,12 @@ pub struct AgentMcpSpec {
 ///   `https:\\user:pass@host`, `https:user:pass@host`, `https:host/mcp?k=x`) with a login, a
 ///   query string or a fragment, the same rule as an `http` URL;
 /// - a `stdio` command or arguments that pass a credential the usual ways: `--token x`,
-///   `--accessToken x`, `--api-key=x`, `--github-pat x`, `--auth-header x`, `TOKEN=x`,
-///   `Authorization:`, `X-Api-Key: x`, `--header X-Api-Key x`, a header blob like
-///   `{"X-Api-Key":"x"}`, `Bearer `, a `ghp_…` value, and any of these inside a shell line
-///   (`sh -c "server --token x"`).
+///   `--accessToken x`, `--api-key=x`, `--github-pat x`, `--auth-header x`, `--bearer x`,
+///   `--jwt x`, `--passphrase x`, `--creds x`, `TOKEN=x`, `Authorization:`, `X-Api-Key: x`,
+///   `--header X-Api-Key x`, a header blob like `{"X-Api-Key":"x"}` or `["X-Api-Key","x"]`
+///   (also with its key escaped, `{"X-Api-\u004bey":"x"}`), `Bearer `, a `ghp_…` value,
+///   curl's `--user alice:x`, and any of these inside a shell line, read the way the shell
+///   reads it (`sh -c "server --token x"`, `--to''ken x`, `--headers "{\"X-Api-Key\":\"x\"}"`).
 ///
 /// That last check goes by names and shapes, so it can't recognize every secret: one put in a
 /// URL's path, or in an argument with no telling name or shape (`-t x`), gets through. The
@@ -304,62 +306,279 @@ fn is_tool_name(tool: &str) -> bool {
 
 /// The place of the first word (the command, then each argument) that passes a credential
 /// the usual ways: an option or variable whose name names one (`--token x`, `--accessToken x`,
-/// `--api-key=x`, `--pat x`, `--github-pat x`, `--auth-header x`, `TOKEN=x`), an HTTP header or
-/// a header blob that carries one (`Authorization:`, `X-Api-Key: x`, `Cookie: x`,
-/// `{"X-Api-Key":"x"}`, `curl -H 'X-Api-Key: x'`, `--header X-Api-Key x`, or a `Bearer `
+/// `--api-key=x`, `--pat x`, `--github-pat x`, `--auth-header x`, `--bearer x`, `--jwt x`,
+/// `--passphrase x`, `--creds x`, `TOKEN=x`), an HTTP header or a header blob that carries one
+/// (`Authorization:`, `X-Api-Key: x`, `Cookie: x`, `{"X-Api-Key":"x"}`, `["X-Api-Key","x"]`,
+/// `curl -H 'X-Api-Key: x'`, `--header X-Api-Key x`, or a `Bearer `
 /// value), or a value that starts the way well-known tokens do (`ghp_`, `github_pat_`, `xoxb-`,
 /// `glpat-`, `sk-ant-` and the like).
 ///
-/// Each word is also read as a shell line, split at spaces, so the same forms inside
-/// `sh -c "server --token x"` count too.
+/// Each word is read as written, with its backslash escapes decoded (`\"`, `\u004b`), and as
+/// JSON when it is JSON (a key or an array's name-and-value pair that names a credential). Each
+/// word is also read as a shell line, split into the words the shell would pass, so the same
+/// forms inside `sh -c "server --token x"` count too, however the shell line quotes them
+/// (`--to''ken x`, `--to\ken x`, `--headers "{\"X-Api-Key\":\"x\"}"`), and so does curl's
+/// login (`curl --user alice:x`).
 ///
 /// Goes by names and shapes, so a secret with no telling name or shape (`-t x`) isn't found: a
 /// one-letter option means different things to different programs, and refusing every one
 /// would refuse ordinary servers.
 fn passes_credential(words: &[&str]) -> Option<usize> {
-    for (i, word) in words.iter().enumerate() {
-        let lower = word.to_ascii_lowercase();
-        if lower.contains("authorization:") || lower.contains("bearer ") {
-            return Some(i);
-        }
-        if looks_like_token(word) || field_passes_credential(word) || assigns_credential(word) {
-            return Some(i);
-        }
+    if let Some(i) = words.iter().position(|word| text_passes_credential(word)) {
+        return Some(i);
     }
 
-    // Every word split at spaces, with the quotes a shell line puts around its parts taken
-    // off, each token keeping the place of the word it came from.
-    let tokens: Vec<(usize, &str)> = words
+    // Every word read as a shell line and split into the words the shell would pass (quotes
+    // and backslashes taken off, `--to''ken` and `--to\ken` joined into `--token`), each
+    // token keeping the place of the word it came from.
+    let tokens: Vec<(usize, String)> = words
         .iter()
         .enumerate()
-        .flat_map(|(i, word)| {
-            word.split_whitespace()
-                .map(move |token| (i, token.trim_matches(|c| matches!(c, '"' | '\'' | '`'))))
-        })
+        .flat_map(|(i, word)| shell_words(word).into_iter().map(move |token| (i, token)))
         .filter(|(_, token)| !token.is_empty())
         .collect();
     let header_flags = ["-H", "--header", "--headers", "-header"];
-    for (at, &(i, token)) in tokens.iter().enumerate() {
-        let followed = at + 1 < tokens.len();
-        if looks_like_token(token) || assigns_credential(token) {
+    let mut runs_curl = false;
+    for (at, (i, token)) in tokens.iter().enumerate() {
+        let i = *i;
+        let next = tokens.get(at + 1).map(|(_, next)| next.as_str());
+        if text_passes_credential(token) {
             return Some(i);
         }
         // `--token x`, the value the next token, in this word or the next one.
-        if token.starts_with('-') && names_credential(token) && followed {
+        if token.starts_with('-') && names_credential(token) && next.is_some() {
             return Some(i);
         }
         // `--header X-Api-Key x`: a header's name and its value as tokens of their own.
-        let after_header_flag = at > 0 && header_flags.contains(&tokens[at - 1].1);
+        let after_header_flag = at > 0 && header_flags.contains(&tokens[at - 1].1.as_str());
         if after_header_flag
             && !token.starts_with('-')
             && !token.contains(':')
             && names_credential(token)
-            && followed
+            && next.is_some()
         {
+            return Some(i);
+        }
+        // curl's login: `curl --user alice:s3cret`, `-u alice:s3cret`, `--user=…`, `-ualice:…`.
+        // Only after `curl`: elsewhere (`docker run -u node:node`) it is a user and a group.
+        if token.rsplit('/').next() == Some("curl") {
+            runs_curl = true;
+        }
+        if runs_curl && curl_login(token, next) {
             return Some(i);
         }
     }
     None
+}
+
+/// Whether one word, read as it stands and with its escapes decoded (`\"`, `K`), passes a
+/// credential by its name or its shape, or is JSON that does.
+fn text_passes_credential(text: &str) -> bool {
+    let decoded = decode_escapes(text);
+    [text, decoded.as_str()].iter().any(|text| {
+        let lower = text.to_ascii_lowercase();
+        lower.contains("authorization:")
+            || lower.contains("bearer ")
+            || looks_like_token(text)
+            || field_passes_credential(text)
+            || assigns_credential(text)
+    }) || serde_json::from_str::<Value>(text.trim())
+        .is_ok_and(|value| json_passes_credential(&value))
+}
+
+/// Whether a JSON value passes a credential: an object key that names one with a value that
+/// isn't empty (`{"X-Api-Key":"x"}`, with the key in any escaped form a JSON parser decodes,
+/// like `{"X-Api-Key":"x"}`), a name and its value next to each other in an array
+/// (`["X-Api-Key","x"]`, `["--token","x"]`), or a string inside that passes one by itself.
+fn json_passes_credential(value: &Value) -> bool {
+    let carries = |value: &Value| match value {
+        Value::String(text) => !text.is_empty(),
+        Value::Number(_) => true,
+        _ => false,
+    };
+    match value {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            (names_credential(key) && carries(value)) || json_passes_credential(value)
+        }),
+        Value::Array(items) => {
+            items.windows(2).any(|pair| {
+                pair[0]
+                    .as_str()
+                    .is_some_and(|name| !name.contains(':') && names_credential(name))
+                    && carries(&pair[1])
+            }) || items.iter().any(json_passes_credential)
+        }
+        Value::String(text) => text_passes_credential(text),
+        _ => false,
+    }
+}
+
+/// Whether `token` (with `next`, the token after it) is curl's login option with a password:
+/// `--user alice:s3cret`, `-u alice:s3cret`, `--proxy-user` / `-U` the same, or the value
+/// attached (`--user=alice:s3cret`, `-ualice:s3cret`). `alice:` alone has curl ask for the
+/// password, so it carries none.
+fn curl_login(token: &str, next: Option<&str>) -> bool {
+    let with_password = |value: &str| {
+        value
+            .split_once(':')
+            .is_some_and(|(_, password)| !password.is_empty())
+    };
+    match token {
+        "--user" | "-u" | "--proxy-user" | "-U" => next.is_some_and(with_password),
+        _ => ["--user=", "--proxy-user=", "-u", "-U"]
+            .iter()
+            .any(|flag| token.strip_prefix(flag).is_some_and(with_password)),
+    }
+}
+
+/// The words a POSIX shell would split `line` into: whitespace and `;|&()<>` and backquotes
+/// separate words; `'…'` is taken as is; inside `"…"` a backslash escapes `"`, `\`, `$` and
+/// a backquote; outside quotes a backslash escapes any character; `$'…'` decodes its escapes;
+/// parts written next to each other make one word (`--to''ken` is `--token`). A quote left open
+/// runs to the end of the line.
+fn shell_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace()
+                || matches!(c, ';' | '|' | '&' | '(' | ')' | '<' | '>' | '`') =>
+            {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            '\\' => {
+                in_word = true;
+                if let Some(next) = chars.next().filter(|next| *next != '\n') {
+                    word.push(next);
+                }
+            }
+            '\'' => {
+                in_word = true;
+                for next in chars.by_ref() {
+                    if next == '\'' {
+                        break;
+                    }
+                    word.push(next);
+                }
+            }
+            '"' => {
+                in_word = true;
+                while let Some(next) = chars.next() {
+                    match next {
+                        '"' => break,
+                        '\\' => match chars.peek().copied() {
+                            Some(escaped @ ('"' | '\\' | '$' | '`')) => {
+                                chars.next();
+                                word.push(escaped);
+                            }
+                            Some('\n') => {
+                                chars.next();
+                            }
+                            _ => word.push('\\'),
+                        },
+                        _ => word.push(next),
+                    }
+                }
+            }
+            '$' if chars.peek() == Some(&'\'') => {
+                chars.next();
+                in_word = true;
+                let mut quoted = String::new();
+                while let Some(next) = chars.next() {
+                    match next {
+                        '\'' => break,
+                        '\\' => {
+                            quoted.push('\\');
+                            if let Some(escaped) = chars.next() {
+                                quoted.push(escaped);
+                            }
+                        }
+                        _ => quoted.push(next),
+                    }
+                }
+                word.push_str(&decode_escapes(&quoted));
+            }
+            _ => {
+                in_word = true;
+                word.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    words
+}
+
+/// `text` with the backslash escapes of JSON, JSON5, JavaScript and `$'…'` decoded: `\uXXXX`
+/// (and surrogate pairs), `\u{X…}`, `\xHH`, and a backslash before any other character taken
+/// off (`\"` is `"`, `\\` is `\`). An escape that doesn't decode is left as written.
+fn decode_escapes(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let hex = |digits: &[char]| -> Option<u32> {
+        let digits: String = digits.iter().collect();
+        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(&digits, 16).ok()
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while at < chars.len() {
+        if chars[at] != '\\' || at + 1 == chars.len() {
+            out.push(chars[at]);
+            at += 1;
+            continue;
+        }
+        let escape = chars[at + 1];
+        // A code point and how many characters its escape takes, from the backslash on.
+        let decoded: Option<(u32, usize)> = match escape {
+            'u' if chars.get(at + 2) == Some(&'{') => chars[at + 3..]
+                .iter()
+                .position(|c| *c == '}')
+                .and_then(|close| {
+                    hex(&chars[at + 3..at + 3 + close]).map(|code| (code, close + 4))
+                }),
+            'u' => chars.get(at + 2..at + 6).and_then(hex).map(|high| {
+                // A high surrogate followed by `\uDC00`-`\uDFFF` is one code point.
+                let low = (chars.get(at + 6..at + 8) == Some(&['\\', 'u']))
+                    .then(|| chars.get(at + 8..at + 12).and_then(hex))
+                    .flatten()
+                    .filter(|low| {
+                        (0xD800..0xDC00).contains(&high) && (0xDC00..0xE000).contains(low)
+                    });
+                match low {
+                    Some(low) => (0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00), 12),
+                    None => (high, 6),
+                }
+            }),
+            'x' => chars
+                .get(at + 2..at + 4)
+                .and_then(hex)
+                .map(|code| (code, 4)),
+            _ => None,
+        };
+        match decoded.and_then(|(code, len)| char::from_u32(code).map(|c| (c, len))) {
+            Some((c, len)) => {
+                out.push(c);
+                at += len;
+            }
+            None if matches!(escape, 'u' | 'x') => {
+                out.push('\\');
+                at += 1;
+            }
+            None => {
+                out.push(escape);
+                at += 2;
+            }
+        }
+    }
+    out
 }
 
 /// Whether `text` is `NAME=value` with a name that names a credential and a value that isn't
@@ -579,17 +798,22 @@ fn names_credential(name: &str) -> bool {
         "secret",
         "password",
         "passwd",
+        "passphrase",
         "apikey",
         "credential",
         "credentials",
+        "creds",
         "cookie",
         "authorization",
+        "bearer",
+        "jwt",
     ];
     let endings = [
         "token",
         "secret",
         "password",
         "passwd",
+        "passphrase",
         "apikey",
         "authorization",
     ];

@@ -288,7 +288,26 @@ fn urls_in_stdio_args_follow_the_http_url_rule() {
 
 #[test]
 fn credential_flags_inside_a_shell_line_are_refused() {
-    let refused_args: [&[&str]; 9] = [
+    let refused_args: [&[&str]; 19] = [
+        // The shell's quoting taken off the way the shell does: the server gets a real
+        // `{"X-Api-Key":"s3cret"}`, and `--to''ken` and `--to\ken` are `--token`.
+        &[
+            "-c",
+            "server --headers \"{\\\"X-Api-Key\\\":\\\"s3cret\\\"}\"",
+        ],
+        &["-c", "server --headers '{\"X-Api-Key\":\"s3cret\"}'"],
+        &["-c", "server --to''ken s3cret"],
+        &["-c", "server --to\\ken s3cret"],
+        &["-c", "server --to\"\"ken s3cret"],
+        &["-c", "server $'--to\\x6ben' s3cret"],
+        &["-c", "server --headers '[\"X-Api-Key\",\"s3cret\"]'"],
+        // curl's login.
+        &["-c", "curl --user alice:s3cret https://mcp.example/x"],
+        &["-c", "curl -u alice:s3cret https://mcp.example/x"],
+        &[
+            "-c",
+            "/usr/bin/curl --user=alice:s3cret https://mcp.example/x",
+        ],
         &["-c", "server --token s3cret"],
         &["-c", "server --api-key s3cret"],
         &["-c", "server --github-pat s3cret"],
@@ -304,11 +323,18 @@ fn credential_flags_inside_a_shell_line_are_refused() {
         value["agentMcp"]["server"] = json!({"type": "stdio", "command": "/bin/sh", "args": args});
         assert!(refused(&value).contains("credential"), "{args:?}");
     }
-    let accepted_args: [&[&str]; 4] = [
+    let accepted_args: [&[&str]; 9] = [
         &["-c", "server --port 8080 --read-only"],
         &["-c", "server --tokens-per-minute 100 --no-auth"],
         &["-c", "server --auth-type oauth"],
         &["-c", "server --token"],
+        &["-c", "server --headers '{\"Accept\":\"application/json\"}'"],
+        // A user and a group, not a login: `-u` means a password only to curl.
+        &["-c", "docker run -i --rm -u node:node ghcr.io/org/server"],
+        &["-c", "server --user alice:staff"],
+        // `alice:` alone has curl ask for the password.
+        &["-c", "curl --user alice: https://mcp.example/x"],
+        &["-c", "curl -u alice https://mcp.example/x"],
     ];
     for args in accepted_args {
         let mut value = tetrix();
@@ -396,7 +422,27 @@ fn a_refusal_names_the_argument_by_its_place_not_its_text() {
 
 #[test]
 fn compound_credential_flags_and_header_blobs_are_refused() {
-    let refused_args: [&[&str]; 16] = [
+    let refused_args: [&[&str]; 30] = [
+        // Header blobs whose keys a JSON parser reads through their escapes.
+        &["--headers", "{\"X-Api-\\u004bey\":\"s3cret\"}"],
+        &["--headers", "{\"\\u0041uthorization\":\"s3cret\"}"],
+        &["--headers", "{\"\\u0058\\u002d\\u0041pi-Key\":\"s3cret\"}"],
+        &["--headers", "{'X-Api-\\x4bey': 's3cret'}"],
+        &["--headers", "{\\\"X-Api-Key\\\":\\\"s3cret\\\"}"],
+        // A header as a JSON array of its name and value, or as one string in one.
+        &["--headers", "[\"X-Api-Key\",\"s3cret\"]"],
+        &["--headers", "[[\"Authorization\",\"Basic eDp5\"]]"],
+        &["--args", "[\"--token\",\"s3cret\"]"],
+        &[
+            "--config",
+            "{\"servers\":[{\"env\":{\"GITHUB\\u005fTOKEN\":\"s3cret\"}}]}",
+        ],
+        // More names that name a credential.
+        &["--bearer", "s3cret"],
+        &["--jwt", "s3cret"],
+        &["--passphrase", "s3cret"],
+        &["--creds", "s3cret"],
+        &["--key-passphrase=s3cret"],
         &["--github-pat", "x"],
         &["--githubPAT", "x"],
         &["--gitlab_pat=x"],
@@ -417,10 +463,15 @@ fn compound_credential_flags_and_header_blobs_are_refused() {
     for args in refused_args {
         assert!(refused(&stdio(args)).contains("credential"), "{args:?}");
     }
-    let accepted_args: [&[&str]; 7] = [
+    let accepted_args: [&[&str]; 12] = [
         &["--no-auth", "--port", "8080"],
         &["--auth-type", "oauth"],
         &["--headers", "{\"Accept\":\"application/json\"}"],
+        &["--headers", "{\"\\u0041ccept\":\"application/json\"}"],
+        &["--headers", "[\"Accept\",\"application/json\"]"],
+        &["--headers", "[\"X-Api-Key\",\"\"]"],
+        &["--path", "C:\\Users\\obi\\tokens"],
+        &["--user", "alice:staff"],
         &["--headers", "{\"X-Api-Key\":\"\"}"],
         &["--config", "{\"maxTokens\":100,\"keyFile\":\"keys/x.pem\"}"],
         &["--listen", "127.0.0.1:8080"],
