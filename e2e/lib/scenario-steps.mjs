@@ -4,7 +4,8 @@
 // `fixture` and `spec` (obi-sphere's reference verifier, loaded by the preflight).
 //
 // The harness plays both owners: their keys are made here, in memory, for each run, and never
-// written anywhere; so are the Sphere's operator token and each obid's API token. Text the obids
+// written anywhere; so is the Sphere's operator token. Each obid's API token is written only to
+// its own home/api-token (0600), where obid takes it from: never its environment. Text the obids
 // and the Sphere send back (goals, findings, summaries) is data: compared, never acted on.
 //
 // This file is the Rust core's (docs/ARCHITECTURE.md, section 6): the scenario's fixed values come
@@ -298,9 +299,12 @@ async function step2(ctx) {
     };
     o.config = join(o.dir, "config.json");
     writeFileSync(o.config, JSON.stringify(config, null, 2));
+    // obid's token goes in home/api-token (0600) before it starts, never in its environment, where
+    // other processes of the same user could read it (docs/runner-api.md, "obid only: configuration").
+    mkdirSync(o.home, { recursive: true, mode: 0o700 });
+    writeFileSync(join(o.home, "api-token"), `${o.token}\n`, { mode: 0o600, flag: "wx" });
     o.process = ctx.start(`obid-${which}`, ctx.env.OBID_BIN, ["serve", "--config", o.config], {
       env: {
-        OBID_API_TOKEN: o.token,
         // Live mode: Claude Code's login lives in the person's real HOME.
         HOME: live ? homedir() : join(o.dir, "env-home"),
         TMPDIR: join(o.dir, "tmp"),

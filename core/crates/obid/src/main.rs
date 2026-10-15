@@ -98,12 +98,18 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // The token only ever from home/api-token: never from obid's environment.
+    if let Err(e) =
+        obid::token::refuse_environment(&config.home, std::env::var_os(obid::token::ENV).is_some())
+    {
+        eprintln!("obid: {e}");
+        return ExitCode::from(2);
+    }
     if let Err(e) = obid::prepare_home(&config) {
         eprintln!("obid: {e}");
         return ExitCode::FAILURE;
     }
-    let from_env = std::env::var_os(obid::token::ENV).map(|v| v.to_string_lossy().into_owned());
-    let token = match obid::token::load(&config.home, from_env) {
+    let token = match obid::token::load(&config.home) {
         Ok(token) => token,
         Err(e) => {
             eprintln!("obid: {e}");

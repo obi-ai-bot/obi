@@ -158,6 +158,27 @@ pub fn config(folder: &Path, remote: &Path, agent: &Path) -> Value {
     })
 }
 
+/// Puts `token` in obid's `home/api-token` (0600, in a 0700 `home`), where obid takes its token
+/// from: never from its environment (docs/runner-api.md, "obid only: configuration").
+pub fn put_token(config: &Value, token: &str) {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let home = Path::new(config["home"].as_str().expect("home"));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(home)
+        .unwrap();
+    let path = home.join("api-token");
+    let _ = std::fs::remove_file(&path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, format!("{token}\n").as_bytes()).unwrap();
+}
+
 /// The e2e stub agent.
 pub fn stub_agent() -> PathBuf {
     obi().join("e2e/stub-agent/stub-agent")
@@ -166,6 +187,7 @@ pub fn stub_agent() -> PathBuf {
 /// Starts obid with `config`, `PATH` the test's own with `path_first` before it.
 pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
     let path = folder.join("config.json");
+    put_token(config, TOKEN);
     std::fs::write(&path, config.to_string()).unwrap();
     std::fs::create_dir_all(folder.join("env-home")).unwrap();
     std::fs::create_dir_all(folder.join("tmp")).unwrap();
@@ -183,7 +205,6 @@ pub fn start(folder: &Path, config: &Value, path_first: Option<&Path>) -> Obid {
         .env("PATH", search)
         .env("HOME", folder.join("env-home"))
         .env("TMPDIR", folder.join("tmp"))
-        .env("OBID_API_TOKEN", TOKEN)
         .env("OBID_LOG", "info")
         .stdout(Stdio::piped())
         .stderr(

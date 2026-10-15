@@ -97,8 +97,30 @@ fn config(folder: &Path, remote: &Path) -> Value {
     })
 }
 
+/// Puts `token` in obid's `home/api-token` (0600, in a 0700 `home`), where obid takes its token
+/// from: never from its environment (docs/runner-api.md, "obid only: configuration").
+fn put_token(config: &Value, token: &str) {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let home = Path::new(config["home"].as_str().expect("home"));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(home)
+        .unwrap();
+    let path = home.join("api-token");
+    let _ = std::fs::remove_file(&path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, format!("{token}\n").as_bytes()).unwrap();
+}
+
 fn start(folder: &Path, config: &Value) -> Obid {
     let path = folder.join("config.json");
+    put_token(config, TOKEN);
     std::fs::write(&path, config.to_string()).unwrap();
     std::fs::create_dir_all(folder.join("env-home")).unwrap();
     std::fs::create_dir_all(folder.join("tmp")).unwrap();
@@ -110,7 +132,6 @@ fn start(folder: &Path, config: &Value) -> Obid {
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", folder.join("env-home"))
         .env("TMPDIR", folder.join("tmp"))
-        .env("OBID_API_TOKEN", TOKEN)
         // What obid must keep from its agents, whatever its own environment holds.
         .env("CLAUDECODE", "1")
         .env("ANTHROPIC_API_KEY", "sk-ant-not-a-key")

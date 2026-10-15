@@ -266,8 +266,8 @@ fn the_mac_app_follows_obid_and_lists_its_jobs() {
 }
 
 /// The app takes only a token that is one of a Mac runner's (Engine/LocalRunner.swift, `isToken`:
-/// 64 hex characters). obid's own token (`home/api-token`) is one; an `OBID_API_TOKEN` of another
-/// shape, which obid accepts, is one the Mac app refuses.
+/// 64 hex characters). obid's own token (`home/api-token`) is one; a token of another shape put in
+/// that file, which obid accepts, is one the Mac app refuses.
 #[test]
 fn the_mac_app_takes_only_a_64_hex_token() {
     let client = client();
