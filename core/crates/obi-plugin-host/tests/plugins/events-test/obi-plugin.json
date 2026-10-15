@@ -1,0 +1,140 @@
+{
+  "manifest": "obi-plugin/0.1",
+  "id": "events-test",
+  "name": "Events test plug-in",
+  "version": "0.1.0",
+  "description": "The host tests' events plug-in.",
+  "kinds": [
+    "events"
+  ],
+  "run": {
+    "command": "bin/obi-plugin-test",
+    "args": [
+      "--kinds",
+      "events"
+    ]
+  },
+  "events": {
+    "kinds": [
+      "pull_request.review_requested",
+      "issue.assigned"
+    ]
+  },
+  "network": [],
+  "config": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "serve": {
+        "type": "array",
+        "items": {
+          "enum": [
+            "context",
+            "events",
+            "agent-mcp"
+          ]
+        },
+        "uniqueItems": true
+      },
+      "failStarts": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "initialize": {
+        "enum": [
+          "answer",
+          "silent",
+          "crash",
+          "wrong-protocol",
+          "extra-kind"
+        ]
+      },
+      "afterReady": {
+        "enum": [
+          "stay",
+          "exit"
+        ]
+      },
+      "ping": {
+        "enum": [
+          "answer",
+          "silent"
+        ]
+      },
+      "exitAfterPings": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "shutdown": {
+        "enum": [
+          "answer",
+          "ignore"
+        ]
+      },
+      "spawnChild": {
+        "type": "boolean"
+      },
+      "stderrLines": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000
+      },
+      "probe": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "read": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "list": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "write": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "context": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "textBytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000
+          },
+          "delayMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fail": {
+            "type": "boolean"
+          }
+        }
+      },
+      "emit": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      },
+      "emitUnasked": {
+        "type": "boolean"
+      }
+    }
+  }
+}

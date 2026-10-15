@@ -1,6 +1,7 @@
-//! The host as `obid` sees it in this version, which finds no plug-ins (docs/ARCHITECTURE.md
+//! The host with a home that holds no plug-ins, as on a fresh install (docs/ARCHITECTURE.md 5 and
 //! 5.5): `list` is empty, `context` and `agent_mcp_servers` give nothing, `set_enabled` knows no
-//! id, and the one event receiver yields nothing until `shutdown` ends it.
+//! id, and the one event receiver yields nothing until `shutdown` ends it. obid runs like this
+//! with zero plug-ins.
 
 use std::path::PathBuf;
 use std::time::Duration;

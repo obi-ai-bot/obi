@@ -1,0 +1,468 @@
+//! The lifecycle of a plug-in with a process (docs/ARCHITECTURE.md 5.3, steps 3 to 6): started
+//! in its sandbox, initialized, pinged, restarted after 1, 2 then 4 seconds (shortened here),
+//! `failed` when the third restart fails too, and stopped with `shutdown`, then killed with
+//! everything it started when it doesn't stop.
+
+mod common;
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use common::{Home, beats, id, options, sandbox_made, status, wait_for_state, wait_until};
+use obi_plugin_host::api::{Kind, PluginState};
+use obi_plugin_host::{Options, PluginHost};
+use serde_json::{Value, json};
+
+const LONG: Duration = Duration::from_secs(20);
+
+async fn host_with(home: &Home, options: Options) -> PluginHost {
+    PluginHost::start_with(&home.path, options).await.unwrap()
+}
+
+#[tokio::test]
+async fn enabling_starts_it_in_its_sandbox_and_initializes_it() {
+    let home = Home::new("init");
+    home.install("context-test", "context-test");
+    let host = host_with(&home, options()).await;
+    let ready = host
+        .set_enabled(&id("context-test"), true, Some(json!({})))
+        .await
+        .unwrap();
+    if !sandbox_made(&ready) {
+        return;
+    }
+    assert_eq!(ready.state, PluginState::Ready, "{ready:?}");
+    assert!(ready.enabled);
+    assert_eq!(ready.last_error, None);
+    assert_eq!(home.starts("context-test"), 1);
+
+    let init = home.record("context-test", "initialize.json").unwrap();
+    let data_dir = home.data_dir("context-test");
+    assert_eq!(
+        init,
+        json!({
+            "protocol": "obi-plugin/0.1",
+            "obid": {"version": env!("CARGO_PKG_VERSION")},
+            "plugin": {"id": "context-test", "dataDir": data_dir.to_str().unwrap()},
+            "config": {}
+        })
+    );
+    assert!(data_dir.join("tmp").is_dir());
+
+    // Pinged, it stays ready, in its first process.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(status(&host, "context-test").state, PluginState::Ready);
+    assert_eq!(home.starts("context-test"), 1);
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_plugin_that_exits_is_restarted_and_failed_when_the_third_restart_fails() {
+    let home = Home::new("exits");
+    home.install("context-test", "context-test");
+    let host = host_with(&home, options()).await;
+    let first = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({"afterReady": "exit"})),
+        )
+        .await
+        .unwrap();
+    if !sandbox_made(&first) {
+        return;
+    }
+    let failed = wait_for_state(&host, "context-test", PluginState::Failed, LONG).await;
+    // The first start and three restarts.
+    assert_eq!(home.starts("context-test"), 4);
+    let reason = failed.last_error.unwrap();
+    assert!(reason.contains("exited"), "{reason}");
+    assert!(reason.contains("4 times in a row"), "{reason}");
+    assert!(failed.enabled);
+
+    // It stays stopped.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(home.starts("context-test"), 4);
+    assert_eq!(status(&host, "context-test").state, PluginState::Failed);
+
+    // Until the owner enables it again: now it fails only on its first start.
+    let again = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({"afterReady": "exit", "failStarts": 5})),
+        )
+        .await
+        .unwrap();
+    assert!(again.state != PluginState::Disabled);
+    assert!(wait_until(LONG, || home.starts("context-test") == 6).await);
+    wait_for_state(&host, "context-test", PluginState::Ready, LONG).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(status(&host, "context-test").state, PluginState::Ready);
+    assert_eq!(home.starts("context-test"), 6);
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_plugin_that_does_not_answer_initialize_in_time_is_restarted_then_failed() {
+    let home = Home::new("silent");
+    home.install("context-test", "context-test");
+    let host = host_with(
+        &home,
+        Options {
+            // Long enough for a loaded machine to start it; it never answers anyway.
+            initialize_timeout: Duration::from_millis(1500),
+            ..options()
+        },
+    )
+    .await;
+    let first = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({"initialize": "silent"})),
+        )
+        .await
+        .unwrap();
+    if !sandbox_made(&first) {
+        return;
+    }
+    let failed = wait_for_state(&host, "context-test", PluginState::Failed, LONG).await;
+    assert_eq!(home.starts("context-test"), 4);
+    let reason = failed.last_error.unwrap();
+    assert!(reason.contains("no answer to initialize"), "{reason}");
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_answer_that_is_not_obi_plugin_0_1_fails_initialize() {
+    for (mode, says) in [
+        ("wrong-protocol", "obi-plugin/9"),
+        ("extra-kind", "Events"),
+        ("crash", "exited before answering initialize"),
+    ] {
+        let home = Home::new(mode);
+        home.install("context-test", "context-test");
+        let host = host_with(&home, options()).await;
+        let first = host
+            .set_enabled(&id("context-test"), true, Some(json!({"initialize": mode})))
+            .await
+            .unwrap();
+        if !sandbox_made(&first) {
+            return;
+        }
+        let failed = wait_for_state(&host, "context-test", PluginState::Failed, LONG).await;
+        let reason = failed.last_error.unwrap();
+        assert!(reason.contains(says), "{mode}: {reason}");
+        assert_eq!(home.starts("context-test"), 4, "{mode}");
+        host.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn a_ping_not_answered_restarts_it() {
+    let home = Home::new("ping");
+    home.install("context-test", "context-test");
+    let host = host_with(&home, options()).await;
+    let first = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({"ping": "silent", "failStarts": 1})),
+        )
+        .await
+        .unwrap();
+    if !sandbox_made(&first) {
+        return;
+    }
+    assert_eq!(first.state, PluginState::Ready);
+    // Its first process never answers a ping: it is restarted, and the second one does.
+    assert!(wait_until(LONG, || home.starts("context-test") == 2).await);
+    wait_for_state(&host, "context-test", PluginState::Ready, LONG).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let now = status(&host, "context-test");
+    assert_eq!(now.state, PluginState::Ready);
+    assert_eq!(home.starts("context-test"), 2);
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_answered_ping_starts_the_count_again() {
+    let home = Home::new("count");
+    home.install("context-test", "context-test");
+    let host = host_with(&home, options()).await;
+    // Six starts in a row each answer a ping and then exit: never three failures in a row
+    // without an answered ping between them, so it is never failed.
+    let first = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({"exitAfterPings": 1, "failStarts": 6})),
+        )
+        .await
+        .unwrap();
+    if !sandbox_made(&first) {
+        return;
+    }
+    assert!(
+        wait_until(Duration::from_secs(30), || home.starts("context-test") == 7).await,
+        "{} starts",
+        home.starts("context-test")
+    );
+    wait_for_state(&host, "context-test", PluginState::Ready, LONG).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(status(&host, "context-test").state, PluginState::Ready);
+    assert_eq!(home.starts("context-test"), 7);
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn disabling_sends_shutdown_and_ends_what_it_started() {
+    let home = Home::new("disable");
+    home.install("context-test", "context-test");
+    let host = host_with(&home, options()).await;
+    let ready = host
+        .set_enabled(&id("context-test"), true, Some(json!({"spawnChild": true})))
+        .await
+        .unwrap();
+    if !sandbox_made(&ready) {
+        return;
+    }
+    assert!(wait_until(LONG, || beats(&home, "context-test") > 0).await);
+
+    let started = Instant::now();
+    let disabled = host
+        .set_enabled(&id("context-test"), false, None)
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(1400),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(disabled.state, PluginState::Disabled);
+    assert!(!disabled.enabled);
+    assert_eq!(home.record("context-test", "shutdown"), Some(json!(true)));
+    assert_stopped_beating(&home, "context-test").await;
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_plugin_still_running_after_shutdown_is_killed_with_what_it_started() {
+    let home = Home::new("kill");
+    home.install("context-test", "context-test");
+    let host = host_with(&home, options()).await;
+    let ready = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({"shutdown": "ignore", "spawnChild": true})),
+        )
+        .await
+        .unwrap();
+    if !sandbox_made(&ready) {
+        return;
+    }
+    assert!(wait_until(LONG, || beats(&home, "context-test") > 0).await);
+    let started = Instant::now();
+    host.set_enabled(&id("context-test"), false, None)
+        .await
+        .unwrap();
+    let took = started.elapsed();
+    // The grace (1.5 s here, 5 s by default), then killed.
+    assert!(took >= Duration::from_millis(1400), "{took:?}");
+    assert!(took < Duration::from_secs(6), "{took:?}");
+    assert_eq!(home.record("context-test", "shutdown"), Some(json!(true)));
+    assert_stopped_beating(&home, "context-test").await;
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_stops_every_plugin() {
+    let home = Home::new("shutdown");
+    home.install("context-test", "context-test");
+    home.install("events-test", "events-test");
+    let host = host_with(&home, options()).await;
+    for plugin in ["context-test", "events-test"] {
+        let ready = host
+            .set_enabled(&id(plugin), true, Some(json!({"spawnChild": true})))
+            .await
+            .unwrap();
+        if !sandbox_made(&ready) {
+            return;
+        }
+    }
+    assert!(
+        wait_until(LONG, || beats(&home, "context-test") > 0
+            && beats(&home, "events-test") > 0)
+        .await
+    );
+    host.shutdown().await;
+    for plugin in ["context-test", "events-test"] {
+        assert_eq!(
+            home.record(plugin, "shutdown"),
+            Some(json!(true)),
+            "{plugin}"
+        );
+        assert_stopped_beating(&home, plugin).await;
+        // Still enabled for the next start; nothing runs now.
+        let now = status(&host, plugin);
+        assert!(now.enabled);
+        assert_eq!(now.state, PluginState::Disabled);
+    }
+
+    // The next host starts them again by itself.
+    let host = host_with(&home, options()).await;
+    for plugin in ["context-test", "events-test"] {
+        wait_for_state(&host, plugin, PluginState::Ready, LONG).await;
+        assert_eq!(home.starts(plugin), 2);
+    }
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn enabling_again_restarts_it_only_for_other_settings() {
+    let home = Home::new("again");
+    home.install("context-test", "context-test");
+    let host = host_with(&home, options()).await;
+    let ready = host
+        .set_enabled(&id("context-test"), true, Some(json!({})))
+        .await
+        .unwrap();
+    if !sandbox_made(&ready) {
+        return;
+    }
+    host.set_enabled(&id("context-test"), true, None)
+        .await
+        .unwrap();
+    host.set_enabled(&id("context-test"), true, Some(json!({})))
+        .await
+        .unwrap();
+    assert_eq!(home.starts("context-test"), 1);
+    let restarted = host
+        .set_enabled(&id("context-test"), true, Some(json!({"stderrLines": 1})))
+        .await
+        .unwrap();
+    assert_eq!(restarted.state, PluginState::Ready);
+    assert_eq!(home.starts("context-test"), 2);
+    assert_eq!(
+        home.record("context-test", "initialize.json").unwrap()["config"],
+        json!({"stderrLines": 1})
+    );
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_plugin_that_floods_stderr_does_not_stop() {
+    let home = Home::new("stderr");
+    home.install("context-test", "context-test");
+    let host = host_with(&home, options()).await;
+    // 1,000 lines of 1,000 bytes: past the log's 64 KB a minute, which drops the rest.
+    let ready = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({"stderrLines": 1000})),
+        )
+        .await
+        .unwrap();
+    if !sandbox_made(&ready) {
+        return;
+    }
+    assert_eq!(ready.state, PluginState::Ready);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(status(&host, "context-test").state, PluginState::Ready);
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_run_command_outside_its_folder_is_failed() {
+    let home = Home::new("command");
+    home.install("context-test", "context-test");
+    let mut manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(home.plugin_dir("context-test").join("obi-plugin.json")).unwrap(),
+    )
+    .unwrap();
+    manifest["run"]["command"] = json!("bin/missing");
+    home.install_manifest("context-test", &manifest);
+    // A link out of the folder is not inside it either.
+    let outside = home.path.join("outside");
+    std::fs::write(&outside, "#!/bin/sh\n").unwrap();
+    std::os::unix::fs::symlink(&outside, home.plugin_dir("context-test").join("bin/link")).unwrap();
+
+    let host = host_with(&home, options()).await;
+    let failed = host
+        .set_enabled(&id("context-test"), true, None)
+        .await
+        .unwrap();
+    if !sandbox_made(&failed) {
+        return;
+    }
+    assert_eq!(failed.state, PluginState::Failed);
+    assert!(failed.last_error.unwrap().contains("bin/missing"));
+    host.shutdown().await;
+
+    manifest["run"]["command"] = json!("bin/link");
+    home.install_manifest("context-test", &manifest);
+    let host = host_with(&home, options()).await;
+    let failed = host
+        .set_enabled(&id("context-test"), true, None)
+        .await
+        .unwrap();
+    assert_eq!(failed.state, PluginState::Failed);
+    assert!(failed.last_error.unwrap().contains("not a file inside"));
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn without_a_sandbox_a_plugin_with_a_process_is_not_started() {
+    let home = Home::new("nosandbox");
+    home.install("context-test", "context-test");
+    home.install_manifest(
+        "mcp-only",
+        &json!({
+            "manifest": "obi-plugin/0.1", "id": "mcp-only", "name": "MCP only", "version": "1",
+            "kinds": ["agent-mcp"],
+            "agentMcp": {"server": {"type": "http", "url": "https://mcp.example.test/"}, "allowedTools": ["a"]}
+        }),
+    );
+    let host = host_with(
+        &home,
+        Options {
+            sandbox_program: Some(PathBuf::from("/nonexistent/sandbox-tool")),
+            ..options()
+        },
+    )
+    .await;
+    let failed = host
+        .set_enabled(&id("context-test"), true, None)
+        .await
+        .unwrap();
+    assert_eq!(failed.state, PluginState::Failed);
+    let reason = failed.last_error.unwrap();
+    assert!(
+        reason.starts_with("can't make the plug-in's sandbox"),
+        "{reason}"
+    );
+    assert!(reason.contains("/nonexistent/sandbox-tool"), "{reason}");
+    assert_eq!(home.starts("context-test"), 0);
+
+    // A plug-in with no process needs no sandbox.
+    let ready = host.set_enabled(&id("mcp-only"), true, None).await.unwrap();
+    assert_eq!(ready.state, PluginState::Ready);
+    assert_eq!(host.agent_mcp_servers().len(), 1);
+    assert_eq!(status(&host, "mcp-only").kinds, [Kind::AgentMcp]);
+    host.shutdown().await;
+}
+
+/// The child the test plug-in started has stopped appending to `beats`.
+async fn assert_stopped_beating(home: &Home, plugin: &str) {
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = beats(home, plugin);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        beats(home, plugin),
+        before,
+        "{plugin}'s child is still running"
+    );
+}

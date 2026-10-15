@@ -10,8 +10,18 @@ publish.workspace = true
 
 [dependencies]
 obi-plugin-api = { path = "../obi-plugin-api" }
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tracing.workspace = true
+
+# The plug-in the host's tests run, one of each kind (tests/plugins/): it speaks obi-plugin/0.1
+# and does what its settings say. Only the tests use it.
+[[bin]]
+name = "obi-plugin-test"
+path = "src/bin/obi-plugin-test.rs"
+test = false
+doc = false
 
 [lints]
 workspace = true
