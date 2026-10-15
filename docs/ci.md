@@ -58,6 +58,6 @@ What each workflow runs, on a machine of your own (macOS with Xcode 27.0 for the
 | Core | In `core/`: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`. |
 | Plug-ins | In `core/`: `OBI_PLUGIN_HOST_REQUIRE_SANDBOX=1 cargo test --locked -p obi-plugin-api -p obi-plugin-host`, on Linux with bubblewrap able to make user namespaces, and on macOS. |
 | Restructure | The case check from `restructure.yml`; `swift build --build-tests`; the three apps with `xcodebuild … CODE_SIGNING_ALLOWED=NO build`, and `MacTests` and `iOSTests` with `build-for-testing`. |
-| Apple apps | `xcodebuild -project Oby.xcodeproj -scheme Oby -destination 'platform=macOS' <the signing flags above> test`, and the same with `-scheme ObyPhone` and an iPhone simulator. |
+| Apple apps | `xcodebuild -project apps/Oby.xcodeproj -scheme Oby -destination 'platform=macOS' <the signing flags above> test`, and the same with `-scheme ObyPhone` and an iPhone simulator. |
 | Runner on Linux | `swift test` (on Linux, with bubblewrap). |
 | obi-sphere Spec, Server | `make spec-check`; in `server/`, the commands in its README (`pnpm test`, `pnpm run conformance`, …). |
