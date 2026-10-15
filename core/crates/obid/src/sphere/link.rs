@@ -1720,6 +1720,16 @@ impl Link {
                 .cloned()
                 .filter(|e| e.state == "inbox")
                 .ok_or_else(|| api(StatusCode::CONFLICT, "That request was settled already."))?;
+            // After its expires_at nobody acts on a request (protocol.md section 3): the clock
+            // settles it, and the answer is refused.
+            if exchange.expires_at().is_some_and(|t| t <= now) {
+                drop(state);
+                self.expire();
+                return Err(api(
+                    StatusCode::CONFLICT,
+                    "That request expired before the answer.",
+                ));
+            }
             let chosen = answer.as_deref().unwrap_or(inbox::DECLINE);
             let accept = chosen == inbox::ACCEPT || chosen == inbox::ACCEPT_REMEMBER;
             let remember = chosen == inbox::ACCEPT_REMEMBER || chosen == inbox::DECLINE_REMEMBER;

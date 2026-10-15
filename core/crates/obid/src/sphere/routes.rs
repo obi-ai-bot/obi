@@ -122,7 +122,17 @@ pub async fn inbox(
             ));
         }
     };
-    let limit = limit(query.limit.as_deref(), 50, 1000)?;
+    // As the Swift runner: 50 unless asked, at most 1,000, and 0 lists nothing.
+    let limit = match query.limit.as_deref() {
+        None => 50,
+        Some(text) => text.parse::<usize>().map_err(|_| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "limit is a number from 0 to 1,000.",
+            )
+        })?,
+    }
+    .min(1000);
     Ok(json(StatusCode::OK, shared.link.inbox_json(done, limit)))
 }
 
