@@ -387,10 +387,29 @@ fn a_build_job_commits_and_ends_done() {
         git(&worktree, &["log", "-1", "--format=%s"]),
         "Add hello.txt"
     );
+    // The agent committed on a detached HEAD (the sandbox never writes the clone's refs); obid
+    // took the commit into its clone and moved the job's branch there.
     assert_eq!(
         git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        format!("oby/build-{id}")
+        "HEAD"
     );
+    let clone = obid.home.join("clones/obi-e2e/fixture-app");
+    assert_eq!(
+        git(
+            &clone,
+            &["rev-parse", &format!("refs/heads/oby/build-{id}")]
+        ),
+        git(&worktree, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        git(
+            &clone,
+            &["log", "-1", "--format=%s", &format!("oby/build-{id}")]
+        ),
+        "Add hello.txt"
+    );
+    // Its own objects aside, the clone has every object of the branch.
+    git(&clone, &["fsck", "--connectivity-only", "--no-dangling"]);
     assert_eq!(git(&remote, &["for-each-ref"]), refs);
     let stages: Vec<(String, String)> = job["pipeline"]["stages"]
         .as_array()
@@ -699,6 +718,7 @@ fn events_follow_every_change() {
         .unwrap()
         .to_owned();
     let mut seen_done = false;
+    let (mut seen_ready, mut seen_running) = (false, false);
     let give_up_at = Instant::now() + Duration::from_secs(30);
     let mut event = String::new();
     while !seen_done && Instant::now() < give_up_at {
@@ -713,8 +733,78 @@ fn events_follow_every_change() {
             assert_eq!(event, "job");
             let job: Value = serde_json::from_str(data).unwrap();
             assert_eq!(job["id"], id.as_str());
+            // While its worktree gets ready it is queued, as the Swift runner has it; running
+            // once its agent starts.
+            if job["step"] == "Getting fixture-app ready" {
+                assert_eq!(job["status"], "queued", "{job}");
+                seen_ready = true;
+            }
+            if job["status"] == "running" {
+                seen_running = true;
+            }
             seen_done = job["status"] == "done";
         }
     }
     assert!(seen_done, "no event said the job was done");
+    assert!(seen_ready && seen_running, "the job got ready, then ran");
+}
+
+/// An account with no `configDir` uses the tool's own login (runner-api.md, "obid only:
+/// configuration"), but never the person's real folders: the job gets a copy of the login only,
+/// in a folder of its own. What the agent writes there (a hook in its settings, its
+/// `.claude.json`) stays there; the person's real `~/.claude` and `~/.claude.json` can't be
+/// written, so nothing a job plants runs later outside the sandbox. The copied credentials are
+/// gone once the job's run ends.
+#[test]
+fn the_default_login_is_a_copy_the_person_keeps_unchanged() {
+    let folder = Folder::new("login");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote);
+    config["agents"]["claude"]["accounts"][0]["configDir"] = Value::Null;
+    let person = folder.0.join("env-home");
+    std::fs::create_dir_all(person.join(".claude")).unwrap();
+    let files = [
+        (
+            ".claude/.credentials.json",
+            "{\"token\":\"test-login-copy\"}",
+        ),
+        (".claude/settings.json", "{}"),
+        (".claude.json", "{\"numStartups\":1}"),
+    ];
+    for (name, text) in files {
+        std::fs::write(person.join(name), text).unwrap();
+    }
+    let obid = start(&folder.0, &config);
+    let task = format!("LOGIN: {}", person.display());
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(
+        job["summary"],
+        "login: creds={\"token\":\"test-login-copy\"} settings=ok state=ok real=no real-state=no"
+    );
+    // The person's own login is as it was.
+    for (name, text) in files {
+        assert_eq!(
+            std::fs::read_to_string(person.join(name)).unwrap(),
+            text,
+            "{name}"
+        );
+    }
+    // The hook landed in the job's own copy, and the copied credentials are gone.
+    let login = obid.home.join("logins").join(&id);
+    assert!(
+        std::fs::read_to_string(login.join(".claude/settings.json"))
+            .unwrap()
+            .contains("planted")
+    );
+    assert!(!login.join(".claude/.credentials.json").exists());
+    assert!(login.join(".claude.json").exists());
 }

@@ -34,6 +34,18 @@ const SAFE: &[&str] = &[
 
 /// Runs git with `args` in `dir`; its stdout, trimmed, or why it failed.
 pub async fn run(dir: &Path, args: &[&OsStr], extra: &[(&str, &str)]) -> Result<String, GitError> {
+    let output = run_bytes(dir, args, extra, None).await?;
+    Ok(String::from_utf8_lossy(&output).trim().to_owned())
+}
+
+/// [`run`] with `input` on git's stdin (none: `/dev/null`), answering its stdout as it is.
+pub async fn run_bytes(
+    dir: &Path,
+    args: &[&OsStr],
+    extra: &[(&str, &str)],
+    input: Option<Vec<u8>>,
+) -> Result<Vec<u8>, GitError> {
+    use tokio::io::AsyncWriteExt;
     let mut command = Command::new("git");
     command
         .current_dir(dir)
@@ -45,7 +57,15 @@ pub async fn run(dir: &Path, args: &[&OsStr], extra: &[(&str, &str)]) -> Result<
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_COMMON_DIR")
-        .stdin(std::process::Stdio::null())
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .stdin(if input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     for (key, value) in extra {
         command.env(key, value);
@@ -55,7 +75,16 @@ pub async fn run(dir: &Path, args: &[&OsStr], extra: &[(&str, &str)]) -> Result<
         .map(|a| a.to_string_lossy())
         .collect::<Vec<_>>()
         .join(" ");
-    let output = tokio::time::timeout(GIT_TIMEOUT, command.output())
+    let mut child = command
+        .spawn()
+        .map_err(|e| GitError(format!("git can't run: {e}")))?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        // Written alongside the read, so a large input and a large output never wait on each other.
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&input).await;
+        });
+    }
+    let output = tokio::time::timeout(GIT_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_| {
             GitError(format!(
@@ -74,7 +103,39 @@ pub async fn run(dir: &Path, args: &[&OsStr], extra: &[(&str, &str)]) -> Result<
             .to_owned();
         return Err(GitError(format!("git {shown} failed: {line}")));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    Ok(output.stdout)
+}
+
+/// Indexes `pack` (what a job committed, packed in its sandbox) into the clone. `index-pack`
+/// computes every object's id from its content, and `--strict` refuses a broken object or one
+/// that names an object neither the pack nor the clone has, so nothing the job wrote lands under a
+/// false name or half there.
+pub async fn take_pack(clone: &Path, pack: Vec<u8>) -> Result<(), GitError> {
+    let args: Vec<&OsStr> = ["index-pack", "--stdin", "--strict"]
+        .iter()
+        .map(OsStr::new)
+        .collect();
+    run_bytes(clone, &args, &[], Some(pack)).await.map(|_| ())
+}
+
+/// Moves the clone's `refs/heads/<branch>` to `commit`, which the clone must have.
+pub async fn move_branch(clone: &Path, branch: &str, commit: &str) -> Result<(), GitError> {
+    if !is_branch_name(branch) || !is_sha(commit) {
+        return Err(GitError(format!(
+            "{branch} at {commit} isn't a branch and commit obid moves"
+        )));
+    }
+    if !has_commit(clone, commit).await {
+        return Err(GitError(format!(
+            "the clone doesn't have the commit {commit}"
+        )));
+    }
+    git(
+        clone,
+        &["update-ref", &format!("refs/heads/{branch}"), commit],
+    )
+    .await
+    .map(|_| ())
 }
 
 /// [`run`] with plain string arguments.

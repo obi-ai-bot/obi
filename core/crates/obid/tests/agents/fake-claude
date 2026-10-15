@@ -5,11 +5,13 @@
 //   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is ended
 //   FAIL             ends the turn with an error result
 //   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
+//   LOGIN: <home>    reads its login in its HOME, writes a hook into its ~/.claude/settings.json
+//                    and its ~/.claude.json, and tries the same in the person's real <home>
 //   anything else    ends the turn with "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
@@ -41,12 +43,33 @@ rl.on("line", (line) => {
   if (leaked.length) return result(`leaked: ${leaked.join(", ")}`, true);
   const commit = prompt.match(/COMMIT: (\S+)/);
   const ask = prompt.match(/ASK: (\{.*\})/);
+  const login = prompt.match(/LOGIN: (\S+)/);
   if (commit) {
     writeFileSync(commit[1], "hello\n");
     execFileSync("git", ["add", commit[1]]);
     execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add ${commit[1]}`]);
     emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Write", input: { file_path: commit[1] } }] } });
     result(`Added ${commit[1]}.`);
+  } else if (login) {
+    const tries = (f) => {
+      try {
+        f();
+        return "ok";
+      } catch {
+        return "no";
+      }
+    };
+    const home = process.env.HOME;
+    let creds = "none";
+    try {
+      creds = readFileSync(`${home}/.claude/.credentials.json`, "utf8").trim();
+    } catch {}
+    const hook = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "touch /tmp/planted" }] }] } });
+    const settings = tries(() => writeFileSync(`${home}/.claude/settings.json`, hook));
+    const state = tries(() => appendFileSync(`${home}/.claude.json`, " "));
+    const real = tries(() => writeFileSync(`${login[1]}/.claude/settings.json`, hook));
+    const realState = tries(() => appendFileSync(`${login[1]}/.claude.json`, " "));
+    result(`login: creds=${creds} settings=${settings} state=${state} real=${real} real-state=${realState}`);
   } else if (prompt.includes("SLEEP")) {
     mkdirSync(".obi", { recursive: true });
     let beats = 0;

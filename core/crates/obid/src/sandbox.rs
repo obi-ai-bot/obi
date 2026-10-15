@@ -4,8 +4,11 @@
 //!
 //! - **Writes** go only to the job's worktree, the worktree's own git directory
 //!   (`<common dir>/worktrees/<name>`), the job's temporary folder (its `HOME` and `TMPDIR`) and,
-//!   for an agent, its account folder. A job that commits also writes the clone's objects, refs and
-//!   logs; a review job never does.
+//!   for an agent, its account folder. Nothing of the clone's common directory, not even for a job
+//!   that commits: its new objects go to an object folder of its own inside the worktree's git
+//!   directory ([`Spec::git_env`]), its `HEAD` is detached there, and obid takes the commits into
+//!   the clone and moves the job's branch itself, outside the sandbox (`git::keep_commits`). So no
+//!   job can touch another job's branch, `refs/remotes/origin/*` or the objects the clone has.
 //! - **Reads, from obid's home and the person's home**: the worktree, the clone's git common
 //!   directory (read-only), the job's own folders, and the tools it runs. Nothing else: not the
 //!   database, `keys/`, `api-token`, other clones or other worktrees.
@@ -33,9 +36,10 @@ pub struct Spec {
     pub worktree: PathBuf,
     /// The worktree's own git directory (`<common>/worktrees/<name>`): written.
     pub git_admin: Option<PathBuf>,
-    /// The clone's git common directory: read only, unless `commits`.
+    /// The clone's git common directory: read only, always.
     pub git_common: Option<PathBuf>,
-    /// The job commits: the common directory's `objects`, `refs` and `logs` are written too.
+    /// The job commits: git writes its new objects to `<git_admin>/objects`, with the clone's
+    /// read as alternates ([`Spec::git_env`]).
     pub commits: bool,
     /// The job's temporary folder: its `HOME` and `TMPDIR`, read and written.
     pub temp: PathBuf,
@@ -167,17 +171,37 @@ impl Spec {
         }
     }
 
+    /// The job's own object folder, where its commits' objects go: `<git_admin>/objects`. `None`
+    /// for a job that doesn't commit.
+    pub fn own_objects(&self) -> Option<PathBuf> {
+        self.git_admin
+            .as_ref()
+            .filter(|_| self.commits)
+            .map(|admin| admin.join("objects"))
+    }
+
+    /// The environment git needs inside the sandbox for a job that commits: its new objects in the
+    /// job's own object folder, the clone's read as alternates. Empty for one that doesn't commit
+    /// (it can't: nothing it could write objects to).
+    pub fn git_env(&self) -> Vec<(&'static str, OsString)> {
+        match (self.own_objects(), &self.git_common) {
+            (Some(own), Some(common)) => vec![
+                ("GIT_OBJECT_DIRECTORY", own.into_os_string()),
+                (
+                    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                    common.join("objects").into_os_string(),
+                ),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
     /// The folders written.
     fn writable(&self) -> Vec<PathBuf> {
         let mut out = vec![self.worktree.clone()];
         out.extend(self.git_admin.clone());
         out.push(self.temp.clone());
         out.extend(self.accounts.iter().cloned());
-        if self.commits
-            && let Some(common) = &self.git_common
-        {
-            out.extend(["objects", "refs", "logs"].map(|d| common.join(d)));
-        }
         out
     }
 
@@ -253,16 +277,6 @@ fn bubblewrap_args(spec: &Spec) -> Vec<OsString> {
             let file = admin.join(file);
             if file.is_file() {
                 push(&["--ro-bind".as_ref(), file.as_os_str(), file.as_os_str()]);
-            }
-        }
-    }
-    if spec.commits
-        && let Some(common) = &spec.git_common
-    {
-        for dir in ["objects", "refs", "logs"] {
-            let dir = common.join(dir);
-            if dir.is_dir() {
-                push(&["--bind".as_ref(), dir.as_os_str(), dir.as_os_str()]);
             }
         }
     }

@@ -662,6 +662,90 @@ impl Jobs {
         self.config.home.join("tmp").join(id)
     }
 
+    /// The tool's own login as a job sees it, when its account has no `configDir`: a folder of the
+    /// job's own (`home/logins/<job id>`), never the person's real one.
+    fn login_path(&self, id: &str) -> PathBuf {
+        self.config.home.join("logins").join(id)
+    }
+
+    /// Takes what an owner's job committed into its clone and moves its branch there: the
+    /// worktree's HEAD commit, which it answers.
+    ///
+    /// In the sandbox the job's HEAD is detached and its new objects are in its own object folder
+    /// (Spec::git_env); the clone's refs and objects were never writable. The objects the clone
+    /// doesn't have are packed inside the job's sandbox again (so git reads nothing the job
+    /// couldn't, whatever links or alternates it left in its object folder), indexed into the
+    /// clone outside it ([`git::take_pack`] checks every object), and then the branch moves.
+    async fn keep_commits(&self, id: &str) -> Result<String, String> {
+        let job = self.get(id).ok_or("the job is gone")?;
+        let worktree = self.worktree_path(id);
+        if !worktree.join(".git").exists() {
+            return Err("the job has no worktree".into());
+        }
+        let (admin, common) = git::worktree_dirs(&worktree)
+            .await
+            .map_err(|e| e.to_string())?;
+        let clone = common
+            .parent()
+            .ok_or("the clone's git directory has no folder")?
+            .to_path_buf();
+        let head = git::git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
+            .await
+            .map_err(|e| e.to_string())?;
+        if !git::is_sha(&head) {
+            return Err(format!("the worktree's HEAD isn't a commit: {head}"));
+        }
+        if !git::has_commit(&clone, &head).await {
+            let sandbox = self.sandbox.as_ref().map_err(String::clone)?;
+            let temp = self.temp_path(id);
+            prepare_folder(&temp).map_err(|e| e.to_string())?;
+            let mut spec = self.spec(&worktree, &admin, &common, &temp, true, Tool::Claude);
+            spec.network = false;
+            spec.read_only.clear();
+            let git_args = |args: &[&str]| -> Vec<OsString> {
+                let mut argv: Vec<OsString> = vec![
+                    "git".into(),
+                    "-c".into(),
+                    "core.hooksPath=/dev/null".into(),
+                    "-c".into(),
+                    "core.fsmonitor=false".into(),
+                ];
+                argv.extend(args.iter().map(OsString::from));
+                sandbox.wrap(&spec, &argv)
+            };
+            let env = process::sandbox_env(&process::tools_path(), &temp, &spec.git_env());
+            let objects = sandboxed_output(
+                &git_args(&[
+                    "rev-list",
+                    "--objects",
+                    &head,
+                    "--not",
+                    "--branches",
+                    "--remotes",
+                    "--tags",
+                ]),
+                &env,
+                &worktree,
+                None,
+            )
+            .await?;
+            let pack = sandboxed_output(
+                &git_args(&["pack-objects", "--stdout", "--quiet"]),
+                &env,
+                &worktree,
+                Some(objects),
+            )
+            .await?;
+            git::take_pack(&clone, pack)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        git::move_branch(&clone, &job.branch, &head)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(head)
+    }
+
     fn log_path(&self, id: &str, name: &str) -> PathBuf {
         self.config.home.join("logs").join(id).join(name)
     }
@@ -672,10 +756,10 @@ impl Jobs {
         if job.status != Status::Queued {
             return;
         }
+        // Queued while its worktree gets ready, as the Swift runner has it: running once its agent
+        // starts.
         self.update(id, |job| {
-            job.status = Status::Running;
             job.waiting = None;
-            job.started.get_or_insert_with(obi_protocol::time::now);
             job.step = format!("Getting {} ready", job.repo_name());
         });
         let temp = self.temp_path(id);
@@ -684,9 +768,18 @@ impl Jobs {
         }) {
             Err(e) => Err(format!("obid couldn't make the job's folders: {e}")),
             Ok(()) if job.obi.is_some() => self.run_obi_review(id, &signal).await,
-            Ok(()) => self.run_owner_job(id, &signal).await,
+            Ok(()) => {
+                let outcome = self.run_owner_job(id, &signal).await;
+                // Whatever ended it (a limit, a stop, a failure), what it committed is on its
+                // branch.
+                if let Err(e) = self.keep_commits(id).await {
+                    tracing::info!("job {id}: its commits stay in its worktree: {e}");
+                }
+                outcome
+            }
         };
         let _ = std::fs::remove_dir_all(&temp);
+        forget_login_secrets(&self.login_path(id));
         let stopped = *signal.borrow() != Signal::Run;
         match outcome {
             // The owner stopped it: its exchange gets a failed result. A shutdown leaves it be.
@@ -785,7 +878,7 @@ impl Jobs {
             format!("obid can't find {}'s binary ({named}).", tool.name())
         })?;
         let mut spec = spec.clone();
-        let mut extra: Vec<(&str, OsString)> = Vec::new();
+        let mut extra: Vec<(&str, OsString)> = spec.git_env();
         match (&account.config_dir, tool) {
             (Some(dir), _) => {
                 std::fs::create_dir_all(dir).map_err(|e| {
@@ -817,24 +910,24 @@ impl Jobs {
                 ));
             }
             (None, _) => {
-                // The tool's own login, in the person's home: shown to the agent through its
-                // temporary HOME, and nothing else of that home.
-                let names: &[&str] = match tool {
-                    Tool::Codex => &[".codex"],
-                    _ => &[".claude", ".claude.json"],
-                };
-                for home in person_homes().into_iter().take(1) {
-                    for name in names {
-                        let real = home.join(name);
-                        if real.exists() {
-                            let link = spec.temp.join(name);
-                            let _ = std::fs::remove_file(&link);
-                            #[cfg(unix)]
-                            let _ = std::os::unix::fs::symlink(&real, &link);
-                            spec.accounts.push(real);
-                        }
-                    }
+                // The tool's own login, without the person's real folders: obid copies the login
+                // (and only that) into a folder of the job's own, which the agent sees as its
+                // ~/.claude and ~/.claude.json (or ~/.codex) through its temporary HOME. What the
+                // agent writes there (settings, hooks, MCP servers, a refreshed token) stays there:
+                // the person's own ~/.claude, ~/.claude.json and ~/.codex are never writable, so
+                // nothing a job runs can plant something the tool runs later outside the sandbox.
+                let login = self.login_path(&job.id);
+                let names = copy_login(login_home().as_deref(), &login, tool).map_err(|e| {
+                    format!("obid can't copy {}'s login for this job: {e}", tool.name())
+                })?;
+                for name in names {
+                    let link = spec.temp.join(name);
+                    let _ = std::fs::remove_file(&link);
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(login.join(name), &link)
+                        .map_err(|e| format!("obid can't show the job its login: {e}"))?;
                 }
+                spec.accounts.push(login);
             }
         }
         if COMMITTING.contains(&job.kind.as_str()) || job.obi.is_none() {
@@ -961,7 +1054,7 @@ impl Jobs {
         spec.accounts.clear();
         let argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), command.into()];
         let argv = sandbox.wrap(&spec, &argv);
-        let env = process::sandbox_env(&process::tools_path(), &spec.temp, &[]);
+        let env = process::sandbox_env(&process::tools_path(), &spec.temp, &spec.git_env());
         let run = run_check(&argv, &env, &spec.worktree, CHECK_LIMIT, signal.clone())
             .await
             .map_err(|e| format!("obid couldn't run the check: {e}"))?;
@@ -1131,7 +1224,14 @@ impl Jobs {
         .map(OsString::from)
         .collect();
         let launch = self.launch(&job, &spec, tool, flags, &account)?;
+        if *signal.borrow() != Signal::Run {
+            return Ok(());
+        }
         self.update(id, |job| {
+            if job.status == Status::Queued {
+                job.status = Status::Running;
+            }
+            job.started.get_or_insert_with(obi_protocol::time::now);
             job.phase = Some(Phase::Work);
             job.step = "Reviewing".into();
         });
@@ -1272,18 +1372,25 @@ impl Jobs {
             )
             .await
             .is_ok();
-            let mut args: Vec<&std::ffi::OsStr> =
-                vec!["worktree".as_ref(), "add".as_ref(), "--quiet".as_ref()];
             if !exists {
-                args.push(std::ffi::OsStr::new("-b"));
-                args.push(std::ffi::OsStr::new(&job.branch));
+                git::git(
+                    &clone,
+                    &["branch", "--no-track", "--", &job.branch, &start_commit],
+                )
+                .await
+                .map_err(|e| format!("obid couldn't make the job's branch: {e}"))?;
             }
-            args.push(worktree.as_os_str());
-            args.push(if exists {
-                job.branch.as_ref()
-            } else {
-                start_commit.as_ref()
-            });
+            // Detached at the branch: the sandbox never writes the clone's refs, so obid moves the
+            // branch to the job's commits itself (git::keep_commits).
+            let branch_ref = format!("refs/heads/{}", job.branch);
+            let args: Vec<&std::ffi::OsStr> = vec![
+                "worktree".as_ref(),
+                "add".as_ref(),
+                "--quiet".as_ref(),
+                "--detach".as_ref(),
+                worktree.as_os_str(),
+                branch_ref.as_ref(),
+            ];
             git::run(&clone, &args, &[])
                 .await
                 .map_err(|e| format!("obid couldn't make the job's worktree: {e}"))?;
@@ -1303,6 +1410,21 @@ impl Jobs {
         let temp = self.temp_path(id);
         let (tool, account) = self.job_account(&job)?;
         let spec = self.spec(&worktree, &admin, &common, &temp, true, tool);
+        // HEAD detached at the branch (a worktree from before may be on it), and the folder the
+        // job's new objects go to (Spec::git_env).
+        if let Ok(head) = git::git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD"]).await
+            && git::git(&worktree, &["symbolic-ref", "--quiet", "HEAD"])
+                .await
+                .is_ok()
+        {
+            git::git(&worktree, &["update-ref", "--no-deref", "HEAD", &head])
+                .await
+                .map_err(|e| format!("obid couldn't detach the job's HEAD: {e}"))?;
+        }
+        if let Some(own) = spec.own_objects() {
+            std::fs::create_dir_all(own.join("info"))
+                .map_err(|e| format!("obid can't make the job's object folder: {e}"))?;
+        }
         if tool == Tool::Cursor {
             let allowed = acp::cursor::repository_allowlist(&worktree);
             if !allowed.is_empty() {
@@ -1353,7 +1475,14 @@ impl Jobs {
                 flags.extend(["--resume".into(), session.into()]);
             }
             let launch = self.launch(&job, &spec, tool, flags, &account)?;
+            if *signal.borrow() != Signal::Run {
+                return Ok(());
+            }
             self.update(id, |job| {
+                if job.status == Status::Queued {
+                    job.status = Status::Running;
+                }
+                job.started.get_or_insert_with(obi_protocol::time::now);
                 job.phase = Some(Phase::Work);
                 job.step = format!("Starting {}", tool.name());
             });
@@ -1428,9 +1557,7 @@ impl Jobs {
             self.update(id, |job| job.round = Some(round + 1));
         }
 
-        let head = git::git(&worktree, &["rev-parse", "HEAD"])
-            .await
-            .map_err(|e| e.to_string())?;
+        let head = self.keep_commits(id).await?;
         let commits = if start_commit.is_empty() || head == start_commit {
             0
         } else {
@@ -1474,6 +1601,126 @@ pub fn claude_accounts(claude: &crate::config::Agent) -> Vec<crate::config::Acco
         }]
     } else {
         claude.accounts.clone()
+    }
+}
+
+/// What a sandboxed command (`argv`, wrapped already) prints, with `input` on its stdin; why not,
+/// when it fails.
+async fn sandboxed_output(
+    argv: &[OsString],
+    env: &[(OsString, OsString)],
+    dir: &Path,
+    input: Option<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .current_dir(dir)
+        .stdin(if input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("obid couldn't start git in the job's sandbox: {e}"))?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&input).await;
+        });
+    }
+    let output = tokio::time::timeout(Duration::from_secs(600), child.wait_with_output())
+        .await
+        .map_err(|_| "git in the job's sandbox took more than 600 seconds".to_owned())?
+        .map_err(|e| format!("git in the job's sandbox failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let line = stderr.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("");
+        return Err(format!("git in the job's sandbox failed: {}", line.trim()));
+    }
+    Ok(output.stdout)
+}
+
+/// Where the tool's own login is: the `HOME` obid was started with, as the tool itself would look
+/// when the person runs it, else the password database's.
+fn login_home() -> Option<PathBuf> {
+    let homes = person_homes();
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| homes.contains(home))
+        .or_else(|| homes.into_iter().next())
+}
+
+/// The tool's own login, copied from `home` into the job's `login` folder, for an account with no
+/// `configDir`: Claude Code's `~/.claude/.credentials.json` and `~/.claude.json`, Codex's
+/// `~/.codex/auth.json` and `config.toml`. Nothing else of those folders (no settings, hooks,
+/// commands or sessions of the person's). The credentials are copied again before every start (the
+/// person may have signed in again) and removed when the job's run ends
+/// ([`forget_login_secrets`]); the rest is copied once, then the job's own. Answers the names to
+/// show in the job's `HOME`. (On macOS Claude Code keeps its credentials in the keychain, not in a
+/// file: there is then no file to copy.)
+fn copy_login(home: Option<&Path>, login: &Path, tool: Tool) -> std::io::Result<Vec<&'static str>> {
+    let (shown, secret, once): (&[&'static str], &[&str], &[&str]) = match tool {
+        Tool::Codex => (&[".codex"], &[".codex/auth.json"], &[".codex/config.toml"]),
+        _ => (
+            &[".claude", ".claude.json"],
+            &[".claude/.credentials.json"],
+            &[".claude.json"],
+        ),
+    };
+    store::make_private_dir(login)?;
+    // The job may have changed its login folder: obid writes only into a real folder there,
+    // never through a link the job left in its place.
+    let folder = login.join(shown[0]);
+    if std::fs::symlink_metadata(&folder).is_ok_and(|m| !m.is_dir()) {
+        std::fs::remove_file(&folder)?;
+    }
+    store::make_private_dir(&folder)?;
+    let Some(home) = home else {
+        return Ok(shown.to_vec());
+    };
+    let copy = |name: &str| -> std::io::Result<()> {
+        let from = home.join(name);
+        let to = login.join(name);
+        // A regular file only: a link or a folder in its place is not a login.
+        match std::fs::symlink_metadata(&from) {
+            Ok(meta) if meta.is_file() => {}
+            _ => return Ok(()),
+        }
+        let bytes = std::fs::read(&from)?;
+        let _ = std::fs::remove_file(&to);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        std::io::Write::write_all(&mut options.open(&to)?, &bytes)
+    };
+    for name in secret {
+        copy(name)?;
+    }
+    for name in once {
+        if std::fs::symlink_metadata(login.join(name)).is_err() {
+            copy(name)?;
+        }
+    }
+    Ok(shown.to_vec())
+}
+
+/// Removes the copied credentials from a job's login folder once its run ended: they are copied
+/// again before its next start.
+fn forget_login_secrets(login: &Path) {
+    for (folder, name) in [(".claude", ".credentials.json"), (".codex", "auth.json")] {
+        let folder = login.join(folder);
+        // Only in a real folder: never through a link the job left in its place.
+        if std::fs::symlink_metadata(&folder).is_ok_and(|m| m.is_dir()) {
+            let _ = std::fs::remove_file(folder.join(name));
+        } else {
+            let _ = std::fs::remove_file(&folder);
+        }
     }
 }
 
@@ -1608,7 +1855,7 @@ fn owner_prompt(job: &Job) -> String {
         .unwrap_or_else(|| "the default branch".into());
     let mut lines = vec![match job.pr {
         Some(pr) => format!(
-            "{} pull request #{pr} in {}. Its code is checked out here on the branch {}; compare it with origin/{base} (git diff origin/{base}...HEAD).",
+            "{} pull request #{pr} in {}. Its code is checked out here at the head of the branch {} (HEAD detached: commit as it is, obid moves the branch to your commits); compare it with origin/{base} (git diff origin/{base}...HEAD).",
             if job.kind == "review" {
                 "Review"
             } else {
@@ -1618,7 +1865,7 @@ fn owner_prompt(job: &Job) -> String {
             job.branch
         ),
         None => format!(
-            "You're working in {}, in a git worktree of its own on the branch {}, started from origin/{base}.",
+            "You're working in {}, in a git worktree of its own at the head of the branch {}, started from origin/{base}. Its HEAD is detached: commit as it is and don't switch branches; obid moves the branch to your commits after each turn.",
             job.repo, job.branch
         ),
     }];
@@ -1626,7 +1873,7 @@ fn owner_prompt(job: &Job) -> String {
         lines.push(format!("The work is about issue #{issue}."));
     }
     lines.push(format!("What the user asked for: {}", job.task));
-    lines.push("Commit your changes on this branch when they're ready. Don't push, open pull requests or post anything to GitHub: obid publishes the work itself.".into());
+    lines.push("Commit your changes here when they're ready. Don't push, open pull requests or post anything to GitHub: obid publishes the work itself.".into());
     if COMMITTING.contains(&job.kind.as_str()) {
         lines.push(format!("If you can't commit, say why in your summary's first line: a {} job that ends with no commits counts as nothing committed.", job.kind));
     }

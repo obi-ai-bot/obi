@@ -207,6 +207,14 @@ fn probe_script(world: &World, port: u16) -> String {
             "clone-objects",
             format!("{}/objects/probe", world.common.display()),
         ),
+        (
+            "clone-refs",
+            format!("{}/refs/heads/probe", world.common.display()),
+        ),
+        (
+            "clone-remote-refs",
+            format!("{}/refs/remotes/origin/probe", world.common.display()),
+        ),
         ("clone-config", format!("{}/config", world.common.display())),
         (
             "clone-hooks",
@@ -317,7 +325,10 @@ fn run(world: &World, spec: &Spec) -> Ran {
         world.worktree.clone().into(),
     ];
     let argv = sandbox.wrap(spec, &argv);
-    let env = obid::process::sandbox_env(&obid::process::tools_path(), &spec.temp, &[]);
+    if let Some(own) = spec.own_objects() {
+        std::fs::create_dir_all(own).unwrap();
+    }
+    let env = obid::process::sandbox_env(&obid::process::tools_path(), &spec.temp, &spec.git_env());
     let output = Command::new(&argv[0])
         .args(&argv[1..])
         .env_clear()
@@ -362,6 +373,9 @@ fn the_same_fences(ran: &Ran, world: &World, commits: bool) {
         "home",
         "worktrees-folder",
         "other-worktree",
+        "clone-objects",
+        "clone-refs",
+        "clone-remote-refs",
         "clone-config",
         "clone-hooks",
         "worktree-pointer",
@@ -374,12 +388,6 @@ fn the_same_fences(ran: &Ran, world: &World, commits: bool) {
     ] {
         expect(ran, &format!("write {label}"), "no");
     }
-    // A job that commits writes the clone's objects (and refs and logs); one that doesn't, none.
-    expect(
-        ran,
-        "write clone-objects",
-        if commits { "ok" } else { "no" },
-    );
     for label in ["worktree", "admin", "temp", "tmpdir"] {
         expect(ran, &format!("write {label}"), "ok");
     }
@@ -424,7 +432,10 @@ fn the_same_fences(ran: &Ran, world: &World, commits: bool) {
     expect(ran, "env-home", &world.temp.display().to_string());
     expect(ran, "env-tmpdir", &world.temp.display().to_string());
     // And on disk: nothing appeared where it was refused, the files that were there are unchanged.
-    assert_eq!(world.common.join("objects/probe").exists(), commits);
+    // Not even a job that commits writes the clone's objects or refs.
+    assert!(!world.common.join("objects/probe").exists());
+    assert!(!world.common.join("refs/heads/probe").exists());
+    assert!(!world.common.join("refs/remotes/origin/probe").exists());
     for path in [
         world.home.join("probe"),
         world.home.join("worktrees/probe"),
@@ -471,10 +482,29 @@ fn an_agent_is_fenced_in_but_keeps_the_network() {
     );
 }
 
-/// A job that commits writes the clone's objects and refs too, and nothing else more.
+/// A job that commits does so in its own git directory only: its HEAD (detached there) and its new
+/// objects (its own object folder, the clone's read as alternates). The clone's objects and refs
+/// stay as they were: no job touches another's branch or `refs/remotes/origin/*`; obid takes the
+/// commits into the clone itself, outside the sandbox (tests/jobs_api.rs).
 #[test]
-fn a_committing_job_writes_objects_and_refs_but_not_the_clones_settings() {
+fn a_committing_job_commits_without_writing_the_clone() {
     let world = world("commits");
-    let ran = run(&world, &spec(&world, false, true, false));
+    let refs = git(&world.common, &["for-each-ref"]);
+    let objects = git(&world.common, &["count-objects", "-v"]);
+    let before = git(&world.worktree, &["rev-parse", "HEAD"]);
+    let spec = spec(&world, false, true, false);
+    let ran = run(&world, &spec);
     the_same_fences(&ran, &world, true);
+    assert_eq!(git(&world.common, &["for-each-ref"]), refs);
+    assert_eq!(git(&world.common, &["count-objects", "-v"]), objects);
+    let own = spec.own_objects().unwrap();
+    let after = std::fs::read_to_string(world.admin.join("HEAD")).unwrap();
+    let after = after.trim();
+    assert_ne!(after, before, "the commit moved the job's own HEAD");
+    let (dir, file) = after.split_at(2);
+    assert!(
+        own.join(dir).join(file).is_file(),
+        "its commit is in the job's own objects"
+    );
+    assert!(!world.common.join("objects").join(dir).join(file).exists());
 }
