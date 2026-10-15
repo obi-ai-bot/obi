@@ -10,7 +10,7 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 
 | Swift test | obid test | Note |
 |---|---|---|
-| ClaimTests.aClientMayClaimFilesAtDispatch | runner_api.rs `a_client_may_claim_files_at_dispatch` | its dispatch half; the plan half needs `POST /v1/plans` |
+| ClaimTests.aClientMayClaimFilesAtDispatch | runner_api.rs `a_client_may_claim_files_at_dispatch` | its dispatch half; the plan half needs `POST /v1/plans` (#442) |
 | ClearTests.everyAppFollowingEventsHearsAClear | runner_api.rs `clear_done_is_kept_said_and_heard` |  |
 | ClearTests.statusSaysNullUntilTheFirstClearThenTheTime | runner_api.rs `clear_done_is_kept_said_and_heard` |  |
 | ClearTests.theClearSurvivesARestartAndNeverGoesBack | runner_api.rs `clear_done_is_kept_said_and_heard` | the restart through the API; the clock going back in src/clear.rs `the_clear_survives_a_restart_and_never_goes_back` |
@@ -51,49 +51,67 @@ Also from the Mac app's side: tests/mac_app.rs builds the Mac app's own client (
 
 ## API-level, not ported: obid doesn't serve it yet
 
-runner-api.md says obid serves the whole API. These tests stay unported until it serves what they ask for; each needs the endpoint or feature named.
+runner-api.md says obid serves the whole API. These tests stay unported until it serves what they ask for; each needs the endpoint or feature named. Each feature group has one issue labeled `core-port` (decision D4) that names the Swift source and these tests to port:
 
-| Swift test | Needs |
-|---|---|
-| AppleCheckTests.ObyCheckAppleWaitsForTheMacAndPrintsTheCompilersErrorsAndFailingTests | `/v1/agent/apple-check`, `/v1/checks/…` (Apple checks) |
-| AttachmentTests.plansRefuseAttachmentsOutsideTheAppsFolder | `POST /v1/plans` |
-| CheckTests.theAPIHandsOutChecksTakesTheirResultsAndTellsEveryApp | Mac checks queued, `/v1/checks/{id}/result` (obid serves `GET /v1/checks/next`, which answers `{"check": null}`: it queues none; runner_api.rs `a_mac_asking_for_a_check_hears_none_waits`) |
-| ConnectionTests.agentsUseConnectedAppsWithoutEverSeeingTheLogin | `/v1/connections`, `/v1/me`, `/v1/agent/mcp/…` |
-| ConversationTests.theConversationEndpointPagesTheThreadAndItsEventFollowsIt | `GET /v1/conversation` (obid has no brain; the Mac app reads its 404 as an empty thread) |
-| ConversationTests.thePlanEndpointTakesRecentTurns | `POST /v1/plans` |
-| FailureTests.theAPIListsFailuresAndFixesThem | `/v1/failures…` |
-| GatewayTests.gatewayForwardsTheRunnersTokenToTheMacRunner | the LAN gateway |
-| GatewayTests.gatewayRouterRedactsSecretsInFiniteAndSSEResponses | the LAN gateway |
-| GatewayTests.gatewayRouterRequiresTokensAndHidesUnlistedRoutes | the LAN gateway and `/v1/pairing/…` (#284) |
-| GatewayTests.gatewayScrubsSessionIDsAndAccountHomes | the LAN gateway |
-| GatewayTests.pairingIsMadeOnTheLoopbackAPIWithTheRunnersToken | `/v1/pairing/invite`, `/v1/pairing/devices` |
-| MoveTests.theMoveEndpointMovesAJobOrSaysWhyNot | `POST /v1/jobs/{id}/move` |
-| PermissionTests.aQuestionSendsEveryKey | `question` on the job (an agent's question, a plan waiting for approval): obid sends `permission` and its inbox item (runner_api.rs `the_api_answers_permissions_and_modes`), and `question` is always null |
-| ResearchTests.aMissingScannerFilesNothing | `POST /v1/jobs/{id}/proposals/{index}/file` |
-| ResearchTests.aSecretInAProposalIsRefused | `POST /v1/jobs/{id}/proposals/{index}/file` |
-| ResearchTests.anUnknownReadIsRejectedByJobsAPI | research `reads` (obid refuses every `reads` with 422) |
-| ResearchTests.proposalsFileOnlyOnTapAndAreScanned | `POST /v1/jobs/{id}/proposals/{index}/file` |
-| ResearchTests.theReportIsStoredAndServed | `GET /v1/jobs/{id}/report` |
-| ReserveTests.theAPILiftsAndRestoresTheReserve | `POST /v1/accounts/{id}/reserve` |
-| ReviewTests.theAPIShowsTheReviewAndTheReviewJob | Oby's review of a published job (`reviewing`, `review`): obid publishes nothing yet |
-| RunnerTests.plansMapToTheirKinds | `POST /v1/plans` (its answer's shape) |
-| RunnerTests.theAppHandsOverItsDeviceToken | `POST /v1/activities`, `POST /v1/notifications` |
-| RunnerTests.withoutAKeyThereIsNoPush | `POST /v1/activities` |
-| SpeechTests.endpointIsOwnerGatedAndValidatesBinaryRequests | `POST /v1/speech` |
-| StartWhenTests.theAPITakesStartWhen | `startWhen`, `POST /v1/jobs/{id}/start`, `/start-when` (obid refuses a non-empty `startWhen` with 422) |
-| UpdateTests.statusExposesVersionCommitAndPendingUpdate | self-update (`status.update`): obid doesn't update itself |
-| VaultTests.theAPIsJSONHasTheVaultsSecretsTakenOut | the vault: obid has none yet |
-| WatchTests.aReplayedRequestFails | the Watch API |
-| WatchTests.bothTheAccessTokenAndTheSignatureAreNeeded | the Watch API |
-| WatchTests.pairingNeedsTheWatchAPISetUp | `POST /v1/watches` |
-| WatchTests.pairingTakesOnlyAKeyAndAToken | `POST /v1/watches` |
-| WatchTests.speechIsTakenButNotWrittenDownYet | the Watch API, `POST /v1/speech` |
-| WatchTests.thePhonePairsListsAndRemovesAWatch | `/v1/watches` |
-| WatchTests.thePhonesActivityEndpointTakesNoWatchTokens | `POST /v1/activities` |
-| WatchTests.theTailnetLoginOpensNothing | the Watch API |
-| WatchTests.theWatchRegistersItsOwnPushTokens | the Watch API, `POST /v1/notifications` |
-| WatchTests.withoutWatchJSONNothingGetsIn | the Watch API |
-| XcodeCloudTests.followsChecksAndExposesStagesAndAPI | Xcode Cloud (`xcodeCloud`): obid publishes nothing yet |
+- #442 Plans and the brain: POST /v1/plans and GET /v1/conversation
+- #443 Mac checks and Apple checks: queued checks, results, /v1/agent/apple-check
+- #444 Connections: /v1/connections, /v1/me and agents' MCP through obid
+- #445 Failures: /v1/failures and their fixes
+- #446 The LAN gateway and its pairing
+- #447 Move: POST /v1/jobs/{id}/move
+- #448 A job's question: `question` on a job and its inbox item
+- #449 Research jobs: reads, reports and filed proposals
+- #450 Usage and reserves: POST /v1/accounts/{id}/reserve
+- #451 Publishing the owner's work and Oby's review of it
+- #452 Pushes: POST /v1/activities and POST /v1/notifications
+- #453 Speech: POST /v1/speech
+- #454 The Watch API and /v1/watches
+- #455 startWhen: jobs that wait to start
+- #456 Self-update: status.update
+- #457 The vault
+- #458 Xcode Cloud: following builds, stages and the API
+
+| Swift test | Needs | Issue |
+|---|---|---|
+| AppleCheckTests.ObyCheckAppleWaitsForTheMacAndPrintsTheCompilersErrorsAndFailingTests | `/v1/agent/apple-check`, `/v1/checks/…` (Apple checks) | #443 |
+| AttachmentTests.plansRefuseAttachmentsOutsideTheAppsFolder | `POST /v1/plans` | #442 |
+| CheckTests.theAPIHandsOutChecksTakesTheirResultsAndTellsEveryApp | Mac checks queued, `/v1/checks/{id}/result` (obid serves `GET /v1/checks/next`, which answers `{"check": null}`: it queues none; runner_api.rs `a_mac_asking_for_a_check_hears_none_waits`) | #443 |
+| ConnectionTests.agentsUseConnectedAppsWithoutEverSeeingTheLogin | `/v1/connections`, `/v1/me`, `/v1/agent/mcp/…` | #444 |
+| ConversationTests.theConversationEndpointPagesTheThreadAndItsEventFollowsIt | `GET /v1/conversation` (obid has no brain; the Mac app reads its 404 as an empty thread) | #442 |
+| ConversationTests.thePlanEndpointTakesRecentTurns | `POST /v1/plans` | #442 |
+| FailureTests.theAPIListsFailuresAndFixesThem | `/v1/failures…` | #445 |
+| GatewayTests.gatewayForwardsTheRunnersTokenToTheMacRunner | the LAN gateway | #446 |
+| GatewayTests.gatewayRouterRedactsSecretsInFiniteAndSSEResponses | the LAN gateway | #446 |
+| GatewayTests.gatewayRouterRequiresTokensAndHidesUnlistedRoutes | the LAN gateway and `/v1/pairing/…` (#284) | #446 |
+| GatewayTests.gatewayScrubsSessionIDsAndAccountHomes | the LAN gateway | #446 |
+| GatewayTests.pairingIsMadeOnTheLoopbackAPIWithTheRunnersToken | `/v1/pairing/invite`, `/v1/pairing/devices` | #446 |
+| MoveTests.theMoveEndpointMovesAJobOrSaysWhyNot | `POST /v1/jobs/{id}/move` | #447 |
+| PermissionTests.aQuestionSendsEveryKey | `question` on the job (an agent's question, a plan waiting for approval): obid sends `permission` and its inbox item (runner_api.rs `the_api_answers_permissions_and_modes`), and `question` is always null | #448 |
+| ResearchTests.aMissingScannerFilesNothing | `POST /v1/jobs/{id}/proposals/{index}/file` | #449 |
+| ResearchTests.aSecretInAProposalIsRefused | `POST /v1/jobs/{id}/proposals/{index}/file` | #449 |
+| ResearchTests.anUnknownReadIsRejectedByJobsAPI | research `reads` (obid refuses every `reads` with 422) | #449 |
+| ResearchTests.proposalsFileOnlyOnTapAndAreScanned | `POST /v1/jobs/{id}/proposals/{index}/file` | #449 |
+| ResearchTests.theReportIsStoredAndServed | `GET /v1/jobs/{id}/report` | #449 |
+| ReserveTests.theAPILiftsAndRestoresTheReserve | `POST /v1/accounts/{id}/reserve` | #450 |
+| ReviewTests.theAPIShowsTheReviewAndTheReviewJob | Oby's review of a published job (`reviewing`, `review`): obid publishes nothing yet | #451 |
+| RunnerTests.plansMapToTheirKinds | `POST /v1/plans` (its answer's shape) | #442 |
+| RunnerTests.theAppHandsOverItsDeviceToken | `POST /v1/activities`, `POST /v1/notifications` | #452 |
+| RunnerTests.withoutAKeyThereIsNoPush | `POST /v1/activities` | #452 |
+| SpeechTests.endpointIsOwnerGatedAndValidatesBinaryRequests | `POST /v1/speech` | #453 |
+| StartWhenTests.theAPITakesStartWhen | `startWhen`, `POST /v1/jobs/{id}/start`, `/start-when` (obid refuses a non-empty `startWhen` with 422) | #455 |
+| UpdateTests.statusExposesVersionCommitAndPendingUpdate | self-update (`status.update`): obid doesn't update itself | #456 |
+| VaultTests.theAPIsJSONHasTheVaultsSecretsTakenOut | the vault: obid has none yet | #457 |
+| WatchTests.aReplayedRequestFails | the Watch API | #454 |
+| WatchTests.bothTheAccessTokenAndTheSignatureAreNeeded | the Watch API | #454 |
+| WatchTests.pairingNeedsTheWatchAPISetUp | `POST /v1/watches` | #454 |
+| WatchTests.pairingTakesOnlyAKeyAndAToken | `POST /v1/watches` | #454 |
+| WatchTests.speechIsTakenButNotWrittenDownYet | the Watch API, `POST /v1/speech` | #454 |
+| WatchTests.thePhonePairsListsAndRemovesAWatch | `/v1/watches` | #454 |
+| WatchTests.thePhonesActivityEndpointTakesNoWatchTokens | `POST /v1/activities` | #452 |
+| WatchTests.theTailnetLoginOpensNothing | the Watch API | #454 |
+| WatchTests.theWatchRegistersItsOwnPushTokens | the Watch API, `POST /v1/notifications` | #454 |
+| WatchTests.withoutWatchJSONNothingGetsIn | the Watch API | #454 |
+| XcodeCloudTests.followsChecksAndExposesStagesAndAPI | Xcode Cloud (`xcodeCloud`): obid publishes nothing yet | #458 |
 
 ## Swift-internal, dropped
 

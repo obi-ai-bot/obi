@@ -1162,7 +1162,7 @@ obid serve --config /path/to/config.json
 - `repos`: the repositories jobs may work in. `remote` is an `https://` or `ssh` URL, or a `file://` URL only when `allowFileRemotes` is true (the e2e test's fixture). `check` is the one-line command that decides `tests_pass` and serves as the job's check.
 - `telemetry`: false unless the owner turns it on. obid sends nothing to anyone otherwise.
 
-The API token is the one in `home/api-token` (0600, at least 32 visible characters): obid makes it on first start, or takes the one put there before it starts. The shells on the same machine read it there. It is never in obid's environment or arguments, where any process of the same user can read it (on macOS through `KERN_PROCARGS2`, which no sandbox holds back): obid refuses to start when `OBID_API_TOKEN` is set, saying to put the token in that file instead. The same holds for every secret obid holds: none is ever in its environment or arguments, nor in a child's. Every request sends `Authorization: Bearer <token>`; anything else is `401`. `GET /v1/status` adds `"engine": "obid"` to `runner`. On SIGTERM or SIGINT obid stops taking requests, leaves its jobs as a restart would (After any restart, above) and exits 0 within 10 seconds.
+The API token is the one in `home/api-token` (0600, at least 32 visible characters): obid makes it on first start, or takes the one put there before it starts. The shells on the same machine read it there. It is never in obid's environment or arguments, where any process of the same user can read it (on macOS through `KERN_PROCARGS2`, which no sandbox holds back; #439): obid refuses to start when `OBID_API_TOKEN` is set, saying to put the token in that file instead. The same holds for every secret obid holds: none is ever in its environment or arguments, nor in a child's. Every request sends `Authorization: Bearer <token>`; anything else is `401`. `GET /v1/status` adds `"engine": "obid"` to `runner`. On SIGTERM or SIGINT obid stops taking requests, leaves its jobs as a restart would (After any restart, above) and exits 0 within 10 seconds.
 
 ### obid only: Sphere membership
 
@@ -1309,10 +1309,10 @@ What obid does when it accepts a `review_request` (by the owner's answer or a de
 
 What the sandbox can't hold back, and is known:
 
-- **macOS: other processes' arguments and environment.** Any process of the same user can read another's (`KERN_PROCARGS2`); Seatbelt has no rule for it. So `obid` keeps every secret out of its own and its children's arguments and environment (above, "obid only: configuration").
-- **macOS: Claude Code's keychain login.** On macOS Claude Code keeps its login in the keychain, which a job can't reach: an account whose login is only there can't sign in inside the sandbox. Giving such an account a login the job can use is a follow-up.
+- **macOS: other processes' arguments and environment.** Any process of the same user can read another's (`KERN_PROCARGS2`); Seatbelt has no rule for it. So `obid` keeps every secret out of its own and its children's arguments and environment (above, "obid only: configuration"). What else Seatbelt can't deny: #439.
+- **macOS: Claude Code's keychain login.** On macOS Claude Code keeps its login in the keychain, which a job can't reach: an account whose login is only there can't sign in inside the sandbox. Giving such an account a login the job can use: #459.
 - **macOS: a job's own preferences.** cfprefsd keeps preferences in the person's home whatever the job's `HOME` says, so the profile can't give a job preferences of its own; tools that keep settings there start from their defaults every time.
-- **macOS: processes that leave the job's process group.** Stopping a job signals its process group; a process that calls `setsid` leaves it, and Seatbelt can't stop that. On Linux, bubblewrap's PID namespace and `--die-with-parent` end everything inside when the job ends.
+- **macOS: processes that leave the job's process group.** Stopping a job signals its process group; a process that calls `setsid` leaves it, and Seatbelt can't stop that. On Linux, bubblewrap's PID namespace and `--die-with-parent` end everything inside when the job ends. Tracking and ending the whole tree on macOS: #460.
 
 When `obid` can't make this sandbox on the machine, it runs neither: the job fails, and its summary says why.
 
