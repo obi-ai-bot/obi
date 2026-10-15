@@ -455,6 +455,8 @@ impl PluginHost {
     }
 
     /// The MCP server of every ready `agent-mcp` plug-in, with the only tools agents may call.
+    /// A server whose URL is the owner's setting (`urlFromConfig`) comes as
+    /// [`McpServerSpec::Http`] with that URL: never as `HttpFromConfig`.
     pub fn agent_mcp_servers(&self) -> Vec<(PluginId, McpServerSpec, Vec<String>)> {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Vec::new();
@@ -472,11 +474,15 @@ impl PluginHost {
                 && live.state == PluginState::Ready
                 && live.served.contains(&Kind::AgentMcp)
             {
-                servers.push((
-                    plugin.id.clone(),
-                    spec.server.clone(),
-                    spec.allowed_tools.clone(),
-                ));
+                // Settings were checked when it was enabled or started, so this holds.
+                match spec.server_for(&live.config) {
+                    Ok(server) => {
+                        servers.push((plugin.id.clone(), server, spec.allowed_tools.clone()))
+                    }
+                    Err(error) => {
+                        tracing::warn!(target: "obi_plugin", plugin = %plugin.id, "its MCP server is left out: {error}")
+                    }
+                }
             }
         }
         servers
@@ -672,10 +678,18 @@ impl Plugin {
             return Err("the manifest is invalid".into());
         };
         match &manifest.config {
-            Some(schema) => schema::validate(schema, config),
-            None if config == &json!({}) => Ok(()),
-            None => Err("the plug-in takes no settings: only {}".into()),
+            Some(schema) => schema::validate(schema, config)?,
+            None if config == &json!({}) => {}
+            None => return Err("the plug-in takes no settings: only {}".into()),
         }
+        // A server URL that is a setting is held to the rule for one in a manifest.
+        if let Some(spec) = &manifest.agent_mcp {
+            spec.server_for(config).map_err(|error| match error {
+                PluginError::Config(reason) => reason,
+                other => other.to_string(),
+            })?;
+        }
+        Ok(())
     }
 }
 

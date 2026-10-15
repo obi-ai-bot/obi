@@ -19,7 +19,8 @@ use tokio::sync::mpsc;
 pub use error::PluginError;
 pub use id::PluginId;
 pub use manifest::{
-    AgentMcpSpec, EventsSpec, MANIFEST_FILE, MAX_TOOL_NAME_BYTES, Manifest, McpServerSpec, RunSpec,
+    AgentMcpSpec, EventsSpec, MANIFEST_FILE, MAX_CONFIG_KEY_BYTES, MAX_TOOL_NAME_BYTES, Manifest,
+    McpServerSpec, RunSpec,
 };
 pub use types::{
     ContextItem, ContextJob, ContextRequest, DEFAULT_MAX_BYTES, Event, EventData, EventKind,

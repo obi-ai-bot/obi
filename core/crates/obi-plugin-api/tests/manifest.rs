@@ -2,12 +2,34 @@
 //! each rule refuses what it should.
 
 use obi_plugin_api::{
-    EventKind, Kind, MANIFEST_FILE, MAX_TOOL_NAME_BYTES, Manifest, McpServerSpec, PROTOCOL,
-    PluginError, PluginId,
+    EventKind, Kind, MANIFEST_FILE, MAX_CONFIG_KEY_BYTES, MAX_TOOL_NAME_BYTES, Manifest,
+    McpServerSpec, PROTOCOL, PluginError, PluginId,
 };
 use serde_json::{Value, json};
 
-/// The manifest docs/ARCHITECTURE.md 5.2 shows, word for word.
+/// The manifest docs/ARCHITECTURE.md 5.2 shows, word for word: Tetrix's server URL is the
+/// owner's setting `url`.
+fn architecture_example() -> Value {
+    json!({
+      "manifest": "obi-plugin/0.1",
+      "id": "tetrix",
+      "name": "Tetrix",
+      "version": "0.1.0",
+      "description": "A code graph and memory for agents.",
+      "kinds": ["agent-mcp"],
+      "run": {"command": "bin/tetrix-plugin", "args": []},
+      "agentMcp": {
+        "server": {"type": "http", "urlFromConfig": "url"},
+        "allowedTools": ["search_entities", "get_entity", "code_impact", "save_session"]
+      },
+      "network": [],
+      "config": {"type": "object", "additionalProperties": false, "required": ["url"],
+                 "properties": {"url": {"type": "string", "pattern": "^https://", "maxLength": 2048}}}
+    })
+}
+
+/// That manifest with the server's other form, a URL in the manifest itself
+/// (`{"type": "http", "url"}`), which the tests below change one field at a time.
 fn tetrix() -> Value {
     json!({
       "manifest": "obi-plugin/0.1",
@@ -51,7 +73,105 @@ fn refused(value: &Value) -> String {
 }
 
 #[test]
-fn the_architecture_example_parses() {
+fn the_architecture_example_parses_and_takes_its_url_from_the_settings() {
+    let manifest = parse(&architecture_example()).unwrap();
+    let mcp = manifest.agent_mcp.as_ref().unwrap();
+    assert_eq!(
+        mcp.server,
+        McpServerSpec::HttpFromConfig { key: "url".into() }
+    );
+    assert!(manifest.network.is_empty());
+    // It writes back as the same JSON.
+    assert_eq!(
+        serde_json::to_value(&manifest).unwrap(),
+        architecture_example()
+    );
+    // The server agents get is the owner's URL, held to the http URL rule.
+    assert_eq!(
+        mcp.server_for(&json!({"url": "https://tetrix.example.test/mcp"}))
+            .unwrap(),
+        McpServerSpec::Http {
+            url: "https://tetrix.example.test/mcp".into()
+        }
+    );
+    for config in [
+        json!({}),
+        json!({"url": 7}),
+        json!({"url": "ftp://tetrix.example.test/mcp"}),
+        json!({"url": "https://user:secret@tetrix.example.test/mcp"}),
+        json!({"url": "https://tetrix.example.test/mcp?token=secret"}),
+        json!({"url": "https://tetrix.example.test/mcp#secret"}),
+        json!({"url": "https://tetrix.example.test/m\u{200B}cp"}),
+        json!({"url": "https://"}),
+    ] {
+        assert!(
+            matches!(mcp.server_for(&config), Err(PluginError::Config(_))),
+            "{config}"
+        );
+    }
+    // A server given in the manifest is the same whatever the settings.
+    let fixed = parse(&tetrix()).unwrap().agent_mcp.unwrap();
+    assert_eq!(fixed.server_for(&json!({})).unwrap(), fixed.server);
+}
+
+#[test]
+fn a_url_from_the_settings_must_be_a_required_string_with_no_default() {
+    let fine = architecture_example();
+    assert!(parse(&fine).is_ok());
+    type Edit = fn(&mut Value);
+    let edits: [(&str, Edit); 7] = [
+        ("there is no config schema", |v| {
+            v.as_object_mut().unwrap().remove("config");
+        }),
+        ("doesn't require it", |v| {
+            v["config"]["required"] = json!([]);
+        }),
+        ("doesn't require it", |v| {
+            v["config"].as_object_mut().unwrap().remove("required");
+        }),
+        ("don't give it", |v| {
+            v["config"]["properties"] = json!({"other": {"type": "string"}});
+            v["config"]["required"] = json!(["url", "other"]);
+        }),
+        ("doesn't make it a string", |v| {
+            v["config"]["properties"]["url"] = json!({"type": "integer"});
+        }),
+        ("gives it a default", |v| {
+            v["config"]["properties"]["url"]["default"] = json!("https://mcp.tetrix.example/mcp");
+        }),
+        ("type is not \"object\"", |v| {
+            v["config"]["type"] = json!("array");
+        }),
+    ];
+    for (says, edit) in edits {
+        let mut value = fine.clone();
+        edit(&mut value);
+        let reason = refused(&value);
+        assert!(reason.contains(says), "{says}: {reason}");
+    }
+    // The key is a setting's plain key.
+    for key in [
+        "",
+        "1url",
+        "u rl",
+        "url.x",
+        &"u".repeat(MAX_CONFIG_KEY_BYTES + 1),
+    ] {
+        let mut value = fine.clone();
+        value["agentMcp"]["server"]["urlFromConfig"] = json!(key);
+        assert!(refused(&value).contains("not a setting's key"), "{key:?}");
+    }
+    // Exactly one of url and urlFromConfig.
+    let mut both = fine.clone();
+    both["agentMcp"]["server"]["url"] = json!("https://mcp.tetrix.example/mcp");
+    assert!(refused(&both).contains("exactly one of url and urlFromConfig"));
+    let mut neither = fine.clone();
+    neither["agentMcp"]["server"] = json!({"type": "http"});
+    assert!(refused(&neither).contains("exactly one of url and urlFromConfig"));
+}
+
+#[test]
+fn the_fixed_url_form_parses() {
     let manifest = parse(&tetrix()).unwrap();
     assert_eq!(MANIFEST_FILE, "obi-plugin.json");
     assert_eq!(manifest.manifest, PROTOCOL);

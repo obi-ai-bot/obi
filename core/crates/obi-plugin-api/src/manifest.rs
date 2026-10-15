@@ -91,11 +91,43 @@ pub struct AgentMcpSpec {
 /// That last check goes by names and shapes, so it can't recognize every secret: one put in a
 /// URL's path, or in an argument with no telling name or shape (`-t x`), gets through. The
 /// owner sees the manifest before enabling the plug-in.
+///
+/// The manifest's `{"type": "http", "urlFromConfig": "<key>"}` is
+/// [`McpServerSpec::HttpFromConfig`]: the URL is the owner's setting under that key, which the
+/// manifest's `config` schema must require, as a string, with no default, so the plug-in can't
+/// be enabled until the owner has given it. [`AgentMcpSpec::server_for`] makes it an
+/// [`McpServerSpec::Http`] with the owner's settings, holding that URL to the same rule as an
+/// `http` URL in the manifest; what `obid` gets from the host is always `Http` or `Stdio`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+#[serde(try_from = "ServerWire", into = "ServerWire")]
 pub enum McpServerSpec {
     Http {
         url: String,
+    },
+    /// `{"type": "http", "urlFromConfig": key}`: the URL is the owner's setting `key`.
+    HttpFromConfig {
+        key: String,
+    },
+    Stdio {
+        command: String,
+        args: Vec<String>,
+    },
+}
+
+/// [`McpServerSpec`] as `obi-plugin.json` writes it: an `http` server has exactly one of `url`
+/// and `urlFromConfig`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+enum ServerWire {
+    Http {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(
+            default,
+            rename = "urlFromConfig",
+            skip_serializing_if = "Option::is_none"
+        )]
+        url_from_config: Option<String>,
     },
     Stdio {
         command: String,
@@ -103,6 +135,46 @@ pub enum McpServerSpec {
         args: Vec<String>,
     },
 }
+
+impl TryFrom<ServerWire> for McpServerSpec {
+    type Error = String;
+
+    fn try_from(wire: ServerWire) -> Result<McpServerSpec, String> {
+        match wire {
+            ServerWire::Http {
+                url: Some(url),
+                url_from_config: None,
+            } => Ok(McpServerSpec::Http { url }),
+            ServerWire::Http {
+                url: None,
+                url_from_config: Some(key),
+            } => Ok(McpServerSpec::HttpFromConfig { key }),
+            ServerWire::Http { .. } => {
+                Err("an http server has exactly one of url and urlFromConfig".into())
+            }
+            ServerWire::Stdio { command, args } => Ok(McpServerSpec::Stdio { command, args }),
+        }
+    }
+}
+
+impl From<McpServerSpec> for ServerWire {
+    fn from(spec: McpServerSpec) -> ServerWire {
+        match spec {
+            McpServerSpec::Http { url } => ServerWire::Http {
+                url: Some(url),
+                url_from_config: None,
+            },
+            McpServerSpec::HttpFromConfig { key } => ServerWire::Http {
+                url: None,
+                url_from_config: Some(key),
+            },
+            McpServerSpec::Stdio { command, args } => ServerWire::Stdio { command, args },
+        }
+    }
+}
+
+/// At most this many bytes in a setting's key that `urlFromConfig` names.
+pub const MAX_CONFIG_KEY_BYTES: usize = 64;
 
 /// The event kinds an `events` plug-in may emit; an event of a kind not listed is refused.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,7 +235,12 @@ impl Manifest {
         match (&self.agent_mcp, self.serves(Kind::AgentMcp)) {
             (None, true) => return fail("agentMcp is needed for an agent-mcp plug-in".into()),
             (Some(_), false) => return fail("agentMcp is only for an agent-mcp plug-in".into()),
-            (Some(spec), true) => spec.validate()?,
+            (Some(spec), true) => {
+                spec.validate()?;
+                if let McpServerSpec::HttpFromConfig { key } = &spec.server {
+                    check_url_setting(self.config.as_ref(), key)?;
+                }
+            }
             (None, false) => {}
         }
 
@@ -203,30 +280,44 @@ impl Manifest {
 }
 
 impl AgentMcpSpec {
+    /// The server agents get with the owner's settings `config`: a server given in the manifest
+    /// as it is, and one whose URL is a setting ([`McpServerSpec::HttpFromConfig`]) as an
+    /// [`McpServerSpec::Http`] with that setting's URL, which must be a string that holds to the
+    /// rule for an `http` URL in the manifest (http or https, a host, no login, no query string
+    /// or fragment, no space or invisible character). [`PluginError::Config`] says why not.
+    pub fn server_for(&self, config: &Value) -> Result<McpServerSpec, PluginError> {
+        match &self.server {
+            McpServerSpec::HttpFromConfig { key } => {
+                let Some(url) = config.get(key).and_then(Value::as_str) else {
+                    return Err(PluginError::Config(format!(
+                        "the setting {key:?} (the MCP server's URL) is missing or not a string"
+                    )));
+                };
+                check_http_url(url, &format!("the setting {key:?}"))
+                    .map_err(PluginError::Config)?;
+                Ok(McpServerSpec::Http {
+                    url: url.to_owned(),
+                })
+            }
+            server => Ok(server.clone()),
+        }
+    }
+
     fn validate(&self) -> Result<(), PluginError> {
         let fail = |reason: String| Err(PluginError::Manifest(reason));
         match &self.server {
             McpServerSpec::Http { url } => {
-                let rest = url
-                    .strip_prefix("https://")
-                    .or_else(|| url.strip_prefix("http://"));
-                let Some(rest) = rest else {
-                    return fail(format!("agentMcp.server.url {url:?} is not http or https"));
-                };
-                let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-                if authority.is_empty() {
-                    return fail(format!("agentMcp.server.url {url:?} has no host"));
-                }
-                if authority.contains('@') {
-                    return fail("agentMcp.server.url carries a login; logins are the server's own, never in the manifest".into());
-                }
-                if rest.contains(['?', '#']) {
-                    return fail("agentMcp.server.url has a query string or a fragment, where a secret could ride; the manifest takes none".into());
-                }
-                if url.chars().any(|c| c.is_whitespace() || is_hidden(c)) {
+                check_http_url(url, "agentMcp.server.url").map_err(PluginError::Manifest)?;
+            }
+            McpServerSpec::HttpFromConfig { key } => {
+                let plain = (1..=MAX_CONFIG_KEY_BYTES).contains(&key.len())
+                    && key.starts_with(|c: char| c.is_ascii_alphabetic())
+                    && key
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+                if !plain {
                     return fail(format!(
-                        "agentMcp.server.url {} has a space, a control character or an invisible format character",
-                        url.escape_unicode()
+                        "agentMcp.server.urlFromConfig {key:?} is not a setting's key (1 to {MAX_CONFIG_KEY_BYTES} ASCII letters, digits, '_' and '-', starting with a letter)"
                     ));
                 }
             }
@@ -292,6 +383,81 @@ impl AgentMcpSpec {
         }
         Ok(())
     }
+}
+
+/// The rule for an `http` MCP server's URL, in the manifest or in the owner's settings: http
+/// or https, with a host, and no login (`user@`), query string or fragment, where a secret could
+/// ride, and no space, control character or invisible character. `field` names where it is.
+fn check_http_url(url: &str, field: &str) -> Result<(), String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    let Some(rest) = rest else {
+        return Err(format!("{field} {url:?} is not an http or https URL"));
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() {
+        return Err(format!("{field} {url:?} has no host"));
+    }
+    if authority.contains('@') {
+        return Err(format!(
+            "{field} carries a login; logins are the server's own, never in the manifest or the settings"
+        ));
+    }
+    if rest.contains(['?', '#']) {
+        return Err(format!(
+            "{field} has a query string or a fragment, where a secret could ride; it takes none"
+        ));
+    }
+    if url.chars().any(|c| c.is_whitespace() || is_hidden(c)) {
+        return Err(format!(
+            "{field} {} has a space, a control character or an invisible format character",
+            url.escape_unicode()
+        ));
+    }
+    Ok(())
+}
+
+/// The manifest's `config` schema for a server URL that is the owner's setting `key`
+/// (docs/ARCHITECTURE.md 5.2): an object schema that requires `key`, and whose `properties`
+/// give `key` the type `string` and no `default`, so the plug-in can't be enabled before the
+/// owner gives the URL.
+fn check_url_setting(config: Option<&Value>, key: &str) -> Result<(), PluginError> {
+    let fail = |reason: String| {
+        Err(PluginError::Manifest(format!(
+            "agentMcp.server.urlFromConfig is {key:?}, but {reason}"
+        )))
+    };
+    let Some(schema) = config.and_then(Value::as_object) else {
+        return fail("there is no config schema".into());
+    };
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        return fail("the config schema's type is not \"object\"".into());
+    }
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .is_some_and(|required| required.iter().any(|k| k.as_str() == Some(key)));
+    if !required {
+        return fail("the config schema doesn't require it".into());
+    }
+    let Some(property) = schema
+        .get("properties")
+        .and_then(|properties| properties.get(key))
+        .and_then(Value::as_object)
+    else {
+        return fail("the config schema's properties don't give it".into());
+    };
+    if property.get("type").and_then(Value::as_str) != Some("string") {
+        return fail("the config schema doesn't make it a string".into());
+    }
+    if property.contains_key("default") {
+        return fail(
+            "the config schema gives it a default; the owner gives the URL, there is none to fall back on"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// One tool's bare name, as an MCP server lists it: 1 to [`MAX_TOOL_NAME_BYTES`] ASCII

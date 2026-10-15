@@ -40,11 +40,9 @@ fn shipped_manifest() -> Value {
     serde_json::from_str(&std::fs::read_to_string(shipped().join(MANIFEST_FILE)).unwrap()).unwrap()
 }
 
-/// Installs `plugins/tetrix` into `home` as it ships, with `edit` applied to its manifest.
-fn install_tetrix(home: &Home, edit: impl FnOnce(&mut Value)) {
-    let mut manifest = shipped_manifest();
-    edit(&mut manifest);
-    home.install_manifest("tetrix", &manifest);
+/// Installs `plugins/tetrix` into `home` as it ships.
+fn install_tetrix(home: &Home) {
+    home.install_manifest("tetrix", &shipped_manifest());
 }
 
 #[test]
@@ -60,7 +58,17 @@ fn the_shipped_manifest_is_valid_and_offers_only_what_the_engine_allows() {
     );
     assert_eq!(manifest.events, None);
     let spec = manifest.agent_mcp.unwrap();
-    assert!(matches!(spec.server, McpServerSpec::Http { .. }));
+    // Its URL is the owner's setting `url`, required and with no default: the manifest names
+    // no server and no host of its own.
+    assert_eq!(
+        spec.server,
+        McpServerSpec::HttpFromConfig { key: "url".into() }
+    );
+    assert!(manifest.network.is_empty());
+    let text = String::from_utf8(bytes).unwrap();
+    for placeholder in ["tetrix.example", "https://", "http://"] {
+        assert!(!text.contains(placeholder), "{placeholder} in {text}");
+    }
     let mut allowed = spec.allowed_tools.clone();
     allowed.sort();
     let mut swift = SWIFT_TETRIX_TOOLS.map(str::to_owned).to_vec();
@@ -72,16 +80,16 @@ fn the_shipped_manifest_is_valid_and_offers_only_what_the_engine_allows() {
             .iter()
             .any(|tool| tool == "resume_session")
     );
-    assert_eq!(
-        manifest.config,
-        Some(json!({"type": "object", "additionalProperties": false, "properties": {}}))
-    );
+    let config = manifest.config.unwrap();
+    assert_eq!(config["required"], json!(["url"]));
+    assert_eq!(config["properties"]["url"]["type"], json!("string"));
+    assert!(config["properties"]["url"].get("default").is_none());
 }
 
 #[tokio::test]
 async fn tetrix_is_disabled_until_enabled_and_disabled_like_any_plugin() {
     let home = Home::new("tetrix");
-    install_tetrix(&home, |_| {});
+    install_tetrix(&home);
     let host = PluginHost::start_with(&home.path, options()).await.unwrap();
 
     let listed = serde_json::to_value(host.list()).unwrap();
@@ -92,34 +100,44 @@ async fn tetrix_is_disabled_until_enabled_and_disabled_like_any_plugin() {
     );
     assert!(host.agent_mcp_servers().is_empty());
 
-    // It takes no settings.
-    assert!(matches!(
-        host.set_enabled(
-            &id("tetrix"),
-            true,
-            Some(json!({"url": "https://elsewhere.test/mcp"}))
-        )
-        .await,
-        Err(PluginError::Config(_))
-    ));
-    assert!(host.agent_mcp_servers().is_empty());
+    // Enabling it without its URL is refused (the route's 422), and so is a URL that breaks the
+    // rule for one, or other settings; none of it changes anything.
+    for config in [
+        None,
+        Some(json!({})),
+        Some(json!({"url": "https://user:secret@tetrix.example.test/mcp"})),
+        Some(json!({"url": "https://tetrix.example.test/mcp?token=secret"})),
+        Some(json!({"url": "ftp://tetrix.example.test/mcp"})),
+        Some(json!({"url": "https://tetrix.example.test/mcp", "other": 1})),
+    ] {
+        assert!(
+            matches!(
+                host.set_enabled(&id("tetrix"), true, config.clone()).await,
+                Err(PluginError::Config(_))
+            ),
+            "{config:?}"
+        );
+        assert_eq!(status(&host, "tetrix").state, PluginState::Disabled);
+        assert!(!status(&host, "tetrix").enabled);
+        assert_eq!(home.settings(), None);
+        assert!(host.agent_mcp_servers().is_empty());
+    }
 
-    let enabled = host.set_enabled(&id("tetrix"), true, None).await.unwrap();
+    let url = "https://tetrix.example.test/mcp";
+    let enabled = host
+        .set_enabled(&id("tetrix"), true, Some(json!({"url": url})))
+        .await
+        .unwrap();
     assert!(enabled.enabled);
     assert_eq!(enabled.state, PluginState::Ready);
     let servers = host.agent_mcp_servers();
     assert_eq!(servers.len(), 1);
     assert_eq!(servers[0].0, id("tetrix"));
-    assert_eq!(
-        servers[0].1,
-        McpServerSpec::Http {
-            url: "https://mcp.tetrix.example/mcp".into()
-        }
-    );
+    assert_eq!(servers[0].1, McpServerSpec::Http { url: url.into() });
     assert_eq!(servers[0].2, SWIFT_TETRIX_TOOLS.map(str::to_owned).to_vec());
     assert_eq!(
         home.settings().unwrap(),
-        json!({"tetrix": {"enabled": true}})
+        json!({"tetrix": {"enabled": true, "config": {"url": url}}})
     );
     // No process, so nothing in plugin-data.
     assert!(!home.data_dir("tetrix").exists());
@@ -130,7 +148,13 @@ async fn tetrix_is_disabled_until_enabled_and_disabled_like_any_plugin() {
     assert!(host.agent_mcp_servers().is_empty());
     assert_eq!(
         home.settings().unwrap(),
-        json!({"tetrix": {"enabled": false}})
+        json!({"tetrix": {"enabled": false, "config": {"url": url}}})
+    );
+    // Enabled again, it keeps the URL it was given.
+    host.set_enabled(&id("tetrix"), true, None).await.unwrap();
+    assert_eq!(
+        host.agent_mcp_servers()[0].1,
+        McpServerSpec::Http { url: url.into() }
     );
     host.shutdown().await;
 }
@@ -257,16 +281,15 @@ async fn call(url: &str, method: &str, params: Value) -> Value {
 async fn an_enabled_tetrix_gives_agents_the_stub_server_and_only_the_allowed_tools() {
     let (url, seen) = stub_tetrix().await;
     let home = Home::new("stub-tetrix");
-    let stub_url = url.clone();
-    install_tetrix(&home, move |manifest| {
-        manifest["agentMcp"]["server"]["url"] = json!(stub_url);
-        manifest["network"] = json!(["127.0.0.1"]);
-    });
+    install_tetrix(&home);
     let host = PluginHost::start_with(&home.path, options()).await.unwrap();
     assert_eq!(status(&host, "tetrix").state, PluginState::Disabled);
     assert!(host.agent_mcp_servers().is_empty());
 
-    host.set_enabled(&id("tetrix"), true, None).await.unwrap();
+    // The owner gives the stub's URL as Tetrix's setting.
+    host.set_enabled(&id("tetrix"), true, Some(json!({"url": url})))
+        .await
+        .unwrap();
     let servers = host.agent_mcp_servers();
     let [(plugin, McpServerSpec::Http { url: given }, allowed)] = servers.as_slice() else {
         panic!("{servers:?}");
