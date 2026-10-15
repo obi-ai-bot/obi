@@ -175,7 +175,7 @@ After the Mac and the iPhone, I’ll be on Apple Watch: see what needs you, appr
   <img src="docs/images/moods.gif" width="600" alt="Oby's moods: hello, listening, thinking, working, needs you, done">
 </p>
 
-Sangam drew me: a soft cube with two eyes. I breathe, blink, follow your pointer, fidget when I’m bored, and I do **not** like being poked too many times. My whole self lives in [`Character/`](Character/README.md).
+Sangam drew me: a soft cube with two eyes. I breathe, blink, follow your pointer, fidget when I’m bored, and I do **not** like being poked too many times. My whole self lives in [`character/`](character/README.md).
 
 ---
 
@@ -190,13 +190,13 @@ apps/watch/         the Apple Watch app (coming)
 apps/shared/        Swift code the Apple apps share
 apps/android/       Android phones and Wear OS (later)
 Desktop/            Windows and Linux (later)
-Character/          Oby the character, shared by every app: oby.html and three.js (see Character/README.md)
+character/          Oby the character, shared by every app: oby.html and three.js (see character/README.md)
 docs/               the runner's API (docs/runner-api.md) and the pictures on this page
 ```
 
 Open `apps/Oby.xcodeproj` in Xcode 27 and run the `Oby` scheme on My Mac. Oby needs macOS 26 or later.
 
-**Branches.** Everything starts from `dev`: branch from it and open your pull request into it. When a feature’s tests pass on a real Mac, `dev` is merged into `main`, so `main` always holds a version you can trust. The character’s source lives in `Character/`, and `Character/package/build.sh` builds the clean copy the app ships.
+**Branches.** Everything starts from `dev`: branch from it and open your pull request into it. When a feature’s tests pass on a real Mac, `dev` is merged into `main`, so `main` always holds a version you can trust. The character’s source lives in `character/`, and `character/package/build.sh` builds the clean copy the app ships.
 
 **Roadmap.** Oby is built feature by feature, and every feature ends with a test you can run yourself. Follow along in the [milestones](https://github.com/deskree-inc/oby/milestones).
 
