@@ -32,5 +32,9 @@ path = "src/bin/obi-plugin-test.rs"
 test = false
 doc = false
 
-[lints]
-workspace = true
+# Not the workspace lints: `sandbox_check` needs unsafe, which the workspace forbids (#461).
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

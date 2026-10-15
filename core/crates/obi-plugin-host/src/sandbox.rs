@@ -167,9 +167,8 @@ const MACH_SERVICES: &[&str] = &[
 /// home, which the profile hides. Outside a sandbox `kill -KILL -1` would end every process of
 /// the person's.
 ///
-/// What it can't stop: the plug-in's processes may signal it too (they are in its sandbox), so
-/// a plug-in that kills its watcher first can leave processes it started outside its process
-/// group running. The host then ends the process group and logs that the watcher was killed.
+/// The plug-in's processes may signal the watcher too. If one kills it, the host finds what
+/// is left from outside: every process that still has this plug-in's `TMPDIR` ([`reap_tmpdir`]).
 const WATCHER: &str = r#"home=$1; shift
 reap() {
   if ! /bin/ls "$home" >/dev/null 2>&1; then kill -KILL -1 2>/dev/null; fi
@@ -500,6 +499,72 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 pub(crate) async fn kill_group(pgid: u32) {
     if pgid > 1 {
         signal(&format!("-{pgid}"), "KILL").await;
+    }
+}
+
+/// Ends processes still in this plug-in's sandbox after the watcher is gone: each one can
+/// read `data_dir` and cannot read `obid_home`. An unsandboxed process can read `obid_home`,
+/// so it is left alone, and so is another sandbox that cannot read this data folder.
+pub(crate) fn reap_sandbox(obid_home: &Path, data_dir: &Path) {
+    #[cfg(target_os = "macos")]
+    reap_sandbox_macos(obid_home, data_dir);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (obid_home, data_dir);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn reap_sandbox_macos(obid_home: &Path, data_dir: &Path) {
+    let Ok(home) = std::ffi::CString::new(obid_home.as_os_str().as_encoded_bytes()) else {
+        return;
+    };
+    let Ok(data) = std::ffi::CString::new(data_dir.as_os_str().as_encoded_bytes()) else {
+        return;
+    };
+    let Ok(listed) = std::process::Command::new("/bin/ps")
+        .args(["ax", "-o", "pid="])
+        .output()
+    else {
+        return;
+    };
+    let mine = std::process::id();
+    for line in String::from_utf8_lossy(&listed.stdout).lines() {
+        let Some(pid) = line.split_whitespace().next() else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
+        };
+        if pid <= 1 || pid == mine {
+            continue;
+        }
+        if !may_read(pid, &home) && may_read(pid, &data) {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+/// Whether `pid`'s sandbox allows reading `path`. An unsandboxed process is allowed.
+#[cfg(target_os = "macos")]
+fn may_read(pid: u32, path: &std::ffi::CString) -> bool {
+    // SANDBOX_FILTER_PATH, from usr/include/sandbox.h.
+    const SANDBOX_FILTER_PATH: i32 = 1;
+    unsafe extern "C" {
+        fn sandbox_check(pid: i32, operation: *const std::ffi::c_char, kind: i32, ...) -> i32;
+    }
+    let operation = c"file-read-data";
+    unsafe {
+        sandbox_check(
+            pid as i32,
+            operation.as_ptr(),
+            SANDBOX_FILTER_PATH,
+            path.as_ptr(),
+        ) == 0
     }
 }
 

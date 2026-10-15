@@ -589,6 +589,31 @@ async fn wait_for_detached(home: &Home, plugin: &str, start: usize) {
     );
 }
 
+/// A plug-in that kills its watcher, then is disabled, leaves nothing it started, including
+/// a process that called `setsid` (#461).
+#[tokio::test]
+async fn killing_the_watcher_then_disabling_ends_what_left_its_session() {
+    let home = Home::new("kill-watcher");
+    home.install("context-test", "context-test");
+    let host = host_with(&home, options()).await;
+    let ready = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({"killWatcher": true})),
+        )
+        .await
+        .unwrap();
+    if !sandbox_made(&ready) {
+        return;
+    }
+    wait_for_detached(&home, "context-test", 1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let _ = host.set_enabled(&id("context-test"), false, None).await;
+    assert_file_stopped_growing(&home, "context-test", "detached-beats-1").await;
+    host.shutdown().await;
+}
+
 /// A plug-in disabled leaves nothing it started running, also a process that called `setsid`
 /// and was orphaned (docs/ARCHITECTURE.md 5.3, step 6), and nothing another plug-in started is
 /// touched.
