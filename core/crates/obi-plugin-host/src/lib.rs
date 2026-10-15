@@ -789,7 +789,7 @@ async fn run_once(
     let (Some(stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
-        end(None, &mut child, pgid, sandbox).await;
+        end(None, &mut child, pgid, sandbox, launch).await;
         return failed("its pipes weren't made".into(), false);
     };
     let events = lock(&inner.events).sender.clone();
@@ -809,11 +809,11 @@ async fn run_once(
     };
     let answer = tokio::select! {
         _ = stopped(stop) => {
-            stop_gracefully(&conn, &mut child, pgid, sandbox, options.stop_grace).await;
+            stop_gracefully(&conn, &mut child, pgid, sandbox, launch, options.stop_grace).await;
             return Outcome::Stopped;
         }
         status = child.wait() => {
-            end(Some(&conn), &mut child, pgid, sandbox).await;
+            end(Some(&conn), &mut child, pgid, sandbox, launch).await;
             return failed(format!("it exited before answering initialize ({})", exit(status)), false);
         }
         answer = conn.request(method::INITIALIZE, &params, options.initialize_timeout) => answer,
@@ -826,14 +826,14 @@ async fn run_once(
         Err(PluginError::Stopped) => {
             // Its stdout ended before the answer: it is exiting.
             let status = exited(&mut child).await;
-            end(Some(&conn), &mut child, pgid, sandbox).await;
+            end(Some(&conn), &mut child, pgid, sandbox, launch).await;
             return failed(
                 format!("it exited before answering initialize ({status})"),
                 false,
             );
         }
         Err(error) => {
-            end(Some(&conn), &mut child, pgid, sandbox).await;
+            end(Some(&conn), &mut child, pgid, sandbox, launch).await;
             return failed(format!("initialize: {error}"), false);
         }
     };
@@ -850,18 +850,18 @@ async fn run_once(
     loop {
         tokio::select! {
             _ = stopped(stop) => {
-                stop_gracefully(&conn, &mut child, pgid, sandbox, options.stop_grace).await;
+                stop_gracefully(&conn, &mut child, pgid, sandbox, launch, options.stop_grace).await;
                 return Outcome::Stopped;
             }
             status = child.wait() => {
-                end(Some(&conn), &mut child, pgid, sandbox).await;
+                end(Some(&conn), &mut child, pgid, sandbox, launch).await;
                 return failed(format!("it exited ({})", exit(status)), pinged);
             }
             _ = tokio::time::sleep(options.ping_interval) => {}
         }
         let answer = tokio::select! {
             _ = stopped(stop) => {
-                stop_gracefully(&conn, &mut child, pgid, sandbox, options.stop_grace).await;
+                stop_gracefully(&conn, &mut child, pgid, sandbox, launch, options.stop_grace).await;
                 return Outcome::Stopped;
             }
             answer = conn.request(method::PING, &Empty {}, options.ping_timeout) => answer,
@@ -870,11 +870,11 @@ async fn run_once(
             Ok(_) => {}
             Err(PluginError::Stopped) => {
                 let status = exited(&mut child).await;
-                end(Some(&conn), &mut child, pgid, sandbox).await;
+                end(Some(&conn), &mut child, pgid, sandbox, launch).await;
                 return failed(format!("it exited ({status})"), pinged);
             }
             Err(error) => {
-                end(Some(&conn), &mut child, pgid, sandbox).await;
+                end(Some(&conn), &mut child, pgid, sandbox, launch).await;
                 return failed(format!("ping: {error}"), pinged);
             }
         }
@@ -897,20 +897,27 @@ async fn stop_gracefully(
     child: &mut Child,
     pgid: u32,
     sandbox: &Sandbox,
+    launch: &sandbox::Launch,
     grace: Duration,
 ) {
     let end_at = tokio::time::Instant::now() + grace;
     let _ = tokio::time::timeout_at(end_at, conn.request(method::SHUTDOWN, &Empty {}, grace)).await;
     conn.close_stdin();
     let _ = tokio::time::timeout_at(end_at, child.wait()).await;
-    end(Some(conn), child, pgid, sandbox).await;
+    end(Some(conn), child, pgid, sandbox, launch).await;
 }
 
 /// Ends the plug-in's process and everything it started, and its connection. On macOS the
 /// process is the sandbox's watcher: told to (`SIGTERM`), it kills everything in the sandbox,
 /// also what left the plug-in's process group or session. Then whatever is left of the process
 /// group is killed.
-async fn end(conn: Option<&Arc<Conn>>, child: &mut Child, pgid: u32, sandbox: &Sandbox) {
+async fn end(
+    conn: Option<&Arc<Conn>>,
+    child: &mut Child,
+    pgid: u32,
+    sandbox: &Sandbox,
+    launch: &sandbox::Launch,
+) {
     if sandbox.has_watcher() {
         match child.try_wait() {
             Ok(None) => {
@@ -922,7 +929,7 @@ async fn end(conn: Option<&Arc<Conn>>, child: &mut Child, pgid: u32, sandbox: &S
                 if let Some(signal) = status.signal() {
                     tracing::warn!(
                         target: "obi_plugin",
-                        "the plug-in's watcher was killed (signal {signal}): processes it started that left its process group may still run"
+                        "the plug-in's watcher was killed (signal {signal}); ending what it started"
                     );
                 }
             }
@@ -932,6 +939,7 @@ async fn end(conn: Option<&Arc<Conn>>, child: &mut Child, pgid: u32, sandbox: &S
     let _ = child.start_kill();
     if sandbox.has_watcher() {
         sandbox::kill_group(pgid).await;
+        sandbox::reap_sandbox(&launch.obid_home, &launch.data_dir);
     }
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
     if let Some(conn) = conn {

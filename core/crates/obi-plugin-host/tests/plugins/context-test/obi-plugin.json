@@ -71,6 +71,9 @@
       "spawnDetached": {
         "type": "boolean"
       },
+      "killWatcher": {
+        "type": "boolean"
+      },
       "stderrLines": {
         "type": "integer",
         "minimum": 0,

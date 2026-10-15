@@ -135,6 +135,16 @@ fn main() {
                     if behaviour.config.get("spawnDetached") == Some(&Value::Bool(true)) {
                         spawn_detached(starts);
                     }
+                    if behaviour.config.get("killWatcher") == Some(&Value::Bool(true)) {
+                        spawn_detached(starts);
+                        let parent = std::os::unix::process::parent_id();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(400));
+                            let _ = std::process::Command::new("/bin/kill")
+                                .args(["-KILL", &parent.to_string()])
+                                .status();
+                        });
+                    }
                     for _ in 0..behaviour.number("stderrLines").unwrap_or(0) {
                         eprintln!("{}", "e".repeat(1000));
                     }
