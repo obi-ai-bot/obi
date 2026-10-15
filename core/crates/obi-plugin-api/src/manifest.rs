@@ -346,7 +346,9 @@ impl AgentMcpSpec {
                             place(i)
                         ));
                     }
-                    match url_in_arg_problem(word) {
+                    // Raw, shell-split and escape-decoded: a login hidden as `pass"@"host` or
+                    // `\u0040` is the same URL once the argument is read the way a shell reads it.
+                    match url_problem_in_forms(word) {
                         Some(UrlProblem::Login) => {
                             return fail(format!(
                                 "{} passes a URL with a login; logins are the server's own, never in the manifest",
@@ -750,12 +752,15 @@ fn decode_escapes(text: &str) -> String {
 /// Whether `text` is `NAME=value` with a name that names a credential and a value that isn't
 /// empty, or with a value that starts the way a well-known token does.
 fn assigns_credential(text: &str) -> bool {
-    match text.split_once('=') {
-        Some((name, value)) => {
-            (names_credential(name) && !value.is_empty()) || looks_like_token(value)
-        }
-        None => false,
-    }
+    // Each comma-separated entry, not only the first `=`: `Accept=text/html,TOKEN=abc`.
+    text.split(',')
+        .any(|part| match part.trim().split_once('=') {
+            Some((name, value)) => {
+                let value = value.trim();
+                (names_credential(name.trim()) && !value.is_empty()) || looks_like_token(value)
+            }
+            None => false,
+        })
 }
 
 /// Whether `text` holds a `name: value` field whose name names a credential and whose value
@@ -823,6 +828,28 @@ const SPECIAL_SCHEMES: [&str; 6] = ["http", "https", "ws", "wss", "ftp", "file"]
 /// (`postgres://`, `postgres:\\`), and without them the text is not taken as a URL
 /// (`Accept: text/html`, `github:owner/repo#v1`). A URL ends at a space or a quote, so one inside
 /// a shell line (`-c "curl 'https://u:p@x'"`) counts too.
+/// `url_in_arg_problem` on the argument as written, on each word a shell would pass, and on
+/// each of those with backslash escapes decoded.
+fn url_problem_in_forms(arg: &str) -> Option<UrlProblem> {
+    let decoded = decode_escapes(arg);
+    let mut forms = vec![arg.to_string()];
+    if decoded != arg {
+        forms.push(decoded.clone());
+    }
+    for source in [arg.to_string(), decoded] {
+        for token in shell_words(&source) {
+            if !forms.iter().any(|have| have == &token) {
+                forms.push(token.clone());
+            }
+            let again = decode_escapes(&token);
+            if again != token && !forms.iter().any(|have| have == &again) {
+                forms.push(again);
+            }
+        }
+    }
+    forms.iter().find_map(|form| url_in_arg_problem(form))
+}
+
 fn url_in_arg_problem(arg: &str) -> Option<UrlProblem> {
     let is_scheme_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.');
     for (colon, _) in arg.match_indices(':') {
