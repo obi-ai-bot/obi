@@ -744,7 +744,7 @@ impl Jobs {
         }
         if job.obi.is_some() {
             return Some(Err(Refused(
-                "This is a review another Obi asked for: its answer goes back to that Obi, so it takes no words of yours.".into(),
+                "This is a review another Oby asked for: its answer goes back to that Oby, so it takes no words of yours.".into(),
             )));
         }
         let tool = Tool::from_id(&job.agent)
@@ -1961,7 +1961,7 @@ impl Jobs {
                 job.obi
                     .as_ref()
                     .map(|o| o.from_owner.as_str())
-                    .unwrap_or("another Obi"),
+                    .unwrap_or("another Oby"),
                 match (&job.check, tests_pass) {
                     (None, _) => "no check to run",
                     (Some(_), true) => "tests pass",
