@@ -73,14 +73,18 @@ pub struct AgentMcpSpec {
 /// store), never a vault secret, so the manifest gives a secret nowhere to go: there is no
 /// field for headers or an environment, and [`Manifest::validate`] refuses
 /// - an `http` URL with a login (`user@`), a query string or a fragment, or with a space, a
-///   control character or an invisible format character (Unicode `Cf`, like U+200B or U+202E);
-/// - a `stdio` command or argument with a control or invisible format character;
-/// - a URL anywhere in a `stdio` argument (`npx mcp-remote https://user:pass@host/mcp`,
-///   `--url=postgres://u:p@db`) with a login, a query string or a fragment, the same rule as
-///   an `http` URL;
-/// - `stdio` arguments that pass a credential the usual ways: `--token x`, `--accessToken x`,
-///   `--api-key=x`, `--github-pat x`, `--auth-header x`, `TOKEN=x`, `Authorization:`,
-///   `X-Api-Key: x`, a header blob like `{"X-Api-Key":"x"}`, `Bearer `, a `ghp_…` value.
+///   control character or an invisible character (Unicode `Cf` like U+200B or U+202E, any other
+///   `Default_Ignorable_Code_Point` like U+034F or U+3164, and U+2028 and U+2029);
+/// - a `stdio` command or argument with a control or invisible character;
+/// - a URL anywhere in a `stdio` command or argument (`npx mcp-remote https://user:pass@host/mcp`,
+///   `--url=postgres://u:p@db`, and the forms a WHATWG parser reads the same way:
+///   `https:\\user:pass@host`, `https:user:pass@host`, `https:host/mcp?k=x`) with a login, a
+///   query string or a fragment, the same rule as an `http` URL;
+/// - a `stdio` command or arguments that pass a credential the usual ways: `--token x`,
+///   `--accessToken x`, `--api-key=x`, `--github-pat x`, `--auth-header x`, `TOKEN=x`,
+///   `Authorization:`, `X-Api-Key: x`, `--header X-Api-Key x`, a header blob like
+///   `{"X-Api-Key":"x"}`, `Bearer `, a `ghp_…` value, and any of these inside a shell line
+///   (`sh -c "server --token x"`).
 ///
 /// That last check goes by names and shapes, so it can't recognize every secret: one put in a
 /// URL's path, or in an argument with no telling name or shape (`-t x`), gets through. The
@@ -228,34 +232,47 @@ impl AgentMcpSpec {
                 if command.trim().is_empty() {
                     return fail("agentMcp.server.command is empty".into());
                 }
-                if command.chars().any(is_hidden) {
-                    return fail("agentMcp.server.command has a control character or an invisible format character".into());
-                }
-                // Each problem names the argument by its place, not its text: the text may be
-                // the very secret, and this message reaches logs.
-                for (i, arg) in args.iter().enumerate() {
-                    if arg.chars().any(is_hidden) {
+                // The command and its arguments are checked alike: a command line put in
+                // `command` (`npx mcp-remote https://u:p@host/mcp`) gets no pass. Each problem
+                // names the word by its place, not its text: the text may be the very secret,
+                // and this message reaches logs.
+                let words: Vec<&str> = std::iter::once(command.as_str())
+                    .chain(args.iter().map(String::as_str))
+                    .collect();
+                let place = |i: usize| {
+                    if i == 0 {
+                        "agentMcp.server.command".to_string()
+                    } else {
+                        format!("agentMcp.server.args[{}]", i - 1)
+                    }
+                };
+                for (i, word) in words.iter().enumerate() {
+                    if word.chars().any(is_hidden) {
                         return fail(format!(
-                            "agentMcp.server.args[{i}] has a control character or an invisible format character"
+                            "{} has a control character or an invisible format character",
+                            place(i)
                         ));
                     }
-                    match url_in_arg_problem(arg) {
+                    match url_in_arg_problem(word) {
                         Some(UrlProblem::Login) => {
                             return fail(format!(
-                                "agentMcp.server.args[{i}] passes a URL with a login; logins are the server's own, never in the manifest"
+                                "{} passes a URL with a login; logins are the server's own, never in the manifest",
+                                place(i)
                             ));
                         }
                         Some(UrlProblem::QueryOrFragment) => {
                             return fail(format!(
-                                "agentMcp.server.args[{i}] passes a URL with a query string or a fragment, where a secret could ride; the manifest takes none"
+                                "{} passes a URL with a query string or a fragment, where a secret could ride; the manifest takes none",
+                                place(i)
                             ));
                         }
                         None => {}
                     }
                 }
-                if let Some(i) = passes_credential(args) {
+                if let Some(i) = passes_credential(&words) {
                     return fail(format!(
-                        "agentMcp.server.args[{i}] passes a credential; logins are the server's own, never in the manifest"
+                        "{} passes a credential; logins are the server's own, never in the manifest",
+                        place(i)
                     ));
                 }
             }
@@ -285,36 +302,75 @@ fn is_tool_name(tool: &str) -> bool {
         && !tool.to_ascii_lowercase().starts_with("mcp__")
 }
 
-/// The place of the first argument that passes a credential the usual ways: an option or
-/// variable whose name names one (`--token x`, `--accessToken x`, `--api-key=x`, `--pat x`,
-/// `--github-pat x`, `--auth-header x`, `TOKEN=x`), an HTTP header or a header blob that
-/// carries one (`Authorization:`, `X-Api-Key: x`, `Cookie: x`, `{"X-Api-Key":"x"}`,
-/// `curl -H 'X-Api-Key: x'`, or a `Bearer ` value), or a value that starts the way well-known
-/// tokens do (`ghp_`, `github_pat_`, `xoxb-`, `glpat-`, `sk-ant-` and the like). Goes by names
-/// and shapes, so a secret with no telling name or shape (`-t x`) isn't found: a one-letter
-/// option means different things to different programs, and refusing every one would refuse
-/// ordinary servers.
-fn passes_credential(args: &[String]) -> Option<usize> {
-    for (i, arg) in args.iter().enumerate() {
-        let lower = arg.to_ascii_lowercase();
+/// The place of the first word (the command, then each argument) that passes a credential
+/// the usual ways: an option or variable whose name names one (`--token x`, `--accessToken x`,
+/// `--api-key=x`, `--pat x`, `--github-pat x`, `--auth-header x`, `TOKEN=x`), an HTTP header or
+/// a header blob that carries one (`Authorization:`, `X-Api-Key: x`, `Cookie: x`,
+/// `{"X-Api-Key":"x"}`, `curl -H 'X-Api-Key: x'`, `--header X-Api-Key x`, or a `Bearer `
+/// value), or a value that starts the way well-known tokens do (`ghp_`, `github_pat_`, `xoxb-`,
+/// `glpat-`, `sk-ant-` and the like).
+///
+/// Each word is also read as a shell line, split at spaces, so the same forms inside
+/// `sh -c "server --token x"` count too.
+///
+/// Goes by names and shapes, so a secret with no telling name or shape (`-t x`) isn't found: a
+/// one-letter option means different things to different programs, and refusing every one
+/// would refuse ordinary servers.
+fn passes_credential(words: &[&str]) -> Option<usize> {
+    for (i, word) in words.iter().enumerate() {
+        let lower = word.to_ascii_lowercase();
         if lower.contains("authorization:") || lower.contains("bearer ") {
             return Some(i);
         }
-        if looks_like_token(arg) || field_passes_credential(arg) {
+        if looks_like_token(word) || field_passes_credential(word) || assigns_credential(word) {
             return Some(i);
         }
-        match arg.split_once('=') {
-            Some((name, value)) if names_credential(name) && !value.is_empty() => {
-                return Some(i);
-            }
-            Some((_, value)) if looks_like_token(value) => return Some(i),
-            None if arg.starts_with('-') && names_credential(arg) && i + 1 < args.len() => {
-                return Some(i);
-            }
-            _ => {}
+    }
+
+    // Every word split at spaces, with the quotes a shell line puts around its parts taken
+    // off, each token keeping the place of the word it came from.
+    let tokens: Vec<(usize, &str)> = words
+        .iter()
+        .enumerate()
+        .flat_map(|(i, word)| {
+            word.split_whitespace()
+                .map(move |token| (i, token.trim_matches(|c| matches!(c, '"' | '\'' | '`'))))
+        })
+        .filter(|(_, token)| !token.is_empty())
+        .collect();
+    let header_flags = ["-H", "--header", "--headers", "-header"];
+    for (at, &(i, token)) in tokens.iter().enumerate() {
+        let followed = at + 1 < tokens.len();
+        if looks_like_token(token) || assigns_credential(token) {
+            return Some(i);
+        }
+        // `--token x`, the value the next token, in this word or the next one.
+        if token.starts_with('-') && names_credential(token) && followed {
+            return Some(i);
+        }
+        // `--header X-Api-Key x`: a header's name and its value as tokens of their own.
+        let after_header_flag = at > 0 && header_flags.contains(&tokens[at - 1].1);
+        if after_header_flag
+            && !token.starts_with('-')
+            && !token.contains(':')
+            && names_credential(token)
+            && followed
+        {
+            return Some(i);
         }
     }
     None
+}
+
+/// Whether `text` is `NAME=value` with a name that names a credential and a value that isn't
+/// empty, or with a value that starts the way a well-known token does.
+fn assigns_credential(text: &str) -> bool {
+    match text.split_once('=') {
+        Some((name, value)) => {
+            (names_credential(name) && !value.is_empty()) || looks_like_token(value)
+        }
+        None => false,
+    }
 }
 
 /// Whether `text` holds a `name: value` field whose name names a credential and whose value
@@ -367,27 +423,53 @@ enum UrlProblem {
     QueryOrFragment,
 }
 
-/// The problem with the first URL (`scheme://…`) in `arg` that has one: a login
-/// (`user:pass@`) or a query string or fragment (`?key=…`, `#token=…`). A URL ends at a space
-/// or a quote, so one inside a shell line (`-c "curl 'https://u:p@x'"`) counts too.
+/// The schemes WHATWG URL parsers (Node's `new URL`, which `mcp-remote` uses; browsers) call
+/// special: after one of them, any run of `/` and `\`, or none, leads to the host, so
+/// `https:\\user:pass@host`, `https:user:pass@host` and `https:host/mcp?k=x` are all URLs with
+/// a login or a query.
+const SPECIAL_SCHEMES: [&str; 6] = ["http", "https", "ws", "wss", "ftp", "file"];
+
+/// The problem with the first URL in `arg` that has one: a login (`user:pass@`) or a query
+/// string or fragment (`?key=…`, `#token=…`).
+///
+/// A URL is a scheme and a colon. After a special scheme ([`SPECIAL_SCHEMES`], in any case,
+/// also as the last part of one like `git+https`), the host follows any run of `/` and `\` or
+/// none, the way a WHATWG parser reads it; after any other scheme, it follows two of them
+/// (`postgres://`, `postgres:\\`), and without them the text is not taken as a URL
+/// (`Accept: text/html`, `github:owner/repo#v1`). A URL ends at a space or a quote, so one inside
+/// a shell line (`-c "curl 'https://u:p@x'"`) counts too.
 fn url_in_arg_problem(arg: &str) -> Option<UrlProblem> {
-    let mut search = 0;
-    while let Some(found) = arg[search..].find("://") {
-        let marker = search + found;
-        search = marker + 3;
-        let scheme_start = arg[..marker]
-            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+    let is_scheme_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.');
+    for (colon, _) in arg.match_indices(':') {
+        let run_start = arg[..colon]
+            .rfind(|c: char| !is_scheme_char(c))
             .map_or(0, |i| i + 1);
-        let scheme = &arg[scheme_start..marker];
-        if !scheme.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        // A scheme starts with a letter: `--https:` and `1https:` read as `https:`.
+        let scheme = arg[run_start..colon]
+            .trim_start_matches(|c: char| !c.is_ascii_alphabetic())
+            .to_ascii_lowercase();
+        if scheme.is_empty() {
             continue;
         }
-        let rest = &arg[search..];
-        let url_end = rest
+        let special = SPECIAL_SCHEMES
+            .iter()
+            .any(|s| scheme == *s || scheme.ends_with(&format!("+{s}")));
+        let body = &arg[colon + 1..];
+        let body_end = body
             .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '<' | '>'))
-            .unwrap_or(rest.len());
-        let rest = &rest[..url_end];
-        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            .unwrap_or(body.len());
+        let body = &body[..body_end];
+        let is_slash = |c: char| matches!(c, '/' | '\\');
+        let rest = if special {
+            body.trim_start_matches(is_slash)
+        } else {
+            let mut chars = body.chars();
+            match (chars.next(), chars.next()) {
+                (Some(a), Some(b)) if is_slash(a) && is_slash(b) => &body[2..],
+                _ => continue,
+            }
+        };
+        let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or("");
         if authority.contains('@') {
             return Some(UrlProblem::Login);
         }
@@ -398,39 +480,47 @@ fn url_in_arg_problem(arg: &str) -> Option<UrlProblem> {
     None
 }
 
-/// Whether `c` is a control character (Unicode `Cc`) or an invisible format character
-/// (Unicode `Cf`: soft hyphen, zero-width space and joiners, bidirectional overrides and
-/// isolates, word joiner, byte order mark, tags and the like). A format character changes
-/// how text shows or reads without being seen: `--to\u{200B}ken` reads as `--token` to the
-/// owner and as some other name to the checks, and U+202E turns what follows around.
+/// Whether `c` is a control character (Unicode `Cc`), an invisible format character (Unicode
+/// `Cf`: soft hyphen, zero-width space and joiners, bidirectional overrides and isolates, word
+/// joiner, byte order mark, tags and the like), any other code point Unicode says to show as
+/// nothing (`Default_Ignorable_Code_Point`: the combining grapheme joiner U+034F, variation
+/// selectors like U+FE0F, Hangul fillers like U+3164, …), or a line or paragraph separator
+/// (U+2028, U+2029). Such a character changes how text shows or reads without being seen:
+/// `--to\u{200B}ken` or `--to\u{34F}ken` reads as `--token` to the owner and as some other name
+/// to the checks, and U+202E turns what follows around.
 fn is_hidden(c: char) -> bool {
-    // Unicode 16.0's `Cf` code points.
-    const FORMAT: [(u32, u32); 21] = [
+    // Unicode 16.0's `Cf` and `Default_Ignorable_Code_Point` code points, and `Zl` and `Zp`.
+    const HIDDEN: [(u32, u32); 26] = [
         (0x00AD, 0x00AD),
+        (0x034F, 0x034F),
         (0x0600, 0x0605),
         (0x061C, 0x061C),
         (0x06DD, 0x06DD),
         (0x070F, 0x070F),
         (0x0890, 0x0891),
         (0x08E2, 0x08E2),
-        (0x180E, 0x180E),
+        (0x115F, 0x1160),
+        (0x17B4, 0x17B5),
+        (0x180B, 0x180F),
         (0x200B, 0x200F),
+        (0x2028, 0x2029),
         (0x202A, 0x202E),
-        (0x2060, 0x2064),
-        (0x2066, 0x206F),
+        (0x2060, 0x206F),
+        (0x3164, 0x3164),
+        (0xFE00, 0xFE0F),
         (0xFEFF, 0xFEFF),
-        (0xFFF9, 0xFFFB),
+        (0xFFA0, 0xFFA0),
+        (0xFFF0, 0xFFFB),
         (0x110BD, 0x110BD),
         (0x110CD, 0x110CD),
         (0x13430, 0x1343F),
         (0x1BCA0, 0x1BCA3),
         (0x1D173, 0x1D17A),
-        (0xE0001, 0xE0001),
-        (0xE0020, 0xE007F),
+        (0xE0000, 0xE0FFF),
     ];
     let code = u32::from(c);
     c.is_control()
-        || FORMAT
+        || HIDDEN
             .iter()
             .any(|&(low, high)| (low..=high).contains(&code))
 }
