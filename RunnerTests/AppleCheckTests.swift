@@ -686,7 +686,7 @@ struct AppleCheckTests {
 
     @Test func theAgentHearsAboutItWhenItsJobTouchesTheAppleApps() throws {
         let line = try #require(AppleCheck.agentLine(author))
-        #expect(line.contains("run `oby-check apple` before you finish") && line.contains("apps/ios/app/, apps/watch/, apps/mac/app/ or apps/shared/") && line.contains("--wait 540"))
+        #expect(line.contains("run `oby-check apple` before you finish") && line.contains("iOS/, Watch/, Mac/ or Shared/") && line.contains("--wait 540"))
         #expect(Prompts.agent(author, apple: true).contains(line) && !Prompts.agent(author).contains("oby-check"))
         var engine = author
         engine.files = ["Engine/Desk.swift", "docs/"]
