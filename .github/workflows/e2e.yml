@@ -65,11 +65,13 @@ jobs:
           node-version: 22
 
       # obi-sphere's server keeps copies of this repository's e2e fixtures; they must still match
-      # obi's (this checkout). The check is obi-sphere's script and needs only Node (set up above).
+      # obi's (this checkout). The check is obi-sphere's script, run from the workspace with
+      # OBI_DIR pointing at this checkout; it needs only Node (set up above) and no dependencies.
       # obi-sphere's dev has had a server/ folder (a README) since its first commit; the server
       # itself is there once server/package.json is (the same test the Makefile uses to install
       # its dependencies). Until then the step says so and passes. Once it is there, the script
-      # must be too: a missing script fails rather than skipping.
+      # must be too: a missing script fails rather than skipping, so the comparison can't stop
+      # silently. When it runs, a difference (or no obi checkout) fails the job.
       - name: obi-sphere's copies of the e2e fixtures match obi's
         run: |
           if [ ! -f obi-sphere/server/package.json ]; then
