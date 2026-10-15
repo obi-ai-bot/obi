@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use common::{Home, id, options, sandbox_made};
+use obi_plugin_api::PluginState;
 use obi_plugin_host::PluginHost;
-use obi_plugin_host::api::PluginState;
 use serde_json::{Value, json};
 
 fn path(p: &Path) -> String {
@@ -179,4 +179,176 @@ async fn its_environment_is_path_home_lang_and_tmpdir_only() {
     assert!(!env["PATH"].as_str().unwrap().is_empty());
     assert!(!env["LANG"].as_str().unwrap().is_empty());
     host.shutdown().await;
+}
+
+/// "Everything it starts" (docs/ARCHITECTURE.md 5.3) covers what a plug-in could ask a service
+/// outside its sandbox to start for it, which would run unconfined: on macOS an app opened
+/// through LaunchServices (`open`) or a job given to launchd, on Linux a unit started through
+/// the user's systemd. None of them may run, a local service's Unix socket outside its data
+/// folder (Docker's, an SSH agent's, D-Bus's) can't be reached, and no process outside its
+/// sandbox can be signalled.
+#[tokio::test]
+async fn nothing_it_starts_runs_outside_its_sandbox() {
+    let home = Home::new("escape");
+    home.install("context-test", "escape");
+    let h = &home.path;
+    std::fs::write(h.join("api-token"), "obid-api-token-escape-test").unwrap();
+    let data = home.data_dir("escape");
+    std::fs::create_dir_all(&data).unwrap();
+    let pid = std::process::id();
+    let escaped = std::env::temp_dir().join(format!("obi-plugin-escaped-{pid}"));
+    let _ = std::fs::remove_file(&escaped);
+    let escape_script = format!(
+        "echo escaped > '{}'; cat '{}' >> '{}'",
+        path(&escaped),
+        path(&h.join("api-token")),
+        path(&escaped)
+    );
+
+    // A local service the plug-in mustn't reach, listening outside its data folder.
+    let socket = std::env::temp_dir().join(format!("obi-plugin-service-{pid}.sock"));
+    let _ = std::fs::remove_file(&socket);
+    let service = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    service.set_nonblocking(true).unwrap();
+
+    let mut run: Vec<Vec<String>> = vec![vec!["/bin/kill".into(), "-0".into(), pid.to_string()]];
+    let launchd_label = format!("obi.plugin-host.test.escape.{pid}");
+    if cfg!(target_os = "macos") {
+        // An app in its data folder, which LaunchServices would start outside the sandbox.
+        let app = data.join("Escape.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>escape</string>
+<key>CFBundleIdentifier</key><string>com.obi.plugin-host.test.escape</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSBackgroundOnly</key><true/>
+</dict></plist>
+"#,
+        )
+        .unwrap();
+        let executable = app.join("Contents/MacOS/escape");
+        std::fs::write(&executable, format!("#!/bin/sh\n{escape_script}\n")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run.push(vec![
+            "/usr/bin/open".into(),
+            "-g".into(),
+            "-n".into(),
+            path(&app),
+        ]);
+        run.push(vec![
+            "/bin/launchctl".into(),
+            "submit".into(),
+            "-l".into(),
+            launchd_label.clone(),
+            "--".into(),
+            "/bin/sh".into(),
+            "-c".into(),
+            escape_script.clone(),
+        ]);
+    } else {
+        for systemd_run in ["/usr/bin/systemd-run", "/bin/systemd-run"] {
+            if Path::new(systemd_run).is_file() {
+                run.push(vec![
+                    systemd_run.into(),
+                    "--user".into(),
+                    "--collect".into(),
+                    "--quiet".into(),
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    escape_script.clone(),
+                ]);
+                break;
+            }
+        }
+    }
+    let listed = ["/run", "/tmp"];
+    let config = json!({"probe": {
+        "connect": [path(&socket)],
+        "run": run,
+        "list": listed,
+        "read": ["/etc/resolv.conf"],
+    }});
+
+    let options = obi_plugin_host::Options {
+        initialize_timeout: std::time::Duration::from_secs(30),
+        ..options()
+    };
+    let host = PluginHost::start_with(&home.path, options).await.unwrap();
+    let ready = host
+        .set_enabled(&id("escape"), true, Some(config))
+        .await
+        .unwrap();
+    let cleanup = || {
+        if cfg!(target_os = "macos") {
+            let _ = std::process::Command::new("/bin/launchctl")
+                .args(["remove", &launchd_label])
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        let _ = std::fs::remove_file(&socket);
+    };
+    if !sandbox_made(&ready) {
+        cleanup();
+        return;
+    }
+    assert_eq!(ready.state, PluginState::Ready, "{ready:?}");
+    let probe = home.record("escape", "probe.json").unwrap();
+    // What it asked others to start would have run by now.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let accepted = service.accept().is_ok();
+    let escape = std::fs::read_to_string(&escaped).ok();
+    let _ = std::fs::remove_file(&escaped);
+    cleanup();
+    host.shutdown().await;
+
+    assert_eq!(
+        escape, None,
+        "something it started ran outside its sandbox: {probe:#}"
+    );
+    assert!(
+        !accepted,
+        "it reached a Unix socket outside its data folder: {probe:#}"
+    );
+    assert_eq!(
+        probed(&probe, &format!("connect {}", path(&socket))),
+        None,
+        "{probe:#}"
+    );
+    assert_eq!(
+        probed(&probe, &format!("run /bin/kill -0 {pid}")),
+        None,
+        "it could signal a process outside its sandbox: {probe:#}"
+    );
+    // Name lookups still work: the resolver's configuration is there to read, even when it
+    // lives under /run.
+    if std::fs::read_to_string("/etc/resolv.conf").is_ok() {
+        assert!(
+            probed(&probe, "read /etc/resolv.conf").is_some(),
+            "{probe:#}"
+        );
+    }
+    if cfg!(target_os = "linux") {
+        // /run and /tmp are empty folders of its own: no D-Bus, user systemd, X11 or Docker
+        // socket, nothing another program left in /tmp.
+        let run_listing = probed(&probe, "list /run").unwrap_or_default();
+        for name in ["user", "dbus", "docker.sock", "docker", "containerd"] {
+            assert!(
+                !run_listing.split(',').any(|n| n == name),
+                "/run showed {run_listing}"
+            );
+        }
+        let tmp_listing = probed(&probe, "list /tmp").unwrap_or_default();
+        let socket_name = socket.file_name().unwrap().to_str().unwrap();
+        assert!(
+            !tmp_listing
+                .split(',')
+                .any(|n| n == socket_name || n == ".X11-unix"),
+            "/tmp showed {tmp_listing}"
+        );
+    }
 }

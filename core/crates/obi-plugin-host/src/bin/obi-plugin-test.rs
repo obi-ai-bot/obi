@@ -6,7 +6,8 @@
 //! - `starts`: one line per start;
 //! - `initialize.json`: the `initialize` params;
 //! - `env.json`: its environment and working directory;
-//! - `probe.json`: what each read, list and write in `config.probe` gave;
+//! - `probe.json`: what each read, list, write, Unix socket connection and command in
+//!   `config.probe` gave;
 //! - `queries.json`: the `context/query` params, one per line;
 //! - `emits.json`: the host's answers to the events it emitted;
 //! - `beats`: a line five times a second from the process it started, with
@@ -332,7 +333,72 @@ fn run_probe(probe: &Value) {
         let result = std::fs::write(&path, "written by the test plug-in\n").map(|()| String::new());
         results.insert(format!("write {path}"), outcome(result));
     }
+    for path in paths("connect") {
+        let result = std::os::unix::net::UnixStream::connect(&path).map(|_| String::new());
+        results.insert(format!("connect {path}"), outcome(result));
+    }
+    let commands: Vec<Vec<String>> = probe
+        .get("run")
+        .and_then(Value::as_array)
+        .map(|commands| {
+            commands
+                .iter()
+                .filter_map(Value::as_array)
+                .map(|argv| {
+                    argv.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .filter(|argv: &Vec<String>| !argv.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    for argv in commands {
+        results.insert(format!("run {}", argv.join(" ")), run_command(&argv));
+    }
     write("probe.json", &Value::Object(results));
+}
+
+/// Runs `argv` for at most five seconds: `ok` is whether it exited with 0, `got` what it
+/// printed.
+fn run_command(argv: &[String]) -> Value {
+    let child = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(error) => return json!({"ok": false, "error": error.to_string()}),
+    };
+    let end_at = std::time::Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < end_at => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let mut said = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = std::io::Read::read_to_string(&mut out, &mut said);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = std::io::Read::read_to_string(&mut err, &mut said);
+    }
+    let said: String = said.chars().take(500).collect();
+    match status {
+        Some(status) => json!({"ok": status.success(), "got": said, "status": status.to_string()}),
+        None => json!({"ok": false, "got": said, "error": "still running after 5 seconds"}),
+    }
 }
 
 /// Starts a shell that appends a line to `beats` five times a second, for as long as it runs,
