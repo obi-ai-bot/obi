@@ -69,7 +69,9 @@ struct AccountsTests {
                                                             home: "/Users/x/Library/Application Support/Oby/accounts/a"))
         #expect(claude.contains("export CLAUDE_CONFIG_DIR='/Users/x/Library/Application Support/Oby/accounts/a'\n"))
         #expect(claude.contains(#"'Oby: sign in to the account for It'\''s mine.'"#))
-        #expect(claude.contains("\nclaude auth login\n"))
+        #expect(claude.contains("sandbox-exec"))
+        #expect(claude.contains("Library/Keychains"))
+        #expect(claude.contains("claude auth login"))
         let codex = AccountStore.signInScript(for: Account(id: "b", agent: "codex", name: "Work", payer: "Deskree", home: nil))
         #expect(codex.contains("unset CODEX_HOME\n") && codex.contains("\ncodex login\n"))
     }

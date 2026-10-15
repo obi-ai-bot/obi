@@ -2421,8 +2421,8 @@ fn login_home() -> Option<PathBuf> {
 /// commands or sessions of the person's). The credentials are copied again before every start (the
 /// person may have signed in again) and removed when the job's run ends
 /// ([`forget_login_secrets`]); the rest is copied once, then the job's own. Answers the names to
-/// show in the job's `HOME`. (On macOS Claude Code keeps its credentials in the keychain, not in a
-/// file: there is then no file to copy.)
+/// show in the job's `HOME`. On macOS a login that lives only in the keychain is not copied: the
+/// job uses `.credentials.json`, which sign-in writes when the keychain's files are denied.
 fn copy_login(home: Option<&Path>, login: &Path, tool: Tool) -> std::io::Result<Vec<&'static str>> {
     let (shown, secret, once): (&[&'static str], &[&str], &[&str]) = match tool {
         Tool::Codex => (&[".codex"], &[".codex/auth.json"], &[".codex/config.toml"]),
