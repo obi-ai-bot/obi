@@ -1,0 +1,44 @@
+{
+  "case": "envelope",
+  "name": "invalid-missing-question-goal",
+  "description": "A question body without goal.",
+  "expect": "reject",
+  "reason": "invalid_envelope",
+  "context": {
+    "now": "2026-10-14T12:00:00Z",
+    "sphere": "conf-sphere",
+    "receiver": "obi-a",
+    "keys": {
+      "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M": {
+        "obi": "obi-a",
+        "public_key": "ntsfB6eWkZc1OaiYP3IQWc8ULKnQgLnlTcEu78Ix1kM"
+      },
+      "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo": {
+        "obi": "obi-b",
+        "public_key": "h0N1imyuq1rRFqca2MG9WIbmY4HFUvtr0utDYJvrlsE"
+      }
+    },
+    "seen_ids": []
+  },
+  "input": {
+    "protocol": "obi/0.1",
+    "id": "246bcc1e-c9b2-866c-8b40-34a55506c9f2",
+    "type": "question",
+    "from": "obi-b",
+    "to": "obi-a",
+    "sphere": "conf-sphere",
+    "correlation_id": "246bcc1e-c9b2-866c-8b40-34a55506c9f2",
+    "created_at": "2026-10-14T11:59:00Z",
+    "expires_at": "2026-10-14T13:00:00Z",
+    "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
+    "body": {
+      "question": "Should average() round to two decimals?",
+      "choices": [
+        "Yes",
+        "No"
+      ],
+      "repo": "obi-conf/fixture-app"
+    },
+    "signature": "lmer1sg3pZju8rdOFtEc-fowHX-bhd_ZHdXkOjGA3nM1FF2f1HmJTAkTgJTu63mhXhGc5Xaaiq2n7pdQ75_pBw"
+  }
+}

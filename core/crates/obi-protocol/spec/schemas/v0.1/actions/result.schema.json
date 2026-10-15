@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/obi-ai-bot/obi-sphere/raw/main/spec/schemas/v0.1/actions/result.schema.json",
+  "title": "result body",
+  "description": "Finishes a request: a review's verdict and findings, a question's answer, or a handoff's outcome. `for` says which.",
+  "oneOf": [
+    {
+      "title": "result of a review_request",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["for", "outcome", "repo", "head_sha", "findings"],
+      "properties": {
+        "for": { "const": "review_request" },
+        "outcome": { "enum": ["approved", "changes_requested", "failed"] },
+        "repo": { "$ref": "../common.schema.json#/$defs/repo" },
+        "head_sha": { "$ref": "../common.schema.json#/$defs/sha" },
+        "findings": { "$ref": "../common.schema.json#/$defs/findings" },
+        "acceptance": { "$ref": "../common.schema.json#/$defs/acceptance_results" },
+        "by_rule": { "$ref": "../common.schema.json#/$defs/rule_id" },
+        "summary": { "$ref": "../common.schema.json#/$defs/block_text", "x-obi-text": "data", "minLength": 1, "maxLength": 4000 }
+      },
+      "if": { "required": ["outcome"], "properties": { "outcome": { "enum": ["approved", "changes_requested"] } } },
+      "then": { "required": ["acceptance"] }
+    },
+    {
+      "title": "result of a question",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["for", "outcome", "answer"],
+      "properties": {
+        "for": { "const": "question" },
+        "outcome": { "const": "answered" },
+        "answer": { "$ref": "../common.schema.json#/$defs/block_text", "x-obi-text": "data", "minLength": 1, "maxLength": 2000 },
+        "choice": { "type": "integer", "minimum": 0, "maximum": 2, "description": "The index of the choice picked, when the question had choices." },
+        "by_rule": { "$ref": "../common.schema.json#/$defs/rule_id" }
+      }
+    },
+    {
+      "title": "result of a handoff",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["for", "outcome", "repo", "acceptance"],
+      "properties": {
+        "for": { "const": "handoff" },
+        "outcome": { "enum": ["done", "failed"] },
+        "repo": { "$ref": "../common.schema.json#/$defs/repo" },
+        "head_branch": { "$ref": "../common.schema.json#/$defs/branch" },
+        "head_sha": { "$ref": "../common.schema.json#/$defs/sha" },
+        "pr": { "$ref": "../common.schema.json#/$defs/pr_number" },
+        "acceptance": { "$ref": "../common.schema.json#/$defs/acceptance_results" },
+        "by_rule": { "$ref": "../common.schema.json#/$defs/rule_id" },
+        "summary": { "$ref": "../common.schema.json#/$defs/block_text", "x-obi-text": "data", "minLength": 1, "maxLength": 4000 }
+      }
+    }
+  ]
+}
