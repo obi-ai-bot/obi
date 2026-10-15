@@ -3,7 +3,7 @@
 //! `initialize`) say, so a test can make it behave and misbehave. It writes what it saw into
 //! its data folder (its working directory), where the test reads it:
 //!
-//! - `starts`: one line per start;
+//! - `starts`: one line per start, with the time it started (milliseconds since 1970);
 //! - `initialize.json`: the `initialize` params;
 //! - `env.json`: its environment and working directory;
 //! - `probe.json`: what each read, list, write, Unix socket connection and command in
@@ -12,6 +12,10 @@
 //! - `emits.json`: the host's answers to the events it emitted;
 //! - `beats`: a line five times a second from the process it started, with
 //!   `config.spawnChild`;
+//! - `detached-<start>` and `detached-beats-<start>`: with `config.spawnDetached`, a process
+//!   that left its process group and session (`setsid`) and whose parent exited (so launchd,
+//!   or the sandbox's PID namespace's first process, took it over) says it did, then appends a
+//!   line five times a second;
 //! - `shutdown`: made when `shutdown` arrives.
 //!
 //! `--kinds a,b` lists the kinds it serves unless `config.serve` says otherwise. Only the
@@ -85,7 +89,11 @@ fn main() {
                 .collect();
         }
     }
-    append("starts", "start");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    append("starts", &format!("start {now}"));
     let starts = std::fs::read_to_string("starts")
         .map(|s| s.lines().count() as u64)
         .unwrap_or(1);
@@ -123,6 +131,9 @@ fn main() {
                     }
                     if behaviour.config.get("spawnChild") == Some(&Value::Bool(true)) {
                         spawn_child();
+                    }
+                    if behaviour.config.get("spawnDetached") == Some(&Value::Bool(true)) {
+                        spawn_detached(starts);
                     }
                     for _ in 0..behaviour.number("stderrLines").unwrap_or(0) {
                         eprintln!("{}", "e".repeat(1000));
@@ -415,4 +426,31 @@ fn spawn_child() {
         let _ = std::fs::write("child.pid", child.id().to_string());
         std::mem::forget(child);
     }
+}
+
+/// Starts a process that leaves the plug-in's process group and session and is orphaned: Perl
+/// forks, calls `setsid`, forks again and the session leader exits, so the last process's parent
+/// is launchd (or the sandbox's PID namespace's first process). It writes `detached-<start>`
+/// once it has, then appends a line to `detached-beats-<start>` five times a second, for as long
+/// as it runs. Waits for the first fork's parent, which exits at once.
+fn spawn_detached(start: u64) {
+    const DETACH: &str = r#"
+use POSIX ();
+my ($start) = @ARGV;
+exit 0 if fork;
+my $sid = POSIX::setsid();
+exit 0 if fork;
+for (1 .. 50) { last if getppid() == 1; select(undef, undef, undef, 0.02); }
+open(my $f, ">", "detached-$start.tmp") or exit 1;
+print $f "sid=$sid pgrp=" . getpgrp() . " ppid=" . getppid() . "\n";
+close $f;
+rename("detached-$start.tmp", "detached-$start");
+exec "/bin/sh", "-c", "while true; do echo beat >> detached-beats-$start; sleep 0.2; done";
+"#;
+    let _ = std::process::Command::new("/usr/bin/perl")
+        .args(["-e", DETACH, &start.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }

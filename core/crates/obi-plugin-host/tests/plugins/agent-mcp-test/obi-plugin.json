@@ -81,6 +81,9 @@
       "spawnChild": {
         "type": "boolean"
       },
+      "spawnDetached": {
+        "type": "boolean"
+      },
       "stderrLines": {
         "type": "integer",
         "minimum": 0,

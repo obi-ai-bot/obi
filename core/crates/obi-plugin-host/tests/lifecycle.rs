@@ -1,7 +1,10 @@
 //! The lifecycle of a plug-in with a process (docs/ARCHITECTURE.md 5.3, steps 3 to 6): started
-//! in its sandbox, initialized, pinged, restarted after 1, 2 then 4 seconds (shortened here),
-//! `failed` when the third restart fails too (and still `failed` when `obid` starts again), and stopped with `shutdown`, then killed with
-//! everything it started when it doesn't stop.
+//! in its sandbox, initialized, pinged, restarted after its first failure in a row after 1
+//! second and after its second after 2 seconds (shortened here, but in
+//! `the_restart_policy_is_one_second_then_two_then_failed`), `failed` at its third failure in a
+//! row (and still `failed` when `obid` starts again), and stopped with `shutdown`, then killed
+//! when it doesn't stop. Whenever it stops or fails, nothing it started is left running, also
+//! not what left its process group or session.
 
 mod common;
 
@@ -537,12 +540,202 @@ async fn without_a_sandbox_a_plugin_with_a_process_is_not_started() {
 
 /// The child the test plug-in started has stopped appending to `beats`.
 async fn assert_stopped_beating(home: &Home, plugin: &str) {
+    assert_file_stopped_growing(home, plugin, "beats").await;
+}
+
+/// `file` in `plugin`'s data folder has stopped growing: what appends to it has ended.
+async fn assert_file_stopped_growing(home: &Home, plugin: &str, file: &str) {
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let before = beats(home, plugin);
+    let before = size(home, plugin, file);
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(
-        beats(home, plugin),
+        size(home, plugin, file),
         before,
-        "{plugin}'s child is still running"
+        "what {plugin} started is still appending to {file}"
     );
+}
+
+/// `file` in `plugin`'s data folder is still growing: what appends to it still runs.
+async fn assert_file_growing(home: &Home, plugin: &str, file: &str) {
+    let before = size(home, plugin, file);
+    assert!(
+        wait_until(LONG, || size(home, plugin, file) > before).await,
+        "nothing appends to {plugin}'s {file} any more"
+    );
+}
+
+fn size(home: &Home, plugin: &str, file: &str) -> u64 {
+    std::fs::metadata(home.data_dir(plugin).join(file))
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+/// Waits until the process start `start` of `plugin` started with `spawnDetached` has left the
+/// plug-in's session and been orphaned (its parent is process 1: launchd, or the first process
+/// of the sandbox's PID namespace), and is appending to its `detached-beats-<start>`.
+async fn wait_for_detached(home: &Home, plugin: &str, start: usize) {
+    let marker = home.data_dir(plugin).join(format!("detached-{start}"));
+    assert!(
+        wait_until(LONG, || marker.is_file()).await,
+        "{plugin}'s start {start} started no detached process"
+    );
+    let said = std::fs::read_to_string(&marker).unwrap();
+    assert!(said.contains(" ppid=1"), "{said}");
+    assert!(!said.starts_with("sid=-1"), "setsid failed: {said}");
+    let beats = format!("detached-beats-{start}");
+    assert!(
+        wait_until(LONG, || size(home, plugin, &beats) > 0).await,
+        "{plugin}'s detached process doesn't run"
+    );
+}
+
+/// A plug-in disabled leaves nothing it started running, also a process that called `setsid`
+/// and was orphaned (docs/ARCHITECTURE.md 5.3, step 6), and nothing another plug-in started is
+/// touched.
+#[tokio::test]
+async fn disabling_ends_what_left_its_session_and_nothing_of_another_plugin() {
+    let home = Home::new("detached-disable");
+    home.install("context-test", "context-test");
+    home.install("events-test", "events-test");
+    let host = host_with(&home, options()).await;
+    for plugin in ["context-test", "events-test"] {
+        let ready = host
+            .set_enabled(&id(plugin), true, Some(json!({"spawnDetached": true})))
+            .await
+            .unwrap();
+        if !sandbox_made(&ready) {
+            return;
+        }
+        assert_eq!(ready.state, PluginState::Ready, "{ready:?}");
+        wait_for_detached(&home, plugin, 1).await;
+    }
+    host.set_enabled(&id("context-test"), false, None)
+        .await
+        .unwrap();
+    assert_file_stopped_growing(&home, "context-test", "detached-beats-1").await;
+    assert_file_growing(&home, "events-test", "detached-beats-1").await;
+    host.shutdown().await;
+    assert_file_stopped_growing(&home, "events-test", "detached-beats-1").await;
+}
+
+/// `obid` shutting down leaves nothing running that its plug-ins started, also processes that
+/// called `setsid`: of a plug-in that stops when asked, and of one that has to be killed.
+#[tokio::test]
+async fn shutdown_ends_what_left_its_session() {
+    let home = Home::new("detached-shutdown");
+    home.install("context-test", "context-test");
+    home.install("events-test", "events-test");
+    let host = host_with(&home, options()).await;
+    for (plugin, config) in [
+        ("context-test", json!({"spawnDetached": true})),
+        (
+            "events-test",
+            json!({"spawnDetached": true, "shutdown": "ignore"}),
+        ),
+    ] {
+        let ready = host
+            .set_enabled(&id(plugin), true, Some(config))
+            .await
+            .unwrap();
+        if !sandbox_made(&ready) {
+            return;
+        }
+        wait_for_detached(&home, plugin, 1).await;
+    }
+    host.shutdown().await;
+    for plugin in ["context-test", "events-test"] {
+        assert_eq!(
+            home.record(plugin, "shutdown"),
+            Some(json!(true)),
+            "{plugin}"
+        );
+        assert_file_stopped_growing(&home, plugin, "detached-beats-1").await;
+    }
+}
+
+/// Each time a plug-in fails, what it started ends with it, also what called `setsid`: when it
+/// exits by itself, and when the host ends it because it didn't answer a ping.
+#[tokio::test]
+async fn a_failed_start_leaves_nothing_running() {
+    for (name, config) in [
+        (
+            "exits",
+            json!({"spawnDetached": true, "afterReady": "exit", "failStarts": 1}),
+        ),
+        (
+            "silent",
+            json!({"spawnDetached": true, "ping": "silent", "failStarts": 1}),
+        ),
+    ] {
+        let home = Home::new(&format!("detached-fail-{name}"));
+        home.install("context-test", "context-test");
+        let host = host_with(&home, options()).await;
+        let ready = host
+            .set_enabled(&id("context-test"), true, Some(config))
+            .await
+            .unwrap();
+        if !sandbox_made(&ready) {
+            return;
+        }
+        wait_for_detached(&home, "context-test", 1).await;
+        // The first start fails and the second stays.
+        wait_for_detached(&home, "context-test", 2).await;
+        wait_for_state(&host, "context-test", PluginState::Ready, LONG).await;
+        assert_file_stopped_growing(&home, "context-test", "detached-beats-1").await;
+        assert_file_growing(&home, "context-test", "detached-beats-2").await;
+        host.shutdown().await;
+        assert_file_stopped_growing(&home, "context-test", "detached-beats-2").await;
+    }
+}
+
+/// docs/ARCHITECTURE.md 5.3, step 5, with its own times: after its first failure in a row a
+/// plug-in is restarted after 1 second, after its second after 2 seconds, and its third
+/// failure in a row makes it `failed`, with no fourth start.
+#[tokio::test]
+async fn the_restart_policy_is_one_second_then_two_then_failed() {
+    let home = Home::new("policy");
+    home.install("context-test", "context-test");
+    let host = host_with(
+        &home,
+        Options {
+            restart_delays: Options::default().restart_delays,
+            ..options()
+        },
+    )
+    .await;
+    let first = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({"afterReady": "exit"})),
+        )
+        .await
+        .unwrap();
+    if !sandbox_made(&first) {
+        return;
+    }
+    let failed = wait_for_state(&host, "context-test", PluginState::Failed, LONG).await;
+    assert!(
+        failed
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("3 times in a row"),
+        "{failed:?}"
+    );
+    // No fourth start, however long it waits.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let starts: Vec<u128> = std::fs::read_to_string(home.data_dir("context-test").join("starts"))
+        .unwrap()
+        .lines()
+        .map(|line| line.trim_start_matches("start ").parse().unwrap())
+        .collect();
+    assert_eq!(starts.len(), 3, "{starts:?}");
+    // Each start exits 100 ms after it answers initialize; what is between two starts beyond
+    // the wait is that, and the time to start one.
+    let gaps = [starts[1] - starts[0], starts[2] - starts[1]];
+    assert!((1000..1900).contains(&gaps[0]), "{gaps:?}");
+    assert!((2000..2900).contains(&gaps[1]), "{gaps:?}");
+    assert_eq!(status(&host, "context-test").state, PluginState::Failed);
+    host.shutdown().await;
 }

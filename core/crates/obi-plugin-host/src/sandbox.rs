@@ -17,14 +17,23 @@
 //!
 //! - on macOS it can't open apps or documents through LaunchServices (`open`), send Apple
 //!   Events, look up any Mach service but the few in [`MACH_SERVICES`] (not launchd's job
-//!   submission, LaunchServices, the pasteboard or any app's service), connect to a Unix
-//!   socket outside its data folder (Docker's, an SSH agent's) or signal a process outside its
-//!   sandbox;
+//!   submission, LaunchServices or any app's service), connect to a Unix socket outside its
+//!   data folder (Docker's, an SSH agent's) or signal a process outside its sandbox;
+//! - on macOS it has no preferences, no pasteboard and no keychain ([`MACH_DENIED`]): `cfprefsd`
+//!   would read and write the person's preferences for it whatever its file rules (it serves
+//!   the account, not the asker's `HOME`), so `cfprefsd` is denied and so are
+//!   `user-preference-read` and `user-preference-write`, and CoreFoundation's own reads of
+//!   preference files find nothing, because `/Users` (every account's home, the person's
+//!   `~/Library/Preferences` among them) is hidden like the person's `HOME`; the pasteboard
+//!   server is denied; so are the keychain's `securityd`, `secd` and SecurityAgent, so it can't
+//!   read even the system's own file keychains through `security` (certificate checks go
+//!   through `trustd`, which it keeps);
 //! - on Linux `/tmp`, `/var/tmp` and `/run` (with `/var/run`) are empty folders of its own, so
 //!   the D-Bus buses, the user's systemd, X11's sockets, an SSH agent's socket and Docker's
 //!   socket aren't there; only the folder the name resolver's `resolv.conf` lives in (and
 //!   `systemd-resolved`'s) is bound back in, read-only. Its processes are in their own PID
-//!   and IPC namespaces. Unix sockets in the abstract namespace belong to the network
+//!   and IPC namespaces, which end with its first process, so nothing it started outlives it,
+//!   whatever left its process group or session. Unix sockets in the abstract namespace belong to the network
 //!   namespace, which the plug-in shares with the machine because it has the network: a
 //!   service listening on one (an X server, an old D-Bus) is still reachable.
 //!
@@ -45,6 +54,12 @@
 //! environment and out of the environment of the long-running processes it starts. On Linux the
 //! plug-in's own PID namespace hides every other process.
 //!
+//! On macOS, which has no PID namespace, the first process in the sandbox is a watcher
+//! ([`WATCHER`]) that kills every process in the sandbox when the plug-in exits or the host
+//! tells it to stop: also what called `setsid` and was handed to launchd. A plug-in that kills
+//! its own watcher first can still leave processes that left its process group running; the
+//! host then ends the process group and logs it.
+//!
 //! When the sandbox can't be made on the machine, the plug-in isn't started.
 
 use std::ffi::OsString;
@@ -58,18 +73,24 @@ const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 /// The Seatbelt profile. Later rules win over earlier ones: everything is allowed, then every
 /// write is denied but to the data folder (and `/dev/null`, which programs write to as a
-/// matter of course), then every read under `obid`'s home and under the person's real `HOME`
-/// and of the machine's temporary folders ([`MACOS_TEMP`]) is denied, then reads of the
+/// matter of course), then every read under `obid`'s home, under the person's real `HOME`,
+/// under `/Users` and of the machine's temporary folders ([`MACOS_TEMP`]) is denied, then
+/// reads of the
 /// plug-in's own folder and its data folder are allowed again, and the metadata (not the
 /// contents) of the folders above those two (`ANCESTOR_<n>`, `ancestors` of them), and the
 /// `xcrun` cache ([`XCRUN_CACHE`]).
 /// Then what would let it start a process outside the sandbox, or use a local service in the
 /// person's name, is denied: LaunchServices, Apple Events, every Mach service but
-/// [`MACH_SERVICES`], Unix sockets outside its data folder (but the name resolver's and the
-/// system log's), and signals to processes outside its sandbox.
+/// [`MACH_SERVICES`] (and [`MACH_DENIED`] by name, whatever that list says), preferences,
+/// Unix sockets outside its data folder (but the name resolver's and the system log's), and
+/// signals to processes outside its sandbox.
 /// The paths come in as parameters (`-D`), so nothing in a path is read as profile syntax.
 fn seatbelt_profile(ancestors: usize) -> String {
     let services: String = MACH_SERVICES
+        .iter()
+        .map(|name| format!("\n  (global-name \"{name}\")"))
+        .collect();
+    let denied: String = MACH_DENIED
         .iter()
         .map(|name| format!("\n  (global-name \"{name}\")"))
         .collect();
@@ -91,12 +112,14 @@ fn seatbelt_profile(ancestors: usize) -> String {
 (allow default)
 (deny file-write*)
 (allow file-write* (subpath (param "DATA")) (literal "/dev/null") (literal "/dev/zero") (regex #"^/dev/fd/"))
-(deny file-read* (subpath (param "OBID_HOME")) (subpath (param "REAL_HOME")){temp})
+(deny file-read* (subpath (param "OBID_HOME")) (subpath (param "REAL_HOME")) (subpath "/Users"){temp})
 (allow file-read* (subpath (param "PLUGIN")) (subpath (param "DATA")) (regex #"{XCRUN_CACHE}"))
 {ancestors}(deny lsopen)
 (deny appleevent-send)
 (deny mach-lookup)
 (allow mach-lookup{services})
+(deny mach-lookup{denied})
+(deny user-preference-read user-preference-write)
 (deny network-outbound (remote unix-socket))
 (allow network-outbound
   (remote unix-socket (subpath (param "DATA")))
@@ -109,9 +132,9 @@ fn seatbelt_profile(ancestors: usize) -> String {
 }
 
 /// The Mach services a plug-in may look up on macOS: users and groups, notifications, logging,
-/// name lookups and the network's configuration, certificate trust, and preferences (which
-/// `cfprefsd` reads and writes under the plug-in's own sandbox). Not launchd's job
-/// submission, LaunchServices, Apple Events, the pasteboard, the keychain or any app's.
+/// name lookups and the network's configuration, and certificate trust. Not launchd's job
+/// submission, LaunchServices, Apple Events, preferences, the pasteboard, the keychain or any
+/// app's.
 const MACH_SERVICES: &[&str] = &[
     "com.apple.system.opendirectoryd.libinfo",
     "com.apple.system.opendirectoryd.membership",
@@ -128,8 +151,57 @@ const MACH_SERVICES: &[&str] = &[
     "com.apple.trustd",
     "com.apple.trustd.agent",
     "com.apple.ocspd",
+];
+
+/// The first process in a plug-in's Seatbelt sandbox on macOS, run by `/bin/sh` with `obid`'s
+/// home, the plug-in's program and its arguments. It starts the plug-in (with its stdin; its
+/// stdout and stderr are the plug-in's; its environment only the four variables, none of the
+/// shell's own like `PWD` or `SHLVL`), and when the plug-in exits, or the host sends it
+/// `SIGTERM`, it kills every process in the sandbox with `kill -KILL -1`: the profile lets a
+/// process signal only processes in its own sandbox, so that reaches exactly what the plug-in
+/// started, also what left its process group or session (`setsid`) and was handed to launchd,
+/// and nothing else. macOS has no PID namespace and no other way to find those from outside
+/// without calling into the system's C API, which this crate doesn't do.
+///
+/// Before it kills, it checks that it really is sandboxed: it must not be able to list `obid`'s
+/// home, which the profile hides. Outside a sandbox `kill -KILL -1` would end every process of
+/// the person's.
+///
+/// What it can't stop: the plug-in's processes may signal it too (they are in its sandbox), so
+/// a plug-in that kills its watcher first can leave processes it started outside its process
+/// group running. The host then ends the process group and logs that the watcher was killed.
+const WATCHER: &str = r#"home=$1; shift
+reap() {
+  if ! /bin/ls "$home" >/dev/null 2>&1; then kill -KILL -1 2>/dev/null; fi
+}
+trap 'reap; exit 143' TERM
+exec 3<&0
+/usr/bin/env -i PATH="$PATH" HOME="$HOME" LANG="$LANG" TMPDIR="$TMPDIR" "$@" <&3 3<&- &
+plugin=$!
+exec 0</dev/null 1>/dev/null 2>&1 3<&-
+wait "$plugin"
+status=$?
+reap
+exit "$status"
+"#;
+
+/// Mach services denied by name too, after [`MACH_SERVICES`], so that adding a service there
+/// can't let one of these back in: cfprefsd (the system's and the person's), which reads and
+/// writes the person's preferences for whoever asks, whatever the asker's `HOME` or file rules;
+/// the pasteboard server and the one that hands the pasteboard to other devices; the keychain's
+/// securityd (file-based keychains), secd (the data protection keychain and iCloud Keychain)
+/// and SecurityAgent, which would ask the person for a keychain's password.
+const MACH_DENIED: &[&str] = &[
     "com.apple.cfprefsd.daemon",
     "com.apple.cfprefsd.agent",
+    "com.apple.pasteboard.1",
+    "com.apple.coreservices.uauseractivitypasteboardclient.xpc",
+    "com.apple.SecurityServer",
+    "com.apple.securityd.xpc",
+    "com.apple.securityd.general",
+    "com.apple.securityd.systemkeychain",
+    "com.apple.security.agent",
+    "com.apple.security.KeychainStasher",
 ];
 
 /// The machine's temporary folders on macOS (their real paths: `/tmp` and `/var` are links into
@@ -221,11 +293,12 @@ impl Sandbox {
         }
     }
 
-    /// Whether this sandbox ends every process the plug-in started when its first process
-    /// ends. bubblewrap does (`--die-with-parent` and its own PID namespace); on macOS the host
-    /// ends the plug-in's process group itself.
-    pub(crate) fn ends_descendants(&self) -> bool {
-        matches!(self, Sandbox::Bubblewrap { .. })
+    /// Whether the process the host starts is the sandbox's watcher ([`WATCHER`], on macOS),
+    /// which ends everything in the sandbox when it gets `SIGTERM` or the plug-in exits. With
+    /// bubblewrap the sandbox's own PID namespace ends with its first process
+    /// (`--die-with-parent`), whatever left its process group or session.
+    pub(crate) fn has_watcher(&self) -> bool {
+        matches!(self, Sandbox::Seatbelt { .. })
     }
 
     /// The command that starts `launch` in this sandbox, with only `PATH`, `HOME`, `LANG` and
@@ -259,6 +332,8 @@ impl Sandbox {
                     .arg(define("REAL_HOME", real_home))
                     .arg("-p")
                     .arg(seatbelt_profile(ancestors.len()))
+                    .args(["/bin/sh", "-c", WATCHER, "obi-plugin-watcher"])
+                    .arg(&launch.obid_home)
                     .arg(&launch.program)
                     .args(&launch.args);
                 command.current_dir(&launch.data_dir);
@@ -424,17 +499,34 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 /// Ends the process group `pgid` (the plug-in's first process and whatever it started that
 /// stayed in its group), with `kill -KILL -- -<pgid>` run by `/bin/sh`.
 pub(crate) async fn kill_group(pgid: u32) {
-    if pgid <= 1 {
-        return;
+    if pgid > 1 {
+        signal(&format!("-{pgid}"), "KILL").await;
     }
+}
+
+/// Sends `SIGTERM` to the watcher `pid` ([`WATCHER`]), which then ends everything in its
+/// sandbox.
+pub(crate) async fn tell_watcher(pid: u32) {
+    if pid > 1 {
+        signal(&pid.to_string(), "TERM").await;
+    }
+}
+
+/// `kill -<signal> -- <target>`, run by `/bin/sh`.
+async fn signal(target: &str, signal: &str) {
     let mut kill = Command::new("/bin/sh");
-    kill.args(["-c", "kill -KILL -- \"-$1\" 2>/dev/null", "sh"])
-        .arg(pgid.to_string())
-        .env_clear()
-        .env("PATH", DEFAULT_PATH)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
+    kill.args([
+        "-c",
+        "kill -\"$1\" -- \"$2\" 2>/dev/null",
+        "sh",
+        signal,
+        target,
+    ])
+    .env_clear()
+    .env("PATH", DEFAULT_PATH)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), kill.status()).await;
 }

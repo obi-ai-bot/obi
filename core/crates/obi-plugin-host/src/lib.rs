@@ -16,12 +16,15 @@
 //!   without `run` has no process: it is `ready` at once.
 //! - **Initialized.** `initialize`, answered within 10 seconds, makes it `ready`.
 //! - **Running.** `ping` every 60 seconds. A plug-in that doesn't answer `initialize` or a ping
-//!   within its time, or exits, is restarted after 1, 2, then 4 seconds; when the third
-//!   restart fails too, its `state` is `failed` and it stays stopped until the owner enables it
-//!   again, across `obid` restarts too: `home/plugins.json` keeps that it failed. A ping
-//!   answered starts the count again.
+//!   within its time, or exits, has failed. After its first failure in a row it is restarted
+//!   after 1 second, after its second after 2 seconds, and its third failure in a row makes its
+//!   `state` `failed`: it stays stopped until the owner enables it again, across `obid` restarts
+//!   too (`home/plugins.json` keeps that it failed). An answered ping ends the run of failures.
 //! - **Stopped.** On disable and at shutdown: `shutdown`, then stdin closes; a plug-in still
-//!   running 5 seconds after `shutdown` was sent is killed, with every process it started.
+//!   running 5 seconds after `shutdown` was sent is killed. Either way no process it started is
+//!   left running, also none that left its process group or session (`setsid`): on Linux the
+//!   sandbox's PID namespace ends with it, on macOS the sandbox's watcher kills every process in
+//!   the sandbox (see the `sandbox` module). The same happens each time it fails.
 //!
 //! A plug-in never blocks Obi: [`PluginHost::start`] doesn't wait for plug-ins to come up, a
 //! context query that fails or is late gives nothing, and a failed plug-in only shows in
@@ -889,10 +892,31 @@ async fn stop_gracefully(
     end(Some(conn), child, pgid, sandbox).await;
 }
 
-/// Ends the plug-in's process and everything it started, and its connection.
+/// Ends the plug-in's process and everything it started, and its connection. On macOS the
+/// process is the sandbox's watcher: told to (`SIGTERM`), it kills everything in the sandbox,
+/// also what left the plug-in's process group or session. Then whatever is left of the process
+/// group is killed.
 async fn end(conn: Option<&Arc<Conn>>, child: &mut Child, pgid: u32, sandbox: &Sandbox) {
+    if sandbox.has_watcher() {
+        match child.try_wait() {
+            Ok(None) => {
+                sandbox::tell_watcher(pgid).await;
+                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+            }
+            Ok(Some(status)) => {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(signal) = status.signal() {
+                    tracing::warn!(
+                        target: "obi_plugin",
+                        "the plug-in's watcher was killed (signal {signal}): processes it started that left its process group may still run"
+                    );
+                }
+            }
+            Err(_) => {}
+        }
+    }
     let _ = child.start_kill();
-    if !sandbox.ends_descendants() {
+    if sandbox.has_watcher() {
         sandbox::kill_group(pgid).await;
     }
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
