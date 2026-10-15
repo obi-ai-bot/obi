@@ -544,3 +544,185 @@ async fn a_review_agent_cant_search_its_account_folder() {
     );
     assert!(summary.contains(&readable), "{summary} (wanted {readable})");
 }
+
+/// feature/average with `links` (path, target) committed on top, pushed to `remote` as `branch`;
+/// its commit.
+fn push_links(folder: &Path, remote: &Path, branch: &str, links: &[(&str, &str)]) -> String {
+    let work = folder.join(format!("work-{}", branch.replace('/', "-")));
+    git(
+        folder,
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            work.to_str().unwrap(),
+        ],
+    );
+    git(&work, &["checkout", "-q", "feature/average"]);
+    for (path, target) in links {
+        std::os::unix::fs::symlink(target, work.join(path)).unwrap();
+        git(&work, &["add", path]);
+    }
+    git(
+        &work,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "Add links",
+        ],
+    );
+    git(
+        &work,
+        &["push", "-q", "origin", &format!("HEAD:refs/heads/{branch}")],
+    );
+    git(&work, &["rev-parse", "HEAD"])
+}
+
+/// Jobs with `agent` (one of tests/agents) for Claude Code and an account folder holding a
+/// canary login; the jobs and the canary.
+fn reading_jobs(folder: &Path, remote: &Path, agent: &str) -> (std::sync::Arc<Jobs>, String) {
+    let mut config = config(folder, remote, Some("node --test"));
+    let bin = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/agents")
+        .join(agent);
+    config.agents.claude.as_mut().unwrap().bin = bin.to_str().unwrap().to_owned();
+    let account = config.home.join("accounts/stub");
+    obid::prepare_home(&config).unwrap();
+    std::fs::create_dir_all(&account).unwrap();
+    // Made up at run time, shaped like no real token, so only this test's own check can find it.
+    let canary = format!("OBI-ACCOUNT-CANARY-{}", std::process::id());
+    std::fs::write(
+        account.join(".credentials.json"),
+        format!("{{\"login\": \"{canary}\"}}"),
+    )
+    .unwrap();
+    let jobs = Jobs::open(
+        config,
+        Events::new(),
+        Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))),
+    )
+    .unwrap();
+    (jobs, canary)
+}
+
+/// A branch that commits a link out of the review's worktree, to the account folders or to one
+/// account, relative or absolute, fails the review before the agent starts. The agent here reads
+/// its whole working folder without asking, links followed, as Claude Code's `grep -R` does
+/// (tests/agents/reading-reviewer): had it run, the canary login would be in its review.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_committed_link_out_fails_the_review_before_the_agent_reads() {
+    let folder = Folder::new("link-out");
+    let remote = fixture(&folder.0.join("fixture"));
+    let (jobs, canary) = reading_jobs(&folder.0, &remote, "reading-reviewer");
+    let account = folder.0.join("home/accounts/stub");
+    let branches = [
+        ("feature/x1", vec![("x1", "../../accounts".to_owned())]),
+        ("feature/x2", vec![("x2", "../../accounts/stub".to_owned())]),
+        (
+            "feature/x3",
+            vec![(
+                "src/x3.json",
+                account
+                    .join(".credentials.json")
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+            )],
+        ),
+        // A link inside is fine, a second one leading out is not.
+        (
+            "feature/x4",
+            vec![
+                ("src/same.js", "average.js".to_owned()),
+                ("src/up", "../../..".to_owned()),
+            ],
+        ),
+    ];
+    for (branch, links) in branches {
+        let links: Vec<(&str, &str)> = links.iter().map(|(p, t)| (*p, t.as_str())).collect();
+        let sha = push_links(&folder.0, &remote, branch, &links);
+        let mut asked = request();
+        asked.body["head_branch"] = json!(branch);
+        asked.body["head_sha"] = json!(sha);
+        let job = jobs.start_obi_review(asked).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(120), jobs.wait(&job.id))
+            .await
+            .unwrap()
+            .unwrap();
+        let shown = serde_json::to_string(&ended).unwrap();
+        assert_eq!(ended.status, Status::Failed, "{branch}: {shown}");
+        assert!(
+            ended
+                .summary
+                .contains("The branch commits a link that leads out of the review's worktree"),
+            "{branch}: {}",
+            ended.summary
+        );
+        let (link, _) = links.last().unwrap();
+        assert!(ended.summary.contains(link), "{branch}: {}", ended.summary);
+        // The agent never started, and what goes back says only that the review failed.
+        assert!(ended.started.is_none(), "{branch}: {shown}");
+        let result = ended.review_result.as_ref().unwrap();
+        assert_eq!(result["outcome"], "failed", "{branch}: {shown}");
+        assert_eq!(result["findings"], json!([]), "{branch}: {shown}");
+        assert!(!shown.contains(&canary), "{branch}: {shown}");
+    }
+}
+
+/// A review agent that reads without asking (tests/agents/reading-reviewer) is started with Read
+/// only (`--tools Read`), finds obid's diff of the change in `.obi/inputs/change.diff`, and reads
+/// nothing of its account through a link inside the worktree: the sandbox lets it read the account
+/// folder, so the worktree holding no link out is what keeps the login out of the review.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_agent_reading_without_asking_gets_only_the_worktree() {
+    let folder = Folder::new("reading");
+    let remote = fixture(&folder.0.join("fixture"));
+    let (jobs, canary) = reading_jobs(&folder.0, &remote, "reading-reviewer");
+    let sha = push_links(
+        &folder.0,
+        &remote,
+        "feature/inside",
+        &[("src/same.js", "average.js"), ("here", ".")],
+    );
+    let mut asked = request();
+    asked.body["head_branch"] = json!("feature/inside");
+    asked.body["head_sha"] = json!(sha);
+    let job = jobs.start_obi_review(asked).unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(120), jobs.wait(&job.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ended.status, Status::Done, "{}", ended.summary);
+    let result = ended.review_result.unwrap();
+    let shown = result.to_string();
+    assert!(
+        !shown.contains(&canary),
+        "the account is in the review: {shown}"
+    );
+    assert_eq!(result["findings"], json!([]), "{shown}");
+    let summary = result["summary"].as_str().unwrap();
+    assert!(summary.starts_with("Tools: Read. "), "{summary}");
+    assert!(summary.contains("Diff: yes."), "{summary}");
+    // The agent could read the folder in the sandbox: no link out is what kept it out.
+    let readable = format!(
+        "readable in the sandbox: {} bytes",
+        format!("{{\"login\": \"{canary}\"}}").len()
+    );
+    assert!(summary.contains(&readable), "{summary} (wanted {readable})");
+    // The diff is the change against the base, with what the branch added.
+    let worktree = PathBuf::from(ended.worktree.unwrap());
+    let diff = std::fs::read_to_string(worktree.join(".obi/inputs/change.diff")).unwrap();
+    assert!(diff.contains("src/average.js"), "{diff}");
+    assert!(
+        diff.contains("diff --git a/src/same.js b/src/same.js"),
+        "{diff}"
+    );
+    assert!(diff.contains("+average.js"), "{diff}");
+}

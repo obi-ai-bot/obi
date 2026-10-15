@@ -7,9 +7,13 @@ use serde_json::Value;
 
 use crate::agent::Answer;
 
-/// The tools a review another Obi asked for may use: it reads the change and reports. No shell,
-/// no edit, no web: what it was sent is data, and its answer goes back through the publish gate.
-pub const REVIEW_TOOLS: [&str; 5] = ["Read", "Grep", "Glob", "LS", "TodoWrite"];
+/// The tools a review another Obi asked for has: it reads the change and reports. obid starts
+/// the agent with only these (`--tools`), since Claude Code runs some calls without asking first
+/// (read-only shell commands, reads inside its working folder), and answers its prompts with
+/// only these too. No shell, no search, no edit, no web: what it was sent is data, and its answer
+/// goes back through the publish gate. obid hands it the change as a diff
+/// (`crate::review::DIFF_FILE`), so reading is all it needs.
+pub const REVIEW_TOOLS: [&str; 1] = ["Read"];
 
 /// Whether `command` publishes: a push, a remote changed, the GitHub CLI posting or calling the API.
 fn publishes(command: &str) -> bool {
@@ -105,6 +109,25 @@ fn real_worktree(worktree: &Path) -> PathBuf {
     resolved(worktree).unwrap_or_else(|| normalized(worktree))
 }
 
+/// Whether the link at `link` (relative to `worktree`) leads out of the worktree, or obid can't
+/// tell where it leads: followed as the system would open it, or, when what it names doesn't
+/// exist, its target taken from the folder it's in. A link inside that leads to a file inside is
+/// fine, also when that file doesn't exist.
+pub fn link_leads_out(worktree: &Path, link: &Path) -> bool {
+    let real = real_worktree(worktree);
+    let path = worktree.join(link);
+    if let Some(to) = resolved(&path) {
+        return !to.starts_with(&real);
+    }
+    let Ok(target) = std::fs::read_link(&path) else {
+        return true;
+    };
+    let Some(folder) = path.parent().and_then(resolved) else {
+        return true;
+    };
+    !resolved(&folder.join(target)).is_some_and(|to| to.starts_with(&real))
+}
+
 /// Whether the path input `path` leads inside `worktree` (already real): relative to the worktree
 /// as the agent's tools take it, after symlinks. `~` is refused, since the agent's tools take it
 /// for its home.
@@ -115,27 +138,17 @@ fn inside(path: &str, worktree: &Path, real_worktree: &Path) -> bool {
     resolved(&worktree.join(path)).is_some_and(|real| real.starts_with(real_worktree))
 }
 
-/// Whether the glob `pattern` (Glob's `pattern`, Grep's `glob`) stays below the folder it's taken
-/// from: no absolute pattern (Glob would search from its root), no `~`, no `..` and no brace
-/// alternative that starts at the root or the home.
-fn stays_below(pattern: &str) -> bool {
-    !(pattern.starts_with('/')
-        || pattern.starts_with('~')
-        || pattern.contains("..")
-        || ["{/", ",/", "{~", ",~", "\\"]
-            .iter()
-            .any(|bad| pattern.contains(bad)))
-}
-
 /// Why a review another Obi asked for may not make this call of one of [`REVIEW_TOOLS`], or
-/// `None`. Every path input must lead inside the worktree once symlinks are followed, so neither
-/// an absolute path nor a link in the reviewed branch reaches the agent's account, its login or
-/// anything else the job sandbox lets the agent read. An input obid doesn't know that may name a
-/// path is refused rather than let through.
+/// `None`. Every path input must lead inside the worktree once symlinks are followed, so an
+/// absolute path doesn't reach the agent's account, its login or anything else the job sandbox
+/// lets the agent read. An input obid doesn't know that may name a path is refused rather than
+/// let through. Claude Code reads inside its working folder without asking, so this covers only
+/// what it asks for: a link in the reviewed branch that leads out fails the review before the
+/// agent starts ([`link_leads_out`]).
 fn review_denial(tool: &str, input: &Value, worktree: &Path) -> Option<String> {
     let stay = || {
         Some(format!(
-            "This review reads only the change, inside its worktree ({}): use paths and patterns inside it.",
+            "This review reads only the change, inside its worktree ({}): use paths inside it.",
             worktree.display()
         ))
     };
@@ -144,26 +157,7 @@ fn review_denial(tool: &str, input: &Value, worktree: &Path) -> Option<String> {
     };
     let real = real_worktree(worktree);
     for (key, value) in fields {
-        let glob = (tool == "Glob" && key == "pattern") || (tool == "Grep" && key == "glob");
-        if glob {
-            if !value.as_str().is_some_and(stays_below) {
-                return stay();
-            }
-            // Glob searches from the pattern's folders before its first wildcard: they too must
-            // lead inside, so a link in the branch can't take the search out.
-            if tool == "Glob" {
-                let base = fields.get("path").and_then(Value::as_str).unwrap_or(".");
-                let pattern = value.as_str().unwrap_or("");
-                let literal: Vec<&str> = pattern
-                    .split('/')
-                    .take_while(|part| !part.contains(['*', '?', '[', '{']))
-                    .collect();
-                let from = Path::new(base).join(literal.join("/"));
-                if !from.to_str().is_some_and(|p| inside(p, worktree, &real)) {
-                    return stay();
-                }
-            }
-        } else if matches!(key.as_str(), "path" | "file_path" | "notebook_path") {
+        if matches!(key.as_str(), "path" | "file_path" | "notebook_path") {
             if !value.as_str().is_some_and(|p| inside(p, worktree, &real)) {
                 return stay();
             }
@@ -307,8 +301,9 @@ mod tests {
         }
     }
 
-    /// A review another Obi asked for reads only inside its worktree, whatever tool and whatever
-    /// path input: Grep's, Glob's and LS's `path`, Glob's pattern, Grep's `glob`, after symlinks.
+    /// A review another Obi asked for only reads, only inside its worktree: Read, whose path
+    /// inputs must lead inside after symlinks. Grep, Glob, LS and TodoWrite are refused too, even
+    /// inside: obid starts the agent with Read only (`--tools`), and answers only for Read.
     #[test]
     fn an_obi_review_stays_inside_its_worktree() {
         let disk = Disk::new("review");
@@ -367,6 +362,24 @@ mod tests {
                 json!({"file_path": "src/a.js", "extra": {"cwd": "/"}}),
             ),
             ("Grep", "not an object".into()),
+            ("Read", "not an object".into()),
+            (
+                "Read",
+                json!({"file_path": at(&account.join(".credentials.json"))}),
+            ),
+            ("Read", json!({"file_path": "src/a.js", "path": "/"})),
+            // Inside the worktree, but not Read: the agent doesn't have them.
+            (
+                "Grep",
+                json!({"pattern": "average", "output_mode": "content", "-n": true}),
+            ),
+            ("Grep", json!({"pattern": "x", "path": at(&worktree)})),
+            ("Glob", json!({"pattern": "**/*.js"})),
+            ("LS", json!({"path": "src"})),
+            (
+                "TodoWrite",
+                json!({"todos": [{"content": "Read the src/ folder", "status": "pending", "activeForm": "Reading"}]}),
+            ),
         ];
         for (tool, input) in refused {
             assert!(
@@ -376,41 +389,18 @@ mod tests {
         }
         let allowed = [
             (
-                "Grep",
-                json!({"pattern": "average", "output_mode": "content", "-n": true}),
-            ),
-            (
-                "Grep",
-                json!({"pattern": "x", "path": "src", "glob": "**/*.{js,ts}", "type": "js"}),
-            ),
-            ("Grep", json!({"pattern": "x", "path": at(&worktree)})),
-            (
-                "Grep",
-                json!({"pattern": "x", "path": at(&worktree_by_link)}),
-            ),
-            ("Glob", json!({"pattern": "**/*.js"})),
-            ("Glob", json!({"pattern": "src/*.js", "path": "."})),
-            (
-                "Glob",
-                json!({"pattern": "*.js", "path": at(&worktree.join("src"))}),
-            ),
-            (
-                "LS",
-                json!({"path": at(&worktree), "ignore": ["node_modules"]}),
-            ),
-            ("LS", json!({"path": "src"})),
-            (
                 "Read",
                 json!({"file_path": "src/a.js", "offset": 1, "limit": 20}),
             ),
             ("Read", json!({"file_path": "src/same.js"})),
+            ("Read", json!({"file_path": at(&worktree.join("src/a.js"))})),
+            (
+                "Read",
+                json!({"file_path": at(&worktree_by_link.join("src/a.js"))}),
+            ),
             (
                 "Read",
                 json!({"file_path": at(&worktree.join(".obi/inputs/obi-request.json"))}),
-            ),
-            (
-                "TodoWrite",
-                json!({"todos": [{"content": "Read the src/ folder", "status": "pending", "activeForm": "Reading"}]}),
             ),
         ];
         for (tool, input) in allowed {
@@ -441,6 +431,59 @@ mod tests {
             ),
             Answer::Allow
         );
+    }
+
+    /// The links a reviewed branch commits: one that leads out of the worktree, by any route, or
+    /// that obid can't follow, leads out; one inside, to a file there or one that doesn't exist
+    /// yet, doesn't.
+    #[test]
+    fn links_that_lead_out() {
+        let disk = Disk::new("links");
+        let home = disk.0.join("h");
+        let worktree = home.join("worktrees/j1");
+        std::fs::create_dir_all(worktree.join("src/deep")).unwrap();
+        std::fs::create_dir_all(home.join("accounts/stub")).unwrap();
+        std::fs::write(home.join("accounts/stub/.credentials.json"), "{}").unwrap();
+        std::fs::write(worktree.join("src/a.js"), "a").unwrap();
+        let link = |name: &str, to: &str| {
+            std::os::unix::fs::symlink(to, worktree.join(name)).unwrap();
+        };
+        link("x1", "../../accounts");
+        link("x2", "../../accounts/stub");
+        link(
+            "x3",
+            home.join("accounts/stub/.credentials.json")
+                .to_str()
+                .unwrap(),
+        );
+        link("x4", "/");
+        link("x5", "../../nowhere/yet");
+        link("x6", "x6");
+        link("x7", "x1/stub");
+        link("x8", "nowhere/../../../accounts");
+        link("src/deep/up", "../../..");
+        link("in1", "src/a.js");
+        link("in2", "src");
+        link("in3", "src/missing.js");
+        link("src/deep/in4", "../a.js");
+        link("in5", ".");
+        link("in6", "in1");
+        for out in [
+            "x1",
+            "x2",
+            "x3",
+            "x4",
+            "x5",
+            "x6",
+            "x7",
+            "x8",
+            "src/deep/up",
+        ] {
+            assert!(link_leads_out(&worktree, Path::new(out)), "{out}");
+        }
+        for inside in ["in1", "in2", "in3", "src/deep/in4", "in5", "in6"] {
+            assert!(!link_leads_out(&worktree, Path::new(inside)), "{inside}");
+        }
     }
 
     #[test]

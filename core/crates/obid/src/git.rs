@@ -239,6 +239,49 @@ pub async fn has_commit(clone: &Path, commit: &str) -> bool {
         .is_ok()
 }
 
+/// The symbolic links `commit` holds (tree mode `120000`), as paths relative to its root.
+pub async fn committed_links(dir: &Path, commit: &str) -> Result<Vec<PathBuf>, GitError> {
+    use std::os::unix::ffi::OsStrExt;
+    let words = ["ls-tree", "-r", "-z", "--full-tree", commit];
+    let args: Vec<&OsStr> = words.iter().map(OsStr::new).collect();
+    let listed = run_bytes(dir, &args, &[], None).await?;
+    let mut links = Vec::new();
+    for entry in listed.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        // `<mode> <type> <object>\t<path>`
+        let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
+            return Err(GitError(
+                "git ls-tree answered a line obid can't read".into(),
+            ));
+        };
+        if entry.starts_with(b"120000 ") {
+            links.push(PathBuf::from(OsStr::from_bytes(&entry[tab + 1..])));
+        }
+    }
+    Ok(links)
+}
+
+/// What `head` changes against `base` from their merge base, the files it touches listed first,
+/// as git shows it with nothing a repository or a branch could set up taking part: no replacement
+/// objects, no external diff or text conversion, fixed `a/` and `b/` prefixes, no color.
+pub async fn change(dir: &Path, base: &str, head: &str) -> Result<Vec<u8>, GitError> {
+    let range = format!("{base}...{head}");
+    let words = [
+        "--no-replace-objects",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--find-renames",
+        "--patch-with-stat",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        &range,
+        "--",
+    ];
+    let args: Vec<&OsStr> = words.iter().map(OsStr::new).collect();
+    run_bytes(dir, &args, &[], None).await
+}
+
 /// A worktree's git directories: its own (`<common>/worktrees/<name>`) and the common one.
 pub async fn worktree_dirs(worktree: &Path) -> Result<(PathBuf, PathBuf), GitError> {
     let admin = git(
