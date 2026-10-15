@@ -205,8 +205,15 @@ async fn nothing_it_starts_runs_outside_its_sandbox() {
         path(&escaped)
     );
 
-    // A local service the plug-in mustn't reach, listening outside its data folder.
-    let socket = std::env::temp_dir().join(format!("obi-plugin-service-{pid}.sock"));
+    // A local service the plug-in mustn't reach, listening outside its data folder: on macOS
+    // anywhere, on Linux in /tmp, where X11 and SSH agents keep theirs (/run, where D-Bus,
+    // systemd and Docker keep theirs, is hidden the same way and checked below).
+    let socket_dir = if cfg!(target_os = "linux") {
+        std::path::PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let socket = socket_dir.join(format!("obi-plugin-service-{pid}.sock"));
     let _ = std::fs::remove_file(&socket);
     let service = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     service.set_nonblocking(true).unwrap();
