@@ -4,7 +4,7 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 
 **API-level** means the test asks the runner through its HTTP API (`client.execute` on the router, or the API's own handlers), or checks what the API puts on the wire (a job's or account's JSON, the gate in front of every request). obid is checked the same way: the real binary, asked over HTTP (tests/*.rs), or a unit test of the same rule where the Swift test was one. Everything else is **Swift-internal**: it drives Swift types (Desk, the brain, the agent fakes, the stores), so it doesn't carry over; obid's own behaviour behind those is covered by its own tests.
 
-994 tests in all: **31 API-level and ported**, **44 API-level and not ported** (their endpoint or feature isn't in obid yet), **919 Swift-internal and dropped**.
+994 tests in all: **33 API-level and ported**, **42 API-level and not ported** (their endpoint or feature isn't in obid yet), **919 Swift-internal and dropped**.
 
 ## API-level, ported
 
@@ -34,6 +34,8 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 | RunnerTests.dispatchBodiesAreWholeJobs | runner_api.rs `dispatch_bodies_are_whole_jobs` | through the API instead of the body's decoder |
 | RunnerTests.dispatchTakesOnlyWholeJobs | jobs_api.rs `dispatch_takes_only_whole_jobs` |  |
 | RunnerTests.jobsHaveISODatesAndEveryKey | runner_api.rs `jobs_have_iso_dates_and_every_key` | 67 keys: the Swift runner's 65 and obid's `obi` and `worktree` |
+| RunnerTests.malformedKeysDontRegister | runner_api.rs `malformed_keys_dont_register` | and src/devices.rs `keys` |
+| RunnerTests.newPhonesNeedPairing | runner_api.rs `new_phones_need_pairing` | obid's pairing file is `home/pairing` |
 | RunnerTests.onlyTheOwnerGetsIn | status.rs `refuses_without_the_token` | obid's owner is whoever holds its API token (runner-api.md, "obid only: configuration"); a Tailscale login opens nothing |
 | RunnerTests.statusAnswersTheOwner | status.rs `status_answers_with_engine_obid` |  |
 | RunnerTests.waitAnswersWithTheJobOnceItEnded | jobs_api.rs `nothing_committed_fails_and_dismiss_lets_it_go` | `GET /v1/jobs/{id}/wait` is how every jobs_api.rs test waits; the 404 is in `dispatch_takes_only_whole_jobs` |
@@ -52,7 +54,7 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 |---|---|
 | AppleCheckTests.ObyCheckAppleWaitsForTheMacAndPrintsTheCompilersErrorsAndFailingTests | `/v1/agent/apple-check`, `/v1/checks/…` (Apple checks) |
 | AttachmentTests.plansRefuseAttachmentsOutsideTheAppsFolder | `POST /v1/plans` |
-| CheckTests.theAPIHandsOutChecksTakesTheirResultsAndTellsEveryApp | `GET /v1/checks/next`, `/v1/checks/{id}/result` (Mac checks) |
+| CheckTests.theAPIHandsOutChecksTakesTheirResultsAndTellsEveryApp | Mac checks queued, `/v1/checks/{id}/result` (obid serves `GET /v1/checks/next`, which answers `{"check": null}`: it queues none; runner_api.rs `a_mac_asking_for_a_check_hears_none_waits`) |
 | ConnectionTests.agentsUseConnectedAppsWithoutEverSeeingTheLogin | `/v1/connections`, `/v1/me`, `/v1/agent/mcp/…` |
 | ConversationTests.theConversationEndpointPagesTheThreadAndItsEventFollowsIt | `GET /v1/conversation` (obid has no brain; the Mac app reads its 404 as an empty thread) |
 | ConversationTests.thePlanEndpointTakesRecentTurns | `POST /v1/plans` |
@@ -73,9 +75,7 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 | ResearchTests.theReportIsStoredAndServed | `GET /v1/jobs/{id}/report` |
 | ReserveTests.theAPILiftsAndRestoresTheReserve | `POST /v1/accounts/{id}/reserve` |
 | ReviewTests.theAPIShowsTheReviewAndTheReviewJob | Oby's review of a published job (`reviewing`, `review`): obid publishes nothing yet |
-| RunnerTests.malformedKeysDontRegister | `POST /v1/devices` |
 | RunnerTests.messagesReachOnlyJobsThatCanTakeThem | `POST /v1/jobs/{id}/messages` |
-| RunnerTests.newPhonesNeedPairing | `POST /v1/devices` |
 | RunnerTests.plansMapToTheirKinds | `POST /v1/plans` (its answer's shape) |
 | RunnerTests.theAppHandsOverItsDeviceToken | `POST /v1/activities`, `POST /v1/notifications` |
 | RunnerTests.withoutAKeyThereIsNoPush | `POST /v1/activities` |

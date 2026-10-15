@@ -1,7 +1,7 @@
 //! The runner API (docs/runner-api.md) as obid serves it: the gate every request goes through,
-//! `GET /v1/status`, the jobs (`/v1/jobs…`, `POST /v1/stop-all`), `POST /v1/clear` and the event
-//! stream. The rest of
-//! the API joins the same router.
+//! `GET /v1/status`, the jobs (`/v1/jobs…`, `POST /v1/stop-all`), `POST /v1/clear`,
+//! `POST /v1/devices`, `GET /v1/checks/next` and the event stream. The rest of the API joins the
+//! same router.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,6 +32,8 @@ pub struct Shared {
     pub cleanup: Cleanup,
     /// When Clear done was last pressed (`POST /v1/clear`).
     pub cleared: crate::clear::Cleared,
+    /// The devices that may approve publishing (`POST /v1/devices`).
+    pub devices: crate::devices::Devices,
     pub jobs: Arc<Jobs>,
     pub events: Events,
     /// Its Sphere: membership, exchanges, the inbox and decisions.
@@ -88,6 +90,8 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/jobs/{id}/dismiss", post(crate::routes::dismiss))
         .route("/v1/stop-all", post(crate::routes::stop_all))
         .route("/v1/clear", post(crate::routes::clear))
+        .route("/v1/devices", post(crate::routes::register_device))
+        .route("/v1/checks/next", get(crate::routes::next_check))
         .route("/v1/events", get(crate::routes::events))
         .route("/v1/inbox", get(crate::sphere::routes::inbox))
         .route("/v1/inbox/{id}/answer", post(crate::sphere::routes::answer))

@@ -15,6 +15,7 @@ base64.workspace = true
 futures-util.workspace = true
 jsonschema.workspace = true
 nix.workspace = true
+p256.workspace = true
 tokio-stream.workspace = true
 getrandom.workspace = true
 gethostname.workspace = true

@@ -570,3 +570,104 @@ fn dispatched_jobs_keep_their_mode() {
     assert_eq!(refused.status, 422);
     call(&obid, "POST", "/v1/stop-all", None);
 }
+
+/// A device's publishing key, X9.63 base64, from a fixed private scalar (no key in the source).
+fn device_key(scalar: u8) -> String {
+    use base64::Engine as _;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    let secret = p256::SecretKey::from_slice(&[scalar; 32]).unwrap();
+    base64::engine::general_purpose::STANDARD
+        .encode(secret.public_key().to_encoded_point(false).as_bytes())
+}
+
+fn register(obid: &Obid, key: &str) -> Answer {
+    call(
+        obid,
+        "POST",
+        "/v1/devices",
+        Some(&json!({"name": "Test iPhone", "publicKey": key})),
+    )
+}
+
+/// Ports RunnerTests.newPhonesNeedPairing: a new key registers only while pairing is open (the
+/// owner touched `home/pairing` in the last 10 minutes), which it uses up; a known key gets its id
+/// back at once.
+#[test]
+fn new_phones_need_pairing() {
+    let folder = Folder::new("pairing");
+    let (obid, _) = obid(&folder);
+    let mine = device_key(1);
+    let other = device_key(2);
+    let closed = register(&obid, &mine);
+    assert_eq!(closed.status, 403, "{}", closed.text);
+    let pairing = obid.home.join("pairing");
+    assert!(
+        closed.body["error"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("touch {}", pairing.display()))
+    );
+    // Opened 601 seconds ago: closed again.
+    let file = std::fs::File::create(&pairing).unwrap();
+    file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(601))
+        .unwrap();
+    drop(file);
+    assert_eq!(register(&obid, &mine).status, 403);
+    std::fs::File::create(&pairing)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now())
+        .unwrap();
+    let registered = register(&obid, &mine);
+    assert_eq!(registered.status, 200, "{}", registered.text);
+    let id = registered.body["id"].as_str().unwrap().to_owned();
+    assert!(!pairing.exists(), "the device used pairing up");
+    assert_eq!(register(&obid, &other).status, 403);
+    assert_eq!(register(&obid, &mine).body, json!({"id": id}));
+}
+
+/// Ports RunnerTests.malformedKeysDontRegister: what isn't a P-256 public key (X9.63, base64) is
+/// refused with 422, pairing open or not.
+#[test]
+fn malformed_keys_dont_register() {
+    use base64::Engine as _;
+    let folder = Folder::new("badkeys");
+    let (obid, _) = obid(&folder);
+    std::fs::write(obid.home.join("pairing"), "").unwrap();
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(device_key(1))
+        .unwrap();
+    for key in [
+        "BJ3x".to_owned(),
+        "not base64!".to_owned(),
+        base64::engine::general_purpose::STANDARD.encode([4u8; 65]),
+        // The key's raw representation (X and Y without the 04 prefix).
+        base64::engine::general_purpose::STANDARD.encode(&raw[1..]),
+    ] {
+        let answer = register(&obid, &key);
+        assert_eq!(answer.status, 422, "{key}: {}", answer.text);
+    }
+    assert!(
+        obid.home.join("pairing").exists(),
+        "nothing used pairing up"
+    );
+    assert_eq!(
+        call(&obid, "POST", "/v1/devices", Some(&json!({"name": "x"}))).status,
+        422
+    );
+}
+
+/// `GET /v1/checks/next`: obid queues no Mac check (it publishes nothing yet, and its agents ask
+/// for no Apple check), so a Mac that runs checks hears that none waits.
+#[test]
+fn a_mac_asking_for_a_check_hears_none_waits() {
+    let folder = Folder::new("nextcheck");
+    let (obid, _) = obid(&folder);
+    let answer = call(
+        &obid,
+        "GET",
+        "/v1/checks/next?mac=Studio&kinds=merge,apple",
+        None,
+    );
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    assert_eq!(answer.body, json!({"check": null}));
+}

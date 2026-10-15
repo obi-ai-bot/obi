@@ -288,3 +288,50 @@ pub async fn clear(State(shared): State<Arc<Shared>>) -> Result<Response, ApiErr
     shared.events.send("clear", body.clone());
     Ok(json(StatusCode::OK, body))
 }
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NewDevice {
+    name: String,
+    public_key: String,
+}
+
+/// `POST /v1/devices`: a device's publishing key, `{"id"}` (crate::devices).
+pub async fn register_device(
+    State(shared): State<Arc<Shared>>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let value: Value = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "That isn't JSON."))?;
+    let device: NewDevice = serde_json::from_value(value).map_err(|_| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "A device is {\"name\", \"publicKey\"}.",
+        )
+    })?;
+    use crate::devices::Refused;
+    match shared.devices.register(
+        &device.name,
+        &device.public_key,
+        std::time::SystemTime::now(),
+    ) {
+        Ok(id) => Ok(json(StatusCode::OK, json!({"id": id}))),
+        Err(Refused::Malformed(why)) => Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, why)),
+        Err(Refused::PairingClosed(why)) => Err(ApiError::new(StatusCode::FORBIDDEN, why)),
+        Err(Refused::Unkept(why)) => {
+            tracing::error!("can't keep a device: {why}");
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The device couldn't be kept.",
+            ))
+        }
+    }
+}
+
+/// `GET /v1/checks/next?mac=…&kinds=…`: the oldest queued Mac check for a Mac that runs them, or
+/// `{"check": null}` when none waits. obid queues none: it publishes nothing yet (so no merge
+/// check), and its agents don't ask for Apple checks; a Mac following obid hears so instead of a
+/// 404.
+pub async fn next_check() -> Response {
+    json(StatusCode::OK, json!({"check": null}))
+}

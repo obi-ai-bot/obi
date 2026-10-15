@@ -165,6 +165,8 @@ fn the_mac_app_follows_obid_and_lists_its_jobs() {
     let done = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None).body;
     assert_eq!(done["status"], "done");
 
+    // The owner opens pairing on obid's machine, so the Mac's key registers (POST /v1/devices).
+    std::fs::write(obid.home.join("pairing"), "").unwrap();
     let mut child = Command::new(&client)
         .env("OBID_URL", format!("http://127.0.0.1:{}", obid.port))
         .env("OBID_TOKEN", TOKEN)
@@ -196,10 +198,22 @@ fn the_mac_app_follows_obid_and_lists_its_jobs() {
         next(&lines, "job ", 30, &mut seen),
         format!("job {id} done heading=Job progress screen")
     );
-    // What obid doesn't serve yet: the app logs these and goes on following.
-    let checks = next(&lines, "checks-next ", 30, &mut seen);
-    let devices = next(&lines, "devices ", 30, &mut seen);
-    eprintln!("not served: {checks}; {devices}");
+    // The Mac's merge checks (none waits on obid) and its publishing key, registered while
+    // pairing is open.
+    assert_eq!(
+        next(&lines, "checks-next ", 30, &mut seen),
+        "checks-next 200"
+    );
+    assert_eq!(next(&lines, "devices ", 30, &mut seen), "devices 200");
+    assert!(
+        !obid.home.join("pairing").exists(),
+        "the Mac used pairing up"
+    );
+    assert!(
+        std::fs::read_to_string(obid.home.join("devices.json"))
+            .unwrap()
+            .contains("\"Test Mac\"")
+    );
     let cleared = next(&lines, "cleared ", 30, &mut seen);
     let time = cleared.strip_prefix("cleared ").unwrap().to_owned();
     assert_eq!(

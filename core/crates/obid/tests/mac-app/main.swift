@@ -9,6 +9,7 @@
 // runner on this Mac from its keychain item (Engine/LocalRunner.swift, `token(from:)`); here the
 // same function reads it from a store that holds obid's.
 
+import CryptoKit
 import Foundation
 
 /// A store holding one token, as the keychain item `com.deskree.oby.runner` holds a Mac runner's.
@@ -75,7 +76,9 @@ do {
             // What RunnerFeed starts once it's live, whose failures it only logs: the Mac's merge
             // checks (MacChecks.look) and its publishing key (MacDevice.register).
             say("checks-next \(await answered { _ = try await runner.nextCheck(mac: "Test Mac") })")
-            say("devices \(await answered { _ = try await runner.register(name: "Test Mac", publicKey: Data(repeating: 4, count: 65)) })")
+            // A P-256 key as DeviceKey.publicKey() gives it (X9.63), made here: no Secure Enclave.
+            let deviceKey = P256.Signing.PrivateKey().publicKey.x963Representation
+            say("devices \(await answered { _ = try await runner.register(name: "Test Mac", publicKey: deviceKey) })")
             // Clear done, from the island.
             let cleared = try await runner.clear()
             say("cleared \(cleared.formatted(.iso8601))")

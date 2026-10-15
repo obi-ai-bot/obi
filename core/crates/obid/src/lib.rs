@@ -12,6 +12,7 @@ pub mod clear;
 pub mod codex;
 pub mod config;
 pub mod conn;
+pub mod devices;
 pub mod events;
 pub mod git;
 pub mod job;
@@ -169,12 +170,14 @@ pub async fn serve(
         source,
     })?;
     let cleared = clear::Cleared::open(&config.home);
+    let devices = devices::Devices::open(&config.home);
     let shared = Arc::new(api::Shared {
         config,
         token,
         host,
         cleanup,
         cleared,
+        devices,
         jobs: jobs.clone(),
         events,
         link: link.clone(),
