@@ -15,6 +15,9 @@ repository = "https://github.com/obi-ai-bot/obi"
 publish = false
 
 [workspace.dependencies]
+# The plug-in boundary's crates (docs/ARCHITECTURE.md 5.5): obid runs the host and reads the types.
+obi-plugin-api = { path = "crates/obi-plugin-api" }
+obi-plugin-host = { path = "crates/obi-plugin-host" }
 # Async runtime and traits (the plug-in traits in docs/ARCHITECTURE.md 5.5 are async-trait).
 tokio = { version = "1.53", features = ["full"] }
 async-trait = "0.1.92"

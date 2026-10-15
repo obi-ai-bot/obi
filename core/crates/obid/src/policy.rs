@@ -11,24 +11,6 @@ use crate::agent::Answer;
 /// no edit, no web: what it was sent is data, and its answer goes back through the publish gate.
 pub const REVIEW_TOOLS: [&str; 5] = ["Read", "Grep", "Glob", "LS", "TodoWrite"];
 
-/// The MCP tools any agent may call: Tetrix's graph reads and earlier sessions, and saving its own
-/// session (Engine/Jobs.swift, `Policy.tetrixTools`).
-const TETRIX_TOOLS: [&str; 13] = [
-    "graph_summary",
-    "search_entities",
-    "get_entity",
-    "operational_context",
-    "impact_radius",
-    "service_topology",
-    "code_impact",
-    "query_graph",
-    "session_digest",
-    "session_context",
-    "repo_sessions",
-    "list_sessions",
-    "save_session",
-];
-
 /// Whether `command` publishes: a push, a remote changed, the GitHub CLI posting or calling the API.
 fn publishes(command: &str) -> bool {
     let words: Vec<&str> = command.split_whitespace().collect();
@@ -94,15 +76,14 @@ fn normalized(path: &Path) -> PathBuf {
     out
 }
 
-/// Why a tool call is refused whatever the job, or `None`.
-pub fn fixed_denial(tool: &str, input: &Value, worktree: &Path) -> Option<String> {
-    let parts: Vec<&str> = tool.split("__").collect();
-    if parts.first() == Some(&"mcp") {
-        let tetrix = parts.len() == 3
-            && parts[1].to_ascii_lowercase().contains("tetrix")
-            && TETRIX_TOOLS.contains(&parts[2]);
-        return (!tetrix).then(|| format!(
-            "obid's agents use only Tetrix's graph reads, earlier sessions' digests and save_session among MCP tools. Say in your summary what you'd have done with {tool}."
+/// Why a tool call is refused whatever the job, or `None`. `mcp` is the job's permission rules
+/// for MCP tools: `mcp__<plugin id>__<tool>`, one per tool an enabled `agent-mcp` plug-in allows
+/// (`crate::plugins::rules`). Every other MCP tool is refused (Engine/Jobs.swift's
+/// `Policy.tetrixTools`, made per plug-in: docs/ARCHITECTURE.md 5.1).
+pub fn fixed_denial(tool: &str, input: &Value, worktree: &Path, mcp: &[String]) -> Option<String> {
+    if tool.starts_with("mcp__") || tool == "mcp" {
+        return (!mcp.iter().any(|rule| rule == tool)).then(|| format!(
+            "obid's agents use only the MCP tools of the plug-ins the owner enabled, and only the ones each allows. Say in your summary what you'd have done with {tool}."
         ));
     }
     let background = match tool {
@@ -138,9 +119,16 @@ pub fn fixed_denial(tool: &str, input: &Value, worktree: &Path) -> Option<String
     None
 }
 
-/// What obid answers for a job of `kind`, and whether it is a review another Obi asked for.
-pub fn decide(tool: &str, input: &Value, worktree: &Path, obi_review: bool) -> Answer {
-    if let Some(why) = fixed_denial(tool, input, worktree) {
+/// What obid answers for a job of `kind`, and whether it is a review another Obi asked for; `mcp`
+/// is the job's MCP permission rules ([`fixed_denial`]).
+pub fn decide(
+    tool: &str,
+    input: &Value,
+    worktree: &Path,
+    obi_review: bool,
+    mcp: &[String],
+) -> Answer {
+    if let Some(why) = fixed_denial(tool, input, worktree, mcp) {
         return Answer::Deny(why);
     }
     if obi_review && !REVIEW_TOOLS.contains(&tool) {
@@ -182,11 +170,23 @@ mod tests {
     fn decisions() {
         let worktree = Path::new("/h/worktrees/j1");
         assert_eq!(
-            decide("Read", &json!({"file_path": "src/a.js"}), worktree, true),
+            decide(
+                "Read",
+                &json!({"file_path": "src/a.js"}),
+                worktree,
+                true,
+                &[]
+            ),
             Answer::Allow
         );
         assert!(matches!(
-            decide("Read", &json!({"file_path": "../j2/a.js"}), worktree, false),
+            decide(
+                "Read",
+                &json!({"file_path": "../j2/a.js"}),
+                worktree,
+                false,
+                &[]
+            ),
             Answer::Deny(_)
         ));
         assert!(matches!(
@@ -194,16 +194,29 @@ mod tests {
                 "Read",
                 &json!({"file_path": "/h/api-token"}),
                 worktree,
-                false
+                false,
+                &[]
             ),
             Answer::Deny(_)
         ));
         assert!(matches!(
-            decide("Bash", &json!({"command": "node --test"}), worktree, true),
+            decide(
+                "Bash",
+                &json!({"command": "node --test"}),
+                worktree,
+                true,
+                &[]
+            ),
             Answer::Deny(_)
         ));
         assert_eq!(
-            decide("Bash", &json!({"command": "node --test"}), worktree, false),
+            decide(
+                "Bash",
+                &json!({"command": "node --test"}),
+                worktree,
+                false,
+                &[]
+            ),
             Answer::Allow
         );
         assert!(matches!(
@@ -211,21 +224,64 @@ mod tests {
                 "Bash",
                 &json!({"command": "sleep 9", "run_in_background": true}),
                 worktree,
-                false
+                false,
+                &[]
             ),
             Answer::Deny(_)
         ));
         assert!(matches!(
-            decide("Task", &json!({"description": "x"}), worktree, false),
+            decide("Task", &json!({"description": "x"}), worktree, false, &[]),
             Answer::Deny(_)
         ));
         assert!(matches!(
-            decide("mcp__github__create_pr", &json!({}), worktree, false),
+            decide("mcp__github__create_pr", &json!({}), worktree, false, &[]),
             Answer::Deny(_)
         ));
+        // An MCP tool only by the job's rules: one rule per tool an enabled plug-in allows.
+        let rules = vec![
+            "mcp__tetrix__get_entity".to_owned(),
+            "mcp__tetrix__save_session".to_owned(),
+        ];
         assert_eq!(
-            decide("mcp__tetrix__get_entity", &json!({}), worktree, false),
+            decide(
+                "mcp__tetrix__get_entity",
+                &json!({}),
+                worktree,
+                false,
+                &rules
+            ),
             Answer::Allow
         );
+        for refused in [
+            "mcp__tetrix__resume_session",
+            "mcp__tetrix__get_entity_x",
+            "mcp__claude_ai_Tetrix__get_entity",
+            "mcp__github__create_pr",
+            "mcp",
+        ] {
+            assert!(
+                matches!(
+                    decide(refused, &json!({}), worktree, false, &rules),
+                    Answer::Deny(_)
+                ),
+                "{refused}"
+            );
+        }
+        // With no plug-in enabled, no MCP tool at all.
+        assert!(matches!(
+            decide("mcp__tetrix__get_entity", &json!({}), worktree, false, &[]),
+            Answer::Deny(_)
+        ));
+        // A review another Obi asked for only reads, whatever the rules.
+        assert!(matches!(
+            decide(
+                "mcp__tetrix__get_entity",
+                &json!({}),
+                worktree,
+                true,
+                &rules
+            ),
+            Answer::Deny(_)
+        ));
     }
 }

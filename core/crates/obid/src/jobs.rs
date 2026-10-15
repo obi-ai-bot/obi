@@ -37,8 +37,20 @@ pub const CHECK_TOO_LONG: &str = "obid stopped it after 20 minutes, the most a t
 const CHECK_OUTPUT_MAX: usize = 64 * 1024;
 /// Claude Code's own turn limit for a round.
 const MAX_TURNS: &str = "200";
+/// The agent's MCP configuration (`--mcp-config`), in the job's own folder (its `HOME`), written
+/// before each turn: the `agent-mcp` plug-ins' servers.
+pub const MCP_CONFIG_FILE: &str = "obi-mcp.json";
 /// The kinds whose work is commits: one that ends with none committed failed.
 const COMMITTING: [&str; 3] = ["build", "fix", "test"];
+
+/// Which of obid's rules a turn's permission prompts meet.
+#[derive(Clone, Copy)]
+enum Gate<'a> {
+    /// A review another Obi asked for: it only reads, and has no plug-in's MCP server.
+    ObiReview,
+    /// The owner's own job, with its MCP permission rules (`crate::plugins::rules`).
+    Owner { mcp: &'a [String] },
+}
 
 /// A job the owner describes whole (`POST /v1/jobs`), checked.
 #[derive(Debug, Clone, Default)]
@@ -158,6 +170,8 @@ pub struct Jobs {
     permission_hook: std::sync::OnceLock<PermissionHook>,
     /// Settings › Permissions' default mode and the saved rules (`home/permissions.json`).
     permissions: Mutex<permissions::Kept>,
+    /// The plug-in host: context for the agent, and `agent-mcp` plug-ins' servers.
+    plugins: std::sync::OnceLock<Arc<crate::plugins::Plugins>>,
 }
 
 impl Jobs {
@@ -203,7 +217,45 @@ impl Jobs {
             review_hook: std::sync::OnceLock::new(),
             permission_hook: std::sync::OnceLock::new(),
             permissions: Mutex::new(kept),
+            plugins: std::sync::OnceLock::new(),
         }))
+    }
+
+    /// The plug-in host jobs ask for context and agent MCP servers (once; a second call changes
+    /// nothing). Without one, jobs run with no plug-in.
+    pub fn use_plugins(&self, plugins: Arc<crate::plugins::Plugins>) {
+        let _ = self.plugins.set(plugins);
+    }
+
+    /// The MCP servers of the ready `agent-mcp` plug-ins, for a `tool` agent of the owner's own
+    /// job: Claude Code's only in this version (Codex and Cursor get none yet).
+    fn agent_mcp(&self, tool: Tool) -> Vec<crate::plugins::AgentMcp> {
+        match (tool, self.plugins.get()) {
+            (Tool::Claude, Some(plugins)) => plugins.agent_mcp(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Asks the ready context plug-ins about the job, writes their answers to
+    /// `.obi/context/<plugin id>.md` in `worktree` as quoted data, and gives what the prompt says
+    /// about those files: their paths and that they are data, nothing a plug-in wrote. `None`
+    /// when no plug-in gave anything.
+    async fn plugin_context(
+        &self,
+        id: &str,
+        purpose: obi_plugin_api::Purpose,
+        job: obi_plugin_api::ContextJob,
+        worktree: &Path,
+    ) -> Option<String> {
+        let plugins = self.plugins.get()?;
+        let answers = plugins.context(purpose, job).await;
+        match crate::plugins::write_context(worktree, &answers) {
+            Ok(files) => crate::plugins::context_note(&files),
+            Err(e) => {
+                tracing::warn!("job {id}: the plug-ins' context isn't given to the agent: {e}");
+                None
+            }
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -1483,8 +1535,12 @@ impl Jobs {
         launch: Launch,
         prompt: &str,
         signal: &watch::Receiver<Signal>,
-        obi_review: bool,
+        gate: Gate<'_>,
     ) -> Result<agent::Turn, String> {
+        let (obi_review, mcp_rules) = match gate {
+            Gate::ObiReview => (true, &[][..]),
+            Gate::Owner { mcp } => (false, mcp),
+        };
         let worktree = launch.cwd.clone();
         let job = self.get(id).ok_or("the job is gone")?;
         let jobs = self;
@@ -1492,7 +1548,7 @@ impl Jobs {
         // and the repository's saved rules, which may ask the owner. A review another Obi asked
         // for only reads, and never asks.
         let decide = |name: &str, input: &Value| -> Ruling {
-            match policy::decide(name, input, &worktree, obi_review) {
+            match policy::decide(name, input, &worktree, obi_review, mcp_rules) {
                 Answer::Deny(why) => Ruling::Now(Answer::Deny(why)),
                 Answer::Allow if obi_review => Ruling::Now(Answer::Allow),
                 Answer::Allow => jobs.rule_on(id, name, input, &worktree),
@@ -1732,6 +1788,29 @@ impl Jobs {
         let temp = self.temp_path(id);
         let (tool, account) = self.job_account(&job)?;
         let spec = self.spec(&worktree, &admin, &common, &temp, false, tool);
+        // The context plug-ins' answers, quoted as data next to the request. The prompt names
+        // only the files.
+        let context = self
+            .plugin_context(
+                id,
+                obi_plugin_api::Purpose::Review,
+                obi_plugin_api::ContextJob {
+                    id: id.to_owned(),
+                    kind: "review".into(),
+                    repo: request.repo.clone(),
+                    branch: request.head_branch.clone(),
+                    base: request.base_branch.clone(),
+                    issue: None,
+                    pr: request.pr,
+                    files: Vec::new(),
+                },
+                &worktree,
+            )
+            .await;
+        let mut prompt = review::prompt(&request);
+        if let Some(note) = context {
+            prompt = format!("{prompt}\n\n{note}");
+        }
         let flags: Vec<OsString> = [
             "-p",
             "--input-format",
@@ -1763,8 +1842,9 @@ impl Jobs {
             job.phase = Some(Phase::Work);
             job.step = "Reviewing".into();
         });
+        // A review another Obi asked for only reads: no plug-in's MCP server.
         let turn = self
-            .turn(id, tool, launch, &review::prompt(&request), signal, true)
+            .turn(id, tool, launch, &prompt, signal, Gate::ObiReview)
             .await?;
         if *signal.borrow() != Signal::Run {
             return Ok(());
@@ -1969,6 +2049,19 @@ impl Jobs {
             words.join("\n\n")
         } else {
             let mut message = owner_prompt(&job);
+            let purpose = if job.kind == "review" {
+                obi_plugin_api::Purpose::Review
+            } else if job.mode.as_deref() == Some("plan") {
+                obi_plugin_api::Purpose::Plan
+            } else {
+                obi_plugin_api::Purpose::Dispatch
+            };
+            if let Some(note) = self
+                .plugin_context(id, purpose, crate::plugins::context_job(&job), &worktree)
+                .await
+            {
+                message = format!("{message}\n\n{note}");
+            }
             if job.session.is_some() {
                 message = format!(
                     "obid restarted while you were working: carry on with this round.\n\n{message}"
@@ -2012,6 +2105,24 @@ impl Jobs {
             if let Some(session) = &job.session {
                 flags.extend(["--resume".into(), session.into()]);
             }
+            // The ready agent-mcp plug-ins' servers, from a file in the job's own folder, and
+            // one permission rule per tool each allows, each its own argument (last, since
+            // --allowedTools takes every argument after it).
+            let servers = self.agent_mcp(tool);
+            let mcp_rules = crate::plugins::rules(&servers);
+            if !servers.is_empty() {
+                let file = spec.temp.join(MCP_CONFIG_FILE);
+                let text = serde_json::to_vec(&crate::plugins::claude_mcp_config(&servers))
+                    .map_err(|e| e.to_string())?;
+                let _ = std::fs::remove_file(&file);
+                crate::store::write_private(&file, &text)
+                    .map_err(|e| format!("obid can't write the agent's MCP config: {e}"))?;
+                flags.extend(["--mcp-config".into(), file.into_os_string()]);
+                if !mcp_rules.is_empty() {
+                    flags.push("--allowedTools".into());
+                    flags.extend(mcp_rules.iter().map(OsString::from));
+                }
+            }
             let launch = self.launch(&job, &spec, tool, flags, &account)?;
             if *signal.borrow() != Signal::Run {
                 return Ok(());
@@ -2026,7 +2137,16 @@ impl Jobs {
                     job.step = format!("Starting {}", tool.name());
                 }
             });
-            let turn = self.turn(id, tool, launch, &message, signal, false).await?;
+            let turn = self
+                .turn(
+                    id,
+                    tool,
+                    launch,
+                    &message,
+                    signal,
+                    Gate::Owner { mcp: &mcp_rules },
+                )
+                .await?;
             if *signal.borrow() != Signal::Run {
                 return Ok(());
             }

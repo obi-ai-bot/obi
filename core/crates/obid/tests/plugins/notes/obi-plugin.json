@@ -1,0 +1,12 @@
+{
+  "manifest": "obi-plugin/0.1",
+  "id": "notes",
+  "name": "Notes",
+  "version": "0.1.0",
+  "description": "obid's tests' context and events plug-in (tests/plugins_api.rs).",
+  "kinds": ["context", "events"],
+  "run": {"command": "bin/notes", "args": []},
+  "events": {"kinds": ["pull_request.review_requested", "issue.assigned"]},
+  "network": [],
+  "config": {"type": "object", "additionalProperties": false, "properties": {}}
+}

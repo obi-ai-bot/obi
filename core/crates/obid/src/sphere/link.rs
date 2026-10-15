@@ -84,6 +84,11 @@ struct State {
     dropped: Vec<String>,
 }
 
+/// The names the Sphere's secrets are known by in `crate::secrets`.
+const OBI_KEY_SECRET: &str = "obi-key";
+const DELEGATION_SECRET: &str = "sphere-delegation";
+const SPHERE_TOKEN_SECRET: &str = "sphere-token";
+
 /// The link. One per obid; one Sphere per obid in this version.
 pub struct Link {
     config: Config,
@@ -212,6 +217,14 @@ impl Link {
         let key = files.load_key()?.map(Arc::new);
         let membership = files.load_membership();
         let delegation = files.load_delegation();
+        // What obid's log layer takes out of plug-ins' lines (crate::logs).
+        let secrets = crate::secrets::known();
+        if let Some(key) = &key {
+            secrets.learn(OBI_KEY_SECRET, hex::encode(key.seed()));
+        }
+        if let Some(delegation) = &delegation {
+            secrets.learn(DELEGATION_SECRET, delegation);
+        }
         let exchanges = Exchanges::open(&config.home)?;
         let inbox = Inbox::open(&config.home)?;
         let decisions = Decisions::open(&config.home);
@@ -381,6 +394,75 @@ impl Link {
         }
     }
 
+    /// An event a plug-in emitted and the host accepted: one `pluginEvent` inbox item
+    /// (docs/runner-api.md, "obid only: plug-ins"), unless an item for the same plug-in and event
+    /// id is there already, open or done. Past [`inbox::MAX_OPEN_EVENTS`] open items of that
+    /// plug-in, the oldest open one is settled by itself, with no answer. The event never starts
+    /// work and no remembered decision applies to it.
+    pub fn plugin_event(&self, event: obi_plugin_api::PluginEvent) {
+        let now = time::now();
+        let item = inbox::plugin_event_item(&event, now);
+        let mut changed = Vec::new();
+        {
+            let mut state = self.lock();
+            if state.inbox.contains_key(&item.id) {
+                return;
+            }
+            let plugin = event.plugin.as_str();
+            let mut open: Vec<(i64, String)> = state
+                .inbox
+                .values()
+                .filter(|i| {
+                    i.kind == "pluginEvent"
+                        && i.done.is_none()
+                        && i.plugin.as_ref().and_then(|p| p["id"].as_str()) == Some(plugin)
+                })
+                .map(|i| (i.created, i.id.clone()))
+                .collect();
+            open.sort();
+            let over = (open.len() + 1).saturating_sub(inbox::MAX_OPEN_EVENTS);
+            for (_, id) in open.into_iter().take(over) {
+                if let Some(old) = state.inbox.get_mut(&id) {
+                    old.done = Some(now);
+                    changed.push(old.clone());
+                }
+            }
+            state.inbox.insert(item.id.clone(), item.clone());
+            changed.push(item);
+        }
+        for item in &changed {
+            self.save_item(item);
+        }
+    }
+
+    /// `POST /v1/inbox/{id}/answer` on a `pluginEvent` item: `Dismiss` or `{"done": true}` settles
+    /// it, `later` puts it off. Nothing is sent anywhere.
+    fn answer_plugin_event(
+        &self,
+        mut item: Item,
+        answer: Option<String>,
+        later: Option<i64>,
+    ) -> Result<Value, ApiError> {
+        if let Some(answer) = &answer
+            && answer != inbox::DISMISS
+        {
+            return Err(api(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("The answer is {}.", inbox::DISMISS),
+            ));
+        }
+        match later {
+            Some(at) => item.later = Some(at),
+            None => {
+                item.done = Some(time::now());
+                item.answer = answer;
+            }
+        }
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        Ok(item.to_json())
+    }
+
     /// `POST /v1/inbox/{id}/answer` on a `permission` item: the owner's answer goes to the job (an
     /// answer of their own words is a no, with those words for the agent); done or later only
     /// settles or puts off the item.
@@ -487,6 +569,7 @@ impl Link {
                         format!("obid couldn't keep its key: {e}"),
                     )
                 })?);
+                crate::secrets::known().learn(OBI_KEY_SECRET, hex::encode(key.seed()));
                 self.lock().key = Some(key.clone());
                 key
             }
@@ -705,6 +788,7 @@ impl Link {
             card,
             joined_at: now,
         };
+        crate::secrets::known().learn(DELEGATION_SECRET, &delegation);
         let kept = self
             .files
             .save_membership(&membership)
@@ -774,6 +858,7 @@ impl Link {
         )
         .map_err(|e| ClientError::Protocol(e.to_string()))?;
         let token = client.token(&delegation, &actor).await?;
+        crate::secrets::known().learn(SPHERE_TOKEN_SECRET, &token.access_token);
         self.lock().token = Some((token.access_token.clone(), now + token.expires_in));
         Ok(token.access_token)
     }
@@ -1785,6 +1870,14 @@ impl Link {
                     Given::Answer(answer) => self.answer_permission_item(item, Some(answer), None),
                     Given::Done => self.answer_permission_item(item, None, None),
                     Given::Later(at) => self.answer_permission_item(item, None, Some(at)),
+                };
+            }
+            if item.kind == "pluginEvent" {
+                drop(state);
+                return match given {
+                    Given::Answer(answer) => self.answer_plugin_event(item, Some(answer), None),
+                    Given::Done => self.answer_plugin_event(item, None, None),
+                    Given::Later(at) => self.answer_plugin_event(item, None, Some(at)),
                 };
             }
             if let Given::Later(at) = &given {
