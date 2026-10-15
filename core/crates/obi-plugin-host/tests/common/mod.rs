@@ -95,6 +95,13 @@ impl Home {
 /// plug-in then ends at once), in a folder thrown away after. macOS checks a program the first
 /// time it runs from a new place, which under load can take longer than the short
 /// `initialize` time the tests give; paid here, it doesn't count against a test's first start.
+///
+/// On Linux a run right after the copy can fail with "Text file busy" (`ETXTBSY`): while the
+/// copy was being written, another test's thread forked, and its child holds the copy's write
+/// descriptor until it execs its own program. That passes in a moment, so the run is tried
+/// again then. Once one run has worked, no write descriptor of the copy is left anywhere (the
+/// copy is closed, and a child forked after that never had one), so the test's own starts
+/// can't meet it.
 fn warm_up(program: &Path) {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -103,16 +110,29 @@ fn warm_up(program: &Path) {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let status = std::process::Command::new(program)
-        .current_dir(&dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    let run = || {
+        std::process::Command::new(program)
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+    };
+    let mut status = run();
+    let mut busy = 0;
+    while busy < 200
+        && status
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::ExecutableFileBusy)
+    {
+        busy += 1;
+        std::thread::sleep(Duration::from_millis(10));
+        status = run();
+    }
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
-        status.is_ok_and(|s| s.success()),
-        "{} doesn't run",
+        status.as_ref().is_ok_and(|s| s.success()),
+        "{} doesn't run (after {busy} tries again on \"Text file busy\"): {status:?}",
         program.display()
     );
 }
