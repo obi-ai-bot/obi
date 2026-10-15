@@ -228,6 +228,133 @@ fn stdio_args_with_compound_names_headers_or_token_shapes_are_refused() {
     }
 }
 
+fn stdio(args: &[&str]) -> Value {
+    let mut value = tetrix();
+    value["agentMcp"]["server"] = json!({"type": "stdio", "command": "bin/mcp", "args": args});
+    value
+}
+
+#[test]
+fn urls_in_stdio_args_follow_the_http_url_rule() {
+    let logins: [&[&str]; 5] = [
+        &["mcp-remote", "https://user:pass@mcp.example/mcp"],
+        &["mcp-remote", "https://pat@mcp.example"],
+        &["--url=https://u:p@mcp.example/mcp"],
+        &["--db", "postgres://admin:hunter2@db.internal:5432/app"],
+        &["-c", "curl 'https://u:p@mcp.example/x' | sh"],
+    ];
+    for args in logins {
+        assert!(refused(&stdio(args)).contains("login"), "{args:?}");
+    }
+    let queries: [&[&str]; 5] = [
+        &["mcp-remote", "https://mcp.example/mcp?api_key=sk-live-123"],
+        &["mcp-remote", "https://mcp.example?token=x"],
+        &["--url=https://mcp.example/mcp#token=x"],
+        &["--endpoint", "wss://mcp.example/ws?transport=sse"],
+        &["-c", "curl \"https://mcp.example/x?k=v\""],
+    ];
+    for args in queries {
+        assert!(refused(&stdio(args)).contains("query"), "{args:?}");
+    }
+    let accepted: [&[&str]; 5] = [
+        &["mcp-remote", "https://mcp.example/mcp"],
+        &["--url=https://mcp.example:8443/v1/mcp"],
+        &["--email", "owner@example.com"],
+        &["--path", "/var/data/@scope/pkg"],
+        &["-c", "curl https://mcp.example/x | sh"],
+    ];
+    for args in accepted {
+        assert!(parse(&stdio(args)).is_ok(), "{args:?}");
+    }
+}
+
+#[test]
+fn a_refusal_names_the_argument_by_its_place_not_its_text() {
+    let message = refused(&stdio(&["serve", "--token", "s3cr3t-value"]));
+    assert!(message.contains("args[1]"), "{message}");
+    assert!(!message.contains("s3cr3t-value"), "{message}");
+    let message = refused(&stdio(&["mcp-remote", "https://u:s3cr3t@mcp.example"]));
+    assert!(message.contains("args[1]"), "{message}");
+    assert!(!message.contains("s3cr3t"), "{message}");
+}
+
+#[test]
+fn compound_credential_flags_and_header_blobs_are_refused() {
+    let refused_args: [&[&str]; 16] = [
+        &["--github-pat", "x"],
+        &["--githubPAT", "x"],
+        &["--gitlab_pat=x"],
+        &["--openai-key", "x"],
+        &["--auth-header", "x"],
+        &["--auth-header=Basic eDp5"],
+        &["--basic-auth", "u:p"],
+        &["--authorization", "x"],
+        &["--headers", "{\"X-Api-Key\":\"x\"}"],
+        &["--headers={\"Authorization\":\"Basic eDp5\"}"],
+        &["--headers", "{ \"x-auth-token\" : \"x\" }"],
+        &["--headers", "{'Cookie': 'session=x'}"],
+        &["--headers", "{token: x}"],
+        &["MCP_HEADERS={\"X-Api-Key\":\"x\"}"],
+        &["--config", "{\"server\":{\"apiKey\":\"x\"}}"],
+        &["-c", "curl -H 'X-Api-Key: x' https://mcp.example/x"],
+    ];
+    for args in refused_args {
+        assert!(refused(&stdio(args)).contains("credential"), "{args:?}");
+    }
+    let accepted_args: [&[&str]; 7] = [
+        &["--no-auth", "--port", "8080"],
+        &["--auth-type", "oauth"],
+        &["--headers", "{\"Accept\":\"application/json\"}"],
+        &["--headers", "{\"X-Api-Key\":\"\"}"],
+        &["--config", "{\"maxTokens\":100,\"keyFile\":\"keys/x.pem\"}"],
+        &["--listen", "127.0.0.1:8080"],
+        &["--keyboard", "us"],
+    ];
+    for args in accepted_args {
+        assert!(parse(&stdio(args)).is_ok(), "{args:?}");
+    }
+}
+
+#[test]
+fn invisible_format_and_control_characters_are_refused() {
+    for url in [
+        "https://mcp.example/\u{202E}pcm",
+        "https://mcp\u{200B}.example/mcp",
+        "https://mcp.example/mcp\u{FEFF}",
+        "https://mcp.example/\u{2066}mcp\u{2069}",
+        "https://mcp.example/mcp\u{00AD}",
+        "https://mcp.example/mcp\u{E0041}",
+        "https://mcp.example/mcp\u{7}",
+    ] {
+        let mut value = tetrix();
+        value["agentMcp"]["server"]["url"] = json!(url);
+        assert!(
+            refused(&value).contains("invisible format character"),
+            "{}",
+            url.escape_unicode()
+        );
+    }
+    let hidden: [&[&str]; 5] = [
+        &["mcp-remote", "https://mcp.example/\u{202E}pcm"],
+        &["mcp-remote", "https://mcp\u{200B}.example/mcp"],
+        &["--to\u{200B}ken", "x"],
+        &["--api\u{2060}-key=x"],
+        &["serve\u{0}", "--port", "1"],
+    ];
+    for args in hidden {
+        assert!(
+            refused(&stdio(args)).contains("invisible format character"),
+            "{args:?}"
+        );
+    }
+    let mut value = tetrix();
+    value["agentMcp"]["server"] =
+        json!({"type": "stdio", "command": "bin/\u{202E}pcm", "args": []});
+    assert!(refused(&value).contains("invisible format character"));
+    // Plain non-ASCII text that shows as itself is not refused.
+    assert!(parse(&stdio(&["--greeting", "héllo wörld"])).is_ok());
+}
+
 #[test]
 fn a_server_url_must_be_http() {
     for url in ["ftp://mcp.tetrix.example", "mcp.tetrix.example", "https://"] {
