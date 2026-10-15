@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use obi_plugin_host::api::{PluginState, PluginStatus};
+use obi_plugin_api::{PluginState, PluginStatus};
 use obi_plugin_host::{Options, PluginHost, PluginId};
 use serde_json::Value;
 
@@ -47,11 +47,9 @@ impl Home {
         self.install_manifest(id, &manifest);
         let bin = self.plugin_dir(id).join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::copy(
-            env!("CARGO_BIN_EXE_obi-plugin-test"),
-            bin.join("obi-plugin-test"),
-        )
-        .unwrap();
+        let program = bin.join("obi-plugin-test");
+        std::fs::copy(env!("CARGO_BIN_EXE_obi-plugin-test"), &program).unwrap();
+        warm_up(&program);
         self.plugin_dir(id)
     }
 
@@ -91,6 +89,32 @@ impl Home {
         let text = std::fs::read_to_string(self.path.join("plugins.json")).ok()?;
         Some(serde_json::from_str(&text).unwrap())
     }
+}
+
+/// Runs a program just copied once, outside any sandbox, with nothing on its stdin (the test
+/// plug-in then ends at once), in a folder thrown away after. macOS checks a program the first
+/// time it runs from a new place, which under load can take longer than the short
+/// `initialize` time the tests give; paid here, it doesn't count against a test's first start.
+fn warm_up(program: &Path) {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "obi-plugin-host-warm-up-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let status = std::process::Command::new(program)
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        status.is_ok_and(|s| s.success()),
+        "{} doesn't run",
+        program.display()
+    );
 }
 
 impl Drop for Home {
