@@ -1,0 +1,63 @@
+#!/usr/bin/env node
+// A reviewer that reads without asking, for obid's review link tests. Claude Code doesn't ask
+// before every call: it runs read-only shell commands (`grep -R`, `find -L`, `ls`) and reads
+// inside its working folder without a can_use_tool, so obid's answers never see them. This agent
+// does the same: offered Bash (no `--tools`, or one that lists Bash), it reads its whole working
+// folder as `grep -R .` would, links followed, and puts every line that holds the account's
+// canary in its review. Offered Read only, it reads what Read can reach without asking: every
+// file under its working folder, links followed, which is the same walk. Either way its summary
+// says what tools it was given, whether obid's diff was there, and how many bytes of its account
+// folder ($CLAUDE_CONFIG_DIR) the sandbox let it read directly, so a review without the canary
+// is one where nothing in the worktree led to the account.
+import { createInterface } from "node:readline";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { join } from "node:path";
+
+const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
+const session = "00000000-0000-4000-8000-000000000004";
+const account = process.env.CLAUDE_CONFIG_DIR ?? "";
+const at = process.argv.indexOf("--tools");
+const tools = at < 0 ? "default" : process.argv[at + 1] ?? "";
+
+// Every file under `path`, links followed, each folder once (as `grep -R` does).
+function walk(path, seen = new Set(), depth = 0) {
+  try {
+    const real = realpathSync(path);
+    const info = statSync(path);
+    if (info.isFile()) return [[path, readFileSync(path, "utf8")]];
+    if (!info.isDirectory() || seen.has(real) || depth > 30) return [];
+    seen.add(real);
+    return readdirSync(path).flatMap((name) => walk(join(path, name), seen, depth + 1));
+  } catch {
+    return [];
+  }
+}
+
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const lines = rl[Symbol.asyncIterator]();
+
+async function next(type) {
+  for (;;) {
+    const { value, done } = await lines.next();
+    if (done) return null;
+    try {
+      const message = JSON.parse(value);
+      if (message.type === type) return message;
+    } catch {}
+  }
+}
+
+(async () => {
+  if (!(await next("user"))) return;
+  emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: tools.split(","), mcp_servers: [], model: "reading", permissionMode: "default", apiKeySource: "none" });
+  const files = walk(".");
+  const found = files.filter(([, text]) => text.includes("OBI-ACCOUNT-CANARY"));
+  const diff = existsSync(".obi/inputs/change.diff") ? readFileSync(".obi/inputs/change.diff", "utf8") : "";
+  const readable = walk(account).reduce((sum, [, text]) => sum + text.length, 0);
+  const review = {
+    summary: `Tools: ${tools}. Read ${files.length} files without asking. Diff: ${diff.includes("src/average.js") ? "yes" : "no"}. Account folder readable in the sandbox: ${readable} bytes.`,
+    findings: found.map(([path, text]) => ({ severity: "minor", file: path, line: 1, title: "Found through the worktree", detail: text })),
+  };
+  emit({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: "Reviewed.", session_id: session, total_cost_usd: 0, structured_output: review });
+  rl.close();
+})();

@@ -1766,12 +1766,40 @@ impl Jobs {
         )
         .await
         .map_err(|e| format!("obid couldn't make the job's worktree: {e}"))?;
-        drop(prepared);
         let worktree_text = worktree.to_string_lossy().into_owned();
         self.update(id, |job| {
             job.worktree = Some(worktree_text);
             job.start_commit = Some(request.head_sha.clone());
         });
+        // A link the branch commits that leads out of the worktree fails the review before the
+        // agent starts: Claude Code reads inside its working folder, links followed, without
+        // asking obid, and the job sandbox lets the agent read its own account folder.
+        let links = git::committed_links(&clone, &request.head_sha)
+            .await
+            .map_err(|e| format!("obid couldn't list the branch's links: {e}"))?;
+        if let Some(out) = links
+            .iter()
+            .find(|link| crate::policy::link_leads_out(&worktree, link))
+        {
+            return Err(format!(
+                "The branch commits a link that leads out of the review's worktree ({:?}), so obid didn't review it: its agent would read through the link.",
+                out.to_string_lossy()
+            ));
+        }
+        // The change, for the agent, which can't run git: from the base as fetched to the head.
+        let base = format!("refs/remotes/origin/{}", request.base_branch);
+        let mut change = match git::change(&clone, &base, &request.head_sha).await {
+            Ok(diff) => diff,
+            Err(e) => {
+                tracing::info!("job {id}: no diff against the base: {e}");
+                b"obid couldn't compare the head with the base branch (it didn't fetch, or they share no history). Review the files as they are in this worktree.\n".to_vec()
+            }
+        };
+        if change.len() > review::DIFF_MAX {
+            change.truncate(review::DIFF_MAX);
+            change.extend_from_slice(b"\n[obid cut the diff here: it is longer than 8 MiB]\n");
+        }
+        drop(prepared);
 
         // 3. The request, as data, in the worktree.
         // The worktree holds what the other Obi's branch commits: a `.obi` or `.obi/inputs` that
@@ -1785,6 +1813,12 @@ impl Jobs {
             .expect("the request file has a name");
         crate::obi_dir::write_new(&inputs, file, &text)
             .map_err(|e| format!("obid can't write the request: {e}"))?;
+        let file = Path::new(review::DIFF_FILE)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the diff file has a name");
+        crate::obi_dir::write_new(&inputs, file, &change)
+            .map_err(|e| format!("obid can't write the diff: {e}"))?;
 
         // 4. The agent, with a fixed prompt, in the sandbox.
         let (admin, common) = git::worktree_dirs(&worktree)
@@ -1829,12 +1863,22 @@ impl Jobs {
             "default",
             "--setting-sources",
             "",
+            "--strict-mcp-config",
             "--json-schema",
             review::OUTPUT_SCHEMA,
         ]
         .iter()
         .map(OsString::from)
         .collect();
+        // Only the tools obid allows a review, given at the start: Claude Code doesn't ask before
+        // every call (it runs read-only shell commands and reads in its working folder without
+        // asking), so obid's answers alone can't keep a tool from running. `--tools` takes the
+        // arguments after it up to the next option, so it goes last, with one value.
+        let mut flags = flags;
+        flags.extend([
+            OsString::from("--tools"),
+            OsString::from(crate::policy::REVIEW_TOOLS.join(",")),
+        ]);
         let launch = self.launch(&job, &spec, tool, flags, &account)?;
         if *signal.borrow() != Signal::Run {
             return Ok(());
