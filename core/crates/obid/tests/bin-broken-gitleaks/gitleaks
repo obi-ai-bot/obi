@@ -1,0 +1,5 @@
+#!/bin/sh
+# A gitleaks that is installed and can't run: what obid's publish gate must treat as a scan that
+# couldn't run, so nothing with text goes out.
+echo "gitleaks: broken on purpose for obid's tests" >&2
+exit 2

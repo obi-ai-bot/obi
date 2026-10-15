@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/obi-ai-bot/obi-sphere/raw/main/spec/schemas/v0.1/wire/health.response.schema.json",
+  "title": "GET /v0.1/health",
+  "description": "Liveness. Answers without authentication.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ok",
+    "protocol"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "protocol": {
+      "$ref": "../common.schema.json#/$defs/protocol"
+    }
+  }
+}

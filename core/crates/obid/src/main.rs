@@ -29,6 +29,19 @@ fn parse(args: &[String]) -> Result<Command, String> {
 }
 
 fn main() -> ExitCode {
+    // `obid __session -- <program> <arguments>`: how obid starts every sandboxed process, in a
+    // session of its own (obid::sandbox::SESSION). Read before anything else, and as it is: its
+    // arguments needn't be UTF-8.
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if raw.first().is_some_and(|a| a == obid::sandbox::SESSION) {
+        if raw.get(1).is_none_or(|a| a != "--") {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+        let error = obid::process::exec_in_own_session(&raw[2..]);
+        eprintln!("obid: can't start the sandboxed process: {error}");
+        return ExitCode::from(126);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = match parse(&args) {
         Ok(command) => command,
@@ -85,12 +98,18 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // The token only ever from home/api-token: never from obid's environment.
+    if let Err(e) =
+        obid::token::refuse_environment(&config.home, std::env::var_os(obid::token::ENV).is_some())
+    {
+        eprintln!("obid: {e}");
+        return ExitCode::from(2);
+    }
     if let Err(e) = obid::prepare_home(&config) {
         eprintln!("obid: {e}");
         return ExitCode::FAILURE;
     }
-    let from_env = std::env::var_os(obid::token::ENV).map(|v| v.to_string_lossy().into_owned());
-    let token = match obid::token::load(&config.home, from_env) {
+    let token = match obid::token::load(&config.home) {
         Ok(token) => token,
         Err(e) => {
             eprintln!("obid: {e}");

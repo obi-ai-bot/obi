@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+// A stand-in for Claude Code in obid's tests: stream-json in and out, as obid runs `claude`. What
+// it does comes from the prompt (the job's task):
+//   COMMIT: <file>   writes the file in the worktree and commits it
+//   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is ended
+//   FAIL             ends the turn with an error result
+//   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
+//   ASKS: <json>     asks for each of a list of {"tool", "input"} in turn, then ends the turn with
+//                    "answers: allow, deny: <why>, …"
+//   LOGIN: <home>    reads its login in its HOME, writes a hook into its ~/.claude/settings.json
+//                    and its ~/.claude.json, and tries the same in the person's real <home>
+//   ECHO             ends the turn with "heard: <the prompt> resume=<the session it resumed, or none>"
+//   PAUSE: <ms>      waits that long, then ends the turn with "Paused."
+//   anything else    ends the turn with "Nothing to do."
+// It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
+
+import { execFileSync } from "node:child_process";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+
+const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
+const session = "00000000-0000-4000-8000-000000000001";
+const result = (text, error = false) =>
+  emit({ type: "result", subtype: error ? "error_during_execution" : "success", is_error: error, num_turns: 1, result: text, session_id: session, total_cost_usd: 0 });
+
+const leaked = Object.keys(process.env).filter((name) =>
+  name === "CLAUDECODE" || name.startsWith("CLAUDE_CODE_") || name.startsWith("ANTHROPIC_") || name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN");
+
+let asked = null;
+let queue = [];
+let listing = false;
+const said = [];
+const askNext = () => {
+  const { tool, input } = queue.shift();
+  asked = tool;
+  emit({ type: "control_request", request_id: `r${said.length + 1}`, request: { subtype: "can_use_tool", tool_name: tool, input } });
+};
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", (line) => {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (message.type === "control_response" && asked) {
+    const answer = message.response?.response ?? {};
+    asked = null;
+    if (listing) {
+      said.push(answer.behavior === "deny" ? `deny: ${answer.message}` : answer.behavior);
+      if (queue.length) return askNext();
+      return result(`answers: ${said.join(", ")}`);
+    }
+    result(`answer: ${answer.behavior}`);
+    return;
+  }
+  if (message.type !== "user") return;
+  const prompt = typeof message.message.content === "string" ? message.message.content : "";
+  emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Bash", "Read", "Edit"], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
+  if (leaked.length) return result(`leaked: ${leaked.join(", ")}`, true);
+  const commit = prompt.match(/COMMIT: (\S+)/);
+  const ask = prompt.match(/ASK: (\{.*\})/);
+  const asks = prompt.match(/ASKS: (\[.*\])/);
+  const login = prompt.match(/LOGIN: (\S+)/);
+  if (commit) {
+    writeFileSync(commit[1], "hello\n");
+    execFileSync("git", ["add", commit[1]]);
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add ${commit[1]}`]);
+    emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Write", input: { file_path: commit[1] } }] } });
+    result(`Added ${commit[1]}.`);
+  } else if (login) {
+    const tries = (f) => {
+      try {
+        f();
+        return "ok";
+      } catch {
+        return "no";
+      }
+    };
+    const home = process.env.HOME;
+    let creds = "none";
+    try {
+      creds = readFileSync(`${home}/.claude/.credentials.json`, "utf8").trim();
+    } catch {}
+    const hook = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "touch /tmp/planted" }] }] } });
+    const settings = tries(() => writeFileSync(`${home}/.claude/settings.json`, hook));
+    const state = tries(() => appendFileSync(`${home}/.claude.json`, " "));
+    const real = tries(() => writeFileSync(`${login[1]}/.claude/settings.json`, hook));
+    const realState = tries(() => appendFileSync(`${login[1]}/.claude.json`, " "));
+    result(`login: creds=${creds} settings=${settings} state=${state} real=${real} real-state=${realState}`);
+  } else if (prompt.startsWith("ECHO")) {
+    const at = process.argv.indexOf("--resume");
+    result(`heard: ${prompt} resume=${at >= 0 ? process.argv[at + 1] : "none"}`);
+  } else if (prompt.match(/PAUSE: (\d+)/)) {
+    setTimeout(() => result("Paused."), Number(prompt.match(/PAUSE: (\d+)/)[1]));
+  } else if (prompt.includes("SLEEP")) {
+    mkdirSync(".obi", { recursive: true });
+    let beats = 0;
+    writeFileSync(".obi/beat", String(beats));
+    setInterval(() => writeFileSync(".obi/beat", String(++beats)), 50);
+  } else if (prompt.includes("FAIL")) {
+    result("it broke", true);
+  } else if (asks) {
+    queue.push(...JSON.parse(asks[1]));
+    said.length = 0;
+    listing = true;
+    askNext();
+  } else if (ask) {
+    const { tool, input } = JSON.parse(ask[1]);
+    asked = tool;
+    emit({ type: "control_request", request_id: "r1", request: { subtype: "can_use_tool", tool_name: tool, input } });
+  } else {
+    result("Nothing to do.");
+  }
+});

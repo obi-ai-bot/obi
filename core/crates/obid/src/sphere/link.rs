@@ -1,0 +1,2016 @@
+//! obid's link to its Sphere: membership and keys, the Obi-to-Obi client, exchanges, the
+//! `obiRequest` inbox item, remembered decisions, and the reply to a review another Obi asked for
+//! with its publish gate (docs/runner-api.md, "obid only"; spec `protocol.md`, `identity.md`,
+//! `sphere-api.md`).
+//!
+//! What crosses in from another Obi is a signed, typed action, checked against the spec before
+//! anything acts on it (protocol.md section 10). It may become only what section 11 allows: an inbox
+//! item, or work a remembered decision covers, and then only the typed reply to that action. Its
+//! text is data: it never reaches a prompt, an inbox item's title or text, or a log line.
+//!
+//! Three tasks run once obid has joined: the follower (deliveries, long-polled), the sender (each
+//! exchange's replies in order, again after a failure) and the clock (requests that expire).
+
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use axum::http::StatusCode;
+use obi_protocol::client::{Client, ClientError, Delivery};
+use obi_protocol::keys::Keypair;
+use obi_protocol::{DirectoryKey, Keys, time};
+use serde_json::{Map, Value, json};
+use tokio::sync::{Notify, watch};
+
+use super::decisions::{self, Decision, Decisions};
+use super::exchange::{Exchange, Exchanges, Message};
+use super::inbox::{self, Inbox, Item};
+use super::membership::{Files, Membership};
+use crate::api::ApiError;
+use crate::config::Config;
+use crate::events::Events;
+use crate::job::Job;
+use crate::jobs::{Jobs, ObiReview};
+use crate::scan;
+
+/// How long a reply obid sends lives, at least (runner-api.md, "Expiry of what obid sends").
+const REPLY_LIFETIME: i64 = 3_600;
+/// A new token when the one held has less than this left.
+const TOKEN_MARGIN: i64 = 60;
+/// How long the Sphere may hold a deliveries call.
+const POLL_WAIT: u32 = 25;
+/// How often the directory is read again while following.
+const DIRECTORY_EVERY: i64 = 60;
+/// The longest a reply waits to be sent again after a failure.
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// What obid's card says it is.
+const OBID_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The scopes a delegation must grant for obid to follow and answer.
+const NEEDED_SCOPES: [&str; 2] = ["receive", "reply"];
+/// The most dropped message ids obid remembers, to acknowledge them again without a second look.
+const DROPPED_MAX: usize = 10_000;
+
+/// One member of the directory, once its card passed the checks (identity.md 2.2).
+#[derive(Debug, Clone)]
+struct Member {
+    owner: String,
+    active: bool,
+    accepts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Directory {
+    members: HashMap<String, Member>,
+    keys: Keys,
+}
+
+struct State {
+    key: Option<Arc<Keypair>>,
+    membership: Option<Membership>,
+    delegation: Option<String>,
+    client: Option<Client>,
+    /// The access token and when it expires.
+    token: Option<(String, i64)>,
+    directory: Directory,
+    directory_read: i64,
+    last_poll: Option<i64>,
+    last_error: Option<String>,
+    exchanges: HashMap<String, Exchange>,
+    inbox: HashMap<String, Item>,
+    decisions: Vec<Decision>,
+    /// Every envelope id obid has handled: the messages of its exchanges, and the ones it dropped.
+    seen: HashSet<String>,
+    dropped: Vec<String>,
+}
+
+/// The link. One per obid; one Sphere per obid in this version.
+pub struct Link {
+    config: Config,
+    files: Files,
+    exchanges: Exchanges,
+    inbox: Inbox,
+    decisions: Decisions,
+    jobs: Arc<Jobs>,
+    events: Events,
+    state: Mutex<State>,
+    /// Woken when a reply waits to be sent.
+    outbox: Notify,
+    /// One send at a time, so each exchange's replies go in order.
+    sending: tokio::sync::Mutex<()>,
+    /// One token exchange at a time.
+    tokening: tokio::sync::Mutex<()>,
+    /// One key, card or join call at a time.
+    joining: tokio::sync::Mutex<()>,
+    following: AtomicBool,
+    stopping: watch::Receiver<bool>,
+}
+
+fn api(status: StatusCode, message: impl Into<String>) -> ApiError {
+    ApiError::new(status, message)
+}
+
+/// A client error as the API answers it: `502` with the Sphere's code and message, `504` when it
+/// couldn't be reached.
+fn from_client(error: &ClientError) -> ApiError {
+    match error {
+        ClientError::Unreachable(_) => api(StatusCode::GATEWAY_TIMEOUT, error.to_string()),
+        _ => api(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+fn new_uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Resolves once obid is stopping.
+async fn stopped(mut stopping: watch::Receiver<bool>) {
+    while !*stopping.borrow() {
+        if stopping.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// A Sphere's base URL: `http://` or `https://`, a host and maybe a port, nothing after it.
+fn is_base_url(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    rest.is_some_and(|host| {
+        !host.is_empty()
+            && host.len() <= 255
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'))
+    })
+}
+
+/// An id the Sphere makes (an invitation id) or a secret: what may go in a path or a body.
+fn is_token_text(text: &str) -> bool {
+    (1..=256).contains(&text.len())
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+}
+
+fn is_slug(text: &str) -> bool {
+    obi_protocol::schema::is_valid("common#/$defs/slug", &json!(text))
+}
+
+/// Reads exactly the keys `allowed` from a JSON object body: `422` for anything else.
+fn object(body: &[u8], allowed: &[&str]) -> Result<Map<String, Value>, ApiError> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|e| api(StatusCode::BAD_REQUEST, format!("The body isn't JSON: {e}")))?;
+    let Value::Object(map) = value else {
+        return Err(api(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "The body is a JSON object.",
+        ));
+    };
+    if let Some(unknown) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(api(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("{unknown} isn't a field this endpoint takes."),
+        ));
+    }
+    Ok(map)
+}
+
+fn text_field<'a>(map: &'a Map<String, Value>, key: &str) -> Result<&'a str, ApiError> {
+    map.get(key).and_then(Value::as_str).ok_or_else(|| {
+        api(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("{key} is a string, and it's required."),
+        )
+    })
+}
+
+/// A later time as the inbox takes it: a protocol timestamp, with or without fractional seconds.
+fn parse_later(text: &str) -> Option<i64> {
+    if let Some(t) = time::parse(text) {
+        return Some(t);
+    }
+    // 2026-10-10T10:12:00.000Z
+    let (whole, rest) = text.split_once('.')?;
+    let digits = rest.strip_suffix('Z')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    time::parse(&format!("{whole}Z"))
+}
+
+impl Link {
+    /// Opens what obid keeps of its Sphere, its exchanges, inbox and decisions.
+    pub fn open(
+        config: Config,
+        jobs: Arc<Jobs>,
+        events: Events,
+        stopping: watch::Receiver<bool>,
+    ) -> std::io::Result<Arc<Link>> {
+        let files = Files::new(&config.home);
+        let key = files.load_key()?.map(Arc::new);
+        let membership = files.load_membership();
+        let delegation = files.load_delegation();
+        let exchanges = Exchanges::open(&config.home)?;
+        let inbox = Inbox::open(&config.home)?;
+        let decisions = Decisions::open(&config.home);
+        let mut seen = HashSet::new();
+        let mut by_id = HashMap::new();
+        for exchange in exchanges.load_all() {
+            seen.extend(exchange.envelope_ids().map(str::to_owned));
+            by_id.insert(exchange.correlation_id.clone(), exchange);
+        }
+        let now = time::now();
+        let items = inbox
+            .load_all()
+            .into_iter()
+            .map(|mut i| {
+                // A permission waited on an agent that ended with obid: its job's agent asks again
+                // when it runs, so the old item is done by itself.
+                if i.kind == "permission" && i.done.is_none() {
+                    i.done = Some(now);
+                    if let Err(e) = inbox.save(&i) {
+                        tracing::error!("can't keep inbox item {}: {e}", i.id);
+                    }
+                }
+                (i.id.clone(), i)
+            })
+            .collect();
+        let client = membership
+            .as_ref()
+            .and_then(|m| Client::new(&m.url, &m.sphere).ok());
+        let state = State {
+            key,
+            membership,
+            delegation,
+            client,
+            token: None,
+            directory: Directory::default(),
+            directory_read: 0,
+            last_poll: None,
+            last_error: None,
+            exchanges: by_id,
+            inbox: items,
+            decisions: decisions.load(),
+            seen,
+            dropped: Vec::new(),
+        };
+        let link = Arc::new(Link {
+            config,
+            files,
+            exchanges,
+            inbox,
+            decisions,
+            jobs,
+            events,
+            state: Mutex::new(state),
+            outbox: Notify::new(),
+            sending: tokio::sync::Mutex::new(()),
+            tokening: tokio::sync::Mutex::new(()),
+            joining: tokio::sync::Mutex::new(()),
+            following: AtomicBool::new(false),
+            stopping,
+        });
+        // The inbox hears of the permissions jobs wait on. Jobs tells it with none of its own
+        // locks held, and never while this Link's state is locked (only `start_obi_review` is
+        // called under it, and an Obi-to-Obi review never asks the owner).
+        let hook = Arc::downgrade(&link);
+        link.jobs.on_permission(Arc::new(move |note| {
+            if let Some(link) = hook.upgrade() {
+                link.permission_note(note);
+            }
+        }));
+        let hook = Arc::downgrade(&link);
+        link.jobs.on_review_end(Arc::new(move |job, done| {
+            let link = hook.upgrade();
+            Box::pin(async move {
+                if let Some(link) = link {
+                    link.review_ended(job, done).await;
+                }
+            })
+        }));
+        Ok(link)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Starts following the Sphere when obid has joined one, and the sender and the clock.
+    pub fn start(self: &Arc<Self>) {
+        self.reconcile();
+        let joined = self
+            .lock()
+            .membership
+            .as_ref()
+            .is_some_and(|m| m.state == "joined");
+        if joined {
+            self.follow();
+        }
+        let link = self.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = link.clone().run_sender() => {}
+                () = stopped(link.stopping.clone()) => {}
+            }
+        });
+    }
+
+    /// After a restart: an accepted request whose job has ended without a reply gets its failed
+    /// result, and one whose job is gone too.
+    fn reconcile(self: &Arc<Self>) {
+        let waiting: Vec<(String, Option<String>)> = self
+            .lock()
+            .exchanges
+            .values()
+            .filter(|e| e.direction == "incoming" && e.state == "accepted" && !e.ended())
+            .map(|e| (e.correlation_id.clone(), e.job.clone()))
+            .collect();
+        for (cid, job) in waiting {
+            let ended = match job.as_deref().and_then(|id| self.jobs.get(id)) {
+                Some(job) => !job.status.is_active(),
+                None => true,
+            };
+            if ended {
+                let link = self.clone();
+                tokio::spawn(async move { link.reply_failed(&cid, None).await });
+            }
+        }
+    }
+
+    /// A permission waits for the owner: its item, which settles any other open item of the job's
+    /// (one open item per job). Or one stopped waiting: its item is done, with the owner's answer
+    /// or none.
+    fn permission_note(&self, note: crate::jobs::PermissionNote) {
+        use crate::jobs::PermissionNote;
+        let now = time::now();
+        let mut changed = Vec::new();
+        {
+            let mut state = self.lock();
+            match note {
+                PermissionNote::Waiting(job, permission) => {
+                    let item = inbox::permission_item(&job, &permission, now);
+                    for other in state.inbox.values_mut() {
+                        if other.job == job.id && other.done.is_none() && other.id != item.id {
+                            other.done = Some(now);
+                            changed.push(other.clone());
+                        }
+                    }
+                    if !state.inbox.contains_key(&item.id) {
+                        state.inbox.insert(item.id.clone(), item.clone());
+                        changed.push(item);
+                    }
+                }
+                PermissionNote::Settled {
+                    job,
+                    permission,
+                    answer,
+                } => {
+                    let id = inbox::permission_item_id(&job, &permission);
+                    if let Some(item) = state.inbox.get_mut(&id).filter(|i| i.done.is_none()) {
+                        item.done = Some(now);
+                        item.answer = answer;
+                        changed.push(item.clone());
+                    }
+                }
+            }
+        }
+        for item in &changed {
+            self.save_item(item);
+        }
+    }
+
+    /// `POST /v1/inbox/{id}/answer` on a `permission` item: the owner's answer goes to the job (an
+    /// answer of their own words is a no, with those words for the agent); done or later only
+    /// settles or puts off the item.
+    fn answer_permission_item(
+        &self,
+        item: Item,
+        answer: Option<String>,
+        later: Option<i64>,
+    ) -> Result<Value, ApiError> {
+        let now = time::now();
+        let Some(answer) = answer else {
+            let mut item = item;
+            match later {
+                Some(at) => item.later = Some(at),
+                None => item.done = Some(now),
+            }
+            self.lock().inbox.insert(item.id.clone(), item.clone());
+            self.save_item(&item);
+            return Ok(item.to_json());
+        };
+        let permission = item
+            .id
+            .strip_prefix(&format!("{}-permission-", item.job))
+            .unwrap_or("")
+            .to_owned();
+        let (decision, words) = crate::permissions::inbox_decision(&answer);
+        use crate::jobs::PermissionRefused;
+        match self
+            .jobs
+            .answer_permission(&item.job, &permission, decision, words.as_deref())
+        {
+            Ok(_) => {}
+            Err(PermissionRefused::NoJob) => {
+                return Err(api(StatusCode::CONFLICT, "Its job is gone."));
+            }
+            Err(PermissionRefused::NotWaiting(why)) => return Err(api(StatusCode::CONFLICT, why)),
+            Err(PermissionRefused::Refused(why)) => {
+                return Err(api(StatusCode::UNPROCESSABLE_ENTITY, why));
+            }
+        }
+        let settled = self.lock().inbox.get(&item.id).cloned().unwrap_or(item);
+        Ok(settled.to_json())
+    }
+
+    fn save_exchange(&self, exchange: &Exchange) {
+        if let Err(e) = self.exchanges.save(exchange) {
+            tracing::error!("can't keep exchange {}: {e}", exchange.correlation_id);
+        }
+        self.events.send("exchange", exchange.to_json());
+    }
+
+    fn save_item(&self, item: &Item) {
+        if let Err(e) = self.inbox.save(item) {
+            tracing::error!("can't keep inbox item {}: {e}", item.id);
+        }
+        self.events.send("inbox", item.to_json());
+    }
+
+    fn save_decisions(&self, decisions: &[Decision]) {
+        if let Err(e) = self.decisions.save(decisions) {
+            tracing::error!("can't keep the remembered decisions: {e}");
+        }
+    }
+
+    fn note_error(&self, error: impl std::fmt::Display) {
+        let line = error.to_string();
+        tracing::warn!("sphere: {line}");
+        self.lock().last_error = Some(line);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Membership: GET /v1/obid/sphere, POST …/key, …/card, …/join
+
+    /// `GET /v1/obid/sphere`.
+    pub fn membership_json(&self) -> Value {
+        let state = self.lock();
+        let key = state.key.as_ref();
+        let joined = state.membership.as_ref();
+        json!({
+            "state": joined.map_or("none", |m| m.state.as_str()),
+            "url": joined.map(|m| &m.url),
+            "sphere": joined.map(|m| &m.sphere),
+            "obiId": joined.map(|m| &m.obi_id),
+            "owner": self.config.owner,
+            "keyId": key.map(|k| k.key_id()),
+            "publicKey": key.map(|k| k.public_key()),
+            "card": joined.map(|m| &m.card),
+            "tokenExpiresAt": state.token.as_ref().map(|t| time::format(t.1)),
+            "lastPoll": state.last_poll.map(time::format),
+            "lastError": state.last_error,
+        })
+    }
+
+    /// `POST /v1/obid/sphere/key`: the Obi key, made the first time.
+    pub async fn make_key(&self) -> Result<Value, ApiError> {
+        let _one = self.joining.lock().await;
+        let existing = self.lock().key.clone();
+        let key = match existing {
+            Some(key) => key,
+            None => {
+                let key = Arc::new(self.files.make_key().map_err(|e| {
+                    api(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("obid couldn't keep its key: {e}"),
+                    )
+                })?);
+                self.lock().key = Some(key.clone());
+                key
+            }
+        };
+        Ok(json!({"keyId": key.key_id(), "publicKey": key.public_key()}))
+    }
+
+    /// `POST /v1/obid/sphere/card`: the card the owner is to sign, around obid's own key.
+    pub async fn card(&self, body: &[u8]) -> Result<Value, ApiError> {
+        let _one = self.joining.lock().await;
+        let map = object(
+            body,
+            &[
+                "url",
+                "sphere",
+                "obiId",
+                "name",
+                "ownerKey",
+                "accepts",
+                "description",
+            ],
+        )?;
+        let invalid = |m: String| api(StatusCode::UNPROCESSABLE_ENTITY, m);
+        let (key, card_seq) = {
+            let state = self.lock();
+            let key = state.key.clone().ok_or_else(|| {
+                api(
+                    StatusCode::CONFLICT,
+                    "There's no Obi key yet: POST /v1/obid/sphere/key first.",
+                )
+            })?;
+            (
+                key,
+                state.membership.as_ref().map_or(1, |m| m.card_seq() + 1),
+            )
+        };
+        let url = text_field(&map, "url")?.trim_end_matches('/');
+        if !is_base_url(url) {
+            return Err(invalid(format!(
+                "url is the Sphere's base URL, like http://127.0.0.1:8787, not {url:?}."
+            )));
+        }
+        let sphere = text_field(&map, "sphere")?;
+        let obi_id = text_field(&map, "obiId")?;
+        let name = text_field(&map, "name")?;
+        let owner_key = text_field(&map, "ownerKey")?;
+        let description = match map.get("description") {
+            None | Some(Value::Null) => obi_protocol::identity::DEFAULT_DESCRIPTION,
+            Some(Value::String(d)) => d.as_str(),
+            Some(_) => return Err(invalid("description is a string.".into())),
+        };
+        let accepts: Vec<String> = match map.get("accepts") {
+            Some(Value::Array(list)) => list
+                .iter()
+                .map(|a| a.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| invalid("accepts is a list of request types.".into()))?,
+            _ => {
+                return Err(invalid(
+                    "accepts is a list of request types, and it's required.".into(),
+                ));
+            }
+        };
+        if accepts.is_empty() {
+            return Err(invalid("accepts names at least one request type.".into()));
+        }
+        if let Some(other) = accepts.iter().find(|a| *a != "review_request") {
+            return Err(invalid(format!(
+                "obid takes review_request only in this version, not {other}."
+            )));
+        }
+        if obi_protocol::keys::key_id_of(owner_key).is_none() {
+            return Err(invalid(
+                "ownerKey is an Ed25519 public key, base64url.".into(),
+            ));
+        }
+        if owner_key == key.public_key() {
+            return Err(invalid(
+                "ownerKey is the owner's key, not the Obi's.".into(),
+            ));
+        }
+        let (key_id, public_key, issued_at) =
+            (key.key_id(), key.public_key(), time::format(time::now()));
+        let unsigned = obi_protocol::identity::unsigned_card(&obi_protocol::identity::CardFields {
+            sphere_url: url,
+            sphere,
+            obi_id,
+            owner: &self.config.owner,
+            owner_key,
+            name,
+            description,
+            version: OBID_VERSION,
+            key_id: &key_id,
+            public_key: &public_key,
+            accepts: &accepts,
+            card_seq,
+            issued_at: &issued_at,
+        });
+        let problems = obi_protocol::identity::unsigned_card_problems(&unsigned);
+        if !problems.is_empty() {
+            return Err(invalid(format!(
+                "That card wouldn't pass the spec's checks: {}",
+                problems.join("; ")
+            )));
+        }
+        Ok(json!({"card": unsigned}))
+    }
+
+    /// `POST /v1/obid/sphere/join`: checks the owner-signed card and the delegation, redeems the
+    /// invitation, exchanges a token, reads the directory and starts following.
+    pub async fn join(self: &Arc<Self>, body: &[u8]) -> Result<Value, ApiError> {
+        let _one = self.joining.lock().await;
+        let map = object(body, &["url", "sphere", "invitation", "card", "delegation"])?;
+        let invalid = |m: String| api(StatusCode::UNPROCESSABLE_ENTITY, m);
+        let key = {
+            let state = self.lock();
+            if let Some(m) = &state.membership {
+                return Err(api(
+                    StatusCode::CONFLICT,
+                    format!("obid has joined {} already ({}).", m.sphere, m.state),
+                ));
+            }
+            state.key.clone().ok_or_else(|| {
+                api(
+                    StatusCode::CONFLICT,
+                    "There's no Obi key yet: POST /v1/obid/sphere/key first.",
+                )
+            })?
+        };
+        let url = text_field(&map, "url")?.trim_end_matches('/').to_owned();
+        if !is_base_url(&url) {
+            return Err(invalid(format!(
+                "url is the Sphere's base URL, like http://127.0.0.1:8787, not {url:?}."
+            )));
+        }
+        let sphere = text_field(&map, "sphere")?.to_owned();
+        if !is_slug(&sphere) {
+            return Err(invalid(format!("{sphere:?} isn't a Sphere id.")));
+        }
+        let invitation = map
+            .get("invitation")
+            .and_then(Value::as_object)
+            .ok_or_else(|| invalid("invitation is {\"id\", \"secret\"}.".into()))?;
+        if invitation.keys().any(|k| k != "id" && k != "secret") {
+            return Err(invalid("invitation is {\"id\", \"secret\"}.".into()));
+        }
+        let invitation_id = text_field(invitation, "id")?;
+        let secret = text_field(invitation, "secret")?;
+        if !is_token_text(invitation_id) || !is_token_text(secret) {
+            return Err(invalid(
+                "The invitation's id and secret are what the Sphere gave, unchanged.".into(),
+            ));
+        }
+        let card = map
+            .get("card")
+            .filter(|c| c.is_object())
+            .ok_or_else(|| invalid("card is the agent card, signed by the owner.".into()))?
+            .clone();
+        let delegation = text_field(&map, "delegation")?.to_owned();
+        let now = time::now();
+        obi_protocol::card::verify(
+            &card,
+            &obi_protocol::card::Context {
+                now: Some(now),
+                bound_owner_key: None,
+            },
+        )
+        .map_err(|r| invalid(format!("The card doesn't pass the spec's checks: {r}")))?;
+        let params = obi_protocol::card::params(&card).expect("a verified card has its params");
+        let param = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or("");
+        if param("key_id") != key.key_id() || param("public_key") != key.public_key() {
+            return Err(invalid("The card doesn't carry obid's own key.".into()));
+        }
+        if param("sphere") != sphere {
+            return Err(invalid(format!(
+                "The card is for the Sphere {}, not {sphere}.",
+                param("sphere")
+            )));
+        }
+        if param("owner") != self.config.owner {
+            return Err(invalid(format!(
+                "The card's owner is {}, not obid's owner {}.",
+                param("owner"),
+                self.config.owner
+            )));
+        }
+        let obi_id = param("obi_id").to_owned();
+        let expected_url = format!("{url}/v0.1/spheres/{sphere}/members/{obi_id}");
+        if card["url"].as_str() != Some(expected_url.as_str()) {
+            return Err(invalid(format!("The card's url isn't {expected_url}.")));
+        }
+        let owner_key = param("owner_key").to_owned();
+        obi_protocol::identity::check_delegation(
+            &delegation,
+            &obi_protocol::identity::DelegationCheck {
+                owner_key: &owner_key,
+                owner: &self.config.owner,
+                sphere: &sphere,
+                obi_id: &obi_id,
+                now,
+                needs: &NEEDED_SCOPES,
+            },
+        )
+        .map_err(|why| invalid(format!("The delegation doesn't pass: {why}.")))?;
+
+        let client = Client::new(&url, &sphere).map_err(|e| from_client(&e))?;
+        client
+            .redeem(invitation_id, secret, &owner_key, &card)
+            .await
+            .map_err(|e| from_client(&e))?;
+        let membership = Membership {
+            state: "joined".into(),
+            url,
+            sphere,
+            obi_id,
+            card,
+            joined_at: now,
+        };
+        let kept = self
+            .files
+            .save_membership(&membership)
+            .and_then(|()| self.files.save_delegation(&delegation));
+        {
+            let mut state = self.lock();
+            state.membership = Some(membership);
+            state.delegation = Some(delegation);
+            state.client = Some(client);
+            state.token = None;
+        }
+        if let Err(e) = kept {
+            self.note_error(format!("obid couldn't keep its membership: {e}"));
+        }
+        let read = self.read_directory().await;
+        self.follow();
+        if let Err(e) = read {
+            self.note_error(&e);
+            return Err(from_client(&e));
+        }
+        Ok(self.membership_json())
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Talking to the Sphere
+
+    fn client(&self) -> Result<Client, ClientError> {
+        self.lock()
+            .client
+            .clone()
+            .ok_or_else(|| ClientError::Unreachable("obid hasn't joined a Sphere".into()))
+    }
+
+    /// The access token, exchanged again when the one held has less than a minute left.
+    async fn token(&self) -> Result<String, ClientError> {
+        let fresh = |state: &State| {
+            state
+                .token
+                .as_ref()
+                .filter(|(_, expires)| expires - time::now() > TOKEN_MARGIN)
+                .map(|(t, _)| t.clone())
+        };
+        if let Some(token) = fresh(&self.lock()) {
+            return Ok(token);
+        }
+        let _one = self.tokening.lock().await;
+        let (client, delegation, key, membership) = {
+            let state = self.lock();
+            if let Some(token) = fresh(&state) {
+                return Ok(token);
+            }
+            let missing = || ClientError::Unreachable("obid hasn't joined a Sphere".into());
+            (
+                state.client.clone().ok_or_else(missing)?,
+                state.delegation.clone().ok_or_else(missing)?,
+                state.key.clone().ok_or_else(missing)?,
+                state.membership.clone().ok_or_else(missing)?,
+            )
+        };
+        let now = time::now();
+        let actor = obi_protocol::identity::actor_assertion(
+            &membership.obi_id,
+            &membership.sphere,
+            &key,
+            now,
+            &new_uuid(),
+        )
+        .map_err(|e| ClientError::Protocol(e.to_string()))?;
+        let token = client.token(&delegation, &actor).await?;
+        self.lock().token = Some((token.access_token.clone(), now + token.expires_in));
+        Ok(token.access_token)
+    }
+
+    /// What to do with a refusal of the token: forget it, so the next call exchanges a new one.
+    fn refused_token(&self, error: &ClientError) {
+        if matches!(error, ClientError::Refused { status: 401, .. }) {
+            self.lock().token = None;
+        }
+    }
+
+    /// Reads the directory and keeps every member whose card passes the checks (identity.md 2.2,
+    /// with the owner key the Sphere bound), with every key it ever had.
+    async fn read_directory(&self) -> Result<(), ClientError> {
+        let token = self.token().await?;
+        let members = match self.client()?.members(&token).await {
+            Ok(members) => members,
+            Err(e) => {
+                self.refused_token(&e);
+                return Err(e);
+            }
+        };
+        let now = time::now();
+        let mut directory = Directory::default();
+        for member in &members {
+            let obi = member["obi"].as_str().unwrap_or("");
+            let owner = member["owner"].as_str().unwrap_or("");
+            let card = &member["card"];
+            let checked = obi_protocol::card::verify(
+                card,
+                &obi_protocol::card::Context {
+                    now: Some(now),
+                    bound_owner_key: member["owner_key"].as_str().map(str::to_owned),
+                },
+            );
+            let params = obi_protocol::card::params(card);
+            let matches = params.is_some_and(|p| p["obi_id"] == obi && p["owner"] == owner);
+            if let Err(why) = checked {
+                tracing::warn!(
+                    "sphere: {obi}'s card doesn't pass the checks ({}): not trusted",
+                    why.code
+                );
+                continue;
+            }
+            if !matches {
+                tracing::warn!("sphere: {obi}'s card names another Obi or owner: not trusted");
+                continue;
+            }
+            for key in member["keys"].as_array().into_iter().flatten() {
+                let (Some(id), Some(public_key)) =
+                    (key["key_id"].as_str(), key["public_key"].as_str())
+                else {
+                    continue;
+                };
+                directory.keys.insert(
+                    id.to_owned(),
+                    DirectoryKey {
+                        obi: obi.to_owned(),
+                        public_key: public_key.to_owned(),
+                        ranged: true,
+                        valid_from_seq: key["valid_from_seq"].as_u64().unwrap_or(1),
+                        valid_until_seq: key["valid_until_seq"].as_u64(),
+                    },
+                );
+            }
+            directory.members.insert(
+                obi.to_owned(),
+                Member {
+                    owner: owner.to_owned(),
+                    active: member["status"] == "active",
+                    accepts: params
+                        .and_then(|p| p.get("accepts"))
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                },
+            );
+        }
+        let revoked = {
+            let mut state = self.lock();
+            let me = state.membership.as_ref().map(|m| m.obi_id.clone());
+            let revoked = me
+                .and_then(|me| members.iter().find(|m| m["obi"] == me.as_str()).cloned())
+                .is_some_and(|m| m["status"] == "revoked");
+            state.directory = directory;
+            state.directory_read = now;
+            if revoked && let Some(m) = state.membership.as_mut() {
+                m.state = "revoked".into();
+            }
+            revoked.then(|| state.membership.clone()).flatten()
+        };
+        if let Some(membership) = revoked {
+            let _ = self.files.save_membership(&membership);
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Following: deliveries
+
+    /// Starts the follower, once.
+    fn follow(self: &Arc<Self>) {
+        if self.following.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let link = self.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = link.clone().run_follower() => {}
+                () = stopped(link.stopping.clone()) => {}
+            }
+        });
+    }
+
+    async fn run_follower(self: Arc<Self>) {
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            let revoked = self
+                .lock()
+                .membership
+                .as_ref()
+                .is_none_or(|m| m.state != "joined");
+            if revoked {
+                return;
+            }
+            match self.poll().await {
+                Ok(()) => backoff = Duration::from_secs(1),
+                Err(e) => {
+                    self.note_error(&e);
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(BACKOFF_MAX);
+                }
+            }
+        }
+    }
+
+    /// One deliveries call: each delivery handled, then acknowledged once what it decided is kept.
+    async fn poll(self: &Arc<Self>) -> Result<(), ClientError> {
+        let stale = time::now() - self.lock().directory_read >= DIRECTORY_EVERY;
+        if stale {
+            self.read_directory().await?;
+        }
+        let token = self.token().await?;
+        let client = self.client()?;
+        let deliveries = match client.deliveries(&token, 50, POLL_WAIT).await {
+            Ok(list) => list,
+            Err(e) => {
+                self.refused_token(&e);
+                return Err(e);
+            }
+        };
+        {
+            let mut state = self.lock();
+            state.last_poll = Some(time::now());
+            state.last_error = None;
+        }
+        if deliveries.is_empty() {
+            return Ok(());
+        }
+        let mut handled = Vec::new();
+        for delivery in deliveries {
+            let id = delivery.delivery_id.clone();
+            self.handle(delivery).await;
+            handled.push(id);
+        }
+        if let Err(e) = client.ack(&token, &handled).await {
+            // They come again; the ids already handled make the second time harmless.
+            self.refused_token(&e);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn verify(&self, delivery: &Delivery) -> Result<(), obi_protocol::Rejection> {
+        let state = self.lock();
+        let context = obi_protocol::envelope::Context {
+            now: Some(time::now()),
+            sphere: state.membership.as_ref().map(|m| m.sphere.clone()),
+            receiver: state.membership.as_ref().map(|m| m.obi_id.clone()),
+            keys: state.directory.keys.clone(),
+            seq: Some(delivery.seq),
+            seen_ids: Vec::new(),
+        };
+        obi_protocol::envelope::verify(&delivery.envelope, &context)
+    }
+
+    fn drop_message(&self, id: &str, why: &str) {
+        // The reason names checks and codes, never the message's text.
+        tracing::warn!("sphere: dropped message {id}: {why}");
+        let mut state = self.lock();
+        state.seen.insert(id.to_owned());
+        state.dropped.push(id.to_owned());
+        if state.dropped.len() > DROPPED_MAX {
+            let old = state.dropped.remove(0);
+            state.seen.remove(&old);
+        }
+    }
+
+    /// One delivery (protocol.md section 11): verified, deduplicated, then a reply matched to its
+    /// exchange or a request decided.
+    async fn handle(self: &Arc<Self>, delivery: Delivery) {
+        let id = delivery.envelope["id"].as_str().unwrap_or("").to_owned();
+        if !id.is_empty() && self.lock().seen.contains(&id) {
+            return;
+        }
+        let mut verdict = self.verify(&delivery);
+        if matches!(&verdict, Err(r) if r.code == "unknown_key") {
+            // A member who joined or rotated since the directory was read.
+            if let Err(e) = self.read_directory().await {
+                self.note_error(&e);
+            }
+            verdict = self.verify(&delivery);
+        }
+        if let Err(rejection) = verdict {
+            self.drop_message(&id, &format!("{}: {}", rejection.code, rejection.message));
+            return;
+        }
+        let kind = delivery.envelope["type"].as_str().unwrap_or("");
+        if obi_protocol::REPLY_TYPES.contains(&kind) {
+            self.handle_reply(delivery);
+        } else {
+            self.handle_request(delivery);
+        }
+    }
+
+    fn received(delivery: &Delivery) -> Message {
+        Message {
+            direction: "received".into(),
+            seq: Some(delivery.seq),
+            at: delivery.relayed_at.clone(),
+            envelope: delivery.envelope.clone(),
+        }
+    }
+
+    /// A reply: matched to the outgoing request it names, sent to the reply's sender, keeping the
+    /// exchange rules; else dropped.
+    fn handle_reply(&self, delivery: Delivery) {
+        let envelope = &delivery.envelope;
+        let id = envelope["id"].as_str().unwrap_or("").to_owned();
+        let cid = envelope["in_reply_to"].as_str().unwrap_or("");
+        let from = envelope["from"].as_str().unwrap_or("");
+        let mut state = self.lock();
+        let Some(exchange) = state
+            .exchanges
+            .get_mut(cid)
+            .filter(|e| e.direction == "outgoing" && e.peer == from)
+        else {
+            drop(state);
+            self.drop_message(&id, "a reply to no request of this Obi's");
+            return;
+        };
+        let earlier: Vec<&Value> = exchange
+            .messages
+            .iter()
+            .skip(1)
+            .map(|m| &m.envelope)
+            .collect();
+        if let Some(problem) =
+            obi_protocol::chain::exchange_problem(envelope, Some(&exchange.request), &earlier)
+        {
+            drop(state);
+            self.drop_message(&id, &format!("breaks the exchange rules: {problem}"));
+            return;
+        }
+        exchange.messages.push(Link::received(&delivery));
+        match envelope["type"].as_str().unwrap_or("") {
+            "accept" if exchange.state == "sent" => exchange.state = "accepted".into(),
+            "decline" => exchange.state = "declined".into(),
+            "result" => {
+                exchange.state = "done".into();
+                exchange.result = Some(envelope["body"].clone());
+            }
+            _ => {}
+        }
+        exchange.updated = time::now();
+        let exchange = exchange.clone();
+        state.seen.insert(id);
+        drop(state);
+        self.save_exchange(&exchange);
+    }
+
+    /// A request (protocol.md section 11, steps 4 to 6): declined when the card doesn't accept its
+    /// type, decided by a remembered decision when one covers it, else put in the owner's inbox.
+    fn handle_request(self: &Arc<Self>, delivery: Delivery) {
+        let envelope = delivery.envelope.clone();
+        let id = envelope["id"].as_str().unwrap_or("").to_owned();
+        let from = envelope["from"].as_str().unwrap_or("").to_owned();
+        let kind = envelope["type"].as_str().unwrap_or("").to_owned();
+        let mut state = self.lock();
+        if state.exchanges.contains_key(&id) {
+            drop(state);
+            self.drop_message(&id, "a request for an exchange obid has already");
+            return;
+        }
+        // The sender's owner comes from the directory, never from the message.
+        let owner = state.directory.members.get(&from).map(|m| m.owner.clone());
+        let Some(owner) = owner else {
+            drop(state);
+            self.drop_message(&id, "its sender isn't in the directory");
+            return;
+        };
+        let accepts = state
+            .membership
+            .as_ref()
+            .map(Membership::accepts)
+            .unwrap_or_default();
+        let mut exchange = Exchange::new(
+            "incoming",
+            envelope.clone(),
+            from.clone(),
+            Some(owner.clone()),
+        );
+        exchange.messages.push(Link::received(&delivery));
+        state.seen.insert(id.clone());
+        let body = &envelope["body"];
+        let repo = body["repo"].as_str();
+        let now = time::now();
+        let mut item = None;
+        let mut decisions_changed = false;
+        if !accepts.contains(&kind) || kind != "review_request" {
+            exchange.state = "declined".into();
+            let decline = self.reply_locked(
+                &state,
+                &exchange,
+                "decline",
+                json!({"reason": "out_of_scope"}),
+            );
+            exchange.outbox.extend(decline);
+        } else if let Some(decision) =
+            decisions::covering(&state.decisions, &kind, &owner, repo).cloned()
+        {
+            exchange.decided_by = Some("rule".into());
+            exchange.rule = Some(decision.id.clone());
+            if let Some(d) = state.decisions.iter_mut().find(|d| d.id == decision.id) {
+                d.uses += 1;
+                d.last_used = Some(now);
+            }
+            decisions_changed = true;
+            if decision.decision == "accept" {
+                self.accept_locked(&state, &mut exchange, Some(&decision.id));
+            } else {
+                exchange.state = "declined".into();
+                let decline = self.reply_locked(
+                    &state,
+                    &exchange,
+                    "decline",
+                    json!({"reason": "owner_declined", "by_rule": decision.id}),
+                );
+                exchange.outbox.extend(decline);
+            }
+        } else {
+            let made = inbox::review_request_item(
+                &exchange.correlation_id,
+                &from,
+                &owner,
+                body,
+                envelope["expires_at"].as_str().unwrap_or(""),
+                now,
+            );
+            exchange.state = "inbox".into();
+            exchange.inbox_item = Some(made.id.clone());
+            state.inbox.insert(made.id.clone(), made.clone());
+            item = Some(made);
+        }
+        state
+            .exchanges
+            .insert(exchange.correlation_id.clone(), exchange.clone());
+        let decisions = decisions_changed.then(|| state.decisions.clone());
+        drop(state);
+        if let Some(decisions) = decisions {
+            self.save_decisions(&decisions);
+        }
+        if let Some(item) = item {
+            self.save_item(&item);
+        }
+        self.save_exchange(&exchange);
+        self.outbox.notify_one();
+    }
+
+    /// Accepts the request: `accept` (with `by_rule` when a decision made it) waits to be sent, and
+    /// the review job starts. When the job can't even start, a failed result follows.
+    fn accept_locked(&self, state: &State, exchange: &mut Exchange, rule: Option<&str>) {
+        let body = match rule {
+            Some(rule) => json!({"by_rule": rule}),
+            None => json!({}),
+        };
+        exchange
+            .outbox
+            .extend(self.reply_locked(state, exchange, "accept", body));
+        exchange.state = "accepted".into();
+        let request = &exchange.request;
+        let started = self.jobs.start_obi_review(ObiReview {
+            correlation_id: exchange.correlation_id.clone(),
+            request_id: request["id"].as_str().unwrap_or("").to_owned(),
+            from: exchange.peer.clone(),
+            from_owner: exchange.peer_owner.clone().unwrap_or_default(),
+            body: request["body"].clone(),
+        });
+        match started {
+            Ok(job) => exchange.job = Some(job.id),
+            Err(refused) => {
+                tracing::warn!(
+                    "sphere: the review for {} couldn't start: {}",
+                    exchange.correlation_id,
+                    refused.0
+                );
+                exchange.error = Some(refused.0);
+                let mut failed = failed_result(&exchange.request);
+                if let Some(rule) = rule {
+                    failed["by_rule"] = json!(rule);
+                }
+                exchange.result = Some(failed.clone());
+                exchange.state = "failed".into();
+                exchange
+                    .outbox
+                    .extend(self.reply_locked(state, exchange, "result", failed));
+            }
+        }
+    }
+
+    /// A reply in `exchange`, built and signed (runner-api.md, "Expiry of what obid sends"):
+    /// created now, expiring the later of an hour from now and the request's expiry, at most the
+    /// longest a message may live. `None` when obid has no key or membership to sign it with.
+    fn reply_locked(
+        &self,
+        state: &State,
+        exchange: &Exchange,
+        kind: &str,
+        body: Value,
+    ) -> Option<Value> {
+        let key = state.key.as_ref()?;
+        let membership = state.membership.as_ref()?;
+        let now = time::now();
+        let request_expires = exchange.expires_at().unwrap_or(now);
+        let expires = (now + REPLY_LIFETIME)
+            .max(request_expires)
+            .min(now + obi_protocol::MAX_LIFETIME_SECONDS);
+        let unsigned = json!({
+            "protocol": obi_protocol::PROTOCOL,
+            "id": new_uuid(),
+            "type": kind,
+            "from": membership.obi_id,
+            "to": exchange.peer,
+            "sphere": membership.sphere,
+            "correlation_id": exchange.correlation_id,
+            "in_reply_to": exchange.correlation_id,
+            "created_at": time::format(now),
+            "expires_at": time::format(expires),
+            "key_id": key.key_id(),
+            "body": body,
+        });
+        let Value::Object(unsigned) = unsigned else {
+            unreachable!("an envelope is an object")
+        };
+        match obi_protocol::envelope::sign(&unsigned, key) {
+            Ok(signed) => Some(signed),
+            Err(e) => {
+                tracing::error!("sphere: can't sign a {kind}: {e}");
+                None
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Sending replies, and the clock
+
+    async fn run_sender(self: Arc<Self>) {
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            self.expire();
+            let all_sent = self.send_waiting().await;
+            let wait = if all_sent {
+                backoff = Duration::from_secs(1);
+                Duration::from_secs(2)
+            } else {
+                let wait = backoff;
+                backoff = (backoff * 2).min(BACKOFF_MAX);
+                wait
+            };
+            tokio::select! {
+                () = self.outbox.notified() => {}
+                () = tokio::time::sleep(wait) => {}
+            }
+        }
+    }
+
+    /// Sends every waiting reply, exchange by exchange, oldest first: `false` when one couldn't
+    /// go and should be tried again.
+    async fn send_waiting(&self) -> bool {
+        let mut waiting: Vec<(i64, String)> = self
+            .lock()
+            .exchanges
+            .values()
+            .filter(|e| !e.outbox.is_empty())
+            .map(|e| (e.updated, e.correlation_id.clone()))
+            .collect();
+        waiting.sort();
+        let mut all = true;
+        for (_, cid) in waiting {
+            all &= self.flush(&cid).await;
+        }
+        all
+    }
+
+    /// Sends the exchange's waiting replies, in order: `true` once none is left to send.
+    async fn flush(&self, cid: &str) -> bool {
+        let _one = self.sending.lock().await;
+        loop {
+            let next = {
+                let state = self.lock();
+                match state.exchanges.get(cid).and_then(|e| e.outbox.first()) {
+                    Some(next) => next.clone(),
+                    None => return true,
+                }
+            };
+            let expires = next["expires_at"]
+                .as_str()
+                .and_then(time::parse)
+                .unwrap_or(0);
+            if expires <= time::now() {
+                self.update_exchange(cid, |e| {
+                    e.outbox.remove(0);
+                    e.error = Some("A reply expired before the Sphere took it.".into());
+                });
+                continue;
+            }
+            let sent = match self.token().await {
+                Ok(token) => match self.client() {
+                    Ok(client) => client.send(&token, &next).await,
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            };
+            match sent {
+                Ok(sent) => {
+                    let id = next["id"].as_str().unwrap_or("").to_owned();
+                    self.lock().seen.insert(id);
+                    self.update_exchange(cid, |e| {
+                        e.outbox.remove(0);
+                        e.messages.push(Message {
+                            direction: "sent".into(),
+                            seq: Some(sent.seq),
+                            at: sent.recorded_at.clone(),
+                            envelope: next.clone(),
+                        });
+                    });
+                }
+                Err(ClientError::Refused {
+                    status,
+                    code,
+                    message,
+                }) if status < 500 && status != 401 && status != 429 && status != 408 => {
+                    // The Sphere won't take it, now or later: what's left of the exchange can't go.
+                    let line = format!(
+                        "The Sphere refused a {}: {code}: {message}",
+                        next["type"].as_str().unwrap_or("reply")
+                    );
+                    tracing::warn!("sphere: exchange {cid}: {line}");
+                    self.update_exchange(cid, |e| {
+                        e.outbox.clear();
+                        e.error = Some(line.clone());
+                    });
+                    return true;
+                }
+                Err(e) => {
+                    self.refused_token(&e);
+                    self.note_error(&e);
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Changes the exchange `cid`, keeps it and tells the apps.
+    fn update_exchange(&self, cid: &str, change: impl FnOnce(&mut Exchange)) -> Option<Exchange> {
+        let exchange = {
+            let mut state = self.lock();
+            let exchange = state.exchanges.get_mut(cid)?;
+            change(exchange);
+            exchange.updated = time::now();
+            exchange.clone()
+        };
+        self.save_exchange(&exchange);
+        Some(exchange)
+    }
+
+    /// Requests that expired: one waiting in the inbox is settled by itself, with no answer, and
+    /// declined with reason `expired`; one this Obi sent with no result is `expired`.
+    fn expire(&self) {
+        let now = time::now();
+        let mut changed = Vec::new();
+        let mut items = Vec::new();
+        {
+            let mut state = self.lock();
+            let due: Vec<String> = state
+                .exchanges
+                .values()
+                .filter(|e| e.expires_at().is_some_and(|t| t <= now))
+                .filter(|e| match e.direction.as_str() {
+                    "incoming" => e.state == "inbox",
+                    _ => e.state == "sent" || e.state == "accepted",
+                })
+                .map(|e| e.correlation_id.clone())
+                .collect();
+            for cid in due {
+                let Some(mut exchange) = state.exchanges.get(&cid).cloned() else {
+                    continue;
+                };
+                exchange.state = "expired".into();
+                exchange.updated = now;
+                if exchange.direction == "incoming" {
+                    let decline = self.reply_locked(
+                        &state,
+                        &exchange,
+                        "decline",
+                        json!({"reason": "expired"}),
+                    );
+                    exchange.outbox.extend(decline);
+                    if let Some(item) = exchange
+                        .inbox_item
+                        .as_ref()
+                        .and_then(|id| state.inbox.get_mut(id))
+                        .filter(|i| i.done.is_none())
+                    {
+                        item.done = Some(now);
+                        items.push(item.clone());
+                    }
+                }
+                state.exchanges.insert(cid, exchange.clone());
+                changed.push(exchange);
+            }
+        }
+        for item in &items {
+            self.save_item(item);
+        }
+        for exchange in &changed {
+            self.save_exchange(exchange);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The review job's end: the publish gate and the result
+
+    /// The review job of an exchange ended (before the job says so): `done` with its result body,
+    /// or not. The publish gate scans every text of the result; clean, it goes; a finding, or a
+    /// scanner that can't run, sends a failed result with no text. Waits for the first try to send.
+    pub async fn review_ended(&self, job: Job, done: bool) {
+        let Some(obi) = job.obi.clone() else { return };
+        let cid = obi.correlation_id;
+        let rule = {
+            let state = self.lock();
+            match state.exchanges.get(&cid) {
+                Some(e) if e.direction == "incoming" && !e.ended() => e.rule.clone(),
+                _ => return,
+            }
+        };
+        let body = job
+            .review_result
+            .clone()
+            .filter(|b| done && b["outcome"] != "failed");
+        let Some(mut body) = body else {
+            self.reply_failed(&cid, None).await;
+            return;
+        };
+        let texts = every_text(&body);
+        let scratch = self.config.home.join("tmp");
+        let verdict = scan::scan(&texts, &scratch).await;
+        let (scan_json, failure) = match &verdict {
+            scan::Verdict::Clean => (json!({"ran": true, "clean": true}), None),
+            scan::Verdict::Found(found) => {
+                let places: Vec<String> = found.iter().take(3).map(ToString::to_string).collect();
+                (
+                    json!({"ran": true, "clean": false}),
+                    Some(format!(
+                        "The publish gate found a possible secret in {}: no text was sent.",
+                        places.join(", ")
+                    )),
+                )
+            }
+            scan::Verdict::CouldNotRun(why) => (
+                json!({"ran": false, "clean": false}),
+                Some(format!(
+                    "The secret scan couldn't run ({why}): no text was sent."
+                )),
+            ),
+        };
+        if let Some(why) = failure {
+            tracing::warn!("sphere: exchange {cid}: {why}");
+            self.reply_failed(&cid, Some((scan_json, why))).await;
+            return;
+        }
+        if let Some(rule) = rule {
+            body["by_rule"] = json!(rule);
+        }
+        let queued = {
+            let mut state = self.lock();
+            let Some(mut exchange) = state.exchanges.get(&cid).cloned() else {
+                return;
+            };
+            let Some(result) = self.reply_locked(&state, &exchange, "result", body.clone()) else {
+                return;
+            };
+            exchange.outbox.push(result);
+            exchange.result = Some(body);
+            exchange.publish_scan = Some(scan_json);
+            exchange.state = "done".into();
+            exchange.updated = time::now();
+            state.exchanges.insert(cid.clone(), exchange.clone());
+            exchange
+        };
+        self.save_exchange(&queued);
+        self.send_now(&cid).await;
+    }
+
+    /// Sends a failed result with no text (and `by_rule` when a decision accepted it): the work, or
+    /// the publish gate (`scan`: what it found, and why nothing with text went), failed.
+    async fn reply_failed(&self, cid: &str, scan: Option<(Value, String)>) {
+        let queued = {
+            let mut state = self.lock();
+            let Some(mut exchange) = state.exchanges.get(cid).cloned() else {
+                return;
+            };
+            if exchange.direction != "incoming" || exchange.ended() {
+                return;
+            }
+            let mut body = failed_result(&exchange.request);
+            if let Some(rule) = &exchange.rule {
+                body["by_rule"] = json!(rule);
+            }
+            let Some(result) = self.reply_locked(&state, &exchange, "result", body.clone()) else {
+                return;
+            };
+            exchange.outbox.push(result);
+            exchange.result = Some(body);
+            exchange.state = "failed".into();
+            if let Some((scan, why)) = scan {
+                exchange.publish_scan = Some(scan);
+                exchange.error = Some(why);
+            }
+            exchange.updated = time::now();
+            state.exchanges.insert(cid.to_owned(), exchange.clone());
+            exchange
+        };
+        self.save_exchange(&queued);
+        self.send_now(cid).await;
+    }
+
+    /// Tries to send the exchange's waiting replies now, for at most 30 seconds; the sender tries
+    /// again later whatever is left.
+    async fn send_now(&self, cid: &str) {
+        let sent = tokio::time::timeout(Duration::from_secs(30), self.flush(cid)).await;
+        if !matches!(sent, Ok(true)) {
+            self.outbox.notify_one();
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Outgoing requests and exchanges
+
+    /// `POST /v1/obid/sphere/requests`: the owner's Obi asks another Obi.
+    pub async fn request(&self, body: &[u8]) -> Result<Value, ApiError> {
+        let map = object(body, &["to", "type", "body", "expiresIn"])?;
+        let invalid = |m: String| api(StatusCode::UNPROCESSABLE_ENTITY, m);
+        let joined = self
+            .lock()
+            .membership
+            .clone()
+            .filter(|m| m.state == "joined")
+            .ok_or_else(|| api(StatusCode::CONFLICT, "obid hasn't joined a Sphere."))?;
+        let to = text_field(&map, "to")?.to_owned();
+        let kind = text_field(&map, "type")?.to_owned();
+        if !obi_protocol::REQUEST_TYPES.contains(&kind.as_str()) {
+            return Err(invalid(format!(
+                "type is review_request, question or handoff, not {kind}."
+            )));
+        }
+        let action = map
+            .get("body")
+            .ok_or_else(|| invalid("body is the action's fields, and it's required.".into()))?
+            .clone();
+        let errors = obi_protocol::schema::errors(&format!("actions/{kind}"), &action, 5);
+        if !errors.is_empty() {
+            return Err(invalid(format!(
+                "body doesn't match the spec's {kind}: {}",
+                errors.join("; ")
+            )));
+        }
+        let expires_in = map
+            .get("expiresIn")
+            .and_then(Value::as_i64)
+            .filter(|n| (60..=obi_protocol::MAX_LIFETIME_SECONDS).contains(n))
+            .ok_or_else(|| invalid("expiresIn is 60 to 2,592,000 seconds.".into()))?;
+        if to == joined.obi_id {
+            return Err(invalid("An Obi doesn't ask itself.".into()));
+        }
+        if let Err(e) = self.read_directory().await {
+            self.note_error(&e);
+            return Err(from_client(&e));
+        }
+        let (envelope, peer_owner) = {
+            let state = self.lock();
+            let member = state
+                .directory
+                .members
+                .get(&to)
+                .ok_or_else(|| invalid(format!("{to} isn't a member of {}.", joined.sphere)))?;
+            if !member.active {
+                return Err(invalid(format!("{to} has been revoked.")));
+            }
+            if !member.accepts.contains(&kind) {
+                return Err(invalid(format!("{to}'s card doesn't accept {kind}.")));
+            }
+            let key = state
+                .key
+                .clone()
+                .ok_or_else(|| api(StatusCode::CONFLICT, "There's no Obi key."))?;
+            let id = new_uuid();
+            let now = time::now();
+            let unsigned = json!({
+                "protocol": obi_protocol::PROTOCOL,
+                "id": id,
+                "type": kind,
+                "from": joined.obi_id,
+                "to": to,
+                "sphere": joined.sphere,
+                "correlation_id": id,
+                "created_at": time::format(now),
+                "expires_at": time::format(now + expires_in),
+                "key_id": key.key_id(),
+                "body": action,
+            });
+            let Value::Object(unsigned) = unsigned else {
+                unreachable!("an envelope is an object")
+            };
+            let envelope = obi_protocol::envelope::sign(&unsigned, &key).map_err(|e| {
+                api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("obid couldn't sign it: {e}"),
+                )
+            })?;
+            // What the receiver will check, checked here first.
+            let context = obi_protocol::envelope::Context {
+                now: Some(now),
+                sphere: Some(joined.sphere.clone()),
+                receiver: Some(to.clone()),
+                keys: state.directory.keys.clone(),
+                seq: None,
+                seen_ids: Vec::new(),
+            };
+            obi_protocol::envelope::verify(&envelope, &context).map_err(|r| {
+                invalid(format!("That message wouldn't pass the spec's checks: {r}"))
+            })?;
+            (envelope, member.owner.clone())
+        };
+        let cid = envelope["id"].as_str().unwrap_or("").to_owned();
+        let mut exchange = Exchange::new("outgoing", envelope.clone(), to, Some(peer_owner));
+        exchange.state = "sent".into();
+        // Kept before it goes, so a reply that comes back at once finds it.
+        self.lock().exchanges.insert(cid.clone(), exchange.clone());
+        let sent = match self.token().await {
+            Ok(token) => match self.client() {
+                Ok(client) => client.send(&token, &envelope).await,
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        };
+        match sent {
+            Ok(sent) => {
+                self.lock().seen.insert(cid.clone());
+                let updated = self.update_exchange(&cid, |e| {
+                    e.messages.insert(
+                        0,
+                        Message {
+                            direction: "sent".into(),
+                            seq: Some(sent.seq),
+                            at: sent.recorded_at.clone(),
+                            envelope: envelope.clone(),
+                        },
+                    );
+                });
+                Ok(updated.unwrap_or(exchange).to_json())
+            }
+            Err(e) => {
+                self.lock().exchanges.remove(&cid);
+                self.exchanges.remove(&cid);
+                self.refused_token(&e);
+                Err(from_client(&e))
+            }
+        }
+    }
+
+    /// `GET /v1/obid/sphere/exchanges?limit=50`, the latest first.
+    pub fn exchanges_json(&self, limit: usize) -> Value {
+        let state = self.lock();
+        let mut all: Vec<&Exchange> = state.exchanges.values().collect();
+        all.sort_by(|a, b| {
+            b.created
+                .cmp(&a.created)
+                .then_with(|| b.correlation_id.cmp(&a.correlation_id))
+        });
+        Value::Array(all.into_iter().take(limit).map(Exchange::to_json).collect())
+    }
+
+    /// `GET /v1/obid/sphere/exchanges/{correlationId}`.
+    pub fn exchange_json(&self, cid: &str) -> Option<Value> {
+        self.lock().exchanges.get(cid).map(Exchange::to_json)
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Decisions and the inbox
+
+    /// `GET /v1/obid/decisions`, oldest first.
+    pub fn decisions_json(&self) -> Value {
+        Value::Array(
+            self.lock()
+                .decisions
+                .iter()
+                .map(Decision::to_json)
+                .collect(),
+        )
+    }
+
+    /// `DELETE /v1/obid/decisions/{id}`: `false` for one obid doesn't have.
+    pub fn forget(&self, id: &str) -> bool {
+        let decisions = {
+            let mut state = self.lock();
+            let before = state.decisions.len();
+            state.decisions.retain(|d| d.id != id);
+            if state.decisions.len() == before {
+                return false;
+            }
+            state.decisions.clone()
+        };
+        self.save_decisions(&decisions);
+        true
+    }
+
+    /// `GET /v1/inbox` (`done` false: open and put off, the longest-waiting first) or
+    /// `?state=done` (the latest settled first, at most `limit`).
+    pub fn inbox_json(&self, done: bool, limit: usize) -> Value {
+        let state = self.lock();
+        let mut items: Vec<&Item> = state
+            .inbox
+            .values()
+            .filter(|i| i.done.is_some() == done)
+            .collect();
+        if done {
+            items.sort_by(|a, b| b.done.cmp(&a.done).then_with(|| b.id.cmp(&a.id)));
+            items.truncate(limit);
+        } else {
+            items.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)));
+        }
+        Value::Array(items.into_iter().map(Item::to_json).collect())
+    }
+
+    /// `POST /v1/inbox/{id}/answer`.
+    pub async fn answer(self: &Arc<Self>, id: &str, body: &[u8]) -> Result<Value, ApiError> {
+        let map = object(body, &["answer", "done", "later"])?;
+        let one_of = "The body is exactly one of {\"answer\": …}, {\"done\": true} or {\"later\": \"<date>\"}.";
+        if map.len() != 1 {
+            return Err(api(StatusCode::UNPROCESSABLE_ENTITY, one_of));
+        }
+        enum Given {
+            Answer(String),
+            Done,
+            Later(i64),
+        }
+        let given = match map.iter().next() {
+            Some((k, Value::String(a))) if k == "answer" => {
+                let length = a.chars().count();
+                if a.trim().is_empty() || length > 2000 {
+                    return Err(api(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "An answer is 1 to 2,000 characters.",
+                    ));
+                }
+                Given::Answer(a.clone())
+            }
+            Some((k, Value::Bool(true))) if k == "done" => Given::Done,
+            Some((k, Value::String(t))) if k == "later" => {
+                Given::Later(parse_later(t).ok_or_else(|| {
+                    api(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "later is a date, like 2026-10-10T10:12:00Z.",
+                    )
+                })?)
+            }
+            _ => return Err(api(StatusCode::UNPROCESSABLE_ENTITY, one_of)),
+        };
+        let now = time::now();
+        let (item, exchange, decisions) = {
+            let mut state = self.lock();
+            let item = state
+                .inbox
+                .get(id)
+                .cloned()
+                .ok_or_else(|| api(StatusCode::NOT_FOUND, "There's no such inbox item."))?;
+            if item.done.is_some() {
+                return Err(api(StatusCode::CONFLICT, "That item is done already."));
+            }
+            if item.kind == "permission" {
+                drop(state);
+                return match given {
+                    Given::Answer(answer) => self.answer_permission_item(item, Some(answer), None),
+                    Given::Done => self.answer_permission_item(item, None, None),
+                    Given::Later(at) => self.answer_permission_item(item, None, Some(at)),
+                };
+            }
+            if let Given::Later(at) = &given {
+                let mut item = item;
+                item.later = Some(*at);
+                state.inbox.insert(item.id.clone(), item.clone());
+                drop(state);
+                self.save_item(&item);
+                return Ok(item.to_json());
+            }
+            let answer = match &given {
+                Given::Answer(a) => {
+                    if !inbox::OBI_OPTIONS.contains(&a.as_str()) {
+                        return Err(api(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!("The answer is one of: {}.", inbox::OBI_OPTIONS.join("; ")),
+                        ));
+                    }
+                    Some(a.clone())
+                }
+                _ => None,
+            };
+            let cid = item
+                .obi
+                .as_ref()
+                .and_then(|o| o["correlationId"].as_str())
+                .unwrap_or("")
+                .to_owned();
+            let mut exchange = state
+                .exchanges
+                .get(&cid)
+                .cloned()
+                .filter(|e| e.state == "inbox")
+                .ok_or_else(|| api(StatusCode::CONFLICT, "That request was settled already."))?;
+            // After its expires_at nobody acts on a request (protocol.md section 3): the clock
+            // settles it, and the answer is refused.
+            if exchange.expires_at().is_some_and(|t| t <= now) {
+                drop(state);
+                self.expire();
+                return Err(api(
+                    StatusCode::CONFLICT,
+                    "That request expired before the answer.",
+                ));
+            }
+            let chosen = answer.as_deref().unwrap_or(inbox::DECLINE);
+            let accept = chosen == inbox::ACCEPT || chosen == inbox::ACCEPT_REMEMBER;
+            let remember = chosen == inbox::ACCEPT_REMEMBER || chosen == inbox::DECLINE_REMEMBER;
+            exchange.decided_by = Some("inbox".into());
+            if accept {
+                self.accept_locked(&state, &mut exchange, None);
+            } else {
+                exchange.state = "declined".into();
+                let decline = self.reply_locked(
+                    &state,
+                    &exchange,
+                    "decline",
+                    json!({"reason": "owner_declined"}),
+                );
+                exchange.outbox.extend(decline);
+            }
+            exchange.updated = now;
+            let mut decisions = None;
+            if remember {
+                let decision = Decision {
+                    id: decisions::new_id(),
+                    kind: exchange.kind.clone(),
+                    from_owner: exchange.peer_owner.clone().unwrap_or_default(),
+                    repo: exchange.request["body"]["repo"]
+                        .as_str()
+                        .unwrap_or("*")
+                        .to_owned(),
+                    decision: if accept { "accept" } else { "decline" }.into(),
+                    created: now,
+                    inbox_item: item.id.clone(),
+                    uses: 0,
+                    last_used: None,
+                };
+                state.decisions.retain(|d| {
+                    !(d.kind == decision.kind
+                        && d.from_owner == decision.from_owner
+                        && d.repo == decision.repo)
+                });
+                state.decisions.push(decision);
+                decisions = Some(state.decisions.clone());
+            }
+            let mut item = item;
+            item.done = Some(now);
+            item.answer = answer;
+            state.inbox.insert(item.id.clone(), item.clone());
+            state.exchanges.insert(cid, exchange.clone());
+            (item, exchange, decisions)
+        };
+        if let Some(decisions) = decisions {
+            self.save_decisions(&decisions);
+        }
+        self.save_item(&item);
+        self.save_exchange(&exchange);
+        self.outbox.notify_one();
+        Ok(item.to_json())
+    }
+}
+
+/// A failed review result: no findings, no text.
+fn failed_result(request: &Value) -> Value {
+    let body = &request["body"];
+    json!({"for": "review_request", "outcome": "failed", "repo": body["repo"], "head_sha": body["head_sha"], "findings": []})
+}
+
+/// Every string in a reply's body, each with where it is (`finding 1 file`, `summary`,
+/// `condition 2 kind`): the publish gate scans all of them, the agent's paths too, not only the
+/// fields meant as prose (ARCHITECTURE.md section 4: nothing leaves until the scan has passed on
+/// everything in it).
+pub(crate) fn every_text(body: &Value) -> Vec<(String, String)> {
+    fn walk(value: &Value, place: String, out: &mut Vec<(String, String)>) {
+        match value {
+            Value::String(text) => out.push((place, text.clone())),
+            Value::Array(items) => {
+                let one = match place.as_str() {
+                    "findings" => "finding",
+                    "acceptance" => "condition",
+                    other => other,
+                }
+                .to_owned();
+                for (i, item) in items.iter().enumerate() {
+                    walk(item, format!("{one} {}", i + 1), out);
+                }
+            }
+            Value::Object(fields) => {
+                for (key, field) in fields {
+                    let here = if place.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{place} {key}")
+                    };
+                    walk(field, here, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(body, String::new(), &mut out);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The publish gate scans every string of the reply: the agent's paths as much as its prose.
+    #[test]
+    fn the_gate_reads_every_text_of_a_result() {
+        let body = json!({"for": "review_request", "outcome": "approved", "repo": "o/r",
+            "head_sha": "a".repeat(40), "summary": "S",
+            "findings": [{"id": "f-1", "severity": "nit", "file": "src/F1.js", "line": 3, "title": "T1", "detail": "D1"},
+                         {"id": "f-2", "severity": "minor", "file": "src/F2.js", "line": 4, "title": "T2", "detail": "D2", "end_line": 5}],
+            "acceptance": [{"index": 0, "kind": "tests_pass", "met": true}]});
+        let texts: std::collections::BTreeMap<String, String> =
+            every_text(&body).into_iter().collect();
+        for (place, text) in [
+            ("finding 1 file", "src/F1.js"),
+            ("finding 1 title", "T1"),
+            ("finding 1 detail", "D1"),
+            ("finding 2 file", "src/F2.js"),
+            ("finding 2 title", "T2"),
+            ("finding 2 detail", "D2"),
+            ("summary", "S"),
+            ("repo", "o/r"),
+            ("condition 1 kind", "tests_pass"),
+        ] {
+            assert_eq!(
+                texts.get(place).map(String::as_str),
+                Some(text),
+                "{place}: {texts:?}"
+            );
+        }
+        // Numbers and booleans aren't text; all 16 strings are there.
+        assert_eq!(texts.len(), 16, "{texts:?}");
+    }
+
+    #[test]
+    fn base_urls() {
+        assert!(is_base_url("http://127.0.0.1:8787"));
+        assert!(is_base_url("https://sphere.example.com"));
+        assert!(!is_base_url("http://127.0.0.1:8787/v0.1"));
+        assert!(!is_base_url("ftp://x"));
+        assert!(!is_base_url("http://"));
+        assert!(!is_base_url("http://a?b"));
+    }
+
+    #[test]
+    fn later_dates() {
+        assert_eq!(
+            parse_later("2026-10-10T10:12:00Z"),
+            time::parse("2026-10-10T10:12:00Z")
+        );
+        assert_eq!(
+            parse_later("2026-10-10T10:12:00.123Z"),
+            time::parse("2026-10-10T10:12:00Z")
+        );
+        assert_eq!(parse_later("tomorrow"), None);
+        assert_eq!(parse_later("2026-10-10T10:12:00.Z"), None);
+    }
+
+    #[test]
+    fn a_failed_result_has_no_text_and_passes_the_schema() {
+        let request = json!({"body": {"repo": "obi-e2e/fixture-app", "head_sha": "6d20146f366b9fac8907b5066c30ee39aaec09b3"}});
+        let mut body = failed_result(&request);
+        assert!(obi_protocol::schema::is_valid("actions/result", &body));
+        body["by_rule"] = json!("d-3f9a0c1b2e4d");
+        assert!(obi_protocol::schema::is_valid("actions/result", &body));
+    }
+
+    #[test]
+    fn bodies_take_only_their_fields() {
+        assert!(object(br#"{"to": "x"}"#, &["to"]).is_ok());
+        assert_eq!(
+            object(br#"{"to": "x", "prompt": "y"}"#, &["to"])
+                .err()
+                .unwrap()
+                .status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            object(b"[", &["to"]).err().unwrap().status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+}
