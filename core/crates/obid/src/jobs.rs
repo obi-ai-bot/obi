@@ -1316,6 +1316,24 @@ impl Jobs {
         self.config.home.join("logs").join(id).join(name)
     }
 
+    /// The end of the agent's stderr, when a turn died without saying why.
+    fn agent_note(&self, id: &str) -> String {
+        let text = std::fs::read_to_string(self.log_path(id, "agent.log")).unwrap_or_default();
+        let text = text.trim();
+        if text.is_empty() {
+            return String::new();
+        }
+        let tail: String = text
+            .chars()
+            .rev()
+            .take(500)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        format!(" {tail}")
+    }
+
     /// Runs a job to its end, unless it is stopped or obid shuts down.
     async fn work(self: &Arc<Self>, id: &str, signal: watch::Receiver<Signal>) {
         let Some(job) = self.get(id) else { return };
@@ -1906,8 +1924,9 @@ impl Jobs {
             let first = said.lines().next().unwrap_or("").trim();
             return Err(if first.is_empty() {
                 format!(
-                    "Claude Code stopped without finishing the review ({}).",
-                    turn.exit
+                    "Claude Code stopped without finishing the review ({}).{}",
+                    turn.exit,
+                    self.agent_note(id)
                 )
             } else {
                 format!("Claude Code couldn't finish the review: {first}")
@@ -2209,7 +2228,12 @@ impl Jobs {
             if !turn.succeeded() {
                 let first = said.lines().next().unwrap_or("").trim().to_owned();
                 return Err(if first.is_empty() {
-                    format!("{} stopped without finishing ({}).", tool.name(), turn.exit)
+                    format!(
+                        "{} stopped without finishing ({}).{}",
+                        tool.name(),
+                        turn.exit,
+                        self.agent_note(id)
+                    )
                 } else {
                     first
                 });
