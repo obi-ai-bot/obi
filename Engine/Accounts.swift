@@ -502,7 +502,19 @@ final class AccountStore {
         if headless { lines.append("export NO_OPEN_BROWSER=1") }
         lines.append("echo \(quote("Oby: sign in to the account for \(who)."))")
         if headless { lines.append("echo 'Open the link on any device.'") }
-        lines += [login, "echo", "echo 'Done? Go back to Oby. You can close this window.'"]
+        // On macOS Claude writes its login to the keychain when it can. A job cannot reach that
+        // keychain (#459). When the keychain's files are denied, Claude writes `.credentials.json`
+        // into `CLAUDE_CONFIG_DIR` instead, and that file is what the job uses. Oby never reads it.
+        #if os(macOS)
+        if account.agent == "claude" {
+            lines.append("sandbox-exec -p '(version 1)(allow default)(deny file-read* file-write* (regex \"^/Users/[^/]+/Library/Keychains\") (regex \"^/private/var/folders/.*/com.apple.security\"))' \(login)")
+        } else {
+            lines.append(login)
+        }
+        #else
+        lines.append(login)
+        #endif
+        lines += ["echo", "echo 'Done? Go back to Oby. You can close this window.'"]
         return lines.joined(separator: "\n") + "\n"
     }
 
