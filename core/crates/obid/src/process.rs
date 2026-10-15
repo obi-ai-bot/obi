@@ -1,5 +1,6 @@
-//! The processes obid starts for a job (an agent, the repository's check): each in a process group
-//! of its own, its environment made from scratch, and ended with everything it started.
+//! The processes obid starts for a job (an agent, the repository's check): each in a session (and
+//! so a process group) of its own, its environment made from scratch, and ended with everything it
+//! started.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -171,6 +172,21 @@ pub fn resolve_bin(bin: &str) -> Option<PathBuf> {
     std::env::split_paths(&tools_path())
         .map(|dir| dir.join(bin))
         .find(|candidate| crate::sandbox::is_executable(candidate))
+}
+
+/// Runs `argv` in a session of its own, in place of this process: `setsid`, then `exec`. What
+/// `obid __session -- <argv>` does ([`crate::sandbox::SESSION`]), so that a sandboxed process has
+/// no controlling terminal, and its process group (its id) holds everything it starts. Returns only
+/// when it couldn't: then nothing ran.
+pub fn exec_in_own_session(argv: &[OsString]) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    let Some((program, args)) = argv.split_first() else {
+        return std::io::Error::other("nothing to run");
+    };
+    if let Err(errno) = nix::unistd::setsid() {
+        return std::io::Error::other(format!("can't start a session of its own: {errno}"));
+    }
+    std::process::Command::new(program).args(args).exec()
 }
 
 /// Sends `signal` to the process group `pgid`; a group that's gone is fine.

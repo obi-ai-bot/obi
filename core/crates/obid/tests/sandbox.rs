@@ -280,10 +280,17 @@ fn probe_script(world: &World, port: u16) -> String {
     ));
     script.push_str("echo \"env-home $HOME\"\necho \"env-tmpdir $TMPDIR\"\n");
     // A Unix socket in the person's home: a login agent, a Docker socket.
-    script.push_str(&format!(
-        "node -e \"require('net').connect('{}').on('connect', () => {{ console.log('unix-socket ok'); process.exit(0) }}).on('error', () => {{ console.log('unix-socket no'); process.exit(0) }})\" 2>/dev/null || echo 'unix-socket node-failed'\n",
-        world.person.join("agent.sock").display()
-    ));
+    // And one outside both homes, where a terminal multiplexer's server or a login agent listens
+    // (`/tmp/tmux-<uid>/default`, `/tmp/com.apple.launchd.*/Listeners`).
+    for (label, socket) in [
+        ("unix-socket", world.person.join("agent.sock")),
+        ("unix-socket-outside", world.outside.join("server.sock")),
+    ] {
+        script.push_str(&format!(
+            "node -e \"require('net').connect('{}').on('connect', () => {{ console.log('{label} ok'); process.exit(0) }}).on('error', () => {{ console.log('{label} no'); process.exit(0) }})\" 2>/dev/null || echo '{label} node-failed'\n",
+            socket.display()
+        ));
+    }
     script
 }
 
@@ -295,7 +302,7 @@ struct Ran {
 }
 
 fn run(world: &World, spec: &Spec) -> Ran {
-    let sandbox = Sandbox::detect()
+    let sandbox = Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid")))
         .unwrap_or_else(|why| panic!("this machine can't make the job sandbox: {why}"));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -316,6 +323,8 @@ fn run(world: &World, spec: &Spec) -> Ran {
     };
     let socket = std::os::unix::net::UnixListener::bind(world.person.join("agent.sock")).unwrap();
     socket.set_nonblocking(true).unwrap();
+    let server = std::os::unix::net::UnixListener::bind(world.outside.join("server.sock")).unwrap();
+    server.set_nonblocking(true).unwrap();
     let script = probe_script(world, port);
     let argv: Vec<OsString> = vec![
         "/bin/sh".into(),
@@ -338,7 +347,7 @@ fn run(world: &World, spec: &Spec) -> Ran {
         .unwrap();
     done.store(true, Ordering::Relaxed);
     watcher.join().unwrap();
-    let socket_reached = socket.accept().is_ok();
+    let socket_reached = socket.accept().is_ok() || server.accept().is_ok();
     let raw = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -423,9 +432,10 @@ fn the_same_fences(ran: &Ran, world: &World, commits: bool) {
     }
     expect(ran, "git head", "ok");
     expect(ran, "unix-socket", "no");
+    expect(ran, "unix-socket-outside", "no");
     assert!(
         !ran.socket_reached,
-        "a socket in the person's home was reached\n{}",
+        "a socket in the person's home or outside was reached\n{}",
         ran.raw
     );
     expect(ran, "git commit", if commits { "ok" } else { "no" });
@@ -507,4 +517,137 @@ fn a_committing_job_commits_without_writing_the_clone() {
         "its commit is in the job's own objects"
     );
     assert!(!world.common.join("objects").join(dir).join(file).exists());
+}
+
+/// What the terminal-reaching probe printed, and what the shell holding that terminal read after it.
+fn through_a_terminal(world: &World, spec: &Spec, probe: &str) -> String {
+    let sandbox = Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid")))
+        .unwrap_or_else(|why| panic!("this machine can't make the job sandbox: {why}"));
+    let argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), probe.into()];
+    let argv = sandbox.wrap(spec, &argv);
+    let root = world.outside.clone();
+    let mut list: Vec<u8> = Vec::new();
+    for arg in &argv {
+        list.extend_from_slice(arg.as_encoded_bytes());
+        list.push(0);
+    }
+    std::fs::write(root.join("argv"), list).unwrap();
+    // The shell that holds the terminal starts the job's process as obid does (its stdin null),
+    // then reads one line from the terminal: anything the job pushed into it.
+    std::fs::write(
+        root.join("holder.sh"),
+        "xargs -0 sh -c '\"$@\" </dev/null' sh < \"$1\"\nIFS= read -r -t 3 line\necho \"outside-read:[$line]\"\n",
+    )
+    .unwrap();
+    let holder = format!(
+        "/bin/bash {} {}",
+        root.join("holder.sh").display(),
+        root.join("argv").display()
+    );
+    let mut command = Command::new("script");
+    if cfg!(target_os = "macos") {
+        command.args(["-q", "/dev/null", "/bin/sh", "-c", &holder]);
+    } else {
+        command.args(["-qec", &holder, "/dev/null"]);
+    }
+    let env = obid::process::sandbox_env(&obid::process::tools_path(), &spec.temp, &[]);
+    let mut child = command
+        .env_clear()
+        .envs(env)
+        .current_dir(&world.worktree)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The terminal's own input stays open (no end of file) until the holder is done.
+    let _input = child.stdin.take();
+    let output = child.wait_with_output().unwrap();
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// A job's process has no controlling terminal: when obid was started from a terminal, nothing the
+/// agent or the check runs can open it, or push keystrokes into the shell that holds it (TIOCSTI),
+/// which would run them outside the sandbox.
+#[test]
+fn a_job_cannot_reach_the_terminal_obid_was_started_from() {
+    let world = world("tty");
+    for network in [false, true] {
+        let spec = spec(&world, network, false, !network);
+        let probe = "if ( : < /dev/tty ) 2>/dev/null; then echo 'tty open'; else echo 'tty none'; fi\n\
+            python3 -c 'import fcntl, termios\nf = open(\"/dev/tty\", \"rb\")\nfor c in b\"echo INJECTED-BY-JOB\\n\": fcntl.ioctl(f, termios.TIOCSTI, bytes([c]))\nprint(\"tiocsti done\")' 2>/dev/null || echo 'tiocsti refused'\n";
+        let ran = through_a_terminal(&world, &spec, probe);
+        assert!(
+            ran.contains("outside-read:"),
+            "the terminal's shell never read\n{ran}"
+        );
+        assert!(
+            ran.contains("tty none"),
+            "the job opened the terminal\n{ran}"
+        );
+        assert!(
+            !ran.contains("tiocsti done") && !ran.contains("INJECTED-BY-JOB]"),
+            "the job pushed keystrokes into the terminal\n{ran}"
+        );
+    }
+}
+
+/// On macOS, nothing the job runs has LaunchServices open an app (one it wrote in its worktree,
+/// which would run outside the sandbox), nor sends Apple events (Finder writing for it), for the
+/// check or for an agent.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_job_cannot_have_another_process_run_or_write_for_it() {
+    let world = world("open");
+    let sandbox = Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))).unwrap();
+    for network in [false, true] {
+        let spec = spec(&world, network, false, !network);
+        let marker = world.outside.join("via-open-app");
+        let folder = world.outside.join("via-finder");
+        let probe = format!(
+            "mkdir -p Probe.app/Contents/MacOS || exit 9\n\
+             printf '%s' '<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>Probe</string><key>CFBundleIdentifier</key><string>invalid.obid.sandbox-probe</string><key>CFBundlePackageType</key><string>APPL</string><key>LSUIElement</key><true/></dict></plist>' > Probe.app/Contents/Info.plist\n\
+             printf '#!/bin/sh\\ntouch \"%s\"\\n' '{marker}' > Probe.app/Contents/MacOS/Probe\n\
+             chmod +x Probe.app/Contents/MacOS/Probe\n\
+             if /usr/bin/open -g -j ./Probe.app 2>/dev/null; then echo 'open ok'; else echo 'open no'; fi\n\
+             if /usr/bin/osascript -e 'tell application \"Finder\" to make new folder at (POSIX file \"{outside}\" as alias) with properties {{name:\"via-finder\"}}' >/dev/null 2>&1; then echo 'appleevent ok'; else echo 'appleevent no'; fi\n\
+             rm -rf Probe.app\n",
+            marker = marker.display(),
+            outside = world.outside.display(),
+        );
+        let argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(), probe.into()];
+        let argv = sandbox.wrap(&spec, &argv);
+        let env = obid::process::sandbox_env(&obid::process::tools_path(), &spec.temp, &[]);
+        let output = Command::new(&argv[0])
+            .args(&argv[1..])
+            .env_clear()
+            .envs(env)
+            .current_dir(&world.worktree)
+            .output()
+            .unwrap();
+        let printed = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // An app that was opened runs a moment later.
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            printed.contains("open no"),
+            "LaunchServices opened the app\n{printed}"
+        );
+        assert!(
+            printed.contains("appleevent no"),
+            "an Apple event went out\n{printed}"
+        );
+        assert!(
+            !marker.exists(),
+            "the app the job wrote ran outside the sandbox\n{printed}"
+        );
+        assert!(!folder.exists(), "Finder wrote for the job\n{printed}");
+    }
 }

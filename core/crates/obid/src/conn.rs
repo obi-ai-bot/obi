@@ -80,8 +80,9 @@ impl Conn {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .process_group(0)
             .kill_on_drop(true);
+        // No process group set here: the command line is the job sandbox's (`Sandbox::wrap`), whose
+        // first program starts a session of its own, and so a process group whose id is the child's.
         let mut child = command.spawn()?;
         let pgid = child.id().unwrap_or(0);
         let stdin = child.stdin.take();

@@ -14,20 +14,43 @@
 //!   database, `keys/`, `api-token`, other clones or other worktrees.
 //! - **Network**: none for the check; an agent keeps the network any agent has (its model's API).
 //!
+//! - **No terminal, no one to ask**: the process leads a session of its own, so it has no
+//!   controlling terminal (none to push keystrokes into with `TIOCSTI` when obid was started from a
+//!   shell); on macOS it can't have LaunchServices open an app, send Apple events, submit a launchd
+//!   job, post input events through the window server, or connect to a Unix socket but the DNS
+//!   resolver's and its own: each of those would run something outside the sandbox for it.
+//!
 //! When the sandbox can't be made on this machine, nothing runs: [`Sandbox::detect`] says why, and
 //! the job fails saying so.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-/// The tool that makes the sandbox on this machine.
+/// The job sandbox on this machine: the tool that makes it, and the program that starts what it
+/// runs in a session of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Sandbox {
+pub struct Sandbox {
+    tool: Tool,
+    /// obid's own executable: `obid __session -- <program> <arguments>` calls `setsid` and runs
+    /// the program ([`SESSION`]).
+    session: PathBuf,
+}
+
+/// The tool that makes the sandbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Tool {
     /// `bwrap`, at this path.
     Bubblewrap(PathBuf),
     /// `/usr/bin/sandbox-exec`.
     Seatbelt(PathBuf),
 }
+
+/// obid's argument that runs the rest of its command line in a session of its own:
+/// `obid __session -- <program> <arguments>` ([`crate::process::exec_in_own_session`]). Not a
+/// command for people: obid starts every sandboxed process through it, because a session of its
+/// own has no controlling terminal, and starting one needs `setsid` between `fork` and `exec`,
+/// which obid's safe Rust can't do in place.
+pub const SESSION: &str = "__session";
 
 /// What one sandboxed process may touch.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -57,12 +80,23 @@ pub struct Spec {
 }
 
 impl Sandbox {
-    /// The sandbox this machine can make, or why it can't.
-    pub fn detect() -> Result<Sandbox, String> {
+    /// The sandbox this machine can make, or why it can't. `obid` is obid's own executable (what
+    /// starts every sandboxed process in a session of its own: [`SESSION`]).
+    pub fn detect(obid: &Path) -> Result<Sandbox, String> {
+        if !is_executable(obid) {
+            return Err(format!(
+                "obid can't find its own executable ({}), which starts every sandboxed process.",
+                obid.display()
+            ));
+        }
+        let session = obid.to_path_buf();
         if cfg!(target_os = "macos") {
             let path = PathBuf::from("/usr/bin/sandbox-exec");
             if path.exists() {
-                return Ok(Sandbox::Seatbelt(path));
+                return Ok(Sandbox {
+                    tool: Tool::Seatbelt(path),
+                    session,
+                });
             }
             return Err(
                 "/usr/bin/sandbox-exec isn't on this Mac, so obid can't make the job sandbox."
@@ -95,7 +129,10 @@ impl Sandbox {
                 .stderr(std::process::Stdio::piped())
                 .output();
             return match tried {
-                Ok(output) if output.status.success() => Ok(Sandbox::Bubblewrap(bwrap)),
+                Ok(output) if output.status.success() => Ok(Sandbox {
+                    tool: Tool::Bubblewrap(bwrap),
+                    session,
+                }),
                 Ok(output) => Err(format!(
                     "bubblewrap can't make a sandbox on this machine: {}",
                     String::from_utf8_lossy(&output.stderr).trim()
@@ -107,24 +144,27 @@ impl Sandbox {
     }
 
     /// The command line that runs `argv` inside the sandbox `spec` describes: the program, then its
-    /// arguments. The caller sets the working directory to `spec.worktree` and the environment.
+    /// arguments. The caller sets the working directory to `spec.worktree` and the environment, and
+    /// starts it as it is, in obid's own process group: the first program (obid, [`SESSION`]) makes
+    /// a session of its own, whose process group's id is the started process's id, so signalling
+    /// that group reaches everything it starts.
     pub fn wrap(&self, spec: &Spec, argv: &[OsString]) -> Vec<OsString> {
         let spec = spec.canonical();
-        match self {
-            Sandbox::Bubblewrap(bwrap) => {
-                let mut out: Vec<OsString> = vec![bwrap.clone().into()];
+        let mut out: Vec<OsString> = vec![self.session.clone().into(), SESSION.into(), "--".into()];
+        match &self.tool {
+            Tool::Bubblewrap(bwrap) => {
+                out.push(bwrap.clone().into());
                 out.extend(bubblewrap_args(&spec));
                 out.push("--".into());
-                out.extend(argv.iter().cloned());
-                out
             }
-            Sandbox::Seatbelt(sandbox_exec) => {
-                let mut out: Vec<OsString> = vec![sandbox_exec.clone().into(), "-p".into()];
+            Tool::Seatbelt(sandbox_exec) => {
+                out.push(sandbox_exec.clone().into());
+                out.push("-p".into());
                 out.push(seatbelt_profile(&spec).into());
-                out.extend(argv.iter().cloned());
-                out
             }
         }
+        out.extend(argv.iter().cloned());
+        out
     }
 }
 
@@ -220,10 +260,15 @@ impl Spec {
 fn bubblewrap_args(spec: &Spec) -> Vec<OsString> {
     let mut args: Vec<OsString> = Vec::new();
     let mut push = |items: &[&std::ffi::OsStr]| args.extend(items.iter().map(|s| s.to_os_string()));
+    // A session of its own inside too (no controlling terminal, whatever started bwrap), and
+    // everything inside ends when bwrap does: its process group is obid's to signal, but what runs
+    // inside is in another session.
     push(&[
         "--unshare-pid".as_ref(),
         "--unshare-ipc".as_ref(),
         "--unshare-uts".as_ref(),
+        "--new-session".as_ref(),
+        "--die-with-parent".as_ref(),
     ]);
     if !spec.network {
         push(&["--unshare-net".as_ref()]);
@@ -302,17 +347,18 @@ fn bubblewrap_args(spec: &Spec) -> Vec<OsString> {
 
 /// A Seatbelt profile: everything allowed but what follows (later rules win). No writes but the
 /// job's own; no reads in a hidden folder but the job's own and the tools', with the folders above
-/// them visible by name only (their metadata, so paths resolve), never listed; no network for the
-/// check.
+/// them visible by name only (their metadata, so paths resolve), never listed; nothing that has
+/// another process run or write something for it; no network for the check.
 fn seatbelt_profile(spec: &Spec) -> String {
     let mut profile =
         String::from("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*");
     for path in spec.writable() {
         profile.push_str(&format!(" (subpath {})", sbpl_string(&path)));
     }
-    // What a process writes to that isn't a file: its terminal and the null device.
+    // What a process writes to that isn't a file: the null device, its own descriptors. Not a
+    // terminal: it has none (it leads a session of its own), and the person's are theirs.
     profile.push_str(
-        " (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/fd/\"))\n",
+        " (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/fd/\"))\n",
     );
     // The pointers that say where the worktree's git data is, and the way back, stay as obid wrote
     // them (bubblewrap binds them read-only).
@@ -356,22 +402,37 @@ fn seatbelt_profile(spec: &Spec) -> String {
         }
         profile.push_str(")\n");
     }
-    // A Unix socket is reached by connecting, not by reading: none inside a hidden folder, and
-    // not Docker's, which runs anything as this user.
-    profile.push_str("(deny network-outbound");
-    for hidden in &spec.hidden {
-        profile.push_str(&format!(
-            " (remote unix-socket (subpath {}))",
-            sbpl_string(hidden)
-        ));
+    // Others who would run something, or write, for the job, outside its sandbox: LaunchServices
+    // opening an app (one the job wrote, say), Apple events (Terminal's `do script`, Finder),
+    // launchd jobs (`launchctl submit`), input events posted through the window server into the
+    // person's terminal.
+    profile.push_str(
+        "(deny lsopen)\n(deny appleevent-send)\n(deny job-creation)\n(deny hid-control)\n",
+    );
+    profile.push_str("(deny mach-lookup");
+    for service in WINDOW_SERVER {
+        profile.push_str(&format!(" (global-name {})", sbpl_text(service)));
     }
-    for socket in DOCKER_SOCKETS {
+    profile.push_str(")\n");
+    // And whatever listens on a Unix socket: a terminal multiplexer's server, a login agent,
+    // Docker's daemon, an editor's command socket. A socket is reached by connecting, not by
+    // reading, so the file rules above don't hold it back. None but the DNS resolver's (an agent
+    // names its model's API by host name) and the job's own, in its own folders.
+    profile.push_str("(deny network-outbound (remote unix-socket))\n");
+    profile.push_str("(allow network-outbound");
+    for socket in RESOLVER_SOCKETS {
         profile.push_str(&format!(
             " (remote unix-socket (path-literal {}))",
-            sbpl_string(Path::new(socket))
+            sbpl_text(socket)
         ));
     }
-    profile.push_str(" (remote unix-socket (path-literal \"/private/var/run/docker.sock\")))\n");
+    for path in spec.writable() {
+        profile.push_str(&format!(
+            " (remote unix-socket (subpath {}))",
+            sbpl_string(&path)
+        ));
+    }
+    profile.push_str(")\n");
     if !spec.network {
         profile.push_str("(deny network*)\n");
     }
@@ -381,9 +442,20 @@ fn seatbelt_profile(spec: &Spec) -> String {
 /// Where Docker's socket is.
 const DOCKER_SOCKETS: [&str; 2] = ["/run/docker.sock", "/var/run/docker.sock"];
 
+/// The DNS resolver's socket on macOS (mDNSResponder): every host name lookup goes through it.
+const RESOLVER_SOCKETS: [&str; 2] = ["/private/var/run/mDNSResponder", "/var/run/mDNSResponder"];
+
+/// The window server's services on macOS, which post input events (keystrokes into the person's
+/// terminal) for whoever asks with the right to.
+const WINDOW_SERVER: [&str; 2] = ["com.apple.windowserver.active", "com.apple.windowserver"];
+
 /// A path as an SBPL string literal.
 fn sbpl_string(path: &Path) -> String {
-    let text = path.to_string_lossy();
+    sbpl_text(&path.to_string_lossy())
+}
+
+/// Text as an SBPL string literal.
+fn sbpl_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
     for c in text.chars() {
@@ -684,6 +756,18 @@ mod tests {
         assert!(profile.contains("(literal \"/h/worktrees\")"));
         assert!(!profile.contains("(subpath \"/h/clones/o/n/.git/objects\")"));
         assert!(profile.ends_with("(deny network*)\n"));
+        for rule in [
+            "(deny lsopen)",
+            "(deny appleevent-send)",
+            "(deny job-creation)",
+            "(deny mach-lookup (global-name \"com.apple.windowserver.active\")",
+            "(deny network-outbound (remote unix-socket))",
+            "(remote unix-socket (path-literal \"/private/var/run/mDNSResponder\"))",
+            "(remote unix-socket (subpath \"/h/tmp/j1\"))",
+        ] {
+            assert!(profile.contains(rule), "{rule}\n{profile}");
+        }
+        assert!(!profile.contains("/dev/tty"), "{profile}");
         assert_eq!(sbpl_string(Path::new("/a \"b\\")), "\"/a \\\"b\\\\\"");
     }
 
@@ -702,6 +786,8 @@ mod tests {
             .collect();
         let at = |s: &str| args.iter().position(|a| a == s).unwrap();
         assert!(args.contains(&"--unshare-net".to_owned()));
+        assert!(args.contains(&"--new-session".to_owned()));
+        assert!(args.contains(&"--die-with-parent".to_owned()));
         assert!(at("--tmpfs") < at("--bind"));
         assert_eq!(
             args[args.len() - 2..],

@@ -148,7 +148,9 @@ pub async fn serve(
         measured = measuring => measured.map_err(|e| StartError::Serve(std::io::Error::other(e)))?,
     };
     let events = events::Events::new();
-    let sandbox = sandbox::Sandbox::detect();
+    let sandbox = std::env::current_exe()
+        .map_err(|e| format!("obid can't find its own executable: {e}"))
+        .and_then(|obid| sandbox::Sandbox::detect(&obid));
     if let Err(why) = &sandbox {
         tracing::warn!("no job sandbox, so no job will run: {why}");
     }

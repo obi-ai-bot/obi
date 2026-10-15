@@ -139,7 +139,12 @@ async fn the_stub_agent_reviews_the_fixture_in_the_sandbox() {
     obid::prepare_home(&config).unwrap();
     let events = Events::new();
     let mut follow = events.subscribe();
-    let jobs = Jobs::open(config, events, Sandbox::detect()).unwrap();
+    let jobs = Jobs::open(
+        config,
+        events,
+        Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))),
+    )
+    .unwrap();
     let job = jobs.start_obi_review(request()).unwrap();
     assert_eq!(job.kind, "review");
     assert_eq!(job.repo, "obi-e2e/fixture-app");
@@ -232,7 +237,12 @@ async fn without_a_check_tests_pass_is_not_met() {
     let remote = fixture(&folder.0.join("fixture"));
     let config = config(&folder.0, &remote, None);
     obid::prepare_home(&config).unwrap();
-    let jobs = Jobs::open(config, Events::new(), Sandbox::detect()).unwrap();
+    let jobs = Jobs::open(
+        config,
+        Events::new(),
+        Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))),
+    )
+    .unwrap();
     let job = jobs.start_obi_review(request()).unwrap();
     let ended = tokio::time::timeout(Duration::from_secs(120), jobs.wait(&job.id))
         .await
@@ -263,7 +273,12 @@ async fn the_check_has_no_network() {
     let config = config(&folder.0, &remote, Some(&check));
     let home = config.home.clone();
     obid::prepare_home(&config).unwrap();
-    let jobs = Jobs::open(config, Events::new(), Sandbox::detect()).unwrap();
+    let jobs = Jobs::open(
+        config,
+        Events::new(),
+        Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))),
+    )
+    .unwrap();
     let job = jobs.start_obi_review(request()).unwrap();
     let ended = tokio::time::timeout(Duration::from_secs(120), jobs.wait(&job.id))
         .await
@@ -314,7 +329,12 @@ async fn a_commit_the_remote_doesnt_have_fails_the_job() {
     let remote = fixture(&folder.0.join("fixture"));
     let config = config(&folder.0, &remote, Some("node --test"));
     obid::prepare_home(&config).unwrap();
-    let jobs = Jobs::open(config, Events::new(), Sandbox::detect()).unwrap();
+    let jobs = Jobs::open(
+        config,
+        Events::new(),
+        Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))),
+    )
+    .unwrap();
     let mut request = request();
     request.body["head_sha"] = json!("0123456789012345678901234567890123456789");
     let job = jobs.start_obi_review(request).unwrap();

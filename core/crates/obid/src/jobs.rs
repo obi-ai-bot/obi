@@ -1919,8 +1919,9 @@ pub async fn run_check(
         .stdin(std::process::Stdio::null())
         .stdout(writer.try_clone()?)
         .stderr(writer)
-        .process_group(0)
         .kill_on_drop(true);
+    // No process group set here: the command line is the job sandbox's (`Sandbox::wrap`), whose
+    // first program starts a session of its own, and so a process group whose id is the child's.
     let mut child = command.spawn()?;
     // The writing ends live in the child now: the reader ends when it (and what it started) does.
     drop(command);
