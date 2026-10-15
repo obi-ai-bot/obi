@@ -267,17 +267,19 @@ fn remote_kind(remote: &str) -> Option<RemoteKind> {
     // git reads a remote with a `/` before its first `:` as a local path, not ssh
     // (`/tmp/x@h:p`, `../srv/x@h:r.git`): that is refused here, or it would get round
     // `allowFileRemotes`. So is `\`, Windows' other separator.
-    if !remote.contains("://") {
-        if let Some((user_host, path)) = remote.split_once(':') {
-            if user_host.contains(['/', '\\']) {
-                return None;
-            }
-            if let Some((user, host)) = user_host.split_once('@') {
-                if user_ok(user) && host_name_ok(host) && !path.is_empty() && !path.starts_with('-')
-                {
-                    return Some(RemoteKind::Ssh);
-                }
-            }
+    if !remote.contains("://")
+        && let Some((user_host, path)) = remote.split_once(':')
+    {
+        if user_host.contains(['/', '\\']) {
+            return None;
+        }
+        if let Some((user, host)) = user_host.split_once('@')
+            && user_ok(user)
+            && host_name_ok(host)
+            && !path.is_empty()
+            && !path.starts_with('-')
+        {
+            return Some(RemoteKind::Ssh);
         }
     }
     None

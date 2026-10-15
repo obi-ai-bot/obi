@@ -164,6 +164,11 @@ fn registry() -> &'static jsonschema::Registry<'static> {
 }
 
 fn document(name: &str) -> Value {
+    // `common#/$defs/finding`: one definition inside a schema, by reference.
+    if let Some((schema, pointer)) = name.split_once('#') {
+        assert!(exists(schema), "no schema {schema}");
+        return serde_json::json!({"$ref": format!("{SCHEMA_BASE}{schema}.schema.json#{pointer}")});
+    }
     let text = SCHEMAS
         .iter()
         .find(|(n, _)| *n == name)
@@ -204,7 +209,8 @@ pub fn exists(name: &str) -> bool {
 }
 
 /// What is wrong with `value` against the schema `name`, one line each, at most `limit`; empty
-/// when it matches. Panics on a name that isn't one of [`SCHEMAS`]: callers name them in code.
+/// when it matches. `name` is one of [`SCHEMAS`], or one of its definitions, like
+/// `common#/$defs/finding`. Panics on any other: callers name them in code.
 pub fn errors(name: &str, value: &Value, limit: usize) -> Vec<String> {
     validator(name)
         .iter_errors(value)
@@ -244,6 +250,14 @@ mod tests {
         assert!(!is_valid(
             "wire/jws-header",
             &json!({"alg": "none", "kid": "x", "typ": "JWT"})
+        ));
+        assert!(is_valid(
+            "common#/$defs/finding",
+            &json!({"id": "f-1", "severity": "nit", "file": "a.js", "line": 1, "title": "t", "detail": "d"})
+        ));
+        assert!(!is_valid(
+            "common#/$defs/finding",
+            &json!({"id": "f-1", "severity": "nit", "file": "../a.js", "line": 1, "title": "t", "detail": "d"})
         ));
     }
 

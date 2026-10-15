@@ -1,5 +1,6 @@
-//! The runner API (docs/runner-api.md) as obid serves it. This first version has the gate every
-//! request goes through and `GET /v1/status`; the rest of the API joins the same router.
+//! The runner API (docs/runner-api.md) as obid serves it: the gate every request goes through,
+//! `GET /v1/status`, the jobs (`/v1/jobs…`, `POST /v1/stop-all`) and the event stream. The rest of
+//! the API joins the same router.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,10 +11,12 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::Serialize;
 
 use crate::config::Config;
+use crate::events::Events;
+use crate::jobs::Jobs;
 use crate::token;
 
 /// The runner API version obid serves: the Swift runner's (Runner/API.swift), which the apps
@@ -26,6 +29,10 @@ pub struct Shared {
     pub token: String,
     pub host: String,
     pub cleanup: Cleanup,
+    pub jobs: Arc<Jobs>,
+    pub events: Events,
+    /// True once obid is stopping: streams end.
+    pub stopping: tokio::sync::watch::Receiver<bool>,
 }
 
 /// What `status.cleanup` says: the job worktrees' folder and the disk space it took when last
@@ -66,6 +73,16 @@ impl Cleanup {
 pub fn router(shared: Arc<Shared>) -> Router {
     Router::new()
         .route("/v1/status", get(status))
+        .route(
+            "/v1/jobs",
+            get(crate::routes::jobs).post(crate::routes::dispatch),
+        )
+        .route("/v1/jobs/{id}", get(crate::routes::job))
+        .route("/v1/jobs/{id}/wait", get(crate::routes::wait))
+        .route("/v1/jobs/{id}/stop", post(crate::routes::stop))
+        .route("/v1/jobs/{id}/dismiss", post(crate::routes::dismiss))
+        .route("/v1/stop-all", post(crate::routes::stop_all))
+        .route("/v1/events", get(crate::routes::events))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(shared.clone(), gate))
@@ -340,7 +357,7 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         accounts,
         models: Models::defaults(),
         max_running: MAX_RUNNING,
-        running: 0,
+        running: shared.jobs.running() as u32,
         cleared_at: None,
         // obid has no GitHub app: its own GitHub calls, once it makes any, go as the owner.
         github: "owner",
@@ -387,10 +404,10 @@ fn disk_usage_unless(path: &Path, cancelled: &AtomicBool) -> u64 {
             let _ = &mut seen;
             total += meta.len();
         }
-        if meta.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&next) {
-                stack.extend(entries.flatten().map(|e| e.path()));
-            }
+        if meta.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&next)
+        {
+            stack.extend(entries.flatten().map(|e| e.path()));
         }
     }
     total

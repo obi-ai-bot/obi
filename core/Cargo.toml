@@ -9,7 +9,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/obi-ai-bot/obi"
 publish = false
@@ -41,7 +41,10 @@ ryu-js = "1.0.3"
 # Ids for jobs and messages.
 uuid = { version = "1.28.0", features = ["v4"] }
 # Process groups for agents and checks: SIGTERM, then SIGKILL, to everything one started.
-nix = { version = "0.31", features = ["signal", "process"] }
+nix = { version = "0.31", features = ["signal", "process", "user"] }
+# Streamed answers: the event stream and `GET /v1/jobs/{id}/wait`.
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

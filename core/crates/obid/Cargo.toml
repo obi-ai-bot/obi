@@ -9,7 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+obi-protocol = { path = "../obi-protocol" }
 axum.workspace = true
+futures-util.workspace = true
+jsonschema.workspace = true
+nix.workspace = true
+tokio-stream.workspace = true
 getrandom.workspace = true
 gethostname.workspace = true
 hex.workspace = true
