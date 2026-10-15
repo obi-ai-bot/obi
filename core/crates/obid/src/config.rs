@@ -37,11 +37,20 @@ pub enum ConfigError {
     Invalid { path: PathBuf, problem: String },
 }
 
+/// Where obid listens when the configuration doesn't say: on macOS, where the Mac app looks for
+/// the runner on the same Mac (127.0.0.1:7777); elsewhere `listen` is required.
+pub const DEFAULT_LISTEN: Option<&str> = if cfg!(target_os = "macos") {
+    Some("127.0.0.1:7777")
+} else {
+    None
+};
+
 /// The file as written. Validated into [`Config`].
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct File {
-    listen: String,
+    #[serde(default)]
+    listen: Option<String>,
     home: PathBuf,
     owner: String,
     #[serde(default)]
@@ -141,19 +150,23 @@ impl Config {
         let file: File = serde_json::from_str(text).map_err(Problem::Parse)?;
         let invalid = |problem: String| Err(Problem::Invalid(problem));
 
-        let listen: SocketAddr = match file.listen.parse() {
+        let Some(listen_text) = file.listen.or_else(|| DEFAULT_LISTEN.map(str::to_owned)) else {
+            return invalid(
+                "listen is missing: give an address on 127.0.0.1 with a port, like 127.0.0.1:7811."
+                    .into(),
+            );
+        };
+        let listen: SocketAddr = match listen_text.parse() {
             Ok(address) => address,
             Err(_) => {
                 return invalid(format!(
-                    "listen is {:?}: it must be an address on 127.0.0.1 with a port, like 127.0.0.1:7811.",
-                    file.listen
+                    "listen is {listen_text:?}: it must be an address on 127.0.0.1 with a port, like 127.0.0.1:7811."
                 ));
             }
         };
         if listen.ip() != Ipv4Addr::LOCALHOST {
             return invalid(format!(
-                "listen is {:?}: obid binds only 127.0.0.1, like 127.0.0.1:7811.",
-                file.listen
+                "listen is {listen_text:?}: obid binds only 127.0.0.1, like 127.0.0.1:7811."
             ));
         }
         if !file.home.is_absolute() {
@@ -458,9 +471,19 @@ mod tests {
 
     #[test]
     fn requires_listen_home_and_owner() {
-        for key in ["listen", "home", "owner"] {
+        for key in ["home", "owner"] {
             let text = with(serde_json::json!({ key: null }));
             assert!(problem(&text).contains(key), "{key}");
+        }
+        // `listen` is required but on macOS, where it is 127.0.0.1:7777 when not given.
+        let text = with(serde_json::json!({ "listen": null }));
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                Config::parse(&text).unwrap().listen,
+                "127.0.0.1:7777".parse().unwrap()
+            );
+        } else {
+            assert!(problem(&text).contains("listen"));
         }
         assert!(problem(&with(serde_json::json!({"owner": " "}))).contains("owner"));
     }
