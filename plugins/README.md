@@ -4,7 +4,20 @@ Each folder here is one optional plug-in. Its folder name is its id, and it hold
 
 - **Installed** into `obid`'s `home/plugins/<id>/`. `obid` reads that folder at start and lists every plug-in it finds (`GET /v1/obid/plugins`).
 - **Disabled** until the owner enables one with `PUT /v1/obid/plugins/{id}` and `{"enabled": true}`. No manifest field can enable a plug-in by itself.
-- **Sandboxed** when it has a process (`run`): bubblewrap on Linux, Seatbelt on macOS. The process can write only to `home/plugin-data/<id>/`, can read only its own folder of `obid`'s home, and gets only `PATH`, `HOME`, `LANG` and `TMPDIR` in its environment. It has the network, but not the machine's local services, because one of them could start a process outside the sandbox for it: on macOS no LaunchServices (`open`), no Apple Events, no Mach services but those for users, logging, name lookups, TLS trust and preferences, no Unix socket outside its data folder, no signal to a process outside its sandbox; on Linux `/tmp`, `/var/tmp` and `/run` are empty and read-only (the resolver's folder under `/run` is bound back in); on macOS `/tmp`, `/var/tmp` and `/var/folders` (every user's `TMPDIR`) can't be read. Use `TMPDIR` for temporary files. One thing the macOS sandbox can't stop: a process can read the arguments and environment of the user's other processes (not Apple's own), `obid`'s included, so no secret belongs in an environment there.
+- **Sandboxed** when it has a process (`run`): bubblewrap on Linux, Seatbelt on macOS. The process can write only to `home/plugin-data/<id>/`, can read only its own folder of `obid`'s home, and gets only `PATH`, `HOME`, `LANG` and `TMPDIR` in its environment. It has the network, but not the machine's local services, because one of them could start a process outside the sandbox for it, or read or write the person's things for it:
+  - on macOS: no LaunchServices (`open`), no Apple Events, no Mach services but those for users, logging, name lookups and TLS trust; no preferences (`cfprefsd` and preference reads and writes are denied, and `/Users` is hidden, so the person's `~/Library/Preferences` can't be read either), no pasteboard, no keychain (`securityd`, `secd`, SecurityAgent); no Unix socket outside its data folder; no signal to a process outside its sandbox; `/tmp`, `/var/tmp` and `/var/folders` (every user's `TMPDIR`) can't be read;
+  - on Linux: `/tmp`, `/var/tmp` and `/run` are empty and read-only (the resolver's folder under `/run` is bound back in).
+
+  Use `TMPDIR` for temporary files.
+- **Restarted** when it fails (it exits, or doesn't answer `initialize` or a `ping` in time): after 1 second the first time in a row, after 2 seconds the second; its third failure in a row makes it `failed`, and it stays stopped until the owner enables it again.
+- **Stopped with everything it started.** When it is disabled, when `obid` stops and each time it fails, no process it started is left running, also none that called `setsid`: on Linux its sandbox's PID namespace ends with it; on macOS the sandbox's first process, a watcher, kills every process in the sandbox.
+
+What the macOS sandbox can't stop:
+
+- A process can read the arguments and environment of the user's other processes (not Apple's own), `obid`'s included, so no secret belongs in an environment there.
+- The plug-in's processes can signal the watcher, since it is in their sandbox: a plug-in that kills its watcher before it stops can leave processes it started outside its process group running. `obid` then ends the process group and logs that the watcher was killed.
+
+On Linux, Unix sockets in the abstract namespace (no file) stay reachable, because the plug-in shares the machine's network namespace.
 
 | Plug-in | Kind | |
 |---|---|---|

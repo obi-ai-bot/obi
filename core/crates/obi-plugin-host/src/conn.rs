@@ -476,10 +476,9 @@ enum Level {
 /// data: logged under the target `obi_plugin` with its id, never acted on, and as one line of
 /// the log ([`log_text`]), so a plug-in can't write what looks like another line of `obid`'s.
 ///
-/// Not done here yet: taking the vault's secrets out of the line (docs/ARCHITECTURE.md 5.4).
-/// The host has no vault and section 5.5's signatures give it none, so where that happens
-/// (a redactor given to the host, or `obid`'s log for the `obi_plugin` target) is the lead's
-/// decision to make.
+/// The vault's secrets, and their encoded forms, are taken out by `obid`'s log layer for the
+/// `obi_plugin` target before anything is written (docs/ARCHITECTURE.md 5.4, decision D6): the
+/// host has no vault, logs only to that target, and writes no log of its own.
 fn log_line(peer: &Peer, level: Level, line: &str) {
     let text = log_text(line);
     let (fits, dropped) = lock(&peer.log).take(text.len().max(1), Instant::now());
