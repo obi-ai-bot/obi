@@ -506,6 +506,16 @@ pub(crate) async fn kill_group(pgid: u32) {
 /// read `data_dir` and cannot read `obid_home`. An unsandboxed process can read `obid_home`,
 /// so it is left alone, and so is another sandbox that cannot read this data folder.
 pub(crate) fn reap_sandbox(obid_home: &Path, data_dir: &Path) {
+    #[cfg(target_os = "macos")]
+    reap_sandbox_macos(obid_home, data_dir);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (obid_home, data_dir);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn reap_sandbox_macos(obid_home: &Path, data_dir: &Path) {
     let Ok(home) = std::ffi::CString::new(obid_home.as_os_str().as_encoded_bytes()) else {
         return;
     };
@@ -540,6 +550,7 @@ pub(crate) fn reap_sandbox(obid_home: &Path, data_dir: &Path) {
 }
 
 /// Whether `pid`'s sandbox allows reading `path`. An unsandboxed process is allowed.
+#[cfg(target_os = "macos")]
 fn may_read(pid: u32, path: &std::ffi::CString) -> bool {
     // SANDBOX_FILTER_PATH, from usr/include/sandbox.h.
     const SANDBOX_FILTER_PATH: i32 = 1;
