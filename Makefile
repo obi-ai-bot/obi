@@ -1,4 +1,4 @@
-# Obi: top-level targets. The Swift apps build with Xcode (AGENTS.md); this file drives what is
+# Oby: top-level targets. The Swift apps build with Xcode (AGENTS.md); this file drives what is
 # not Xcode's: the end-to-end scenario (e2e/SCENARIO.md).
 #
 #   make e2e        the scenario with stub agents: headless, no model credentials, Linux and macOS

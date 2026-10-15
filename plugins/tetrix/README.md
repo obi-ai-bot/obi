@@ -1,6 +1,6 @@
 # Tetrix
 
-Tetrix is a code graph and memory for agents. This plug-in lets a job's agents call Tetrix's MCP server. Obi works fully without it. It is **disabled** until the owner enables it, the same way as any other plug-in (docs/ARCHITECTURE.md, section 5).
+Tetrix is a code graph and memory for agents. This plug-in lets a job's agents call Tetrix's MCP server. Oby works fully without it. It is **disabled** until the owner enables it, the same way as any other plug-in (docs/ARCHITECTURE.md, section 5).
 
 - **Kind:** `agent-mcp` only. `obid` adds the server to each job's agent MCP configuration, and its permission gate refuses every Tetrix tool not listed below. It may add `context` later.
 - **No process.** An `agent-mcp`-only plug-in may leave `run` out (docs/ARCHITECTURE.md 5.2), and this one has nothing to run. So no sandbox is needed and the plug-in is `ready` as soon as it is enabled. (The manifest example in docs/ARCHITECTURE.md 5.2 shows a `run` of `bin/tetrix-plugin`. Nothing needs it in this version.)

@@ -1,12 +1,12 @@
-# Obi's architecture
+# Oby's architecture
 
-How Obi is put together once the engine runs as the Rust daemon `obid`, where every piece lives, which lines nothing crosses, and who edits what while Phase 1 is under way. It follows the plan in [docs/NEXT-STEPS.md](NEXT-STEPS.md) (section 4, "Target layout"); the contracts it relies on are:
+How Oby is put together once the engine runs as the Rust daemon `obid`, where every piece lives, which lines nothing crosses, and who edits what while Phase 1 is under way. It follows the plan in [docs/NEXT-STEPS.md](NEXT-STEPS.md) (section 4, "Target layout"); the contracts it relies on are:
 
 - [docs/runner-api.md](runner-api.md): the API between `obid` and every shell, including its "obid only" section.
 - The Obi-to-Obi protocol v0.1: `spec/` in [obi-ai-bot/obi-sphere](https://github.com/obi-ai-bot/obi-sphere).
 - [e2e/SCENARIO.md](../e2e/SCENARIO.md): the run that says Phase 1 is done.
 
-Decided and not reopened here: the product is Obi (the code still says Oby); Apache-2.0; the engine moves from Swift to `obid` behind the existing runner API; the UI shells stay native and thin; the Sphere server is TypeScript on Cloudflare Workers with D1; Tetrix is an optional plug-in; Deskree's own pipeline rules become configuration.
+Decided and not reopened here: the product is Oby (apps, bundle ids, `window.oby`); Apache-2.0; the engine moves from Swift to `obid` behind the existing runner API; the UI shells stay native and thin; the Sphere server is TypeScript on Cloudflare Workers with D1; Tetrix is an optional plug-in; Deskree's own pipeline rules become configuration. The GitHub org, the repository names and the daemon keep the `obi` spelling.
 
 ## 1. Layout
 
@@ -21,7 +21,7 @@ obi/
 │   └── android/     Kotlin thin client, later
 ├── character/       The three.js mascot, unchanged
 ├── plugins/         Context providers and event sources, each optional; Tetrix is one of them
-├── mcp/             The Obi MCP server
+├── mcp/             The Oby MCP server
 ├── e2e/             The end-to-end scenario: SCENARIO.md, the harness, the stub agent, fixtures
 ├── docs/            Documentation
 └── Makefile         make e2e, make e2e-live
@@ -78,27 +78,27 @@ How the engine's parts are split into modules inside `obid` is the Rust core's c
 
 ## 4. Trust boundaries
 
-What crosses into Obi, and what it may become:
+What crosses into Oby, and what it may become:
 
 | Comes from | Arrives as | May become |
 |---|---|---|
 | The owner (a shell, the MCP server) | Runner API calls with the API token | Anything the API offers: goals, answers, settings, publishing by hand with a device signature. |
-| Another Obi | A signed, typed action through the Sphere, checked against the spec (schema, signature, expiry, policy) | Only what the receiver's decision rule allows (spec `protocol.md` section 11): an inbox item, or work a remembered decision covers, and then only the typed reply to that action. Never a merge, a push, a published change, a changed setting or a changed decision. |
+| Another Oby | A signed, typed action through the Sphere, checked against the spec (schema, signature, expiry, policy) | Only what the receiver's decision rule allows (spec `protocol.md` section 11): an inbox item, or work a remembered decision covers, and then only the typed reply to that action. Never a merge, a push, a published change, a changed setting or a changed decision. |
 | GitHub, Slack, web pages, plug-ins, other people | Data | Quoted to agents as files (`.obi/inputs/`, `.obi/context/`), shown to the owner. Never part of a prompt's instructions. |
 | Agents (their output, their questions) | Data and typed requests (permission prompts, `QUESTION:` lines) | What `obid`'s fixed rules and the owner's saved rules allow; everything else waits in the inbox. |
 
 The rules every component keeps:
 
-- **Typed actions in, data never instructions.** Other Obis can only send the seven typed actions; there is no free-text type, and a field the schema doesn't list makes a message invalid. Every human-written field (`x-obi-text: data` in the spec) reaches an agent only as a quoted file and the owner only as text. The same holds for text from GitHub, Slack, plug-ins and fixtures.
+- **Typed actions in, data never instructions.** Other Obys can only send the seven typed actions; there is no free-text type, and a field the schema doesn't list makes a message invalid. Every human-written field (`x-obi-text: data` in the spec) reaches an agent only as a quoted file and the owner only as text. The same holds for text from GitHub, Slack, plug-ins and fixtures.
 - **The publish gate.** Nothing leaves `obid` (a push, a pull request, its description, a check run, an Obi-to-Obi reply) until the secret scan has passed on everything in it, with the vault's secrets and their encoded forms. If the scanner can't run, nothing goes out.
-- **Obi never merges.** Not on its owner's behalf, not on anyone else's. The Swift runner's squash-merge into `dev` after a Mac check is not ported to `obid`; merging is a person's step. Deskree's own promotion rules (Xcode Cloud, `dev` to `main`, the three-review escalation) become configuration that changes what Obi checks and reports, never something that merges.
+- **Oby never merges.** Not on its owner's behalf, not on anyone else's. The Swift runner's squash-merge into `dev` after a Mac check is not ported to `obid`; merging is a person's step. Deskree's own promotion rules (Xcode Cloud, `dev` to `main`, the three-review escalation) become configuration that changes what Oby checks and reports, never something that merges.
 - **Agents can't publish.** They run in sandboxed worktrees with no code-host login, no vault secret, and a clone whose push URL is invalid. Only the publish gate pushes, and only the owner's own work.
-- **Secrets stay in the vault.** No agent, plug-in or other Obi receives a vault secret, in any form. No vault secret and no token is ever in `obid`'s environment or arguments either, because other processes of the same user can read those (5.3, "What the sandbox can't hide").
+- **Secrets stay in the vault.** No agent, plug-in or other Oby receives a vault secret, in any form. No vault secret and no token is ever in `obid`'s environment or arguments either, because other processes of the same user can read those (5.3, "What the sandbox can't hide").
 - **Telemetry is off** unless the owner turns it on.
 
 ## 5. Plug-ins
 
-A plug-in adds context or events to Obi. Obi works fully with none: a fresh install has **zero plug-ins enabled**, and Tetrix is the first plug-in, shipped **disabled**, enabled the same way as any other.
+A plug-in adds context or events to Oby. Oby works fully with none: a fresh install has **zero plug-ins enabled**, and Tetrix is the first plug-in, shipped **disabled**, enabled the same way as any other.
 
 ### 5.1 Kinds
 
@@ -164,7 +164,7 @@ There is no field that enables a plug-in by itself.
 5. **Running.** `ping` every 60 seconds; a plug-in that doesn't answer within 5 seconds, or exits, has failed. After its first failure in a row it is restarted after 1 second, after its second after 2 seconds, and its **third failure in a row** makes its `state` `failed`: it stays stopped until the owner enables it again. An answered `ping` ends the run of failures.
 6. **Stopped.** On disable or when `obid` stops: `shutdown`, then stdin closes; a plug-in still running 5 seconds later is killed. Either way **no process it started is left running**: `obid` kills the whole tree it tracked, descendants that called `setsid` included (on Linux bubblewrap's own PID namespace with `--die-with-parent`; on macOS by tracking every descendant).
 
-A plug-in never blocks Obi: a context query that fails or is late gives no context and the job goes on; a failed plug-in only shows in `GET /v1/obid/plugins`.
+A plug-in never blocks Oby: a context query that fails or is late gives no context and the job goes on; a failed plug-in only shows in `GET /v1/obid/plugins`.
 
 ### 5.4 Wire protocol: `obi-plugin/0.1`
 

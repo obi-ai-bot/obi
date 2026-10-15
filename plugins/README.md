@@ -1,6 +1,6 @@
 # Plug-ins
 
-Each folder here is one optional plug-in. Its folder name is its id, and it holds an `obi-plugin.json` manifest (docs/ARCHITECTURE.md, section 5). Plug-ins add context, events, or an MCP server for agents. Obi works fully with none of them.
+Each folder here is one optional plug-in. Its folder name is its id, and it holds an `obi-plugin.json` manifest (docs/ARCHITECTURE.md, section 5). Plug-ins add context, events, or an MCP server for agents. Oby works fully with none of them.
 
 - **Installed** into `obid`'s `home/plugins/<id>/`. `obid` reads that folder at start and lists every plug-in it finds (`GET /v1/obid/plugins`).
 - **Disabled** until the owner enables one with `PUT /v1/obid/plugins/{id}` and `{"enabled": true}`. No manifest field can enable a plug-in by itself.

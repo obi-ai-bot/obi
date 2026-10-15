@@ -744,7 +744,7 @@ impl Jobs {
         }
         if job.obi.is_some() {
             return Some(Err(Refused(
-                "This is a review another Obi asked for: its answer goes back to that Obi, so it takes no words of yours.".into(),
+                "This is a review another Oby asked for: its answer goes back to that Oby, so it takes no words of yours.".into(),
             )));
         }
         let tool = Tool::from_id(&job.agent)
@@ -1314,6 +1314,24 @@ impl Jobs {
 
     fn log_path(&self, id: &str, name: &str) -> PathBuf {
         self.config.home.join("logs").join(id).join(name)
+    }
+
+    /// The end of the agent's stderr, when a turn died without saying why.
+    fn agent_note(&self, id: &str) -> String {
+        let text = std::fs::read_to_string(self.log_path(id, "agent.log")).unwrap_or_default();
+        let text = text.trim();
+        if text.is_empty() {
+            return String::new();
+        }
+        let tail: String = text
+            .chars()
+            .rev()
+            .take(500)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        format!(" {tail}")
     }
 
     /// Runs a job to its end, unless it is stopped or obid shuts down.
@@ -1906,8 +1924,9 @@ impl Jobs {
             let first = said.lines().next().unwrap_or("").trim();
             return Err(if first.is_empty() {
                 format!(
-                    "Claude Code stopped without finishing the review ({}).",
-                    turn.exit
+                    "Claude Code stopped without finishing the review ({}).{}",
+                    turn.exit,
+                    self.agent_note(id)
                 )
             } else {
                 format!("Claude Code couldn't finish the review: {first}")
@@ -1961,7 +1980,7 @@ impl Jobs {
                 job.obi
                     .as_ref()
                     .map(|o| o.from_owner.as_str())
-                    .unwrap_or("another Obi"),
+                    .unwrap_or("another Oby"),
                 match (&job.check, tests_pass) {
                     (None, _) => "no check to run",
                     (Some(_), true) => "tests pass",
@@ -2209,7 +2228,12 @@ impl Jobs {
             if !turn.succeeded() {
                 let first = said.lines().next().unwrap_or("").trim().to_owned();
                 return Err(if first.is_empty() {
-                    format!("{} stopped without finishing ({}).", tool.name(), turn.exit)
+                    format!(
+                        "{} stopped without finishing ({}).{}",
+                        tool.name(),
+                        turn.exit,
+                        self.agent_note(id)
+                    )
                 } else {
                     first
                 });

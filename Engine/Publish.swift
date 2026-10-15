@@ -451,7 +451,7 @@ nonisolated enum Publish {
     /// gitleaks when it's installed. Throws when the scan can't run (the vault can't be read, too): then nothing goes out.
     static func scan(texts: [(name: String, text: String)], vault: Vault = .shared) async throws -> [Finding] {
         let leaks = try vault.leaks()
-        let lines = texts.flatMap { lines(of: $0.text, named: $0.name) }
+        let lines = texts.flatMap { Self.lines(of: $0.text, named: $0.name) }
         let found = texts.flatMap { findings(inText: $0.text, named: $0.name, leaks: leaks) }
         var seen = Set<Finding>()
         return (found + (try await gitleaks(lines))).filter { seen.insert($0).inserted }
