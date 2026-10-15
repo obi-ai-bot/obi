@@ -7,7 +7,9 @@
 
 pub mod card;
 pub mod chain;
+pub mod client;
 pub mod envelope;
+pub mod identity;
 pub mod jcs;
 pub mod jwt;
 pub mod keys;
