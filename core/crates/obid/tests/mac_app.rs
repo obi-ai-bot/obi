@@ -1,7 +1,7 @@
 //! The existing Mac app against obid: tests/mac-app/main.swift is built with the app's own client
-//! code (Shared/Runner.swift and what it needs: Shared/Decisions.swift, Shared/JobList.swift,
-//! Shared/Elapsed.swift, Shared/DeviceKey.swift and Engine/, compiled as the Oby target compiles
-//! them) and follows a running obid as Mac/RunnerFeed.swift follows the runner on this Mac
+//! code (apps/shared/Runner.swift and what it needs: apps/shared/Decisions.swift, apps/shared/JobList.swift,
+//! apps/shared/Elapsed.swift, apps/shared/DeviceKey.swift and Engine/, compiled as the Oby target compiles
+//! them) and follows a running obid as apps/mac/app/RunnerFeed.swift follows the runner on this Mac
 //! (Settings › Runner › This Mac, #283): the token through `LocalRunner.token(from:)`, `GET
 //! /v1/events`, then status, the jobs, the inbox (open and done), the conversation and a job by
 //! id, read into the app's types; Clear done; and Stop all from the island on a job that started
@@ -28,11 +28,11 @@ use support::*;
 
 /// The app's files the client is built from, under the repository root.
 const APP_SOURCES: [&str; 5] = [
-    "Shared/Runner.swift",
-    "Shared/Decisions.swift",
-    "Shared/JobList.swift",
-    "Shared/Elapsed.swift",
-    "Shared/DeviceKey.swift",
+    "apps/shared/Runner.swift",
+    "apps/shared/Decisions.swift",
+    "apps/shared/JobList.swift",
+    "apps/shared/Elapsed.swift",
+    "apps/shared/DeviceKey.swift",
 ];
 
 /// What Package.swift and the Xcode project compile Oby's Swift with.
