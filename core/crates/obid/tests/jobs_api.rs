@@ -568,7 +568,10 @@ fn stop_and_stop_all_end_the_agents() {
     assert!(!stopped_beating(&obid, &id), "the agent isn't running");
     let running = until(&obid, &id, |j| j["status"] == "running");
     assert_eq!(running["session"], "00000000-0000-4000-8000-000000000001");
-    assert_eq!(request(&obid, "GET", "/v1/status", None).body["running"], 1);
+    let status = request(&obid, "GET", "/v1/status", None).body;
+    assert_eq!(status["running"], 1);
+    assert_eq!(status["accounts"][0]["id"], "stub");
+    assert_eq!(status["accounts"][0]["running"], 1);
     let started = Instant::now();
     let stopped = request(&obid, "POST", &format!("/v1/jobs/{id}/stop"), None);
     assert_eq!(stopped.status, 200);

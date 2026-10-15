@@ -162,6 +162,16 @@ impl Jobs {
         self.lock().workers.len()
     }
 
+    /// How many of them run on the account `id`.
+    pub fn running_on(&self, account: &str) -> usize {
+        let state = self.lock();
+        state
+            .workers
+            .keys()
+            .filter(|id| state.jobs.get(*id).is_some_and(|j| j.account == account))
+            .count()
+    }
+
     /// Changes the job `id` with `change`, keeps it and tells the apps. `None` for a job obid
     /// doesn't have.
     fn update(&self, id: &str, change: impl FnOnce(&mut Job)) -> Option<Job> {
