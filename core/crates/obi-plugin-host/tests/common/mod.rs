@@ -150,11 +150,7 @@ pub fn options() -> Options {
         ping_interval: Duration::from_millis(300),
         ping_timeout: Duration::from_millis(700),
         context_timeout: Duration::from_millis(1500),
-        restart_delays: vec![
-            Duration::from_millis(100),
-            Duration::from_millis(200),
-            Duration::from_millis(400),
-        ],
+        restart_delays: vec![Duration::from_millis(100), Duration::from_millis(200)],
         stop_grace: Duration::from_millis(1500),
         sandbox_program: None,
     }

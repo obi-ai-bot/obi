@@ -89,8 +89,8 @@ mod options {
         pub ping_timeout: Duration,
         /// How long it has to answer `context/query`: 5 seconds.
         pub context_timeout: Duration,
-        /// The waits before each restart in a row: 1, 2, then 4 seconds. A failure with no wait
-        /// left makes the plug-in `failed`.
+        /// The waits before each restart in a row: 1, then 2 seconds. A failure with no wait
+        /// left (the third in a row) makes the plug-in `failed`.
         pub restart_delays: Vec<Duration>,
         /// How long after `shutdown` a plug-in still running is killed: 5 seconds.
         pub stop_grace: Duration,
@@ -106,11 +106,7 @@ mod options {
                 ping_interval: Duration::from_secs(60),
                 ping_timeout: Duration::from_secs(5),
                 context_timeout: Duration::from_secs(5),
-                restart_delays: vec![
-                    Duration::from_secs(1),
-                    Duration::from_secs(2),
-                    Duration::from_secs(4),
-                ],
+                restart_delays: vec![Duration::from_secs(1), Duration::from_secs(2)],
                 stop_grace: Duration::from_secs(5),
                 sandbox_program: None,
             }

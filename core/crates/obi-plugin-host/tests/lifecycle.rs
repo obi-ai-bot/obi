@@ -57,7 +57,7 @@ async fn enabling_starts_it_in_its_sandbox_and_initializes_it() {
 }
 
 #[tokio::test]
-async fn a_plugin_that_exits_is_restarted_and_failed_when_the_third_restart_fails() {
+async fn a_plugin_that_exits_is_restarted_and_failed_at_its_third_failure_in_a_row() {
     let home = Home::new("exits");
     home.install("context-test", "context-test");
     let host = host_with(&home, options()).await;
@@ -73,16 +73,16 @@ async fn a_plugin_that_exits_is_restarted_and_failed_when_the_third_restart_fail
         return;
     }
     let failed = wait_for_state(&host, "context-test", PluginState::Failed, LONG).await;
-    // The first start and three restarts.
-    assert_eq!(home.starts("context-test"), 4);
+    // The first start and two restarts.
+    assert_eq!(home.starts("context-test"), 3);
     let reason = failed.last_error.unwrap();
     assert!(reason.contains("exited"), "{reason}");
-    assert!(reason.contains("4 times in a row"), "{reason}");
+    assert!(reason.contains("3 times in a row"), "{reason}");
     assert!(failed.enabled);
 
     // It stays stopped.
     tokio::time::sleep(Duration::from_millis(1000)).await;
-    assert_eq!(home.starts("context-test"), 4);
+    assert_eq!(home.starts("context-test"), 3);
     assert_eq!(status(&host, "context-test").state, PluginState::Failed);
 
     // Until the owner enables it again: now it fails only on its first start.
@@ -90,16 +90,16 @@ async fn a_plugin_that_exits_is_restarted_and_failed_when_the_third_restart_fail
         .set_enabled(
             &id("context-test"),
             true,
-            Some(json!({"afterReady": "exit", "failStarts": 5})),
+            Some(json!({"afterReady": "exit", "failStarts": 4})),
         )
         .await
         .unwrap();
     assert!(again.state != PluginState::Disabled);
-    assert!(wait_until(LONG, || home.starts("context-test") == 6).await);
+    assert!(wait_until(LONG, || home.starts("context-test") == 5).await);
     wait_for_state(&host, "context-test", PluginState::Ready, LONG).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(status(&host, "context-test").state, PluginState::Ready);
-    assert_eq!(home.starts("context-test"), 6);
+    assert_eq!(home.starts("context-test"), 5);
     host.shutdown().await;
 }
 
@@ -132,7 +132,7 @@ async fn a_failed_plugin_stays_stopped_when_obid_starts_again() {
     );
     assert_eq!(kept().as_deref(), Some(reason.as_str()));
     host.shutdown().await;
-    assert_eq!(home.starts("context-test"), 4);
+    assert_eq!(home.starts("context-test"), 3);
 
     // obid starts again: it is listed as failed, with its reason, and not started.
     let host = host_with(&home, options()).await;
@@ -141,20 +141,20 @@ async fn a_failed_plugin_stays_stopped_when_obid_starts_again() {
     assert!(listed.enabled);
     assert_eq!(listed.last_error.as_deref(), Some(reason.as_str()));
     tokio::time::sleep(Duration::from_millis(1000)).await;
-    assert_eq!(home.starts("context-test"), 4);
+    assert_eq!(home.starts("context-test"), 3);
     assert_eq!(status(&host, "context-test").state, PluginState::Failed);
 
-    // Until the owner enables it again (its fifth start answers, and stays).
+    // Until the owner enables it again (its fourth start answers, and stays).
     let again = host
         .set_enabled(
             &id("context-test"),
             true,
-            Some(json!({"afterReady": "exit", "failStarts": 4})),
+            Some(json!({"afterReady": "exit", "failStarts": 3})),
         )
         .await
         .unwrap();
     assert_eq!(again.state, PluginState::Ready, "{again:?}");
-    assert_eq!(home.starts("context-test"), 5);
+    assert_eq!(home.starts("context-test"), 4);
     assert_eq!(kept(), None);
     assert_eq!(
         home.settings().unwrap()["context-test"]["enabled"],
@@ -208,7 +208,7 @@ async fn a_plugin_that_does_not_answer_initialize_in_time_is_restarted_then_fail
         return;
     }
     let failed = wait_for_state(&host, "context-test", PluginState::Failed, LONG).await;
-    assert_eq!(home.starts("context-test"), 4);
+    assert_eq!(home.starts("context-test"), 3);
     let reason = failed.last_error.unwrap();
     assert!(reason.contains("no answer to initialize"), "{reason}");
     host.shutdown().await;
@@ -234,7 +234,7 @@ async fn an_answer_that_is_not_obi_plugin_0_1_fails_initialize() {
         let failed = wait_for_state(&host, "context-test", PluginState::Failed, LONG).await;
         let reason = failed.last_error.unwrap();
         assert!(reason.contains(says), "{mode}: {reason}");
-        assert_eq!(home.starts("context-test"), 4, "{mode}");
+        assert_eq!(home.starts("context-test"), 3, "{mode}");
         host.shutdown().await;
     }
 }

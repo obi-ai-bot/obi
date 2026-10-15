@@ -310,7 +310,7 @@ async fn the_spec_times_are_the_defaults() {
     assert_eq!(defaults.context_timeout, Duration::from_secs(5));
     assert_eq!(
         defaults.restart_delays,
-        [1, 2, 4].map(Duration::from_secs).to_vec()
+        [1, 2].map(Duration::from_secs).to_vec()
     );
     assert_eq!(defaults.stop_grace, Duration::from_secs(5));
     assert_eq!(defaults.sandbox_program, None);
