@@ -5,7 +5,8 @@
 //! - writes go only to `home/plugin-data/<id>/` (its working directory, `HOME`, and `TMPDIR`
 //!   under `tmp/`);
 //! - of `obid`'s `home` it reads only its own folder `home/plugins/<id>/` (read-only) and its
-//!   data folder; nothing else of `home`, and not the person's real `HOME`;
+//!   data folder; nothing else of `home`, not the person's real `HOME`, and not the machine's
+//!   temporary folders (where `obid`'s `TMPDIR`, and so its jobs' temporary folders, are);
 //! - it reads the system's files and the tools it runs, read-only;
 //! - its environment is only `PATH`, `HOME`, `LANG` and `TMPDIR`;
 //! - it has the network.
@@ -27,6 +28,23 @@
 //!   namespace, which the plug-in shares with the machine because it has the network: a
 //!   service listening on one (an X server, an old D-Bus) is still reachable.
 //!
+//! On macOS the temporary folders `/private/tmp`, `/private/var/tmp` and `/private/var/folders`
+//! (which holds every user's `TMPDIR` and caches) can't be read. Of the folders above its own
+//! two (`/`, the person's `HOME`, `obid`'s home, `home/plugin-data`, ...) a plug-in may read
+//! only the folder itself (`stat`), not what it holds: tools like `git` check every folder of
+//! the path they work in. Tools started through `xcrun` (Apple's `git`, `python3`) may read
+//! the user's `xcrun` cache (`<TMPDIR>/xcrun_db`, which names where developer tools are; without
+//! it each of them takes seconds to start) but not write it, so they print that they
+//! "couldn't create cache file" when it lacks a tool, and work without it.
+//!
+//! What no sandbox here stops, on macOS: any process of the same user that isn't one of
+//! Apple's own can have its full arguments and environment read by another (the
+//! `KERN_PROCARGS2` sysctl), and Seatbelt has no rule against it (`sysctl-read` and
+//! `process-info*` denials don't reach it). So a plug-in can read `obid`'s environment and the
+//! environment of whatever else the person runs. `obid` must keep secrets out of its own
+//! environment and out of the environment of the long-running processes it starts. On Linux the
+//! plug-in's own PID namespace hides every other process.
+//!
 //! When the sandbox can't be made on the machine, the plug-in isn't started.
 
 use std::ffi::OsString;
@@ -41,25 +59,41 @@ const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 /// The Seatbelt profile. Later rules win over earlier ones: everything is allowed, then every
 /// write is denied but to the data folder (and `/dev/null`, which programs write to as a
 /// matter of course), then every read under `obid`'s home and under the person's real `HOME`
-/// is denied, then reads of the plug-in's own folder and its data folder are allowed again.
+/// and of the machine's temporary folders ([`MACOS_TEMP`]) is denied, then reads of the
+/// plug-in's own folder and its data folder are allowed again, and the metadata (not the
+/// contents) of the folders above those two (`ANCESTOR_<n>`, `ancestors` of them), and the
+/// `xcrun` cache ([`XCRUN_CACHE`]).
 /// Then what would let it start a process outside the sandbox, or use a local service in the
 /// person's name, is denied: LaunchServices, Apple Events, every Mach service but
 /// [`MACH_SERVICES`], Unix sockets outside its data folder (but the name resolver's and the
 /// system log's), and signals to processes outside its sandbox.
 /// The paths come in as parameters (`-D`), so nothing in a path is read as profile syntax.
-fn seatbelt_profile() -> String {
+fn seatbelt_profile(ancestors: usize) -> String {
     let services: String = MACH_SERVICES
         .iter()
         .map(|name| format!("\n  (global-name \"{name}\")"))
         .collect();
+    let temp: String = MACOS_TEMP
+        .iter()
+        .map(|path| format!(" (subpath \"{path}\")"))
+        .collect();
+    // With no folder to name, no rule at all: an `allow` without a filter allows everywhere.
+    let ancestors: String = if ancestors == 0 {
+        String::new()
+    } else {
+        let folders: String = (0..ancestors)
+            .map(|n| format!("\n  (literal (param \"ANCESTOR_{n}\"))"))
+            .collect();
+        format!("(allow file-read-metadata{folders})\n")
+    };
     format!(
         r#"(version 1)
 (allow default)
 (deny file-write*)
 (allow file-write* (subpath (param "DATA")) (literal "/dev/null") (literal "/dev/zero") (regex #"^/dev/fd/"))
-(deny file-read* (subpath (param "OBID_HOME")) (subpath (param "REAL_HOME")))
-(allow file-read* (subpath (param "PLUGIN")) (subpath (param "DATA")))
-(deny lsopen)
+(deny file-read* (subpath (param "OBID_HOME")) (subpath (param "REAL_HOME")){temp})
+(allow file-read* (subpath (param "PLUGIN")) (subpath (param "DATA")) (regex #"{XCRUN_CACHE}"))
+{ancestors}(deny lsopen)
 (deny appleevent-send)
 (deny mach-lookup)
 (allow mach-lookup{services})
@@ -97,6 +131,15 @@ const MACH_SERVICES: &[&str] = &[
     "com.apple.cfprefsd.daemon",
     "com.apple.cfprefsd.agent",
 ];
+
+/// The machine's temporary folders on macOS (their real paths: `/tmp` and `/var` are links into
+/// `/private`), which a plug-in can't read: other programs' temporary files, and under
+/// `/private/var/folders` each user's `TMPDIR` (`obid`'s and its jobs') and caches.
+const MACOS_TEMP: &[&str] = &["/private/tmp", "/private/var/tmp", "/private/var/folders"];
+
+/// The user's `xcrun` cache in their `TMPDIR`, which a plug-in may read (not write): the
+/// paths of the developer tools `xcrun` starts (Apple's `git`, `python3`, `clang`).
+const XCRUN_CACHE: &str = "^/private/var/folders/[^/]+/[^/]+/T/xcrun_db$";
 
 /// The folders on Linux that hold the machine's local services' sockets (D-Bus, the user's
 /// systemd, X11, SSH agents, Docker) and other programs' temporary files. Each is an empty
@@ -199,6 +242,12 @@ impl Sandbox {
                 // When the person's HOME is unknown, the rule names the data folder again,
                 // which changes nothing.
                 let real_home = launch.real_home.as_deref().unwrap_or(&launch.data_dir);
+                let ancestors = ancestors(&[&launch.data_dir, &launch.plugin_dir]);
+                for (n, ancestor) in ancestors.iter().enumerate() {
+                    command
+                        .arg("-D")
+                        .arg(define(&format!("ANCESTOR_{n}"), ancestor));
+                }
                 command
                     .arg("-D")
                     .arg(define("DATA", &launch.data_dir))
@@ -209,7 +258,7 @@ impl Sandbox {
                     .arg("-D")
                     .arg(define("REAL_HOME", real_home))
                     .arg("-p")
-                    .arg(seatbelt_profile())
+                    .arg(seatbelt_profile(ancestors.len()))
                     .arg(&launch.program)
                     .args(&launch.args);
                 command.current_dir(&launch.data_dir);
@@ -303,6 +352,18 @@ impl Sandbox {
             .kill_on_drop(true);
         command
     }
+}
+
+/// Every folder above `folders` (not the folders themselves), once each.
+fn ancestors(folders: &[&Path]) -> Vec<PathBuf> {
+    let mut above: Vec<PathBuf> = folders
+        .iter()
+        .flat_map(|folder| folder.ancestors().skip(1))
+        .map(Path::to_path_buf)
+        .collect();
+    above.sort();
+    above.dedup();
+    above
 }
 
 /// The folders under a hidden one that name lookups need: [`LINUX_RUN_KEPT`], and the folder

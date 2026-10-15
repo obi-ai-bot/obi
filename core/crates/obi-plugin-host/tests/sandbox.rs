@@ -359,3 +359,105 @@ async fn nothing_it_starts_runs_outside_its_sandbox() {
         );
     }
 }
+
+/// The machine's temporary folders (`/tmp`, `/var/tmp`, and on macOS `/private/var/folders`,
+/// where `obid`'s own `TMPDIR` and so its jobs' temporary folders are) can't be read, and tools
+/// that check every folder of the path they work in, like `git`, still work in the data folder.
+#[tokio::test]
+async fn the_temporary_folders_stay_hidden_and_tools_work_in_its_data_folder() {
+    let home = Home::new("temp");
+    home.install("context-test", "temp");
+    let pid = std::process::id();
+    let name = format!("obi-plugin-temp-secret-{pid}");
+    let mut secrets = Vec::new();
+    let mut folders = vec![
+        std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from("/var/tmp"),
+        std::env::temp_dir(),
+    ];
+    folders.dedup();
+    for folder in &folders {
+        let secret = folder.join(&name);
+        if std::fs::write(&secret, "a job's temporary file").is_ok() {
+            secrets.push(secret);
+        }
+    }
+    assert!(!secrets.is_empty(), "no temporary folder to write to");
+    // Apple's git (`/usr/bin/git`, through `xcrun`) is the one that checks every folder of
+    // the path it works in; another git where there's none.
+    let git = ["/usr/bin/git", "git"].into_iter().find(|git| {
+        std::process::Command::new(git)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    });
+    let git_script = "\"$0\" init -q repo && cd repo && echo hi > f && \"$0\" add f \\
+        && \"$0\" -c user.email=t@example.invalid -c user.name=t commit -q -m m \\
+        && \"$0\" status --porcelain && echo git-ok";
+    let mut run: Vec<Vec<String>> = Vec::new();
+    if let Some(git) = git {
+        run.push(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            git_script.into(),
+            git.into(),
+        ]);
+    }
+    let config = json!({"probe": {
+        "read": secrets.iter().map(|s| path(s)).collect::<Vec<_>>(),
+        "list": folders.iter().map(|f| path(f)).collect::<Vec<_>>(),
+        "run": run,
+    }});
+
+    // The probe runs while the plug-in initializes, git among it.
+    let options = obi_plugin_host::Options {
+        initialize_timeout: std::time::Duration::from_secs(30),
+        ..options()
+    };
+    let host = PluginHost::start_with(&home.path, options).await.unwrap();
+    let ready = host
+        .set_enabled(&id("temp"), true, Some(config))
+        .await
+        .unwrap();
+    let cleanup = || {
+        for secret in &secrets {
+            let _ = std::fs::remove_file(secret);
+        }
+    };
+    if !sandbox_made(&ready) {
+        cleanup();
+        return;
+    }
+    host.shutdown().await;
+    cleanup();
+    assert_eq!(ready.state, PluginState::Ready, "{ready:?}");
+    let probe = home.record("temp", "probe.json").unwrap();
+    for secret in &secrets {
+        assert_eq!(
+            probed(&probe, &format!("read {}", path(secret))),
+            None,
+            "{} was readable: {probe:#}",
+            secret.display()
+        );
+    }
+    for folder in &folders {
+        if let Some(listing) = probed(&probe, &format!("list {}", path(folder))) {
+            assert!(
+                !listing.split(',').any(|n| n == name),
+                "{} showed {listing}",
+                folder.display()
+            );
+        }
+    }
+    if let Some(git) = git {
+        let got = probed(&probe, &format!("run /bin/sh -c {git_script} {git}"));
+        assert!(
+            got.as_deref().is_some_and(|got| got.contains("git-ok")),
+            "git didn't work in the data folder: {probe:#}"
+        );
+    } else {
+        eprintln!("NOTE: no git on this machine, so only the temporary folders are checked");
+    }
+}
