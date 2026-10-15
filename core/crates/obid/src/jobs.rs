@@ -311,18 +311,7 @@ impl Jobs {
         {
             return Err(Refused("mode is ask, acceptEdits, plan or bypass.".into()));
         }
-        if let Some(files) = &new.files {
-            if files.len() > 30 {
-                return Err(Refused("files names at most 30 paths.".into()));
-            }
-            for file in files {
-                if !inside_repository(file) {
-                    return Err(Refused(format!(
-                        "{file} isn't a path inside the repository."
-                    )));
-                }
-            }
-        }
+        let files = new.files.as_deref().map(claimed_files).transpose()?;
         if let Some(base) = &new.base
             && !git::is_branch_name(base)
         {
@@ -360,7 +349,7 @@ impl Jobs {
             .or(repo.check.clone())
             .filter(|c| !c.trim().is_empty());
         job.model = new.model.map(|m| m.trim().to_owned());
-        job.files = new.files;
+        job.files = files;
         job.mode = Some(new.mode.unwrap_or_else(|| "bypass".into()));
         job.base = Some(new.base.unwrap_or_else(|| repo.default_branch.clone()));
         job.branch = match new
@@ -1378,6 +1367,65 @@ fn inside_repository(path: &str) -> bool {
         && !path.starts_with('/')
         && !path.contains('\0')
         && path.split('/').all(|part| part != "..")
+}
+
+/// The `files` a client claims at dispatch, as Engine/Desk.swift's `validated` takes them: each
+/// one cleaned (spaces, a sentence's trailing `.:!?*_`, Markdown's leading `*_`, `./` and doubled
+/// slashes gone), the empty ones dropped, each kept once in order; at most 30, every one a path
+/// inside the repository (Engine/Lead.swift, `isPath`), or the whole list is refused naming the
+/// first that isn't.
+pub fn claimed_files(files: &[String]) -> Result<Vec<String>, Refused> {
+    let mut paths: Vec<String> = Vec::new();
+    for file in files {
+        let path = cleaned_path(file);
+        if !path.is_empty() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    if paths.len() > 30 {
+        return Err(Refused(format!(
+            "files holds at most 30 paths, not {}.",
+            paths.len()
+        )));
+    }
+    if let Some(bad) = paths.iter().find(|p| !is_claimable_path(p)) {
+        return Err(Refused(format!(
+            "{bad:?} isn't a path inside the repository."
+        )));
+    }
+    Ok(paths)
+}
+
+fn cleaned_path(token: &str) -> String {
+    let mut text = token.trim_matches(|c: char| c == ' ' || c == '\t');
+    text = text.trim_end_matches(|c: char| ".:!?*_".contains(c));
+    text = text.trim_start_matches(['*', '_']);
+    let mut text = text.trim_matches(|c: char| c == ' ' || c == '\t');
+    while let Some(rest) = text.strip_prefix("./") {
+        text = rest;
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '/' && out.ends_with('/') {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Engine/Lead.swift's `isPath`: one line of up to 200 characters, relative (not `/` or `~`),
+/// never `..`, no NUL.
+fn is_claimable_path(path: &str) -> bool {
+    let text = path.trim_matches(|c: char| c == ' ' || c == '\t');
+    !text.is_empty()
+        && text.chars().count() <= 200
+        && !text.contains([
+            '\n', '\r', '\u{2028}', '\u{2029}', '\u{85}', '\u{b}', '\u{c}',
+        ])
+        && !text.starts_with('/')
+        && !text.starts_with('~')
+        && inside_repository(text)
 }
 
 /// The end of `text`, at most `max` bytes, cut at a character.
