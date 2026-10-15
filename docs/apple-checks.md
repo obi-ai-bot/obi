@@ -39,8 +39,6 @@ Apple's machines build and test every pull request into `dev` and report to GitH
 6. **Post-actions:** none (Oby reads the results; email or Slack notifications are optional).
 7. Optionally, in GitHub › Settings › Branches, make both checks required on `dev`. Oby's own merge rule (docs/runner-api.md) would then read them too.
 
-**When the project moves.** The repository restructure moves the project from `Oby.xcodeproj` at the root to `apps/Oby.xcodeproj` and the apps' folders under `apps/`. App Store Connect keeps its own copy of the workflows' settings, and nothing in the repository updates it. When that move reaches `dev`, someone with App Store Connect access opens each Xcode Cloud workflow on the product (this PR-check workflow, and the TestFlight workflow that starts for `oby-build/` tags), points it at `apps/Oby.xcodeproj`, and replaces the old folders in its start condition with the ones in step 4. Until then the required PR checks fail or never start, and a missing check reads as "not run", never as passed.
-
 **How Oby would read the results.** Xcode Cloud reports each action as a GitHub check run on the pull request's head commit, made by its GitHub app. The runner would read them with its own `gh` login, outside the agents' sandbox, as it follows pull requests (Runner/PullRequests.swift), every three minutes:
 
 ```sh
