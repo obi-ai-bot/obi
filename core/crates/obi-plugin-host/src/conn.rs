@@ -26,7 +26,11 @@ pub(crate) const MAX_LINE_BYTES: usize = 1 << 20;
 pub(crate) const LOG_BYTES_PER_MINUTE: usize = 64 * 1024;
 /// The longest `log` message or stderr line the host logs; the rest is cut.
 const MAX_LOG_LINE_BYTES: usize = 4 * 1024;
-/// How many event ids the host remembers per plug-in to ignore a repeat.
+/// How many event ids the host remembers per plug-in to ignore a repeat. This is a first
+/// filter, for one `obid` run and bounded: what makes "an `id` seen before is accepted and
+/// ignored" hold for good is the inbox item's own id, `ev-<plug-in id>-` and a hash of the
+/// event's `id` (runner-api.md, "obid only: plug-ins"), so an event `obid` already stored
+/// "makes nothing new" there, after a restart or past this many ids too.
 pub(crate) const REMEMBERED_EVENT_IDS: usize = 4_096;
 /// Lines waiting to be written to the plug-in's stdin.
 const WRITE_BUFFER: usize = 64;
@@ -470,6 +474,11 @@ enum Level {
 
 /// Logs one line a plug-in wrote, within its [`LOG_BYTES_PER_MINUTE`]. The plug-in's words are
 /// data: logged under the target `obi_plugin` with its id, never acted on.
+///
+/// Not done here yet: taking the vault's secrets out of the line (docs/ARCHITECTURE.md 5.4).
+/// The host has no vault and section 5.5's signatures give it none, so where that happens
+/// (a redactor given to the host, or `obid`'s log for the `obi_plugin` target) is the lead's
+/// decision to make.
 fn log_line(peer: &Peer, level: Level, line: &str) {
     let mut text: String = line.trim_end().to_owned();
     if text.len() > MAX_LOG_LINE_BYTES {
