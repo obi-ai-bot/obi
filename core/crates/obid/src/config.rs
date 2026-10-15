@@ -4,7 +4,9 @@
 //! {"listen": "127.0.0.1:7811",
 //!  "home": "/abs/path/obid-home",
 //!  "owner": "wellington",
-//!  "agents": {"claude": {"bin": "claude", "accounts": [{"id": "default", "name": "Default", "configDir": null}]}},
+//!  "agents": {"claude": {"bin": "claude", "accounts": [{"id": "default", "name": "Default", "configDir": null}]},
+//!             "codex": {"bin": "codex", "accounts": [{"id": "work", "name": "Work", "configDir": "/abs/path/codex-work"}]},
+//!             "cursor": {"bin": "cursor-agent", "accounts": [{"id": "cursor", "name": "Cursor", "configDir": "/abs/path/cursor"}]}},
 //!  "repos": [{"repo": "obi-e2e/fixture-app", "remote": "file:///abs/path/remote.git", "defaultBranch": "main", "check": "node --test"}],
 //!  "allowFileRemotes": false,
 //!  "telemetry": false}
@@ -35,11 +37,20 @@ pub enum ConfigError {
     Invalid { path: PathBuf, problem: String },
 }
 
+/// Where obid listens when the configuration doesn't say: on macOS, where the Mac app looks for
+/// the runner on the same Mac (127.0.0.1:7777); elsewhere `listen` is required.
+pub const DEFAULT_LISTEN: Option<&str> = if cfg!(target_os = "macos") {
+    Some("127.0.0.1:7777")
+} else {
+    None
+};
+
 /// The file as written. Validated into [`Config`].
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct File {
-    listen: String,
+    #[serde(default)]
+    listen: Option<String>,
     home: PathBuf,
     owner: String,
     #[serde(default)]
@@ -52,12 +63,14 @@ struct File {
     telemetry: bool,
 }
 
-/// The agents' adapters. Codex and Cursor take the same shape as Claude Code when their adapters
-/// land.
+/// The agents' adapters, each the same shape: Claude Code (stream-json), Codex (`codex
+/// app-server`) and Cursor (`cursor-agent acp`, the Agent Client Protocol).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Agents {
     pub claude: Option<Agent>,
+    pub codex: Option<Agent>,
+    pub cursor: Option<Agent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -74,7 +87,9 @@ pub struct Agent {
 pub struct Account {
     pub id: String,
     pub name: String,
-    /// `CLAUDE_CONFIG_DIR` for this account's agents, or null for the tool's own default login.
+    /// The account's own folder: `CLAUDE_CONFIG_DIR` for Claude Code, `CODEX_HOME` for Codex, and
+    /// for Cursor its `CURSOR_CONFIG_DIR`, `HOME` and `XDG_CONFIG_HOME` (`<configDir>/.config`).
+    /// Null for the tool's own default login (not for Cursor, whose accounts each need one).
     pub config_dir: Option<PathBuf>,
 }
 
@@ -135,19 +150,23 @@ impl Config {
         let file: File = serde_json::from_str(text).map_err(Problem::Parse)?;
         let invalid = |problem: String| Err(Problem::Invalid(problem));
 
-        let listen: SocketAddr = match file.listen.parse() {
+        let Some(listen_text) = file.listen.or_else(|| DEFAULT_LISTEN.map(str::to_owned)) else {
+            return invalid(
+                "listen is missing: give an address on 127.0.0.1 with a port, like 127.0.0.1:7811."
+                    .into(),
+            );
+        };
+        let listen: SocketAddr = match listen_text.parse() {
             Ok(address) => address,
             Err(_) => {
                 return invalid(format!(
-                    "listen is {:?}: it must be an address on 127.0.0.1 with a port, like 127.0.0.1:7811.",
-                    file.listen
+                    "listen is {listen_text:?}: it must be an address on 127.0.0.1 with a port, like 127.0.0.1:7811."
                 ));
             }
         };
         if listen.ip() != Ipv4Addr::LOCALHOST {
             return invalid(format!(
-                "listen is {:?}: obid binds only 127.0.0.1, like 127.0.0.1:7811.",
-                file.listen
+                "listen is {listen_text:?}: obid binds only 127.0.0.1, like 127.0.0.1:7811."
             ));
         }
         if !file.home.is_absolute() {
@@ -161,20 +180,45 @@ impl Config {
                 "owner is empty: it is the owner's id, as their Sphere knows them.".into(),
             );
         }
-        if let Some(claude) = &file.agents.claude {
-            if claude.bin.trim().is_empty() {
-                return invalid("agents.claude.bin is empty: it is the Claude Code adapter's binary, a path or a command name.".into());
+        // Account ids are unique across the tools: jobs and the apps name an account by its id.
+        let mut seen = std::collections::HashSet::new();
+        for (key, agent) in [
+            ("claude", &file.agents.claude),
+            ("codex", &file.agents.codex),
+            ("cursor", &file.agents.cursor),
+        ] {
+            let Some(agent) = agent else { continue };
+            if agent.bin.trim().is_empty() {
+                return invalid(format!(
+                    "agents.{key}.bin is empty: it is the adapter's binary, a path or a command name."
+                ));
             }
-            let mut seen = std::collections::HashSet::new();
-            for account in &claude.accounts {
+            for account in &agent.accounts {
                 if account.id.trim().is_empty() {
-                    return invalid("agents.claude.accounts: an account has an empty id.".into());
+                    return invalid(format!(
+                        "agents.{key}.accounts: an account has an empty id."
+                    ));
                 }
                 if !seen.insert(account.id.as_str()) {
                     return invalid(format!(
-                        "agents.claude.accounts: the id {:?} is listed twice.",
+                        "agents.{key}.accounts: the id {:?} is listed twice.",
                         account.id
                     ));
+                }
+                match &account.config_dir {
+                    Some(dir) if !dir.is_absolute() => {
+                        return invalid(format!(
+                            "agents.{key}.accounts: {}'s configDir {dir:?} must be an absolute path.",
+                            account.id
+                        ));
+                    }
+                    None if key == "cursor" => {
+                        return invalid(format!(
+                            "agents.cursor.accounts: {} has no configDir: each Cursor account needs a folder of its own, where its login lives.",
+                            account.id
+                        ));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -267,17 +311,19 @@ fn remote_kind(remote: &str) -> Option<RemoteKind> {
     // git reads a remote with a `/` before its first `:` as a local path, not ssh
     // (`/tmp/x@h:p`, `../srv/x@h:r.git`): that is refused here, or it would get round
     // `allowFileRemotes`. So is `\`, Windows' other separator.
-    if !remote.contains("://") {
-        if let Some((user_host, path)) = remote.split_once(':') {
-            if user_host.contains(['/', '\\']) {
-                return None;
-            }
-            if let Some((user, host)) = user_host.split_once('@') {
-                if user_ok(user) && host_name_ok(host) && !path.is_empty() && !path.starts_with('-')
-                {
-                    return Some(RemoteKind::Ssh);
-                }
-            }
+    if !remote.contains("://")
+        && let Some((user_host, path)) = remote.split_once(':')
+    {
+        if user_host.contains(['/', '\\']) {
+            return None;
+        }
+        if let Some((user, host)) = user_host.split_once('@')
+            && user_ok(user)
+            && host_name_ok(host)
+            && !path.is_empty()
+            && !path.starts_with('-')
+        {
+            return Some(RemoteKind::Ssh);
         }
     }
     None
@@ -425,9 +471,19 @@ mod tests {
 
     #[test]
     fn requires_listen_home_and_owner() {
-        for key in ["listen", "home", "owner"] {
+        for key in ["home", "owner"] {
             let text = with(serde_json::json!({ key: null }));
             assert!(problem(&text).contains(key), "{key}");
+        }
+        // `listen` is required but on macOS, where it is 127.0.0.1:7777 when not given.
+        let text = with(serde_json::json!({ "listen": null }));
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                Config::parse(&text).unwrap().listen,
+                "127.0.0.1:7777".parse().unwrap()
+            );
+        } else {
+            assert!(problem(&text).contains("listen"));
         }
         assert!(problem(&with(serde_json::json!({"owner": " "}))).contains("owner"));
     }
@@ -527,5 +583,43 @@ mod tests {
         let agents = serde_json::json!({"claude": {"bin": "claude", "accounts": [
             {"id": "a", "name": "A", "configDir": null}, {"id": "a", "name": "B", "configDir": null}]}});
         assert!(problem(&with(serde_json::json!({ "agents": agents }))).contains("twice"));
+        let agents = serde_json::json!({
+            "claude": {"bin": "claude", "accounts": [{"id": "a", "name": "A", "configDir": null}]},
+            "codex": {"bin": "codex", "accounts": [{"id": "a", "name": "B", "configDir": null}]}});
+        assert!(
+            problem(&with(serde_json::json!({ "agents": agents })))
+                .contains("agents.codex.accounts: the id \"a\" is listed twice")
+        );
+    }
+
+    #[test]
+    fn codex_and_cursor_take_claudes_shape() {
+        let agents = serde_json::json!({
+            "codex": {"bin": "codex", "accounts": [{"id": "work", "name": "Work", "configDir": "/srv/codex-work"}]},
+            "cursor": {"bin": "cursor-agent", "accounts": [{"id": "c", "name": "Cursor", "configDir": "/srv/cursor"}]}});
+        let config = Config::parse(&with(serde_json::json!({ "agents": agents }))).unwrap();
+        assert!(config.agents.claude.is_none());
+        assert_eq!(config.agents.codex.unwrap().accounts[0].id, "work");
+        assert_eq!(
+            config.agents.cursor.unwrap().accounts[0].config_dir,
+            Some(PathBuf::from("/srv/cursor"))
+        );
+        let agents = serde_json::json!({"cursor": {"bin": "cursor-agent", "accounts": [{"id": "c", "name": "C", "configDir": null}]}});
+        assert!(
+            problem(&with(serde_json::json!({ "agents": agents })))
+                .contains("needs a folder of its own")
+        );
+        let agents = serde_json::json!({"codex": {"bin": " ", "accounts": []}});
+        assert!(
+            problem(&with(serde_json::json!({ "agents": agents })))
+                .contains("agents.codex.bin is empty")
+        );
+        let agents = serde_json::json!({"codex": {"bin": "codex", "accounts": [{"id": "w", "name": "W", "configDir": "rel"}]}});
+        assert!(
+            problem(&with(serde_json::json!({ "agents": agents })))
+                .contains("must be an absolute path")
+        );
+        let agents = serde_json::json!({"gemini": {"bin": "gemini"}});
+        assert!(Config::parse(&with(serde_json::json!({ "agents": agents }))).is_err());
     }
 }

@@ -1,0 +1,45 @@
+{
+  "case": "envelope",
+  "name": "invalid-request-correlation-not-own-id",
+  "description": "A request's correlation_id must be its own id.",
+  "expect": "reject",
+  "reason": "invalid_envelope",
+  "context": {
+    "now": "2026-10-14T12:00:00Z",
+    "sphere": "conf-sphere",
+    "receiver": "obi-a",
+    "keys": {
+      "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M": {
+        "obi": "obi-a",
+        "public_key": "ntsfB6eWkZc1OaiYP3IQWc8ULKnQgLnlTcEu78Ix1kM"
+      },
+      "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo": {
+        "obi": "obi-b",
+        "public_key": "h0N1imyuq1rRFqca2MG9WIbmY4HFUvtr0utDYJvrlsE"
+      }
+    },
+    "seen_ids": []
+  },
+  "input": {
+    "protocol": "obi/0.1",
+    "id": "3c986055-7bdf-805b-8305-c05f11a9f9af",
+    "type": "question",
+    "from": "obi-b",
+    "to": "obi-a",
+    "sphere": "conf-sphere",
+    "correlation_id": "9660ec8f-0dcf-8d9c-8f3c-2721dafe04ae",
+    "created_at": "2026-10-14T11:59:00Z",
+    "expires_at": "2026-10-14T13:00:00Z",
+    "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
+    "body": {
+      "goal": "Decide the rounding rule",
+      "question": "Should average() round to two decimals?",
+      "choices": [
+        "Yes",
+        "No"
+      ],
+      "repo": "obi-conf/fixture-app"
+    },
+    "signature": "JUBqSqLJr67rNDpgZ_XmR7-__UA6wFkLrrvIcdd5LVIvGGO2DZUPJIDySUzbcg8IpZ9r3UN52xjLxXZ5krzjBg"
+  }
+}
