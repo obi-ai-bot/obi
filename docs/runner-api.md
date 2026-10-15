@@ -1162,6 +1162,8 @@ obid serve --config /path/to/config.json
 - `repos`: the repositories jobs may work in. `remote` is an `https://` or `ssh` URL, or a `file://` URL only when `allowFileRemotes` is true (the e2e test's fixture). `check` is the one-line command that decides `tests_pass` and serves as the job's check.
 - `telemetry`: false unless the owner turns it on. obid sends nothing to anyone otherwise.
 
+**What Settings changes** is kept in `home` as files, not in the database: the permission rules and Settings › Permissions' default mode (`GET`/`PUT /v1/settings/permissions`, `/v1/permissions/rules`) in `home/permissions.json`, and `maxRunning` (`PUT /v1/settings/jobs`) in `home/settings.json`, both 0600 and kept across restarts.
+
 The API token is the one in `home/api-token` (0600, at least 32 visible characters): obid makes it on first start, or takes the one put there before it starts. The shells on the same machine read it there. It is never in obid's environment or arguments, where any process of the same user can read it (on macOS through `KERN_PROCARGS2`, which no sandbox holds back; #439): obid refuses to start when `OBID_API_TOKEN` is set, saying to put the token in that file instead. The same holds for every secret obid holds: none is ever in its environment or arguments, nor in a child's. Every request sends `Authorization: Bearer <token>`; anything else is `401`. `GET /v1/status` adds `"engine": "obid"` to `runner`. On SIGTERM or SIGINT obid stops taking requests, leaves its jobs as a restart would (After any restart, above) and exits 0 within 10 seconds.
 
 ### obid only: Sphere membership
@@ -1359,7 +1361,7 @@ Context providers and event sources (docs/ARCHITECTURE.md, "Plug-ins"). None is 
   "state": "disabled", "lastError": null}]
 ```
 
-`state` is `disabled`, `starting`, `ready` or `failed` (it crashed three times in a row; enabling it again starts it again).
+`state` is `disabled`, `starting`, `ready` or `failed` (it failed three times in a row, after restarts 1 and then 2 seconds after its first two failures, docs/ARCHITECTURE.md 5.3; or it couldn't be started, `lastError` says why; enabling it again starts it again).
 
 **`PUT /v1/obid/plugins/{id}`**: `{"enabled": true}` or `{"enabled": false}`, optionally with `"config": { … }` matching the manifest's `config` schema. Answers the plug-in. Kept in `home/plugins.json`. `404` for an unknown plug-in, `422` for a config that doesn't match.
 
