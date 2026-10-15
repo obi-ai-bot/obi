@@ -216,6 +216,17 @@ fn bubblewrap_args(spec: &Spec) -> Vec<OsString> {
     for hidden in &spec.hidden {
         push(&["--tmpfs".as_ref(), hidden.as_os_str()]);
     }
+    // What runs commands or holds logins for this user without a file to read: the user's own
+    // runtime folder (its session bus, its keyring) and Docker's socket.
+    let runtime = PathBuf::from(format!("/run/user/{}", nix::unistd::getuid()));
+    if runtime.is_dir() {
+        push(&["--tmpfs".as_ref(), runtime.as_os_str()]);
+    }
+    for socket in DOCKER_SOCKETS {
+        if Path::new(socket).exists() {
+            push(&["--ro-bind".as_ref(), "/dev/null".as_ref(), socket.as_ref()]);
+        }
+    }
     for path in &spec.read_only {
         if path.exists() {
             push(&["--ro-bind".as_ref(), path.as_os_str(), path.as_os_str()]);
@@ -331,11 +342,30 @@ fn seatbelt_profile(spec: &Spec) -> String {
         }
         profile.push_str(")\n");
     }
+    // A Unix socket is reached by connecting, not by reading: none inside a hidden folder, and
+    // not Docker's, which runs anything as this user.
+    profile.push_str("(deny network-outbound");
+    for hidden in &spec.hidden {
+        profile.push_str(&format!(
+            " (remote unix-socket (subpath {}))",
+            sbpl_string(hidden)
+        ));
+    }
+    for socket in DOCKER_SOCKETS {
+        profile.push_str(&format!(
+            " (remote unix-socket (path-literal {}))",
+            sbpl_string(Path::new(socket))
+        ));
+    }
+    profile.push_str(" (remote unix-socket (path-literal \"/private/var/run/docker.sock\")))\n");
     if !spec.network {
         profile.push_str("(deny network*)\n");
     }
     profile
 }
+
+/// Where Docker's socket is.
+const DOCKER_SOCKETS: [&str; 2] = ["/run/docker.sock", "/var/run/docker.sock"];
 
 /// A path as an SBPL string literal.
 fn sbpl_string(path: &Path) -> String {

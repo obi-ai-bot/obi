@@ -271,12 +271,18 @@ fn probe_script(world: &World, port: u16) -> String {
         "if git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=2 ls-remote http://127.0.0.1:{port}/x >/dev/null 2>&1; then echo \"net loopback tried\"; else echo \"net loopback tried\"; fi\n"
     ));
     script.push_str("echo \"env-home $HOME\"\necho \"env-tmpdir $TMPDIR\"\n");
+    // A Unix socket in the person's home: a login agent, a Docker socket.
+    script.push_str(&format!(
+        "node -e \"require('net').connect('{}').on('connect', () => {{ console.log('unix-socket ok'); process.exit(0) }}).on('error', () => {{ console.log('unix-socket no'); process.exit(0) }})\" 2>/dev/null || echo 'unix-socket node-failed'\n",
+        world.person.join("agent.sock").display()
+    ));
     script
 }
 
 struct Ran {
     lines: BTreeMap<String, String>,
     connected: bool,
+    socket_reached: bool,
     raw: String,
 }
 
@@ -300,6 +306,8 @@ fn run(world: &World, spec: &Spec) -> Ran {
             }
         })
     };
+    let socket = std::os::unix::net::UnixListener::bind(world.person.join("agent.sock")).unwrap();
+    socket.set_nonblocking(true).unwrap();
     let script = probe_script(world, port);
     let argv: Vec<OsString> = vec![
         "/bin/sh".into(),
@@ -319,6 +327,7 @@ fn run(world: &World, spec: &Spec) -> Ran {
         .unwrap();
     done.store(true, Ordering::Relaxed);
     watcher.join().unwrap();
+    let socket_reached = socket.accept().is_ok();
     let raw = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -334,6 +343,7 @@ fn run(world: &World, spec: &Spec) -> Ran {
     Ran {
         lines,
         connected: connected.load(Ordering::Relaxed),
+        socket_reached,
         raw,
     }
 }
@@ -404,6 +414,12 @@ fn the_same_fences(ran: &Ran, world: &World, commits: bool) {
         }
     }
     expect(ran, "git head", "ok");
+    expect(ran, "unix-socket", "no");
+    assert!(
+        !ran.socket_reached,
+        "a socket in the person's home was reached\n{}",
+        ran.raw
+    );
     expect(ran, "git commit", if commits { "ok" } else { "no" });
     expect(ran, "env-home", &world.temp.display().to_string());
     expect(ran, "env-tmpdir", &world.temp.display().to_string());
