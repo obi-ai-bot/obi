@@ -387,13 +387,22 @@ pub fn built_in(texts: &[(String, String)]) -> Vec<Finding> {
 /// with only `PATH`, `HOME` and `TMPDIR` (that folder), so no configuration of the machine's or
 /// the person's changes what it looks for.
 pub async fn gitleaks(texts: &[(String, String)], scratch: &Path) -> Result<Vec<Finding>, String> {
-    let Some(bin) = crate::process::resolve_bin("gitleaks") else {
-        return Ok(Vec::new());
-    };
+    match crate::process::resolve_bin("gitleaks") {
+        Some(bin) => gitleaks_with(&bin, texts, scratch).await,
+        None => Ok(Vec::new()),
+    }
+}
+
+/// [`gitleaks`] with the binary `bin`.
+async fn gitleaks_with(
+    bin: &Path,
+    texts: &[(String, String)],
+    scratch: &Path,
+) -> Result<Vec<Finding>, String> {
     let folder = scratch.join(format!("scan-{}", hex::encode(random_bytes())));
     crate::store::make_private_dir(&folder)
         .map_err(|e| format!("can't make the scan's folder: {e}"))?;
-    let result = run_gitleaks(&bin, texts, &folder).await;
+    let result = run_gitleaks(bin, texts, &folder).await;
     let _ = std::fs::remove_dir_all(&folder);
     result
 }
@@ -585,6 +594,99 @@ mod tests {
                 .any(|f| f.rule == "GitHub token, base64" && f.line == Some(2)),
             "{found:?}"
         );
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("obid-scan-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    /// A stand-in gitleaks: `script` is its shell body.
+    fn fake_gitleaks(folder: &Path, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = folder.join("gitleaks");
+        std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    #[tokio::test]
+    async fn what_gitleaks_reports_is_placed_by_text_and_line() {
+        let folder = scratch("report");
+        // Its arguments: dir <file> … --report-path=<report>. It reports line 3 of what it read.
+        let bin = fake_gitleaks(
+            &folder,
+            r#"for a in "$@"; do case "$a" in --report-path=*) report="${a#--report-path=}";; esac; done
+echo '[{"StartLine": 3, "RuleID": "generic-api-key"}]' > "$report"
+exit 99"#,
+        );
+        let texts = vec![
+            ("summary".to_owned(), "one\ntwo".to_owned()),
+            ("finding 1 detail".to_owned(), "three".to_owned()),
+        ];
+        let found = gitleaks_with(&bin, &texts, &folder).await.unwrap();
+        assert_eq!(
+            found,
+            [Finding {
+                name: "finding 1 detail".into(),
+                line: Some(1),
+                rule: "gitleaks generic-api-key".into()
+            }]
+        );
+        // Its folder is gone afterwards.
+        let left: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("scan-"))
+            .collect();
+        assert!(left.is_empty());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[tokio::test]
+    async fn a_gitleaks_that_fails_is_a_scan_that_couldnt_run() {
+        let folder = scratch("broken");
+        let bin = fake_gitleaks(&folder, "echo 'config is broken' >&2\nexit 1");
+        let why = gitleaks_with(&bin, &texts("clean text"), &folder)
+            .await
+            .unwrap_err();
+        assert!(
+            why.contains("couldn't run") && why.contains("config is broken"),
+            "{why}"
+        );
+        let clean = fake_gitleaks(&folder, "exit 0");
+        assert_eq!(
+            gitleaks_with(&clean, &texts("clean"), &folder).await,
+            Ok(Vec::new())
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[tokio::test]
+    async fn the_real_gitleaks_when_it_is_installed() {
+        let folder = scratch("real");
+        // Made up at run time, so this file holds no value a scanner flags: 36 varied letters and
+        // digits (gitleaks skips a value with too little entropy).
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let varied: String = obi_protocol::keys::sha256(b"obid scan test")
+            .iter()
+            .chain(obi_protocol::keys::sha256(b"more").iter())
+            .take(36)
+            .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
+            .collect();
+        let token = format!("ghp_{varied}");
+        let found = gitleaks(&texts(&format!("token = {token}")), &folder).await;
+        match crate::process::resolve_bin("gitleaks") {
+            Some(_) => assert!(!found.unwrap().is_empty(), "gitleaks found nothing"),
+            None => assert_eq!(
+                found,
+                Ok(Vec::new()),
+                "no gitleaks: the built-in rules alone"
+            ),
+        }
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]
