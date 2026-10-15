@@ -62,10 +62,14 @@ pub struct AgentMcpSpec {
     pub allowed_tools: Vec<String>,
 }
 
-/// The MCP server an `agent-mcp` plug-in gives agents. It has no field for headers or an
-/// environment, so a server that needs a secret in its configuration can't be described: its
-/// login is its own (OAuth in its own store), never a vault secret. A URL with a user or a
-/// password in it is refused for the same reason.
+/// The MCP server an `agent-mcp` plug-in gives agents. Its login is its own (OAuth in its own
+/// store), never a vault secret, so the manifest gives a secret nowhere to go: there is no
+/// field for headers or an environment, and [`Manifest::validate`] refuses an `http` URL with
+/// a login (`user@`), a query string or a fragment, and `stdio` arguments that pass a
+/// credential the usual ways (`--token x`, `--api-key=x`, `TOKEN=x`, `Authorization:`,
+/// `Bearer `). That last check goes by names, so it can't recognize every secret: one put in
+/// a URL's path, or in an argument with no telling name, gets through. The owner sees the
+/// manifest before enabling the plug-in.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum McpServerSpec {
@@ -195,10 +199,23 @@ impl AgentMcpSpec {
                 if authority.contains('@') {
                     return fail("agentMcp.server.url carries a login; logins are the server's own, never in the manifest".into());
                 }
+                if rest.contains(['?', '#']) {
+                    return fail("agentMcp.server.url has a query string or a fragment, where a secret could ride; the manifest takes none".into());
+                }
+                if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                    return fail(format!(
+                        "agentMcp.server.url {url:?} has a space or a control character"
+                    ));
+                }
             }
-            McpServerSpec::Stdio { command, .. } => {
+            McpServerSpec::Stdio { command, args } => {
                 if command.trim().is_empty() {
                     return fail("agentMcp.server.command is empty".into());
+                }
+                if let Some(arg) = passes_credential(args) {
+                    return fail(format!(
+                        "agentMcp.server.args passes a credential ({arg:?}); logins are the server's own, never in the manifest"
+                    ));
                 }
             }
         }
@@ -213,6 +230,56 @@ impl AgentMcpSpec {
         }
         Ok(())
     }
+}
+
+/// The first argument that passes a credential the usual ways: `--token x`, `--api-key=x`,
+/// `TOKEN=x`, or an HTTP `Authorization:` header or `Bearer ` value anywhere in it. Goes by
+/// names, so a secret with no telling name isn't found.
+fn passes_credential(args: &[String]) -> Option<&str> {
+    for (i, arg) in args.iter().enumerate() {
+        let lower = arg.to_ascii_lowercase();
+        if lower.contains("authorization:") || lower.contains("bearer ") {
+            return Some(arg);
+        }
+        match arg.split_once('=') {
+            Some((name, value)) if names_credential(name) && !value.is_empty() => {
+                return Some(arg);
+            }
+            None if arg.starts_with('-') && names_credential(arg) && i + 1 < args.len() => {
+                return Some(arg);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether an option or variable name, like `--api-key` or `GITHUB_TOKEN`, names a credential.
+fn names_credential(name: &str) -> bool {
+    let name = name.trim_start_matches('-').to_ascii_lowercase();
+    let words: Vec<&str> = name
+        .split(['-', '_', '.'])
+        .filter(|w| !w.is_empty())
+        .collect();
+    let single = [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "apikey",
+        "credential",
+        "credentials",
+    ];
+    let pairs = [
+        ("api", "key"),
+        ("access", "key"),
+        ("private", "key"),
+        ("client", "secret"),
+    ];
+    words.iter().any(|w| single.contains(w))
+        || words
+            .windows(2)
+            .any(|pair| pairs.contains(&(pair[0], pair[1])))
 }
 
 /// A path that stays inside the plug-in's folder: relative, no `..`.

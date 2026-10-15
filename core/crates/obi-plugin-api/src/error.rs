@@ -4,8 +4,10 @@ use crate::PluginId;
 /// are data: shown to the owner as text, never given to a model as instructions.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PluginError {
-    /// Not lower-case letters, digits and hyphens.
-    #[error("{0:?} is not a plug-in id: only lower-case letters, digits and hyphens")]
+    /// Not lower-case letters, digits and hyphens, starting with a letter or a digit.
+    #[error(
+        "{0:?} is not a plug-in id: only lower-case letters, digits and hyphens, starting with a letter or a digit"
+    )]
     InvalidId(String),
     /// `obi-plugin.json` doesn't parse or doesn't match docs/ARCHITECTURE.md 5.2.
     #[error("the manifest is invalid: {0}")]

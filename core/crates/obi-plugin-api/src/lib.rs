@@ -21,7 +21,8 @@ pub use id::PluginId;
 pub use manifest::{AgentMcpSpec, EventsSpec, MANIFEST_FILE, Manifest, McpServerSpec, RunSpec};
 pub use types::{
     ContextItem, ContextJob, ContextRequest, DEFAULT_MAX_BYTES, Event, EventData, EventKind,
-    EventSubject, MAX_CONTEXT_ITEMS, PluginEvent, PluginState, PluginStatus, Purpose, limit_items,
+    EventSubject, MAX_CONTEXT_ITEMS, MAX_EVENT_ID_BYTES, MAX_SOURCE_BYTES, MAX_TITLE_BYTES,
+    MAX_URI_BYTES, PluginEvent, PluginState, PluginStatus, Purpose, limit_items,
 };
 
 /// The protocol both the manifest and the wire speak.

@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::PluginError;
 
 /// A plug-in's id: one or more lower-case letters, digits and hyphens (docs/ARCHITECTURE.md
-/// 5.2). It is also the plug-in's folder name under `home/plugins/` and `home/plugin-data/`,
-/// which is why nothing else (no `.`, no `/`) is allowed.
+/// 5.2), starting with a letter or a digit. It is also the plug-in's folder name under
+/// `home/plugins/` and `home/plugin-data/`, which is why nothing else (no `.`, no `/`) is
+/// allowed, and it ends up in the sandbox's command lines (bubblewrap's or `sandbox-exec`'s
+/// arguments), which is why it never starts with a hyphen that could be read as an option.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct PluginId(String);
@@ -14,7 +16,10 @@ pub struct PluginId(String);
 impl PluginId {
     pub fn new(id: impl Into<String>) -> Result<PluginId, PluginError> {
         let id = id.into();
-        let valid = !id.is_empty()
+        let valid = id
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
             && id
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');

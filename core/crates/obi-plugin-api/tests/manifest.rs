@@ -143,6 +143,54 @@ fn a_server_url_with_a_login_is_refused() {
 }
 
 #[test]
+fn a_server_url_with_a_query_or_fragment_is_refused() {
+    for url in [
+        "https://mcp.example/mcp?api_key=sk-live-123",
+        "https://mcp.example/mcp?transport=http",
+        "https://mcp.example?token=x",
+        "https://mcp.example/mcp#token=x",
+    ] {
+        let mut value = tetrix();
+        value["agentMcp"]["server"]["url"] = json!(url);
+        assert!(refused(&value).contains("query"), "{url}");
+    }
+    let mut value = tetrix();
+    value["agentMcp"]["server"]["url"] = json!("https://mcp.example/mcp\nx");
+    refused(&value);
+}
+
+#[test]
+fn stdio_args_that_pass_a_credential_are_refused() {
+    let refused_args: [&[&str]; 8] = [
+        &["-c", "curl -H 'Authorization: Bearer sk' https://x"],
+        &["--header", "authorization: token abc"],
+        &["--token", "abc"],
+        &["--api-key=abc"],
+        &["--client-secret", "abc"],
+        &["GITHUB_TOKEN=abc", "bin/mcp"],
+        &["--password", "hunter2"],
+        &["serve", "--access_key", "abc"],
+    ];
+    for args in refused_args {
+        let mut value = tetrix();
+        value["agentMcp"]["server"] = json!({"type": "stdio", "command": "/bin/sh", "args": args});
+        assert!(refused(&value).contains("credential"), "{args:?}");
+    }
+    let accepted_args: [&[&str]; 5] = [
+        &["--x"],
+        &["--port", "8080", "--read-only"],
+        &["--tokens-per-minute"],
+        &["--keyboard", "us", "--log=debug"],
+        &["--monkey=1", "--tokenizer", "bpe"],
+    ];
+    for args in accepted_args {
+        let mut value = tetrix();
+        value["agentMcp"]["server"] = json!({"type": "stdio", "command": "bin/mcp", "args": args});
+        assert!(parse(&value).is_ok(), "{args:?}");
+    }
+}
+
+#[test]
 fn a_server_url_must_be_http() {
     for url in ["ftp://mcp.tetrix.example", "mcp.tetrix.example", "https://"] {
         let mut value = tetrix();
@@ -160,7 +208,9 @@ fn the_protocol_must_be_obi_plugin_0_1() {
 
 #[test]
 fn bad_ids_are_refused() {
-    for id in ["", "Tetrix", "te_trix", "../x", "a.b", "a/b", "é"] {
+    for id in [
+        "", "Tetrix", "te_trix", "../x", "a.b", "a/b", "é", "-", "--help", "-tetrix",
+    ] {
         let mut value = tetrix();
         value["id"] = json!(id);
         assert!(
@@ -169,7 +219,7 @@ fn bad_ids_are_refused() {
         );
         assert!(matches!(PluginId::new(id), Err(PluginError::InvalidId(_))));
     }
-    for id in ["tetrix", "a", "gh-events-2", "0x"] {
+    for id in ["tetrix", "a", "gh-events-2", "0x", "tetrix-"] {
         assert_eq!(PluginId::new(id).unwrap().as_str(), id);
     }
 }
