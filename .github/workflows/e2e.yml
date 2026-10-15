@@ -67,14 +67,20 @@ jobs:
       # obi-sphere's server keeps copies of this repository's e2e fixtures; they must still match
       # obi's (this checkout). The check is obi-sphere's script, run from the workspace with
       # OBI_DIR pointing at this checkout; it needs only Node (set up above) and no dependencies.
-      # It runs whenever the script is in obi-sphere's dev; until then the step says so and passes.
-      # When it runs, a difference (or no obi checkout) fails the job.
+      # obi-sphere's dev has had a server/ folder (a README) since its first commit; the server
+      # itself is there once server/package.json is (the same test the Makefile uses to install
+      # its dependencies). Until then the step says so and passes. Once it is there, the script
+      # must be too: a missing script fails rather than skipping, so the comparison can't stop
+      # silently. When it runs, a difference (or no obi checkout) fails the job.
       - name: obi-sphere's copies of the e2e fixtures match obi's
         run: |
-          if [ -f obi-sphere/server/scripts/check-fixtures.mjs ]; then
-            OBI_DIR=obi node obi-sphere/server/scripts/check-fixtures.mjs
+          if [ ! -f obi-sphere/server/package.json ]; then
+            echo "::notice::obi-sphere's server (server/package.json) is not in obi-sphere's dev yet: the fixture comparison is skipped."
+          elif [ ! -f obi-sphere/server/scripts/check-fixtures.mjs ]; then
+            echo "::error::obi-sphere's server (server/package.json) is in obi-sphere's dev but server/scripts/check-fixtures.mjs is not: the fixture comparison can't run."
+            exit 1
           else
-            echo "::notice::obi-sphere's dev has no server/scripts/check-fixtures.mjs yet: the fixture comparison is skipped."
+            OBI_DIR=obi node obi-sphere/server/scripts/check-fixtures.mjs
           fi
 
       # obid is Rust (core/): `make e2e` runs `cargo build -p obid` in it before the harness.
