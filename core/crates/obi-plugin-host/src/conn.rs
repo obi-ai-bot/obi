@@ -473,21 +473,15 @@ enum Level {
 }
 
 /// Logs one line a plug-in wrote, within its [`LOG_BYTES_PER_MINUTE`]. The plug-in's words are
-/// data: logged under the target `obi_plugin` with its id, never acted on.
+/// data: logged under the target `obi_plugin` with its id, never acted on, and as one line of
+/// the log ([`log_text`]), so a plug-in can't write what looks like another line of `obid`'s.
 ///
 /// Not done here yet: taking the vault's secrets out of the line (docs/ARCHITECTURE.md 5.4).
 /// The host has no vault and section 5.5's signatures give it none, so where that happens
 /// (a redactor given to the host, or `obid`'s log for the `obi_plugin` target) is the lead's
 /// decision to make.
 fn log_line(peer: &Peer, level: Level, line: &str) {
-    let mut text: String = line.trim_end().to_owned();
-    if text.len() > MAX_LOG_LINE_BYTES {
-        let mut end = MAX_LOG_LINE_BYTES;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-    }
+    let text = log_text(line);
     let (fits, dropped) = lock(&peer.log).take(text.len().max(1), Instant::now());
     if let Some(dropped) = dropped {
         tracing::warn!(target: "obi_plugin", plugin = %peer.id, "{dropped} line(s) left out of the log: over 64 KB in a minute");
@@ -501,6 +495,32 @@ fn log_line(peer: &Peer, level: Level, line: &str) {
         Level::Warn => tracing::warn!(target: "obi_plugin", plugin = %id, "{text}"),
         Level::Error => tracing::error!(target: "obi_plugin", plugin = %id, "{text}"),
     }
+}
+
+/// What of `line` goes into the log: without trailing white space, every control character
+/// (a line break, a carriage return, a terminal's escape) and Unicode's line and paragraph
+/// separators written as their Rust escapes (`\n`, `\r`, `\u{1b}`, `\u{2028}`), and at most
+/// [`MAX_LOG_LINE_BYTES`] long.
+fn log_text(line: &str) -> String {
+    let mut text = String::with_capacity(line.len());
+    for c in line.trim_end().chars() {
+        if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+            text.extend(c.escape_default());
+        } else {
+            text.push(c);
+        }
+        if text.len() > MAX_LOG_LINE_BYTES {
+            break;
+        }
+    }
+    if text.len() > MAX_LOG_LINE_BYTES {
+        let mut end = MAX_LOG_LINE_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
 }
 
 /// Reads one line ending in `\n` (or the last one, at the end), without the `\n`: `Ok(None)` at
@@ -546,8 +566,26 @@ async fn read_line<R: AsyncBufRead + Unpin>(
 
 #[cfg(test)]
 mod tests {
-    use super::{LOG_BYTES_PER_MINUTE, LogBudget, REMEMBERED_EVENT_IDS, Seen, read_line};
+    use super::{
+        LOG_BYTES_PER_MINUTE, LogBudget, MAX_LOG_LINE_BYTES, REMEMBERED_EVENT_IDS, Seen, log_text,
+        read_line,
+    };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_logged_line_stays_one_line() {
+        assert_eq!(
+            log_text("ok\n2026-01-01T00:00:00Z  INFO obid: the vault is open\r\x1b[2K\tx \n"),
+            "ok\\n2026-01-01T00:00:00Z  INFO obid: the vault is open\\r\\u{1b}[2K\\tx"
+        );
+        assert_eq!(log_text("plain words, é"), "plain words, é");
+        assert_eq!(log_text("a\u{2028}b\u{2029}c"), "a\\u{2028}b\\u{2029}c");
+        let long = log_text(&"x\n".repeat(MAX_LOG_LINE_BYTES));
+        assert_eq!(long.len(), MAX_LOG_LINE_BYTES);
+        assert!(long.starts_with("x\\nx\\n") && !long.contains('\n'));
+        let wide = log_text(&"é".repeat(MAX_LOG_LINE_BYTES));
+        assert!(wide.len() <= MAX_LOG_LINE_BYTES && wide.chars().all(|c| c == 'é'));
+    }
 
     #[tokio::test]
     async fn lines_split_on_newline_only() {
