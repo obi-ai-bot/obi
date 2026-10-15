@@ -1,0 +1,102 @@
+# The plug-in boundary (core/crates/obi-plugin-api, core/crates/obi-plugin-host, plugins/) on Linux
+# and macOS, with the plug-in sandbox made for real: bubblewrap on Linux, Seatbelt (sandbox-exec)
+# on macOS (docs/ARCHITECTURE.md 5.3). core.yml runs these crates' tests too; on a machine where
+# the sandbox can't be made they check that a plug-in with a process is `failed` for that reason,
+# as specified. Here OBI_PLUGIN_HOST_REQUIRE_SANDBOX makes that a failure, so every lifecycle and
+# sandbox test runs its sandboxed path. This file belongs to the plug-in boundary
+# (docs/ARCHITECTURE.md, section 6).
+name: Plug-ins
+
+on:
+  pull_request:
+    branches: [dev]
+    paths:
+      - "core/crates/obi-plugin-api/**"
+      - "core/crates/obi-plugin-host/**"
+      - "plugins/**"
+      - "core/Cargo.toml"
+      - "core/Cargo.lock"
+      - ".github/workflows/plugins.yml"
+  push:
+    branches: [dev]
+    paths:
+      - "core/crates/obi-plugin-api/**"
+      - "core/crates/obi-plugin-host/**"
+      - "plugins/**"
+      - "core/Cargo.toml"
+      - "core/Cargo.lock"
+      - ".github/workflows/plugins.yml"
+
+# A newer push to the same pull request (or to dev) cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  plugins:
+    name: Plug-ins (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # bubblewrap needs an unprivileged user namespace, which Ubuntu's AppArmor restricts by
+      # default; lifted for this throwaway runner only.
+      - name: bubblewrap
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --version
+          bwrap --die-with-parent --unshare-pid --new-session --ro-bind / / --dev /dev --proc /proc -- true
+          echo "bubblewrap makes a sandbox here"
+
+      - name: Seatbelt
+        if: runner.os == 'macOS'
+        run: /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true && echo "sandbox-exec makes a sandbox here"
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          cargo --version
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            core/target
+          key: plugins-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: plugins-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: cargo fmt --check
+        run: cargo fmt --check -p obi-plugin-api -p obi-plugin-host
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy -p obi-plugin-api -p obi-plugin-host --all-targets --locked -- -D warnings
+
+      - name: cargo test --locked, with the sandbox required
+        env:
+          OBI_PLUGIN_HOST_REQUIRE_SANDBOX: "1"
+        run: cargo test --locked -p obi-plugin-api -p obi-plugin-host
