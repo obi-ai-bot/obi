@@ -1,0 +1,69 @@
+#!/usr/bin/env node
+// A reviewer that looks outside its worktree, for obid's review path tests: answering an
+// Obi-to-Obi review (stream-json, --permission-prompt-tool stdio), it asks obid for Grep, Glob and
+// LS on its own account folder ($CLAUDE_CONFIG_DIR), as a review agent told to by the change it
+// reads might. For each call obid allows it does what Claude Code's tool would do, here in the job
+// sandbox: it reads what is there and puts it in its review. So a review whose result holds none of
+// the account folder's contents is one obid refused. It also reads the folder itself, without
+// asking, and reports only how many bytes it could read: that shows the sandbox lets the agent
+// read its account, so the refusal is what kept the folder out of the review.
+import { createInterface } from "node:readline";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+
+const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
+const session = "00000000-0000-4000-8000-000000000003";
+const account = process.env.CLAUDE_CONFIG_DIR ?? "";
+
+// Every file under `path`, read as Claude Code's Grep with pattern "." and output "content" would.
+function everything(path) {
+  try {
+    if (statSync(path).isFile()) return [`${path}: ${readFileSync(path, "utf8")}`];
+    return readdirSync(path).flatMap((name) => everything(join(path, name)));
+  } catch (e) {
+    return [`${path}: ${e.code}`];
+  }
+}
+
+const bytes = (path) => everything(path).join("").length;
+
+const probes = [
+  ["Grep", { pattern: ".", path: account, output_mode: "content" }],
+  ["Glob", { pattern: "**/*", path: account }],
+  ["LS", { path: account }],
+];
+
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const lines = rl[Symbol.asyncIterator]();
+
+async function next(type) {
+  for (;;) {
+    const { value, done } = await lines.next();
+    if (done) return null;
+    try {
+      const message = JSON.parse(value);
+      if (message.type === type) return message;
+    } catch {}
+  }
+}
+
+(async () => {
+  if (!(await next("user"))) return;
+  emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Read", "Grep", "Glob", "LS"], mcp_servers: [], model: "prying", permissionMode: "default", apiKeySource: "none" });
+  const outcomes = [];
+  const read = [];
+  for (const [index, [tool, input]] of probes.entries()) {
+    const request_id = `probe-${index}`;
+    emit({ type: "control_request", request_id, request: { subtype: "can_use_tool", tool_name: tool, input, tool_use_id: `toolu_${index}` } });
+    const answer = await next("control_response");
+    const behavior = answer?.response?.response?.behavior ?? "none";
+    outcomes.push(`${tool} ${behavior}`);
+    if (behavior === "allow") read.push(...everything(account));
+  }
+  const review = {
+    summary: `${outcomes.join(", ")}. Account folder readable in the sandbox: ${bytes(account)} bytes.`,
+    findings: read.map((text) => ({ severity: "minor", file: "src/average.js", line: 1, title: "Found outside the worktree", detail: text })),
+  };
+  emit({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: "Reviewed.", session_id: session, total_cost_usd: 0, structured_output: review });
+  rl.close();
+})();

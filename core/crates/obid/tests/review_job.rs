@@ -489,3 +489,58 @@ async fn a_committed_obi_link_fails_the_review_and_writes_nothing_outside() {
     );
     assert_eq!(std::fs::read_dir(&victim).unwrap().count(), 1);
 }
+
+/// A review agent that asks for Grep, Glob and LS on its own account folder (the one thing in the
+/// job sandbox, beside the worktree, that holds a login) is refused each time, and its review holds
+/// nothing of the folder: the sandbox lets the agent read the folder, so obid's answer is what
+/// keeps the account out of the result that goes back to the requesting Obi
+/// (tests/agents/prying-reviewer).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_agent_cant_search_its_account_folder() {
+    let folder = Folder::new("prying");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, Some("node --test"));
+    let prying = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/prying-reviewer");
+    config.agents.claude.as_mut().unwrap().bin = prying.to_str().unwrap().to_owned();
+    let account = config.home.join("accounts/stub");
+    obid::prepare_home(&config).unwrap();
+    std::fs::create_dir_all(&account).unwrap();
+    // Made up at run time, shaped like no real token, so only this test's own check can find it.
+    let canary = format!("OBI-ACCOUNT-CANARY-{}", std::process::id());
+    let credentials = format!("{{\"login\": \"{canary}\"}}");
+    std::fs::write(account.join(".credentials.json"), &credentials).unwrap();
+    let jobs = Jobs::open(
+        config,
+        Events::new(),
+        Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))),
+    )
+    .unwrap();
+    let job = jobs.start_obi_review(request()).unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(120), jobs.wait(&job.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ended.status, Status::Done, "{}", ended.summary);
+    let result = ended.review_result.unwrap();
+    let shown = result.to_string();
+    assert!(
+        !shown.contains(&canary),
+        "the account is in the review: {shown}"
+    );
+    assert_eq!(result["findings"], json!([]), "{shown}");
+    let summary = result["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("Grep deny, Glob deny, LS deny."),
+        "{summary}"
+    );
+    // The agent could read the folder in the sandbox: the refusal is what kept it out.
+    let readable = format!(
+        "readable in the sandbox: {} bytes",
+        format!(
+            "{}: {credentials}",
+            account.join(".credentials.json").display()
+        )
+        .len()
+    );
+    assert!(summary.contains(&readable), "{summary} (wanted {readable})");
+}
