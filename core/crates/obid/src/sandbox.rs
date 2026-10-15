@@ -285,6 +285,8 @@ fn bubblewrap_args(spec: &Spec) -> Vec<OsString> {
         "--proc".as_ref(),
         "/proc".as_ref(),
     ]);
+    // `--dev` is a new /dev without the host's /dev/shm. Node exits 1 without it.
+    push(&["--tmpfs".as_ref(), "/dev/shm".as_ref()]);
     // /tmp is empty and, at the end, read-only: TMPDIR is the job's own folder.
     push(&["--tmpfs".as_ref(), "/tmp".as_ref()]);
     for hidden in &spec.hidden {
