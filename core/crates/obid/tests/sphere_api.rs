@@ -279,8 +279,20 @@ async fn a_request_waits_for_the_owner_and_the_remembered_decision_answers_the_n
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_publish_gate_sends_no_text_when_the_result_holds_a_secret() {
-    let folder = Folder::new("leak");
-    let leaky = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents/leaky-reviewer");
+    the_gate_stops_a_leak("leak", "leaky-reviewer").await;
+}
+
+/// A finding's `file` is the agent's text too: a secret in a path is stopped like one in prose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_publish_gate_scans_the_findings_paths_too() {
+    the_gate_stops_a_leak("leakpath", "leaky-path-reviewer").await;
+}
+
+async fn the_gate_stops_a_leak(name: &str, agent: &str) {
+    let folder = Folder::new(name);
+    let leaky = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/agents")
+        .join(agent);
     let (_sphere, obid, ernesto) = setup(&folder, &leaky, None).await;
     let request = ernesto.request("obi-wellington", "review_request", brief(), 3600);
     let cid = request["id"].as_str().unwrap().to_owned();

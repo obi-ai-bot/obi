@@ -1337,22 +1337,7 @@ impl Link {
             self.reply_failed(&cid, None).await;
             return;
         };
-        let mut texts: Vec<(String, String)> = Vec::new();
-        for (i, finding) in body["findings"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
-            for field in ["title", "detail"] {
-                if let Some(text) = finding[field].as_str() {
-                    texts.push((format!("finding {} {field}", i + 1), text.to_owned()));
-                }
-            }
-        }
-        if let Some(summary) = body["summary"].as_str() {
-            texts.push(("summary".into(), summary.to_owned()));
-        }
+        let texts = every_text(&body);
         let scratch = self.config.home.join("tmp");
         let verdict = scan::scan(&texts, &scratch).await;
         let (scan_json, failure) = match &verdict {
@@ -1794,9 +1779,77 @@ fn failed_result(request: &Value) -> Value {
     json!({"for": "review_request", "outcome": "failed", "repo": body["repo"], "head_sha": body["head_sha"], "findings": []})
 }
 
+/// Every string in a reply's body, each with where it is (`finding 1 file`, `summary`,
+/// `condition 2 kind`): the publish gate scans all of them, the agent's paths too, not only the
+/// fields meant as prose (ARCHITECTURE.md section 4: nothing leaves until the scan has passed on
+/// everything in it).
+pub(crate) fn every_text(body: &Value) -> Vec<(String, String)> {
+    fn walk(value: &Value, place: String, out: &mut Vec<(String, String)>) {
+        match value {
+            Value::String(text) => out.push((place, text.clone())),
+            Value::Array(items) => {
+                let one = match place.as_str() {
+                    "findings" => "finding",
+                    "acceptance" => "condition",
+                    other => other,
+                }
+                .to_owned();
+                for (i, item) in items.iter().enumerate() {
+                    walk(item, format!("{one} {}", i + 1), out);
+                }
+            }
+            Value::Object(fields) => {
+                for (key, field) in fields {
+                    let here = if place.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{place} {key}")
+                    };
+                    walk(field, here, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(body, String::new(), &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The publish gate scans every string of the reply: the agent's paths as much as its prose.
+    #[test]
+    fn the_gate_reads_every_text_of_a_result() {
+        let body = json!({"for": "review_request", "outcome": "approved", "repo": "o/r",
+            "head_sha": "a".repeat(40), "summary": "S",
+            "findings": [{"id": "f-1", "severity": "nit", "file": "src/F1.js", "line": 3, "title": "T1", "detail": "D1"},
+                         {"id": "f-2", "severity": "minor", "file": "src/F2.js", "line": 4, "title": "T2", "detail": "D2", "end_line": 5}],
+            "acceptance": [{"index": 0, "kind": "tests_pass", "met": true}]});
+        let texts: std::collections::BTreeMap<String, String> =
+            every_text(&body).into_iter().collect();
+        for (place, text) in [
+            ("finding 1 file", "src/F1.js"),
+            ("finding 1 title", "T1"),
+            ("finding 1 detail", "D1"),
+            ("finding 2 file", "src/F2.js"),
+            ("finding 2 title", "T2"),
+            ("finding 2 detail", "D2"),
+            ("summary", "S"),
+            ("repo", "o/r"),
+            ("condition 1 kind", "tests_pass"),
+        ] {
+            assert_eq!(
+                texts.get(place).map(String::as_str),
+                Some(text),
+                "{place}: {texts:?}"
+            );
+        }
+        // Numbers and booleans aren't text; all 16 strings are there.
+        assert_eq!(texts.len(), 16, "{texts:?}");
+    }
 
     #[test]
     fn base_urls() {
