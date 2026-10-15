@@ -71,6 +71,14 @@ pub struct ObiReview {
     pub body: Value,
 }
 
+/// What obid does when an Obi-to-Obi review job ends, before the job says it has: the exchange's
+/// publish gate and reply (`sphere::Link::review_ended`). Given the job and whether it ended done.
+pub type ReviewHook = Arc<
+    dyn Fn(Job, bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Why a job couldn't be made: a person can read it (`422`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
@@ -96,6 +104,8 @@ pub struct Jobs {
     /// One preparation at a time per repository (Engine/Desk.swift, `setups`): its clone is
     /// fetched and its worktrees added one after the other, never at once.
     preparing: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Told when an Obi-to-Obi review ends.
+    review_hook: std::sync::OnceLock<ReviewHook>,
 }
 
 impl Jobs {
@@ -132,11 +142,27 @@ impl Jobs {
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             identity,
             preparing: Mutex::new(HashMap::new()),
+            review_hook: std::sync::OnceLock::new(),
         }))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Who is told when an Obi-to-Obi review job ends (once; a second call changes nothing).
+    pub fn on_review_end(&self, hook: ReviewHook) {
+        let _ = self.review_hook.set(hook);
+    }
+
+    /// Tells the hook the review job `id` ended (`done` or not), and waits for it.
+    async fn review_ended(&self, id: &str, done: bool) {
+        let (Some(hook), Some(job)) = (self.review_hook.get(), self.get(id)) else {
+            return;
+        };
+        if job.obi.is_some() {
+            hook(job, done).await;
+        }
     }
 
     /// Starts the queued jobs there are slots for.
@@ -475,15 +501,28 @@ impl Jobs {
         if !job.status.is_active() {
             return Some(job);
         }
-        if let Some(worker) = self.lock().workers.get(id) {
-            let _ = worker.send(Signal::Stop);
-        }
-        self.update(id, |job| {
+        let worked = match self.lock().workers.get(id) {
+            Some(worker) => {
+                let _ = worker.send(Signal::Stop);
+                true
+            }
+            None => false,
+        };
+        let stopped = self.update(id, |job| {
             job.status = Status::Stopped;
             job.step = String::new();
             job.waiting = None;
             job.finished = Some(obi_protocol::time::now());
-        })
+        });
+        // A review that never started: its exchange still gets its answer. One that ran is
+        // answered by its worker as it ends.
+        if !worked
+            && let (Some(job), Some(hook)) = (stopped.clone(), self.review_hook.get())
+            && job.obi.is_some()
+        {
+            tokio::spawn(hook(job, false));
+        }
+        stopped
     }
 
     /// Stops every queued and running job: answers the ones it stopped.
@@ -597,7 +636,12 @@ impl Jobs {
         let _ = std::fs::remove_dir_all(&temp);
         let stopped = *signal.borrow() != Signal::Run;
         match outcome {
-            _ if stopped => {}
+            // The owner stopped it: its exchange gets a failed result. A shutdown leaves it be.
+            _ if stopped => {
+                if *signal.borrow() == Signal::Stop {
+                    self.review_ended(id, false).await;
+                }
+            }
             Ok(()) => {}
             Err(why) => {
                 let review = self.get(id).and_then(|j| {
@@ -605,6 +649,10 @@ impl Jobs {
                         serde_json::from_value(j.obi_request?.get("body")?.clone()).ok()?;
                     Some(review::failed_result(&body))
                 });
+                if job.obi.is_some() {
+                    self.update(id, |job| job.review_result = review.clone());
+                    self.review_ended(id, false).await;
+                }
                 self.update(id, |job| {
                     job.status = Status::Failed;
                     job.step = String::new();
@@ -1002,10 +1050,15 @@ impl Jobs {
             None => false,
         };
 
-        // 7. The result.
+        // 7. The result; 8. the publish gate and the reply, the exchange's, before the job ends.
         let body = review::result(&request, &output, tests_pass);
         let findings = body["findings"].as_array().map_or(0, Vec::len);
         let outcome = body["outcome"].as_str().unwrap_or("").replace('_', " ");
+        self.update(id, |job| {
+            job.review_result = Some(body.clone());
+            job.step = "Scanning the result for secrets and sending it".into();
+        });
+        self.review_ended(id, true).await;
         self.update(id, |job| {
             job.status = Status::Done;
             job.step = String::new();

@@ -17,6 +17,8 @@ pub mod process;
 pub mod review;
 pub mod routes;
 pub mod sandbox;
+pub mod scan;
+pub mod sphere;
 pub mod store;
 pub mod token;
 
@@ -152,6 +154,16 @@ pub async fn serve(
         }
     })?;
     let (stopping_tx, stopping_rx) = tokio::sync::watch::channel(false);
+    let link = sphere::Link::open(
+        config.clone(),
+        jobs.clone(),
+        events.clone(),
+        stopping_rx.clone(),
+    )
+    .map_err(|source| StartError::Jobs {
+        path: config.home.join("exchanges"),
+        source,
+    })?;
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -159,6 +171,7 @@ pub async fn serve(
         cleanup,
         jobs: jobs.clone(),
         events,
+        link: link.clone(),
         stopping: stopping_rx.clone(),
     });
     let app = api::router(shared);
@@ -168,8 +181,9 @@ pub async fn serve(
         let _ = stopping_tx.send(true);
     });
     ready(bound);
-    // Jobs that were queued or running when obid last stopped carry on.
+    // Jobs that were queued or running when obid last stopped carry on, and so does its Sphere.
     jobs.resume();
+    link.start();
     // Once told to stop: every agent and check ends now, and its job stays as it is for the next
     // start; the event streams and waits end, so the server's connections close.
     let ending = {

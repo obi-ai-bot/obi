@@ -80,3 +80,23 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
     std::fs::rename(&temporary, path)
 }
+
+/// Every `*.json` file in `dir` that reads as a `T`; the others are left alone and logged.
+pub fn load_dir<T: serde::de::DeserializeOwned>(dir: &Path) -> Vec<T> {
+    let mut items = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return items;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        match std::fs::read(&path).map(|bytes| serde_json::from_slice::<T>(&bytes)) {
+            Ok(Ok(item)) => items.push(item),
+            Ok(Err(e)) => tracing::warn!("{} doesn't read: {e}", path.display()),
+            Err(e) => tracing::warn!("can't read {}: {e}", path.display()),
+        }
+    }
+    items
+}

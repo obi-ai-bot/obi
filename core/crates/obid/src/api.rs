@@ -31,6 +31,8 @@ pub struct Shared {
     pub cleanup: Cleanup,
     pub jobs: Arc<Jobs>,
     pub events: Events,
+    /// Its Sphere: membership, exchanges, the inbox and decisions.
+    pub link: Arc<crate::sphere::Link>,
     /// True once obid is stopping: streams end.
     pub stopping: tokio::sync::watch::Receiver<bool>,
 }
@@ -83,6 +85,29 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/jobs/{id}/dismiss", post(crate::routes::dismiss))
         .route("/v1/stop-all", post(crate::routes::stop_all))
         .route("/v1/events", get(crate::routes::events))
+        .route("/v1/inbox", get(crate::sphere::routes::inbox))
+        .route("/v1/inbox/{id}/answer", post(crate::sphere::routes::answer))
+        .route("/v1/obid/sphere", get(crate::sphere::routes::membership))
+        .route("/v1/obid/sphere/key", post(crate::sphere::routes::key))
+        .route("/v1/obid/sphere/card", post(crate::sphere::routes::card))
+        .route("/v1/obid/sphere/join", post(crate::sphere::routes::join))
+        .route(
+            "/v1/obid/sphere/requests",
+            post(crate::sphere::routes::request),
+        )
+        .route(
+            "/v1/obid/sphere/exchanges",
+            get(crate::sphere::routes::exchanges),
+        )
+        .route(
+            "/v1/obid/sphere/exchanges/{id}",
+            get(crate::sphere::routes::exchange),
+        )
+        .route("/v1/obid/decisions", get(crate::sphere::routes::decisions))
+        .route(
+            "/v1/obid/decisions/{id}",
+            axum::routing::delete(crate::sphere::routes::forget),
+        )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(shared.clone(), gate))
