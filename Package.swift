@@ -40,7 +40,7 @@ let package = Package(
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
             ],
             path: "Runner",
-            // The launchd plist is the Mac app's (Oby.xcodeproj bundles it with the executable, #283).
+            // The launchd plist is the Mac app's (apps/Oby.xcodeproj bundles it with the executable, #283).
             exclude: ["CSQLite", "README.md", "oby-runner.service", "com.deskree.oby.runner.plist"],
             swiftSettings: features
         ),

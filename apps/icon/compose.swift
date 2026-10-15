@@ -1,5 +1,5 @@
-// Builds Oby's icons from a render of Sangam's character (Icon/render.mjs makes it).
-// Usage: swift Icon/compose.swift <render.png> <Icon folder>
+// Builds Oby's icons from a render of Sangam's character (apps/icon/render.mjs makes it).
+// Usage: swift apps/icon/compose.swift <render.png> <icon folder>
 import AppKit
 import CoreGraphics
 import ImageIO

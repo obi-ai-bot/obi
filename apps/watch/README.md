@@ -1,6 +1,6 @@
 # Oby for Apple Watch
 
-The watch app is the `ObyWatch` target in `Oby.xcodeproj` (on the wrist it's called Oby), shipped inside the iPhone app: the iPhone build on TestFlight installs it on the paired watch. It's F16 ([#20](https://github.com/deskree-inc/oby/issues/20)); this is its second slice.
+The watch app is the `ObyWatch` target in `apps/Oby.xcodeproj` (on the wrist it's called Oby), shipped inside the iPhone app: the iPhone build on TestFlight installs it on the paired watch. It's F16 ([#20](https://github.com/deskree-inc/oby/issues/20)); this is its second slice.
 
 What it does today:
 
@@ -14,7 +14,7 @@ What it does today:
 
 ## Oby animated
 
-watchOS has no WebKit, so Oby plays as frames rendered from `Character/oby.html`, as the preview's Oby and the icon were (`Icon/render.mjs`). There are three loops at 15 fps, 160 px (80 pt at 2x): `idle` (breathes and blinks, 4.3 s), `working` (spins round with busy dots, 4.4 s) and `needs` (Hello's bounce and wiggle, then a beat of calm, 4.5 s). Three reactions to taps play once, at the same rate and crop, each ending calm: `poked` (startled, 1.7 s, 26 frames), `annoyed` (2.5 s, 38 frames) and `ignoring` (turns away, peeks, then shakes it off, 5.3 s, 80 frames). They are one image set per frame in `Frames.xcassets` (`oby-idle-000`…), about 1.9 MB in all.
+watchOS has no WebKit, so Oby plays as frames rendered from `Character/oby.html`, as the preview's Oby and the icon were (`apps/icon/render.mjs`). There are three loops at 15 fps, 160 px (80 pt at 2x): `idle` (breathes and blinks, 4.3 s), `working` (spins round with busy dots, 4.4 s) and `needs` (Hello's bounce and wiggle, then a beat of calm, 4.5 s). Three reactions to taps play once, at the same rate and crop, each ending calm: `poked` (startled, 1.7 s, 26 frames), `annoyed` (2.5 s, 38 frames) and `ignoring` (turns away, peeks, then shakes it off, 5.3 s, 80 frames). They are one image set per frame in `Frames.xcassets` (`oby-idle-000`…), about 1.9 MB in all.
 
 `ObyAnimation.swift` plays them with a `TimelineView`. It runs only while it's on screen, the app is in front, the wrist is up (not Always On) and Reduce Motion is off; otherwise it holds the loop's first frame. A new loop starts from its first frame. A reaction plays once over the loop, and a new tap starts it again; when it ends, the current loop (which may have changed meanwhile) starts from its first frame. Oby stopping (the wrist down, the app in the background) drops the reaction.
 

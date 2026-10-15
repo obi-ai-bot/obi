@@ -1,8 +1,8 @@
-// One signing config for every target, Debug and Release (#282). Oby.xcodeproj reads it at the
+// One signing config for every target, Debug and Release (#282). apps/Oby.xcodeproj reads it at the
 // project level: every DEVELOPMENT_TEAM is $(OBY_TEAM_ID) and the bundle ids come from here.
 // Switching every app to another team is this one line.
 //
-// To override any of these on one Mac, write them in Config/Signing.local.xcconfig (gitignored).
+// To override any of these on one Mac, write them in apps/config/Signing.local.xcconfig (gitignored).
 // CI's ad hoc flags (docs/ci.md) still win: command-line settings beat every xcconfig.
 
 OBY_TEAM_ID = PQKAL8E36D

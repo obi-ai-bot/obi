@@ -8,7 +8,7 @@
 #   1. bumps the version: CFBundleShortVersionString from <version>, the build number from the git
 #      commit count, committed on the current branch;
 #   2. archives the Oby scheme (Release) and exports it with Developer ID
-#      (ExportOptions-DeveloperID.plist, teamID from Config/Signing.xcconfig);
+#      (apps/ExportOptions-DeveloperID.plist, teamID from apps/config/Signing.xcconfig);
 #   3. notarizes the app (xcrun notarytool, keychain profile "oby-notary") and staples it;
 #   4. builds Oby-<version>.dmg with an Applications link (and a background, with create-dmg), then
 #      signs, notarizes and staples the DMG;
@@ -34,18 +34,18 @@ notary_profile="${OBY_NOTARY_PROFILE:-oby-notary}"
 # The R2 bucket the appcast and the DMGs live in (docs/release.md).
 bucket="${OBY_R2_BUCKET:-oby-downloads}"
 minimum_system="26.0"
-# What Config/Signing.xcconfig holds for OBY_SPARKLE_PUBLIC_KEY until the key is generated.
+# What apps/config/Signing.xcconfig holds for OBY_SPARKLE_PUBLIC_KEY until the key is generated.
 placeholder_public_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 die() { printf 'release.sh: %s\n' "$*" >&2; exit 1; }
 
-# A build setting from Config/Signing.local.xcconfig, else Config/Signing.xcconfig: comments
+# A build setting from apps/config/Signing.local.xcconfig, else apps/config/Signing.xcconfig: comments
 # stripped, the empty $() that keeps "//" out of a URL removed.
 setting() {
     local name="$1" file value=""
-    for file in "$root/Config/Signing.local.xcconfig" "$root/Config/Signing.xcconfig"; do
+    for file in "$root/apps/config/Signing.local.xcconfig" "$root/apps/config/Signing.xcconfig"; do
         [[ -f "$file" ]] || continue
         value="$(grep -E "^[[:space:]]*$name[[:space:]]*=" "$file" | tail -n 1 || true)"
         [[ -n "$value" ]] && break
@@ -227,10 +227,10 @@ main() {
     team="$(setting OBY_TEAM_ID)"
     feed="$(setting OBY_APPCAST_URL)"
     public_key="$(setting OBY_SPARKLE_PUBLIC_KEY)"
-    [[ -n "$team" ]] || die "OBY_TEAM_ID isn't set in Config/Signing.xcconfig"
-    [[ -n "$feed" ]] || die "OBY_APPCAST_URL isn't set in Config/Signing.xcconfig"
+    [[ -n "$team" ]] || die "OBY_TEAM_ID isn't set in apps/config/Signing.xcconfig"
+    [[ -n "$feed" ]] || die "OBY_APPCAST_URL isn't set in apps/config/Signing.xcconfig"
     if [[ -z "$public_key" || "$public_key" == "$placeholder_public_key" ]]; then
-        $dry_run || die "OBY_SPARKLE_PUBLIC_KEY in Config/Signing.xcconfig is still the placeholder: no shipped Oby could verify this update (docs/release.md, Sparkle keys)"
+        $dry_run || die "OBY_SPARKLE_PUBLIC_KEY in apps/config/Signing.xcconfig is still the placeholder: no shipped Oby could verify this update (docs/release.md, Sparkle keys)"
         note "OBY_SPARKLE_PUBLIC_KEY is still the placeholder: fine for a dry run"
     fi
     base="${feed%/*}"
@@ -251,7 +251,7 @@ main() {
     say "Checks: swift test"
     swift test > "$out/swift-test.log" 2>&1 || { tail -n 40 "$out/swift-test.log"; die "swift test failed: build/release/swift-test.log"; }
     say "Checks: the Mac app and MacTests"
-    xcodebuild -project Oby.xcodeproj -scheme Oby -destination 'platform=macOS' -derivedDataPath "$out/DerivedData" \
+    xcodebuild -project apps/Oby.xcodeproj -scheme Oby -destination 'platform=macOS' -derivedDataPath "$out/DerivedData" \
         test > "$out/mac-test.log" 2>&1 || { tail -n 40 "$out/mac-test.log"; die "MacTests failed: build/release/mac-test.log"; }
     note "both passed"
 
@@ -262,10 +262,10 @@ main() {
         build="$(git rev-list --count HEAD)"
         say "Dry run: Oby $version ($build), ad hoc signed, nothing notarized, uploaded or tagged"
     else
-        say "Oby $version: bumping the version in Oby.xcodeproj"
+        say "Oby $version: bumping the version in apps/Oby.xcodeproj"
         build="$(( $(git rev-list --count HEAD) + 1 ))"
-        sed -i '' -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = $version;/; s/CURRENT_PROJECT_VERSION = [^;]+;/CURRENT_PROJECT_VERSION = $build;/" Oby.xcodeproj/project.pbxproj
-        git add Oby.xcodeproj/project.pbxproj
+        sed -i '' -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = $version;/; s/CURRENT_PROJECT_VERSION = [^;]+;/CURRENT_PROJECT_VERSION = $build;/" apps/Oby.xcodeproj/project.pbxproj
+        git add apps/Oby.xcodeproj/project.pbxproj
         git commit -q -m "chore(release): Oby $version ($build)"
         [[ "$(git rev-list --count HEAD)" == "$build" ]] || die "the build number and the commit count disagree"
         note "committed $(git rev-parse --short HEAD): build $build"
@@ -280,7 +280,7 @@ main() {
         signing=(CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=)
     fi
     local -a archive_args=(
-        -project Oby.xcodeproj
+        -project apps/Oby.xcodeproj
         -scheme Oby
         -configuration Release
         -destination 'generic/platform=macOS'
@@ -299,7 +299,7 @@ main() {
         note "exported ad hoc: $app"
     else
         say "Exporting with Developer ID (team $team)"
-        plutil -convert xml1 -o "$out/ExportOptions.plist" ExportOptions-DeveloperID.plist
+        plutil -convert xml1 -o "$out/ExportOptions.plist" apps/ExportOptions-DeveloperID.plist
         plutil -replace teamID -string "$team" "$out/ExportOptions.plist"
         xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$out/ExportOptions.plist" \
             -exportPath "$out/export" > "$out/export.log" 2>&1 || { tail -n 40 "$out/export.log"; die "the export failed: build/release/export.log"; }
@@ -331,7 +331,7 @@ main() {
     rm -rf "$staging" && mkdir -p "$staging"
     cp -R "$app" "$staging/Oby.app"
     ln -s /Applications "$staging/Applications"
-    local background="$root/Icon/dmg-background.png"
+    local background="$root/apps/icon/dmg-background.png"
     if command -v create-dmg >/dev/null 2>&1; then
         local -a layout=(--volname "Oby" --window-size 600 400 --icon-size 128 --icon "Oby.app" 150 190 --app-drop-link 450 190 --no-internet-enable)
         [[ -f "$background" ]] && layout+=(--background "$background")

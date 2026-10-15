@@ -6,7 +6,7 @@ Teammates install the DMG once, without a Gatekeeper warning, and from then on t
 
 ## One signing config
 
-[`Config/Signing.xcconfig`](../Config/Signing.xcconfig) is the one place every target reads its signing from, in Debug and Release:
+[`apps/config/Signing.xcconfig`](../apps/config/Signing.xcconfig) is the one place every target reads its signing from, in Debug and Release:
 
 | Setting | Today | What it is |
 | --- | --- | --- |
@@ -16,7 +16,7 @@ Teammates install the DMG once, without a Gatekeeper warning, and from then on t
 | `OBY_APPCAST_URL` | `https://downloads.oby.deskree.com/appcast.xml` | Where the Mac app looks for updates (`SUFeedURL`). Hosting is this one setting. |
 | `OBY_SPARKLE_PUBLIC_KEY` | a placeholder of 32 zero bytes | Sparkle's EdDSA public key (`SUPublicEDKey`). With the placeholder, Oby starts fine and accepts no update, and `release.sh` refuses a real release. |
 
-To override any of them on one Mac, write it in `Config/Signing.local.xcconfig` (gitignored, included at the end). CI's command-line flags still win over both ([ci.md, Signing](ci.md#signing)).
+To override any of them on one Mac, write it in `apps/config/Signing.local.xcconfig` (gitignored, included at the end). CI's command-line flags still win over both ([ci.md, Signing](ci.md#signing)).
 
 The Mac app keeps the hardened runtime on, isn't sandboxed (it runs the user's CLIs, [AGENTS.md](../AGENTS.md)) and has one entitlement, the microphone, in [`apps/mac/app/Oby.entitlements`](../apps/mac/app/Oby.entitlements). Nothing else it does needs one under the hardened runtime: it runs CLIs as child processes through the login shell, the `oby://` character loads in WebKit's own process, screenshots go through ScreenCaptureKit, and it sends no Apple Events.
 
@@ -47,8 +47,8 @@ Hand the `.p12` and its password, the `.p8`, the Key ID, the Issuer ID and the T
    "$bin/generate_keys"
    ```
 
-   `generate_keys` keeps the private key in the login keychain (it prints nothing of it) and prints the public key. Put the public key in `Config/Signing.xcconfig` as `OBY_SPARKLE_PUBLIC_KEY`, replacing the placeholder, and commit. To release from another Mac later, `generate_keys -x key.private` exports the private key for `generate_keys -f key.private` there; delete the file afterwards. Keep a copy of the private key somewhere safe: a lost key means shipped Obys can't verify any future update.
-4. **Set the team.** `OBY_TEAM_ID` in `Config/Signing.xcconfig`, in the same commit. Nothing else in the project names a team.
+   `generate_keys` keeps the private key in the login keychain (it prints nothing of it) and prints the public key. Put the public key in `apps/config/Signing.xcconfig` as `OBY_SPARKLE_PUBLIC_KEY`, replacing the placeholder, and commit. To release from another Mac later, `generate_keys -x key.private` exports the private key for `generate_keys -f key.private` there; delete the file afterwards. Keep a copy of the private key somewhere safe: a lost key means shipped Obys can't verify any future update.
+4. **Set the team.** `OBY_TEAM_ID` in `apps/config/Signing.xcconfig`, in the same commit. Nothing else in the project names a team.
 5. **Hosting.** Create the R2 bucket (`oby-downloads`, or set `OBY_R2_BUCKET`) and point `downloads.oby.deskree.com` at it as a public custom domain in Cloudflare. For the upload, either `brew install wrangler` and `wrangler login`, or an R2 API token (Account › R2 › Manage API tokens, Object Read & Write on the bucket) kept in the keychain so `aws` can use it:
 
    ```sh
@@ -58,7 +58,7 @@ Hand the `.p12` and its password, the `.p8`, the Key ID, the Issuer ID and the T
    ```
 
    `.env.local` at the repository root (gitignored) with `OBY_R2_ACCOUNT_ID`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` works too.
-6. **Optional:** `brew install create-dmg` for a DMG with a background (`Icon/dmg-background.png`, when it exists). Without it, the DMG is plain: Oby.app and an Applications link.
+6. **Optional:** `brew install create-dmg` for a DMG with a background (`apps/icon/dmg-background.png`, when it exists). Without it, the DMG is plain: Oby.app and an Applications link.
 
 ## A release
 
@@ -70,8 +70,8 @@ scripts/release.sh 0.2.0
 
 In order, it:
 
-1. **Bumps the version.** `MARKETING_VERSION` becomes `0.2.0` and `CURRENT_PROJECT_VERSION` the git commit count including the bump commit, so build numbers only grow; both in `Oby.xcodeproj`, committed as `chore(release): Oby 0.2.0 (N)`.
-2. **Archives the `Oby` scheme** (Release) and exports it with Developer ID ([`ExportOptions-DeveloperID.plist`](../ExportOptions-DeveloperID.plist), `teamID` filled from `OBY_TEAM_ID`).
+1. **Bumps the version.** `MARKETING_VERSION` becomes `0.2.0` and `CURRENT_PROJECT_VERSION` the git commit count including the bump commit, so build numbers only grow; both in `apps/Oby.xcodeproj`, committed as `chore(release): Oby 0.2.0 (N)`.
+2. **Archives the `Oby` scheme** (Release) and exports it with Developer ID ([`apps/ExportOptions-DeveloperID.plist`](../apps/ExportOptions-DeveloperID.plist), `teamID` filled from `OBY_TEAM_ID`).
 3. **Notarizes the app** (`xcrun notarytool submit --keychain-profile oby-notary --wait`), staples the ticket, and checks it with `spctl`.
 4. **Builds `Oby-0.2.0.dmg`**, signs it with the Developer ID, notarizes and staples it too.
 5. **Signs it for Sparkle** with `sign_update` and the EdDSA key in the keychain.

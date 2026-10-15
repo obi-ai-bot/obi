@@ -1,5 +1,5 @@
 // Renders Oby's watch loops from Character/oby.html, frame by frame, through headless Chromium's
-// DevTools protocol (the pipeline of Icon/render.mjs, on a stepped clock so every frame is
+// DevTools protocol (the pipeline of apps/icon/render.mjs, on a stepped clock so every frame is
 // exactly 1/30 s after the last and two runs give the same frames).
 // Usage: node apps/watch/Frames/render.mjs <out-dir> [css-size] [oby-size]
 // Then: python3 apps/watch/Frames/compose.py <out-dir> apps/watch/Frames.xcassets
