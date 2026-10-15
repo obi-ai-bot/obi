@@ -4,7 +4,7 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 
 **API-level** means the test asks the runner through its HTTP API (`client.execute` on the router, or the API's own handlers), or checks what the API puts on the wire (a job's or account's JSON, the gate in front of every request). obid is checked the same way: the real binary, asked over HTTP (tests/*.rs), or a unit test of the same rule where the Swift test was one. Everything else is **Swift-internal**: it drives Swift types (Desk, the brain, the agent fakes, the stores), so it doesn't carry over; obid's own behaviour behind those is covered by its own tests.
 
-994 tests in all: **33 API-level and ported**, **42 API-level and not ported** (their endpoint or feature isn't in obid yet), **919 Swift-internal and dropped**.
+994 tests in all: **35 API-level and ported**, **40 API-level and not ported** (their endpoint or feature isn't in obid yet), **919 Swift-internal and dropped**.
 
 ## API-level, ported
 
@@ -14,7 +14,7 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 | ClearTests.everyAppFollowingEventsHearsAClear | runner_api.rs `clear_done_is_kept_said_and_heard` |  |
 | ClearTests.statusSaysNullUntilTheFirstClearThenTheTime | runner_api.rs `clear_done_is_kept_said_and_heard` |  |
 | ClearTests.theClearSurvivesARestartAndNeverGoesBack | runner_api.rs `clear_done_is_kept_said_and_heard` | the restart through the API; the clock going back in src/clear.rs `the_clear_survives_a_restart_and_never_goes_back` |
-| DismissTests.theAPIDismissesAndSaysWhenItCant | jobs_api.rs `nothing_committed_fails_and_dismiss_lets_it_go` | all but its last line, `GET /v1/jobs/{id}/publish` answering 409, which obid doesn't serve |
+| DismissTests.theAPIDismissesAndSaysWhenItCant | jobs_api.rs `nothing_committed_fails_and_dismiss_lets_it_go` | its last line, `GET /v1/jobs/{id}/publish` answering 409 for a dismissed job, in runner_api.rs `publish_by_hand_is_off_a_dismissed_job` (obid publishes nothing for its owner yet, so it answers 409 for every job, saying why) |
 | InboxTests.theAPIListsAnswersAndTellsEveryApp | sphere_api.rs `the_inbox_lists_answers_and_tells_every_app` | with an `obiRequest` item, the only kind obid makes so far |
 | LoopbackTests.comparesTokensWhole | src/token.rs `same_compares_whole_tokens` | unit test |
 | LoopbackTests.letsLoopbackHostsInWithTheToken | status.rs `lets_loopback_hosts_in_with_the_token` |  |
@@ -29,11 +29,13 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 | NoDispatchCardTests.theAPIAnswersTheJobsItStartedAndRefusesDrafts | jobs_api.rs `dispatch_takes_only_whole_jobs` | the draft refused with 410 only; the jobs a plan started need `POST /v1/plans` |
 | OldJobsTests.theAPIFindsAndDismissesJob60 | runner_api.rs `the_api_finds_and_dismisses_job_60` |  |
 | ParallelTests.aSeventhJobWaitsWhileSixRunAndStartsWhenOneEnds | runner_api.rs `a_seventh_job_waits_for_a_slot_and_says_so` | as the API shows it |
+| ParallelTests.theCapIsInStatusAndSettings | runner_api.rs `the_cap_is_in_status_and_settings` | and kept across a restart (`home/settings.json`); raising it starts a waiting job at once in `raising_the_cap_starts_a_waiting_job_at_once` |
 | PipelineTests.oldJobsDecodeAndAPISendsDerivedStages | runner_api.rs `a_seventh_job_waits_for_a_slot_and_says_so` | the API half: the stages sent on running jobs |
 | ReviewJobTests.theRunnerSaysAReviewMadeNoCommits | runner_api.rs `the_runner_says_a_review_made_no_commits` |  |
 | RunnerTests.dispatchBodiesAreWholeJobs | runner_api.rs `dispatch_bodies_are_whole_jobs` | through the API instead of the body's decoder |
 | RunnerTests.dispatchTakesOnlyWholeJobs | jobs_api.rs `dispatch_takes_only_whole_jobs` |  |
 | RunnerTests.jobsHaveISODatesAndEveryKey | runner_api.rs `jobs_have_iso_dates_and_every_key` | 67 keys: the Swift runner's 65 and obid's `obi` and `worktree` |
+| RunnerTests.messagesReachOnlyJobsThatCanTakeThem | runner_api.rs `messages_reach_only_jobs_that_can_take_them` | a job that never started is one whose repository couldn't be got ready (obid has no Gemini, the Swift test's way to fail one); a job at work hears the words as its next turn, and a round the owner asked for may commit nothing, in `a_running_job_hears_the_words_next_and_the_owners_round_may_commit_nothing`. A review another Obi asked for takes no words (422): its answer goes back to that Obi |
 | RunnerTests.malformedKeysDontRegister | runner_api.rs `malformed_keys_dont_register` | and src/devices.rs `keys` |
 | RunnerTests.newPhonesNeedPairing | runner_api.rs `new_phones_need_pairing` | obid's pairing file is `home/pairing` |
 | RunnerTests.onlyTheOwnerGetsIn | status.rs `refuses_without_the_token` | obid's owner is whoever holds its API token (runner-api.md, "obid only: configuration"); a Tailscale login opens nothing |
@@ -65,7 +67,6 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 | GatewayTests.gatewayScrubsSessionIDsAndAccountHomes | the LAN gateway |
 | GatewayTests.pairingIsMadeOnTheLoopbackAPIWithTheRunnersToken | `/v1/pairing/invite`, `/v1/pairing/devices` |
 | MoveTests.theMoveEndpointMovesAJobOrSaysWhyNot | `POST /v1/jobs/{id}/move` |
-| ParallelTests.theCapIsInStatusAndSettings | `/v1/settings/jobs` (status's `maxRunning` is checked in `a_seventh_job_waits_for_a_slot_and_says_so`) |
 | PermissionTests.aQuestionSendsEveryKey | the `permission` inbox item and job key |
 | PermissionTests.theAPIAnswersPermissionsAndModes | `/v1/jobs/{id}/permission`, `/v1/jobs/{id}/mode`, `/v1/permissions/rules`, `/v1/settings/permissions` |
 | ResearchTests.aMissingScannerFilesNothing | `POST /v1/jobs/{id}/proposals/{index}/file` |
@@ -75,7 +76,6 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 | ResearchTests.theReportIsStoredAndServed | `GET /v1/jobs/{id}/report` |
 | ReserveTests.theAPILiftsAndRestoresTheReserve | `POST /v1/accounts/{id}/reserve` |
 | ReviewTests.theAPIShowsTheReviewAndTheReviewJob | Oby's review of a published job (`reviewing`, `review`): obid publishes nothing yet |
-| RunnerTests.messagesReachOnlyJobsThatCanTakeThem | `POST /v1/jobs/{id}/messages` |
 | RunnerTests.plansMapToTheirKinds | `POST /v1/plans` (its answer's shape) |
 | RunnerTests.theAppHandsOverItsDeviceToken | `POST /v1/activities`, `POST /v1/notifications` |
 | RunnerTests.withoutAKeyThereIsNoPush | `POST /v1/activities` |

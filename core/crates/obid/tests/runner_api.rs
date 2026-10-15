@@ -671,3 +671,273 @@ fn a_mac_asking_for_a_check_hears_none_waits() {
     assert_eq!(answer.status, 200, "{}", answer.text);
     assert_eq!(answer.body, json!({"check": null}));
 }
+
+/// ParallelTests.theCapIsInStatusAndSettings: `status.maxRunning` starts at 6; Settings changes it
+/// with `PUT /v1/settings/jobs`, 1 to 20 (0 and 21 are refused), `GET` says it, status follows,
+/// and obid keeps it across a restart.
+#[test]
+fn the_cap_is_in_status_and_settings() {
+    let folder = Folder::new("cap");
+    let (mut obid, config) = obid(&folder);
+    let status = call(&obid, "GET", "/v1/status", None).body;
+    assert_eq!(status["maxRunning"], 6);
+    assert_eq!(status["running"], 0);
+    for refused in [0, 21] {
+        let answer = call(
+            &obid,
+            "PUT",
+            "/v1/settings/jobs",
+            Some(&json!({"maxRunning": refused})),
+        );
+        assert_eq!(answer.status, 422, "{refused}: {}", answer.text);
+    }
+    assert_eq!(
+        call(
+            &obid,
+            "PUT",
+            "/v1/settings/jobs",
+            Some(&json!({"maxRunning": "3"}))
+        )
+        .status,
+        422
+    );
+    let set = call(
+        &obid,
+        "PUT",
+        "/v1/settings/jobs",
+        Some(&json!({"maxRunning": 3})),
+    );
+    assert_eq!(set.status, 200, "{}", set.text);
+    assert_eq!(set.body, json!({"maxRunning": 3}));
+    assert_eq!(
+        call(&obid, "GET", "/v1/settings/jobs", None).body,
+        json!({"maxRunning": 3})
+    );
+    assert_eq!(call(&obid, "GET", "/v1/status", None).body["maxRunning"], 3);
+    assert!(obid.stop().success());
+    drop(obid);
+    let obid = start(&folder.0, &config, None);
+    assert_eq!(
+        call(&obid, "GET", "/v1/settings/jobs", None).body,
+        json!({"maxRunning": 3})
+    );
+    assert_eq!(call(&obid, "GET", "/v1/status", None).body["maxRunning"], 3);
+}
+
+/// With the cap lowered to one, a second job waits for the slot, and raising the cap starts it at
+/// once (runner-api.md, "GET /v1/settings/jobs and PUT /v1/settings/jobs").
+#[test]
+fn raising_the_cap_starts_a_waiting_job_at_once() {
+    let folder = Folder::new("raise");
+    let (obid, _) = obid(&folder);
+    let set = |max: u64| {
+        let answer = call(
+            &obid,
+            "PUT",
+            "/v1/settings/jobs",
+            Some(&json!({"maxRunning": max})),
+        );
+        assert_eq!(answer.status, 200, "{}", answer.text);
+    };
+    set(1);
+    let sleeper = || {
+        dispatch(
+            &obid,
+            json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "SLEEP"}),
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let first = sleeper();
+    within(60, "the first runs", || {
+        (job(&obid, &first)["status"] == "running").then_some(())
+    });
+    let second = sleeper();
+    let waiting = within(30, "the second waits for the slot", || {
+        let body = job(&obid, &second);
+        (!body["waiting"].is_null()).then_some(body)
+    });
+    assert_eq!(
+        waiting["waiting"],
+        json!({"kind": "cap", "text": "a slot opens"})
+    );
+    set(2);
+    within(60, "the second starts", || {
+        (job(&obid, &second)["status"] == "running").then_some(())
+    });
+    assert_eq!(call(&obid, "POST", "/v1/stop-all", None).body["stopped"], 2);
+}
+
+/// RunnerTests.messagesReachOnlyJobsThatCanTakeThem: `POST /v1/jobs/{id}/messages` answers 404 for
+/// an unknown job, 400 for a body without `text`, 422 for words that aren't 1 to 2,000 characters
+/// and for a job that never started (no session); a finished job picks its session up again in
+/// the same worktree and branch, hears the words, keeps them in `notes`, and gets a new round (and
+/// one more on a loop's limit).
+#[test]
+fn messages_reach_only_jobs_that_can_take_them() {
+    let folder = Folder::new("talk");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &fake_claude());
+    config["repos"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"repo": "obi-e2e/gone", "remote": format!("file://{}", folder.0.join("nowhere.git").display()), "defaultBranch": "main"}));
+    let obid = start(&folder.0, &config, None);
+    let post = |id: &str, body: Value| {
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/messages"),
+            Some(&body),
+        )
+    };
+
+    assert_eq!(post("nowhere", json!({"text": "hi"})).status, 404);
+    // Never started: its repository couldn't be got ready, so it has no session.
+    let never = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/gone", "kind": "investigate", "task": "Look around"}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(ended(&obid, &never)["status"], "failed");
+    let refused = post(&never, json!({"text": "hi"}));
+    assert_eq!(refused.status, 422, "{}", refused.text);
+    assert!(
+        refused.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("never started"),
+        "{}",
+        refused.text
+    );
+
+    // A loop of up to two rounds that ends done after its first (its check passes), then the
+    // owner's words.
+    let finished = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Look around", "rounds": 2, "branch": "oby/review-33"}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let done = ended(&obid, &finished);
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(
+        (done["round"].clone(), done["rounds"].clone()),
+        (json!(1), json!(2))
+    );
+    let session = done["session"].as_str().unwrap().to_owned();
+    assert_eq!(post(&finished, json!({"words": "hi"})).status, 400);
+    assert_eq!(post(&finished, json!({"text": " \n "})).status, 422);
+    assert_eq!(
+        post(&finished, json!({"text": "x".repeat(2001)})).status,
+        422
+    );
+    let words = "ECHO rename notes.txt to hello.txt";
+    let resumed = post(&finished, json!({"text": words}));
+    assert_eq!(resumed.status, 200, "{}", resumed.text);
+    let again = &resumed.body;
+    assert_eq!(again["id"], finished.as_str());
+    assert_eq!(again["branch"], "oby/review-33");
+    assert_eq!(again["notes"], json!([words]));
+    assert_eq!(again["round"], 2);
+    assert_eq!(again["rounds"], 3);
+    assert_eq!(again["step"], format!("You: {words}"));
+    assert!(again["finished"].is_null());
+    let after = ended(&obid, &finished);
+    assert_eq!(after["status"], "done", "{after}");
+    assert_eq!(after["summary"], format!("heard: {words} resume={session}"));
+    assert_eq!(after["worktree"], done["worktree"]);
+    assert_eq!(after["notes"], json!([words]));
+}
+
+/// The owner's words reach a job whose agent is at work as its next turn, before the check, in
+/// the same round; a job that must commit and whose round the owner asked for may end done with
+/// nothing committed: their words decide (runner-api.md, "POST /v1/jobs/{id}/messages").
+#[test]
+fn a_running_job_hears_the_words_next_and_the_owners_round_may_commit_nothing() {
+    let folder = Folder::new("hear");
+    let (obid, _) = obid(&folder);
+    let post = |id: &str, text: &str| {
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/messages"),
+            Some(&json!({"text": text})),
+        )
+    };
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "PAUSE: 3000"}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    within(60, "its agent is at work", || {
+        let body = job(&obid, &id);
+        (body["status"] == "running" && body["step"] == "Starting Claude Code").then_some(())
+    });
+    let heard = post(&id, "ECHO and add a test");
+    assert_eq!(heard.status, 200, "{}", heard.text);
+    assert_eq!(heard.body["status"], "running");
+    assert_eq!(heard.body["step"], "You: ECHO and add a test");
+    let done = ended(&obid, &id);
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["round"], 1);
+    assert_eq!(
+        done["summaries"],
+        json!([
+            "Paused.",
+            "heard: ECHO and add a test resume=00000000-0000-4000-8000-000000000001"
+        ])
+    );
+
+    // A fix that commits nothing fails; the owner's round after it may end done without a commit.
+    let fix = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "Look around"}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let failed = ended(&obid, &fix);
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["summary"], "Nothing committed: Nothing to do.");
+    assert_eq!(post(&fix, "ECHO leave it as it is").status, 200);
+    let left = ended(&obid, &fix);
+    assert_eq!(left["status"], "done", "{left}");
+    assert_eq!(left["commits"], 0);
+    assert_eq!(left["round"], 2);
+    assert_eq!(left["rounds"], 1);
+}
+
+/// DismissTests.theAPIDismissesAndSaysWhenItCant, its last line: publishing a dismissed job by hand
+/// is off, `409` (and `404` for an unknown job). obid publishes nothing for its owner yet, so every
+/// job answers `409`, saying why.
+#[test]
+fn publish_by_hand_is_off_a_dismissed_job() {
+    let folder = Folder::new("publish");
+    let (obid, _) = obid(&folder);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "Look around"}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(ended(&obid, &id)["status"], "failed");
+    assert_eq!(
+        call(&obid, "POST", &format!("/v1/jobs/{id}/dismiss"), None).status,
+        200
+    );
+    let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None);
+    assert_eq!(answer.status, 409, "{}", answer.text);
+    assert!(answer.body["error"].as_str().unwrap().contains("dismissed"));
+    assert_eq!(
+        call(&obid, "GET", "/v1/jobs/nowhere/publish", None).status,
+        404
+    );
+}

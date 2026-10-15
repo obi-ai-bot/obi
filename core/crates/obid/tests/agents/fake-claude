@@ -7,6 +7,8 @@
 //   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
 //   LOGIN: <home>    reads its login in its HOME, writes a hook into its ~/.claude/settings.json
 //                    and its ~/.claude.json, and tries the same in the person's real <home>
+//   ECHO             ends the turn with "heard: <the prompt> resume=<the session it resumed, or none>"
+//   PAUSE: <ms>      waits that long, then ends the turn with "Paused."
 //   anything else    ends the turn with "Nothing to do."
 // It fails the turn when its environment holds a Claude Code, Anthropic or GitHub variable.
 
@@ -70,6 +72,11 @@ rl.on("line", (line) => {
     const real = tries(() => writeFileSync(`${login[1]}/.claude/settings.json`, hook));
     const realState = tries(() => appendFileSync(`${login[1]}/.claude.json`, " "));
     result(`login: creds=${creds} settings=${settings} state=${state} real=${real} real-state=${realState}`);
+  } else if (prompt.startsWith("ECHO")) {
+    const at = process.argv.indexOf("--resume");
+    result(`heard: ${prompt} resume=${at >= 0 ? process.argv[at + 1] : "none"}`);
+  } else if (prompt.match(/PAUSE: (\d+)/)) {
+    setTimeout(() => result("Paused."), Number(prompt.match(/PAUSE: (\d+)/)[1]));
   } else if (prompt.includes("SLEEP")) {
     mkdirSync(".obi", { recursive: true });
     let beats = 0;

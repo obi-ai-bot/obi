@@ -1,7 +1,7 @@
 //! The runner API (docs/runner-api.md) as obid serves it: the gate every request goes through,
-//! `GET /v1/status`, the jobs (`/v1/jobs…`, `POST /v1/stop-all`), `POST /v1/clear`,
-//! `POST /v1/devices`, `GET /v1/checks/next` and the event stream. The rest of the API joins the
-//! same router.
+//! `GET /v1/status`, the jobs (`/v1/jobs…`, their messages, `POST /v1/stop-all`), `POST
+//! /v1/clear`, `POST /v1/devices`, `GET /v1/checks/next`, `/v1/settings/jobs` and the event
+//! stream. The rest of the API joins the same router.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -88,10 +88,19 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/jobs/{id}/wait", get(crate::routes::wait))
         .route("/v1/jobs/{id}/stop", post(crate::routes::stop))
         .route("/v1/jobs/{id}/dismiss", post(crate::routes::dismiss))
+        .route("/v1/jobs/{id}/messages", post(crate::routes::message))
+        .route(
+            "/v1/jobs/{id}/publish",
+            get(crate::routes::publish_action).post(crate::routes::publish_action),
+        )
         .route("/v1/stop-all", post(crate::routes::stop_all))
         .route("/v1/clear", post(crate::routes::clear))
         .route("/v1/devices", post(crate::routes::register_device))
         .route("/v1/checks/next", get(crate::routes::next_check))
+        .route(
+            "/v1/settings/jobs",
+            get(crate::routes::job_settings).put(crate::routes::set_job_settings),
+        )
         .route("/v1/events", get(crate::routes::events))
         .route("/v1/inbox", get(crate::sphere::routes::inbox))
         .route("/v1/inbox/{id}/answer", post(crate::sphere::routes::answer))
@@ -396,7 +405,7 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         },
         accounts,
         models: Models::defaults(),
-        max_running: MAX_RUNNING,
+        max_running: shared.jobs.max_running() as u32,
         running: shared.jobs.running() as u32,
         cleared_at: shared.cleared.at().map(obi_protocol::time::format),
         // obid has no GitHub app: its own GitHub calls, once it makes any, go as the owner.

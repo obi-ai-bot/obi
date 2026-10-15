@@ -79,6 +79,15 @@ pub type ReviewHook = Arc<
         + Sync,
 >;
 
+/// Why a setting wasn't changed: a value out of range (`422`), or one obid couldn't keep (`500`).
+#[derive(Debug, thiserror::Error)]
+pub enum SettingsError {
+    #[error("{0}")]
+    Refused(String),
+    #[error("the settings couldn't be kept: {0}")]
+    Unkept(std::io::Error),
+}
+
 /// Why a job couldn't be made: a person can read it (`422`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
@@ -88,6 +97,8 @@ struct State {
     jobs: HashMap<String, Job>,
     /// The jobs a worker runs now, and how to tell it to stop.
     workers: HashMap<String, watch::Sender<Signal>>,
+    /// The jobs whose agent had its last turn: they take no more words until they end.
+    wrapping: std::collections::HashSet<String>,
 }
 
 /// Every job obid has, and the workers running them.
@@ -98,7 +109,8 @@ pub struct Jobs {
     sandbox: Result<Sandbox, String>,
     state: Mutex<State>,
     changed: Notify,
-    max_running: usize,
+    /// How many jobs run at once (Settings, `home/settings.json`).
+    max_running: std::sync::atomic::AtomicUsize,
     shutting_down: std::sync::atomic::AtomicBool,
     identity: (String, String),
     /// One preparation at a time per repository (Engine/Desk.swift, `setups`): its clone is
@@ -128,6 +140,7 @@ impl Jobs {
             jobs.insert(job.id.clone(), job);
         }
         let identity = commit_identity(&config.owner);
+        let max_running = crate::settings::load(&config.home).max_running as usize;
         Ok(Arc::new(Jobs {
             config,
             store,
@@ -136,9 +149,10 @@ impl Jobs {
             state: Mutex::new(State {
                 jobs,
                 workers: HashMap::new(),
+                wrapping: std::collections::HashSet::new(),
             }),
             changed: Notify::new(),
-            max_running: crate::api::MAX_RUNNING as usize,
+            max_running: std::sync::atomic::AtomicUsize::new(max_running),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             identity,
             preparing: Mutex::new(HashMap::new()),
@@ -181,6 +195,26 @@ impl Jobs {
         jobs.sort_by(|a, b| b.created.cmp(&a.created).then_with(|| b.id.cmp(&a.id)));
         jobs.truncate(limit);
         jobs
+    }
+
+    /// How many jobs run at once.
+    pub fn max_running(&self) -> usize {
+        self.max_running.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Changes how many jobs run at once, and keeps it: 1 to 20 (`Err` says why not). Raising it
+    /// starts waiting jobs at once; lowering it stops nothing.
+    pub fn set_max_running(self: &Arc<Self>, max: u32) -> Result<u32, SettingsError> {
+        if !crate::settings::MAX_RUNNING_RANGE.contains(&max) {
+            return Err(SettingsError::Refused("maxRunning is 1 to 20.".into()));
+        }
+        let mut settings = crate::settings::load(&self.config.home);
+        settings.max_running = max;
+        crate::settings::save(&self.config.home, &settings).map_err(SettingsError::Unkept)?;
+        self.max_running
+            .store(max as usize, std::sync::atomic::Ordering::Relaxed);
+        self.schedule();
+        Ok(max)
     }
 
     /// How many slots are taken: jobs a worker runs.
@@ -513,7 +547,7 @@ impl Jobs {
                 .collect();
             queued.sort();
             for (_, id) in queued {
-                if state.workers.len() < self.max_running {
+                if state.workers.len() < self.max_running() {
                     let (sender, receiver) = watch::channel(Signal::Run);
                     state.workers.insert(id.clone(), sender);
                     start.push((id, receiver));
@@ -524,7 +558,7 @@ impl Jobs {
         }
         let running = self.running();
         for id in waiting {
-            let max = self.max_running;
+            let max = self.max_running();
             self.update(&id, |job| {
                 let wait = Waiting {
                     kind: "cap".into(),
@@ -540,7 +574,11 @@ impl Jobs {
             let jobs = self.clone();
             tokio::spawn(async move {
                 jobs.work(&id, signal).await;
-                jobs.lock().workers.remove(&id);
+                {
+                    let mut state = jobs.lock();
+                    state.workers.remove(&id);
+                    state.wrapping.remove(&id);
+                }
                 jobs.changed.notify_waiters();
                 jobs.schedule();
             });
@@ -588,6 +626,109 @@ impl Jobs {
             .map(|j| j.id.clone())
             .collect();
         ids.iter().filter_map(|id| self.stop(id)).collect()
+    }
+
+    /// The owner tells the job's agent something (`POST /v1/jobs/{id}/messages`). A job whose
+    /// agent is at work hears it as its next turn, before the check; a finished one picks its
+    /// session up again in the same worktree and branch, for one more round (and one more on a
+    /// loop's limit). `None` for a job obid doesn't have; `Err` says why it can't take the words.
+    pub fn message(self: &Arc<Self>, id: &str, text: &str) -> Option<Result<Job, Refused>> {
+        let job = self.get(id)?;
+        let text = text.trim();
+        if text.is_empty() || text.chars().count() > 2000 {
+            return Some(Err(Refused(
+                "Tell the agent something of 1 to 2,000 characters.".into(),
+            )));
+        }
+        if job.obi.is_some() {
+            return Some(Err(Refused(
+                "This is a review another Obi asked for: its answer goes back to that Obi, so it takes no words of yours.".into(),
+            )));
+        }
+        let tool = Tool::from_id(&job.agent)
+            .map(Tool::name)
+            .unwrap_or("The agent");
+        let heard = |job: &mut Job| {
+            job.notes.get_or_insert_with(Vec::new).push(text.to_owned());
+            job.heard.push(text.to_owned());
+            job.step = format!("You: {text}");
+        };
+        if job.status.is_active() {
+            // Checked and changed under one lock: a worker wrapping up takes no more words.
+            let taken = {
+                let mut state = self.lock();
+                let working = state.workers.contains_key(id) && !state.wrapping.contains(id);
+                let job = state.jobs.get_mut(id)?;
+                if working && job.status == Status::Running && job.phase == Some(Phase::Work) {
+                    heard(job);
+                    Some(job.clone())
+                } else {
+                    None
+                }
+            };
+            let Some(job) = taken else {
+                return Some(Err(Refused(if job.status == Status::Queued {
+                    format!("{tool} hasn't started yet. Tell it again in a moment.")
+                } else {
+                    format!("{tool} is wrapping up. Tell it again once it's done.")
+                })));
+            };
+            if let Err(e) = self.store.save(&job) {
+                tracing::error!("can't keep job {id}: {e}");
+            }
+            self.events.send("job", job.to_json());
+            self.changed.notify_waiters();
+            return Some(Ok(job));
+        }
+        if job.session.is_none() {
+            return Some(Err(Refused(
+                "This job never started, so there's no session to pick up.".into(),
+            )));
+        }
+        let resumed = self.update(id, |job| {
+            heard(job);
+            job.status = Status::Queued;
+            job.phase = Some(Phase::Work);
+            job.round = Some(job.current_round() + 1);
+            if let Some(rounds) = job.rounds.filter(|r| *r > 1) {
+                job.rounds = Some(rounds + 1);
+            }
+            job.finished = None;
+            job.dismissed = None;
+            job.limit = None;
+            job.waiting = None;
+            job.asked = true;
+        });
+        self.schedule();
+        resumed.map(Ok)
+    }
+
+    /// The owner's words the agent hasn't heard yet, taken: what its next turn hears.
+    fn take_heard(&self, id: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        self.update(id, |job| words = std::mem::take(&mut job.heard));
+        words
+    }
+
+    /// The agent's last turn is over: the owner's words that came meanwhile, taken (its next
+    /// turn), or none, and from now on the job takes no more until it ends.
+    fn last_turn(&self, id: &str) -> Vec<String> {
+        let words = {
+            let mut state = self.lock();
+            let words = state
+                .jobs
+                .get_mut(id)
+                .map(|job| std::mem::take(&mut job.heard))
+                .unwrap_or_default();
+            if words.is_empty() {
+                state.wrapping.insert(id.to_owned());
+            }
+            words
+        };
+        if !words.is_empty() {
+            self.update(id, |_| {});
+        }
+        words
     }
 
     /// Lets go of a job that needs the owner. `Err` when it doesn't need them.
@@ -760,7 +901,10 @@ impl Jobs {
         // starts.
         self.update(id, |job| {
             job.waiting = None;
-            job.step = format!("Getting {} ready", job.repo_name());
+            // The owner's words show until the agent moves on.
+            if job.heard.is_empty() {
+                job.step = format!("Getting {} ready", job.repo_name());
+            }
         });
         let temp = self.temp_path(id);
         let outcome = match prepare_folder(&temp).and_then(|()| {
@@ -801,6 +945,7 @@ impl Jobs {
                 }
                 self.update(id, |job| {
                     job.status = Status::Failed;
+                    job.asked = false;
                     job.step = String::new();
                     job.summary = why;
                     job.finished = Some(obi_protocol::time::now());
@@ -1435,12 +1580,22 @@ impl Jobs {
             }
         }
 
-        let mut message = owner_prompt(&job);
-        if job.session.is_some() {
-            message = format!(
-                "obid restarted while you were working: carry on with this round.\n\n{message}"
-            );
-        }
+        let words = self.take_heard(id);
+        let mut message = if !words.is_empty() && job.session.is_some() {
+            // A round the owner asked for: the agent picks its session up and hears their words.
+            words.join("\n\n")
+        } else {
+            let mut message = owner_prompt(&job);
+            if job.session.is_some() {
+                message = format!(
+                    "obid restarted while you were working: carry on with this round.\n\n{message}"
+                );
+            }
+            if !words.is_empty() {
+                message = format!("{message}\n\n{}", words.join("\n\n"));
+            }
+            message
+        };
         loop {
             let job = self.get(id).ok_or("the job is gone")?;
             let round = job.current_round();
@@ -1484,7 +1639,9 @@ impl Jobs {
                 }
                 job.started.get_or_insert_with(obi_protocol::time::now);
                 job.phase = Some(Phase::Work);
-                job.step = format!("Starting {}", tool.name());
+                if !job.step.starts_with("You: ") {
+                    job.step = format!("Starting {}", tool.name());
+                }
             });
             let turn = self.turn(id, tool, launch, &message, signal, false).await?;
             if *signal.borrow() != Signal::Run {
@@ -1511,6 +1668,13 @@ impl Jobs {
                     .get_or_insert_with(Vec::new)
                     .push(said.clone());
             });
+            // Words the owner sent while it worked: the agent hears them now, in another turn of
+            // this round, before the check.
+            let words = self.take_heard(id);
+            if !words.is_empty() {
+                message = words.join("\n\n");
+                continue;
+            }
             let job = self.get(id).ok_or("the job is gone")?;
             let more_rounds = round < job.max_rounds();
             if let Some(command) = &job.check {
@@ -1523,7 +1687,13 @@ impl Jobs {
                     return Ok(());
                 }
                 if run.passed {
-                    break;
+                    // The last turn, unless the owner's words came meanwhile: those are the next.
+                    let words = self.last_turn(id);
+                    if words.is_empty() {
+                        break;
+                    }
+                    message = words.join("\n\n");
+                    continue;
                 }
                 if !more_rounds {
                     let limit = format!("`{command}` still fails after {round} round(s)");
@@ -1544,11 +1714,23 @@ impl Jobs {
                     .unwrap_or("")
                     .trim();
                 if last == "GOAL MET" || !more_rounds {
-                    break;
+                    // The last turn, unless the owner's words came meanwhile: those are the next.
+                    let words = self.last_turn(id);
+                    if words.is_empty() {
+                        break;
+                    }
+                    message = words.join("\n\n");
+                    continue;
                 }
                 message = "Your last line didn't say `GOAL MET`: carry on with what's left, then end with `GOAL MET` or `GOAL NOT MET: <what's left>`.".into();
             } else {
-                break;
+                // The last turn, unless the owner's words came meanwhile: those are the next.
+                let words = self.last_turn(id);
+                if words.is_empty() {
+                    break;
+                }
+                message = words.join("\n\n");
+                continue;
             }
             // What obid declined last round, for a tool whose answers carry no words (ACP).
             if !turn.notes.is_empty() {
@@ -1572,12 +1754,14 @@ impl Jobs {
         };
         let job = self.get(id).ok_or("the job is gone")?;
         let first_line = job.summary.lines().next().unwrap_or("").trim().to_owned();
-        if COMMITTING.contains(&job.kind.as_str()) && commits == 0 {
+        // A round the owner asked for may end with nothing committed: their words decide.
+        if COMMITTING.contains(&job.kind.as_str()) && commits == 0 && !job.asked {
             return Err(format!("Nothing committed: {first_line}"));
         }
         self.update(id, |job| {
             job.status = Status::Done;
             job.step = String::new();
+            job.asked = false;
             job.commits = Some(commits);
             if commits > 0 {
                 job.publish_error = Some(format!(

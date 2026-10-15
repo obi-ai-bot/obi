@@ -23,6 +23,7 @@ pub mod review;
 pub mod routes;
 pub mod sandbox;
 pub mod scan;
+pub mod settings;
 pub mod sphere;
 pub mod store;
 pub mod token;

@@ -335,3 +335,89 @@ pub async fn register_device(
 pub async fn next_check() -> Response {
     json(StatusCode::OK, json!({"check": null}))
 }
+
+/// `GET /v1/settings/jobs`: how many jobs run at once.
+pub async fn job_settings(State(shared): State<Arc<Shared>>) -> Response {
+    json(
+        StatusCode::OK,
+        json!({"maxRunning": shared.jobs.max_running()}),
+    )
+}
+
+/// `PUT /v1/settings/jobs`: `{"maxRunning": 1…20}`, kept across restarts. Raising it starts
+/// waiting jobs at once; lowering it stops nothing.
+pub async fn set_job_settings(
+    State(shared): State<Arc<Shared>>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let value: Value = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "That isn't JSON."))?;
+    let max = value
+        .get("maxRunning")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "The body is {\"maxRunning\": 1 to 20}.",
+            )
+        })?;
+    use crate::jobs::SettingsError;
+    match shared.jobs.set_max_running(max) {
+        Ok(max) => Ok(json(StatusCode::OK, json!({"maxRunning": max}))),
+        Err(SettingsError::Refused(why)) => {
+            Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, why))
+        }
+        Err(e) => {
+            tracing::error!("{e}");
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The setting couldn't be kept.",
+            ))
+        }
+    }
+}
+
+/// `POST /v1/jobs/{id}/messages`: `{"text": "…"}`, the owner's words to the job's agent.
+pub async fn message(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    if shared.jobs.get(&id).is_none() {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB));
+    }
+    let text = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_owned))
+        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "The body is {\"text\": \"…\"}."))?;
+    match shared.jobs.message(&id, &text) {
+        None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+        Some(Err(refused)) => Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, refused.0)),
+        Some(Ok(job)) => Ok(json(StatusCode::OK, job.to_json())),
+    }
+}
+
+/// `GET` and `POST /v1/jobs/{id}/publish`: what publishing the job by hand would do, and doing it.
+/// obid publishes nothing for its owner yet (the branch keeps the commits: `publishError` says
+/// so), so there is never anything to publish by hand: `409`, saying why, and nothing goes out.
+pub async fn publish_action(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let job = shared
+        .jobs
+        .get(&id)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, NO_JOB))?;
+    let why = if job.dismissed.is_some() {
+        "It was dismissed: there's nothing to publish.".to_owned()
+    } else if job.status != crate::job::Status::Done || job.commits.unwrap_or(0) == 0 {
+        "There's nothing to publish: it isn't done with commits.".to_owned()
+    } else {
+        format!(
+            "obid doesn't publish yet: the branch {} keeps the commits, for a person to push.",
+            job.branch
+        )
+    };
+    Err(ApiError::new(StatusCode::CONFLICT, why))
+}

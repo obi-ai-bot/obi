@@ -121,6 +121,14 @@ pub struct Job {
     /// body}`, the body exactly as received. Data, never in a prompt. Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obi_request: Option<Value>,
+    /// The owner's words (`POST /v1/jobs/{id}/messages`) the agent hasn't heard yet: its next
+    /// turn's prompt. Never in the API's job (`notes` has them all).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heard: Vec<String>,
+    /// This round is one the owner asked for with their words: it may end `done` with nothing
+    /// committed. Never in the API's job.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asked: bool,
 }
 
 impl Job {
@@ -173,6 +181,8 @@ impl Job {
             obi: None,
             review_result: None,
             obi_request: None,
+            heard: Vec::new(),
+            asked: false,
         }
     }
 
