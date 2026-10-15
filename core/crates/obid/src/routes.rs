@@ -270,3 +270,21 @@ fn new_job(job: &Map<String, Value>) -> Result<NewJob, String> {
         mode: text("mode")?,
     })
 }
+
+/// `POST /v1/clear`: Clear done, on any app. obid records now, on its own clock (never earlier than
+/// the last clear), answers it, and every app following events hears it.
+pub async fn clear(State(shared): State<Arc<Shared>>) -> Result<Response, ApiError> {
+    let time = shared
+        .cleared
+        .clear(obi_protocol::time::now())
+        .map_err(|e| {
+            tracing::error!("can't keep the clear: {e}");
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The clear couldn't be kept.",
+            )
+        })?;
+    let body = json!({"clearedAt": obi_protocol::time::format(time)});
+    shared.events.send("clear", body.clone());
+    Ok(json(StatusCode::OK, body))
+}

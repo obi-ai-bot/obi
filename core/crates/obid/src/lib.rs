@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod api;
+pub mod clear;
 pub mod config;
 pub mod events;
 pub mod git;
@@ -164,11 +165,13 @@ pub async fn serve(
         path: config.home.join("exchanges"),
         source,
     })?;
+    let cleared = clear::Cleared::open(&config.home);
     let shared = Arc::new(api::Shared {
         config,
         token,
         host,
         cleanup,
+        cleared,
         jobs: jobs.clone(),
         events,
         link: link.clone(),

@@ -1,5 +1,6 @@
 //! The runner API (docs/runner-api.md) as obid serves it: the gate every request goes through,
-//! `GET /v1/status`, the jobs (`/v1/jobs…`, `POST /v1/stop-all`) and the event stream. The rest of
+//! `GET /v1/status`, the jobs (`/v1/jobs…`, `POST /v1/stop-all`), `POST /v1/clear` and the event
+//! stream. The rest of
 //! the API joins the same router.
 
 use std::path::{Path, PathBuf};
@@ -29,6 +30,8 @@ pub struct Shared {
     pub token: String,
     pub host: String,
     pub cleanup: Cleanup,
+    /// When Clear done was last pressed (`POST /v1/clear`).
+    pub cleared: crate::clear::Cleared,
     pub jobs: Arc<Jobs>,
     pub events: Events,
     /// Its Sphere: membership, exchanges, the inbox and decisions.
@@ -84,6 +87,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/jobs/{id}/stop", post(crate::routes::stop))
         .route("/v1/jobs/{id}/dismiss", post(crate::routes::dismiss))
         .route("/v1/stop-all", post(crate::routes::stop_all))
+        .route("/v1/clear", post(crate::routes::clear))
         .route("/v1/events", get(crate::routes::events))
         .route("/v1/inbox", get(crate::sphere::routes::inbox))
         .route("/v1/inbox/{id}/answer", post(crate::sphere::routes::answer))
@@ -383,7 +387,7 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         models: Models::defaults(),
         max_running: MAX_RUNNING,
         running: shared.jobs.running() as u32,
-        cleared_at: None,
+        cleared_at: shared.cleared.at().map(obi_protocol::time::format),
         // obid has no GitHub app: its own GitHub calls, once it makes any, go as the owner.
         github: "owner",
         checks: "no app",
