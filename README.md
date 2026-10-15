@@ -182,18 +182,19 @@ Sangam drew me: a soft cube with two eyes. I breathe, blink, follow your pointer
 ## For developers
 
 ```
-Oby.xcodeproj    the Apple apps: the Mac app now, the iPhone and Apple Watch apps later
-Mac/             the Mac app (SwiftUI): the notch, the character, Settings
-Engine/          Oby's engine, shared by the Mac app and the runner: the brain, jobs, agents, accounts, Publish
-iOS/             the iPhone app (coming)
-Watch/           the Apple Watch app (coming)
-Android/         Android phones and Wear OS (later)
-Desktop/         Windows and Linux (later)
-Character/       Oby the character, shared by every app: oby.html and three.js (see Character/README.md)
-docs/            the runner's API (docs/runner-api.md) and the pictures on this page
+apps/Oby.xcodeproj  the Apple apps: the Mac app now, the iPhone and Apple Watch apps later
+apps/mac/           the Mac app (SwiftUI): the notch, the character, Settings
+Engine/             Oby's engine, shared by the Mac app and the runner: the brain, jobs, agents, accounts, Publish
+apps/ios/           the iPhone app (coming)
+apps/watch/         the Apple Watch app (coming)
+apps/shared/        Swift code the Apple apps share
+apps/android/       Android phones and Wear OS (later)
+Desktop/            Windows and Linux (later)
+Character/          Oby the character, shared by every app: oby.html and three.js (see Character/README.md)
+docs/               the runner's API (docs/runner-api.md) and the pictures on this page
 ```
 
-Open `Oby.xcodeproj` in Xcode 27 and run the `Oby` scheme on My Mac. Oby needs macOS 26 or later.
+Open `apps/Oby.xcodeproj` in Xcode 27 and run the `Oby` scheme on My Mac. Oby needs macOS 26 or later.
 
 **Branches.** Everything starts from `dev`: branch from it and open your pull request into it. When a feature’s tests pass on a real Mac, `dev` is merged into `main`, so `main` always holds a version you can trust. The character’s source lives in `Character/`, and `Character/package/build.sh` builds the clean copy the app ships.
 

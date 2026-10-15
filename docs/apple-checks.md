@@ -28,10 +28,10 @@ Apple's machines build and test every pull request into `dev` and report to GitH
 
 **What to set in App Store Connect › Xcode Cloud** (or Xcode › Product › Xcode Cloud › Create Workflow, same settings):
 
-1. Before you start: Xcode Cloud sees only shared schemes. `Oby`, `ObyPhone` and `ObyWatch` are shared already (`Oby.xcodeproj/xcshareddata/xcschemes/`); keep them that way. Create the product on the app record for the iPhone app (`ObyPhone`); the Mac app's scheme is used as an action in the same workflow.
+1. Before you start: Xcode Cloud sees only shared schemes. `Oby`, `ObyPhone` and `ObyWatch` are shared already (`apps/Oby.xcodeproj/xcshareddata/xcschemes/`); keep them that way. Create the product on the app record for the iPhone app (`ObyPhone`); the Mac app's scheme is used as an action in the same workflow.
 2. **General:** name `PR checks`, the deskree-inc/oby repository, "Restrict editing" on.
 3. **Environment:** Xcode 27 (Latest Release), macOS Latest; "Clean" off (builds reuse what Xcode Cloud caches; turn it on if a stale build ever passes).
-4. **Start condition:** "Pull Request Changes", source branch "Any branch" (or custom: `oby/*`), target branch `dev`. Files and folders: start only when something changes in `iOS/`, `Watch/`, `Mac/`, `Shared/`, `Engine/`, `LiveActivity/`, `Character/`, `iOSTests/`, `MacTests/` or `Oby.xcodeproj`. "Auto-cancel builds" on, so a new push cancels the run of the old one. Add no "Branch Changes" or schedule.
+4. **Start condition:** "Pull Request Changes", source branch "Any branch" (or custom: `oby/*`), target branch `dev`. Files and folders: start only when something changes in `apps/ios/app/`, `apps/watch/`, `apps/mac/app/`, `apps/shared/`, `Engine/`, `apps/ios/live-activity/`, `Character/`, `apps/ios/tests/`, `apps/mac/tests/` or `apps/Oby.xcodeproj`. "Auto-cancel builds" on, so a new push cancels the run of the old one. Add no "Branch Changes" or schedule.
 5. **Actions:**
    - Test: scheme `Oby`, platform macOS, destination Mac, the scheme's tests (MacTests). "Required to pass" on.
    - Test: scheme `ObyPhone`, platform iOS, destination simulator iPhone 17 (latest iOS), the scheme's tests (iOSTests; the Watch app builds as part of ObyPhone). "Required to pass" on.

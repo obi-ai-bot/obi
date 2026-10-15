@@ -39,11 +39,11 @@ jobs:
       - name: Mac app and MacTests
         run: |
           set -o pipefail
-          xcodebuild -project Oby.xcodeproj -scheme Oby -destination 'platform=macOS' \
+          xcodebuild -project apps/Oby.xcodeproj -scheme Oby -destination 'platform=macOS' \
             $SIGNING test | xcbeautify --renderer github-actions
 
       - name: ObyPhone with ObyWatch, and iOSTests
         run: |
           set -o pipefail
-          xcodebuild -project Oby.xcodeproj -scheme ObyPhone -destination "$IPHONE" \
+          xcodebuild -project apps/Oby.xcodeproj -scheme ObyPhone -destination "$IPHONE" \
             $SIGNING test | xcbeautify --renderer github-actions
