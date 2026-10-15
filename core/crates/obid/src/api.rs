@@ -1,5 +1,7 @@
-//! The runner API (docs/runner-api.md) as obid serves it. This first version has the gate every
-//! request goes through and `GET /v1/status`; the rest of the API joins the same router.
+//! The runner API (docs/runner-api.md) as obid serves it: the gate every request goes through,
+//! `GET /v1/status`, the jobs (`/v1/jobs…`, their messages, `POST /v1/stop-all`), `POST
+//! /v1/clear`, `POST /v1/devices`, `GET /v1/checks/next`, `/v1/settings/jobs` and the event
+//! stream. The rest of the API joins the same router.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,10 +12,12 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::Serialize;
 
 use crate::config::Config;
+use crate::events::Events;
+use crate::jobs::Jobs;
 use crate::token;
 
 /// The runner API version obid serves: the Swift runner's (Runner/API.swift), which the apps
@@ -26,6 +30,16 @@ pub struct Shared {
     pub token: String,
     pub host: String,
     pub cleanup: Cleanup,
+    /// When Clear done was last pressed (`POST /v1/clear`).
+    pub cleared: crate::clear::Cleared,
+    /// The devices that may approve publishing (`POST /v1/devices`).
+    pub devices: crate::devices::Devices,
+    pub jobs: Arc<Jobs>,
+    pub events: Events,
+    /// Its Sphere: membership, exchanges, the inbox and decisions.
+    pub link: Arc<crate::sphere::Link>,
+    /// True once obid is stopping: streams end.
+    pub stopping: tokio::sync::watch::Receiver<bool>,
 }
 
 /// What `status.cleanup` says: the job worktrees' folder and the disk space it took when last
@@ -66,6 +80,65 @@ impl Cleanup {
 pub fn router(shared: Arc<Shared>) -> Router {
     Router::new()
         .route("/v1/status", get(status))
+        .route(
+            "/v1/jobs",
+            get(crate::routes::jobs).post(crate::routes::dispatch),
+        )
+        .route("/v1/jobs/{id}", get(crate::routes::job))
+        .route("/v1/jobs/{id}/wait", get(crate::routes::wait))
+        .route("/v1/jobs/{id}/stop", post(crate::routes::stop))
+        .route("/v1/jobs/{id}/dismiss", post(crate::routes::dismiss))
+        .route("/v1/jobs/{id}/messages", post(crate::routes::message))
+        .route("/v1/jobs/{id}/permission", post(crate::routes::permission))
+        .route("/v1/jobs/{id}/mode", post(crate::routes::mode))
+        .route(
+            "/v1/settings/permissions",
+            get(crate::routes::permission_settings).put(crate::routes::set_permission_settings),
+        )
+        .route(
+            "/v1/permissions/rules",
+            get(crate::routes::permission_rules),
+        )
+        .route(
+            "/v1/permissions/rules/{id}",
+            axum::routing::delete(crate::routes::forget_permission_rule),
+        )
+        .route(
+            "/v1/jobs/{id}/publish",
+            get(crate::routes::publish_action).post(crate::routes::publish_action),
+        )
+        .route("/v1/stop-all", post(crate::routes::stop_all))
+        .route("/v1/clear", post(crate::routes::clear))
+        .route("/v1/devices", post(crate::routes::register_device))
+        .route("/v1/checks/next", get(crate::routes::next_check))
+        .route(
+            "/v1/settings/jobs",
+            get(crate::routes::job_settings).put(crate::routes::set_job_settings),
+        )
+        .route("/v1/events", get(crate::routes::events))
+        .route("/v1/inbox", get(crate::sphere::routes::inbox))
+        .route("/v1/inbox/{id}/answer", post(crate::sphere::routes::answer))
+        .route("/v1/obid/sphere", get(crate::sphere::routes::membership))
+        .route("/v1/obid/sphere/key", post(crate::sphere::routes::key))
+        .route("/v1/obid/sphere/card", post(crate::sphere::routes::card))
+        .route("/v1/obid/sphere/join", post(crate::sphere::routes::join))
+        .route(
+            "/v1/obid/sphere/requests",
+            post(crate::sphere::routes::request),
+        )
+        .route(
+            "/v1/obid/sphere/exchanges",
+            get(crate::sphere::routes::exchanges),
+        )
+        .route(
+            "/v1/obid/sphere/exchanges/{id}",
+            get(crate::sphere::routes::exchange),
+        )
+        .route("/v1/obid/decisions", get(crate::sphere::routes::decisions))
+        .route(
+            "/v1/obid/decisions/{id}",
+            axum::routing::delete(crate::sphere::routes::forget),
+        )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(shared.clone(), gate))
@@ -305,32 +378,39 @@ pub fn worktrees(home: &Path) -> PathBuf {
 }
 
 async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>, ApiError> {
-    let accounts = shared
-        .config
-        .agents
-        .claude
-        .iter()
-        .flat_map(|claude| &claude.accounts)
-        .map(|account| AccountJson {
-            id: account.id.clone(),
-            agent: "claude",
-            name: account.name.clone(),
-            label: None,
-            // A listed account is usable until one of its jobs fails on its login.
-            signed_in: true,
-            five_hour: None,
-            seven_day: None,
-            five_hour_resets: None,
-            seven_day_resets: None,
-            running: 0,
-            full_until: None,
-            tetrix: None,
-            tetrix_jobs: 0,
-            tetrix_used: 0,
-            reserved: false,
-            reserve_lifted_until: None,
-        })
-        .collect();
+    let agents = &shared.config.agents;
+    let accounts = [
+        ("claude", &agents.claude),
+        ("codex", &agents.codex),
+        ("cursor", &agents.cursor),
+    ]
+    .into_iter()
+    .flat_map(|(agent, configured)| {
+        configured
+            .iter()
+            .flat_map(|tool| &tool.accounts)
+            .map(move |account| (agent, account))
+    })
+    .map(|(agent, account)| AccountJson {
+        id: account.id.clone(),
+        agent,
+        name: account.name.clone(),
+        label: None,
+        // A listed account is usable until one of its jobs fails on its login.
+        signed_in: true,
+        five_hour: None,
+        seven_day: None,
+        five_hour_resets: None,
+        seven_day_resets: None,
+        running: shared.jobs.running_on(&account.id) as u32,
+        full_until: None,
+        tetrix: None,
+        tetrix_jobs: 0,
+        tetrix_used: 0,
+        reserved: false,
+        reserve_lifted_until: None,
+    })
+    .collect();
     Ok(axum::Json(Status {
         runner: RunnerJson {
             version: API_VERSION,
@@ -339,14 +419,16 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
         },
         accounts,
         models: Models::defaults(),
-        max_running: MAX_RUNNING,
-        running: 0,
-        cleared_at: None,
+        max_running: shared.jobs.max_running() as u32,
+        running: shared.jobs.running() as u32,
+        cleared_at: shared.cleared.at().map(obi_protocol::time::format),
         // obid has no GitHub app: its own GitHub calls, once it makes any, go as the owner.
         github: "owner",
         checks: "no app",
         // Settings › Permissions: bypass until the owner picks another (Engine/Permissions.swift).
-        permissions: ModeJson { mode: "bypass" },
+        permissions: ModeJson {
+            mode: shared.jobs.default_mode().as_str(),
+        },
         cleanup: CleanupJson {
             path: shared.cleanup.path.to_string_lossy().into_owned(),
             bytes: shared.cleanup.bytes(),
@@ -387,10 +469,10 @@ fn disk_usage_unless(path: &Path, cancelled: &AtomicBool) -> u64 {
             let _ = &mut seen;
             total += meta.len();
         }
-        if meta.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&next) {
-                stack.extend(entries.flatten().map(|e| e.path()));
-            }
+        if meta.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&next)
+        {
+            stack.extend(entries.flatten().map(|e| e.path()));
         }
     }
     total
