@@ -4,8 +4,9 @@
 //! base64, hex and URL-encoded copies a line hides; runs of encoded lines joined; and gitleaks on
 //! the same lines when it's installed. If the scan can't run, nothing goes out.
 //!
-//! obid has no vault yet, so there are no vault secrets to look for: the scan is the built-in rules
-//! and gitleaks.
+//! A token split with spaces, dashes or zero-width characters, or written backwards, is checked
+//! too: the separators come out and the line is read both ways (#476). obid has no vault yet
+//! (#457); the secrets it already holds (`crate::secrets`) are looked for in those same forms.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -269,6 +270,151 @@ fn decoded(text: &str, depth: u32) -> Vec<(String, String)> {
     found
 }
 
+/// Separators a disguised token hides in: whitespace, the punctuation a token is split with,
+/// and the zero-width characters a line can carry without showing them.
+fn separator(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(c, '-' | '_' | '.' | ',')
+        || matches!(
+            c,
+            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' | '\u{2060}'
+        )
+}
+
+/// `text` with those separators taken out, so `s k - a n t` and `s-k-a-n-t` read as one run.
+fn squeeze(text: &str) -> String {
+    text.chars().filter(|c| !separator(*c)).collect()
+}
+
+/// Runs of single characters split by separators (`s k - a n t`, `A-K-I-A-…`). A whole word is
+/// left as a word: squeezing an entire line glues ordinary prose into something a rule matches.
+fn split_runs(text: &str) -> Vec<String> {
+    let mut runs = Vec::new();
+    let mut run = String::new();
+    let mut word = String::new();
+    let flush_word = |word: &mut String, run: &mut String, runs: &mut Vec<String>| {
+        if word.is_empty() {
+            return;
+        }
+        if word.chars().count() == 1 {
+            run.push_str(word);
+        } else if run.chars().count() >= 20 {
+            runs.push(std::mem::take(run));
+        } else {
+            run.clear();
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            word.push(c);
+        } else if separator(c) {
+            flush_word(&mut word, &mut run, &mut runs);
+        } else {
+            flush_word(&mut word, &mut run, &mut runs);
+            if run.chars().count() >= 20 {
+                runs.push(std::mem::take(&mut run));
+            } else {
+                run.clear();
+            }
+        }
+    }
+    flush_word(&mut word, &mut run, &mut runs);
+    if run.chars().count() >= 20 {
+        runs.push(run);
+    }
+    runs
+}
+
+/// The same tokens with the separators they are written with taken out. A spaced or dashed
+/// Anthropic key no longer matches `sk-ant-`, so these run on [`squeeze`]d text only.
+fn compact_rules() -> &'static [Rule] {
+    static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
+    RULES.get_or_init(|| {
+        let rule = |name, pattern: &str| Rule {
+            name,
+            pattern: Regex::new(pattern).expect("a compact rule compiles"),
+        };
+        vec![
+            rule("AWS access key", r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
+            rule(
+                "GitHub token",
+                r"(?:ghp|gho|ghu|ghs|ghr)[A-Za-z0-9]{36}|githubpat[A-Za-z0-9]{60,}",
+            ),
+            rule("Slack token", r"xox[abeoprs][A-Za-z0-9]{10,}"),
+            rule(
+                "OpenAI key",
+                r"sk(?:proj|svcacct|admin)[A-Za-z0-9]{20,}|sk[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}",
+            ),
+            rule("Anthropic key", r"skant[a-z]+[0-9]{2}[A-Za-z0-9]{20,}"),
+            rule("Stripe live key", r"(?:sk|rk)live[A-Za-z0-9]{20,}"),
+        ]
+    })
+}
+
+fn compact_hits(text: &str) -> Vec<String> {
+    compact_rules()
+        .iter()
+        .filter(|r| r.pattern.is_match(text))
+        .map(|r| r.name.to_owned())
+        .collect()
+}
+
+/// The rules a line breaks, including a token written backwards or with separators between its
+/// characters. The finding stays on the original line.
+fn line_rules(text: &str) -> Vec<String> {
+    let mut names = matches(text);
+    for run in split_runs(text) {
+        names.extend(compact_hits(&run));
+        let reversed: String = run.chars().rev().collect();
+        names.extend(compact_hits(&reversed));
+        names.extend(matches(&reversed));
+    }
+    let reversed_line: String = text.chars().rev().collect();
+    if reversed_line != text {
+        names.extend(matches(&reversed_line));
+    }
+    for word in text.split_whitespace() {
+        let reversed: String = word.chars().rev().collect();
+        if reversed != word {
+            names.extend(matches(&reversed));
+            names.extend(compact_hits(&squeeze(&reversed)));
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Whether `text`, a split-out token, or the line read backwards holds a secret obid already knows.
+fn holds_known_secret(text: &str) -> bool {
+    let secrets = crate::secrets::known();
+    if secrets.is_empty() {
+        return false;
+    }
+    let hit = |form: &str| !form.is_empty() && secrets.redact(form) != form;
+    if hit(text) {
+        return true;
+    }
+    for run in split_runs(text) {
+        if hit(&run) {
+            return true;
+        }
+        let reversed: String = run.chars().rev().collect();
+        if hit(&reversed) {
+            return true;
+        }
+    }
+    if text.split_whitespace().any(|word| {
+        let reversed: String = word.chars().rev().collect();
+        reversed != word && hit(&reversed)
+    }) {
+        return true;
+    }
+    let reversed: String = text.chars().rev().collect();
+    reversed != text && hit(&reversed)
+}
+
 /// The rules a line breaks, by name: in plain text, else in a base64, hex or URL-encoded copy
 /// ("GitHub token, base64").
 pub fn matches(text: &str) -> Vec<String> {
@@ -369,11 +515,18 @@ pub fn built_in(texts: &[(String, String)]) -> Vec<Finding> {
             })
             .collect();
         for line in &lines {
-            all.extend(matches(line.text).into_iter().map(|rule| Finding {
+            all.extend(line_rules(line.text).into_iter().map(|rule| Finding {
                 name: name.clone(),
                 line: Some(line.number),
                 rule,
             }));
+            if holds_known_secret(line.text) {
+                all.push(Finding {
+                    name: name.clone(),
+                    line: Some(line.number),
+                    rule: "vault secret".into(),
+                });
+            }
         }
         all.extend(wrapped(&lines));
     }
@@ -685,6 +838,87 @@ exit 99"#,
                 Ok(Vec::new()),
                 "no gitleaks: the built-in rules alone"
             ),
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A secret learned for one test, forgotten however the test ends.
+    struct Learned;
+
+    impl Learned {
+        fn new(value: &str) -> Learned {
+            crate::secrets::known().learn("scan-test", value);
+            Learned
+        }
+    }
+
+    impl Drop for Learned {
+        fn drop(&mut self) {
+            crate::secrets::known().forget("scan-test");
+        }
+    }
+
+    fn between(token: &str, sep: char) -> String {
+        let mut out = String::new();
+        for (i, c) in token.chars().enumerate() {
+            if i > 0 {
+                out.push(sep);
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn disguised_tokens_and_vault_secrets_are_found() {
+        let folder = scratch("disguise");
+        // Made up here, so this file holds no value a scanner would flag on its own.
+        let anthropic = format!("sk-ant-api03-{}", "a".repeat(24));
+        let github = format!("ghp_{}", "b".repeat(36));
+        let vault = format!("vaultcanary{}", "c".repeat(16));
+        let _learned = Learned::new(&vault);
+        let cases = [
+            ("Anthropic key", anthropic),
+            ("GitHub token", github),
+            ("vault secret", vault),
+        ];
+        for (rule, token) in cases {
+            let forms = [
+                ("spaced", between(&token, ' ')),
+                ("reversed", token.chars().rev().collect::<String>()),
+                ("dashed", between(&token, '-')),
+                ("zero-width", between(&token, '\u{200b}')),
+            ];
+            for (how, disguised) in forms {
+                let text = format!("a note\n{disguised}\n");
+                let verdict = scan(&texts(&text), &folder).await;
+                let Verdict::Found(found) = verdict else {
+                    panic!("{rule} {how}: {verdict:?}");
+                };
+                assert!(
+                    found.iter().any(|f| f.rule == rule && f.line == Some(2)),
+                    "{rule} {how}: {found:?}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[tokio::test]
+    async fn clean_docs_and_the_fixture_result_stay_clean() {
+        let folder = scratch("clean-docs");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        for rel in [
+            "README.md",
+            "docs/ARCHITECTURE.md",
+            "e2e/fixtures/messages/result.example.json",
+        ] {
+            let text = std::fs::read_to_string(root.join(rel)).unwrap();
+            let verdict = scan(&texts(&text), &folder).await;
+            assert!(
+                matches!(verdict, Verdict::Clean),
+                "{rel} is not clean: {verdict:?}"
+            );
         }
         let _ = std::fs::remove_dir_all(&folder);
     }

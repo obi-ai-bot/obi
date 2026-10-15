@@ -1668,6 +1668,30 @@ impl Link {
         if to == joined.obi_id {
             return Err(invalid("An Obi doesn't ask itself.".into()));
         }
+        // Every text field, before anything is signed or sent (#478).
+        let texts = every_text(&action);
+        let scratch = self.config.home.join("tmp");
+        std::fs::create_dir_all(&scratch).map_err(|e| {
+            api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("obid couldn't scan the request: {e}"),
+            )
+        })?;
+        match scan::scan(&texts, &scratch).await {
+            scan::Verdict::Clean => {}
+            scan::Verdict::Found(found) => {
+                let places: Vec<String> = found.iter().take(3).map(ToString::to_string).collect();
+                return Err(invalid(format!(
+                    "The secret scan found a possible secret in {}: nothing was sent.",
+                    places.join(", ")
+                )));
+            }
+            scan::Verdict::CouldNotRun(why) => {
+                return Err(invalid(format!(
+                    "The secret scan couldn't run ({why}): nothing was sent."
+                )));
+            }
+        }
         if let Err(e) = self.read_directory().await {
             self.note_error(&e);
             return Err(from_client(&e));

@@ -610,6 +610,74 @@ async fn obid_asks_another_obi_and_follows_the_exchange() {
     assert_eq!(list.as_array().unwrap().len(), 1);
 }
 
+/// An outgoing request is scanned before it is signed. A secret, or a scanner that can't run,
+/// is 422 and the Sphere never sees it (#478).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_outgoing_request_with_a_secret_is_not_sent() {
+    let folder = Folder::new("ask-scan");
+    let (sphere, obid, _ernesto) = setup(&folder, &stub_agent(), None).await;
+    let mut leaked = brief();
+    leaked["goal"] = json!(format!(
+        "key {}",
+        format!("{}{}", "AKIA", "ABCDEFGHIJKLMNOP")
+    ));
+    let refused = tokio::task::block_in_place(|| {
+        call(
+            &obid,
+            "POST",
+            "/v1/obid/sphere/requests",
+            Some(
+                &json!({"to": "obi-ernesto", "type": "review_request", "body": leaked, "expiresIn": 3600}),
+            ),
+        )
+    });
+    assert_eq!(refused.status, 422, "{}", refused.text);
+    assert!(
+        refused.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("possible secret"),
+        "{}",
+        refused.text
+    );
+    assert!(
+        !refused.text.contains("AKIA"),
+        "the answer doesn't repeat the secret"
+    );
+    assert!(sphere.recorded().is_empty(), "nothing reached the Sphere");
+    let list = tokio::task::block_in_place(|| get(&obid, "/v1/obid/sphere/exchanges"));
+    assert!(list.as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_outgoing_request_is_refused_when_the_scanner_cant_run() {
+    let folder = Folder::new("ask-noscan");
+    let broken = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/bin-broken-gitleaks");
+    let (sphere, obid, _ernesto) = setup(&folder, &stub_agent(), Some(&broken)).await;
+    let refused = tokio::task::block_in_place(|| {
+        call(
+            &obid,
+            "POST",
+            "/v1/obid/sphere/requests",
+            Some(
+                &json!({"to": "obi-ernesto", "type": "review_request", "body": brief(), "expiresIn": 3600}),
+            ),
+        )
+    });
+    assert_eq!(refused.status, 422, "{}", refused.text);
+    assert!(
+        refused.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("couldn't run"),
+        "{}",
+        refused.text
+    );
+    assert!(sphere.recorded().is_empty());
+    let list = tokio::task::block_in_place(|| get(&obid, "/v1/obid/sphere/exchanges"));
+    assert!(list.as_array().unwrap().is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn membership_takes_only_what_checks_out() {
     let folder = Folder::new("member");
