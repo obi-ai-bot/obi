@@ -809,7 +809,11 @@ pub mod cursor {
         config["permissions"] = json!({"allow": [], "deny": []});
         config["approvalMode"] = json!("allowlist");
         let text = serde_json::to_vec_pretty(&config).map_err(std::io::Error::other)?;
-        let temporary = home.join(".cli-config.json.obid");
+        // A name of this write's own: two jobs on one account start at once, and one's rename
+        // must never take the other's file away.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temporary = home.join(format!(".cli-config.json.obid-{}-{n}", std::process::id()));
         std::fs::write(&temporary, text)?;
         std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
         std::fs::rename(&temporary, &file)
@@ -946,6 +950,27 @@ mod tests {
             code: 1,
             message: "The model is busy".into()
         }));
+    }
+
+    /// Jobs on one Cursor account start at once: each rewrite of its settings succeeds.
+    #[test]
+    fn cursor_settings_are_rewritten_by_many_jobs_at_once() {
+        let home = std::env::temp_dir().join(format!("obid-cursor-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let writers: Vec<_> = (0..8)
+            .map(|_| {
+                let home = home.clone();
+                std::thread::spawn(move || (0..50).try_for_each(|_| cursor::rewrite_config(&home)))
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap().unwrap();
+        }
+        let config: Value =
+            serde_json::from_slice(&std::fs::read(home.join("cli-config.json")).unwrap()).unwrap();
+        assert_eq!(config["approvalMode"], "allowlist");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
