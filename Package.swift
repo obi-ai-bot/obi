@@ -45,7 +45,7 @@ let package = Package(
             swiftSettings: features
         ),
         // Oby's runner as an MCP server over stdio, for Claude Code and other assistants (docs/mcp.md).
-        .executableTarget(name: "oby-mcp", path: "MCP", swiftSettings: features),
+        .executableTarget(name: "oby-mcp", path: "mcp/server", swiftSettings: features),
         // The apps/shared/ code the runner's tests cover; the rest of apps/shared/ needs the apps.
         .target(name: "ObyShared", path: "apps/shared", sources: ["Elapsed.swift", "JobList.swift", "RemoteRoute.swift", "Usage.swift", "VoiceSettings.swift", "WidgetToken.swift"], swiftSettings: features),
         .testTarget(
@@ -58,7 +58,7 @@ let package = Package(
             path: "RunnerTests",
             swiftSettings: features
         ),
-        .testTarget(name: "MCPTests", dependencies: ["oby-mcp"], path: "MCPTests", swiftSettings: features),
+        .testTarget(name: "MCPTests", dependencies: ["oby-mcp"], path: "mcp/tests", swiftSettings: features),
     ],
     swiftLanguageModes: [.v5]
 )
