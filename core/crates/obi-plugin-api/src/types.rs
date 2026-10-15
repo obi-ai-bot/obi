@@ -189,22 +189,50 @@ pub struct EventData {
 
 /// At most this many bytes in an event's `id`.
 pub const MAX_EVENT_ID_BYTES: usize = 256;
+/// At most this many bytes in an event's `actor` (quoted text).
+pub const MAX_ACTOR_BYTES: usize = 256;
+/// At most this many bytes in an event's `data.title` (quoted text).
+pub const MAX_EVENT_TITLE_BYTES: usize = 1_024;
+/// At most this many bytes in an event's `data.url` (quoted text).
+pub const MAX_EVENT_URL_BYTES: usize = 2_048;
 
 impl Event {
     /// The checks the host makes before it accepts an event from a plug-in whose manifest
     /// declares `allowed` (`events.kinds`). Every field outside `actor` and `data` (the quoted
-    /// text) is typed and held to its form here: the id is short and has no control
-    /// characters, `occurredAt` is a real RFC 3339 time, `subject.repo` is `owner/name`,
-    /// `pr` and `issue` are 1 or more, and `headSha` is a commit's hex. So nothing a plug-in
-    /// writes as free text reaches a `pluginEvent` item's `title` or `text`.
+    /// text) is typed and held to its form here: the id is printable ASCII with no space and
+    /// short (it is shown to the owner as `plugin.eventId`, so no line or paragraph separator,
+    /// no bidi override), `occurredAt` is a real RFC 3339 time, `subject.repo` is
+    /// `owner/name`, `pr` and `issue` are 1 or more, and `headSha` is a commit's hex. So
+    /// nothing a plug-in writes as free text reaches a `pluginEvent` item's `title` or `text`.
+    ///
+    /// The quoted text is kept unchanged, so it is refused, not cut, when it is too long: an
+    /// `actor` over [`MAX_ACTOR_BYTES`], a `data.title` over [`MAX_EVENT_TITLE_BYTES`], a
+    /// `data.url` over [`MAX_EVENT_URL_BYTES`]. A `data.url` is also empty or an `http` or
+    /// `https` URL with no space or control character: never `javascript:` or another scheme,
+    /// even though `obid` never opens it by itself.
     pub fn check(&self, allowed: &[EventKind]) -> Result<(), PluginError> {
         let fail = |reason: String| Err(PluginError::Protocol(reason));
         if self.id.is_empty() {
             return fail("the event has an empty id".into());
         }
-        if self.id.len() > MAX_EVENT_ID_BYTES || self.id.chars().any(char::is_control) {
+        if self.id.len() > MAX_EVENT_ID_BYTES || !self.id.bytes().all(|b| b.is_ascii_graphic()) {
             return fail(format!(
-                "the event's id is longer than {MAX_EVENT_ID_BYTES} bytes or has a control character"
+                "the event's id is longer than {MAX_EVENT_ID_BYTES} bytes or has a character other than printable ASCII"
+            ));
+        }
+        if self.actor.len() > MAX_ACTOR_BYTES {
+            return fail(format!(
+                "the event's actor is longer than {MAX_ACTOR_BYTES} bytes"
+            ));
+        }
+        if self.data.title.len() > MAX_EVENT_TITLE_BYTES {
+            return fail(format!(
+                "the event's data.title is longer than {MAX_EVENT_TITLE_BYTES} bytes"
+            ));
+        }
+        if !is_event_url(&self.data.url) {
+            return fail(format!(
+                "the event's data.url is not empty or an http or https URL of at most {MAX_EVENT_URL_BYTES} bytes"
             ));
         }
         if !allowed.contains(&self.kind) {
@@ -254,6 +282,21 @@ fn is_repo(repo: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
     owner_ok && name_ok
+}
+
+/// Empty, or an `http` or `https` URL of at most [`MAX_EVENT_URL_BYTES`] with something after
+/// the scheme and no space or control character.
+fn is_event_url(url: &str) -> bool {
+    if url.is_empty() {
+        return true;
+    }
+    let lower = url.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"));
+    url.len() <= MAX_EVENT_URL_BYTES
+        && rest.is_some_and(|rest| !rest.is_empty())
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// A commit id: 40 (SHA-1) or 64 (SHA-256) lower-case hex digits.
@@ -367,7 +410,7 @@ fn days_in_month(year: u32, month: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_commit, is_repo, is_rfc3339};
+    use super::{is_commit, is_event_url, is_repo, is_rfc3339};
 
     #[test]
     fn rfc3339_times() {
@@ -441,6 +484,31 @@ mod tests {
             "6d20146f366b9fac8907b5066c30ee39aaec09b3\n",
         ] {
             assert!(!is_commit(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn event_urls() {
+        for good in [
+            "",
+            "https://github.com/obi-e2e/fixture-app/pull/12",
+            "HTTP://example.test/x",
+            &format!("https://e.test/{}", "p".repeat(2_048 - 15)),
+        ] {
+            assert!(is_event_url(good), "{good:?}");
+        }
+        for bad in [
+            "javascript:alert(1)",
+            "data:text/html,x",
+            "file:///etc/passwd",
+            "https://",
+            "example.test/x",
+            "https://e.test/a b",
+            "https://e.test/\u{2028}",
+            "https://e.test/\n",
+            &format!("https://e.test/{}", "p".repeat(2_048)),
+        ] {
+            assert!(!is_event_url(bad), "{bad:?}");
         }
     }
 }

@@ -14,6 +14,9 @@ use crate::{EventKind, Kind, PROTOCOL, PluginError, PluginId};
 /// The manifest's file name inside the plug-in's folder.
 pub const MANIFEST_FILE: &str = "obi-plugin.json";
 
+/// At most this many bytes in a name `agentMcp.allowedTools` lists.
+pub const MAX_TOOL_NAME_BYTES: usize = 128;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Manifest {
@@ -58,7 +61,11 @@ pub struct RunSpec {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentMcpSpec {
     pub server: McpServerSpec,
-    /// The only tools agents may call; the job's permission gate refuses every other.
+    /// The only tools agents may call; the job's permission gate refuses every other. Each is
+    /// one tool's bare name, as the server lists it: 1 to [`MAX_TOOL_NAME_BYTES`] ASCII letters,
+    /// digits, `_`, `-` and `.`, not starting with `mcp__`. So no name is a wildcard (`*`), a
+    /// list (`a,b`), a rule for another tool (`a Bash(...)`), or a name already prefixed for
+    /// another server: `obid` prefixes each one itself (`mcp__<plugin id>__<tool>`).
     pub allowed_tools: Vec<String>,
 }
 
@@ -66,9 +73,10 @@ pub struct AgentMcpSpec {
 /// store), never a vault secret, so the manifest gives a secret nowhere to go: there is no
 /// field for headers or an environment, and [`Manifest::validate`] refuses an `http` URL with
 /// a login (`user@`), a query string or a fragment, and `stdio` arguments that pass a
-/// credential the usual ways (`--token x`, `--api-key=x`, `TOKEN=x`, `Authorization:`,
-/// `Bearer `). That last check goes by names, so it can't recognize every secret: one put in
-/// a URL's path, or in an argument with no telling name, gets through. The owner sees the
+/// credential the usual ways (`--token x`, `--accessToken x`, `--api-key=x`, `TOKEN=x`,
+/// `Authorization:`, `X-Api-Key: x`, `Bearer `, a `ghp_…` value). That last check goes by
+/// names and shapes, so it can't recognize every secret: one put in a URL's path, or in an
+/// argument with no telling name or shape (`-t x`), gets through. The owner sees the
 /// manifest before enabling the plug-in.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
@@ -222,8 +230,10 @@ impl AgentMcpSpec {
         if self.allowed_tools.is_empty() {
             return fail("agentMcp.allowedTools is empty".into());
         }
-        if self.allowed_tools.iter().any(|tool| tool.trim().is_empty()) {
-            return fail("agentMcp.allowedTools lists an empty name".into());
+        if let Some(tool) = self.allowed_tools.iter().find(|tool| !is_tool_name(tool)) {
+            return fail(format!(
+                "agentMcp.allowedTools lists {tool:?}, which is not one tool's bare name (1 to {MAX_TOOL_NAME_BYTES} ASCII letters, digits, '_', '-' and '.', not starting with \"mcp__\")"
+            ));
         }
         if !unique(&self.allowed_tools) {
             return fail("agentMcp.allowedTools lists a tool twice".into());
@@ -232,17 +242,37 @@ impl AgentMcpSpec {
     }
 }
 
-/// The first argument that passes a credential the usual ways: `--token x`, `--api-key=x`,
-/// `TOKEN=x`, or an HTTP `Authorization:` header or `Bearer ` value anywhere in it. Goes by
-/// names, so a secret with no telling name isn't found.
+/// One tool's bare name, as an MCP server lists it: 1 to [`MAX_TOOL_NAME_BYTES`] ASCII
+/// letters, digits, `_`, `-` and `.`, and not already prefixed for a server (`mcp__`).
+fn is_tool_name(tool: &str) -> bool {
+    (1..=MAX_TOOL_NAME_BYTES).contains(&tool.len())
+        && tool
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        && !tool.to_ascii_lowercase().starts_with("mcp__")
+}
+
+/// The first argument that passes a credential the usual ways: an option or variable whose
+/// name names one (`--token x`, `--accessToken x`, `--api-key=x`, `--pat x`, `TOKEN=x`), an
+/// HTTP header that carries one (`Authorization:`, `X-Api-Key: x`, `Cookie: x`, or a `Bearer `
+/// value), or a value that starts the way well-known tokens do (`ghp_`, `github_pat_`,
+/// `xoxb-`, `glpat-`, `sk-ant-` and the like). Goes by names and shapes, so a secret with no
+/// telling name or shape (`-t x`) isn't found: a one-letter option means different things to
+/// different programs, and refusing every one would refuse ordinary servers.
 fn passes_credential(args: &[String]) -> Option<&str> {
     for (i, arg) in args.iter().enumerate() {
         let lower = arg.to_ascii_lowercase();
         if lower.contains("authorization:") || lower.contains("bearer ") {
             return Some(arg);
         }
+        if looks_like_token(arg) || header_passes_credential(arg) {
+            return Some(arg);
+        }
         match arg.split_once('=') {
             Some((name, value)) if names_credential(name) && !value.is_empty() => {
+                return Some(arg);
+            }
+            Some((_, value)) if looks_like_token(value) || header_passes_credential(value) => {
                 return Some(arg);
             }
             None if arg.starts_with('-') && names_credential(arg) && i + 1 < args.len() => {
@@ -254,13 +284,66 @@ fn passes_credential(args: &[String]) -> Option<&str> {
     None
 }
 
-/// Whether an option or variable name, like `--api-key` or `GITHUB_TOKEN`, names a credential.
+/// Whether `text` is an HTTP header (`Name: value`) whose name names a credential, like
+/// `X-Api-Key: x` or `Cookie: x`, with a value.
+fn header_passes_credential(text: &str) -> bool {
+    let Some((name, value)) = text.split_once(':') else {
+        return false;
+    };
+    let header = !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+    header && !value.trim().is_empty() && names_credential(name)
+}
+
+/// Whether `value` starts the way a well-known token does.
+fn looks_like_token(value: &str) -> bool {
+    const PREFIXES: [&str; 11] = [
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "glpat-",
+        "xoxb-",
+        "xoxp-",
+        "xapp-",
+        "sk-ant-",
+    ];
+    PREFIXES
+        .iter()
+        .any(|prefix| value.len() > prefix.len() && value.starts_with(prefix))
+}
+
+/// Whether an option, variable or header name, like `--api-key`, `--accessToken`,
+/// `GITHUB_TOKEN` or `X-Api-Key`, names a credential. The name is cut into words at `-`, `_`,
+/// `.` and where a lower-case letter meets an upper-case one; a word names a credential when
+/// it is one of the usual words or ends with one (`githubtoken`, `dbpassword`), so `--tokens`
+/// or `--tokenizer` don't count. A name that is all of `auth`, `pat`, `key`, `pass`, `pw` or
+/// `pwd` counts too.
 fn names_credential(name: &str) -> bool {
-    let name = name.trim_start_matches('-').to_ascii_lowercase();
-    let words: Vec<&str> = name
-        .split(['-', '_', '.'])
-        .filter(|w| !w.is_empty())
-        .collect();
+    let name = name.trim_start_matches('-');
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut previous_lower = false;
+    for c in name.chars() {
+        if matches!(c, '-' | '_' | '.') {
+            words.push(std::mem::take(&mut word));
+            previous_lower = false;
+            continue;
+        }
+        if c.is_ascii_uppercase() && previous_lower {
+            words.push(std::mem::take(&mut word));
+        }
+        previous_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+        word.push(c.to_ascii_lowercase());
+    }
+    words.push(word);
+    words.retain(|w| !w.is_empty());
+
+    let whole = ["auth", "pat", "key", "pass", "pw", "pwd"];
     let single = [
         "token",
         "secret",
@@ -269,17 +352,23 @@ fn names_credential(name: &str) -> bool {
         "apikey",
         "credential",
         "credentials",
+        "cookie",
     ];
+    let endings = ["token", "secret", "password", "passwd", "apikey"];
     let pairs = [
         ("api", "key"),
         ("access", "key"),
         ("private", "key"),
+        ("secret", "key"),
         ("client", "secret"),
     ];
-    words.iter().any(|w| single.contains(w))
+    (words.len() == 1 && whole.contains(&words[0].as_str()))
+        || words.iter().any(|w| {
+            single.contains(&w.as_str()) || endings.iter().any(|ending| w.ends_with(ending))
+        })
         || words
             .windows(2)
-            .any(|pair| pairs.contains(&(pair[0], pair[1])))
+            .any(|pair| pairs.contains(&(pair[0].as_str(), pair[1].as_str())))
 }
 
 /// A path that stays inside the plug-in's folder: relative, no `..`.

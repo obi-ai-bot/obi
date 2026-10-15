@@ -2,7 +2,8 @@
 //! each rule refuses what it should.
 
 use obi_plugin_api::{
-    EventKind, Kind, MANIFEST_FILE, Manifest, McpServerSpec, PROTOCOL, PluginError, PluginId,
+    EventKind, Kind, MANIFEST_FILE, MAX_TOOL_NAME_BYTES, Manifest, McpServerSpec, PROTOCOL,
+    PluginError, PluginId,
 };
 use serde_json::{Value, json};
 
@@ -191,6 +192,43 @@ fn stdio_args_that_pass_a_credential_are_refused() {
 }
 
 #[test]
+fn stdio_args_with_compound_names_headers_or_token_shapes_are_refused() {
+    let refused_args: [&[&str]; 14] = [
+        &["--accessToken", "x"],
+        &["--apiToken", "x"],
+        &["--githubToken", "x"],
+        &["--githubtoken", "x"],
+        &["--APIKey", "x"],
+        &["--pat", "ghp_x"],
+        &["--auth", "x"],
+        &["-t", "ghp_0123456789abcdef"],
+        &["--header", "X-Api-Key: x"],
+        &["--header=X-Auth-Token: x"],
+        &["-H", "Cookie: session=x"],
+        &["--db-password=x"],
+        &["--slack", "xoxb-123-456"],
+        &["--gitlab=glpat-abc"],
+    ];
+    for args in refused_args {
+        let mut value = tetrix();
+        value["agentMcp"]["server"] = json!({"type": "stdio", "command": "bin/mcp", "args": args});
+        assert!(refused(&value).contains("credential"), "{args:?}");
+    }
+    let accepted_args: [&[&str]; 5] = [
+        &["--maxTokens", "100"],
+        &["--author", "ernesto"],
+        &["--header", "Accept: application/json"],
+        &["--url", "https://mcp.example/mcp"],
+        &["--keyFile", "keys/x.pem", "--patience", "3"],
+    ];
+    for args in accepted_args {
+        let mut value = tetrix();
+        value["agentMcp"]["server"] = json!({"type": "stdio", "command": "bin/mcp", "args": args});
+        assert!(parse(&value).is_ok(), "{args:?}");
+    }
+}
+
+#[test]
 fn a_server_url_must_be_http() {
     for url in ["ftp://mcp.tetrix.example", "mcp.tetrix.example", "https://"] {
         let mut value = tetrix();
@@ -278,6 +316,41 @@ fn allowed_tools_are_named_once_each() {
         value["agentMcp"]["allowedTools"] = tools.clone();
         assert!(refused(&value).contains("allowedTools"), "{tools}");
     }
+}
+
+#[test]
+fn allowed_tools_are_bare_tool_names() {
+    // A wildcard, a list, a rule for another tool, a line break or a name already prefixed
+    // for another server would widen what the permission gate lets agents call.
+    for tool in [
+        "*",
+        "search_*",
+        "a,Bash",
+        "a Bash(rm -rf /)",
+        "Bash(rm:*)",
+        "a\nb",
+        "mcp__other__x",
+        "MCP__other__x",
+        "a/b",
+        "a:b",
+        "é",
+        &"x".repeat(MAX_TOOL_NAME_BYTES + 1),
+    ] {
+        let mut value = tetrix();
+        value["agentMcp"]["allowedTools"] = json!(["get_entity", tool]);
+        assert!(refused(&value).contains("allowedTools"), "{tool:?}");
+    }
+    let tools = json!([
+        "search_entities",
+        "get-entity",
+        "tools.v2.list",
+        "A1",
+        "x".repeat(MAX_TOOL_NAME_BYTES)
+    ]);
+    let mut value = tetrix();
+    value["agentMcp"]["allowedTools"] = tools.clone();
+    let manifest = parse(&value).unwrap();
+    assert_eq!(json!(manifest.agent_mcp.unwrap().allowed_tools), tools);
 }
 
 #[test]

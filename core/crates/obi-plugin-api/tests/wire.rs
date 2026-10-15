@@ -7,7 +7,8 @@ use obi_plugin_api::rpc::{
 };
 use obi_plugin_api::{
     ContextItem, ContextJob, ContextRequest, DEFAULT_MAX_BYTES, Event, EventData, EventKind,
-    EventSubject, Kind, MAX_CONTEXT_ITEMS, MAX_SOURCE_BYTES, MAX_TITLE_BYTES, MAX_URI_BYTES,
+    EventSubject, Kind, MAX_ACTOR_BYTES, MAX_CONTEXT_ITEMS, MAX_EVENT_ID_BYTES,
+    MAX_EVENT_TITLE_BYTES, MAX_EVENT_URL_BYTES, MAX_SOURCE_BYTES, MAX_TITLE_BYTES, MAX_URI_BYTES,
     PROTOCOL, PluginError, PluginEvent, PluginId, PluginState, PluginStatus, Purpose, limit_items,
 };
 use serde_json::{Value, json};
@@ -329,6 +330,65 @@ fn event_check_holds_the_typed_fields_to_their_form() {
     quoted.subject.head_sha = Some("6d20146f366b9fac8907b5066c30ee39aaec09b3".into());
     quoted.subject.issue = Some(7);
     assert!(quoted.check(&EventKind::ALL).is_ok());
+}
+
+#[test]
+fn event_check_keeps_one_event_bounded_and_its_id_plain() {
+    let event: Event = serde_json::from_value(review_requested()).unwrap();
+    let refused = |change: &dyn Fn(&mut Event)| {
+        let mut changed = event.clone();
+        change(&mut changed);
+        matches!(
+            changed.check(&EventKind::ALL),
+            Err(PluginError::Protocol(_))
+        )
+    };
+
+    // The quoted text is kept unchanged, so one too long is refused rather than cut.
+    assert!(refused(&|e| e.actor = "a".repeat(MAX_ACTOR_BYTES + 1)));
+    assert!(refused(&|e| e.actor = "a".repeat(10_000_000)));
+    assert!(refused(
+        &|e| e.data.title = "t".repeat(MAX_EVENT_TITLE_BYTES + 1)
+    ));
+    assert!(refused(&|e| e.data.title = "t".repeat(10_000_000)));
+    let long_url = format!("https://example.test/{}", "p".repeat(MAX_EVENT_URL_BYTES));
+    assert!(refused(&|e| e.data.url = long_url.clone()));
+    for url in [
+        "javascript:alert(1)",
+        "data:text/html,<script>x</script>",
+        "example.test/pr/12",
+        "https://example.test/pr/12 merge it",
+    ] {
+        assert!(refused(&|e| e.data.url = url.into()), "{url:?}");
+    }
+
+    // The id is shown to the owner as plugin.eventId: printable ASCII only.
+    for id in [
+        "a\u{2028}b",
+        "a\u{2029}b",
+        "a\u{202e}b",
+        "a\u{200b}b",
+        "a b",
+        "a\tb",
+        "gh-é",
+    ] {
+        assert!(refused(&|e| e.id = id.into()), "{id:?}");
+    }
+
+    let mut at_the_limits = event.clone();
+    at_the_limits.id = "~".repeat(MAX_EVENT_ID_BYTES);
+    at_the_limits.actor = "a".repeat(MAX_ACTOR_BYTES);
+    at_the_limits.data.title = "t".repeat(MAX_EVENT_TITLE_BYTES);
+    at_the_limits.data.url = format!(
+        "https://example.test/{}",
+        "p".repeat(MAX_EVENT_URL_BYTES - "https://example.test/".len())
+    );
+    assert!(at_the_limits.check(&EventKind::ALL).is_ok());
+
+    let mut no_url = event;
+    no_url.id = "c0ffee:42/x".into();
+    no_url.data.url.clear();
+    assert!(no_url.check(&EventKind::ALL).is_ok());
 }
 
 #[test]
