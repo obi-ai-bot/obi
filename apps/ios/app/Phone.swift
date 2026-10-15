@@ -24,7 +24,7 @@ final class Phone {
     /// The tab in front; a notification's job opens on Home.
     var tab = PhoneTab.home
     /// The runner's conversation, read in pages and followed over `turn` events, for the Chat
-    /// tab's thread (Shared/ConversationModel.swift): one thread for every device (#11).
+    /// tab's thread (apps/shared/ConversationModel.swift): one thread for every device (#11).
     let conversation = ConversationModel()
     /// What this iPhone said and the runner hasn't listed yet (ChatThread): the runner adds the
     /// user's turn with Oby's answer, so the words show here from the moment they're sent.
@@ -92,7 +92,7 @@ final class Phone {
             start()
         }
     }
-    /// The Mac this iPhone is linked to (#285, Shared/RemoteRoute.swift), kept in the defaults;
+    /// The Mac this iPhone is linked to (#285, apps/shared/RemoteRoute.swift), kept in the defaults;
     /// nil until pairing, or Settings › Your Mac, gives one. Then the Mac is where the calls go.
     var link: MacLink? {
         didSet {

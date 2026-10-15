@@ -2,7 +2,7 @@
 import SwiftUI
 
 /// Settings › Permissions, on the iPhone and in the Mac's Runner tab alike (as the sections in
-/// Shared/SettingsSections.swift): the mode the runner's jobs get when a dispatch doesn't pick one,
+/// apps/shared/SettingsSections.swift): the mode the runner's jobs get when a dispatch doesn't pick one,
 /// and the rules Always allow (or Deny) saved there, each removed with its button (or a swipe on
 /// the iPhone).
 struct PermissionsSection: View {

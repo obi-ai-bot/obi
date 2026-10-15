@@ -227,9 +227,10 @@ nonisolated struct Review: Codable, Equatable, Sendable {
     /// security surfaces visible while keyword-sensitive files are covered by `securityPath`.
     static func securityPath(_ path: String) -> Bool {
         let path = path.lowercased()
+        // `shared/e2e` stays for pull requests from branches cut before Shared/ moved to apps/shared/.
         let roots = ["runner/api.swift", "runner/gateway.swift", "runner/devices.swift", "runner/routes.swift",
-                     "runner/auth", "shared/e2e", "engine/vault", "engine/jobs.swift", "engine/publish",
-                     "cloud/"]
+                     "runner/auth", "apps/shared/e2e", "engine/vault", "engine/jobs.swift", "engine/publish",
+                     "cloud/", "shared/e2e"]
         if roots.contains(where: { path == $0 || path.hasPrefix($0) }) { return true }
         let name = URL(fileURLWithPath: path).lastPathComponent
         return ["auth", "token", "secret", "key", "crypto", "listener", "gateway", "route", "vault", "publish"]

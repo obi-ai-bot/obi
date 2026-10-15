@@ -3,7 +3,7 @@ import LocalAuthentication
 import Observation
 import OSLog
 
-/// What signs a publish on this Mac: its Touch ID key (Shared/DeviceKey.swift), or a stand-in in tests.
+/// What signs a publish on this Mac: its Touch ID key (apps/shared/DeviceKey.swift), or a stand-in in tests.
 nonisolated protocol PublishingKey: Sendable {
     var isAvailable: Bool { get }
     /// The public half, X9.63, to register with the runner. It doesn't ask for Touch ID.

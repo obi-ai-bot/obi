@@ -2,7 +2,7 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
-/// Settings › General: what the iPhone's Settings has too (Shared/SettingsSections.swift),
+/// Settings › General: what the iPhone's Settings has too (apps/shared/SettingsSections.swift),
 /// opening at login, and how much this Mac's own jobs ask.
 struct SettingsView: View {
     /// This Mac's desk: Settings › Permissions' default for the jobs it runs itself (#134). The
@@ -148,7 +148,7 @@ struct RunnerSettingsView: View {
             } footer: {
                 Text("On power, Oby prevents idle sleep while This Mac is enabled and this setting is on. A running job always keeps this Mac awake.")
             }
-            // As on the iPhone (Shared/PermissionsSection.swift). This Mac's own jobs' default is in General.
+            // As on the iPhone (apps/shared/PermissionsSection.swift). This Mac's own jobs' default is in General.
             PermissionsSection(runner: feed.runner, defaultMode: feed.defaultMode, setDefault: feed.setDefaultMode)
             Section("Checks on this Mac") {
                 Toggle("Run merge checks on this Mac", isOn: $runMergeChecks)
@@ -300,7 +300,7 @@ struct RemoteAccessSettingsView: View {
 }
 
 /// Settings › Accounts: the logins Oby spreads jobs across, who pays for each, and how much each has
-/// used, on this Mac and on the runner, as the iPhone shows them (Shared/SettingsSections.swift).
+/// used, on this Mac and on the runner, as the iPhone shows them (apps/shared/SettingsSections.swift).
 struct AccountsSettingsView: View {
     let store: AccountStore
     let feed: RunnerFeed
@@ -479,7 +479,7 @@ struct VaultSettingsView: View {
 }
 
 /// Settings › Models: which model and effort Claude Code and Codex jobs use, on this Mac and on the
-/// runner (as the iPhone sets them, Shared/SettingsSections.swift).
+/// runner (as the iPhone sets them, apps/shared/SettingsSections.swift).
 struct ModelsSettingsView: View {
     let store: AccountStore
     let feed: RunnerFeed

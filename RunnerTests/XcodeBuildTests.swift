@@ -9,7 +9,7 @@ import Testing
     }
 
     @Test func onlyAppleFacingFilesRequestACloudBuild() {
-        for path in ["apps/ios/app/Chat.swift", "apps/ios/tests/ChatTests.swift", "Shared/Runner.swift", "apps/watch/HomeView.swift",
+        for path in ["apps/ios/app/Chat.swift", "apps/ios/tests/ChatTests.swift", "apps/shared/Runner.swift", "apps/watch/HomeView.swift",
                      "apps/ios/live-activity/ObyActivity.swift", "Character/character.json", "Icon/compose.swift", "Oby.xcodeproj/project.pbxproj"] {
             #expect(XcodeBuild.includes(path))
         }

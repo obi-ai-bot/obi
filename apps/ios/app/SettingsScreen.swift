@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The Settings tab: the runner Oby talks to, the accounts signed in there, each tool's model and
 /// effort, and the Apple Watches that reach it without this iPhone. The sections the Mac has too
-/// are shared (Shared/SettingsSections.swift).
+/// are shared (apps/shared/SettingsSections.swift).
 struct SettingsScreen: View {
     @Environment(Phone.self) private var phone
     @State private var address = ""

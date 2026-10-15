@@ -34,7 +34,7 @@ struct VoiceSection: View {
 }
 
 /// Accounts and their usage: a line on the one with the most room, then each tool's accounts, each
-/// with its usage card (Shared/Usage.swift) or the row the device gives it.
+/// with its usage card (apps/shared/Usage.swift) or the row the device gives it.
 struct AccountSections<Item, ID: Hashable, Row: View>: View {
     var title: String
     var items: [Item]

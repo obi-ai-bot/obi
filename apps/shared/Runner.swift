@@ -537,7 +537,7 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
 
 #if os(iOS) || os(watchOS)
 /// One turn of the conversation with Oby, as Engine/Conversation.swift has it: the Mac compiles
-/// that one; the iPhone reads the runner's turns into this copy (Shared/ConversationModel.swift).
+/// that one; the iPhone reads the runner's turns into this copy (apps/shared/ConversationModel.swift).
 nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     enum Who: String, Codable, Sendable { case user, oby }
 
@@ -652,7 +652,7 @@ extension Job {
     /// "After #223 merges", "Runner update": a waiting job's row, under the Waiting heading (#238).
     nonisolated static func waitingLine(_ text: String) -> String { text.prefix(1).uppercased() + text.dropFirst() }
 
-    /// Where the list puts the job (Shared/JobList.swift): what needs you, the ones working, the
+    /// Where the list puts the job (apps/shared/JobList.swift): what needs you, the ones working, the
     /// ones waiting their turn (#238), published ones whose pull request is still open, then
     /// everything else.
     nonisolated var group: JobGroup {
@@ -673,12 +673,12 @@ extension Job {
                                author: author.map { $0.settled(among: []) })
     }
 
-    /// Whether the list shows the job after the last Clear done, on any app (Shared/JobList.swift).
+    /// Whether the list shows the job after the last Clear done, on any app (apps/shared/JobList.swift).
     nonisolated func listed(after clearedAt: Date?, among jobs: [Job]) -> Bool {
         JobList.lists(settled: settled(among: jobs), finished: finished, clearedAt: clearedAt)
     }
 
-    /// Clear done would take it from the list (Shared/JobList.swift).
+    /// Clear done would take it from the list (apps/shared/JobList.swift).
     nonisolated func clearable(among jobs: [Job]) -> Bool { JobList.clears(settled: settled(among: jobs)) }
 
     /// The status pill, the same on the iPhone and the Mac: how it's going, how it ended, and
@@ -716,7 +716,7 @@ extension Job {
 
 /// What needs the user among these jobs, in one line, like "2 jobs are ready to publish, 1 job
 /// failed", or nil when nothing does. Home on the iPhone and the Mac's island both say it, through
-/// `Summary.line` (Shared/JobList.swift). Dismissed jobs aren't counted.
+/// `Summary.line` (apps/shared/JobList.swift). Dismissed jobs aren't counted.
 nonisolated enum NeedsYou {
     static func line(_ jobs: [Job]) -> String? {
         func count(_ n: Int, _ one: String, _ many: String) -> String? { n == 0 ? nil : n == 1 ? "1 job \(one)" : "\(n) jobs \(many)" }
@@ -921,7 +921,7 @@ nonisolated struct Runner: Sendable {
         return answer.action
     }
 
-    // Approvals come from the iPhone's Face ID key or the Mac's Touch ID key (Shared/DeviceKey.swift).
+    // Approvals come from the iPhone's Face ID key or the Mac's Touch ID key (apps/shared/DeviceKey.swift).
     #if os(iOS) || os(macOS)
     func publish(_ id: String, approval: Approval) async throws -> URL {
         struct Answer: Decodable { var url: URL }

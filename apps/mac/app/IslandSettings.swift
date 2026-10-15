@@ -190,7 +190,7 @@ struct IslandRow<Control: View>: View {
     }
 }
 
-/// The runner's default permission mode and its saved rules, as Settings › Permissions (Shared/PermissionsSection.swift)
+/// The runner's default permission mode and its saved rules, as Settings › Permissions (apps/shared/PermissionsSection.swift)
 /// without the paragraphs: the mode's line is its tooltip.
 private struct IslandPermissions: View {
     var runner: Runner?

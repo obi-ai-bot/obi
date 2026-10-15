@@ -216,7 +216,7 @@
 				0B1E0C0A0000000000AD0006 /* Exceptions for "Shared" folder in "ObyWatch" target */,
 				0B1E0C0A0000000000AE0006 /* Exceptions for "Shared" folder in "ObyWatchWidget" target */,
 			);
-			path = Shared;
+			path = apps/shared;
 			sourceTree = "<group>";
 		};
 		0B1E0C0A000000000000C2 /* iOS */ = {
