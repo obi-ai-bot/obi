@@ -9,7 +9,9 @@ rm -rf "$here/spec/schemas" "$here/spec/conformance"
 mkdir -p "$here/spec/conformance"
 cp -R "$src/schemas" "$here/spec/schemas"
 cp -R "$src/conformance/fixtures" "$here/spec/conformance/fixtures"
-cp "$src/conformance/jcs-vectors.json" "$src/conformance/keys.json" "$here/spec/conformance/"
+# The agent-card cases are made by the tests (spec/README.md): not copied.
+rm -rf "$here/spec/conformance/fixtures/card"
+cp "$src/conformance/jcs-vectors.json" "$here/spec/conformance/"
 commit=$(git -C "$OBI_SPHERE_DIR" rev-parse HEAD 2>/dev/null || echo unknown)
 sed -i.bak "s/^Copied from obi-sphere commit \`[0-9a-f]*\`/Copied from obi-sphere commit \`$commit\`/" "$here/spec/README.md"
 rm -f "$here/spec/README.md.bak"
