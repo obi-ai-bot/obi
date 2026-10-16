@@ -1,0 +1,70 @@
+/* Shared look for every screen. */
+:root {
+  /* dark: native controls (the overlay scrollbar included) draw their dark
+     versions, like Safari on a dark page */
+  color-scheme: dark;
+
+  /* SF Pro, the system sans serif (SF Mono's family) */
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+
+  --bg: #0b0b0b;
+  --ink: #ececec;
+  --text: #a3a3a8;
+  --muted: #6e6e74;
+  --label: rgba(255, 255, 255, 0.4);  /* group labels in the side panel */
+  --item: rgba(255, 255, 255, 0.8);   /* the items under them */
+  --line: rgba(255, 255, 255, 0.10);         /* outlines at rest */
+  --line-strong: rgba(255, 255, 255, 0.15);  /* hovered or pressed */
+  --line-focus: rgba(255, 255, 255, 0.25);   /* a focused text field */
+  --divider: rgba(255, 255, 255, 0.05);      /* lines between panels */
+  --hover: rgba(255, 255, 255, 0.06);        /* a row or icon under the pointer */
+  --active: rgba(255, 255, 255, 0.1);        /* the selected one */
+  --chip: #161617;
+  --chip-hover: #1f1f21;
+  --danger: #f07167;  /* destructive actions (delete) */
+  --unread: #0a84ff;  /* something new: macOS's blue */
+  --needs: #ff9f0a;   /* needs you (a decision is yours): macOS's orange */
+  --full: #ffd60a;    /* an account past 80% used: macOS's yellow */
+  --over: #ff453a;    /* past 90%: macOS's red */
+
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-base: 14px;  /* what you read: chips, conversation names */
+  --text-lg: 15px;    /* what you type: the message box */
+  --text-title: 24px; /* section titles in the side panel */
+
+  /* text too long for its row fades out over its last 24px instead of ending
+     in dots (short text never reaches the fade) */
+  --fade-out: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  --composer-line: 22px;  /* message box line height */
+
+  /* menus, popovers, modals and Settings' cards */
+  --surface: #181817;
+  --surface-edge: rgba(255, 255, 255, 0.08);  /* a popover's edge, and the lines inside it */
+  /* text fields and pop-up menus: their fill; edged as the message box is (--line, 20% white hovered or focused) */
+  --field: rgba(255, 255, 255, 0.02);
+  --field-edge-on: rgba(255, 255, 255, 0.2);
+  --sidebar: 290px;  /* side panel width, icons included (the default; the user can drag it) */
+  --rail: 48px;      /* the side panel's icon column: 32px icons, 8px each side */
+  --view-min: 420px; /* the view never gets narrower (the window's minimum width) */
+
+  /* hover, focus and press ease in softly instead of snapping */
+  --fade: 280ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  /* things arriving: decelerate past the mark by a few px, then settle */
+  --spring: cubic-bezier(0.34, 1.32, 0.64, 1);
+  --ease-in: cubic-bezier(0.55, 0, 0.75, 0.3);
+  /* opening, closing, folding: quick off the mark, a long soft landing */
+  --warm: cubic-bezier(0.22, 1, 0.36, 1);
+  /* like warm, with a little overshoot (~3%) before it rests: the first 320ms
+     of cubic-bezier(0.3, 1.3, 0.6, 1) over 400ms, then the last bit of the
+     return eased out over 200ms instead of 80ms, so it lands gently */
+  --settle: 520ms linear(0.0000 0.0%, 0.1047 1.9%, 0.2021 3.8%, 0.2926 5.8%, 0.3762 7.7%, 0.4534 9.6%, 0.5242 11.5%, 0.5890 13.5%, 0.6480 15.4%, 0.7015 17.3%, 0.7498 19.2%, 0.7931 21.2%, 0.8317 23.1%, 0.8659 25.0%, 0.8960 26.9%, 0.9222 28.8%, 0.9448 30.8%, 0.9642 32.7%, 0.9804 34.6%, 0.9939 36.5%, 1.0048 38.5%, 1.0134 40.4%, 1.0200 42.3%, 1.0247 44.2%, 1.0278 46.2%, 1.0295 48.1%, 1.0299 50.0%, 1.0293 51.9%, 1.0279 53.8%, 1.0259 55.8%, 1.0233 57.7%, 1.0203 59.6%, 1.0172 61.5%, 1.0135 63.9%, 1.0104 66.3%, 1.0077 68.8%, 1.0056 71.2%, 1.0038 73.6%, 1.0024 76.0%, 1.0014 78.4%, 1.0006 80.8%, 1.0001 83.2%, 0.9998 85.6%, 0.9997 88.0%, 0.9997 90.4%, 0.9998 92.8%, 0.9999 95.2%, 1.0000 97.6%, 1.0000 100.0%);
+
+  --radius-pill: 999px;
+  --gutter: 20px;
+  /* title bar: tall enough to centre on the traffic lights, content starting
+     just right of them. The desktop app overrides both with where macOS
+     actually put the lights; these are for a plain browser. */
+  --bar: 48px;
+  --after-lights: 84px;
+}
