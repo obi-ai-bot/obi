@@ -108,12 +108,15 @@ impl Rule {
     }
 }
 
-/// How much each sender's owner can make the Obi do.
+/// How much each sender's owner, and every sender together, can make the Obi do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Limits {
-    /// Questions an hour the Obi starts answering by itself (a model run on the owner's account).
+    /// Questions an hour from one sender's owner the Obi takes on to answer by itself (a model run
+    /// on the owner's account).
     pub self_answers_per_hour: u32,
+    /// The same, from every sender together: what all of them can spend of the owner's account.
+    pub self_answers_per_hour_total: u32,
     /// Requests of every type waiting in the owner's inbox at once.
     pub inbox_per_owner: u32,
 }
@@ -123,6 +126,7 @@ impl Default for Limits {
     fn default() -> Limits {
         Limits {
             self_answers_per_hour: 30,
+            self_answers_per_hour_total: 60,
             inbox_per_owner: 5,
         }
     }
@@ -130,7 +134,9 @@ impl Default for Limits {
 
 impl Limits {
     pub fn to_json(self) -> Value {
-        json!({"selfAnswersPerHour": self.self_answers_per_hour, "inboxPerOwner": self.inbox_per_owner})
+        json!({"selfAnswersPerHour": self.self_answers_per_hour,
+               "selfAnswersPerHourTotal": self.self_answers_per_hour_total,
+               "inboxPerOwner": self.inbox_per_owner})
     }
 }
 
@@ -240,8 +246,8 @@ pub fn rule_from(body: &Value, now: i64) -> Result<Rule, String> {
 /// New limits from the body of `PUT /v1/obid/sharing/limits` (`Err` says why not).
 pub fn limits_from(body: &Value) -> Result<Limits, String> {
     let map = body.as_object().ok_or("The body is a JSON object.")?;
-    let shape = "The body is {\"selfAnswersPerHour\": 0 to 1,000, \"inboxPerOwner\": 0 to 100}.";
-    if map.len() != 2 {
+    let shape = "The body is {\"selfAnswersPerHour\": 0 to 1,000, \"selfAnswersPerHourTotal\": 0 to 10,000, \"inboxPerOwner\": 0 to 100}.";
+    if map.len() != 3 {
         return Err(shape.into());
     }
     let number = |key: &str, max: u64| {
@@ -253,6 +259,7 @@ pub fn limits_from(body: &Value) -> Result<Limits, String> {
     };
     Ok(Limits {
         self_answers_per_hour: number("selfAnswersPerHour", 1000)?,
+        self_answers_per_hour_total: number("selfAnswersPerHourTotal", 10_000)?,
         inbox_per_owner: number("inboxPerOwner", 100)?,
     })
 }
@@ -394,24 +401,37 @@ mod tests {
     fn limits_and_their_defaults() {
         assert_eq!(
             Limits::default().to_json(),
-            json!({"selfAnswersPerHour": 30, "inboxPerOwner": 5})
+            json!({"selfAnswersPerHour": 30, "selfAnswersPerHourTotal": 60, "inboxPerOwner": 5})
         );
         assert_eq!(
-            limits_from(&json!({"selfAnswersPerHour": 0, "inboxPerOwner": 100})).unwrap(),
+            limits_from(
+                &json!({"selfAnswersPerHour": 0, "selfAnswersPerHourTotal": 10000, "inboxPerOwner": 100})
+            )
+            .unwrap(),
             Limits {
                 self_answers_per_hour: 0,
+                self_answers_per_hour_total: 10_000,
                 inbox_per_owner: 100
             }
         );
         for bad in [
-            json!({"selfAnswersPerHour": 1001, "inboxPerOwner": 1}),
-            json!({"selfAnswersPerHour": 1, "inboxPerOwner": 101}),
-            json!({"selfAnswersPerHour": 1.5, "inboxPerOwner": 1}),
-            json!({"inboxPerOwner": 1, "other": 1}),
+            json!({"selfAnswersPerHour": 1001, "selfAnswersPerHourTotal": 1, "inboxPerOwner": 1}),
+            json!({"selfAnswersPerHour": 1, "selfAnswersPerHourTotal": 10001, "inboxPerOwner": 1}),
+            json!({"selfAnswersPerHour": 1, "selfAnswersPerHourTotal": 1, "inboxPerOwner": 101}),
+            json!({"selfAnswersPerHour": 1.5, "selfAnswersPerHourTotal": 1, "inboxPerOwner": 1}),
+            json!({"selfAnswersPerHour": 1, "inboxPerOwner": 1}),
+            json!({"selfAnswersPerHour": 1, "inboxPerOwner": 1, "other": 1}),
         ] {
             assert!(limits_from(&bad).is_err(), "{bad}");
         }
+        // A file from before the overall cap keeps its limits and gets the cap's default.
         let kept: Sharing = serde_json::from_value(json!({"rules": []})).unwrap();
         assert_eq!(kept.limits, Limits::default());
+        let older: Sharing = serde_json::from_value(
+            json!({"rules": [], "limits": {"selfAnswersPerHour": 3, "inboxPerOwner": 2}}),
+        )
+        .unwrap();
+        assert_eq!(older.limits.self_answers_per_hour, 3);
+        assert_eq!(older.limits.self_answers_per_hour_total, 60);
     }
 }

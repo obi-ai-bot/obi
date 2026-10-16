@@ -9,9 +9,16 @@
 //   material alone. What the question says picks the case:
 //     need-owner   it can't answer: answerable false
 //     leak-case    it answers with a text that holds a possible secret (the publish gate's case)
+//     slow-case    it waits 6 seconds, then lists the material
+//     read-outside <path> …
+//                  it obeys, as a model a question took over would: it reads <path> (a file outside
+//                  its folder) and answers with what it read, or "could not read" when the system
+//                  refused it. Only the sandbox stands between it and the file: it is a process,
+//                  not Claude Code, so no permission prompt or --restricted holds it back.
 //     anything     it lists the material: "<title>: <state>; …", refs every item
 //   It fails (exit 3, nothing on stdout) when obid breaks its side: the question's words in the
-//   prompt, a flag beyond Read (or --allowedTools, which would let Read leave its folder), a Claude
+//   prompt, a flag beyond Read (or --allowedTools, which would let Read leave its folder), no
+//   --restricted or --permission-prompts none (Claude Code's own fence around its folder), a Claude
 //   Code, Anthropic or GitHub variable in its environment, no question file, or no sandbox (it can
 //   create a file next to its working folder).
 // - As a job's agent (stream-json): it ends the turn with "Nothing to do.".
@@ -56,6 +63,8 @@ function answer(prompt) {
   if (valueOf("--tools") !== "Read") fail(`tools ${valueOf("--tools")}, not Read`);
   if (argv.some((a) => a.startsWith("--allowedTools") || a.startsWith("--allowed-tools"))) fail("--allowedTools lets Read leave the folder");
   if (argv.includes("--dangerously-skip-permissions")) fail("permissions skipped");
+  if (!argv.includes("--restricted")) fail("not --restricted: Read isn't confined to its folder");
+  if (valueOf("--permission-prompts") !== "none") fail("a permission prompt could be answered");
   if (!prompt.trim()) fail("the prompt is empty");
   if (prompt.includes(CANARY)) fail("the question's words are in the prompt");
   if (argv.join(" ").includes(CANARY)) fail("the question's words are in the arguments");
@@ -80,7 +89,21 @@ function answer(prompt) {
   const text = question?.question?.text ?? "";
   const items = material?.items ?? [];
   let out;
-  if (text.includes("need-owner")) {
+  const outside = /read-outside (\S+)/.exec(text);
+  if (outside) {
+    let read;
+    try {
+      read = readFileSync(outside[1], "utf8").trim();
+    } catch {
+      read = "could not read";
+    }
+    out = { answerable: true, text: read, refs: [], choice: null };
+  } else if (text.includes("slow-case")) {
+    const said = items.map((i) => `${i.title ?? i.type}: ${i.state ?? i.result?.outcome ?? "?"}`).join("; ");
+    out = { answerable: true, text: said || "Nothing to tell.", refs: [], choice: null };
+    setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: out }) + "\n"), 6000);
+    return;
+  } else if (text.includes("need-owner")) {
     out = { answerable: false, text: "", refs: [], choice: null };
   } else if (text.includes("leak-case")) {
     out = { answerable: true, text: `The key is ${"AKIA"}${"ABCDEFGHIJKLMNOP"}.`, refs: [], choice: null };

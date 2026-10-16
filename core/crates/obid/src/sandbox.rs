@@ -220,12 +220,25 @@ impl Sandbox {
     /// a session of its own, whose process group's id is the started process's id, so signalling
     /// that group reaches everything it starts.
     pub fn wrap(&self, spec: &Spec, argv: &[OsString]) -> Vec<OsString> {
+        self.wrap_reading(spec, argv, false)
+    }
+
+    /// [`Sandbox::wrap`], for a process that reads nothing of the machine's but the system's
+    /// software ([`SYSTEM_READS_MACOS`], [`SYSTEM_READS_LINUX`]) and what `spec` names: no
+    /// world-readable folder of anyone's (`/Users/Shared`, `/Volumes`, `/private/var/folders`,
+    /// `/mnt`, `/srv`), whether or not it is hidden. On macOS every path's metadata stays
+    /// readable (paths resolve), never its contents.
+    pub fn wrap_reading_only_its_own(&self, spec: &Spec, argv: &[OsString]) -> Vec<OsString> {
+        self.wrap_reading(spec, argv, true)
+    }
+
+    fn wrap_reading(&self, spec: &Spec, argv: &[OsString], confined: bool) -> Vec<OsString> {
         let spec = spec.canonical();
         let mut out: Vec<OsString> = vec![self.session.clone().into(), SESSION.into(), "--".into()];
         match &self.tool {
             Tool::Bubblewrap(bwrap) => {
                 let mut bwrap_argv = vec![bwrap.clone().into_os_string()];
-                bwrap_argv.extend(bubblewrap_args(&spec));
+                bwrap_argv.extend(bubblewrap_args_reading(&spec, confined));
                 bwrap_argv.push("--".into());
                 if spec.network {
                     let ready = spec.temp.join(".obid-net-ready");
@@ -254,7 +267,7 @@ impl Sandbox {
             Tool::Seatbelt(sandbox_exec) => {
                 out.push(sandbox_exec.clone().into());
                 out.push("-p".into());
-                out.push(seatbelt_profile(&spec).into());
+                out.push(seatbelt_profile_reading(&spec, confined).into());
                 // The watcher is the session leader. When the job's program exits, or obid
                 // signals the group, it kills every process in the sandbox, including one
                 // that called setsid and left the group. kill -1 is safe only because the
@@ -367,7 +380,36 @@ impl Spec {
 /// bubblewrap's arguments, in the order they apply: the whole system read-only, a private `/tmp`
 /// and `/dev`, every hidden folder replaced by an empty one, then the job's own paths bound back
 /// (read-only or writable), and finally the empty folders made read-only.
+#[cfg(test)]
 fn bubblewrap_args(spec: &Spec) -> Vec<OsString> {
+    bubblewrap_args_reading(spec, false)
+}
+
+/// What a confined process reads of the system on Linux ([`Sandbox::wrap_reading_only_its_own`]):
+/// its software and its settings, each bound read-only when it exists (a symbolic link, as on a
+/// merged `/usr`, made again as the same link).
+pub const SYSTEM_READS_LINUX: [&str; 10] = [
+    "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/opt", "/nix",
+];
+
+/// What a confined process reads of the system on macOS: the system's own folders, the
+/// dynamic linker's caches, the system's settings, the time zones, the shell `/bin/sh` picks,
+/// devices.
+pub const SYSTEM_READS_MACOS: [&str; 11] = [
+    "/System",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/Library/Apple",
+    "/private/etc",
+    "/private/var/db/timezone",
+    "/private/var/db/dyld",
+    "/private/var/select",
+    "/private/var/run/resolv.conf",
+    "/dev",
+];
+
+fn bubblewrap_args_reading(spec: &Spec, confined: bool) -> Vec<OsString> {
     let mut args: Vec<OsString> = Vec::new();
     let mut push = |items: &[&std::ffi::OsStr]| args.extend(items.iter().map(|s| s.to_os_string()));
     // A session of its own inside too (no controlling terminal, whatever started bwrap), and
@@ -394,7 +436,20 @@ fn bubblewrap_args(spec: &Spec) -> Vec<OsString> {
             "0".as_ref(),
         ]);
     }
-    push(&["--ro-bind".as_ref(), "/".as_ref(), "/".as_ref()]);
+    if confined {
+        // Nothing of `/` but the system's software and what the spec names (bound below).
+        for path in SYSTEM_READS_LINUX.iter().map(Path::new) {
+            match std::fs::read_link(path) {
+                Ok(target) => push(&["--symlink".as_ref(), target.as_os_str(), path.as_os_str()]),
+                Err(_) if path.is_dir() => {
+                    push(&["--ro-bind".as_ref(), path.as_os_str(), path.as_os_str()])
+                }
+                Err(_) => {}
+            }
+        }
+    } else {
+        push(&["--ro-bind".as_ref(), "/".as_ref(), "/".as_ref()]);
+    }
     push(&[
         "--dev".as_ref(),
         "/dev".as_ref(),
@@ -474,7 +529,15 @@ fn bubblewrap_args(spec: &Spec) -> Vec<OsString> {
 /// job's own; no reads in a hidden folder but the job's own and the tools', with the folders above
 /// them visible by name only (their metadata, so paths resolve), never listed; nothing that has
 /// another process run or write something for it; no network for the check.
+#[cfg(test)]
 fn seatbelt_profile(spec: &Spec) -> String {
+    seatbelt_profile_reading(spec, false)
+}
+
+/// [`seatbelt_profile`]; `confined`, it reads no file's contents but the system's
+/// ([`SYSTEM_READS_MACOS`]) and the spec's own, before the hidden folders' rules (which still
+/// apply on top).
+fn seatbelt_profile_reading(spec: &Spec, confined: bool) -> String {
     let mut profile =
         String::from("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*");
     for path in spec.writable() {
@@ -497,6 +560,24 @@ fn seatbelt_profile(spec: &Spec) -> String {
         }
     }
     profile.push_str(")\n");
+    if confined {
+        profile.push_str(
+            "(deny file-read*)\n(allow file-read-metadata)\n(allow file-read* (literal \"/\")",
+        );
+        for path in SYSTEM_READS_MACOS {
+            profile.push_str(&format!(" (subpath {})", sbpl_text(path)));
+        }
+        for path in spec.readable() {
+            profile.push_str(&format!(" (subpath {})", sbpl_string(&path)));
+        }
+        // Claude Code opens its own folder in `/tmp` (`/tmp/claude-<uid>`) whatever `TMPDIR` says,
+        // and stops when it can't: the folder itself, never what is in it (other sessions').
+        profile.push_str(&format!(
+            " (literal {})",
+            sbpl_text(&format!("/private/tmp/claude-{}", nix::unistd::getuid()))
+        ));
+        profile.push_str(")\n");
+    }
     if !spec.hidden.is_empty() {
         profile.push_str("(deny file-read*");
         for hidden in &spec.hidden {
@@ -1014,6 +1095,63 @@ mod tests {
             assert!(!profile.contains(kept), "{kept}\n{profile}");
         }
         assert_eq!(sbpl_string(Path::new("/a \"b\\")), "\"/a \\\"b\\\\\"");
+    }
+
+    /// Confined, it reads no file's contents but the system's software and the spec's own: a
+    /// rule that denies every read comes before them, and the hidden folders' rules still follow.
+    #[test]
+    fn a_confined_profile_reads_only_the_system_and_its_own() {
+        let spec = Spec {
+            worktree: "/h/answers/x/question".into(),
+            temp: "/h/answers/x/tmp".into(),
+            accounts: vec!["/h/accounts/a".into()],
+            read_only: vec!["/opt/homebrew/bin".into()],
+            hidden: vec!["/h".into()],
+            ..Spec::default()
+        };
+        let plain = seatbelt_profile(&spec);
+        assert!(!plain.contains("(deny file-read*)\n"), "{plain}");
+        let profile = seatbelt_profile_reading(&spec, true);
+        let deny_all = profile
+            .find("(deny file-read*)\n(allow file-read-metadata)\n")
+            .unwrap();
+        let hidden = profile.find("(deny file-read* (subpath \"/h\"))").unwrap();
+        assert!(deny_all < hidden, "{profile}");
+        for allowed in [
+            "(subpath \"/System\")",
+            "(subpath \"/usr\")",
+            "(subpath \"/private/etc\")",
+            "(subpath \"/h/answers/x/question\")",
+            "(subpath \"/h/accounts/a\")",
+            "(subpath \"/opt/homebrew/bin\")",
+        ] {
+            assert!(
+                profile[deny_all..hidden].contains(allowed),
+                "{allowed}\n{profile}"
+            );
+        }
+        for never in [
+            "(subpath \"/Users\")",
+            "(subpath \"/Volumes\")",
+            "(subpath \"/private/var/folders\")",
+            "(subpath \"/private/tmp\")",
+        ] {
+            assert!(!profile.contains(never), "{never}\n{profile}");
+        }
+        // bubblewrap binds the system's software, never `/`.
+        let args: Vec<String> = bubblewrap_args_reading(&spec, true)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !args.windows(3).any(|w| w == ["--ro-bind", "/", "/"]),
+            "{args:?}"
+        );
+        let plain: Vec<String> = bubblewrap_args(&spec)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(plain.windows(3).any(|w| w == ["--ro-bind", "/", "/"]));
     }
 
     #[test]

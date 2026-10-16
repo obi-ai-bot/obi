@@ -89,6 +89,8 @@ struct State {
     /// When each sender's owner's questions started an answer the Obi wrote by itself, within the
     /// last hour: the self-answer limit (protocol.md section 11, "Rate limits").
     self_answers: HashMap<String, Vec<i64>>,
+    /// The same, every sender's together: the overall hourly cap.
+    all_self_answers: Vec<i64>,
     /// Every envelope id obid has handled: the messages of its exchanges, and the ones it dropped.
     seen: HashSet<String>,
     dropped: Vec<String>,
@@ -298,6 +300,7 @@ impl Link {
             decisions: decisions.load(),
             sharing: sharing.load(),
             self_answers: HashMap::new(),
+            all_self_answers: Vec::new(),
             seen,
             dropped: Vec::new(),
         };
@@ -373,21 +376,22 @@ impl Link {
         // What a run cut short left: its folder, with a copied login in it.
         let _ = std::fs::remove_dir_all(self.config.home.join("answers"));
         {
-            // The self-answer limit counts the last hour across restarts.
+            // The self-answer limits count the last hour across restarts: every run obid took
+            // on, whatever it ended in (an answer, the owner's inbox, `busy`).
             let mut state = self.lock();
             let since = time::now() - 3600;
             let started: Vec<(String, i64)> = state
                 .exchanges
                 .values()
-                .filter(|e| {
-                    e.direction == "incoming"
-                        && e.decided_by.as_deref() == Some("sharing")
-                        && e.created > since
+                .filter_map(|e| {
+                    e.self_answered
+                        .filter(|at| *at > since)
+                        .map(|at| (e.peer_owner.clone().unwrap_or_default(), at))
                 })
-                .map(|e| (e.peer_owner.clone().unwrap_or_default(), e.created))
                 .collect();
             for (owner, at) in started {
                 state.self_answers.entry(owner).or_default().push(at);
+                state.all_self_answers.push(at);
             }
         }
         let answering: Vec<String> = self
@@ -1433,23 +1437,7 @@ impl Link {
         now: i64,
     ) -> Decided {
         let owner = exchange.peer_owner.clone().unwrap_or_default();
-        if let Some(decision) =
-            decisions::covering_question(&state.decisions, &owner, repos).cloned()
-        {
-            exchange.decided_by = Some("rule".into());
-            exchange.rule = Some(decision.id.clone());
-            if let Some(d) = state.decisions.iter_mut().find(|d| d.id == decision.id) {
-                d.uses += 1;
-                d.last_used = Some(now);
-            }
-            exchange.state = "declined".into();
-            let decline = self.reply_locked(
-                state,
-                exchange,
-                "decline",
-                json!({"reason": "owner_declined", "by_rule": decision.id}),
-            );
-            exchange.outbox.extend(decline);
+        if self.decline_remembered(state, exchange, repos, now) {
             return Decided::Settled { decisions: true };
         }
         let body = &exchange.request["body"];
@@ -1466,12 +1454,18 @@ impl Link {
             return Decided::Settled { decisions: false };
         }
         if let Some(rule) = state.sharing.covering(&owner, repos).cloned() {
-            let limit = state.sharing.limits.self_answers_per_hour as usize;
+            let limits = state.sharing.limits;
+            state.all_self_answers.retain(|t| *t > now - 3600);
+            let all = state.all_self_answers.len();
             let started = state.self_answers.entry(owner.clone()).or_default();
             started.retain(|t| *t > now - 3600);
-            if started.len() < limit {
-                // It counts as the run starts, whatever the run ends in.
+            if started.len() < limits.self_answers_per_hour as usize
+                && all < limits.self_answers_per_hour_total as usize
+            {
+                // It counts when obid takes it on, whatever the run ends in.
                 started.push(now);
+                state.all_self_answers.push(now);
+                exchange.self_answered = Some(now);
                 exchange.state = "answering".into();
                 exchange.decided_by = Some("sharing".into());
                 exchange.rule = Some(rule.id.clone());
@@ -1482,6 +1476,65 @@ impl Link {
             Some(item) => Decided::Inbox(item),
             None => Decided::Settled { decisions: false },
         }
+    }
+
+    /// Declines the question with reason `owner_declined` when a remembered decline covers it,
+    /// repository by repository (`by_rule` its id, counted as a use): whether it did.
+    fn decline_remembered(
+        &self,
+        state: &mut State,
+        exchange: &mut Exchange,
+        repos: &[String],
+        now: i64,
+    ) -> bool {
+        let owner = exchange.peer_owner.clone().unwrap_or_default();
+        let Some(decision) = decisions::covering_question(&state.decisions, &owner, repos).cloned()
+        else {
+            return false;
+        };
+        exchange.decided_by = Some("rule".into());
+        exchange.rule = Some(decision.id.clone());
+        if let Some(d) = state.decisions.iter_mut().find(|d| d.id == decision.id) {
+            d.uses += 1;
+            d.last_used = Some(now);
+        }
+        exchange.state = "declined".into();
+        let decline = self.reply_locked(
+            state,
+            exchange,
+            "decline",
+            json!({"reason": "owner_declined", "by_rule": decision.id}),
+        );
+        exchange.outbox.extend(decline);
+        true
+    }
+
+    /// A question obid is answering by itself that a remembered decline now covers (the owner said
+    /// "Decline, and remember" while it waited or ran): declined as one that came in covered.
+    /// Whether it was. Takes the lock.
+    fn declined_meanwhile(&self, cid: &str, repos: &[String]) -> bool {
+        let (exchange, decisions) = {
+            let mut state = self.lock();
+            let Some(mut exchange) = state
+                .exchanges
+                .get(cid)
+                .filter(|e| e.state == "answering")
+                .cloned()
+            else {
+                return false;
+            };
+            let now = time::now();
+            if !self.decline_remembered(&mut state, &mut exchange, repos, now) {
+                return false;
+            }
+            exchange.updated = now;
+            state.exchanges.insert(cid.to_owned(), exchange.clone());
+            (exchange, state.decisions.clone())
+        };
+        self.save_decisions(&decisions);
+        self.save_exchange(&exchange);
+        self.outbox.notify_one();
+        true
     }
 
     /// Puts the question in the owner's inbox (`inbox`), or declines it `busy` when the asker's
@@ -1893,6 +1946,10 @@ impl Link {
         let Ok(_run) = self.answering.acquire().await else {
             return;
         };
+        // A remembered decline the owner made while it waited covers it now: no run.
+        if self.declined_meanwhile(&cid, &repos) {
+            return;
+        }
         // Once a run may start: the question still waits for it, unexpired, and the rule is still
         // there and still covers it (the owner may have changed it meanwhile). Else no run.
         let snapshot = {
@@ -2003,6 +2060,18 @@ impl Link {
             else {
                 return;
             };
+            // A remembered decline made while the model ran covers it now: declined, and nothing
+            // the model wrote goes.
+            if self.decline_remembered(&mut state, &mut exchange, &repos, now) {
+                exchange.updated = now;
+                state.exchanges.insert(cid.clone(), exchange.clone());
+                let decisions = state.decisions.clone();
+                drop(state);
+                self.save_decisions(&decisions);
+                self.save_exchange(&exchange);
+                self.outbox.notify_one();
+                return;
+            }
             // The rule may have gone while the model ran: then nothing it wrote goes.
             let still = state
                 .sharing

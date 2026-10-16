@@ -4,11 +4,20 @@
 //! Its only material is what that rule allows ([`material`]). A model run on the owner's Claude Code
 //! account writes it ([`write`]): the question reaches the model only as a quoted file,
 //! `question.json`, and the material as another, `material.json`, in a folder of the run's own; its
-//! prompt is fixed and names neither's words. It runs in the job sandbox with Read as its only tool
-//! and no `--allowedTools`, so Claude Code reads inside that folder without asking and asks, with
-//! no one to answer, before reading anything else; it runs no command, writes nothing that leaves,
-//! and changes nothing. What it writes is checked, cleaned and scanned (the publish gate) before
-//! anything is sent, and it can always say it can't answer: the question then goes to the owner.
+//! prompt is fixed and names neither's words. It reads nothing else, by two layers that each hold
+//! alone:
+//!
+//! - **The system**: the job sandbox in its confined form ([`Sandbox::wrap_reading_only_its_own`]):
+//!   no file's contents but the system's software, the run's folder, the tools and its account
+//!   (which Claude Code itself reads to sign in). Seatbelt on macOS, bubblewrap on Linux.
+//! - **Claude Code**: Read as its only tool, `--restricted` (its file tools confined to the working
+//!   directory) and `--permission-prompts none` (anything that would ask is refused), and no
+//!   `--allowedTools`. This is what keeps the account folder, which the system must let the process
+//!   read, out of the model's reach.
+//!
+//! It runs no command, writes nothing that leaves, and changes nothing. What it writes is checked,
+//! cleaned and scanned (the publish gate) before anything is sent, and it can always say it can't
+//! answer: the question then goes to the owner.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -252,6 +261,21 @@ async fn run(
         std::slice::from_ref(&config.home),
     ));
     read_only.push(bin.clone());
+    // Software on `PATH` outside the hidden folders (`/opt/homebrew/bin`, `/usr/local/bin`): the
+    // confined run reads it, and the install prefix around a `bin` (its libraries, a symbolic
+    // link's target in it), never `/` itself.
+    for entry in std::env::split_paths(&process::tools_path()) {
+        if !entry.is_absolute() || hidden.iter().any(|h| entry.starts_with(h)) {
+            continue;
+        }
+        let prefix = entry
+            .file_name()
+            .filter(|n| *n == "bin" || *n == "sbin")
+            .and_then(|_| entry.parent())
+            .filter(|p| p.components().count() > 1 && !hidden.iter().any(|h| h.starts_with(p)));
+        read_only.extend(prefix.map(Path::to_path_buf));
+        read_only.push(entry);
+    }
     let mut spec = Spec {
         worktree: reads.clone(),
         git_admin: None,
@@ -296,6 +320,9 @@ async fn run(
         "Read",
         "--permission-mode",
         "default",
+        "--restricted",
+        "--permission-prompts",
+        "none",
         "--strict-mcp-config",
         "--setting-sources",
         "",
@@ -314,7 +341,7 @@ async fn run(
     .collect();
     let mut argv: Vec<OsString> = vec![bin.into_os_string()];
     argv.extend(flags);
-    let argv = sandbox.wrap(&spec, &argv);
+    let argv = sandbox.wrap_reading_only_its_own(&spec, &argv);
     let env = process::sandbox_env(&process::tools_path(), &temp, &extra);
 
     use tokio::io::AsyncWriteExt;
