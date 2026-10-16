@@ -35,7 +35,12 @@ oby.setState('thinking')            // what Oby does until told otherwise
 oby.play('Agree')                   // one reaction now, then back to the state
 await oby.play('Laugh')             // true when it finished, false if cut off
 oby.setState('idle', { now: true }) // switch without waiting for a reaction to finish
+oby.setState('idle', { finish: true }) // let what's playing end first (Loading: its dots run back into Oby)
 oby.pause(true)                     // stop drawing while off screen; false resumes
+oby.look(x, y)                      // look at a point, in the page's CSS px from its top-left; outside the frame too
+oby.look(null)                      // let go: Oby looks around on its own
+oby.notice(x, y)                    // something happened there (a click): a glance, then back to its business
+oby.attend(true)                    // watch the pointer the whole time; false goes back to its own rhythm
 oby.on('poke', ({ count }) => {})   // events (below); returns an unsubscribe function
 
 oby.state        // current state
@@ -57,10 +62,11 @@ oby.expressions  // list of expressions
 
 | State | What Oby does |
 |---|---|
-| `idle` | Waits, following the pointer. Every 7–16 s it fidgets: Distracted, Yawn or Hiding. |
+| `idle` | Waits, watching the pointer now and then. Every 7–16 s it fidgets: Distracted, Grin, Yawn or Hiding. |
 | `listening` | Turns an ear to you and nods, over and over. Use it for "Hi Oby" and while the user talks. |
 | `thinking` | Looks up one way, then the other, with thought dots, over and over. |
 | `working` | Spins (Working) or melts into three bouncing dots (Loading), one after the other. |
+| `loading` | Melts into three bouncing dots (Loading), over and over. Leave it with `{ finish: true }` and the dots run back together into Oby first. |
 | `quiet` | Only breathes, blinks and follows the pointer. |
 
 Oby starts in `idle`.
@@ -69,8 +75,10 @@ Oby starts in `idle`.
 
 | Expression | Length | Looks like |
 |---|---|---|
+| `Hello` | 3.4 s | happy bounce, a little wiggle, the ears wave |
 | `Agree` | 2.4 s | three clear nods |
 | `Disagree` | 3.0 s | disappointed "no": droopy eyes, slow head shake, a sigh |
+| `Grin` | 3.0 s | happy squint with a little chuckle |
 | `Laugh` | 3.0 s | shakes with laughter |
 | `Surprised` | 2.8 s | jumps, eyes wide |
 | `Confused` | 3.2 s | tilts, small round eyes, a question mark |
@@ -95,13 +103,22 @@ Oby forgets the clicks after 6 seconds.
 
 | Event | Data | When |
 |---|---|---|
+| `ready` | `{}` | the first frame is drawn: show Oby's frame from here on, so nothing flashes while it loads |
 | `state` | `{ state }` | the state changed |
 | `expression` | `{ name }` | an expression started |
 | `end` | `{ name, completed }` | an expression ended; `completed` is false if it was cut off |
 | `poke` | `{ count }` | someone clicked Oby |
 
-Clicks play their own reactions (`Poked`, `Annoyed`, `Ignoring you`). They
-show up in `expression`/`end` and `oby.playing`, but you can't `play()` them.
+Oby doesn't stare at the pointer all the time: it watches it for 2–4 s, then
+looks around or fidgets for 14–26 s. The pointer coming close to its face, or
+a click, catches its eye at once; `oby.attend(true)` holds its attention.
+Ease the pointer slowly towards its face and it backs away, as if the pointer
+had something icky on it.
+
+Clicks play their own reactions (`Poked`, `Annoyed`, `Ignoring you`). So does
+spinning the pointer round fast (`Dizzy`), and whipping it side to side while
+Oby follows it (`Shaking it off`). They show up in `expression`/`end` and
+`oby.playing`, but you can't `play()` them.
 
 A `play()` that's running while Oby is paused or hidden finishes only once
 it's drawing again, because its clock stops with it.
@@ -124,6 +141,10 @@ webView.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent()
 webView.evaluateJavaScript("oby.setState('thinking')")
 ```
 
+- Keep the web view transparent (`alphaValue = 0`) until the `ready` event
+  arrives, so nothing flashes while it loads. Don't hide it or take it out of
+  the window instead: Oby draws nothing while its page is hidden, so `ready`
+  would never come.
 - On iOS, use `webView.isOpaque = false` and `backgroundColor = .clear` instead
   of `drawsBackground`.
 - `add(self, name:)` keeps `self` alive. In a view controller, call
@@ -144,10 +165,16 @@ states.
     oby.postMessage({ setState: 'listening' }, '*');      // { setState, now: true } switches at once
     oby.postMessage({ play: 'Agree' }, '*');
     oby.postMessage({ pause: true }, '*');
+    oby.postMessage({ look: { x: 300, y: -40 } }, '*');  // frame coordinates; outside is fine
   });
   addEventListener('message', (e) => { if (e.data?.oby) console.log(e.data); }); // { oby: 'poke', count: 1 }
 </script>
 ```
+
+To make Oby watch the cursor across a whole window or screen, pass the
+cursor's position from the frame's top-left corner to `oby.look(x, y)`; past
+the frame's edge the head keeps turning but eases off. Once you call
+`look()`, Oby ignores the pointer over its own frame.
 
 Oby only takes messages from the page it's embedded in. On the same origin
 you can also call `iframe.contentWindow.oby` directly.

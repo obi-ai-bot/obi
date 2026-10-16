@@ -9,8 +9,10 @@ src=${here:h}
 dist=${src:h}/dist
 out=$dist/oby
 
-# What ships. Listening, Thinking and Working stay because the states use them.
-KEEP="Listening Thinking Working Loading Agree Disagree Laugh Surprised Confused Tired Yawn Distracted Hiding"
+# What ships. Listening, Thinking, Working and Loading stay because the states use them;
+# Hello, Grin, Agree and Confused because the apps play them (apps/ios/app/Home.swift,
+# apps/mac/app/Island.swift).
+KEEP="Hello Listening Thinking Working Loading Agree Disagree Grin Laugh Surprised Confused Tired Yawn Distracted Hiding"
 
 rm -rf "$out" "$dist/oby.zip"
 mkdir -p "$out/vendor" "$out/mac"

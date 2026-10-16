@@ -7,15 +7,21 @@ import WebKit
 @Observable
 final class ObyCharacter {
     let page: WebPage
-    private let events = CharacterEvents()
+    let events = CharacterEvents()
     private var loaded = false
     private var paused = false
+    /// The host has fed Oby the cursor with `look(at:)`: from then on the page goes by that alone.
+    private var looks = false
+    /// Oby's first frame is drawn (its `ready` event). Show its frame from then on: shown before,
+    /// it may flash while the page loads.
+    private(set) var ready = false
 
     init() {
         var config = WebPage.Configuration()
         config.urlSchemeHandlers[URLScheme("oby")!] = CharacterFiles()
         config.userContentController.add(events, name: "oby")
         page = WebPage(configuration: config)
+        events.received = { [weak self] event in if event == "ready" { self?.ready = true } }
         Task {
             do {
                 for try await event in page.load(URLRequest(url: URL(string: "oby://character/oby.html?size=1.25")!))
@@ -29,12 +35,16 @@ final class ObyCharacter {
         }
     }
 
-    /// What Oby does until told otherwise: idle, listening, thinking, working, quiet.
-    func setState(_ state: String) { run("oby.setState(state, { now: true })", ["state": state]) }
-
-    /// The state Oby shows whenever the island isn't closed.
+    /// The state Oby shows whenever the island isn't closed: idle, listening, thinking, working,
+    /// loading or quiet.
     var mood = "idle" {
-        didSet { if !paused, mood != oldValue { setState(mood) } }
+        didSet { if !paused, mood != oldValue { run(Self.switching(from: oldValue), ["state": mood]) } }
+    }
+
+    /// How Oby leaves `state` for the next mood: at once, except out of loading, where it
+    /// finishes first, its dots running back together into Oby (`setState`'s `finish`).
+    static func switching(from state: String) -> String {
+        state == "loading" ? "oby.setState(state, { finish: true })" : "oby.setState(state, { now: true })"
     }
 
     /// One expression now, then back to the state.
@@ -54,7 +64,8 @@ final class ObyCharacter {
         }
         // Look ahead and settle into a calm face first: paused mid-fidget or mid-glance,
         // Oby would freeze looking away.
-        run("document.dispatchEvent(new PointerEvent('pointerleave')); oby.setState('quiet', { now: true })", [:])
+        let letGo = looks ? "oby.look(null)" : "document.dispatchEvent(new PointerEvent('pointerleave'))"
+        run("\(letGo); oby.setState('quiet', { now: true })", [:])
         Task {
             try? await Task.sleep(for: .milliseconds(900))
             if paused { run("oby.pause(true)", [:]) }
@@ -62,10 +73,12 @@ final class ObyCharacter {
     }
 
     /// The panel never becomes key while you work elsewhere, so the page gets no mouse
-    /// events of its own: feed it the pointer, in the page's coordinates.
-    func point(at p: CGPoint) {
+    /// events of its own: Oby looks at the cursor wherever it is, given from the top-left
+    /// corner of its frame in points (the page's CSS pixels), outside the frame too.
+    func look(at p: CGPoint) {
         guard loaded else { return }
-        run("dispatchEvent(new PointerEvent('pointermove', { clientX: x, clientY: y }))", ["x": p.x, "y": p.y])
+        looks = true
+        run("oby.look(x, y)", ["x": p.x, "y": p.y])
     }
 
     private func run(_ js: String, _ arguments: [String: Any]) {
@@ -82,11 +95,17 @@ final class ObyCharacter {
     }
 }
 
-/// Oby's events (state, expression, end, poke) come back here.
-private final class CharacterEvents: NSObject, WKScriptMessageHandler {
+/// Oby's events (ready, state, expression, end, poke) come back here, as `{ oby: name, … }`.
+final class CharacterEvents: NSObject, WKScriptMessageHandler {
+    var received: (String) -> Void = { _ in }
+
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         Logger.character.debug("event \(String(describing: message.body), privacy: .public)")
+        if let event = Self.name(message.body) { received(event) }
     }
+
+    /// The event's name, from what the page posted.
+    static func name(_ body: Any) -> String? { (body as? [String: Any])?["oby"] as? String }
 }
 
 /// Serves the bundled character files, and nothing outside them.

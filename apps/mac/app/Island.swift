@@ -92,6 +92,20 @@ final class IslandModel {
     /// Jobs queued behind something, on this Mac and on the runner (`Job.waiting`).
     var waiting: Int { desk.jobs.count(where: \.isWaiting) + feed.waiting }
 
+    /// What Oby does while the island shows it: listens while you talk, melts into Loading while
+    /// the brain thinks (and comes back together when the answer lands), works while agents work.
+    var mood: String {
+        if state == .listening { return "listening" }
+        if case .thinking = desk.talk { return "loading" }
+        return working == 0 ? "idle" : "working"
+    }
+
+    /// Where the cursor is for Oby: from the top-left corner of its frame, in points, which are
+    /// its page's CSS pixels. `mouse` and `island` are in screen coordinates, `frame` in the island's.
+    nonisolated static func look(_ mouse: CGPoint, island: CGRect, frame: CGRect) -> CGPoint {
+        CGPoint(x: mouse.x - island.minX - frame.minX, y: island.maxY - frame.minY - mouse.y)
+    }
+
     /// Whether the island lists a job: it isn't settled (`Job.settled`: still running, waiting,
     /// needing you or with its pull request open), or it finished after the last Clear done on any
     /// app. The runner keeps that time, and this Mac's own jobs go by it too.
@@ -482,12 +496,9 @@ final class IslandController {
         }
         guard model.state != .compact, mouse != lastMouse else { return }
         lastMouse = mouse
-        // oby.html reads the pointer relative to its own frame, which is tiny here: scale the
-        // distance from Oby so far-away pointers turn the head a little, not all the way round.
-        let frame = model.layout.character
-        let x = max(-1, min(1, (mouse.x - (island.minX + frame.midX)) / 420))
-        let y = max(-1, min(1, ((island.maxY - frame.midY) - mouse.y) / 260))
-        character.point(at: CGPoint(x: (x + 1) / 2 * frame.width, y: (y + 1) / 2 * frame.height))
+        // The cursor where it really is, outside Oby's tiny frame too: oby.html eases the head
+        // off past the frame's edge, and keeps its distance from a cursor close to its face.
+        character.look(at: IslandModel.look(mouse, island: island, frame: model.layout.character))
     }
 }
 
@@ -516,12 +527,6 @@ struct IslandView: View {
     /// Opens the Oby window, on a job when one is named (apps/mac/app/App/ChatWindow.swift).
     var onOpenWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
 
-    private var mood: String {
-        if model.state == .listening { return "listening" }
-        if case .thinking = model.desk.talk { return "thinking" }
-        return model.working == 0 ? "idle" : "working"
-    }
-
     var body: some View {
         let layout = model.layout
         let size = layout.size
@@ -531,6 +536,9 @@ struct IslandView: View {
         ZStack(alignment: .topLeading) {
             WebView(character.page)
                 .webViewContentBackground(.hidden)
+                // Transparent until Oby's first frame is drawn, so nothing flashes while the page
+                // loads. Still in the window: a hidden page draws nothing, and ready would never come.
+                .opacity(character.ready ? 1 : 0)
                 .allowsHitTesting(model.state == .open)
                 .frame(width: frame.width, height: frame.height)
                 .offset(x: frame.minX, y: frame.minY)
@@ -580,7 +588,7 @@ struct IslandView: View {
         .animation(.spring(response: 0.42, dampingFraction: 0.8), value: model.state)
         .animation(.spring(response: 0.42, dampingFraction: 0.8), value: model.openHeight)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onChange(of: mood, initial: true) { character.mood = mood }
+        .onChange(of: model.mood, initial: true) { character.mood = model.mood }
     }
 
     /// "Oby" and the hover line: under the camera, centered, on a screen with a notch; else Oby's

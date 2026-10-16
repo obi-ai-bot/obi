@@ -1,0 +1,90 @@
+import CoreGraphics
+import Foundation
+import Testing
+import WebKit
+@testable import Oby
+
+/// Sangam's newer mascot (#499), as the app bundles it (character/package/build.sh) and the notch drives it.
+@MainActor
+struct CharacterTests {
+    /// The bundled page, loaded as the app loads it.
+    static func page() async throws -> WebPage {
+        var config = WebPage.Configuration()
+        config.urlSchemeHandlers[URLScheme("oby")!] = CharacterFiles()
+        let page = WebPage(configuration: config)
+        for try await _ in page.load(URLRequest(url: URL(string: "oby://character/oby.html?size=1.25")!)) {}
+        return page
+    }
+
+    static func js(_ page: WebPage, _ body: String, _ arguments: [String: Any] = [:]) async throws -> Any? {
+        try await page.callJavaScript(body, arguments: arguments, contentWorld: .page)
+    }
+
+    @Test func bundledPageHasLoadingAndTheExpressionsTheAppsPlay() async throws {
+        let page = try await Self.page()
+        let states = try await Self.js(page, "return oby.states") as? [String]
+        #expect(states == ["idle", "listening", "thinking", "working", "loading", "quiet"])
+        let expressions = Set(try await Self.js(page, "return oby.expressions") as? [String] ?? [])
+        // The states' expressions, Island.swift's notices, and the iPhone's Home (apps/ios/app/Home.swift).
+        for name in ["Listening", "Thinking", "Working", "Loading", "Agree", "Confused", "Hello", "Grin"] {
+            #expect(expressions.contains(name), "\(name) isn't in the bundled page")
+        }
+        let api = try await Self.js(page, "return ['look', 'notice', 'attend'].every((f) => typeof oby[f] === 'function')") as? Bool
+        #expect(api == true)
+        // The playground stays out of what the app ships.
+        let playground = try await Self.js(page, "return document.getElementById('ui') !== null || '__cube' in window") as? Bool
+        #expect(playground == false)
+    }
+
+    @Test func leavingLoadingLetsItFinish() async throws {
+        let page = try await Self.page()
+        _ = try await Self.js(page, "oby.setState('loading', { now: true })")
+        #expect(try await Self.js(page, "return oby.playing") as? String == "Loading")
+        // The answer landed: Oby's next mood starts once Loading has run back together, not mid-melt.
+        _ = try await Self.js(page, ObyCharacter.switching(from: "loading"), ["state": "idle"])
+        #expect(try await Self.js(page, "return oby.state") as? String == "idle")
+        #expect(try await Self.js(page, "return oby.playing") as? String == "Loading")
+        // Any other mood switches at once.
+        _ = try await Self.js(page, ObyCharacter.switching(from: "idle"), ["state": "working"])
+        #expect(try await Self.js(page, "return oby.state") as? String == "working")
+        #expect(try await Self.js(page, "return oby.playing") as? String != "Loading")
+    }
+
+    @Test func readyArrivesWithTheFirstFrame() {
+        #expect(CharacterEvents.name(["oby": "ready"]) == "ready")
+        #expect(CharacterEvents.name(["oby": "poke", "count": 2]) == "poke")
+        #expect(CharacterEvents.name("ready") == nil)
+        let character = ObyCharacter()
+        #expect(!character.ready)
+        character.events.received("state")
+        #expect(!character.ready)
+        character.events.received("ready")
+        #expect(character.ready)
+    }
+
+    @Test func notchShowsLoadingWhileTheBrainThinks() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "oby-character-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let desk = Desk(accounts: AccountStore(root: folder), store: JobStore(url: folder.appending(path: "oby.sqlite")))
+        let model = IslandModel(desk: desk, feed: RunnerFeed(), availability: MacAvailability())
+        model.state = .open
+        #expect(model.mood == "idle")
+        desk.talk = .thinking("What's left on #499?")
+        #expect(model.mood == "loading")
+        desk.talk = .reply("Two checks.")
+        #expect(model.mood == "idle")
+        model.state = .listening
+        #expect(model.mood == "listening")
+    }
+
+    @Test func cursorIsGivenFromObysFrame() {
+        // A 600-point island whose top is the top of a 982-point screen, Oby's frame 14 in and 18 down.
+        let island = CGRect(x: 456, y: 982 - 300, width: 600, height: 300)
+        let frame = CGRect(x: 14, y: 18, width: 136, height: 136)
+        #expect(IslandModel.look(CGPoint(x: 470, y: 964), island: island, frame: frame) == .zero)
+        #expect(IslandModel.look(CGPoint(x: 606, y: 828), island: island, frame: frame) == CGPoint(x: 136, y: 136))
+        // Outside the frame stays outside: the page eases the head off past its edge.
+        #expect(IslandModel.look(CGPoint(x: 1200, y: 982), island: island, frame: frame) == CGPoint(x: 730, y: -18))
+    }
+}
