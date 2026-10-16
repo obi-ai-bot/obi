@@ -197,7 +197,7 @@ fn spec(world: &World, network: bool, commits: bool, account: bool) -> Spec {
 }
 
 /// The probe: each try prints `<what> <label> ok|no`.
-fn probe_script(world: &World, port: u16) -> String {
+fn probe_script(world: &World, port: u16, net_host: &str) -> String {
     let h = world.home.display();
     let writes_denied = [
         ("home", format!("{h}/probe")),
@@ -276,7 +276,7 @@ fn probe_script(world: &World, port: u16) -> String {
     script.push_str("if git -c user.name=t -c user.email=t@t commit -q --allow-empty -m probe >/dev/null 2>&1; then echo \"git commit ok\"; else echo \"git commit no\"; fi\n");
     // The network: a connection to a listener on 127.0.0.1 the test holds.
     script.push_str(&format!(
-        "if git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=2 ls-remote http://127.0.0.1:{port}/x >/dev/null 2>&1; then echo \"net loopback tried\"; else echo \"net loopback tried\"; fi\n"
+        "if git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=2 ls-remote http://{net_host}:{port}/x >/dev/null 2>&1; then echo \"net loopback tried\"; else echo \"net loopback tried\"; fi\n"
     ));
     script.push_str("echo \"env-home $HOME\"\necho \"env-tmpdir $TMPDIR\"\n");
     // A Unix socket in the person's home: a login agent, a Docker socket.
@@ -325,7 +325,14 @@ fn run(world: &World, spec: &Spec) -> Ran {
     socket.set_nonblocking(true).unwrap();
     let server = std::os::unix::net::UnixListener::bind(world.outside.join("server.sock")).unwrap();
     server.set_nonblocking(true).unwrap();
-    let script = probe_script(world, port);
+    // Linux agents have their own network namespace. 10.0.2.2 is the host, where this listener
+    // is; 127.0.0.1 inside the namespace is the namespace itself.
+    let net_host = if spec.network && cfg!(target_os = "linux") {
+        "10.0.2.2"
+    } else {
+        "127.0.0.1"
+    };
+    let script = probe_script(world, port, net_host);
     let argv: Vec<OsString> = vec![
         "/bin/sh".into(),
         "-c".into(),
@@ -1145,4 +1152,77 @@ fn a_sandboxed_job_reads_other_processes_but_finds_no_secret() {
         !text.contains(&vault),
         "the vault secret is in a process's arguments or environment"
     );
+}
+
+/// An agent has its own network namespace: a listener on an abstract Unix socket outside is
+/// unreachable, and a local HTTP endpoint (the model's API, in the stub's case) is reached
+/// through the namespace's gateway (docs/ARCHITECTURE.md 5.3).
+#[cfg(target_os = "linux")]
+#[test]
+fn an_agent_reaches_its_api_but_not_an_abstract_socket() {
+    use std::io::{Read, Write};
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener};
+
+    let world = world("abstract");
+    let name = format!("obid438-{}", std::process::id());
+    let addr = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+    let abstract_listener = UnixListener::bind_addr(&addr).unwrap();
+    abstract_listener.set_nonblocking(true).unwrap();
+    let http = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = http.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = http.accept() {
+            let mut buf = [0; 256];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        }
+    });
+    let script = format!(
+        r#"
+const net = require('net');
+const http = require('http');
+let abs = 'abstract no';
+const s = net.connect('\\0{name}');
+s.on('connect', () => {{ abs = 'abstract ok'; s.end(); }});
+s.on('error', () => {{}});
+setTimeout(() => {{
+  http.get('http://10.0.2.2:{port}/', (res) => {{
+    console.log(abs);
+    console.log('http ' + res.statusCode);
+    process.exit(0);
+  }}).on('error', () => {{
+    console.log(abs);
+    console.log('http no');
+    process.exit(1);
+  }});
+}}, 300);
+"#
+    );
+    let sandbox = Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))).unwrap();
+    let job = spec(&world, true, false, false);
+    let argv = sandbox.wrap(&job, &["node".into(), "-e".into(), script.into()]);
+    let extra = job.git_env();
+    let env = obid::process::sandbox_env(&obid::process::tools_path(), &world.temp, &extra);
+    let ran = Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .envs(env)
+        .current_dir(&world.worktree)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(
+        text.contains("abstract no"),
+        "the agent reached an abstract socket outside its namespace\n{text}"
+    );
+    assert!(
+        text.contains("http 200"),
+        "the agent didn't reach the local endpoint\n{text}"
+    );
+    assert!(abstract_listener.accept().is_err());
 }

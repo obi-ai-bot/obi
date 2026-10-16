@@ -31,7 +31,7 @@ jobs:
       - name: Install SQLite's headers and bubblewrap
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends libsqlite3-dev bubblewrap
+          sudo apt-get install -y -q --no-install-recommends libsqlite3-dev bubblewrap slirp4netns
 
       # The bubblewrap tests skip themselves when bwrap can't run; here they must run.
       - name: Check bwrap runs

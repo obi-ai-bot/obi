@@ -53,7 +53,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo apt-get install -y --no-install-recommends bubblewrap slirp4netns
           bwrap --version
           bwrap --unshare-pid --ro-bind / / --dev /dev --proc /proc -- true
 

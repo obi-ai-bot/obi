@@ -12,7 +12,8 @@
 //! - **Reads, from obid's home and the person's home**: the worktree, the clone's git common
 //!   directory (read-only), the job's own folders, and the tools it runs. Nothing else: not the
 //!   database, `keys/`, `api-token`, other clones or other worktrees.
-//! - **Network**: none for the check; an agent keeps the network any agent has (its model's API).
+//! - **Network**: none for the check. An agent has its own network namespace, with slirp4netns so
+//!   it still reaches its model's API, and the host's abstract Unix sockets are not in it.
 //!
 //! - **No terminal, no one to ask**: the process leads a session of its own, so it has no
 //!   controlling terminal (none to push keystrokes into with `TIOCSTI` when obid was started from a
@@ -56,6 +57,70 @@ enum Tool {
 /// own has no controlling terminal, and starting one needs `setsid` between `fork` and `exec`,
 /// which obid's safe Rust can't do in place.
 pub const SESSION: &str = "__session";
+
+/// Runs inside the network namespace: waits until the launcher has started slirp4netns, then
+/// replaces itself with the job's program.
+const NET_WAIT: &str = r#"
+while [ ! -f "$1" ]; do sleep 0.05; done
+shift
+exec "$@"
+"#;
+
+/// Runs outside the sandbox, as the process obid starts. `bwrap` is already in its own network
+/// namespace; slirp4netns joins that namespace, so the host's abstract Unix sockets are not in
+/// it and the guest still reaches the host (10.0.2.2) and the rest of the network.
+const NET_LAUNCH: &str = r#"
+ready=$1
+shift
+rm -f "$ready" "$ready.log"
+# An explicit stdin redirect: a background command otherwise gets /dev/null, and the
+# program inside the sandbox would see its stdin close.
+"$@" <&0 &
+bpid=$!
+child=
+i=0
+while [ -z "$child" ] && [ "$i" -lt 50 ]; do
+  i=$((i + 1))
+  for status in /proc/[0-9]*/status; do
+    pid=${status#/proc/}
+    pid=${pid%/status}
+    ppid=$(sed -n 's/^PPid:[^0-9]*//p' "$status" 2>/dev/null) || continue
+    if [ "$ppid" = "$bpid" ]; then
+      child=$pid
+      break
+    fi
+  done
+  [ -n "$child" ] && break
+  sleep 0.05
+done
+if [ -z "$child" ]; then
+  echo "obid: the sandbox never started" >&2
+  kill "$bpid" 2>/dev/null
+  wait "$bpid" 2>/dev/null
+  exit 1
+fi
+slirp4netns --configure --mtu=65520 "$child" tap0 >"$ready.log" 2>&1 &
+slirp=$!
+i=0
+while [ "$i" -lt 50 ]; do
+  i=$((i + 1))
+  grep -q "sent tapfd" "$ready.log" 2>/dev/null && break
+  sleep 0.05
+done
+if ! grep -q "sent tapfd" "$ready.log" 2>/dev/null; then
+  echo "obid: slirp4netns didn't give the sandbox a network" >&2
+  cat "$ready.log" >&2
+  kill "$slirp" "$bpid" 2>/dev/null
+  wait "$bpid" 2>/dev/null
+  exit 1
+fi
+touch "$ready"
+wait "$bpid"
+status=$?
+kill "$slirp" 2>/dev/null
+wait "$slirp" 2>/dev/null
+exit "$status"
+"#;
 
 /// What one sandboxed process may touch.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -158,9 +223,32 @@ impl Sandbox {
         let mut out: Vec<OsString> = vec![self.session.clone().into(), SESSION.into(), "--".into()];
         match &self.tool {
             Tool::Bubblewrap(bwrap) => {
-                out.push(bwrap.clone().into());
-                out.extend(bubblewrap_args(&spec));
-                out.push("--".into());
+                let mut bwrap_argv = vec![bwrap.clone().into_os_string()];
+                bwrap_argv.extend(bubblewrap_args(&spec));
+                bwrap_argv.push("--".into());
+                if spec.network {
+                    let ready = spec.temp.join(".obid-net-ready");
+                    let _ = std::fs::remove_file(&ready);
+                    bwrap_argv.extend([
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        NET_WAIT.into(),
+                        "net-wait".into(),
+                        ready.clone().into(),
+                    ]);
+                    // bash, not dash: a background command keeps the program's stdin only
+                    // when the redirect is explicit, and dash drops it anyway.
+                    out.extend([
+                        "/bin/bash".into(),
+                        "-c".into(),
+                        NET_LAUNCH.into(),
+                        "net-launch".into(),
+                        ready.into(),
+                    ]);
+                    out.extend(bwrap_argv);
+                } else {
+                    out.extend(bwrap_argv);
+                }
             }
             Tool::Seatbelt(sandbox_exec) => {
                 out.push(sandbox_exec.clone().into());
@@ -291,9 +379,10 @@ fn bubblewrap_args(spec: &Spec) -> Vec<OsString> {
         "--new-session".as_ref(),
         "--die-with-parent".as_ref(),
     ]);
-    if !spec.network {
-        push(&["--unshare-net".as_ref()]);
-    }
+    // Always a network namespace of its own. With no network, nothing is set up in it. With
+    // network, the launcher outside starts slirp4netns in it, so the host's abstract Unix
+    // sockets stay unreachable and the model's API does not.
+    push(&["--unshare-net".as_ref()]);
     push(&["--ro-bind".as_ref(), "/".as_ref(), "/".as_ref()]);
     push(&[
         "--dev".as_ref(),
@@ -931,6 +1020,15 @@ mod tests {
             .collect();
         let at = |s: &str| args.iter().position(|a| a == s).unwrap();
         assert!(args.contains(&"--unshare-net".to_owned()));
+        let with_network = Spec {
+            network: true,
+            ..spec.clone()
+        };
+        let with_network: Vec<String> = bubblewrap_args(&with_network)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(with_network.contains(&"--unshare-net".to_owned()));
         assert!(args.contains(&"--new-session".to_owned()));
         assert!(args.contains(&"--die-with-parent".to_owned()));
         assert!(at("--tmpfs") < at("--bind"));

@@ -897,3 +897,75 @@ async fn a_sandboxed_plugin_reads_other_processes_but_finds_no_secret() {
         "the vault secret is in a process's arguments or environment"
     );
 }
+
+/// A plug-in has its own network namespace: an abstract Unix socket outside is unreachable, and
+/// a local HTTP endpoint still answers (docs/ARCHITECTURE.md 5.3).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_sandboxed_plugin_reaches_the_network_but_not_an_abstract_socket() {
+    use std::io::{Read, Write};
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener};
+
+    let home = Home::new("abstract");
+    home.install("context-test", "context-test");
+    let name = format!("obid438p-{}", std::process::id());
+    let addr = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+    let abstract_listener = UnixListener::bind_addr(&addr).unwrap();
+    abstract_listener.set_nonblocking(true).unwrap();
+    let http = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = http.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = http.accept() {
+            let mut buf = [0; 256];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        }
+    });
+    let script = format!(
+        r#"
+const net = require('net');
+const http = require('http');
+let abs = 'abstract no';
+const s = net.connect('\\0{name}');
+s.on('connect', () => {{ abs = 'abstract ok'; s.end(); }});
+s.on('error', () => {{}});
+setTimeout(() => {{
+  http.get('http://10.0.2.2:{port}/', (res) => {{
+    console.log(abs);
+    console.log('http ' + res.statusCode);
+    process.exit(0);
+  }}).on('error', () => {{
+    console.log(abs);
+    console.log('http no');
+    process.exit(1);
+  }});
+}}, 300);
+"#
+    );
+    let host = host_with(&home, options()).await;
+    let ready = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({"probe": {"run": [["node", "-e", script]]}})),
+        )
+        .await
+        .unwrap();
+    if !sandbox_made(&ready) {
+        return;
+    }
+    assert_eq!(ready.state, PluginState::Ready, "{ready:?}");
+    let probe = home.record("context-test", "probe.json");
+    let text = probe.as_ref().map(|v| v.to_string()).unwrap_or_default();
+    host.shutdown().await;
+    assert!(
+        text.contains("abstract no"),
+        "the plug-in reached an abstract socket\n{text}"
+    );
+    assert!(
+        text.contains("http 200"),
+        "the plug-in didn't reach the local endpoint\n{text}"
+    );
+    assert!(abstract_listener.accept().is_err());
+}
