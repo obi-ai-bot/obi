@@ -1,7 +1,7 @@
 //! obid with its plug-ins (docs/ARCHITECTURE.md 5 and 6; docs/runner-api.md, "obid only:
 //! plug-ins"), the real binary asked over HTTP: the plug-ins it ships installed at start,
 //! disabled; `GET` and `PUT /v1/obid/plugins` with the host from obi-plugin-host; Tetrix enabled
-//! and disabled against a stub MCP server on 127.0.0.1 (no network, no credentials), its tools
+//! and disabled against a local stub MCP server (no external network or credentials), its tools
 //! given to the agent as one permission rule each; a context and events plug-in (tests/plugins/
 //! notes, sh and sed, in the plug-in sandbox) quoted to the agent as data and turned into
 //! `pluginEvent` inbox items; the secrets obid holds taken out of plug-ins' lines in its log; and
@@ -74,7 +74,7 @@ fn allowed_tools(argv: &[Value]) -> Option<Vec<String>> {
     )
 }
 
-/// A stub MCP server on 127.0.0.1: it answers every POST with a `tools/list` result and keeps
+/// A local stub MCP server: it answers every POST with a `tools/list` result and keeps
 /// what it was sent.
 struct StubMcp {
     url: String,
@@ -84,8 +84,15 @@ struct StubMcp {
 impl StubMcp {
     fn start() -> StubMcp {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        // The agent consumes this URL in its sandbox. Linux's slirp gateway reaches the
+        // host listener; 127.0.0.1 there belongs to the agent's own network namespace.
+        let host = if cfg!(target_os = "linux") {
+            "10.0.2.2"
+        } else {
+            "127.0.0.1"
+        };
         let url = format!(
-            "http://127.0.0.1:{}/mcp",
+            "http://{host}:{}/mcp",
             listener.local_addr().unwrap().port()
         );
         let seen = Arc::new(Mutex::new(Vec::new()));

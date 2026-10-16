@@ -442,12 +442,15 @@ fn spawn_child() {
 /// forks, calls `setsid`, forks again and the session leader exits, so the last process's parent
 /// is launchd (or the sandbox's PID namespace's first process). It writes `detached-<start>`
 /// once it has, then appends a line to `detached-beats-<start>` five times a second, for as long
-/// as it runs. Waits for the first fork's parent, which exits at once.
+/// as it runs. Waits until that process is orphaned and beating before answering initialize,
+/// so a deliberately failed start cannot kill it before the test has anything to observe.
 fn spawn_detached(start: u64) {
     const DETACH: &str = r#"
 use POSIX ();
 my ($start) = @ARGV;
+# Let the first parent exit well before this child is ready, exercising the startup race.
 exit 0 if fork;
+select(undef, undef, undef, 0.3);
 my $sid = POSIX::setsid();
 exit 0 if fork;
 for (1 .. 50) { last if getppid() == 1; select(undef, undef, undef, 0.02); }
@@ -463,4 +466,18 @@ exec "/bin/sh", "-c", "while true; do echo beat >> detached-beats-$start; sleep 
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+    // The first fork's parent exits before the detached child has necessarily run. Waiting
+    // for that parent alone races afterReady's exit and the host's cleanup under load.
+    let marker = format!("detached-{start}");
+    let beats = format!("detached-beats-{start}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while !std::path::Path::new(&marker).is_file()
+        || !std::fs::metadata(&beats).is_ok_and(|m| m.len() > 0)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "detached child did not become ready"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

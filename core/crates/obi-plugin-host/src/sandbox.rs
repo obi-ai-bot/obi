@@ -33,9 +33,9 @@
 //!   socket aren't there; only the folder the name resolver's `resolv.conf` lives in (and
 //!   `systemd-resolved`'s) is bound back in, read-only. Its processes are in their own PID
 //!   and IPC namespaces, which end with its first process, so nothing it started outlives it,
-//!   whatever left its process group or session. Unix sockets in the abstract namespace belong to the network
-//!   namespace, which the plug-in shares with the machine because it has the network: a
-//!   service listening on one (an X server, an old D-Bus) is still reachable.
+//!   whatever left its process group or session. Its network namespace is its own, with
+//!   slirp4netns for the hosts it talks to, so an abstract-namespace Unix socket on the host
+//!   is not reachable.
 //!
 //! On macOS the temporary folders `/private/tmp`, `/private/var/tmp` and `/private/var/folders`
 //! (which holds every user's `TMPDIR` and caches) can't be read. Of the folders above its own
@@ -68,6 +68,68 @@ use tokio::process::Command;
 
 /// The PATH a plug-in gets when `obid` has none.
 const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// Same wait as obid's job sandbox: runs in the network namespace until slirp4netns is up.
+const NET_WAIT: &str = r#"
+while [ ! -f "$1" ]; do sleep 0.05; done
+shift
+exec "$@"
+"#;
+
+/// Same launcher as obid's job sandbox: slirp4netns in the plug-in's network namespace.
+const NET_LAUNCH: &str = r#"
+ready=$1
+shift
+rm -f "$ready" "$ready.log"
+# An explicit stdin redirect: a background command otherwise gets /dev/null, and the
+# program inside the sandbox would see its stdin close. bash would also hand the
+# program SHLVL and _, which are not part of the sandbox environment.
+env -u SHLVL -u _ "$@" <&0 &
+bpid=$!
+child=
+i=0
+while [ -z "$child" ] && [ "$i" -lt 50 ]; do
+  i=$((i + 1))
+  for status in /proc/[0-9]*/status; do
+    pid=${status#/proc/}
+    pid=${pid%/status}
+    ppid=$(sed -n 's/^PPid:[^0-9]*//p' "$status" 2>/dev/null) || continue
+    if [ "$ppid" = "$bpid" ]; then
+      child=$pid
+      break
+    fi
+  done
+  [ -n "$child" ] && break
+  sleep 0.05
+done
+if [ -z "$child" ]; then
+  echo "obid: the sandbox never started" >&2
+  kill "$bpid" 2>/dev/null
+  wait "$bpid" 2>/dev/null
+  exit 1
+fi
+slirp4netns --configure --mtu=65520 --userns-path="/proc/$child/ns/user" "$child" tap0 >"$ready.log" 2>&1 &
+slirp=$!
+i=0
+while [ "$i" -lt 50 ]; do
+  i=$((i + 1))
+  grep -q "sent tapfd" "$ready.log" 2>/dev/null && break
+  sleep 0.05
+done
+if ! grep -q "sent tapfd" "$ready.log" 2>/dev/null; then
+  echo "obid: slirp4netns didn't give the sandbox a network" >&2
+  cat "$ready.log" >&2
+  kill "$slirp" "$bpid" 2>/dev/null
+  wait "$bpid" 2>/dev/null
+  exit 1
+fi
+touch "$ready"
+wait "$bpid"
+status=$?
+kill "$slirp" 2>/dev/null
+wait "$slirp" 2>/dev/null
+exit "$status"
+"#;
 
 /// The Seatbelt profile. Later rules win over earlier ones: everything is allowed, then every
 /// write is denied but to the data folder (and `/dev/null`, which programs write to as a
@@ -342,6 +404,11 @@ impl Sandbox {
                     "--die-with-parent",
                     "--unshare-pid",
                     "--unshare-ipc",
+                    "--unshare-net",
+                    "--uid",
+                    "0",
+                    "--gid",
+                    "0",
                     "--new-session",
                     "--ro-bind",
                     "/",
@@ -395,14 +462,30 @@ impl Sandbox {
                 for path in &hidden {
                     command.arg("--remount-ro").arg(path);
                 }
+                let ready = launch.data_dir.join(".obid-net-ready");
                 command
-                    // bubblewrap sets PWD after its --chdir; `env -u PWD` takes it out again,
-                    // so the plug-in's environment is the four variables only.
-                    .args(["--", "env", "-u", "PWD", "--"])
+                    // The wait runs in the namespace; the shell outside starts slirp4netns in
+                    // it. bubblewrap sets PWD after its --chdir; `env -u PWD` takes it out, so
+                    // the plug-in's environment is the four variables only.
+                    .args(["--", "/bin/sh", "-c", NET_WAIT, "net-wait"])
+                    .arg(&ready)
+                    .args(["env", "-u", "PWD", "-u", "SHLVL", "-u", "_", "--"])
                     .arg(&launch.program)
                     .args(&launch.args);
-                command.current_dir("/");
-                command
+                // bash, not dash: a background command keeps the plug-in's stdin only
+                // when the redirect is explicit, and dash drops it anyway.
+                let mut launch_net = Command::new("/bin/bash");
+                launch_net
+                    .arg("-c")
+                    .arg(NET_LAUNCH)
+                    .arg("net-launch")
+                    .arg(&ready)
+                    .arg(command.as_std().get_program());
+                for arg in command.as_std().get_args() {
+                    launch_net.arg(arg);
+                }
+                launch_net.current_dir("/");
+                launch_net
             }
         };
         let path = std::env::var_os("PATH")
