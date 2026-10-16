@@ -1012,3 +1012,137 @@ fn running(pid: &str) -> bool {
         .status()
         .is_ok_and(|status| status.success())
 }
+
+/// Reads every process of this user (`KERN_PROCARGS2`) and writes the bytes to `argv[1]`.
+#[cfg(target_os = "macos")]
+const PROCARGS_C: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/sysctl.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+  if (argc < 2) return 2;
+  FILE *out = fopen(argv[1], "wb");
+  if (!out) return 3;
+  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_UID, (int)getuid()};
+  size_t size = 0;
+  if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0) return 4;
+  struct kinfo_proc *kp = malloc(size);
+  if (!kp || sysctl(mib, 4, kp, &size, NULL, 0) != 0) return 5;
+  int n = (int)(size / sizeof(*kp));
+  for (int i = 0; i < n; i++) {
+    int a[3] = {CTL_KERN, KERN_PROCARGS2, kp[i].kp_proc.p_pid};
+    size_t asz = 0;
+    if (sysctl(a, 3, NULL, &asz, NULL, 0) != 0 || asz == 0 || asz > 1024 * 1024) continue;
+    char *buf = malloc(asz);
+    if (!buf) continue;
+    if (sysctl(a, 3, buf, &asz, NULL, 0) == 0) fwrite(buf, 1, asz, out);
+    free(buf);
+  }
+  free(kp);
+  fclose(out);
+  return 0;
+}
+"#;
+
+#[cfg(target_os = "macos")]
+fn compile_procargs(dir: &Path) -> PathBuf {
+    let src = dir.join("procargs.c");
+    std::fs::write(&src, PROCARGS_C).unwrap();
+    let bin = dir.join("procargs");
+    let output = Command::new("cc")
+        .args(["-O2", "-o"])
+        .arg(&bin)
+        .arg(&src)
+        .output()
+        .expect("cc");
+    assert!(
+        output.status.success(),
+        "cc: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    bin
+}
+
+#[cfg(target_os = "macos")]
+fn private_file(path: &Path, text: &str) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let _ = std::fs::remove_file(path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap();
+    writeln!(file, "{text}").unwrap();
+}
+
+/// Seatbelt can't block `KERN_PROCARGS2`, so a sandboxed job can read other processes. The API
+/// token and a vault secret exist only as files, so neither string is in any process's arguments
+/// or environment while the job runs. A marker in another process's arguments is, which shows
+/// the read worked. This kernel returns that process's arguments and not its environment
+/// (docs/ARCHITECTURE.md 5.3, docs/runner-api.md "The job sandbox").
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_job_reads_other_processes_but_finds_no_secret() {
+    let world = world("procargs");
+    let nonce = format!(
+        "{}{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+    );
+    let marker = format!("obi439-marker-{nonce}");
+    let token = format!("obi439token{nonce}{}", "b".repeat(24));
+    let vault = format!("obi439vault{nonce}{}", "c".repeat(24));
+    private_file(&world.home.join("api-token"), &token);
+    private_file(&world.home.join("vault.secret"), &vault);
+
+    // The marker is an argument. An environment variable on this process is not in the sysctl
+    // result on this macOS, so it would not show the read worked.
+    let mut decoy = Command::new("/usr/bin/perl");
+    decoy
+        .args(["-e", "sleep 60", &marker])
+        .env("OBI_LEAK_MARKER", &marker)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut decoy = decoy.spawn().unwrap();
+
+    let dump_path = world.worktree.join("procargs.out");
+    let bin = compile_procargs(&world.outside);
+    let sandbox = Sandbox::detect(Path::new(env!("CARGO_BIN_EXE_obid"))).unwrap();
+    let job = spec(&world, false, false, false);
+    let argv = sandbox.wrap(&job, &[bin.into(), dump_path.clone().into()]);
+    let extra = job.git_env();
+    let env = obid::process::sandbox_env(&obid::process::tools_path(), &world.temp, &extra);
+    let ran = Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .envs(env)
+        .current_dir(&world.worktree)
+        .output()
+        .unwrap();
+    let dump = std::fs::read(&dump_path).unwrap_or_default();
+    let text = String::from_utf8_lossy(&dump);
+    let _ = decoy.kill();
+    let _ = decoy.wait();
+    assert!(
+        text.contains(&marker),
+        "a sandboxed job could not read another process ({} bytes, status {:?}): {}",
+        dump.len(),
+        ran.status,
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(
+        !text.contains(&token),
+        "the API token is in a process's arguments or environment"
+    );
+    assert!(
+        !text.contains(&vault),
+        "the vault secret is in a process's arguments or environment"
+    );
+}

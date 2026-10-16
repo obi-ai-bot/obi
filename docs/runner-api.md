@@ -1313,9 +1313,9 @@ What obid does when it accepts a `review_request` (by the owner's answer or a de
 
 What the sandbox can't hold back, and is known:
 
-- **macOS: other processes' arguments and environment.** Any process of the same user can read another's (`KERN_PROCARGS2`); Seatbelt has no rule for it. So `obid` keeps every secret out of its own and its children's arguments and environment (above, "obid only: configuration"). What else Seatbelt can't deny: #439.
-- **macOS: a keychain file outside the person's home.** securityd's file-based keychains stay reachable (above), so a keychain file the job can read, outside the hidden homes and unlocked by the person, gives up the items whose access list lets the reading program in. #439.
-- **macOS: a job's own preferences.** cfprefsd keeps preferences in the person's home whatever the job's `HOME` says, so the profile can't give a job preferences of its own; tools that keep settings there start from their defaults every time.
+- **macOS: other processes' arguments and environment.** Any process of the same user can read another's arguments (`KERN_PROCARGS2`), and its environment when the kernel still includes it; Seatbelt has no rule for it. So `obid` keeps every secret out of its own and its children's arguments and environment (above, "obid only: configuration"). `a_sandboxed_job_reads_other_processes_but_finds_no_secret` shows a sandboxed job reads a marker in another process's arguments and finds neither the API token nor a vault secret kept only in a file. `a_sandboxed_plugin_reads_other_processes_but_finds_no_secret` shows the same for a plug-in.
+- **macOS: a keychain file outside the person's home.** securityd's file-based keychains stay reachable (above), so a keychain file the job can read, outside the hidden homes and unlocked by the person, gives up the items whose access list lets the reading program in. `a_job_reaches_no_preferences_pasteboard_or_keychain` shows the person's login keychain and secd are out of reach.
+- **macOS: a job's own preferences.** cfprefsd keeps preferences in the person's home whatever the job's `HOME` says, so the profile can't give a job preferences of its own; tools that keep settings there start from their defaults every time. The same test shows preference reads and writes fail.
 When `obid` can't make this sandbox on the machine, it runs neither: the job fails, and its summary says why.
 
 The review output schema obid passes with `--json-schema`:

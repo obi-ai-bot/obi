@@ -47,18 +47,16 @@
 //! "couldn't create cache file" when it lacks a tool, and work without it.
 //!
 //! What no sandbox here stops, on macOS: any process of the same user that isn't one of
-//! Apple's own can have its full arguments and environment read by another (the
-//! `KERN_PROCARGS2` sysctl), and Seatbelt has no rule against it (`sysctl-read` and
-//! `process-info*` denials don't reach it). So a plug-in can read `obid`'s environment and the
-//! environment of whatever else the person runs. `obid` must keep secrets out of its own
-//! environment and out of the environment of the long-running processes it starts. On Linux the
-//! plug-in's own PID namespace hides every other process.
+//! Apple's own can have its arguments read by another (the `KERN_PROCARGS2` sysctl), and its
+//! environment when the kernel still includes it. Seatbelt has no rule against it (`sysctl-read`
+//! and `process-info*` denials don't reach it). `obid` must keep secrets out of its own
+//! arguments and environment, and out of those of the long-running processes it starts. On Linux
+//! the plug-in's own PID namespace hides every other process.
 //!
 //! On macOS, which has no PID namespace, the first process in the sandbox is a watcher
 //! ([`WATCHER`]) that kills every process in the sandbox when the plug-in exits or the host
-//! tells it to stop: also what called `setsid` and was handed to launchd. A plug-in that kills
-//! its own watcher first can still leave processes that left its process group running; the
-//! host then ends the process group and logs it.
+//! tells it to stop: also what called `setsid` and was handed to launchd. If the plug-in kills
+//! that watcher first, [`reap_sandbox`] ends whatever is still in the sandbox.
 //!
 //! When the sandbox can't be made on the machine, the plug-in isn't started.
 

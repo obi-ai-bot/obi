@@ -764,3 +764,136 @@ async fn the_restart_policy_is_one_second_then_two_then_failed() {
     assert_eq!(status(&host, "context-test").state, PluginState::Failed);
     host.shutdown().await;
 }
+
+/// Reads every process of this user (`KERN_PROCARGS2`) and writes the bytes to `argv[1]`.
+#[cfg(target_os = "macos")]
+const PROCARGS_C: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/sysctl.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+  if (argc < 2) return 2;
+  FILE *out = fopen(argv[1], "wb");
+  if (!out) return 3;
+  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_UID, (int)getuid()};
+  size_t size = 0;
+  if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0) return 4;
+  struct kinfo_proc *kp = malloc(size);
+  if (!kp || sysctl(mib, 4, kp, &size, NULL, 0) != 0) return 5;
+  int n = (int)(size / sizeof(*kp));
+  for (int i = 0; i < n; i++) {
+    int a[3] = {CTL_KERN, KERN_PROCARGS2, kp[i].kp_proc.p_pid};
+    size_t asz = 0;
+    if (sysctl(a, 3, NULL, &asz, NULL, 0) != 0 || asz == 0 || asz > 1024 * 1024) continue;
+    char *buf = malloc(asz);
+    if (!buf) continue;
+    if (sysctl(a, 3, buf, &asz, NULL, 0) == 0) fwrite(buf, 1, asz, out);
+    free(buf);
+  }
+  free(kp);
+  fclose(out);
+  return 0;
+}
+"#;
+
+/// Seatbelt can't block `KERN_PROCARGS2`, so a sandboxed plug-in can read other processes. The
+/// API token and a vault secret exist only as files, so neither string is in any process's
+/// arguments or environment. A marker in another process's arguments is, which shows the read
+/// worked (docs/ARCHITECTURE.md 5.3).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_sandboxed_plugin_reads_other_processes_but_finds_no_secret() {
+    let home = Home::new("procargs");
+    home.install("context-test", "context-test");
+    let nonce = format!(
+        "{}{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+    );
+    let marker = format!("obi439-marker-{nonce}");
+    let token = format!("obi439token{nonce}{}", "b".repeat(24));
+    let vault = format!("obi439vault{nonce}{}", "c".repeat(24));
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(home.path.join("api-token"))
+            .unwrap();
+        writeln!(file, "{token}").unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(home.path.join("vault.secret"))
+            .unwrap();
+        writeln!(file, "{vault}").unwrap();
+    }
+    let src = home.plugin_dir("context-test").join("procargs.c");
+    std::fs::write(&src, PROCARGS_C).unwrap();
+    let bin = home.plugin_dir("context-test").join("bin").join("procargs");
+    let compiled = std::process::Command::new("cc")
+        .args(["-O2", "-o"])
+        .arg(&bin)
+        .arg(&src)
+        .output()
+        .expect("cc");
+    assert!(
+        compiled.status.success(),
+        "cc: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let dump_path = home.data_dir("context-test").join("procargs.out");
+    let mut decoy = std::process::Command::new("/usr/bin/perl")
+        .args(["-e", "sleep 60", &marker])
+        .env("OBI_LEAK_MARKER", &marker)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let host = host_with(&home, options()).await;
+    let ready = host
+        .set_enabled(
+            &id("context-test"),
+            true,
+            Some(json!({
+                "probe": {"run": [[bin, dump_path]]}
+            })),
+        )
+        .await
+        .unwrap();
+    if !sandbox_made(&ready) {
+        let _ = decoy.kill();
+        let _ = decoy.wait();
+        return;
+    }
+    let dump =
+        std::fs::read(home.data_dir("context-test").join("procargs.out")).unwrap_or_default();
+    let text = String::from_utf8_lossy(&dump);
+    let probe = home.record("context-test", "probe.json");
+    let _ = decoy.kill();
+    let _ = decoy.wait();
+    host.shutdown().await;
+    assert!(
+        text.contains(&marker),
+        "a sandboxed plug-in could not read another process ({} bytes): {probe:?}",
+        dump.len()
+    );
+    assert!(
+        !text.contains(&token),
+        "the API token is in a process's arguments or environment"
+    );
+    assert!(
+        !text.contains(&vault),
+        "the vault secret is in a process's arguments or environment"
+    );
+}
