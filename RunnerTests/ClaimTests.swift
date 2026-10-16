@@ -189,7 +189,9 @@ struct ClaimTests {
         try await endDone(176)
         let published = try #require(desk.job(first.id))
         #expect(published.published == url.absoluteString && published.holdsClaim)
-        #expect(desk.job(second.id)?.status == .running && made.agents.count == 2)
+        // Publishing may now start a review on the author's account (#408). Count the
+        // author jobs whose claims this test covers, independently of that reviewer.
+        #expect(desk.job(second.id)?.status == .running && made.agents.filter { $0.job.kind == .fix }.count == 2)
 
         // Merged: its claim ends.
         desk.followed(first.id, published: url.absoluteString, pushed: published.pushed,

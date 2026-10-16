@@ -86,9 +86,15 @@ struct CursorAccountTests {
         #expect(!mac.contains("NO_OPEN_BROWSER") && !mac.contains("Open the link"))
         let runner = AccountStore.signInScript(for: account, headless: true)
         #expect(runner.contains("export NO_OPEN_BROWSER=1\n") && runner.contains("Open the link on any device."))
-        // The other tools' scripts don't change with it.
+        // Claude's macOS login deliberately denies keychain files (#459), so its credentials
+        // stay in the account folder. Other platforms still run the bare login command.
         let claude = AccountStore.signInScript(for: Account(id: "a", agent: "claude", name: "Work", payer: "", home: nil), headless: true)
-        #expect(!claude.contains("NO_OPEN_BROWSER") && claude.contains("\nclaude auth login\n"))
+        #expect(!claude.contains("NO_OPEN_BROWSER"))
+        #if os(macOS)
+        #expect(claude.contains("sandbox-exec -p") && claude.contains("Library/Keychains") && claude.contains(" claude auth login\n"))
+        #else
+        #expect(claude.contains("\nclaude auth login\n"))
+        #endif
     }
 
     @Test func tetrixSignInForCursorUsesItsMCPLogin() {
