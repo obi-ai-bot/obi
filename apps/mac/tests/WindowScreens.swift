@@ -108,9 +108,7 @@ struct WindowScreens {
         for turn in turns { model.feed.conversation.apply(turn) }
         var ask = InboxItem(id: "q1", kind: .question, job: "i2", title: "#251 Attention queue",
                             text: "Should a job that commits nothing end as failed, or get a new status?", options: ["Failed", "A new status"], created: now - 300)
-        ask.headline = "Fail empty jobs, or add a status?"
-        ask.happened = "The agent finished its round with nothing to commit."
-        ask.recommended = 0
+        ask.details = ["It ends as failed and shows under Needs you.", "A new status: Empty, which needs nothing from you."]
         model.feed.apply(ask)
         let state = ChatState()
         state.trail.start(.talk)

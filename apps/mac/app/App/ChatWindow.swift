@@ -523,7 +523,8 @@ struct CenteredFlow: Layout {
         var rows: [[(index: Int, size: CGSize)]] = [[]]
         var used: CGFloat = 0
         for (index, view) in subviews.enumerated() {
-            let size = view.sizeThatFits(.unspecified)
+            var size = view.sizeThatFits(.unspecified)
+            if size.width > width { size = view.sizeThatFits(ProposedViewSize(width: width, height: nil)) }
             if !rows[rows.count - 1].isEmpty && used + spacing + size.width > width {
                 rows.append([]); used = 0
             }

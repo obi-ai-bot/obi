@@ -22,14 +22,18 @@ struct ChatPageTests {
         #expect(ChatRuns.rows([]).isEmpty)
     }
 
+    /// Today, the clock; this week, the day and the clock; before that, the date too.
     @Test func aMessagesTimeSaysTheDayOnlyWhenItIsntToday() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
         let locale = Locale(identifier: "en_US")
         let today = ChatRuns.clock(now - 60, now: now, calendar: calendar, locale: locale)
-        let before = ChatRuns.clock(now - 3 * 86_400, now: now, calendar: calendar, locale: locale)
-        #expect(!today.contains(" ") || today.hasSuffix("AM") || today.hasSuffix("PM"))
-        #expect(before.split(separator: " ").count > today.split(separator: " ").count)
+        let week = ChatRuns.clock(now - 3 * 86_400, now: now, calendar: calendar, locale: locale)
+        let older = ChatRuns.clock(now - 40 * 86_400, now: now, calendar: calendar, locale: locale)
+        let days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        #expect(!days.contains { today.contains($0) }, "today's time names a day: \(today)")
+        #expect(days.contains { week.hasPrefix($0) }, "this week's time names no day: \(week)")
+        #expect(["Sep", "Aug", "Oct"].contains { older.hasPrefix($0) } && older.contains(","), "an older time has no date: \(older)")
     }
 
     /// Links and references in blue, paths and `code` in coral monospace, the rest plain.
@@ -42,6 +46,15 @@ struct ChatPageTests {
         #expect(runs.map(\.text).joined() == "See #412 and `swift test` in apps/mac/app, on https://github.com/obi-ai-bot/obi.")
         #expect(SaidTokens.runs("Nothing special here.") == [SaidTokens.Run(text: "Nothing special here.", kind: nil)])
         #expect(SaidTokens.runs("tetrix-ee#490").first == SaidTokens.Run(text: "tetrix-ee#490", kind: .ref))
+        // What comes before a match still counts: "#13" glued to "#12" is no reference of its own.
+        #expect(SaidTokens.runs("PR #12#13").filter { $0.kind == .ref }.map(\.text) == ["#12"])
+        // A path doesn't take the sentence's full stop.
+        #expect(SaidTokens.runs("See Engine/Desk.swift.").contains(SaidTokens.Run(text: "Engine/Desk.swift", kind: .path)))
+        // A long reply is read in one pass per pattern, not one per match.
+        let long = String(repeating: "M apps/mac/app/App/ChatWindow.swift and #412 in `code` ", count: 600)
+        let start = Date.now
+        #expect(SaidTokens.runs(long).count > 1800)
+        #expect(Date.now.timeIntervalSince(start) < 1, "tokenizing 30 KB took \(Date.now.timeIntervalSince(start)) s")
     }
 
     func job(_ status: Job.Status, question: Bool = false) -> Job {

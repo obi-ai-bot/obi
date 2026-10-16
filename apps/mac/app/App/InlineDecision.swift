@@ -68,12 +68,13 @@ struct InlineDecision: View {
             }
             if !settled || expanded {
                 AskCard(kind: AskKind.label("\(item.kind)", plan: question?.plan != nil), failed: AskKind.failed("\(item.kind)"),
-                        title: words.title(item.text), happened: words.body ?? words.details(item.text), detail: permission?.detail,
-                        plan: question?.plan,
+                        source: item.title, title: words.title(item.text), happened: words.body,
+                        behindDetails: words.details(item.text), detail: permission?.detail, plan: question?.plan,
                         options: CardOption.inbox(item.options, kind: "\(item.kind)", question: question,
                                                   permission: permission, words: words, details: item.details),
                         busy: busy || settled, answered: settled, keyboardEnabled: keyboardEnabled && !settled, focusRequest: focusRequest,
-                        hint: !settled && item.kind.takesWords ? (item.kind == .permission ? CardOption.denyWords : "Or answer in your own words below") : nil,
+                        hint: !settled && item.kind.takesWords && onTell != nil
+                            ? (item.kind == .permission ? "No, and tell the agent what to do differently" : "Answer in your own words…") : nil,
                         onHint: item.kind.takesWords ? onTell : nil,
                         onChoose: { answer($0.answer) },
                         onLater: settled ? nil : { answer(later: .now.addingTimeInterval(3600)) },
@@ -139,8 +140,12 @@ struct Receipt: View {
 struct AskCard: View {
     let kind: String
     var failed = false
+    /// The job it's from, after its kind.
+    var source: String? = nil
     let title: String
     var happened: String? = nil
+    /// The asker's own words, behind Details, when the title is Oby's headline instead.
+    var behindDetails: String? = nil
     var detail: String? = nil
     var plan: String? = nil
     let options: [CardOption]
@@ -155,11 +160,15 @@ struct AskCard: View {
     var onLater: (() -> Void)? = nil
     var onOpen: (() -> Void)? = nil
     @State private var picked: String?
+    @State private var showsDetails = false
     @FocusState private var focused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(kind).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(failed ? Tokens.danger : Tokens.needs)
+            HStack(spacing: 6) {
+                Text(kind).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(failed ? Tokens.danger : Tokens.needs)
+                if let source, !source.isEmpty { Text(source).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fadeOut() }
+            }
             Text(title).font(Tokens.font(Tokens.textBase, .medium)).foregroundStyle(Tokens.ink).lineSpacing(6)
                 .fixedSize(horizontal: false, vertical: true).padding(.top, 4)
                 .accessibilityAddTraits(.isHeader)
@@ -167,8 +176,23 @@ struct AskCard: View {
                 Text(happened).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).lineSpacing(6)
                     .fixedSize(horizontal: false, vertical: true).padding(.top, 4).textSelection(.enabled)
             }
+            if let behindDetails, !behindDetails.isEmpty {
+                Button { withAnimation(Tokens.warm) { showsDetails.toggle() } } label: {
+                    HStack(spacing: 4) {
+                        Text("Details")
+                        Image(systemName: "chevron.right").font(Tokens.font(9, .semibold)).rotationEffect(.degrees(showsDetails ? 90 : 0))
+                    }
+                    .font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.muted).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).padding(.top, 8)
+                .accessibilityValue(showsDetails ? "Shown" : "Hidden")
+                if showsDetails {
+                    Text(behindDetails).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).lineSpacing(6)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled).padding(.top, 6)
+                }
+            }
             if let detail, !detail.isEmpty { code(detail) }
-            if let plan, !plan.isEmpty { code(plan, mono: false) }
+            if let plan, !plan.isEmpty { PlanText(plan: plan).padding(.top, 10) }
             if !answered {
                 CenteredFlow(spacing: 8, centred: false) {
                     ForEach(Array(options.enumerated()), id: \.offset) { index, option in
@@ -182,11 +206,24 @@ struct AskCard: View {
                     }
                 }
                 .padding(.top, 14)
+                // What each choice does, the recommended one marked, and the rule Always allow saves.
+                let explained = options.filter { $0.detail != nil || $0.recommended }
+                if !explained.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(explained.enumerated()), id: \.offset) { _, option in
+                            (Text(option.label).foregroundStyle(Tokens.text)
+                                + Text(option.recommended ? " · Recommended" : "").foregroundStyle(Tokens.needs)
+                                + Text(option.detail.map { ": \($0)" } ?? "").foregroundStyle(Tokens.muted))
+                                .font(Tokens.font(Tokens.textSm)).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.top, 10)
+                }
             }
             if hint != nil || onOpen != nil {
                 HStack(spacing: 14) {
                     if let hint {
-                        if let onHint { Button(hint, action: onHint).buttonStyle(.plain) } else { Text(hint) }
+                        if let onHint { Button(hint, action: onHint).buttonStyle(.plain).disabled(busy) } else { Text(hint) }
                     }
                     if let onOpen { Button("Open task", action: onOpen).buttonStyle(.plain) }
                 }
@@ -244,12 +281,13 @@ private struct OptionPill: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 if pending { ProgressView().controlSize(.mini) }
-                Text(option.label).font(Tokens.font(Tokens.textMd, primary ? .medium : .regular)).lineLimit(1)
+                Text(option.label).font(Tokens.font(Tokens.textMd, primary ? .medium : .regular)).lineLimit(2)
+                    .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
             }
             .foregroundStyle(primary ? Color(hex: 0x111111) : option.role == .destructive ? Tokens.danger : quiet ? (hovering ? Tokens.ink : Tokens.muted) : hovering ? Tokens.ink : Tokens.item)
-            .padding(.horizontal, 14).frame(height: 32)
-            .background(background, in: Capsule())
-            .contentShape(Capsule())
+            .padding(.horizontal, 14).padding(.vertical, 6).frame(minHeight: 32)
+            .background(background, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(disabled)
@@ -264,4 +302,40 @@ private struct OptionPill: View {
         if quiet { return hovering ? Tokens.hover : .clear }
         return hovering ? Color.white.opacity(0.13) : Tokens.pill
     }
+}
+
+/// A plan to approve, as its markdown says it (headings, lists, code), in at most 220 points that
+/// scroll, so the choices under it stay in sight.
+private struct PlanText: View {
+    let plan: String
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(PlanBlock.blocks(plan).enumerated()), id: \.offset) { _, block in
+                    switch block {
+                    case .heading(let text): Text(inline(text)).font(Tokens.font(Tokens.textMd, .semibold)).foregroundStyle(Tokens.ink)
+                    case .item(let marker, let text):
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(marker).foregroundStyle(Tokens.muted)
+                            Text(inline(text))
+                        }
+                    case .code(let text):
+                        Text(text).font(Tokens.mono(12)).padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    case .text(let text): Text(inline(text))
+                    }
+                }
+            }
+            .font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12).padding(.vertical, 10)
+        }
+        .frame(maxHeight: 220)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func inline(_ text: String) -> AttributedString { Reading.markdown(text, code: Tokens.mono(12)) }
 }

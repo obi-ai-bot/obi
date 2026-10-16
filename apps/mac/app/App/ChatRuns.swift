@@ -28,11 +28,14 @@ nonisolated enum ChatRuns {
         first.who == next.who && next.date.timeIntervalSince(first.date) < gap
     }
 
-    /// A message's time: the clock today, else the day and the clock.
+    /// A message's time: the clock today, the day and the clock this week, else the date too.
     static func clock(_ date: Date, now: Date = .now, calendar: Calendar = .current, locale: Locale = .current) -> String {
         let time = date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, locale: locale, calendar: calendar))
         if calendar.isDate(date, inSameDayAs: now) { return time }
-        return date.formatted(Date.FormatStyle(locale: locale, calendar: calendar).weekday(.abbreviated)) + " " + time
+        if abs(now.timeIntervalSince(date)) < 6 * 86_400 {
+            return date.formatted(Date.FormatStyle(locale: locale, calendar: calendar).weekday(.abbreviated)) + " " + time
+        }
+        return date.formatted(Date.FormatStyle(locale: locale, calendar: calendar).month(.abbreviated).day()) + ", " + time
     }
 }
 
@@ -55,27 +58,41 @@ nonisolated enum SaidTokens {
     ]
     private static let compiled = patterns.compactMap { kind, pattern in (try? NSRegularExpression(pattern: pattern)).map { (kind, $0) } }
 
+
+    /// What's recognised in `text`, in order: each pattern runs once over the whole text, and where
+    /// two overlap the one starting first wins (the earlier pattern, at the same place).
+    static func matches(_ text: String) -> [(range: Range<String.Index>, kind: Kind)] {
+        let whole = NSRange(text.startIndex..., in: text)
+        var found: [(range: NSRange, order: Int, kind: Kind)] = []
+        for (order, (kind, regex)) in compiled.enumerated() {
+            for match in regex.matches(in: text, range: whole) {
+                var range = match.range
+                // A path doesn't take the sentence's full stop with it.
+                if kind == .path, let end = Range(range, in: text), text[end].hasSuffix(".") { range.length -= 1 }
+                found.append((range, order, kind))
+            }
+        }
+        found.sort { ($0.range.location, $0.order) < ($1.range.location, $1.order) }
+        var out: [(range: Range<String.Index>, kind: Kind)] = []
+        var end = 0
+        for match in found where match.range.location >= end && match.range.length > 0 {
+            guard let range = Range(match.range, in: text) else { continue }
+            out.append((range, match.kind))
+            end = match.range.location + match.range.length
+        }
+        return out
+    }
+
     /// The text cut into runs, plain or recognised, in order.
     static func runs(_ text: String) -> [Run] {
         var out: [Run] = []
-        var rest = Substring(text)
-        while !rest.isEmpty {
-            let string = String(rest)
-            let range = NSRange(string.startIndex..., in: string)
-            var best: (Kind, NSRange)?
-            for (kind, regex) in compiled {
-                if let match = regex.firstMatch(in: string, range: range), best.map({ match.range.location < $0.1.location }) ?? true {
-                    best = (kind, match.range)
-                }
-            }
-            guard let (kind, found) = best, let at = Range(found, in: string) else {
-                out.append(Run(text: string, kind: nil))
-                break
-            }
-            if at.lowerBound > string.startIndex { out.append(Run(text: String(string[..<at.lowerBound]), kind: nil)) }
-            out.append(Run(text: String(string[at]), kind: kind))
-            rest = Substring(string[at.upperBound...])
+        var at = text.startIndex
+        for match in matches(text) {
+            if at < match.range.lowerBound { out.append(Run(text: String(text[at..<match.range.lowerBound]), kind: nil)) }
+            out.append(Run(text: String(text[match.range]), kind: match.kind))
+            at = match.range.upperBound
         }
+        if at < text.endIndex { out.append(Run(text: String(text[at...]), kind: nil)) }
         return out
     }
 }

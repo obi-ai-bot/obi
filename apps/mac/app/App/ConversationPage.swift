@@ -101,7 +101,7 @@ struct ConversationPage: View {
                                            account: { LiveView.account(of: $0, local: $1, desk: desk, feed: feed) },
                                            isLocal: { id in desk.jobs.contains { $0.id == id } },
                                            steps: conversation.steps(under: row.turn, in: turns),
-                                           onOpenJob: onOpenJob)
+                                           onOpenJob: onOpenJob, onStopJob: { model.stopChatJob($0, local: $1) })
                                     .task(id: row.turn.jobs ?? []) {
                                         // A runner's job older than its list: fetched, so its card shows.
                                         for id in ConversationModel.missing(of: row.turn, among: desk.jobs + feed.jobs) { try? await feed.fetch(id) }
@@ -175,6 +175,7 @@ struct ConversationPage: View {
         VStack(alignment: .leading, spacing: 6) {
             if let replyTarget {
                 HStack(spacing: 6) {
+                    if sendingAnswer { ProgressView().controlSize(.mini).accessibilityLabel("Sending answer") }
                     Text("Replying to \(replyTarget.title)").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fadeOut()
                     Button { self.replyTarget = nil; sendProblem = nil } label: {
                         Image(systemName: "xmark").font(Tokens.font(10, .semibold)).foregroundStyle(Tokens.muted)
@@ -197,9 +198,6 @@ struct ConversationPage: View {
                        onStop: { if thinking { desk.cancel(); return true }; return false },
                        onEscape: onBack, usage: model.usageRows)
                 .disabled(sendingAnswer)
-                .overlay(alignment: .trailing) {
-                    if sendingAnswer { ProgressView().controlSize(.small).padding(.trailing, 52).accessibilityLabel("Sending answer") }
-                }
         }
     }
 
@@ -207,9 +205,13 @@ struct ConversationPage: View {
     /// Oby's own question while one waits, else words for Oby.
     private func send() {
         let value = text
-        guard !sendingAnswer, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let words = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sendingAnswer, !words.isEmpty else { return }
         let question: (said: String, text: String)? = if case .question(let said, let question) = desk.talk { (said, question.text) } else { nil }
-        switch ChatSend.route(replying: replyTarget != nil, questionWaits: question != nil) {
+        let route = ChatSend.route(replying: replyTarget != nil, questionWaits: question != nil)
+        // An answer goes to an agent or the brain as one message, at most 2,000 characters.
+        if route != .oby, words.count > 2000 { sendProblem = "An answer can be at most 2,000 characters."; return }
+        switch route {
         case .answer:
             if let question { desk.answer(value, said: question.said, question: question.text) }
             text = ""
@@ -253,6 +255,7 @@ private struct MessageRow: View {
     let isLocal: (_ id: String) -> Bool
     let steps: [TurnStep]
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
+    let onStopJob: (_ job: String, _ local: Bool) -> Void
 
     private var turn: Turn { row.turn }
     private var yours: Bool { turn.who == .user }
@@ -266,20 +269,22 @@ private struct MessageRow: View {
                         .padding(.horizontal, 14).padding(.vertical, 9)
                         .background(Tokens.bubble, in: RoundedRectangle(cornerRadius: Tokens.bubbleRadius, style: .continuous))
                 }
-            } else if !turn.text.isEmpty {
-                SaidText(text: turn.text, color: Tokens.item)
+            } else {
+                if !turn.text.isEmpty { SaidText(text: turn.text, color: Tokens.item) }
                 if let markdown = ConversationModel.markdownDetails(for: turn) {
                     Text(markdown).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.item).lineSpacing(6).textSelection(.enabled)
                 }
             }
-            if !steps.isEmpty { Steps(steps: steps) }
+            // What Oby did for these words: Oby's side, whoever's turn it hangs from.
+            if !steps.isEmpty { Steps(steps: steps).frame(maxWidth: .infinity, alignment: .leading) }
             ForEach(jobs) { job in
                 let local = isLocal(job.id)
-                ThreadTask(job: job, account: account(job, local)) { onOpenJob(job.id, local) }
+                ThreadTask(job: job, account: account(job, local), onOpen: { onOpenJob(job.id, local) },
+                           onStop: { onStopJob(job.id, local) })
             }
             if row.endsRun {
                 Text(ChatRuns.clock(turn.date, now: now)).font(Tokens.font(11)).monospacedDigit().foregroundStyle(Tokens.muted)
-                    .padding(.top, yours || !jobs.isEmpty ? -9 : -9)
+                    .padding(.top, -9)
             }
         }
         .frame(maxWidth: .infinity, alignment: yours ? .trailing : .leading)
@@ -339,24 +344,35 @@ struct SaidText: View {
             .map { $0.components(separatedBy: "\n") }
     }
 
+    /// Inline markdown as Oby writes it (bold, links, `code`), then what the message box
+    /// recognises set apart on top: links and references in blue, paths and code in coral monospace.
     static func styled(_ text: String) -> AttributedString {
-        var out = AttributedString()
-        for run in SaidTokens.runs(text) {
-            var part = AttributedString(run.text)
-            switch run.kind {
-            case .url, .ref:
-                part.foregroundColor = Tokens.link
-                if run.kind == .url, let url = URL(string: run.text) { part.link = url }
-            case .code, .path:
-                if run.kind == .code { part = AttributedString(String(run.text.dropFirst().dropLast())) }
-                part.foregroundColor = Tokens.code
-                part.font = Tokens.mono(13)
-                part.backgroundColor = Tokens.pill
-            case nil: break
+        var string = Reading.markdown(text, code: Tokens.mono(13))
+        for run in string.runs where run.inlinePresentationIntent?.contains(.code) == true { coral(&string, run.range) }
+        let plain = String(string.characters)
+        for match in SaidTokens.matches(plain) {
+            let start = plain.distance(from: plain.startIndex, to: match.range.lowerBound)
+            let count = plain.distance(from: match.range.lowerBound, to: match.range.upperBound)
+            let lower = string.characters.index(string.startIndex, offsetBy: start)
+            let range = lower..<string.characters.index(lower, offsetBy: count)
+            // Already code or a link in the markdown: left as it is.
+            if string[range].runs.contains(where: { $0.inlinePresentationIntent?.contains(.code) == true || $0.link != nil }) { continue }
+            switch match.kind {
+            case .url:
+                string[range].foregroundColor = Tokens.link
+                if let url = URL(string: String(plain[match.range])) { string[range].link = url }
+            case .ref: string[range].foregroundColor = Tokens.link
+            case .code, .path: coral(&string, range)
             }
-            out += part
         }
-        return out
+        for run in string.runs where run.link != nil { string[run.range].foregroundColor = Tokens.link }
+        return string
+    }
+
+    private static func coral(_ string: inout AttributedString, _ range: Range<AttributedString.Index>) {
+        string[range].foregroundColor = Tokens.code
+        string[range].font = Tokens.mono(13)
+        string[range].backgroundColor = Tokens.pill
     }
 }
 
@@ -413,10 +429,19 @@ private struct ThreadTask: View {
     let job: Job
     let account: String
     let onOpen: () -> Void
+    let onStop: () -> Void
     @State private var hovering = false
 
     var body: some View {
         let mark = ThreadTaskLine.mark(job)
+        card(mark)
+            .overlay(alignment: .topTrailing) {
+                if hovering && job.isActive { StopButton(action: onStop).padding(.top, 8).padding(.trailing, 38) }
+            }
+            .onHover { hovering = $0 }
+    }
+
+    private func card(_ mark: WorkMark) -> some View {
         Button(action: onOpen) {
             HStack(alignment: .top, spacing: 10) {
                 AgentMark(agent: job.agent).font(Tokens.font(13, .semibold)).frame(width: 16).padding(.top, 1)
@@ -437,9 +462,12 @@ private struct ThreadTask: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { hovering = $0 }
         .animation(Tokens.fade, value: hovering)
         .accessibilityLabel("Open \(job.heading), \(ThreadTaskLine.status(mark))")
+        .contextMenu {
+            Button("Open task", action: onOpen)
+            if job.isActive { Button("Stop", action: onStop) }
+        }
     }
 }
 
@@ -476,10 +504,14 @@ struct Sheen: View {
         } else {
             TimelineView(.animation) { context in
                 let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.6) / 1.6
+                // The band's middle crosses from before the start to past the end.
+                let middle = phase * 1.6 - 0.3
                 label.foregroundStyle(LinearGradient(stops: [
-                    .init(color: Tokens.muted, location: 0), .init(color: Tokens.muted, location: max(0, phase * 1.6 - 0.45)),
-                    .init(color: Tokens.ink, location: max(0, min(1, phase * 1.6 - 0.3))),
-                    .init(color: Tokens.muted, location: min(1, max(0, phase * 1.6 - 0.15))), .init(color: Tokens.muted, location: 1),
+                    .init(color: Tokens.muted, location: 0),
+                    .init(color: Tokens.muted, location: min(1, max(0, middle - 0.15))),
+                    .init(color: Tokens.ink, location: min(1, max(0, middle))),
+                    .init(color: Tokens.muted, location: min(1, max(0, middle + 0.15))),
+                    .init(color: Tokens.muted, location: 1),
                 ], startPoint: .leading, endPoint: .trailing))
             }
             .accessibilityLabel(text)

@@ -18,20 +18,22 @@ nonisolated enum BoxMetrics {
     static let radius: CGFloat = 23
 
     /// The text's width on one row, between + and voice-or-send, in a box `width` wide.
-    static func rowWidth(_ width: CGFloat) -> CGFloat { max(1, width - 2 * inset - 3 * button - 3 * 4 - 8) }
+    static func rowWidth(_ width: CGFloat, gauge: Bool = false) -> CGFloat {
+        max(1, width - 2 * inset - CGFloat(gauge ? 3 : 2) * (button + 4) - 8)
+    }
     /// Stacked, the text's width.
     static func stackedWidth(_ width: CGFloat) -> CGFloat { max(1, width - 2 * inset - stackedPadding.leading - stackedPadding.trailing) }
 
     /// Whether the box stacks: the text doesn't fit on the row's one line. Measured at the row's
     /// width whichever way it shows, so it never flips back and forth at the edge.
-    @MainActor static func stacked(_ text: String, width: CGFloat) -> Bool {
-        ComposerMetrics.lines(text, width: rowWidth(width)) > 1
+    @MainActor static func stacked(_ text: String, width: CGFloat, gauge: Bool = false) -> Bool {
+        ComposerMetrics.lines(text, width: rowWidth(width, gauge: gauge)) > 1
     }
 
     /// The text's height: a line per line, up to what's left of `maximum` once the box's own room
     /// is taken; past that it scrolls.
-    @MainActor static func textHeight(_ text: String, width: CGFloat, maximum: CGFloat) -> CGFloat {
-        guard stacked(text, width: width) else { return lineHeight }
+    @MainActor static func textHeight(_ text: String, width: CGFloat, maximum: CGFloat, gauge: Bool = false) -> CGFloat {
+        guard stacked(text, width: width, gauge: gauge) else { return lineHeight }
         let lines = ComposerMetrics.lines(text, width: stackedWidth(width))
         let room = maximum - 2 * inset - stackedPadding.top - stackedPadding.bottom - button
         return min(max(lineHeight, room), CGFloat(lines) * lineHeight)
@@ -63,8 +65,8 @@ struct MessageBox: View {
     @State private var hovering = false
 
     private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    private var stacked: Bool { BoxMetrics.stacked(text, width: width) }
-    private var textHeight: CGFloat { BoxMetrics.textHeight(text, width: width, maximum: maximumHeight) }
+    private var stacked: Bool { BoxMetrics.stacked(text, width: width, gauge: !usage.isEmpty) }
+    private var textHeight: CGFloat { BoxMetrics.textHeight(text, width: width, maximum: maximumHeight, gauge: !usage.isEmpty) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
