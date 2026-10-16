@@ -19,6 +19,7 @@
 // Who edits what (docs/ARCHITECTURE.md, section 6): the bodies in `steps` are the Rust core's;
 // the rest of this file, and e2e/lib/{fixture,scenario,scenario-doc,snapshot}.mjs, are the lead's.
 
+import { stopGroups } from "./lib/processes.mjs";
 import { spawn, execFileSync } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -81,25 +82,8 @@ function start(name, command, args, { cwd, env: childEnv, log, stdio } = {}) {
 }
 ctx.start = start;
 
-const running = (child) => child.exitCode === null && child.signalCode === null;
-function signalGroup(child, signal) {
-  try {
-    process.kill(-child.pid, signal);
-  } catch {
-    try {
-      child.kill(signal);
-    } catch {}
-  }
-}
-
-// SIGTERM to every process still running, then SIGKILL to any still running 10 seconds later.
-async function stopAll() {
-  const live = ctx.processes.filter((p) => p.pid && running(p));
-  for (const p of live) signalGroup(p, "SIGTERM");
-  const grace = new Promise((r) => setTimeout(r, 10_000).unref());
-  await Promise.race([Promise.all(live.map((p) => p.exited)), grace]);
-  for (const p of live) if (running(p)) signalGroup(p, "SIGKILL");
-}
+// Clean up groups even after a launcher exits before its descendants.
+const stopAll = () => stopGroups(ctx.processes);
 
 let finished = false;
 async function finish() {

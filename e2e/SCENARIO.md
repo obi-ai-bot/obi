@@ -141,7 +141,7 @@ The preflight runs it alone on a worktree of the fixture and checks the two find
 
 Turned green by: **the Sphere server**.
 
-1. Start the Sphere: in `$OBI_SPHERE_DIR/server`, `pnpm run local -- --port <sphere port> --persist-to R/sphere/state`, with `SPHERE_OPERATOR_TOKEN`, `HOME=R/sphere/home`, `TMPDIR=R/sphere/tmp`, `WRANGLER_SEND_METRICS=false` and `PATH` (sphere-api.md, "Running a Sphere locally"). Within 60 seconds `GET /v0.1/health` answers `200 {"ok": true, "protocol": "obi/0.1"}`.
+1. Start the Sphere: in `$OBI_SPHERE_DIR/server`, `node scripts/local.mjs --port <sphere port> --persist-to R/sphere/state`, with `SPHERE_OPERATOR_TOKEN`, `HOME=R/sphere/home`, `TMPDIR=R/sphere/tmp`, `WRANGLER_SEND_METRICS=false` and `PATH` (sphere-api.md, "Running a Sphere locally"). Within 60 seconds `GET /v0.1/health` answers `200 {"ok": true, "protocol": "obi/0.1"}`.
 2. `POST /v0.1/spheres` with the operator token: `{"sphere": "e2e", "name": "E2E sphere", "admin": {"owner": "wellington", "owner_key": "<W public>"}}` → `201` with `sphere` `e2e`, `admin_owner` `wellington`, `protocol` `obi/0.1`.
 3. The admin token (how every one is made; see above for when): an owner assertion signed by W, `{"iss": "wellington", "sub": "wellington", "aud": "obi-sphere:e2e", "iat": now, "exp": now + 300, "jti": <uuid>, "scope": "admin directory:read audit:read"}`, exchanged at `POST /v0.1/oauth/token` (`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token`, `subject_token_type=urn:ietf:params:oauth:token-type:jwt`, no actor) → `200`, `token_type` `Bearer`, `scope` exactly `admin directory:read audit:read` (the spec fixes the order the Sphere writes scopes in: identity.md 4.2, "Canonical order").
 4. `POST /v0.1/spheres/e2e/invitations` (admin token) `{"owner": "wellington", "obi": "obi-wellington", "expires_in": 3600}` → `201` invitation A; the same for `ernesto` / `obi-ernesto` → invitation B. Each has an `invitation_id` and a 43-character `secret`.
@@ -223,7 +223,7 @@ Turned green by: **both**.
 3. **The audit chain verifies** (step 7).
 4. **No process wrote outside its write root, as far as the run can see** (below).
 5. **Nothing was pushed.** `git for-each-ref` in `R/fixture/remote.git` is the same as before step 1: `refs/heads/feature/average 6d20146f…` and `refs/heads/main aeab70f3…`, nothing else.
-6. **Clean exit.** SIGTERM to obid A, obid B and the Sphere: each exits within 10 seconds, the obids with status 0. The harness exits 0.
+6. **Clean exit.** SIGTERM to the PID of obid A, obid B and the Sphere launcher (not their process groups): each exits within 10 seconds, the obids with status 0, with no descendants left running. The harness exits 0.
 
 ## "No process wrote outside its write root"
 
