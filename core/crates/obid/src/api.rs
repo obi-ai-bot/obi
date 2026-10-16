@@ -115,6 +115,12 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/clear", post(crate::routes::clear))
         .route("/v1/devices", post(crate::routes::register_device))
         .route("/v1/checks/next", get(crate::routes::next_check))
+        .route("/v1/checks/{id}/bundle", get(crate::routes::check_bundle))
+        .route("/v1/checks/{id}/result", post(crate::routes::check_result))
+        .route(
+            "/v1/agent/apple-check",
+            get(crate::routes::apple_check).post(crate::routes::apple_check),
+        )
         .route(
             "/v1/settings/jobs",
             get(crate::routes::job_settings).put(crate::routes::set_job_settings),
@@ -190,7 +196,23 @@ pub const NO_TOKEN: &str = "This runner answers only requests with its API token
 /// discovery paths get no exception: runner-api.md, "obid only: configuration", says anything
 /// without the token is `401`, so they are `401` without it and `404` with it.
 async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -> Response {
-    match admit(request.uri(), request.headers(), &shared.token) {
+    let agent_check = request.uri().path() == "/v1/agent/apple-check";
+    let admitted = admit(request.uri(), request.headers(), &shared.token).or_else(|error| {
+        if !agent_check || !loopback_request(request.uri(), request.headers()) {
+            return Err(error);
+        }
+        let mut values = request.headers().get_all(header::AUTHORIZATION).iter();
+        let given = match (values.next(), values.next()) {
+            (Some(value), None) => value.to_str().ok().and_then(bearer),
+            _ => None,
+        };
+        if given.is_some_and(|token| shared.jobs.is_apple_check_token(token)) {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    });
+    match admitted {
         Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
     }

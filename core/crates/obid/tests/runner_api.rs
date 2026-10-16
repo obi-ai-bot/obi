@@ -5,7 +5,10 @@
 
 mod support;
 
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use support::*;
@@ -63,6 +66,38 @@ fn is_iso_second(text: &str) -> bool {
             19 => *b == b'Z',
             _ => b.is_ascii_digit(),
         })
+}
+
+fn events(obid: &Obid) -> BufReader<TcpStream> {
+    let mut stream = TcpStream::connect(("127.0.0.1", obid.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream.write_all(format!("GET /v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").as_bytes()).unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" {
+            break;
+        }
+    }
+    reader
+}
+
+fn next_check_event(reader: &mut BufReader<TcpStream>) -> Value {
+    let mut is_check = false;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        if line.starts_with("event: ") {
+            is_check = line.trim_end() == "event: check";
+        } else if is_check && let Some(data) = line.strip_prefix("data: ") {
+            return serde_json::from_str(data.trim()).unwrap();
+        }
+    }
 }
 
 /// Every key the Swift runner's job has (Runner/API.swift, `JobJSON`): the stored ones, the ones
@@ -670,6 +705,246 @@ fn a_mac_asking_for_a_check_hears_none_waits() {
     );
     assert_eq!(answer.status, 200, "{}", answer.text);
     assert_eq!(answer.body, json!({"check": null}));
+}
+
+/// AppleCheckTests.ObyCheckAppleWaitsForTheMacAndPrintsTheCompilersErrorsAndFailingTests:
+/// an agent's job token queues a check of its committed worktree; the Mac takes it and its result
+/// and diagnostic log are returned to that same job.
+#[test]
+fn oby_check_apple_waits_for_the_mac_and_prints_compilers_errors_and_failing_tests() {
+    let folder = Folder::new("applecheck");
+    let remote = fixture(&folder.0.join("fixture"));
+    let config = config(&folder.0, &remote, &fake_claude());
+    let obid = start(&folder.0, &config, None);
+    let created = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(&json!({"job":{"repo":"obi-e2e/fixture-app","kind":"investigate","task":"SLEEP"}})),
+    );
+    assert_eq!(created.status, 201, "{}", created.text);
+    let job_id = created.body["id"].as_str().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let running = loop {
+        let state = call(&obid, "GET", &format!("/v1/jobs/{job_id}"), None);
+        if state.body["status"] == "running" {
+            break state.body;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "job didn't start: {}",
+            state.text
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let token_path = obid.home.join("jobs").join(format!("{job_id}.json"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let kept = loop {
+        let kept: Value = serde_json::from_slice(&std::fs::read(&token_path).unwrap()).unwrap();
+        if kept["appleToken"].is_string() {
+            break kept;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "agent did not receive a check token: job={kept}, log={}",
+            obid.log()
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let token = kept["appleToken"]
+        .as_str()
+        .expect("job-scoped Apple-check token");
+    let env_path = std::path::Path::new(running["worktree"].as_str().unwrap())
+        .join(".obi/apple-check-env.json");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let agent_env = loop {
+        if let Ok(bytes) = std::fs::read(&env_path)
+            && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+        {
+            break value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "agent didn't receive the Apple-check environment"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(
+        agent_env["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://127.0.0.1:")
+    );
+    assert_eq!(agent_env["token"], token);
+    let asked = call_with_token(&obid, token, "POST", "/v1/agent/apple-check", None);
+    assert_eq!(asked.status, 200, "{}", asked.text);
+    assert_eq!(asked.body["check"]["kind"], "apple");
+    for key in [
+        "started",
+        "finished",
+        "mac",
+        "steps",
+        "failures",
+        "checkRun",
+        "comment",
+        "postError",
+    ] {
+        assert!(
+            asked.body["check"].get(key).is_some(),
+            "missing MacCheckJSON key {key}"
+        );
+    }
+    assert!(asked.body["check"].get("problem").is_none());
+    assert!(asked.body.get("appleToken").is_none());
+    assert!(
+        asked.body["line"]
+            .as_str()
+            .unwrap()
+            .contains("queued, waiting for a Mac")
+    );
+    assert!(asked.body["report"].is_null());
+    let no_mac = call(&obid, "GET", "/v1/checks/next?mac=Studio", None);
+    assert_eq!(
+        no_mac.body,
+        json!({"check": null}),
+        "default kinds only takes merge checks"
+    );
+    let taken = call(
+        &obid,
+        "GET",
+        "/v1/checks/next?mac=Studio&kinds=merge,apple",
+        None,
+    );
+    assert_eq!(taken.status, 200, "{}", taken.text);
+    assert_eq!(taken.body["check"]["state"], "running");
+    assert_eq!(taken.body["check"]["mac"], "Studio");
+    let id = taken.body["check"]["id"].as_str().unwrap();
+    let bundle = call(&obid, "GET", &format!("/v1/checks/{id}/bundle"), None);
+    assert_eq!(bundle.status, 200, "{}", bundle.text);
+    let failed = json!({
+        "passed": false,
+        "steps": [
+            {"name":"Mac app and MacTests","passed":false,"seconds":61},
+            {"name":"iPhone app with Watch, and iOSTests","passed":true,"seconds":17}
+        ],
+        "failures":["MacTests.JobViewTests/showsActions()"],
+        "log":"Mac/JobView.swift:12:5: error: cannot find 'OSLog' in scope"
+    });
+    let ended = call(
+        &obid,
+        "POST",
+        &format!("/v1/checks/{id}/result"),
+        Some(&failed),
+    );
+    assert_eq!(ended.status, 200, "{}", ended.text);
+    assert_eq!(ended.body["check"]["state"], "failed");
+    let answer = call_with_token(&obid, token, "GET", "/v1/agent/apple-check", None);
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    assert_eq!(
+        answer.body["check"]["failures"][0],
+        "MacTests.JobViewTests/showsActions()"
+    );
+    assert!(
+        answer.body["report"]
+            .as_str()
+            .unwrap()
+            .contains("cannot find 'OSLog' in scope")
+    );
+    assert!(
+        answer.body["report"]
+            .as_str()
+            .unwrap()
+            .contains("MacTests.JobViewTests/showsActions()")
+    );
+    assert_eq!(running["status"], "running");
+    assert_eq!(
+        call_with_token(&obid, "wrong", "GET", "/v1/agent/apple-check", None).status,
+        401
+    );
+}
+
+/// CheckTests.theAPIHandsOutChecksTakesTheirResultsAndTellsEveryApp: check state is on the job,
+/// each transition emits a check event, and duplicate/malformed results are refused.
+#[test]
+fn the_api_hands_out_checks_takes_their_results_and_tells_every_app() {
+    let folder = Folder::new("checkresult");
+    let remote = fixture(&folder.0.join("fixture"));
+    let config = config(&folder.0, &remote, &fake_claude());
+    let mut job = obid::job::Job::new(
+        "author".into(),
+        "obi-e2e/fixture-app".into(),
+        "fix".into(),
+        "Fix it".into(),
+        "claude".into(),
+        "stub".into(),
+    );
+    job.status = obid::job::Status::Done;
+    job.branch = "oby/fix-author".into();
+    job.base = Some("dev".into());
+    job.pr = Some(80);
+    job.mac_check = Some(json!({
+        "id":"ab12cd34","job":"author","repo":"obi-e2e/fixture-app","pr":80,
+        "branch":"oby/fix-author","base":"dev","head":"0123456789012345678901234567890123456789",
+        "round":1,"state":"queued","created":obi_protocol::time::format(obi_protocol::time::now()),
+        "started":null,"finished":null,"mac":null,"steps":null,"failures":null,
+        "checkRun":null,"comment":null,"postError":null,"problem":null,"handedOff":null,
+        "tries":null,"transient":null,"kind":"merge","finalCheck":null,"agentAsked":null
+    }));
+    let jobs = std::path::Path::new(config["home"].as_str().unwrap()).join("jobs");
+    std::fs::create_dir_all(&jobs).unwrap();
+    std::fs::write(
+        jobs.join("author.json"),
+        serde_json::to_vec_pretty(&job).unwrap(),
+    )
+    .unwrap();
+    let obid = start(&folder.0, &config, None);
+    let mut feed = events(&obid);
+    let queued = call(&obid, "GET", "/v1/checks/next?mac=Studio", None);
+    assert_eq!(queued.status, 200, "{}", queued.text);
+    assert_eq!(queued.body["check"]["id"], "ab12cd34");
+    assert_eq!(queued.body["check"]["kind"], "merge");
+    assert_eq!(queued.body["check"]["state"], "running");
+    let id = queued.body["check"]["id"].as_str().unwrap();
+    assert_eq!(next_check_event(&mut feed)["state"], "running");
+    assert_eq!(
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/checks/{id}/result"),
+            Some(&json!({}))
+        )
+        .status,
+        400
+    );
+    let report = json!({"passed":false,"steps":[
+        {"name":"Mac app and MacTests","passed":false,"seconds":61}
+    ],"failures":["PublishTests/blocksASecret()"],"log":"error: x"});
+    let ended = call(
+        &obid,
+        "POST",
+        &format!("/v1/checks/{id}/result"),
+        Some(&report),
+    );
+    assert_eq!(ended.status, 200, "{}", ended.text);
+    assert_eq!(ended.body["check"]["state"], "failed");
+    assert_eq!(next_check_event(&mut feed)["state"], "failed");
+    assert_eq!(
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/checks/{id}/result"),
+            Some(&report)
+        )
+        .status,
+        409
+    );
+    let current = call(&obid, "GET", "/v1/jobs/author", None);
+    assert_eq!(
+        current.body["macCheck"]["state"], "failed",
+        "{}",
+        current.text
+    );
+    assert_eq!(current.body.get("appleToken"), None);
 }
 
 /// ParallelTests.theCapIsInStatusAndSettings: `status.maxRunning` starts at 6; Settings changes it

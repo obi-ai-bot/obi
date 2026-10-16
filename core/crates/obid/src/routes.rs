@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream::{self, Stream, StreamExt};
@@ -329,12 +329,145 @@ pub async fn register_device(
     }
 }
 
-/// `GET /v1/checks/next?mac=…&kinds=…`: the oldest queued Mac check for a Mac that runs them, or
-/// `{"check": null}` when none waits. obid queues none: it publishes nothing yet (so no merge
-/// check), and its agents don't ask for Apple checks; a Mac following obid hears so instead of a
-/// 404.
-pub async fn next_check() -> Response {
-    json(StatusCode::OK, json!({"check": null}))
+/// `GET /v1/checks/next?mac=…&kinds=…`: Apple checks first, then the oldest queued merge check
+/// of a kind this Mac takes, or `{"check": null}` when none waits. Merge checks are persisted on
+/// jobs; publishing/review creates their queue in a later port.
+#[derive(serde::Deserialize)]
+pub struct CheckQuery {
+    mac: Option<String>,
+    kinds: Option<String>,
+}
+
+pub async fn next_check(
+    State(shared): State<Arc<Shared>>,
+    Query(query): Query<CheckQuery>,
+) -> Result<Response, ApiError> {
+    let kinds = query.kinds.as_deref().unwrap_or("merge");
+    let kinds: Vec<&str> = kinds.split(',').collect();
+    if kinds.is_empty() || kinds.iter().any(|kind| !matches!(*kind, "merge" | "apple")) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "kinds lists merge, apple or both.",
+        ));
+    }
+    if query
+        .mac
+        .as_ref()
+        .is_some_and(|mac| mac.chars().count() > 100)
+    {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "mac is a name of up to 100 characters.",
+        ));
+    }
+    let mac = query.mac.as_deref().unwrap_or("a Mac");
+    let check = shared
+        .jobs
+        .held_mac_check(mac)
+        .or_else(|| {
+            if kinds.contains(&"apple") {
+                shared.jobs.next_apple_check(mac)
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            kinds
+                .contains(&"merge")
+                .then(|| shared.jobs.next_merge_check(mac))
+                .flatten()
+        });
+    Ok(json(StatusCode::OK, json!({"check": check})))
+}
+
+/// `GET /v1/checks/{id}/bundle`: the commits in the job's worktree for the Mac that took it.
+pub async fn check_bundle(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let data = shared
+        .jobs
+        .apple_check_bundle(&id)
+        .map_err(check_api_error)?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        data,
+    )
+        .into_response())
+}
+
+/// `POST /v1/checks/{id}/result`: a Mac's bounded report.
+pub async fn check_result(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let report: Value = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "That isn't JSON."))?;
+    let Some((_, check, _)) = shared.jobs.find_check(&id) else {
+        return Err(check_api_error(crate::jobs::CheckResultError::Missing));
+    };
+    let mac = check["mac"].as_str().unwrap_or("").to_owned();
+    let check = shared
+        .jobs
+        .end_mac_check(&id, &mac, report)
+        .map_err(check_api_error)?;
+    Ok(json(StatusCode::OK, json!({"check": check})))
+}
+
+/// `POST` asks for the current committed head; `GET` reports the job's latest one.
+pub async fn apple_check(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    method: axum::http::Method,
+) -> Result<Response, ApiError> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .trim();
+    let job_id = shared
+        .jobs
+        .apple_job_for_token(token)
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, crate::api::NO_TOKEN))?;
+    let answer = if method == axum::http::Method::POST {
+        shared.jobs.ask_apple_check(&job_id).map_err(|why| {
+            let status =
+                if why.contains("running") || why.contains("commit") || why.contains("20 Apple") {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::NOT_FOUND
+                };
+            ApiError::new(status, why)
+        })?;
+        shared
+            .jobs
+            .apple_check_answer(&job_id)
+            .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "No Apple check."))?
+    } else {
+        shared
+            .jobs
+            .apple_check_answer(&job_id)
+            .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "No Apple check."))?
+    };
+    Ok(json(StatusCode::OK, answer))
+}
+
+fn check_api_error(error: crate::jobs::CheckResultError) -> ApiError {
+    match error {
+        crate::jobs::CheckResultError::Missing => {
+            ApiError::new(StatusCode::NOT_FOUND, "There's no such check.")
+        }
+        crate::jobs::CheckResultError::Conflict => ApiError::new(
+            StatusCode::CONFLICT,
+            "The check hasn't been taken by a Mac or already has its result.",
+        ),
+        crate::jobs::CheckResultError::BadRequest => {
+            ApiError::new(StatusCode::BAD_REQUEST, "The check result is malformed.")
+        }
+    }
 }
 
 /// `GET /v1/settings/jobs`: how many jobs run at once.

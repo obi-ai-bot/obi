@@ -4,7 +4,7 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 
 **API-level** means the test asks the runner through its HTTP API (`client.execute` on the router, or the API's own handlers), or checks what the API puts on the wire (a job's or account's JSON, the gate in front of every request). obid is checked the same way: the real binary, asked over HTTP (tests/*.rs), or a unit test of the same rule where the Swift test was one. Everything else is **Swift-internal**: it drives Swift types (Desk, the brain, the agent fakes, the stores), so it doesn't carry over; obid's own behaviour behind those is covered by its own tests.
 
-994 tests in all: **40 API-level and ported**, **35 API-level and not ported** (their endpoint or feature isn't in obid yet), **919 Swift-internal and dropped**.
+994 tests in all: **42 API-level and ported**, **33 API-level and not ported** (their endpoint or feature isn't in obid yet), **919 Swift-internal and dropped**.
 
 ## API-level, ported
 
@@ -12,11 +12,13 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 |---|---|---|
 | ClaimTests.aClientMayClaimFilesAtDispatch | runner_api.rs `a_client_may_claim_files_at_dispatch`; plans_api.rs `plans_map_replies_questions_none_and_dispatched_jobs` | dispatch and plan paths are checked over HTTP |
 | AttachmentTests.plansRefuseAttachmentsOutsideTheAppsFolder | plans_api.rs `plans_refuse_attachments_outside_the_apps_folder` |  |
+| AppleCheckTests.ObyCheckAppleWaitsForTheMacAndPrintsTheCompilersErrorsAndFailingTests | runner_api.rs `oby_check_apple_waits_for_the_mac_and_prints_compilers_errors_and_failing_tests` | job-scoped check token, Mac queue/take, bundle, result and compiler/test report over HTTP |
 | ConversationTests.theConversationEndpointPagesTheThreadAndItsEventFollowsIt | plans_api.rs `plan_uses_recent_turns_and_conversation_paginates` | event stream, recent-first paging and unknown cursor behavior |
 | ConversationTests.thePlanEndpointTakesRecentTurns | plans_api.rs `plan_uses_recent_turns_and_conversation_paginates` |  |
 | RunnerTests.plansMapToTheirKinds | plans_api.rs `plans_map_replies_questions_none_and_dispatched_jobs` |  |
 | ClearTests.everyAppFollowingEventsHearsAClear | runner_api.rs `clear_done_is_kept_said_and_heard` |  |
 | ClearTests.statusSaysNullUntilTheFirstClearThenTheTime | runner_api.rs `clear_done_is_kept_said_and_heard` |  |
+| CheckTests.theAPIHandsOutChecksTakesTheirResultsAndTellsEveryApp | runner_api.rs `the_api_hands_out_checks_takes_their_results_and_tells_every_app` | an existing queued merge check is handed out and its result is sent to every app; queue creation follows publishing and review (#451) |
 | ClearTests.theClearSurvivesARestartAndNeverGoesBack | runner_api.rs `clear_done_is_kept_said_and_heard` | the restart through the API; the clock going back in src/clear.rs `the_clear_survives_a_restart_and_never_goes_back` |
 | DismissTests.theAPIDismissesAndSaysWhenItCant | jobs_api.rs `nothing_committed_fails_and_dismiss_lets_it_go` | its last line, `GET /v1/jobs/{id}/publish` answering 409 for a dismissed job, in runner_api.rs `publish_by_hand_is_off_a_dismissed_job` (obid publishes nothing for its owner yet, so it answers 409 for every job, saying why) |
 | InboxTests.theAPIListsAnswersAndTellsEveryApp | sphere_api.rs `the_inbox_lists_answers_and_tells_every_app` | with an `obiRequest` item, the only kind obid makes so far |
@@ -77,8 +79,6 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 
 | Swift test | Needs | Issue |
 |---|---|---|
-| AppleCheckTests.ObyCheckAppleWaitsForTheMacAndPrintsTheCompilersErrorsAndFailingTests | `/v1/agent/apple-check`, `/v1/checks/…` (Apple checks) | #443 |
-| CheckTests.theAPIHandsOutChecksTakesTheirResultsAndTellsEveryApp | Mac checks queued, `/v1/checks/{id}/result` (obid serves `GET /v1/checks/next`, which answers `{"check": null}`: it queues none; runner_api.rs `a_mac_asking_for_a_check_hears_none_waits`) | #443 |
 | ConnectionTests.agentsUseConnectedAppsWithoutEverSeeingTheLogin | `/v1/connections`, `/v1/me`, `/v1/agent/mcp/…` | #444 |
 | FailureTests.theAPIListsFailuresAndFixesThem | `/v1/failures…` | #445 |
 | GatewayTests.gatewayForwardsTheRunnersTokenToTheMacRunner | the LAN gateway | #446 |

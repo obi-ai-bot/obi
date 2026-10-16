@@ -175,6 +175,7 @@ pub async fn serve(
             source,
         }
     })?;
+    jobs.set_api_address(bound);
     let (stopping_tx, stopping_rx) = tokio::sync::watch::channel(false);
     let link = sphere::Link::open(
         config.clone(),
