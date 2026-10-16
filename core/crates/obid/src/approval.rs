@@ -35,19 +35,33 @@ pub struct Approval {
 pub struct Approvals {
     file: PathBuf,
     used: Mutex<HashMap<String, i64>>,
+    /// Until when no approval goes through, when the file was there and didn't read: what it held
+    /// could have been used, so a replay can't be ruled out until it would be stale.
+    unread_until: Option<i64>,
 }
 
 impl Approvals {
-    /// The approvals kept in `home/approvals.json`; none when it doesn't read.
+    /// The approvals kept in `home/approvals.json`. When the file is there and doesn't read, no
+    /// approval goes through for 10 minutes.
     pub fn open(home: &Path) -> Approvals {
         let file = home.join("approvals.json");
-        let used = std::fs::read(&file)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        let (used, unread_until) = match std::fs::read(&file) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (HashMap::new(), None),
+            read => match read.ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+                Some(used) => (used, None),
+                None => {
+                    tracing::error!(
+                        "can't read {}: no approval goes through for 10 minutes",
+                        file.display()
+                    );
+                    (HashMap::new(), Some(obi_protocol::time::now() + REMEMBERED))
+                }
+            },
+        };
         Approvals {
             file,
             used: Mutex::new(used),
+            unread_until,
         }
     }
 
@@ -66,6 +80,11 @@ impl Approvals {
             "oby-publish\n{job}\n{}\n{}",
             approval.action, approval.signed_at
         );
+        if self.unread_until.is_some_and(|until| now < until) {
+            return Err(
+                "obid couldn't read the approvals it used. Approve it again in 10 minutes.".into(),
+            );
+        }
         let Some(key) = key.and_then(verifying_key) else {
             return Err("That device isn't registered with this runner.".into());
         };
@@ -208,6 +227,17 @@ mod tests {
                 .check(&good, "j1", action, Some(&public), NOW + 1)
                 .unwrap_err()
                 .contains("already used")
+        );
+        // A file that doesn't read: nothing goes through, not even a new approval.
+        std::fs::write(home.join("approvals.json"), "{broken").unwrap();
+        let unread = Approvals::open(&home);
+        let now = obi_protocol::time::now();
+        let fresh = approval(&key, "j1", action, now);
+        assert!(
+            unread
+                .check(&fresh, "j1", action, Some(&public), now)
+                .unwrap_err()
+                .contains("couldn't read")
         );
         let _ = std::fs::remove_dir_all(&home);
     }

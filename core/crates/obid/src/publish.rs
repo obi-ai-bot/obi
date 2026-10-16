@@ -122,6 +122,14 @@ impl Found {
     }
 }
 
+impl Found {
+    /// The agent can rewrite what holds it with a fixup round: a file or a commit's message, not
+    /// who the commit says made it.
+    pub fn fixable(&self) -> bool {
+        self.file != "commit author"
+    }
+}
+
 impl std::fmt::Display for Found {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.line {
@@ -142,6 +150,9 @@ pub enum Failure {
     Stopped,
     /// Another publish of the same job is under way: this one sent nothing and changes nothing.
     Busy,
+    /// The job may not be published now (nothing to publish, or not what was approved): nothing
+    /// ran, and nothing changes.
+    Refused(String),
     /// Anything else, as one line a person can read.
     Failed(String),
 }
@@ -156,6 +167,7 @@ impl Failure {
             }
             Failure::Stopped => "Not published: the job was stopped.".into(),
             Failure::Busy => "obid is publishing it already.".into(),
+            Failure::Refused(why) => why.clone(),
             Failure::Failed(why) => why.clone(),
         }
     }
@@ -515,10 +527,13 @@ pub async fn publish(
             job.branch
         )));
     }
-    // The base as the remote has it now: work merged since the job started counts as merged.
-    {
+    // The base as the remote has it now: work merged since the job started counts as merged, and
+    // what the remote doesn't have is all that the scan reads. Pinned to one commit, so another
+    // fetch can't move it between the scan and the push. A base that can't be fetched sends
+    // nothing.
+    let since = {
         let _fetching = target.fetching.lock().await;
-        if let Err(e) = git::git(
+        git::git(
             clone,
             &[
                 "fetch",
@@ -530,14 +545,25 @@ pub async fn publish(
             ],
         )
         .await
-        {
-            tracing::info!(
-                "job {}: couldn't fetch {base} before publishing: {e}",
-                job.id
-            );
-        }
-    }
-    let since = format!("refs/remotes/origin/{base}");
+        .map_err(|e| {
+            Failure::Failed(format!(
+                "Not published: couldn't fetch {base}: {}",
+                git_said(&e, &target.remote)
+            ))
+        })?;
+        git_in(
+            clone,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/remotes/origin/{base}^{{commit}}"),
+            ],
+        )
+        .await
+        .ok()
+        .filter(|c| git::is_sha(c))
+        .ok_or_else(|| Failure::Failed(format!("Not published: can't read {base}.")))?
+    };
     let range = format!("{since}..{head}");
     if git_in(clone, &["rev-list", "--count", &range]).await.ok() == Some("0".into()) {
         return Err(Failure::Failed(format!(
@@ -591,7 +617,7 @@ pub async fn publish(
         Verdict::Found(found) => found.into_iter().map(|f| Found::of(f, None)).collect(),
         Verdict::CouldNotRun(why) => return Err(could_not_run(&why)),
     };
-    said.extend(scan_messages(clone, &range, &target.scratch).await?);
+    said.extend(scan_commits(clone, &range, &target.scratch).await?);
     if !said.is_empty() {
         return Err(Failure::Blocked(said));
     }
@@ -625,7 +651,12 @@ pub async fn publish(
             "Couldn't open the pull request: obid couldn't write its description ({e})."
         ))
     })?;
-    let opened = github::open_pull_request(gh, &job.repo, base, &job.branch, &title, &file).await;
+    let opened = {
+        // GitHub may still show the commit obid pushed before as the pull request's head.
+        let mut heads = vec![head.as_str()];
+        heads.extend(job.pushed_head());
+        github::open_pull_request(gh, &job.repo, base, &job.branch, &heads, &title, &file).await
+    };
     let _ = std::fs::remove_file(&file);
     let (url, sent) = opened.map_err(Failure::Failed)?;
     match sent {
@@ -634,6 +665,16 @@ pub async fn publish(
         github::Sent::Nothing => {}
     }
     Ok(url)
+}
+
+/// What git said when a command of publishing failed: its last line on stderr, never the command
+/// line (which names the remote and the credential helper), with the remote's address taken out.
+fn git_said(error: &git::GitError, remote: &str) -> String {
+    let said = error
+        .0
+        .rsplit_once(" failed: ")
+        .map_or("no reason given", |(_, said)| said);
+    github::said(&said.replace(remote, "the remote"))
 }
 
 fn could_not_run(why: &str) -> Failure {
@@ -720,10 +761,12 @@ async fn scan_changes(
                 .any(|t| t.name == finding.file && t.rule == finding.rule);
             found.push(finding);
         }
-        let added: Vec<(String, usize, String)> = scan::parse_diff(&diff)
-            .1
+        // The lines it adds, and the names of the files it touches, as line 0 of each.
+        let (names, added) = scan::parse_diff(&diff);
+        let added: Vec<(String, usize, String)> = names
             .into_iter()
-            .map(|a| (a.file, a.number, a.text))
+            .map(|name| (name.clone(), 0, name))
+            .chain(added.into_iter().map(|a| (a.file, a.number, a.text)))
             .collect();
         if !added.is_empty() {
             let leaked = scan::gitleaks_lines(&added, scratch)
@@ -732,6 +775,8 @@ async fn scan_changes(
             let secrets = crate::secrets::known();
             found.extend(leaked.into_iter().map(|mut f| {
                 f.name = secrets.redact(&f.name);
+                // Line 0 is the file's name.
+                f.line = f.line.filter(|l| *l > 0);
                 Found::of(f, Some(commit))
             }));
         }
@@ -825,59 +870,145 @@ async fn known_secrets_in_files(clone: &Path, range: &str) -> Result<Vec<Finding
     )
     .await
     .map_err(|e| e.0)?;
-    // Each: "<sha> blob <size>\n", the bytes, "\n".
-    let mut rest = &read[..];
-    while let Some(newline) = rest.iter().position(|b| *b == b'\n') {
-        let header = String::from_utf8_lossy(&rest[..newline]).into_owned();
-        let parts: Vec<&str> = header.split(' ').collect();
-        let [sha, _, size] = parts[..] else {
-            return Err("git cat-file answered something else".into());
-        };
-        let (Ok(size), Some(path)) = (size.parse::<usize>(), paths.get(sha)) else {
-            return Err("git cat-file answered something else".into());
-        };
-        let start = newline + 1;
-        let end = start + size;
-        if end >= rest.len() {
-            return Err("git cat-file stopped short".into());
-        }
+    for (sha, bytes) in batch_objects(&read)? {
+        let path = paths
+            .get(&sha)
+            .ok_or("git cat-file answered an object obid didn't ask for")?;
         found.extend(scan::known_secrets_in_file(
-            &String::from_utf8_lossy(&rest[start..end]),
+            &String::from_utf8_lossy(bytes),
             path,
         ));
-        rest = &rest[end + 1..];
     }
     Ok(found)
 }
 
-/// Each commit's message, scanned on its own so a finding names the commit whose message must be
-/// rewritten. NUL framing is safe: a commit message can't hold NUL.
-async fn scan_messages(clone: &Path, range: &str, scratch: &Path) -> Result<Vec<Found>, Failure> {
-    let raw = git_in(clone, &["log", "-z", "--format=%H%x00%B", range])
+/// The headers a commit obid publishes may carry: anything else (an `encoding` that re-encodes its
+/// message, a signature, a header of any other name) is refused, so what the scan reads is what
+/// goes out, byte for byte.
+const COMMIT_HEADERS: [&str; 4] = ["tree", "parent", "author", "committer"];
+
+/// Every commit the push sends, read as git keeps it (`cat-file`), not as `git log` shows it: its
+/// author and committer, and its message's own bytes, each scanned on its own so a finding names
+/// the commit to rewrite. A commit with any other header, or a message that isn't UTF-8 text, is
+/// refused: nothing goes out.
+async fn scan_commits(clone: &Path, range: &str, scratch: &Path) -> Result<Vec<Found>, Failure> {
+    let unreadable = |e: String| {
+        Failure::Failed(format!(
+            "Not published: the secret scan couldn't read the commits ({e})."
+        ))
+    };
+    let listed = git_in(clone, &["rev-list", range])
         .await
-        .map_err(|e| {
-            Failure::Failed(format!(
-                "Not published: the secret scan couldn't read the commit messages ({e})."
-            ))
-        })?;
-    let fields: Vec<&str> = raw.split('\0').collect();
+        .map_err(unreadable)?;
+    let commits: Vec<&str> = listed.lines().filter(|c| git::is_sha(c)).collect();
+    if commits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let args: Vec<&std::ffi::OsStr> = ["--no-replace-objects", "cat-file", "--batch"]
+        .iter()
+        .map(std::ffi::OsStr::new)
+        .collect();
+    let raw = git::run_bytes(
+        clone,
+        &args,
+        &[],
+        Some(format!("{}\n", commits.join("\n")).into_bytes()),
+    )
+    .await
+    .map_err(|e| unreadable(e.0))?;
     let mut found = Vec::new();
-    for pair in fields.chunks(2) {
-        let [commit, message] = pair else { continue };
-        let commit = commit.trim();
-        if !git::is_sha(commit) {
-            continue;
+    for (commit, object) in batch_objects(&raw).map_err(unreadable)? {
+        let (texts, refused) = commit_texts(&commit, object);
+        if let Some(why) = refused {
+            return Err(Failure::Failed(why));
         }
-        let texts = vec![("commit message".to_owned(), message.to_string())];
         match scan::scan(&texts, scratch).await {
             Verdict::Clean => {}
             Verdict::Found(more) => {
-                found.extend(more.into_iter().map(|f| Found::of(f, Some(commit))))
+                found.extend(more.into_iter().map(|f| Found::of(f, Some(&commit))))
             }
             Verdict::CouldNotRun(why) => return Err(could_not_run(&why)),
         }
     }
     Ok(found)
+}
+
+/// `git cat-file --batch`'s answer: each object's id and bytes.
+fn batch_objects(mut rest: &[u8]) -> Result<Vec<(String, &[u8])>, String> {
+    let mut objects = Vec::new();
+    // Each: "<id> <type> <size>\n", the bytes, "\n".
+    while let Some(newline) = rest.iter().position(|b| *b == b'\n') {
+        let header = String::from_utf8_lossy(&rest[..newline]).into_owned();
+        let parts: Vec<&str> = header.split(' ').collect();
+        let [id, _, size] = parts[..] else {
+            return Err(format!("git cat-file answered {header:?}"));
+        };
+        let size: usize = size
+            .parse()
+            .map_err(|_| format!("git cat-file answered {header:?}"))?;
+        let start = newline + 1;
+        let end = start + size;
+        if end >= rest.len() {
+            return Err("git cat-file stopped short".into());
+        }
+        objects.push((id.to_owned(), &rest[start..end]));
+        rest = &rest[end + 1..];
+    }
+    Ok(objects)
+}
+
+/// A commit object's texts that go out, `commit author` (its author and committer) and `commit
+/// message` (its message's bytes), or why obid won't publish it.
+fn commit_texts(commit: &str, object: &[u8]) -> (Vec<(String, String)>, Option<String>) {
+    let short = &commit[..12.min(commit.len())];
+    let (headers, message) = match object.windows(2).position(|w| w == b"\n\n") {
+        Some(at) => (&object[..at], &object[at + 2..]),
+        None => (object, &[][..]),
+    };
+    let mut people = Vec::new();
+    for line in headers.split(|b| *b == b'\n') {
+        let line = String::from_utf8_lossy(line);
+        let key = line.split(' ').next().unwrap_or("");
+        if !COMMIT_HEADERS.contains(&key) {
+            let key: String = key
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .take(20)
+                .collect();
+            return (
+                Vec::new(),
+                Some(format!(
+                    "Not published: commit {short} carries a header obid doesn't publish ({}).",
+                    if key.is_empty() {
+                        "a continued one"
+                    } else {
+                        &key
+                    }
+                )),
+            );
+        }
+        if key == "author" || key == "committer" {
+            people.push(line.into_owned());
+        }
+    }
+    let message = match std::str::from_utf8(message) {
+        Ok(text) if !text.contains('\0') => text.to_owned(),
+        _ => {
+            return (
+                Vec::new(),
+                Some(format!(
+                    "Not published: commit {short}'s message isn't UTF-8 text, which obid doesn't publish."
+                )),
+            );
+        }
+    };
+    (
+        vec![
+            ("commit author".to_owned(), people.join("\n")),
+            ("commit message".to_owned(), message),
+        ],
+        None,
+    )
 }
 
 /// The commit the job's branch has on the remote, or none when it has no such branch yet.
@@ -895,7 +1026,7 @@ async fn remote_head(job: &Job, target: &Target) -> Result<Option<String>, Failu
         Failure::Failed(format!(
             "Couldn't read {} on the remote: {}",
             job.branch,
-            github::said(&e.0)
+            git_said(&e, &target.remote)
         ))
     })?;
     let wanted = format!("refs/heads/{}", job.branch);
@@ -976,7 +1107,7 @@ async fn push(head: &str, job: &Job, target: &Target, lease: Option<&str>) -> Re
             Failure::Failed(format!(
                 "Couldn't push {}: {}",
                 job.branch,
-                github::said(&e.0)
+                git_said(&e, &target.remote)
             ))
         }
     })?;
@@ -1113,6 +1244,52 @@ mod tests {
         assert!(prompt.contains("--fixup=<commit>"));
         assert!(prompt.contains(&format!("commit {}", "c".repeat(40))));
         assert!(prompt.contains("git rebase -i --autosquash origin/dev"));
+    }
+
+    /// A commit is read as git keeps it: its author and committer and its message's own bytes go
+    /// to the scan; an `encoding` (which would re-encode the message `git log` shows), a signature
+    /// or any other header, or a message that isn't UTF-8 text, refuses it.
+    #[test]
+    fn commits_are_read_as_git_keeps_them() {
+        let commit = "c".repeat(40);
+        let who = "A <a@example.com> 1791582173 +0000";
+        let plain = format!(
+            "tree {0}\nparent {0}\nauthor {who}\ncommitter {who}\n\nFix it\n",
+            "d".repeat(40)
+        );
+        let (texts, refused) = commit_texts(&commit, plain.as_bytes());
+        assert_eq!(refused, None);
+        assert_eq!(
+            texts[0],
+            (
+                "commit author".into(),
+                format!("author {who}\ncommitter {who}")
+            )
+        );
+        assert_eq!(texts[1], ("commit message".into(), "Fix it\n".into()));
+        for header in [
+            "encoding UTF-16LE",
+            "gpgsig -----BEGIN PGP SIGNATURE-----",
+            "x-note hi",
+            " continued",
+        ] {
+            let object = format!(
+                "tree {0}\nauthor {who}\ncommitter {who}\n{header}\n\nFix it\n",
+                "d".repeat(40)
+            );
+            let (_, refused) = commit_texts(&commit, object.as_bytes());
+            assert!(
+                refused
+                    .unwrap()
+                    .contains("carries a header obid doesn't publish"),
+                "{header}"
+            );
+        }
+        let mut utf16 =
+            format!("tree {}\nauthor {who}\ncommitter {who}\n\n", "d".repeat(40)).into_bytes();
+        utf16.extend("Fix".encode_utf16().flat_map(u16::to_le_bytes));
+        let (_, refused) = commit_texts(&commit, &utf16);
+        assert!(refused.unwrap().contains("isn't UTF-8 text"));
     }
 
     #[test]

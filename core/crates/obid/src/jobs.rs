@@ -1398,7 +1398,16 @@ impl Jobs {
                 "This job never started, so there's no session to pick up.".into(),
             )));
         }
-        let resumed = self.update(id, |job| {
+        // Checked and changed under one lock: a job being published by hand takes no words, and
+        // one that took them can't be published by hand until it ends again.
+        let resumed = {
+            let mut state = self.lock();
+            if state.publishing.contains(id) {
+                return Some(Err(Refused(
+                    "obid is publishing it. Tell it again once that's done.".into(),
+                )));
+            }
+            let job = state.jobs.get_mut(id)?;
             heard(job);
             job.status = Status::Queued;
             job.phase = Some(Phase::Work);
@@ -1411,9 +1420,15 @@ impl Jobs {
             job.limit = None;
             job.waiting = None;
             job.asked = true;
-        });
+            job.clone()
+        };
+        if let Err(e) = self.store.save(&resumed) {
+            tracing::error!("can't keep job {id}: {e}");
+        }
+        self.events.send("job", resumed.to_json());
+        self.changed.notify_waiters();
         self.schedule();
-        resumed.map(Ok)
+        Some(Ok(resumed))
     }
 
     /// The owner's words the agent hasn't heard yet, taken: what its next turn hears.
@@ -3027,7 +3042,7 @@ impl Jobs {
                 job.publish_step = Some(crate::publish::Step::Scan);
                 job.step = "Publishing".into();
             });
-            let published = self.publish_job(id, Some(signal.clone())).await;
+            let published = self.publish_job(id, Some(signal.clone()), |_| Ok(())).await;
             if *signal.borrow() != Signal::Run {
                 return Ok(());
             }
@@ -3052,6 +3067,7 @@ impl Jobs {
                     // it found something else than last time.
                     if job.current_round() < job.max_rounds()
                         && blocked_before.as_ref() != Some(&found)
+                        && found.iter().all(crate::publish::Found::fixable)
                     {
                         let base = job
                             .base
@@ -3079,7 +3095,7 @@ impl Jobs {
                     ));
                 }
                 Err(Failure::Stopped) => return Ok(()),
-                Err(failure @ (Failure::Failed(_) | Failure::Busy)) => {
+                Err(failure @ (Failure::Failed(_) | Failure::Busy | Failure::Refused(_))) => {
                     let why = failure.line();
                     self.end_done(id, commits, pushed, |job| job.publish_error = Some(why));
                 }
@@ -3156,18 +3172,29 @@ impl Jobs {
         self: &Arc<Self>,
         id: &str,
         signal: Option<watch::Receiver<Signal>>,
+        may: impl FnOnce(&Job) -> Result<(), crate::publish::Failure>,
     ) -> Result<String, crate::publish::Failure> {
         use crate::publish::Failure;
-        let job = self
-            .get(id)
-            .ok_or_else(|| Failure::Failed("There's no such job.".into()))?;
-        let base = job
-            .base
-            .clone()
-            .ok_or_else(|| Failure::Failed("Nothing to publish: it has no base.".into()))?;
-        if !self.lock().publishing.insert(id.to_owned()) {
-            return Err(Failure::Busy);
-        }
+        // `may` and the claim under one lock: nothing changes the job between them.
+        let job = {
+            let mut state = self.lock();
+            let job = state
+                .jobs
+                .get(id)
+                .cloned()
+                .ok_or_else(|| Failure::Failed("There's no such job.".into()))?;
+            may(&job)?;
+            if !state.publishing.insert(id.to_owned()) {
+                return Err(Failure::Busy);
+            }
+            job
+        };
+        let Some(base) = job.base.clone() else {
+            self.lock().publishing.remove(id);
+            return Err(Failure::Failed(
+                "Nothing to publish: it has no base.".into(),
+            ));
+        };
         let outcome = match self.publish_target(&job) {
             Ok(target) => {
                 let hooks = PublishHooks {
@@ -3191,23 +3218,7 @@ impl Jobs {
     /// What publishing the job `id` by hand would do: obid's own sentence and the base, or why
     /// there's nothing to publish (`409`).
     pub fn publish_action(&self, id: &str) -> Option<Result<(String, String), String>> {
-        let job = self.get(id)?;
-        Some(match (&job.base, job.can_publish()) {
-            (Some(base), true) => Ok((crate::publish::action(&job, base), base.clone())),
-            _ => Err(if job.dismissed.is_some() {
-                "It was dismissed: there's nothing to publish.".into()
-            } else if job.status != Status::Done {
-                "Nothing to publish: the job hasn't finished.".into()
-            } else if job.kind == "review" || job.kind == "research" {
-                format!("Nothing to publish: a {} job doesn't publish.", job.kind)
-            } else if job.published.is_some() && job.unpublished() == 0 {
-                "It's already published, with every commit.".into()
-            } else if job.stranded() {
-                "Nothing to publish: its pull request was merged or closed.".into()
-            } else {
-                "Nothing to publish: the job made no commits.".into()
-            }),
-        })
+        Some(publish_action_of(&self.get(id)?))
     }
 
     /// The approvals devices give to publish by hand.
@@ -3223,16 +3234,16 @@ impl Jobs {
         id: &str,
         action: &str,
     ) -> Result<String, String> {
-        match self.publish_action(id) {
-            Some(Ok((now, _))) if now == action => {}
-            Some(Ok(_)) => {
-                return Err("The job changed since it was approved. Approve it again.".into());
-            }
-            Some(Err(why)) => return Err(why),
-            None => return Err("There's no such job.".into()),
-        }
         use crate::publish::Failure;
-        match self.publish_job(id, None).await {
+        // Still obid's own sentence for it, checked as it's claimed for publishing.
+        let may = |job: &Job| match publish_action_of(job) {
+            Ok((now, _)) if now == action => Ok(()),
+            Ok(_) => Err(Failure::Refused(
+                "The job changed since it was approved. Approve it again.".into(),
+            )),
+            Err(why) => Err(Failure::Refused(why)),
+        };
+        match self.publish_job(id, None, may).await {
             Ok(url) => {
                 self.update(id, |job| {
                     job.publish_step = None;
@@ -3254,8 +3265,8 @@ impl Jobs {
                 });
                 Err(line)
             }
-            // The publish under way says how it went: this one changes nothing.
-            Err(Failure::Busy) => Err(Failure::Busy.line()),
+            // Nothing ran: the job is as it was (the publish under way says how it went).
+            Err(failure @ (Failure::Busy | Failure::Refused(_))) => Err(failure.line()),
             Err(failure) => {
                 let line = failure.line();
                 self.update(id, |job| {
@@ -3349,6 +3360,27 @@ impl Jobs {
                 }
             });
         }
+    }
+}
+
+/// What publishing `job` by hand would do: obid's own sentence and the base, or why there's
+/// nothing to publish.
+fn publish_action_of(job: &Job) -> Result<(String, String), String> {
+    match (&job.base, job.can_publish()) {
+        (Some(base), true) => Ok((crate::publish::action(&job, base), base.clone())),
+        _ => Err(if job.dismissed.is_some() {
+            "It was dismissed: there's nothing to publish.".into()
+        } else if job.status != Status::Done {
+            "Nothing to publish: the job hasn't finished.".into()
+        } else if job.kind == "review" || job.kind == "research" {
+            format!("Nothing to publish: a {} job doesn't publish.", job.kind)
+        } else if job.published.is_some() && job.unpublished() == 0 {
+            "It's already published, with every commit.".into()
+        } else if job.stranded() {
+            "Nothing to publish: its pull request was merged or closed.".into()
+        } else {
+            "Nothing to publish: the job made no commits.".into()
+        }),
     }
 }
 

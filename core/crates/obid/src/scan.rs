@@ -675,6 +675,12 @@ pub fn in_diff(diff: &str) -> Vec<Finding> {
                 rule: "vault secret in the file's name".into(),
             });
         }
+        // A name goes out as it is: the rules read it as they read a line.
+        all.extend(line_rules(file).into_iter().map(|rule| Finding {
+            name: file.clone(),
+            line: None,
+            rule: format!("{rule} in the file's name"),
+        }));
     }
     let lines: Vec<Line<'_>> = added
         .iter()
@@ -1202,6 +1208,29 @@ exit 99"#,
         let whole = known_secrets_in_file(&format!("one\nx = {vault}\n"), "f.txt");
         assert_eq!(whole.len(), 1);
         assert_eq!(whole[0].line, Some(2));
+    }
+
+    /// A file's name goes out as it is: the rules read it like a line. And the names of this
+    /// repository's own files are clean.
+    #[test]
+    fn a_token_in_a_files_name_is_found() {
+        let token = format!("ghp_{}", "e".repeat(36));
+        let found = in_diff(&format!("diff --git a/x/{token}.txt b/x/{token}.txt\n"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].rule, "GitHub token in the file's name");
+        assert_eq!(found[0].line, None);
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let files = std::process::Command::new("git")
+            .args(["ls-files"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let diff: String = String::from_utf8_lossy(&files.stdout)
+            .lines()
+            .map(|f| format!("diff --git a/{f} b/{f}\n"))
+            .collect();
+        let found = in_diff(&diff);
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]

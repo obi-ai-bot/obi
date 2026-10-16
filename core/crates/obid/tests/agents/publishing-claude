@@ -4,6 +4,10 @@
 //   COMMIT: <file>   writes the file in the worktree and commits it
 //   LEAK: <file>     commits the file with a made-up AWS access key id in it (put together here at
 //                    run time, so this file holds none a scanner flags)
+//   AUTHOR: <file>   commits the file with a made-up GitHub token as the commit's author's name
+//   HEADER: <file>   commits the file through a commit object with an extra header holding that
+//                    token (git hash-object), and moves HEAD to it
+//   SLOW: <file>     waits 3 seconds, then commits the file
 //   the publish gate's fix prompt ("secret scan blocked publishing … commit <sha>"): takes the key
 //                    out with `git commit --fixup=<sha>`, autosquashes onto the base the prompt
 //                    names, and ends the turn with what it was told
@@ -21,6 +25,8 @@ const git = (...args) => execFileSync("git", ["-c", "commit.gpgsign=false", ...a
 
 // A made-up key id: "AKIA" and 16 capitals, joined only when the agent runs.
 const KEY = ["AK", "IA", "QWERTYUIOPASDFGH"].join("");
+// A made-up GitHub token: "ghp_" and 36 varied letters and digits, joined only when it runs.
+const MADE_UP = ["gh", "p_", "Zq8LmN2pR4sT6uV8wX0yA1bC3dE5fG7hJ9kM"].join("");
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", (line) => {
@@ -36,6 +42,9 @@ rl.on("line", (line) => {
   const fix = prompt.match(/secret scan blocked publishing[\s\S]*— commit ([0-9a-f]{40})[\s\S]*--autosquash (origin\/\S+?)`/);
   const commit = prompt.match(/COMMIT: (\S+)/);
   const leak = prompt.match(/LEAK: (\S+)/);
+  const author = prompt.match(/AUTHOR: (\S+)/);
+  const header = prompt.match(/HEADER: (\S+)/);
+  const slow = prompt.match(/SLOW: (\S+)/);
   try {
     if (fix) {
       const file = git("show", "--name-only", "--format=", fix[1]).trim().split("\n")[0];
@@ -46,6 +55,33 @@ rl.on("line", (line) => {
         env: { ...process.env, GIT_SEQUENCE_EDITOR: ":" },
       });
       result(`Took the key out of ${file}.`);
+    } else if (author) {
+      writeFileSync(author[1], "hello\n");
+      git("add", author[1]);
+      execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add ${author[1]}`], {
+        env: { ...process.env, GIT_AUTHOR_NAME: MADE_UP },
+      });
+      result(`Added ${author[1]}.`);
+    } else if (header) {
+      writeFileSync(header[1], "hello\n");
+      git("add", header[1]);
+      const tree = git("write-tree").trim();
+      const parent = git("rev-parse", "HEAD").trim();
+      const who = "Agent <agent@example.com> 1791582173 +0000";
+      const object = `tree ${tree}\nparent ${parent}\nauthor ${who}\ncommitter ${who}\nx-note ${MADE_UP}\n\nAdd ${header[1]}\n`;
+      writeFileSync(".obi-commit", object);
+      const commit = git("hash-object", "-t", "commit", "-w", ".obi-commit").trim();
+      execFileSync("rm", [".obi-commit"]);
+      git("update-ref", "--no-deref", "HEAD", commit);
+      git("reset", "-q");
+      result(`Added ${header[1]}.`);
+    } else if (slow) {
+      setTimeout(() => {
+        writeFileSync(slow[1], "hello\n");
+        git("add", slow[1]);
+        git("commit", "-q", "-m", `Add ${slow[1]}`);
+        result(`Added ${slow[1]}.`);
+      }, 3000);
     } else if (leak) {
       writeFileSync(leak[1], `aws_key_id ${KEY}\nhello\n`);
       git("add", leak[1]);

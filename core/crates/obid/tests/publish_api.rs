@@ -25,8 +25,9 @@ fn agent() -> PathBuf {
 const PULL: &str = "https://github.com/obi-e2e/fixture-app/pull/7";
 
 /// A stand-in `gh` in `folder/bin`, keeping its state in `folder/gh`: every call's arguments
-/// (`calls`), its environment (`env`), the title and description it was given, the pull request it
-/// opened (`open`), and what `pr view` answers (`view.json`, written by the test).
+/// (`calls`), its environment (`env`), the title and description it was given, the open pull
+/// requests `pr list` answers (`open`: `__HEAD__` stands for the commit obid's clone has the
+/// branch at, which is what obid pushed), and what `pr view` answers (`view.json`).
 fn fake_gh(folder: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = folder.join("bin");
@@ -40,14 +41,19 @@ printf '%s\n' "$*" >> "$dir/calls"
 env >> "$dir/env"
 prev=
 case "$1 $2" in
-  "pr list") [ -f "$dir/open" ] && cat "$dir/open"; exit 0 ;;
+  "pr list")
+    [ -f "$dir/open" ] || exit 0
+    for a in "$@"; do [ "$prev" = --head ] && branch="$a"; prev="$a"; done
+    oid=$(git -C '{clone}' rev-parse "refs/heads/$branch")
+    sed "s/__HEAD__/$oid/" "$dir/open"
+    exit 0 ;;
   "pr create")
     for a in "$@"; do
       [ "$prev" = --body-file ] && cp "$a" "$dir/body"
       case "$a" in --title=*) printf '%s' "${{a#--title=}}" > "$dir/title" ;; esac
       prev="$a"
     done
-    echo '{PULL}' > "$dir/open"
+    echo '[{{"url":"{PULL}","isCrossRepository":false,"headRefOid":"__HEAD__"}}]' > "$dir/open"
     echo 'Creating pull request…'
     echo '{PULL}'
     exit 0 ;;
@@ -58,7 +64,8 @@ case "$1 $2" in
   *) echo "gh: not in this test" >&2; exit 1 ;;
 esac
 "#,
-        state = state.display()
+        state = state.display(),
+        clone = folder.join("home/clones/obi-e2e/fixture-app").display()
     );
     std::fs::write(bin.join("gh"), script).unwrap();
     std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -594,4 +601,99 @@ fn a_job_stopped_while_it_publishes_sends_nothing_more() {
     assert_eq!(job["published"], Value::Null);
     assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
     assert!(!calls_now(&folder.0).contains("pr create"));
+}
+
+/// What leaves in a commit besides its files and message is scanned too: a token as the author's
+/// name is a possible secret, and a commit carrying a header obid doesn't publish (here one holding
+/// a token) is refused. Nothing goes out either way.
+#[test]
+fn a_commits_author_and_headers_are_scanned_too() {
+    let folder = Folder::new("publish-headers");
+    let bin = fake_gh(&folder.0);
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    let author = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "AUTHOR: a.txt", "rounds": 2}),
+    );
+    let job = ended(&obid, &author);
+    assert_eq!(job["status"], "failed", "{job}\n{}", obid.log());
+    let summary = job["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("Not published: possible secret in commit author:1 (GitHub token"),
+        "{summary}"
+    );
+    // Who made a commit isn't the agent's to rewrite with a fixup: no fix round.
+    assert_eq!(job["round"], 1);
+    assert_eq!(remote_branch(&remote, &format!("oby/build-{author}")), None);
+    let header = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "HEADER: b.txt"}),
+    );
+    let job = ended(&obid, &header);
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    let error = job["publishError"].as_str().unwrap();
+    assert!(
+        error.contains("carries a header obid doesn't publish (xnote)"),
+        "{error}"
+    );
+    assert_eq!(remote_branch(&remote, &format!("oby/build-{header}")), None);
+    assert_eq!(job["outgoing"], json!([]));
+    assert!(!calls_now(&folder.0).contains("pr create"));
+}
+
+/// An open pull request from a fork's branch of the same name isn't obid's: obid opens its own
+/// rather than edit (and vouch for) someone else's.
+#[test]
+fn a_forks_pull_request_of_the_same_branch_is_never_taken_for_obids() {
+    let folder = Folder::new("publish-fork");
+    let bin = fake_gh(&folder.0);
+    std::fs::write(
+        folder.0.join("gh/open"),
+        r#"[{"url":"https://github.com/obi-e2e/fixture-app/pull/9","isCrossRepository":true,"headRefOid":"__HEAD__"}]"#,
+    )
+    .unwrap();
+    let (obid, _, _) = obid_with(&folder, &bin);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: hello.txt"}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["published"], PULL, "{job}");
+    let calls = calls_now(&folder.0);
+    assert!(calls.contains("pr create"), "{calls}");
+    assert!(!calls.contains("pr edit"), "{calls}");
+}
+
+/// The base can't be fetched when it publishes: nothing goes out, and `publishError` says so
+/// without git's command line or the remote's address.
+#[test]
+fn a_base_that_cant_be_fetched_sends_nothing() {
+    let folder = Folder::new("publish-nofetch");
+    let bin = fake_gh(&folder.0);
+    let (obid, remote, _) = obid_with(&folder, &bin);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "SLOW: hello.txt"}),
+    );
+    within(60, "the agent starts", || {
+        let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["status"] == "running").then_some(())
+    });
+    let gone = folder.0.join("gone");
+    std::fs::rename(&remote, &gone).unwrap();
+    let job = ended(&obid, &id);
+    std::fs::rename(&gone, &remote).unwrap();
+    assert_eq!(job["status"], "done", "{job}");
+    let error = job["publishError"].as_str().unwrap();
+    assert!(
+        error.starts_with("Not published: couldn't fetch main: "),
+        "{error}"
+    );
+    assert!(!error.contains(remote.to_str().unwrap()), "{error}");
+    assert!(
+        !error.contains("credential.helper") && !error.contains("--no-tags"),
+        "{error}"
+    );
+    assert_eq!(job["outgoing"], json!([]));
+    assert_eq!(remote_branch(&remote, &format!("oby/build-{id}")), None);
 }

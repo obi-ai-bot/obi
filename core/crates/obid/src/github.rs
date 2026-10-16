@@ -153,19 +153,42 @@ pub enum Sent {
     Nothing,
 }
 
+/// The open pull request obid published `branch` to: from this repository itself (never a fork's
+/// branch of the same name, which `gh pr list --head` would match too) and with one of `heads` as
+/// its head: the commit obid just pushed, or the one it pushed before (GitHub may not have moved
+/// it yet). `gh pr list --json` answers a list of them.
+pub fn own_pull_request(listed: &str, repo: &str, heads: &[&str]) -> Option<String> {
+    if listed.trim().is_empty() {
+        return None;
+    }
+    let list: Vec<Value> = serde_json::from_str(listed).ok()?;
+    list.iter()
+        .filter(|pr| {
+            pr["isCrossRepository"] == Value::Bool(false)
+                && pr["headRefOid"]
+                    .as_str()
+                    .is_some_and(|h| git_sha(h) && heads.contains(&h))
+        })
+        .filter_map(|pr| pr["url"].as_str())
+        .find(|url| pull_request_number(url, repo).is_some())
+        .map(str::to_owned)
+}
+
 /// Opens the pull request for `branch` into `base`, ready for review (never a draft), or finds the
-/// one already open for the branch and brings its description up to date from `body_file`.
-/// Answers its URL, which must be a pull request of `repo`, and what went out.
+/// one obid already opened for it (`own_pull_request`: same repository, one of `heads` its head) and
+/// brings its description up to date from `body_file`. Answers its URL, which must be a pull
+/// request of `repo`, and what went out.
 pub async fn open_pull_request(
     gh: &Path,
     repo: &str,
     base: &str,
     branch: &str,
+    heads: &[&str],
     title: &str,
     body_file: &Path,
 ) -> Result<(String, Sent), String> {
     let body = body_file.to_string_lossy();
-    let open = run(
+    let listed = run(
         gh,
         &[
             "pr",
@@ -177,17 +200,12 @@ pub async fn open_pull_request(
             "--state",
             "open",
             "--json",
-            "url",
-            "--jq",
-            ".[0].url // empty",
+            "url,isCrossRepository,headRefOid",
         ],
     )
     .await
     .map_err(|e| format!("Couldn't look for the open pull request: {e}"))?;
-    if !open.is_empty() {
-        if pull_request_number(&open, repo).is_none() {
-            return Err("gh named a pull request that isn't one of this repository's.".into());
-        }
+    if let Some(open) = own_pull_request(&listed, repo, heads) {
         // The commits are on it already; a description that didn't update isn't worth failing for.
         let edited = run(gh, &["pr", "edit", &open, "-R", repo, "--body-file", &body])
             .await
@@ -290,6 +308,10 @@ pub fn decode(text: &str, now: i64) -> Option<PullRequest> {
     })
 }
 
+fn git_sha(text: &str) -> bool {
+    crate::git::is_sha(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +341,44 @@ mod tests {
             pull_request_number("https://github.com/../x/pull/1", "../x"),
             None
         );
+    }
+
+    /// Only a pull request from this repository's own branch, at a commit obid pushed: never a
+    /// fork's pull request from a branch of the same name.
+    #[test]
+    fn only_its_own_open_pull_request_is_adopted() {
+        let repo = "deskree-inc/oby";
+        let head = "a".repeat(40);
+        let before = "b".repeat(40);
+        let pr = |url: &str, cross: bool, oid: &str| json!({"url": url, "isCrossRepository": cross, "headRefOid": oid});
+        let ours = "https://github.com/deskree-inc/oby/pull/42";
+        let list = |items: Vec<Value>| Value::Array(items).to_string();
+        assert_eq!(
+            own_pull_request(&list(vec![pr(ours, false, &head)]), repo, &[&head]),
+            Some(ours.into())
+        );
+        assert_eq!(
+            own_pull_request(
+                &list(vec![pr(ours, false, &before)]),
+                repo,
+                &[&head, &before]
+            ),
+            Some(ours.into())
+        );
+        for listed in [
+            list(vec![pr(ours, true, &head)]),
+            list(vec![pr(ours, false, &"c".repeat(40))]),
+            list(vec![pr(
+                "https://github.com/other/oby/pull/42",
+                false,
+                &head,
+            )]),
+            list(vec![json!({"url": ours})]),
+            String::new(),
+            "not json".into(),
+        ] {
+            assert_eq!(own_pull_request(&listed, repo, &[&head]), None, "{listed}");
+        }
     }
 
     #[test]
