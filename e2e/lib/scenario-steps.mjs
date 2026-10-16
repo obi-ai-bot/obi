@@ -17,6 +17,7 @@ import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { groupRunning } from "./processes.mjs";
 import { FIXTURE, git, refs } from "./fixture.mjs";
 import {
   ADMIN_SCOPES, BRIEF, CANARY, EXPECTED_DECISION, EXPECTED_FINDINGS, EXPECTED_RESULT, EXPIRES_IN,
@@ -230,7 +231,7 @@ async function step1(ctx) {
   const sphereDir = join(R, "sphere");
   for (const d of ["state", "home", "tmp"]) mkdirSync(join(sphereDir, d), { recursive: true });
   mkdirSync(join(R, "harness"), { recursive: true });
-  ctx.sphereProcess = ctx.start("sphere", "pnpm", ["run", "local", "--", "--port", String(spherePort), "--persist-to", join(sphereDir, "state")], {
+  ctx.sphereProcess = ctx.start("sphere", process.execPath, ["scripts/local.mjs", "--port", String(spherePort), "--persist-to", join(sphereDir, "state")], {
     cwd: join(ctx.env.OBI_SPHERE_DIR, "server"),
     env: { SPHERE_OPERATOR_TOKEN: ctx.operatorToken, HOME: join(sphereDir, "home"), TMPDIR: join(sphereDir, "tmp"), WRANGLER_SEND_METRICS: "false", PATH: process.env.PATH },
     log: join(R, "harness", "sphere.log"),
@@ -540,16 +541,19 @@ async function step7(ctx) {
   ctx.chainVerified = true;
 }
 
-// SIGTERM to a process's group; its exit, or null after `seconds`.
+// Test the documented PID-only shutdown. Failure cleanup in run.mjs still
+// signals groups so a broken launcher cannot leave a Worker behind.
 async function stop(child, seconds) {
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
-    try {
-      child.kill("SIGTERM");
-    } catch {}
+  const deadline = Date.now() + seconds * 1000;
+  child.kill("SIGTERM");
+  const exited = await Promise.race([child.exited, sleep(seconds * 1000).then(() => null)]);
+  if (!exited) return null;
+  // The launcher exiting isn't enough: its children must also have stopped.
+  while (Date.now() < deadline) {
+    if (!groupRunning(child.pid)) return exited;
+    await sleep(100);
   }
-  return Promise.race([child.exited, sleep(seconds * 1000).then(() => null)]);
+  return null;
 }
 
 async function step8(ctx) {
@@ -576,7 +580,7 @@ async function step8(ctx) {
   // 8.6 Clean exit: SIGTERM to obid A, obid B and the Sphere.
   for (const [name, child, zero] of [["obid A", ctx.obids.a.process, true], ["obid B", ctx.obids.b.process, true], ["the Sphere", ctx.sphereProcess, false]]) {
     const exit = await stop(child, 10);
-    assert(exit, `${name} was still running 10 seconds after SIGTERM`);
+    assert(exit, `${name} or its descendants were still running 10 seconds after PID-only SIGTERM`);
     if (zero) assert(exit.code === 0, `${name} exited with ${exit.code ?? exit.signal}, not 0`);
   }
   // 8.4 No process wrote outside its write root, as far as the run can see.
