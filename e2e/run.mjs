@@ -29,6 +29,7 @@ import {
   AGENT_FLAGS, BRIEF, CANARY, EXPECTED_FINDINGS, EXPECTED_RESULT, OBIS, STUB_PROMPT,
 } from "./lib/scenario.mjs";
 import { scenarioDocProblems } from "./lib/scenario-doc.mjs";
+import { MIN_NODE_VERSION, requireNodeVersion } from "./lib/node-version.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const OBI_DIR = resolve(here, "..");
@@ -151,10 +152,9 @@ async function loadSpec() {
 
 const preflight = [
   {
-    title: "Node 22 or later",
+    title: `Node ${MIN_NODE_VERSION} or later`,
     run: async () => {
-      const major = Number(process.versions.node.split(".")[0]);
-      assert(major >= 22, `Node ${process.versions.node}; the harness and wrangler need 22 or later`);
+      requireNodeVersion(process.versions.node);
       return `Node ${process.versions.node}`;
     },
   },
