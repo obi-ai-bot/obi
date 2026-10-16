@@ -2,15 +2,15 @@
 //! code (apps/shared/Runner.swift and what it needs: apps/shared/Decisions.swift, apps/shared/JobList.swift,
 //! apps/shared/Elapsed.swift, apps/shared/DeviceKey.swift and Engine/, compiled as the Oby target compiles
 //! them) and follows a running obid as apps/mac/app/RunnerFeed.swift follows the runner on this Mac
-//! (Settings › Runner › This Mac, #283): the token through `LocalRunner.token(from:)`, `GET
+//! (Settings › Runner › This Mac, #283): the token through `LocalRunner.token(home:fallback:)`, `GET
 //! /v1/events`, then status, the jobs, the inbox (open and done), the conversation and a job by
 //! id, read into the app's types; Clear done; and Stop all from the island on a job that started
 //! while it followed. macOS only: the app is a Mac app, and swiftc comes with Xcode.
 //!
 //! The app's own `LocalRunner.url` is `http://127.0.0.1:7777`: to follow obid, the app needs obid
-//! listening there (`"listen": "127.0.0.1:7777"`) and obid's token in its keychain item
-//! (`com.deskree.oby.runner`, `token`). This test gives the client obid's address and token
-//! instead, so it never touches the keychain or a port another runner may hold.
+//! listening there (`"listen": "127.0.0.1:7777"`) with its home set to `LocalRunner.home`.
+//! This test gives the client an isolated obid home and address, so it reads the private token
+//! file without touching the keychain or a port another runner may hold.
 
 #![cfg(target_os = "macos")]
 
