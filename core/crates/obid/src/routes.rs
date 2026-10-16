@@ -269,6 +269,7 @@ fn new_job(job: &Map<String, Value>) -> Result<NewJob, String> {
         files,
         attachments: None,
         mode: text("mode")?,
+        conversation: None,
     })
 }
 

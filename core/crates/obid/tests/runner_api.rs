@@ -197,8 +197,8 @@ fn jobs_have_iso_dates_and_every_key() {
             .filter(|k| !SWIFT_JOB_KEYS.contains(k))
             .collect();
         extra.sort_unstable();
-        assert_eq!(extra, ["obi", "worktree"], "{body}");
-        assert_eq!(keys.len(), 67);
+        assert_eq!(extra, ["conversation", "obi", "worktree"], "{body}");
+        assert_eq!(keys.len(), 68);
         // What obid never sets is there, as null.
         for key in [
             "published",

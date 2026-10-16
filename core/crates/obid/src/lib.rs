@@ -193,7 +193,7 @@ pub async fn serve(
     jobs.use_plugins(plugins.clone());
     let cleared = clear::Cleared::open(&config.home);
     let devices = devices::Devices::open(&config.home);
-    let conversation = conversation::Conversation::open(&config.home, events.clone());
+    let conversations = conversation::Conversations::open(&config.home, events.clone());
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -203,7 +203,7 @@ pub async fn serve(
         devices,
         jobs: jobs.clone(),
         events,
-        conversation,
+        conversations,
         link: link.clone(),
         plugins: plugins.clone(),
         stopping: stopping_rx.clone(),

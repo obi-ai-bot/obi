@@ -461,7 +461,7 @@ To answer the brain's question, send the original words with the answer:
 
 Bare cancel words ("never mind", "stop", "cancel", "forget it") never reach the brain. When a conversation turn is underway they request a boundary stop; otherwise the answer is `none` and nothing stops. Stopping coding work still takes a job's name or "stop everything".
 
-The conversation so far is the runner's own, the last 50 of the turns it keeps (`GET /v1/conversation`, below). An app that shows its own thread sends it instead, oldest first; `who` is `user` or `oby`, `text` 1 to 2,000 characters, at most 50 turns (`422` otherwise). Either way the new exchange joins the runner's conversation.
+The conversation so far is the runner's own, the last 50 of the turns it keeps (`GET /v1/conversation`, below). An app that shows its own thread sends it instead, oldest first; `who` is `user` or `oby`, `text` 1 to 2,000 characters, at most 50 turns (`422` otherwise). Either way the new exchange joins the runner's conversation. On `obid`, which keeps many conversations, the request may name the one it joins (`conversation`, or `new`), and the answer says which it joined: obid only: conversations, below.
 
 While a turn carries out actions, `GET /v1/events` sends a `step` event when each action starts and when it ends. Its `turn` is the user's turn id, `index` starts at 1, `action` is the plan action (including `research`), `text` is a short description, `state` is `running`, `done` or `failed`, and `at` is ISO 8601 time:
 
@@ -534,7 +534,7 @@ Every Lead turn is logged on the runner (the words, the plan or why it was refus
 
 One thread for every device (#11): the conversation the runner keeps, which every `POST /v1/plans` joins, whichever app sent it. The runner keeps the last 500 turns in `oby.sqlite`, the oldest pruned; the brain reads the last 50 of them. Answers one page, oldest first:
 
-obid keeps the same 500-turn thread in its private `home/conversation.json`; its API and events have the same shape.
+`obid` keeps many conversations, 500 turns each, and every turn names its `conversation`. There this endpoint takes `id`, and without it answers the latest conversation: obid only: conversations, below.
 
 ```json
 [{"id": "7c1e2f30-…", "who": "user", "text": "Review oby PR #33", "at": "2026-10-11T09:12:00Z", "jobs": []},
@@ -1183,6 +1183,41 @@ the fallback when no usable obid file exists or the server refuses its token wit
 credential is refreshed, so a stale file does not prevent connecting to a running Swift runner,
 and rotating obid's token does not require restarting the app. Other obid homes and ports remain
 valid for other clients; This Mac mode uses the fixed home and address above.
+
+### obid only: conversations
+
+Many conversations with Oby instead of one thread (#493; decided 2026-10-16, D2): each thing asked on Home can start its own, and every device sees them all. The Swift runner keeps its one thread.
+
+A conversation, as `GET /v1/conversations` lists it and the `conversation` event sends it:
+
+```json
+{"id": "5b0e2c4d-…", "title": "Review oby PR #33", "pinned": false,
+ "created": "2026-10-16T09:12:00Z", "lastActivity": "2026-10-16T09:14:07Z"}
+```
+
+- `id`: a lower-case UUID. `title`: the first line the user said in it, as Sangam's design names conversations (`design/app/src/renderer/src/chats.ts`): at most 48 characters (the first 45 and `…` when longer), its first letter upper-case. A rename replaces it. `created`: when it started. `lastActivity`: its latest turn's `at`, or `created`. Renaming or pinning isn't activity.
+- Each keeps its last 500 turns, the oldest pruned, in a private file of its own (`home/conversations/<id>.json`, 0600).
+- Every turn names its conversation: `GET /v1/conversation` and the `turn` event carry `"conversation": "<id>"`.
+
+**`GET /v1/conversations?after=&limit=`**: the conversations, the pinned ones first, then the others, each newest first (by their latest turn; obid orders turns exactly, not only to the second). `limit` is as for turns: 50 unless asked, 1 to 500. `after` is the `id` of the last conversation you show, for the ones after it: `404` for one that isn't there (deleted since). Fewer than `limit` means there are no more; `[]` before anything was said.
+
+**`GET /v1/conversation?id=&before=&limit=`**: one page of the conversation `id`'s turns, as above; `404` for an `id` that isn't there. Without `id`, a `before` turn names the conversation (the one it's in); with neither, it's the latest conversation (the one with the latest turn), `[]` when there's none. So an app from before #493 shows the latest conversation and pages back through the one it shows.
+
+**`PATCH /v1/conversations/{id}`** with `{"title": "Vault questions"}`, `{"pinned": true}` or both renames or pins it, and answers the conversation. The title is trimmed, one line of 1 to 100 characters. `422` for neither key or a bad title, `400` for any other key or a body that isn't that, `404` for an id that isn't there.
+
+**`DELETE /v1/conversations/{id}`** forgets it and its turns: `204`, `404` for an id that isn't there. The jobs it started stay, and keep its id in their `conversation`: show such a job's card on its own.
+
+**`POST /v1/plans`** takes `conversation`, an `id` (the words join it; `404` if it isn't there), or `"new": true` (they start a new conversation, titled from them); both is `422`. With neither, the words join the latest conversation, or start the first one: the apps from before #493 (the Mac, the iPhone, the Watch) send neither and show one thread, and the notch, the Watch and the talk key carry on the latest conversation (#493). The brain reads only that conversation's turns (or the `turns` the app sends). Every answer, whatever its `kind`, carries `"conversation": "<id>"`, the one the words joined.
+
+**Jobs remember the conversation that started them.** A job a plan started has `conversation`, the id of the conversation whose words started it, kept when that conversation is deleted, and every `job` event of it carries it, up to the last one (how it ended): show its events in that conversation. A job from `POST /v1/jobs`, or another Obi's review, has `conversation` null. An inbox item names its `job`, so it belongs where its job does. obid doesn't yet write a job's events into its conversation as turns (#351), and work that comes in from elsewhere (a routine, another Oby, GitHub) doesn't yet start a conversation of its own.
+
+**Events.** A `conversation` event comes when one starts (before its first `turn`), and when one is renamed or pinned, with the conversation as listed; when one is deleted, it's `{"id": "<id>", "deleted": true}`: take it out. A `turn` event moves its conversation's `lastActivity` to the turn's `at`, with no `conversation` event. An app from before #493 adds every `turn` to the one thread it shows, whichever conversation it's in, until it fetches again.
+
+**From one thread to many.** When obid starts, the single thread it kept before #493 (`home/conversation.json`) becomes the first conversation, with all its turns: its `id` is the thread's first turn's, its `title` comes from the first thing the user said in it, and its `created` is that turn's `at`. Then the old file is deleted. A move cut short is finished at the next start, never made twice.
+
+**Through the gateway.** `GET /v1/conversations`, `PATCH` and `DELETE /v1/conversations/{id}` aren't on the gateway's allowlist (Runner/Routes.swift), like the rest of this section; `GET /v1/conversation` and `POST /v1/plans` are, as before.
+
+**Memory isn't shared between conversations yet.** What the user decides in one conversation ("never touch the Watch target") should hold in all of them (#493). obid's brain has no memory or briefing that could carry it: it reads only the conversation's own turns. Its remembered decisions (below) are the owner's answers to other Obis' requests, not what they say to Oby. Until Oby's memory (#378) comes to obid, a decision said in one conversation doesn't reach the others.
 
 ### obid only: Sphere membership
 

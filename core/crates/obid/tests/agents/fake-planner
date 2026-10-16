@@ -1,4 +1,9 @@
 #!/bin/sh
+# Run as a job's agent rather than as the brain (no --json-schema), it fails at once.
+case " $* " in
+  *" --json-schema "*) ;;
+  *) echo "fake-planner plans; it doesn't do the work" >&2; exit 1 ;;
+esac
 input=$(cat)
 printf '%s\n' "$input" > "$HOME/plan-input"
 current=$(printf '%s\n' "$input" | sed -n '/The user says now:/,$p')
