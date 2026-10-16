@@ -471,7 +471,7 @@ async fn messages_that_fail_the_checks_are_dropped_and_never_answered() {
     let question = ernesto.request(
         "obi-wellington",
         "question",
-        json!({"goal": "Know the plan", "question": "Which branch?"}),
+        json!({"text": "Which branch?"}),
         3600,
     );
     sphere.record_unchecked("obi-wellington", question.clone());
@@ -581,7 +581,7 @@ async fn obid_asks_another_obi_and_follows_the_exchange() {
             "itself",
         ),
         (
-            json!({"to": "obi-ernesto", "type": "question", "body": {"goal": "g", "question": "q"}, "expiresIn": 3600}),
+            json!({"to": "obi-ernesto", "type": "question", "body": {"text": "q"}, "expiresIn": 3600}),
             "accept",
         ),
         (

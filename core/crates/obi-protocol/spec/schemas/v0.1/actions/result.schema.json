@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/obi-ai-bot/obi-sphere/raw/main/spec/schemas/v0.1/actions/result.schema.json",
   "title": "result body",
-  "description": "Finishes a request: a review's verdict and findings, a question's answer, or a handoff's outcome. `for` says which.",
+  "description": "Finishes a review_request or a handoff: a review's verdict and findings, or a handoff's outcome. `for` says which. A question is answered by `answer`, never by a result.",
   "oneOf": [
     {
       "title": "result of a review_request",
@@ -21,19 +21,6 @@
       },
       "if": { "required": ["outcome"], "properties": { "outcome": { "enum": ["approved", "changes_requested"] } } },
       "then": { "required": ["acceptance"] }
-    },
-    {
-      "title": "result of a question",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["for", "outcome", "answer"],
-      "properties": {
-        "for": { "const": "question" },
-        "outcome": { "const": "answered" },
-        "answer": { "$ref": "../common.schema.json#/$defs/block_text", "x-obi-text": "data", "minLength": 1, "maxLength": 2000 },
-        "choice": { "type": "integer", "minimum": 0, "maximum": 2, "description": "The index of the choice picked, when the question had choices." },
-        "by_rule": { "$ref": "../common.schema.json#/$defs/rule_id" }
-      }
     },
     {
       "title": "result of a handoff",

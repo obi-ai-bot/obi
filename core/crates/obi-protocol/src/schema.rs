@@ -19,6 +19,10 @@ pub const SCHEMAS: &[(&str, &str)] = &[
         include_str!("../spec/schemas/v0.1/actions/accept.schema.json"),
     ),
     (
+        "actions/answer",
+        include_str!("../spec/schemas/v0.1/actions/answer.schema.json"),
+    ),
+    (
         "actions/decline",
         include_str!("../spec/schemas/v0.1/actions/decline.schema.json"),
     ),

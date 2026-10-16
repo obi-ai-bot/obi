@@ -1,13 +1,13 @@
 {
   "case": "envelope",
-  "name": "invalid-missing-result-answer-outcome",
-  "description": "A result answer body without outcome.",
+  "name": "invalid-ref-without-repo",
+  "description": "A pull request reference with no repository.",
   "expect": "reject",
   "reason": "invalid_envelope",
   "context": {
     "now": "2026-10-14T12:00:00Z",
     "sphere": "conf-sphere",
-    "receiver": "obi-b",
+    "receiver": "obi-a",
     "keys": {
       "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M": {
         "obi": "obi-a",
@@ -22,21 +22,24 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "bc5d13c9-9dec-8939-831a-62d6c623bbe4",
-    "type": "result",
-    "from": "obi-a",
-    "to": "obi-b",
+    "id": "62f98e11-d559-8864-840d-5347386e5c61",
+    "type": "question",
+    "from": "obi-b",
+    "to": "obi-a",
     "sphere": "conf-sphere",
-    "correlation_id": "293ecc97-39be-89df-82d7-918d301f18fa",
-    "in_reply_to": "293ecc97-39be-89df-82d7-918d301f18fa",
+    "correlation_id": "62f98e11-d559-8864-840d-5347386e5c61",
     "created_at": "2026-10-14T11:59:00Z",
     "expires_at": "2026-10-14T13:00:00Z",
-    "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
+    "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
     "body": {
-      "for": "question",
-      "answer": "No: keep full precision.",
-      "choice": 1
+      "text": "Is this ready?",
+      "about": [
+        {
+          "kind": "pr",
+          "pr": 260
+        }
+      ]
     },
-    "signature": "XqYPhXIy48UdkVygylTs9JGy2cfeTlkG9aO-TG7BBA0S8hACkLyjhiI0RJFuH1EcBkxN-J4fU8HiM_ZfjMLoBw"
+    "signature": "sCYgC_jHdkz5SDYa3xDTSCzO1-BXvQSP1wupzC7QxAIA_aiRvlLTybARG0ChIPGDXR3iNu7L3eTSuBjWkgH-Cg"
   }
 }

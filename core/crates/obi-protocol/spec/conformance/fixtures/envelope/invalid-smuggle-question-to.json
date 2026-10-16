@@ -1,7 +1,7 @@
 {
   "case": "envelope",
-  "name": "invalid-missing-question-goal",
-  "description": "A question body without goal.",
+  "name": "invalid-smuggle-question-to",
+  "description": "A question naming more Obis in its body: one envelope goes to one Obi, and a question to several is one envelope each.",
   "expect": "reject",
   "reason": "invalid_envelope",
   "context": {
@@ -22,23 +22,32 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "246bcc1e-c9b2-866c-8b40-34a55506c9f2",
+    "id": "0eea4a6e-dabe-8302-8fe8-6f93d66fde5c",
     "type": "question",
     "from": "obi-b",
     "to": "obi-a",
     "sphere": "conf-sphere",
-    "correlation_id": "246bcc1e-c9b2-866c-8b40-34a55506c9f2",
+    "correlation_id": "0eea4a6e-dabe-8302-8fe8-6f93d66fde5c",
     "created_at": "2026-10-14T11:59:00Z",
     "expires_at": "2026-10-14T13:00:00Z",
     "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
     "body": {
-      "question": "Should average() round to two decimals?",
+      "text": "Should average() round to two decimals?",
+      "about": [
+        {
+          "kind": "repo",
+          "repo": "obi-conf/fixture-app"
+        }
+      ],
       "choices": [
         "Yes",
         "No"
       ],
-      "repo": "obi-conf/fixture-app"
+      "to": [
+        "obi-a",
+        "obi-c"
+      ]
     },
-    "signature": "lmer1sg3pZju8rdOFtEc-fowHX-bhd_ZHdXkOjGA3nM1FF2f1HmJTAkTgJTu63mhXhGc5Xaaiq2n7pdQ75_pBw"
+    "signature": "BtSdgVTz-RtcwCzB3gs7XyFnTpegMxiOJMqO5X2Uymaz3owyOoAZ_Nk5nBjkSKUzrzCKPX8rRqijshkcZdoXBg"
   }
 }

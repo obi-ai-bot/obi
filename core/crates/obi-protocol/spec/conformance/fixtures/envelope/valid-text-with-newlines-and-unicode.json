@@ -21,19 +21,18 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "23711164-c766-867b-82ed-f4de35aa1b03",
+    "id": "bdc80f6e-18cf-84ec-8060-2cd1c751e982",
     "type": "question",
     "from": "obi-b",
     "to": "obi-a",
     "sphere": "conf-sphere",
-    "correlation_id": "23711164-c766-867b-82ed-f4de35aa1b03",
+    "correlation_id": "bdc80f6e-18cf-84ec-8060-2cd1c751e982",
     "created_at": "2026-10-14T11:59:00Z",
     "expires_at": "2026-10-14T13:00:00Z",
     "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
     "body": {
-      "goal": "Décider l'arrondi · 丸め",
-      "question": "Line one\n\tLine two: ¿redondear? 🙂"
+      "text": "Décider l'arrondi · 丸め\nLine one\n\tLine two: ¿redondear? 🙂"
     },
-    "signature": "ubE7KqZijXt0QyNJol3pJJvCW2YmXamh7teX9S26WbZjAHN_Ap-TF-rpvJY3-CYDC8PJCBdBE-Qh1IC03rM5Cw"
+    "signature": "eF2AbU1cvAp2SnKopHGWYymkdozAV6fLjA1Dkb-nhxZXx1c_NLL2ItaqjzCLg4fcIb6xaITAK3E5kJFCPyPaAA"
   }
 }

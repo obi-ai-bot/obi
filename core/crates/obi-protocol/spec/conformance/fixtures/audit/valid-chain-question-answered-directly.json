@@ -1,7 +1,7 @@
 {
   "case": "audit",
   "name": "valid-chain-question-answered-directly",
-  "description": "A question answered by a result with no accept: only a question may be.",
+  "description": "A question the Obi answers by itself, with no accept: an answer needs none.",
   "expect": "accept",
   "context": {
     "keys": {
@@ -45,27 +45,31 @@
           "expires_at": "2026-10-14T13:00:00Z",
           "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
           "body": {
-            "goal": "Decide the rounding rule",
-            "question": "Should average() round to two decimals?",
+            "text": "Should average() round to two decimals?",
+            "about": [
+              {
+                "kind": "repo",
+                "repo": "obi-conf/fixture-app"
+              }
+            ],
             "choices": [
               "Yes",
               "No"
-            ],
-            "repo": "obi-conf/fixture-app"
+            ]
           },
-          "signature": "TGqEkDlaCVZKIUx4t0apQ8tf563QworQVHhyHafW5kbvN33AhyK5BT61NHBYYpGUK9pxlIDBgbHES38-ZINABA"
+          "signature": "kDZQ-RrKYdryNszQor36mHNhv9qrTu9HPTXv7h9-LGmcFsUayIBPYBII926s1ALWMPhQNzK2j3LDRNc6KV4UAg"
         },
-        "hash": "e105e7642746d065c0037d74451a9af33536b7c63f46a70b783c7ab471bc1f41"
+        "hash": "448a3a0d5c12b19f014937b8a4f0f6d913ebb565968cf6ef3bee9a09a4d01d45"
       },
       {
         "sphere": "conf-sphere",
         "seq": 2,
-        "prev": "e105e7642746d065c0037d74451a9af33536b7c63f46a70b783c7ab471bc1f41",
+        "prev": "448a3a0d5c12b19f014937b8a4f0f6d913ebb565968cf6ef3bee9a09a4d01d45",
         "recorded_at": "2026-10-14T11:59:02Z",
         "envelope": {
           "protocol": "obi/0.1",
           "id": "ab2b3e3f-21c2-8570-8ee2-162b49ff51c4",
-          "type": "result",
+          "type": "answer",
           "from": "obi-a",
           "to": "obi-b",
           "sphere": "conf-sphere",
@@ -75,14 +79,25 @@
           "expires_at": "2026-10-14T13:00:00Z",
           "key_id": "ed25519:z6WLmvO2TG4LaAn2ppQXKN2Po5NJVyWEm4RIFgMBs-M",
           "body": {
-            "for": "question",
-            "outcome": "answered",
-            "answer": "No: keep full precision.",
-            "choice": 1
+            "by": "obi",
+            "text": "The job for #251 is in review: PR #260 is open and its checks pass. Merging it is my owner's call.",
+            "refs": [
+              {
+                "kind": "pr",
+                "repo": "obi-conf/fixture-app",
+                "pr": 260
+              },
+              {
+                "kind": "job",
+                "repo": "obi-conf/fixture-app",
+                "job": "9f08fd10"
+              }
+            ],
+            "by_rule": "share-job-status-with-team"
           },
-          "signature": "iyk4xwuPrInsPv5JKHifLNPjYXOw6X8W8V_DnKk-1f6R31DPFEo_nRvN0LM_KqvYeWUg1I_12ReQV78cMquJCg"
+          "signature": "tIKiXKVqMqH32vwi8huI_UuaHgQc6uf6Lp3j1wklTlTRfoo-VmFVpiHYtTr5c2NolXW5N0GOn_sOCHTueRUvBA"
         },
-        "hash": "819c428a552b1b0a14b1ed13d57c5457e30296d81cc751d51ef2181adc69e911"
+        "hash": "fe829297206ad43d3a25420126422314b7615b14de11df327d6670deb352f6e6"
       }
     ]
   }

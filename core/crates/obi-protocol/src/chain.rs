@@ -67,20 +67,24 @@ pub fn exchange_problem(
     }
     let accepted = earlier.iter().any(|e| text(e, "type") == "accept");
     let kind = text(reply, "type");
+    let asked = text(request, "type");
     if kind == "accept" && accepted {
         return Some("accepted twice".into());
     }
     if kind == "result" {
         let answers = reply["body"]["for"].as_str().unwrap_or("");
-        let asked = text(request, "type");
         if answers != asked {
             return Some(format!("a result for {answers} answers a {asked}"));
         }
-        if asked != "question" && !accepted {
+        if !accepted {
             return Some(format!(
                 "a {asked} is answered by a result only after an accept"
             ));
         }
+    }
+    // An answer answers a question, and nothing else; an accept before it is allowed, not needed.
+    if kind == "answer" && asked != "question" {
+        return Some(format!("an answer answers a question, not a {asked}"));
     }
     None
 }

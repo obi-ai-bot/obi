@@ -1,7 +1,7 @@
 {
   "case": "envelope",
-  "name": "invalid-missing-question-question",
-  "description": "A question body without question.",
+  "name": "invalid-ref-repeated",
+  "description": "The same reference twice.",
   "expect": "reject",
   "reason": "invalid_envelope",
   "context": {
@@ -22,23 +22,30 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "949860b1-89f3-82f9-89f7-bb31b84476a7",
+    "id": "612e91e2-54fa-86db-87c5-2c4b6498b41c",
     "type": "question",
     "from": "obi-b",
     "to": "obi-a",
     "sphere": "conf-sphere",
-    "correlation_id": "949860b1-89f3-82f9-89f7-bb31b84476a7",
+    "correlation_id": "612e91e2-54fa-86db-87c5-2c4b6498b41c",
     "created_at": "2026-10-14T11:59:00Z",
     "expires_at": "2026-10-14T13:00:00Z",
     "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
     "body": {
-      "goal": "Decide the rounding rule",
-      "choices": [
-        "Yes",
-        "No"
-      ],
-      "repo": "obi-conf/fixture-app"
+      "text": "Is this ready?",
+      "about": [
+        {
+          "kind": "pr",
+          "repo": "obi-conf/fixture-app",
+          "pr": 260
+        },
+        {
+          "kind": "pr",
+          "repo": "obi-conf/fixture-app",
+          "pr": 260
+        }
+      ]
     },
-    "signature": "k22dvXoToEcGwetm_XVj29jCemp-TUq6s53EFy1zZpebH2fsxJ0x0Jf3GSyrfYW2ix8u0WhPiQlrRgRXIpLFDA"
+    "signature": "8AuF4DOmiEez0NDAn7p6k_4JIR17lejfVFxyjrSbNTRnXaIVZ-k-7zvUAvgkvZFLh6ZyBSZMdXZpVc3pDpshBQ"
   }
 }

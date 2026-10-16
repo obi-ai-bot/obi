@@ -89,7 +89,7 @@ What crosses into Oby, and what it may become:
 
 The rules every component keeps:
 
-- **Typed actions in, data never instructions.** Other Obys can only send the seven typed actions; there is no free-text type, and a field the schema doesn't list makes a message invalid. Every human-written field (`x-obi-text: data` in the spec) reaches an agent only as a quoted file and the owner only as text. The same holds for text from GitHub, Slack, plug-ins and fixtures.
+- **Typed actions in, data never instructions.** Other Obys can only send the eight typed actions; there is no free-text type, and a field the schema doesn't list makes a message invalid. Every human-written field (`x-obi-text: data` in the spec) reaches an agent only as a quoted file and the owner only as text. The same holds for text from GitHub, Slack, plug-ins and fixtures.
 - **The publish gate.** Nothing leaves `obid` (a push, a pull request, its description, a check run, an Obi-to-Obi reply) until the secret scan has passed on everything in it, with the vault's secrets and their encoded forms. If the scanner can't run, nothing goes out.
 - **Oby never merges.** Not on its owner's behalf, not on anyone else's. The Swift runner's squash-merge into `dev` after a Mac check is not ported to `obid`; merging is a person's step. Deskree's own promotion rules (Xcode Cloud, `dev` to `main`, the three-review escalation) become configuration that changes what Oby checks and reports, never something that merges.
 - **Agents can't publish.** They run in sandboxed worktrees with no code-host login, no vault secret, and a clone whose push URL is invalid. Only the publish gate pushes, and only the owner's own work.
