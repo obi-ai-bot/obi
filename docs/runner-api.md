@@ -447,7 +447,7 @@ One turn of the conversation with Oby: words become work that starts, a question
 {"said": "Review oby PR #33"}
 ```
 
-`attachments`, when present, is a list of file paths in the runner's own attachments folder. The runner resolves `..` and symlinks before accepting them; a path outside that folder returns `422` naming the refused file. Accepted paths are checked again before they are copied into the job's `.oby/inputs`, including jobs restored after a restart.
+`attachments`, when present, is a list of file paths in the runner's own attachments folder. The runner resolves `..` and symlinks before accepting them; a path outside that folder returns `422` naming the refused file. Accepted paths are checked again before they are copied into the job's input folder, including jobs restored after a restart: `.oby/inputs` on the Swift runner and `.obi/inputs` on `obid`.
 
 To answer the brain's question, send the original words with the answer:
 
