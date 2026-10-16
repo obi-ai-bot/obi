@@ -134,6 +134,13 @@ nonisolated struct FakeKey: PublishingKey {
         let signature = try signing.signature(for: Approval.message(job: job, action: action, signedAt: signedAt))
         return Approval(device: device, action: action, signedAt: signedAt, signature: signature.derRepresentation.base64EncodedString())
     }
+
+    func approveConnection(action: String, device: String) async throws -> Approval {
+        if cancels { throw RunnerError(message: "Nothing changed: Touch ID didn't approve it.") }
+        let signedAt = ISO8601DateFormatter().string(from: .now)
+        let signature = try signing.signature(for: Approval.connectionMessage(action: action, signedAt: signedAt))
+        return Approval(device: device, action: action, signedAt: signedAt, signature: signature.derRepresentation.base64EncodedString())
+    }
 }
 
 /// A runner on a host of its own, answered by `answer`, that keeps every request it got.

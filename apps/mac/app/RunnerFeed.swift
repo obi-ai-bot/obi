@@ -102,6 +102,10 @@ final class RunnerFeed {
     /// The model and effort the runner's jobs use, as it last said (Settings › Models).
     private(set) var models: ModelSettings?
     private(set) var cleanup: RunnerStatus.Cleanup?
+    /// Who the runner's own GitHub calls act as, `app` or `owner`, and whether its check runs reach
+    /// pull requests, as it last said (Settings › Connectors); nil from older runners.
+    private(set) var github: String?
+    private(set) var checkRuns: String?
     /// Merge checks this Mac runs for the runner (Settings › Runner, on by default).
     let checks = MacChecks()
     /// This Mac's Touch ID key, registered on every connection: with it, the runner's jobs publish from here.
@@ -214,6 +218,8 @@ final class RunnerFeed {
         defaultMode = nil
         host = nil
         version = nil
+        github = nil
+        checkRuns = nil
         clearedAt = nil
         notified = nil
         conversation.forget()
@@ -251,6 +257,8 @@ final class RunnerFeed {
                         accounts = status.accounts
                         models = status.models
                         cleanup = status.cleanup
+                        github = status.github
+                        checkRuns = status.checks
                         defaultMode = RunnerMode(status.permissions?.mode)
                         self.extras = extras
                         await take(list, from: runner)

@@ -480,6 +480,12 @@ nonisolated struct RunnerStatus: Decodable, Equatable, Sendable {
     /// The default mode new jobs get, or nil from older runners.
     var permissions: Permissions?
     var cleanup: Cleanup?
+    /// Who the runner's own GitHub calls act as: `app` (Oby's GitHub app) or `owner` (the owner's
+    /// `gh` login). Older runners don't send it.
+    var github: String?
+    /// Whether Oby's review and Mac check go on pull requests as check runs: `ok`, `missing
+    /// permission` or `no app`. Older runners don't send it.
+    var checks: String?
 
     struct Cleanup: Codable, Equatable, Sendable {
         var path: String
@@ -985,6 +991,54 @@ nonisolated struct Runner: Sendable {
         let answer: Answer = try await call("POST", "v1/checks/\(id)/result", body: report)
         return answer.check
     }
+
+    /// The connections the runner's agents use through its broker (Settings › Connectors), or nil
+    /// from a runner that has none to list: obid doesn't serve them yet (#444).
+    func connections() async throws -> [ConnectedApp]? {
+        do {
+            return try await call("GET", "v1/connections")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// The runner's own sentence for removing connection `name`: asked without an approval, it
+    /// answers 403 with what to approve.
+    func disconnectAction(_ name: String) async throws -> String {
+        var request = URLRequest(url: URL(string: "v1/connections/\(name)", relativeTo: base.appending(path: "/"))!)
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 45
+        let (data, response) = try await URLSession.shared.data(for: signed(request))
+        struct Ask: Decodable { var action: String }
+        if (response as? HTTPURLResponse)?.statusCode == 403, let ask = try? JSONDecoder().decode(Ask.self, from: data) { return ask.action }
+        try Self.check(response, data)
+        throw RunnerError(message: "The runner didn't say what to approve.")
+    }
+
+    /// Removes connection `name` with a device's approval of `disconnectAction`'s sentence. Its
+    /// secret stays in the runner's vault.
+    func disconnect(_ name: String, approval: Approval) async throws {
+        struct Body: Encodable { var approval: Approval }
+        struct Answer: Decodable { var removed: String }
+        let _: Answer = try await call("DELETE", "v1/connections/\(name)", body: Body(approval: approval))
+    }
+
+    /// The plug-ins obid found, enabled or not (docs/runner-api.md, "obid only: plug-ins"), or nil
+    /// from the Swift runner, which has none.
+    func plugins() async throws -> [RunnerPlugin]? {
+        do {
+            return try await call("GET", "v1/obid/plugins")
+        } catch let error as RunnerError where error.status == 404 {
+            return nil
+        }
+    }
+
+    /// Turns plug-in `id` on, with its settings, or off. obid answers once it's ready (or its first
+    /// start failed), or once it and everything it started have stopped.
+    func setPlugin(_ id: String, enabled: Bool, config: [String: String]? = nil) async throws -> RunnerPlugin {
+        struct Body: Encodable { var enabled: Bool; var config: [String: String]? }
+        return try await call("PUT", "v1/obid/plugins/\(id)", body: Body(enabled: enabled, config: config))
+    }
     #endif
 
     /// Server-Sent Events until the connection drops; the caller reconnects.
@@ -1156,6 +1210,36 @@ nonisolated struct PairedWatch: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var name: String
     var registered: Date
+}
+
+/// An app or API the runner's agents use through its broker, as `GET /v1/connections` lists it
+/// (docs/runner-api.md, "Connection"): which vault secret it sends, by name, never its value.
+nonisolated struct ConnectedApp: Decodable, Identifiable, Equatable, Sendable {
+    var name: String
+    /// A remote MCP server's URL, or nil for an API.
+    var mcp: String?
+    /// An API's base URL, or nil for an MCP server.
+    var api: String?
+    /// The vault secret's name.
+    var secret: String
+    /// Where the secret goes: `Authorization` sends it as a bearer token, any other header as it is.
+    var header: String?
+    /// Whether the runner's vault has the secret now.
+    var secretSaved: Bool
+    var lastUsed: Date?
+    var id: String { name }
+}
+
+/// A plug-in obid found, as `GET /v1/obid/plugins` lists it.
+nonisolated struct RunnerPlugin: Decodable, Identifiable, Equatable, Sendable {
+    var id: String
+    var name: String
+    var version: String?
+    var kinds: [String]
+    var enabled: Bool
+    /// `disabled`, `starting`, `ready` or `failed`.
+    var state: String
+    var lastError: String?
 }
 
 /// What `POST /v1/jobs/{id}/move` takes: nils are left out.

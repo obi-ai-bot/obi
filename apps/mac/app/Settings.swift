@@ -412,6 +412,217 @@ struct AccountsSettingsView: View {
     }
 }
 
+/// Settings › Connectors (#498): everything Oby is connected to, on this Mac and on the runner,
+/// each with how it's signed in and how to disconnect it, then what needs attention, what isn't
+/// confirmed and what's set up but not connected, with a search over all of it
+/// (apps/mac/app/Connectors.swift).
+struct ConnectorsSettingsView: View {
+    let store: AccountStore
+    let feed: RunnerFeed
+    @State private var query = ""
+    /// What the runner lists besides its status, once it answers, and each list it couldn't read.
+    @State private var lists = Connectors.Lists()
+    @State private var confirming: Connector?
+    /// The plug-in whose Connect asks for Tetrix's MCP URL, and the URL typed.
+    @State private var asking: String?
+    @State private var url = ""
+    @State private var busy = false
+    /// What went wrong with a row's button, by the row's id, shown under that row.
+    @State private var problems: [String: String] = [:]
+
+    var body: some View {
+        let groups = Connectors.groups(list, query: query)
+        Form {
+            Section {
+                HStack {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
+                    TextField("Search connectors", text: $query, prompt: Text("Search connectors"))
+                        .textFieldStyle(.plain)
+                        .labelsHidden()
+                }
+                // The runner's rows are left out while it doesn't answer: they'd be out of date.
+                if feed.runner != nil, let note = Connectors.waiting(for: feed.name, feed.connection) {
+                    Text(note).font(.caption).foregroundStyle(.orange)
+                }
+                ForEach(lists.problems, id: \.self) { problem in
+                    Text(problem).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                }
+            }
+            ForEach(groups, id: \.title) { group in
+                Section(group.title) { ForEach(group.items, content: row) }
+            }
+            if groups.isEmpty {
+                let typed = query.trimmingCharacters(in: .whitespaces)
+                Text(typed.isEmpty ? "Nothing is set up yet." : "No connector matches “\(typed)”").foregroundStyle(.secondary)
+            }
+            Text("Each tool and Tetrix sign in through their own login: Oby never reads or shows it. Agents reach the runner's connections through Oby, never seeing their secrets.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
+        .task { await store.refresh() }
+        // Back from signing in or out, in Terminal.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await store.refresh() }
+        }
+        // Once the runner answers, and again after it comes back or Settings › Runner changes it.
+        .task(id: feed.connection) { await load() }
+        .confirmationDialog("Disconnect \(confirming?.name ?? "it")?",
+                            isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
+                            presenting: confirming) { connector in
+            Button("Disconnect", role: .destructive) { disconnect(connector) }
+        } message: { connector in
+            Text(warning(connector))
+        }
+        .alert("Connect Tetrix", isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } })) {
+            TextField("MCP URL", text: $url, prompt: Text("https://"))
+            Button("Connect") {
+                if let id = asking { setPlugin(id, enabled: true, config: ["url": typedURL], row: "plugin-\(id)") }
+            }
+            .disabled(!Connectors.isURL(typedURL))
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your Tetrix MCP server's address, starting with https://. Agents get its tools on \(feed.name); its login stays Tetrix's own.")
+        }
+    }
+
+    /// This Mac's accounts, and what the runner said about itself while it answers.
+    private var list: [Connector] {
+        let runner = feed.runner == nil || feed.connection != .live ? nil : Connectors.RunnerState(
+            name: feed.name, local: feed.local, accounts: feed.accounts, github: feed.github, checks: feed.checkRuns,
+            plugins: lists.plugins, connections: lists.connections)
+        return Connectors.list(mac: store.accounts, runner: runner)
+    }
+
+    private var typedURL: String { url.trimmingCharacters(in: .whitespaces) }
+
+    private func row(_ connector: Connector) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: connector.symbol)
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+                .padding(.top, 2)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(connector.name)
+                Text("\(connector.about) · \(connector.place)").font(.caption).foregroundStyle(.secondary)
+                Text(connector.how).font(.caption).foregroundStyle(connector.state == .broken ? Color.orange : Color.secondary)
+                if case .steps(let steps) = connector.way {
+                    Text(steps).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                if let problem = problems[connector.id] {
+                    Text(problem).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                }
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 6) {
+                switch connector.state {
+                case .connected: Label("Connected", systemImage: "checkmark").font(.caption)
+                case .broken: Label("Not working", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                case .unconfirmed: Text("Not confirmed").font(.caption).foregroundStyle(.secondary)
+                case .available: EmptyView()
+                }
+                if case .button(let label, let action) = connector.way {
+                    Button(label) { perform(action, connector) }
+                        .disabled(busy)
+                        .accessibilityLabel("\(label.replacingOccurrences(of: "…", with: "")) \(connector.name), \(connector.place)")
+                }
+            }
+        }
+    }
+
+    /// What the runner lists besides its status: obid's plug-ins, the Swift runner's connections.
+    /// A list it couldn't read says why; only a 404 means it has none.
+    private func load() async {
+        guard feed.connection == .live, let runner = feed.runner else {
+            lists = Connectors.Lists()
+            return
+        }
+        lists = await Connectors.lists(from: runner, name: feed.name)
+    }
+
+    /// A button: what takes something away asks first; signing in or out opens Terminal.
+    private func perform(_ action: Connector.Action, _ connector: Connector) {
+        switch action {
+        case .removeAccount, .disablePlugin, .disconnect: confirming = connector
+        case .signIn(let account): attempt(connector.id) { try store.signIn(account) }
+        case .signInTetrix(let account): attempt(connector.id) { try store.signIn(account, tetrix: true) }
+        case .signOutTetrix(let account): attempt(connector.id) { try store.signOutOfTetrix(account) }
+        case .enablePlugin(let id, let needsURL):
+            if needsURL {
+                url = ""
+                asking = id
+            } else {
+                setPlugin(id, enabled: true, row: connector.id)
+            }
+        }
+    }
+
+    private func disconnect(_ connector: Connector) {
+        guard case .button(_, let action) = connector.way else { return }
+        switch action {
+        case .removeAccount(let account): attempt(connector.id) { try store.remove(account) }
+        case .disablePlugin(let id): setPlugin(id, enabled: false, row: connector.id)
+        case .disconnect(let name):
+            guard let runner = feed.runner else { return }
+            Task {
+                busy = true
+                defer { busy = false }
+                do {
+                    try await feed.device.disconnect(name, with: runner)
+                    problems[connector.id] = nil
+                } catch {
+                    problems[connector.id] = error.localizedDescription
+                }
+                lists = await Connectors.lists(from: runner, name: feed.name)
+            }
+        default: break
+        }
+    }
+
+    /// What disconnecting does, said before it's done.
+    private func warning(_ connector: Connector) -> String {
+        guard case .button(_, let action) = connector.way else { return "" }
+        switch action {
+        case .removeAccount(let account):
+            return account.home == nil ? "Oby stops using it. Its login stays in \(Usage.tool(account.agent))'s own settings."
+                                       : "Oby removes this account and deletes its settings folder, with its login."
+        case .disablePlugin:
+            return "\(feed.name) stops it and everything it started, and agents no longer get its tools."
+        case .disconnect:
+            return "After Touch ID, \(feed.name) forgets it and its agents can't reach it any more. Its secret stays in the runner's vault."
+        default:
+            return ""
+        }
+    }
+
+    /// Turns a plug-in on or off on the runner, then shows what it answered on its row.
+    private func setPlugin(_ id: String, enabled: Bool, config: [String: String]? = nil, row: String) {
+        guard let runner = feed.runner else { return }
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                let plugin = try await runner.setPlugin(id, enabled: enabled, config: config)
+                lists.plugins = lists.plugins?.map { $0.id == plugin.id ? plugin : $0 }
+                problems[row] = nil
+            } catch {
+                problems[row] = error.localizedDescription
+            }
+        }
+    }
+
+    /// Runs a row's button, keeping what went wrong under that row.
+    private func attempt(_ row: String, _ action: () throws -> Void) {
+        do {
+            try action()
+            problems[row] = nil
+        } catch {
+            problems[row] = error.localizedDescription
+        }
+    }
+}
+
 /// Settings › Vault: the secrets Oby keeps in the keychain, by name. Never their values: a value
 /// is typed once, into a secure field that empties when it's saved.
 struct VaultSettingsView: View {
@@ -593,5 +804,18 @@ extension AccountStore {
         try (tetrix ? TetrixUse.signInScript(for: account) : Self.signInScript(for: account)).write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
         guard NSWorkspace.shared.open(script) else { throw Shell.Failure(message: "Couldn't open Terminal to sign in.") }
+    }
+
+    /// Opens Terminal on the tool's own sign-out from its Tetrix MCP server, with the account's
+    /// home in the environment (`Connectors.tetrixSignOutScript`).
+    func signOutOfTetrix(_ account: Account) throws {
+        let script = URL(filePath: account.home ?? homes.path).appending(path: "sign-out-tetrix-\(account.id).command")
+        try FileManager.default.createDirectory(at: script.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard let text = Connectors.tetrixSignOutScript(for: account) else {
+            throw Shell.Failure(message: "Oby can't sign \(Usage.tool(account.agent)) out of Tetrix.")
+        }
+        try text.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        guard NSWorkspace.shared.open(script) else { throw Shell.Failure(message: "Couldn't open Terminal to sign out.") }
     }
 }
