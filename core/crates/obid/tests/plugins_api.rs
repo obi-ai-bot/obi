@@ -12,10 +12,12 @@ mod support;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
+use p256::ecdsa::signature::Signer as _;
 use serde_json::{Value, json};
 use support::*;
 
@@ -72,6 +74,336 @@ fn allowed_tools(argv: &[Value]) -> Option<Vec<String>> {
             .take_while(|a| !a.starts_with('-'))
             .collect(),
     )
+}
+
+/// A local MCP endpoint that requires the vault secret and deliberately echoes it in its result.
+fn connected_mcp(secret: String, api_secret: String) -> (String, String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/mcp",
+        listener.local_addr().unwrap().port()
+    );
+    let api = format!("{}/api", url.trim_end_matches("/mcp"));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let kept = seen.clone();
+    let expire_once = Arc::new(AtomicBool::new(true));
+    let expire = expire_once.clone();
+    let session_count = Arc::new(AtomicUsize::new(0));
+    let sessions = session_count.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0;
+            let mut auth = String::new();
+            let mut api_key = String::new();
+            let mut request_line = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let line = line.trim_end();
+                if request_line.is_empty() {
+                    request_line = line.to_owned();
+                }
+                if line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                    if name.eq_ignore_ascii_case("authorization") {
+                        auth = value.trim().to_owned();
+                    }
+                    if name.eq_ignore_ascii_case("x-api-key") {
+                        api_key = value.trim().to_owned();
+                    }
+                }
+            }
+            let mut body = vec![0; length];
+            let _ = reader.read_exact(&mut body);
+            let text = String::from_utf8_lossy(&body).to_string();
+            kept.lock().unwrap().push(format!("{auth} {text}"));
+            let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let id = message.get("id").cloned().unwrap_or(Value::Null);
+            let method = message["method"].as_str().unwrap_or("");
+            let session_header = if method == "initialize" {
+                let session = sessions.fetch_add(1, Ordering::SeqCst) + 1;
+                format!("Mcp-Session-Id: fixture-{session}\r\n")
+            } else {
+                String::new()
+            };
+            let (status, answer) = if request_line.starts_with("GET /api/v1/me ") {
+                if api_key != api_secret {
+                    ("401 Unauthorized", String::new())
+                } else {
+                    (
+                        "200 OK",
+                        format!("{{\"me\":\"well\",\"key\":\"{api_secret}\"}}"),
+                    )
+                }
+            } else if auth != format!("Bearer {secret}") {
+                ("401 Unauthorized", String::new())
+            } else if method.starts_with("notifications/") {
+                ("202 Accepted", String::new())
+            } else if method == "tools/call" && expire.swap(false, Ordering::SeqCst) {
+                ("404 Not Found", String::new())
+            } else {
+                let result = match method {
+                    "initialize" => {
+                        json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}})
+                    }
+                    "tools/list" => {
+                        json!({"tools":[{"name":"search","description":"Search.","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}},
+                                           {"name":"send_message","description":"Send.","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":false}}]})
+                    }
+                    "tools/call" => {
+                        json!({"content":[{"type":"text","text":format!("Found mail. Bearer {secret} {}",base64::engine::general_purpose::STANDARD.encode(&secret))}]})
+                    }
+                    _ => json!({}),
+                };
+                (
+                    "200 OK",
+                    json!({"jsonrpc":"2.0","id":id,"result":result}).to_string(),
+                )
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{session_header}Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                answer.len()
+            );
+        }
+    });
+    (url, api, seen)
+}
+
+fn connection_approval(action: &str, device: &str, key: &p256::ecdsa::SigningKey) -> Value {
+    let signed_at = obi_protocol::time::format(obi_protocol::time::now());
+    let signature: p256::ecdsa::Signature =
+        key.sign(format!("oby-connection\n{action}\n{signed_at}").as_bytes());
+    json!({"device":device,"action":action,"signedAt":signed_at,
+        "signature":base64::engine::general_purpose::STANDARD.encode(signature.to_der().as_bytes())})
+}
+
+/// Ported from ConnectionTests.agentsUseConnectedAppsWithoutEverSeeingTheLogin: the real obid
+/// API keeps the login in its private vault and gives Claude only a per-job broker token.
+#[test]
+fn agents_use_connected_apps_without_ever_seeing_the_login() {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+
+    let folder = Folder::new("connections");
+    let remote = fixture(&folder.0.join("fixture"));
+    let secret = format!("mail-{}-secret", uuid::Uuid::new_v4().simple());
+    let api_secret = format!("people-{}-key", uuid::Uuid::new_v4().simple());
+    let secret_name = "mail-token";
+    let (mcp_url, api_url, seen) = connected_mcp(secret.clone(), api_secret.clone());
+    let config = plugin_config(&folder.0, &remote, None);
+    let home = Path::new(config["home"].as_str().unwrap());
+    let vault = home.join("vault");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&vault)
+        .unwrap();
+    let vault_file = vault.join("secrets.json");
+    let mut vf = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&vault_file)
+        .unwrap();
+    use std::io::Write as _;
+    write!(
+        vf,
+        "{{\"secrets\":{{\"{secret_name}\":\"{secret}\",\"people-key\":\"{api_secret}\"}}}}"
+    )
+    .unwrap();
+    let key = p256::ecdsa::SigningKey::from_slice(&[9; 32]).unwrap();
+    let public = key.verifying_key().to_encoded_point(false);
+    let device = "test-phone";
+    let devices = home.join("devices.json");
+    std::fs::write(&devices,json!({"devices":[{"id":device,"name":"Test phone","publicKey":base64::engine::general_purpose::STANDARD.encode(public.as_bytes()),"registered":obi_protocol::time::format(obi_protocol::time::now())}]}).to_string()).unwrap();
+    std::fs::set_permissions(&devices, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut obid = start(&folder.0, &config, None);
+
+    assert_eq!(call(&obid, "GET", "/v1/connections", None).status, 200);
+    assert_eq!(
+        call_with_token(&obid, "", "GET", "/v1/connections", None).status,
+        401
+    );
+    let bad = call(
+        &obid,
+        "POST",
+        "/v1/connections",
+        Some(&json!({"name":"mail","mcp":mcp_url,"secret":secret_name,"value":secret})),
+    );
+    assert_eq!(bad.status, 422, "{}", bad.text);
+    assert!(!bad.text.contains(&secret));
+    let request = json!({"name":"mail","mcp":mcp_url,"secret":secret_name});
+    let asked = call(&obid, "POST", "/v1/connections", Some(&request));
+    assert_eq!(asked.status, 403, "{}", asked.text);
+    let action = asked.body["action"].as_str().unwrap();
+    assert!(action.contains("the vault secret mail-token"), "{action}");
+    let mut approved = request.clone();
+    approved["approval"] = connection_approval(action, device, &key);
+    let added = call(&obid, "POST", "/v1/connections", Some(&approved));
+    assert_eq!(added.status, 201, "{}", added.text);
+    assert_eq!(added.body["name"], "mail");
+    assert_eq!(added.body["secretSaved"], true);
+    let listed = call(&obid, "GET", "/v1/connections", None);
+    assert_eq!(listed.status, 200, "{}", listed.text);
+    assert_eq!(listed.body[0]["secretSaved"], true);
+    assert!(listed.body[0]["lastUsed"].is_null());
+    assert!(!listed.text.contains(&secret));
+    let replay = call(&obid, "POST", "/v1/connections", Some(&approved));
+    assert_eq!(replay.status, 403, "{}", replay.text);
+    assert!(obid.stop().success());
+    obid = start(&folder.0, &config, None);
+    let replay_after_restart = call(&obid, "POST", "/v1/connections", Some(&approved));
+    assert_eq!(
+        replay_after_restart.status, 403,
+        "{}",
+        replay_after_restart.text
+    );
+
+    let people = json!({"name":"people","api":api_url,"secret":"people-key","header":"X-Api-Key"});
+    let asked_people = call(&obid, "POST", "/v1/connections", Some(&people));
+    assert_eq!(asked_people.status, 403, "{}", asked_people.text);
+    let mut approved_people = people.clone();
+    approved_people["approval"] =
+        connection_approval(asked_people.body["action"].as_str().unwrap(), device, &key);
+    assert_eq!(
+        call(&obid, "POST", "/v1/connections", Some(&approved_people)).status,
+        201
+    );
+
+    let (job, report) = run_job(
+        &obid,
+        "investigate",
+        "REPORT MCP_CALL MCP_WRITE MCP_API",
+        None,
+    );
+    assert_eq!(job["status"], "done", "{job}");
+    let report = report.expect("agent report");
+    assert!(
+        report["mcp"]["mcpServers"]["oby"]["headers"]["Authorization"]
+            .as_str()
+            .unwrap()
+            .starts_with("Bearer ")
+    );
+    assert!(!report.to_string().contains(&secret) && !report.to_string().contains(&api_secret));
+    let tools = report["answers"]["oby"]["result"]["tools"]
+        .as_array()
+        .unwrap();
+    assert!(tools.iter().any(|t| t["name"] == "mail_search"));
+    assert!(tools.iter().any(|t| t["name"] == "mail_send_message"));
+    let called = &report["toolCalls"]["oby"]["result"]["content"][0]["text"];
+    assert!(
+        called.as_str().unwrap().contains("[redacted: mail-token]"),
+        "{called}"
+    );
+    assert!(!called.as_str().unwrap().contains(&secret));
+    assert!(report["toolCalls"]["oby_write"]["result"]["isError"] == true);
+    let api_call = report["toolCalls"]["oby_api"]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(api_call.contains("HTTP 200"), "{api_call}");
+    assert!(api_call.contains("[redacted: people-key]"), "{api_call}");
+    assert!(!api_call.contains(&api_secret));
+    assert_eq!(job["connectionUses"].as_array().unwrap().len(), 3, "{job}");
+    assert_eq!(job["connectionUses"][0]["access"], "read");
+    assert_eq!(job["connectionUses"][1]["access"], "write");
+    assert_eq!(job["connectionUses"][1]["allowed"], false);
+    assert_eq!(job["connectionUses"][2]["connection"], "people");
+    assert_eq!(job["connectionUses"][2]["access"], "read");
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains(&format!("Bearer {secret}")))
+    );
+    assert_eq!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.contains("\"method\":\"initialize\""))
+            .count(),
+        2,
+        "broker should recover once when the server expires its MCP session"
+    );
+    let log = std::fs::read_to_string(home.join("vault/uses.jsonl")).unwrap();
+    assert_eq!(log.lines().count(), 3);
+    assert!(!log.contains(&secret) && !log.contains(&api_secret));
+    assert_eq!(
+        std::fs::metadata(home.join("vault/uses.jsonl"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let saved = std::fs::read_to_string(home.join("connections.json")).unwrap();
+    assert!(!saved.contains(&secret) && !saved.contains(&api_secret));
+
+    let (second_job, second_report) = run_job(&obid, "investigate", "REPORT", None);
+    let second_report = second_report.expect("second agent report");
+    let first_id = job["id"].as_str().unwrap();
+    let second_id = second_job["id"].as_str().unwrap();
+    let first_token = report["mcp"]["mcpServers"]["oby"]["headers"]["Authorization"]
+        .as_str()
+        .unwrap();
+    let second_token = second_report["mcp"]["mcpServers"]["oby"]["headers"]["Authorization"]
+        .as_str()
+        .unwrap();
+    assert_ne!(first_token, second_token);
+    let rpc = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+    assert_eq!(
+        call_with_token(
+            &obid,
+            first_token,
+            "POST",
+            &format!("/v1/agent/mcp/{second_id}"),
+            Some(&rpc)
+        )
+        .status,
+        401
+    );
+    assert_eq!(
+        call_with_token(
+            &obid,
+            first_token,
+            "POST",
+            &format!("/v1/agent/mcp/{first_id}"),
+            Some(&rpc)
+        )
+        .status,
+        401
+    );
+    let remove_asked = call(&obid, "DELETE", "/v1/connections/people", None);
+    assert_eq!(remove_asked.status, 403);
+    assert_eq!(
+        call(&obid, "DELETE", "/v1/connections/missing", None).status,
+        404
+    );
+    let removal = connection_approval("Disconnect people.", device, &key);
+    let removed = call(
+        &obid,
+        "DELETE",
+        "/v1/connections/people",
+        Some(&json!({"approval":removal})),
+    );
+    assert_eq!(removed.status, 200, "{}", removed.text);
+    assert_eq!(
+        call(&obid, "GET", "/v1/connections", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(obid.stop().success());
 }
 
 /// A local stub MCP server: it answers every POST with a `tools/list` result and keeps

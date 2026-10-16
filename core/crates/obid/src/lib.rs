@@ -14,6 +14,7 @@ pub mod clear;
 pub mod codex;
 pub mod config;
 pub mod conn;
+pub mod connections;
 pub mod conversation;
 pub mod devices;
 pub mod events;
@@ -200,6 +201,13 @@ pub async fn serve(
     jobs.use_plugins(plugins.clone());
     let cleared = clear::Cleared::open(&config.home);
     let devices = devices::Devices::open(&config.home);
+    let broker_host = if cfg!(target_os = "linux") {
+        format!("http://10.0.2.2:{}", bound.port())
+    } else {
+        format!("http://127.0.0.1:{}", bound.port())
+    };
+    let connections = connections::Connections::open(&config.home, &jobs, broker_host);
+    jobs.use_connections(connections.clone());
     let conversations = conversation::Conversations::open(&config.home, events.clone());
     let shared = Arc::new(api::Shared {
         config,
@@ -208,6 +216,7 @@ pub async fn serve(
         cleanup,
         cleared,
         devices,
+        connections,
         jobs: jobs.clone(),
         events,
         conversations,

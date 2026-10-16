@@ -5,6 +5,7 @@
 //! minutes, which uses it up. The API token can't be the gate on its own: agents run on the same
 //! machine. They can't touch `pairing`: obid's home is hidden in their sandbox.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -29,6 +30,10 @@ struct Device {
 struct Saved {
     #[serde(default)]
     devices: Vec<Device>,
+    /// SHA-256 of each signed approval message and its signed timestamp, shared with the Mac
+    /// runner's `devices.json` so a phone approval can't be replayed after a restart.
+    #[serde(default)]
+    used: HashMap<String, String>,
 }
 
 /// Why a device didn't register.
@@ -138,6 +143,80 @@ impl Devices {
         let _ = std::fs::remove_file(&self.pairing);
         tracing::info!("registered device {}: {}", device.id, device.name);
         Ok(device.id)
+    }
+
+    /// Checks the phone's signed approval sentence for a sensitive connection change. A
+    /// signature is tied to the exact action and timestamp, expires after two minutes, and is
+    /// accepted once and kept in `devices.json`, across restarts.
+    pub fn approves_connection(&self, value: &serde_json::Value, action: &str) -> bool {
+        let Some(device) = value.get("device").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let Some(signed_at) = value.get("signedAt").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let Some(signature) = value.get("signature").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        if value.get("action").and_then(serde_json::Value::as_str) != Some(action) {
+            return false;
+        }
+        let Some(seconds) = obi_protocol::time::parse(signed_at) else {
+            return false;
+        };
+        if (obi_protocol::time::now() - seconds).abs() > 120 {
+            return false;
+        }
+        use base64::Engine as _;
+        use p256::ecdsa::signature::Verifier as _;
+        let Ok(signature_bytes) = base64::engine::general_purpose::STANDARD.decode(signature)
+        else {
+            return false;
+        };
+        let Ok(signature) = p256::ecdsa::Signature::from_der(&signature_bytes) else {
+            return false;
+        };
+        let Some(saved) = self
+            .saved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .devices
+            .iter()
+            .find(|d| d.id == device)
+            .cloned()
+        else {
+            return false;
+        };
+        let Ok(key_bytes) = base64::engine::general_purpose::STANDARD.decode(saved.public_key)
+        else {
+            return false;
+        };
+        let Ok(key) = p256::ecdsa::VerifyingKey::from_sec1_bytes(&key_bytes) else {
+            return false;
+        };
+        let signed_message = format!("oby-connection\n{action}\n{signed_at}");
+        if key.verify(signed_message.as_bytes(), &signature).is_err() {
+            return false;
+        }
+        let mut message = device.as_bytes().to_vec();
+        message.extend_from_slice(signed_message.as_bytes());
+        let hash = hex::encode(obi_protocol::keys::sha256(message));
+        let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
+        let now = obi_protocol::time::now();
+        saved
+            .used
+            .retain(|_, at| obi_protocol::time::parse(at).is_some_and(|at| now - at < 600));
+        if saved.used.contains_key(&hash) {
+            return false;
+        }
+        saved.used.insert(hash.clone(), signed_at.to_owned());
+        let kept = serde_json::to_vec_pretty(&*saved)
+            .ok()
+            .is_some_and(|bytes| crate::store::write_private(&self.file, &bytes).is_ok());
+        if !kept {
+            saved.used.remove(&hash);
+        }
+        kept
     }
 }
 

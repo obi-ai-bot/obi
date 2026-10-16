@@ -33,6 +33,7 @@ axum = "0.8.9"
 # The API token obid makes on first start, and the host name `GET /v1/status` reports.
 getrandom = "0.4.3"
 hex = "0.4.3"
+libc = "0.2"
 gethostname = "1.1.0"
 # The Obi-to-Obi protocol (crates/obi-protocol): Ed25519, SHA-256, base64url, its JSON Schemas,
 # and ECMAScript number formatting for canonical JSON (RFC 8785).

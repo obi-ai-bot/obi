@@ -32,8 +32,18 @@ pub struct Options {
 }
 
 /// The `command` line `codex app-server` runs as: the binary, then `app-server`.
-pub fn argv(bin: PathBuf) -> Vec<std::ffi::OsString> {
-    vec![bin.into_os_string(), "app-server".into()]
+pub fn argv(bin: PathBuf, mcp: Option<(&str, &str)>) -> Vec<std::ffi::OsString> {
+    let mut argv = vec![bin.into_os_string()];
+    if let Some((url, _)) = mcp {
+        argv.extend([
+            "-c".into(),
+            format!("mcp_servers.oby.url=\"{url}\"").into(),
+            "-c".into(),
+            "mcp_servers.oby.bearer_token_env_var=\"OBY_MCP_TOKEN\"".into(),
+        ]);
+    }
+    argv.push("app-server".into());
+    argv
 }
 
 /// Runs one turn: starts the server, sends `prompt`, answers approvals with `decide`, reports with

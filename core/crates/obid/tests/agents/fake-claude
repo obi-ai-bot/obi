@@ -134,20 +134,54 @@ async function report(prompt) {
     }
   }
   const answers = {};
+  const toolCalls = {};
   for (const [name, server] of Object.entries(mcp?.mcpServers ?? {})) {
     if (server.type !== "http") continue;
     try {
       const response = await fetch(server.url, {
         method: "POST",
-        headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(server.headers ?? {}) },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
       });
       answers[name] = await response.json();
+      if (prompt.includes("MCP_CALL") && name === "oby") {
+        const first = answers[name]?.result?.tools?.find((tool) => tool.name.endsWith("_search"));
+        if (first) {
+          const called = await fetch(server.url, {
+            method: "POST",
+            headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(server.headers ?? {}) },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: first.name, arguments: {} } }),
+          });
+          toolCalls[name] = await called.json();
+        }
+      }
+      if (prompt.includes("MCP_WRITE") && name === "oby") {
+        const acting = answers[name]?.result?.tools?.find((tool) => tool.name.endsWith("_send_message"));
+        if (acting) {
+          const refused = await fetch(server.url, {
+            method: "POST",
+            headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(server.headers ?? {}) },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: acting.name, arguments: {} } }),
+          });
+          toolCalls[`${name}_write`] = await refused.json();
+        }
+      }
+      if (prompt.includes("MCP_API") && name === "oby") {
+        const api = answers[name]?.result?.tools?.find((tool) => tool.name.endsWith("_get"));
+        if (api) {
+          const read = await fetch(server.url, {
+            method: "POST",
+            headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(server.headers ?? {}) },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: api.name, arguments: { path: "/v1/me" } } }),
+          });
+          toolCalls[`${name}_api`] = await read.json();
+        }
+      }
     } catch (e) {
       answers[name] = { error: String(e) };
     }
   }
   const context = existsSync(".obi/context") ? readdirSync(".obi/context").sort() : [];
   mkdirSync(".obi", { recursive: true });
-  writeFileSync(".obi/report.json", JSON.stringify({ argv, env: process.env, prompt, mcp, allowed, answers, context }, null, 2));
+  writeFileSync(".obi/report.json", JSON.stringify({ argv, env: process.env, prompt, mcp, allowed, answers, toolCalls, context }, null, 2));
 }
