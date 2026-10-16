@@ -154,10 +154,10 @@ pub enum Sent {
 }
 
 /// The open pull request obid published `branch` to: from this repository itself (never a fork's
-/// branch of the same name, which `gh pr list --head` would match too) and with one of `heads` as
+/// branch of the same name, which `gh pr list --head` would match too), into `base`, and with one of `heads` as
 /// its head: the commit obid just pushed, or the one it pushed before (GitHub may not have moved
 /// it yet). `gh pr list --json` answers a list of them.
-pub fn own_pull_request(listed: &str, repo: &str, heads: &[&str]) -> Option<String> {
+pub fn own_pull_request(listed: &str, repo: &str, base: &str, heads: &[&str]) -> Option<String> {
     if listed.trim().is_empty() {
         return None;
     }
@@ -165,6 +165,7 @@ pub fn own_pull_request(listed: &str, repo: &str, heads: &[&str]) -> Option<Stri
     list.iter()
         .filter(|pr| {
             pr["isCrossRepository"] == Value::Bool(false)
+                && pr["baseRefName"] == base
                 && pr["headRefOid"]
                     .as_str()
                     .is_some_and(|h| git_sha(h) && heads.contains(&h))
@@ -200,12 +201,14 @@ pub async fn open_pull_request(
             "--state",
             "open",
             "--json",
-            "url,isCrossRepository,headRefOid",
+            "url,isCrossRepository,headRefOid,baseRefName",
+            "--limit",
+            "100",
         ],
     )
     .await
     .map_err(|e| format!("Couldn't look for the open pull request: {e}"))?;
-    if let Some(open) = own_pull_request(&listed, repo, heads) {
+    if let Some(open) = own_pull_request(&listed, repo, base, heads) {
         // The commits are on it already; a description that didn't update isn't worth failing for.
         let edited = run(gh, &["pr", "edit", &open, "-R", repo, "--body-file", &body])
             .await
@@ -350,17 +353,18 @@ mod tests {
         let repo = "deskree-inc/oby";
         let head = "a".repeat(40);
         let before = "b".repeat(40);
-        let pr = |url: &str, cross: bool, oid: &str| json!({"url": url, "isCrossRepository": cross, "headRefOid": oid});
+        let pr = |url: &str, cross: bool, oid: &str| json!({"url": url, "isCrossRepository": cross, "headRefOid": oid, "baseRefName": "dev"});
         let ours = "https://github.com/deskree-inc/oby/pull/42";
         let list = |items: Vec<Value>| Value::Array(items).to_string();
         assert_eq!(
-            own_pull_request(&list(vec![pr(ours, false, &head)]), repo, &[&head]),
+            own_pull_request(&list(vec![pr(ours, false, &head)]), repo, "dev", &[&head]),
             Some(ours.into())
         );
         assert_eq!(
             own_pull_request(
                 &list(vec![pr(ours, false, &before)]),
                 repo,
+                "dev",
                 &[&head, &before]
             ),
             Some(ours.into())
@@ -374,10 +378,18 @@ mod tests {
                 &head,
             )]),
             list(vec![json!({"url": ours})]),
+            // Someone's pull request of the same branch at obid's commit, into another base.
+            list(vec![
+                json!({"url": ours, "isCrossRepository": false, "headRefOid": head, "baseRefName": "main"}),
+            ]),
             String::new(),
             "not json".into(),
         ] {
-            assert_eq!(own_pull_request(&listed, repo, &[&head]), None, "{listed}");
+            assert_eq!(
+                own_pull_request(&listed, repo, "dev", &[&head]),
+                None,
+                "{listed}"
+            );
         }
     }
 

@@ -53,7 +53,7 @@ case "$1 $2" in
       case "$a" in --title=*) printf '%s' "${{a#--title=}}" > "$dir/title" ;; esac
       prev="$a"
     done
-    echo '[{{"url":"{PULL}","isCrossRepository":false,"headRefOid":"__HEAD__"}}]' > "$dir/open"
+    echo '[{{"url":"{PULL}","isCrossRepository":false,"headRefOid":"__HEAD__","baseRefName":"main"}}]' > "$dir/open"
     echo 'Creating pull request…'
     echo '{PULL}'
     exit 0 ;;
@@ -633,7 +633,7 @@ fn a_commits_author_and_headers_are_scanned_too() {
     assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
     let error = job["publishError"].as_str().unwrap();
     assert!(
-        error.contains("carries a header obid doesn't publish (xnote)"),
+        error.contains("carries headers other than its tree, parents, author and committer"),
         "{error}"
     );
     assert_eq!(remote_branch(&remote, &format!("oby/build-{header}")), None);
@@ -649,7 +649,7 @@ fn a_forks_pull_request_of_the_same_branch_is_never_taken_for_obids() {
     let bin = fake_gh(&folder.0);
     std::fs::write(
         folder.0.join("gh/open"),
-        r#"[{"url":"https://github.com/obi-e2e/fixture-app/pull/9","isCrossRepository":true,"headRefOid":"__HEAD__"}]"#,
+        r#"[{"url":"https://github.com/obi-e2e/fixture-app/pull/9","isCrossRepository":true,"headRefOid":"__HEAD__","baseRefName":"main"}]"#,
     )
     .unwrap();
     let (obid, _, _) = obid_with(&folder, &bin);

@@ -882,11 +882,6 @@ async fn known_secrets_in_files(clone: &Path, range: &str) -> Result<Vec<Finding
     Ok(found)
 }
 
-/// The headers a commit obid publishes may carry: anything else (an `encoding` that re-encodes its
-/// message, a signature, a header of any other name) is refused, so what the scan reads is what
-/// goes out, byte for byte.
-const COMMIT_HEADERS: [&str; 4] = ["tree", "parent", "author", "committer"];
-
 /// Every commit the push sends, read as git keeps it (`cat-file`), not as `git log` shows it: its
 /// author and committer, and its message's own bytes, each scanned on its own so a finding names
 /// the commit to rewrite. A commit with any other header, or a message that isn't UTF-8 text, is
@@ -961,46 +956,42 @@ fn batch_objects(mut rest: &[u8]) -> Result<Vec<(String, &[u8])>, String> {
 /// message` (its message's bytes), or why obid won't publish it.
 fn commit_texts(commit: &str, object: &[u8]) -> (Vec<(String, String)>, Option<String>) {
     let short = &commit[..12.min(commit.len())];
+    let refused = |what: &str| {
+        (
+            Vec::new(),
+            Some(format!(
+                "Not published: commit {short} {what}, which obid doesn't publish."
+            )),
+        )
+    };
     let (headers, message) = match object.windows(2).position(|w| w == b"\n\n") {
         Some(at) => (&object[..at], &object[at + 2..]),
         None => (object, &[][..]),
     };
-    let mut people = Vec::new();
-    for line in headers.split(|b| *b == b'\n') {
-        let line = String::from_utf8_lossy(line);
-        let key = line.split(' ').next().unwrap_or("");
-        if !COMMIT_HEADERS.contains(&key) {
-            let key: String = key
-                .chars()
-                .filter(char::is_ascii_alphanumeric)
-                .take(20)
-                .collect();
-            return (
-                Vec::new(),
-                Some(format!(
-                    "Not published: commit {short} carries a header obid doesn't publish ({}).",
-                    if key.is_empty() {
-                        "a continued one"
-                    } else {
-                        &key
-                    }
-                )),
-            );
-        }
-        if key == "author" || key == "committer" {
-            people.push(line.into_owned());
-        }
+    // Exactly the layout git writes for a plain commit, and nothing else: one `tree`, its
+    // `parent`s, one `author`, one `committer`. The ids are hex, so only who made it is text.
+    let Ok(headers) = std::str::from_utf8(headers) else {
+        return refused("has headers that aren't UTF-8 text");
+    };
+    let lines: Vec<&str> = headers.split('\n').collect();
+    let id = |line: &str, key: &str| {
+        line.strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(' '))
+            .is_some_and(git::is_sha)
+    };
+    let parents = lines.iter().skip(1).take_while(|l| id(l, "parent")).count();
+    let people = &lines[(1 + parents).min(lines.len())..];
+    let laid_out = lines.first().is_some_and(|l| id(l, "tree"))
+        && people.len() == 2
+        && people[0].starts_with("author ")
+        && people[1].starts_with("committer ")
+        && !headers.contains(['\0', '\r']);
+    if !laid_out {
+        return refused("carries headers other than its tree, parents, author and committer");
     }
     let message = match std::str::from_utf8(message) {
         Ok(text) if !text.contains('\0') => text.to_owned(),
-        _ => {
-            return (
-                Vec::new(),
-                Some(format!(
-                    "Not published: commit {short}'s message isn't UTF-8 text, which obid doesn't publish."
-                )),
-            );
-        }
+        _ => return refused("has a message that isn't UTF-8 text"),
     };
     (
         vec![
@@ -1267,29 +1258,37 @@ mod tests {
             )
         );
         assert_eq!(texts[1], ("commit message".into(), "Fix it\n".into()));
-        for header in [
-            "encoding UTF-16LE",
-            "gpgsig -----BEGIN PGP SIGNATURE-----",
-            "x-note hi",
-            " continued",
+        let d = "d".repeat(40);
+        for object in [
+            format!("tree {d}\nauthor {who}\ncommitter {who}\nencoding UTF-16LE\n\nFix it\n"),
+            format!("tree {d}\nauthor {who}\ncommitter {who}\ngpgsig -----BEGIN PGP-----\n\nFix\n"),
+            format!("tree {d}\nauthor {who}\ncommitter {who}\n continued\n\nFix it\n"),
+            // A second tree or parent after the committer, holding anything at all.
+            format!("tree {d}\nauthor {who}\ncommitter {who}\ntree ghp_x\n\nFix it\n"),
+            format!("tree {d}\nauthor {who}\ncommitter {who}\nparent {d}\n\nFix it\n"),
+            format!("tree\tghp_x\nauthor {who}\ncommitter {who}\n\nFix it\n"),
+            format!("tree {d}\nparent ghp_x\nauthor {who}\ncommitter {who}\n\nFix it\n"),
+            format!("tree {d}\nauthor {who}\n\nFix it\n"),
         ] {
-            let object = format!(
-                "tree {0}\nauthor {who}\ncommitter {who}\n{header}\n\nFix it\n",
-                "d".repeat(40)
-            );
             let (_, refused) = commit_texts(&commit, object.as_bytes());
+            let refused = refused.unwrap_or_else(|| panic!("{object:?}"));
+            assert!(refused.contains("carries headers other than"), "{object:?}");
+            // The line never echoes what the commit holds.
             assert!(
-                refused
-                    .unwrap()
-                    .contains("carries a header obid doesn't publish"),
-                "{header}"
+                !refused.contains("ghp") && !refused.contains("UTF-16"),
+                "{refused}"
             );
         }
+        let mut split = format!("tree {d}\nauthor A").into_bytes();
+        split.push(0xff);
+        split.extend(format!(" <a@example.com> 1 +0000\ncommitter {who}\n\nFix\n").bytes());
+        let (_, refused) = commit_texts(&commit, &split);
+        assert!(refused.unwrap().contains("headers that aren't UTF-8 text"));
         let mut utf16 =
             format!("tree {}\nauthor {who}\ncommitter {who}\n\n", "d".repeat(40)).into_bytes();
         utf16.extend("Fix".encode_utf16().flat_map(u16::to_le_bytes));
         let (_, refused) = commit_texts(&commit, &utf16);
-        assert!(refused.unwrap().contains("isn't UTF-8 text"));
+        assert!(refused.unwrap().contains("a message that isn't UTF-8 text"));
     }
 
     #[test]
