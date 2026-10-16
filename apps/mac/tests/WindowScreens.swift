@@ -22,7 +22,8 @@ struct WindowScreens {
         job.status = status
         job.title = title
         job.issue = issue
-        if question { job.question = Plan.Question(text: "Post this review as you?", options: []) }
+        if question { job.question = Plan.Question(text: "Post this review as you?", options: ["Post review", "Read it first"]) }
+        if status == .running && !question { job.step = "Reading src/queue/retry.ts" }
         if status == .done || status == .failed { job.finished = now - ago + 600 }
         return job
     }
@@ -113,5 +114,17 @@ struct WindowScreens {
         let state = ChatState()
         state.trail.start(.talk)
         try await shoot("mac-convo", model: model, state: state)
+    }
+
+    @Test func task() async throws {
+        let state = ChatState()
+        state.trail.start(.group(.review), .job(id: "r2", local: false))
+        try await shoot("mac-task", model: model(), state: state)
+    }
+
+    @Test func taskNeedingYou() async throws {
+        let state = ChatState()
+        state.trail.start(.group(.review), .job(id: "r1", local: false))
+        try await shoot("mac-task-needs", model: model(), state: state)
     }
 }

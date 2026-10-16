@@ -28,10 +28,7 @@ struct GroupPane: View {
                 .padding(.bottom, 16)
                 let cards = WorkList.items(ranked, in: tab)
                 ForEach(cards) { item in
-                    let row = item.job
-                    JobChip(job: row.job, account: LiveView.account(of: row.job, local: row.local, desk: model.desk, feed: model.feed),
-                            onOpen: { onOpenJob(row.job.id, row.local) },
-                            onStop: { model.stopChatJob(row.job.id, local: row.local) })
+                    TaskCardView(item: item, model: model) { onOpenJob(item.job.job.id, item.job.local) }
                 }
                 if cards.isEmpty {
                     Text(tab == .done ? "Nothing completed yet" : "Nothing running")

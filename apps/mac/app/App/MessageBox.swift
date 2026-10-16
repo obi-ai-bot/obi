@@ -61,6 +61,8 @@ struct MessageBox: View {
     var onEscape: (() -> Void)? = nil
     /// Each account's week, for the gauge by voice-or-send; none, no gauge.
     var usage: [UsageRow] = []
+    /// The + (a screenshot, the clipboard, a file): off where nothing can take them (a task's page).
+    var attachments = true
     @State private var width: CGFloat = 480
     @State private var hovering = false
 
@@ -118,7 +120,11 @@ struct MessageBox: View {
 
     /// + : a screenshot, what you copied, or a file (Sangam's + panel's Add files; the Obys and tasks
     /// it can add come with obid).
-    private var plus: some View {
+    @ViewBuilder private var plus: some View {
+        if attachments { plusMenu } else { Color.clear.frame(width: 4, height: BoxMetrics.button) }
+    }
+
+    private var plusMenu: some View {
         Menu {
             Button("Screenshot", action: onScreenshot).disabled(tray.capturing)
             Button("Clipboard", action: tray.pasteClipboard)
