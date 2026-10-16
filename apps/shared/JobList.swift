@@ -133,6 +133,158 @@ nonisolated enum JobList {
     }
 }
 
+/// How Home groups the work (#496): by kind of work, the default, or by status. Remembered on
+/// each app under `key`.
+nonisolated enum GroupBy: String, CaseIterable, Sendable {
+    case type, status
+    static let key = "ObyGroupBy"
+
+    var label: String { self == .type ? "Type" : "Status" }
+}
+
+/// Where a task stands on Home (#496): running (queued too: it starts by itself, with nothing for
+/// you to do), needs you (whatever its agent is doing), or done.
+nonisolated enum WorkStatus: Sendable { case running, needs, done }
+
+/// A task's one mark wherever it's listed (#496): new until it's opened, then needs you, working,
+/// queued or done. The raw value is what VoiceOver reads.
+nonisolated enum WorkMark: String, Sendable {
+    case new = "New", needs = "Needs you", working = "Working", queued = "Queued", done = "Done"
+}
+
+/// A kind of work (#496), in Home's order: pull requests to review, issues' work, a group per
+/// teammate whose Oby asked for something, and the tasks asked in Oby. Routines join with #395.
+nonisolated enum WorkType: Hashable, Sendable {
+    case review, issues, teammate(String), tasks
+
+    /// A request from a teammate's Oby goes under them, whatever it asks for; then a review, then
+    /// work on an issue; anything else is a task asked in Oby.
+    static func of(review: Bool, issue: Int?, requester: String?) -> WorkType {
+        if let name = requester?.trimmingCharacters(in: .whitespaces), !name.isEmpty { return .teammate(name) }
+        if review { return .review }
+        return issue == nil ? .tasks : .issues
+    }
+
+    var id: String {
+        switch self {
+        case .review: "review"
+        case .issues: "issues"
+        case .teammate(let name): "teammate:\(name)"
+        case .tasks: "tasks"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .review: "Review PR"
+        case .issues: "Issues"
+        case .teammate(let name): name
+        case .tasks: "Tasks"
+        }
+    }
+
+    /// Home's order, teammates by name.
+    fileprivate var order: (Int, String) {
+        switch self {
+        case .review: (0, "")
+        case .issues: (1, "")
+        case .teammate(let name): (2, name)
+        case .tasks: (3, "")
+        }
+    }
+}
+
+/// The work as Home groups it (#496, Sangam's design: design/app's tasks.ts), on every app: by kind
+/// of work or by status, what each group shows, and a kind's page with its Running and Completed tabs.
+nonisolated enum WorkList {
+    /// One task: its job, its kind, where it stands, whether it waits to start (`queued`), and
+    /// whether it's new (`fresh`: arrived since the app opened, and not opened yet).
+    struct Item<J>: Identifiable {
+        var id: String
+        var job: J
+        var type: WorkType
+        var status: WorkStatus
+        var queued: Bool
+        var fresh: Bool
+
+        var mark: WorkMark {
+            if fresh { return .new }
+            switch status {
+            case .needs: return .needs
+            case .done: return .done
+            case .running: return queued ? .queued : .working
+            }
+        }
+    }
+
+    /// One group of Home's list: a kind of work (`type`) or a status, its tasks in order (`ranked`),
+    /// the count by its name (a kind's open tasks, a status's all), how many need you, and whether one's new.
+    struct Group<J>: Identifiable {
+        var id: String
+        var type: WorkType?
+        var label: String
+        var items: [Item<J>]
+        var count: Int
+        var countLabel: String
+        var needs: Int
+        var fresh: Bool
+    }
+
+    /// A kind's page: Running holds everything not done, what needs you included; Completed the rest.
+    enum Tab: String, CaseIterable, Sendable { case running = "Running", done = "Completed" }
+
+    /// `items` (newest first) in their groups, empty ones left out.
+    static func groups<J>(_ items: [Item<J>], by: GroupBy) -> [Group<J>] {
+        switch by {
+        case .type:
+            let kinds = Set(items.map(\.type)).sorted { $0.order < $1.order }
+            return kinds.map { kind in
+                let list = ranked(items.filter { $0.type == kind })
+                return Group(id: kind.id, type: kind, label: kind.label, items: list, count: list.count { $0.status != .done },
+                             countLabel: "open", needs: list.count { $0.status == .needs }, fresh: list.contains(where: \.fresh))
+            }
+        case .status:
+            let statuses: [(WorkStatus, String, String)] = [(.needs, "needs", "Needs you"), (.running, "running", "Running"), (.done, "done", "Completed")]
+            return statuses.compactMap { status, id, label in
+                let list = ranked(items.filter { $0.status == status })
+                if list.isEmpty { return nil }
+                return Group(id: "status:\(id)", type: nil, label: label, items: list, count: list.count, countLabel: "tasks",
+                             needs: status == .needs ? list.count : 0, fresh: list.contains(where: \.fresh))
+            }
+        }
+    }
+
+    /// Top of each list: new tasks, then what needs you, then what waits to start; the rest as
+    /// they came (newest first).
+    static func ranked<J>(_ items: [Item<J>]) -> [Item<J>] {
+        func rank(_ item: Item<J>) -> Int { item.fresh ? 0 : item.status == .needs ? 1 : item.queued ? 2 : 3 }
+        return items.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
+    }
+
+    /// What a group shows: everything still open, and its latest 3 done (5 under Completed), the
+    /// rest behind Show more (`more`); `hidden` is how many that holds back.
+    static func shown<J>(_ group: Group<J>, more: Bool) -> (rows: [Item<J>], hidden: Int) {
+        let keep = group.id == "status:done" ? 5 : 3
+        let done = group.items.filter { $0.status == .done }
+        let hidden = max(0, done.count - keep)
+        if more { return (group.items, hidden) }
+        return (group.items.filter { $0.status != .done } + done.prefix(keep), hidden)
+    }
+
+    /// A kind's tasks under one tab of its page.
+    static func items<J>(_ items: [Item<J>], in tab: Tab) -> [Item<J>] {
+        items.filter { ($0.status == .done) == (tab == .done) }
+    }
+
+    /// The tab a kind's page opens on: where its new task is, else Running while anything's open,
+    /// else Completed when anything's done, else Running.
+    static func firstTab<J>(_ items: [Item<J>]) -> Tab {
+        if let fresh = items.first(where: \.fresh) { return fresh.status == .done ? .done : .running }
+        if items.contains(where: { $0.status != .done }) { return .running }
+        return items.isEmpty ? .running : .done
+    }
+}
+
 #if canImport(SwiftUI)
 extension JobBadge.Tone {
     /// The same colours on the iPhone and the Mac.

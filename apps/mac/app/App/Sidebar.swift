@@ -9,18 +9,19 @@ nonisolated enum ChatSelection: Hashable, Sendable {
     case job(id: String, local: Bool)
     case channels
     case obys
+    /// A kind of work's page (#496): its Running and Completed tabs.
+    case group(WorkType)
 }
 
 /// The sidebar's sections, as the window lists them: what each row says, with no view in the
 /// way, so the tests read them (apps/mac/tests/SidebarTests.swift).
 nonisolated enum SidebarSections {
-    /// A job in Agents: running, or needing you, with its dot.
-    struct AgentRow: Identifiable, Equatable, Sendable {
-        enum Dot: Sendable { case working, waiting, needsYou }
+    /// A job, this Mac's own or the runner's.
+    struct JobRow: Identifiable, Equatable, Sendable {
         var job: Job
         var local: Bool
-        var dot: Dot
-        var id: String { (local ? "mac/" : "runner/") + job.id }
+        var id: String { Self.id(job.id, local: local) }
+        static func id(_ job: String, local: Bool) -> String { (local ? "mac/" : "runner/") + job }
     }
 
     /// What Channels says until F11 brings them, and Obys until F12: honest empty states, no fake data.
@@ -37,31 +38,27 @@ nonisolated enum SidebarSections {
         "Oby, \(obyPreview(last))" + (unread ? ", unread reply" : "")
     }
 
-    /// "2 active" beside Agents, or "None".
-    static func activeLine(_ rows: [AgentRow]) -> String {
-        rows.isEmpty ? "None" : "\(rows.count) active"
-    }
-
-    /// The jobs the sidebar lists under Agents: every one that's queued or running (a gray dot for
-    /// one waiting its turn, #238), and every one that needs you, this Mac's and the runner's, most
-    /// recently active first. Dismissed and finished jobs stay
-    /// out: the window's job cards and the island's list have them.
-    static func agents(local: [Job], runner: [Job]) -> [AgentRow] {
-        let rows = local.map { ($0, true) } + runner.map { ($0, false) }
-        return rows.compactMap { job, local in
-            if job.isWaiting { return AgentRow(job: job, local: local, dot: .waiting) }
-            if job.isActive { return AgentRow(job: job, local: local, dot: .working) }
-            if job.needsYou { return AgentRow(job: job, local: local, dot: .needsYou) }
-            return nil
-        }
-        .sorted {
-            let left = activity($0.job), right = activity($1.job)
-            return left == right ? $0.id < $1.id : left > right
-        }
-    }
-
-    static func activity(_ job: Job) -> Date {
-        [job.created, job.started, job.finished, job.pullRequest?.checkedAt].compactMap { $0 }.max() ?? job.created
+    /// Every job on Home as a task (#496), this Mac's and the runner's, latest first (by when it
+    /// finished, else when it was created, so "the latest done" are the last to finish): its kind of
+    /// work, where it stands, and whether it's new (created after `since`, when the window's state
+    /// began, and not in `seen`, the rows opened since). The caller leaves out what Clear done took.
+    ///
+    /// No job lands in a teammate's group yet: the runner this Mac talks to doesn't say who asked
+    /// for a job (only obid's jobs carry `obi.fromOwner`, docs/runner-api.md), so there's no
+    /// requester to group by rather than one made up.
+    static func work(local: [Job], runner: [Job], since: Date, seen: Set<String>) -> [WorkList.Item<JobRow>] {
+        let rows = local.map { JobRow(job: $0, local: true) } + runner.map { JobRow(job: $0, local: false) }
+        return rows
+            .sorted {
+                let left = $0.job.finished ?? $0.job.created, right = $1.job.finished ?? $1.job.created
+                return left == right ? $0.id < $1.id : left > right
+            }
+            .map { row in
+                let job = row.job
+                let status: WorkStatus = job.needsYou || job.waitsForAnswer || job.waitsForPermission ? .needs : job.isActive ? .running : .done
+                return WorkList.Item(id: row.id, job: row, type: .of(review: job.kind == .review, issue: job.issue, requester: nil),
+                                     status: status, queued: job.status == .queued, fresh: job.created > since && !seen.contains(row.id))
+            }
     }
 
     /// "WP" for Wellington Prado: the first letters of the first two names.
@@ -71,21 +68,37 @@ nonisolated enum SidebarSections {
     }
 }
 
-/// A messenger chat list: pinned Oby with a preview and unread dot, searchable agent
-/// chats by activity, future channels and Obys, and account/settings links below.
+extension IslandModel {
+    /// Home's tasks (#496, `SidebarSections.work`), less what Clear done took (`lists`).
+    func work(since: Date, seen: Set<String>) -> [WorkList.Item<SidebarSections.JobRow>] {
+        SidebarSections.work(local: desk.jobs.filter(lists), runner: feed.jobs.filter(lists), since: since, seen: seen)
+    }
+}
+
+/// A messenger chat list: pinned Oby with a preview and unread dot, the work grouped by kind or by
+/// status (#496, Home's ⋮ picks), and account/settings links below.
 struct SidebarView: View {
     let model: IslandModel
     @State private var search = ""
     @Binding var selection: ChatSelection
+    /// When the window's state began and the rows opened since, for the blue "new" mark.
+    let since: Date
+    let seen: Set<String>
     let onOpenSettings: (SettingsTab) -> Void
+    @AppStorage(GroupBy.key) private var groupBy = GroupBy.type
+    /// Groups folded away; while searching, every group with a match opens.
+    @State private var folded: Set<String> = []
+    /// Groups showing all their done tasks (Show more), not just the latest few.
+    @State private var more: Set<String> = []
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
-    private var agents: [SidebarSections.AgentRow] {
-        SidebarSections.agents(local: desk.jobs, runner: feed.jobs).filter {
-            search.isEmpty || $0.job.heading.localizedCaseInsensitiveContains(search)
-                || $0.job.agentName.localizedCaseInsensitiveContains(search)
+    private var groups: [WorkList.Group<SidebarSections.JobRow>] {
+        let items = model.work(since: since, seen: seen).filter {
+            search.isEmpty || $0.job.job.heading.localizedCaseInsensitiveContains(search)
+                || $0.job.job.agentName.localizedCaseInsensitiveContains(search)
         }
+        return WorkList.groups(items, by: groupBy)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -96,7 +109,7 @@ struct SidebarView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     if search.isEmpty || "Oby".localizedCaseInsensitiveContains(search) || (model.thread.last?.text.localizedCaseInsensitiveContains(search) ?? false) { obyRow }
-                    if !agents.isEmpty { agentsSection }
+                    ForEach(groups) { group($0) }
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 4)
@@ -153,45 +166,64 @@ struct SidebarView: View {
         .accessibilityLabel(SidebarSections.obyLabel(last: model.thread.last?.text, unread: model.unreadReply))
     }
 
-    private var agentsSection: some View {
-        section("Agents", trailing: SidebarSections.activeLine(agents)) {
-            if agents.isEmpty {
-                Text("No agent is working.").font(.system(size: 13)).foregroundStyle(.white.opacity(0.4))
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-            }
-            ForEach(agents) { row in
-                let picked = selection == .job(id: row.job.id, local: row.local)
-                Button { selection = .job(id: row.job.id, local: row.local) } label: {
-                    HStack(spacing: 10) {
-                        AgentMark(agent: row.job.agent).font(.system(size: 14, weight: .semibold)).frame(width: 18)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(row.job.heading).font(.system(size: 14, weight: .medium)).lineLimit(1)
-                            Text(row.job.line).font(.system(size: 11)).foregroundStyle(.white.opacity(0.5)).lineLimit(1)
-                        }
-                        Spacer(minLength: 6)
-                        Circle().fill(row.dot.color).frame(width: 8, height: 8)
-                            .accessibilityLabel(row.dot.label)
+    /// One group: its header folds it (an orange dot when something in it needs you, its count when
+    /// anything's open), then its rows, then Show more past the latest done ones.
+    private func group(_ group: WorkList.Group<SidebarSections.JobRow>) -> some View {
+        let open = !folded.contains(group.id) || !search.isEmpty
+        let shown = WorkList.shown(group, more: more.contains(group.id))
+        return VStack(alignment: .leading, spacing: 2) {
+            Button { folded.formSymmetricDifference([group.id]) } label: {
+                HStack(spacing: 6) {
+                    Text(group.label).font(OBYStyle.caption.weight(.medium)).foregroundStyle(.white.opacity(0.45))
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(.white.opacity(0.35))
+                        .rotationEffect(.degrees(open ? 0 : -90)).accessibilityHidden(true)
+                    Spacer()
+                    if group.needs > 0 {
+                        Circle().fill(.orange).frame(width: 6, height: 6)
+                            .accessibilityLabel("\(group.needs) need\(group.needs == 1 ? "s" : "") you")
                     }
-                    .padding(.horizontal, 10).padding(.vertical, 8)
-                    .background(.white.opacity(picked ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .contentShape(Rectangle())
+                    if group.count > 0 {
+                        Text("\(group.count)").font(OBYStyle.caption).foregroundStyle(.white.opacity(0.45))
+                            .accessibilityLabel("\(group.count) \(group.countLabel)")
+                    }
                 }
-                .buttonStyle(.plain)
-                .help(row.local ? "On this Mac" : "On \(feed.name)")
+                .padding(.horizontal, 10).padding(.bottom, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityValue(open ? "Open" : "Folded")
+            .contextMenu {
+                if let kind = group.type { Button("Open \(group.label)") { selection = .group(kind) } }
+            }
+            if open {
+                ForEach(shown.rows) { row($0) }
+                if shown.hidden > 0 {
+                    Button(more.contains(group.id) ? "Show less" : "Show \(shown.hidden) more") { more.formSymmetricDifference([group.id]) }
+                        .buttonStyle(.plain).font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                }
             }
         }
     }
-    private func section(_ title: String, trailing: String?, @ViewBuilder _ content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(title).font(OBYStyle.caption.weight(.medium)).foregroundStyle(.white.opacity(0.45))
-                Spacer()
-                if let trailing { Text(trailing).font(OBYStyle.caption).foregroundStyle(.white.opacity(0.45)) }
+
+    private func row(_ item: WorkList.Item<SidebarSections.JobRow>) -> some View {
+        let job = item.job.job, local = item.job.local
+        let picked = selection == .job(id: job.id, local: local)
+        return Button { selection = .job(id: job.id, local: local) } label: {
+            HStack(spacing: 10) {
+                AgentMark(agent: job.agent).font(.system(size: 14, weight: .semibold)).frame(width: 18)
+                Text(job.heading).font(.system(size: 14, weight: .medium)).lineLimit(1)
+                    .foregroundStyle(item.status == .done ? OBYStyle.secondary : OBYStyle.primary)
+                Spacer(minLength: 6)
+                WorkMarkView(mark: item.mark)
             }
-            .padding(.horizontal, 10).padding(.bottom, 4)
-            .accessibilityAddTraits(.isHeader)
-            content()
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(.white.opacity(picked ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .help(local ? "On this Mac" : "On \(feed.name)")
     }
 
     private func emptyRow(_ text: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -232,20 +264,23 @@ struct SidebarView: View {
     }
 }
 
-extension SidebarSections.AgentRow.Dot {
-    var color: Color {
-        switch self {
-        case .working: .blue
-        case .waiting: .gray
-        case .needsYou: .orange
-        }
-    }
+/// A task's one mark at the end of its row (#496): blue while new, orange when it needs you, gray
+/// while working, nothing while queued (the spot stays, so rows line up), a small check when done.
+struct WorkMarkView: View {
+    let mark: WorkMark
 
-    var label: String {
-        switch self {
-        case .working: "Working"
-        case .waiting: "Waiting"
-        case .needsYou: "Needs you"
+    var body: some View {
+        Group {
+            switch mark {
+            case .new: Circle().fill(.blue).frame(width: 8, height: 8)
+            case .needs: Circle().fill(.orange).frame(width: 8, height: 8)
+            case .working: Circle().fill(.gray).frame(width: 8, height: 8)
+            case .queued: Color.clear
+            case .done: Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(OBYStyle.tertiary)
+            }
         }
+        .frame(width: 12, height: 12)
+        .accessibilityElement()
+        .accessibilityLabel(mark.rawValue)
     }
 }

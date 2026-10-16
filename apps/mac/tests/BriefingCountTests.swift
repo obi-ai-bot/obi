@@ -63,7 +63,7 @@ struct BriefingCountTests {
 
     /// 1 job running on the runner and 14 queued behind another's files or the update: the notch,
     /// the island's header and the brain say "1 agent is working, 14 waiting." (#238). The waiting
-    /// ones say Waiting, in gray, under their own group, and the sidebar gives them a gray dot.
+    /// ones say Waiting, in gray, under their own group, and the sidebar marks them queued (#496).
     @Test func theHeadlineCountsOnlyWorkingJobs() {
         let feed = RunnerFeed()
         var waiting: [Job] = []
@@ -83,7 +83,7 @@ struct BriefingCountTests {
         #expect(waiting[1].line == "After #223 merges" && waiting[0].line == "Runner update")
         #expect(running.badge == JobBadge(text: "Working", tone: .blue) && running.group == .working)
         #expect(JobList.groups(feed.jobs, by: \.group).map(\.group) == [.working, .waiting])
-        #expect(SidebarSections.agents(local: [], runner: feed.jobs).filter { $0.dot == .waiting }.count == 14)
+        #expect(SidebarSections.work(local: [], runner: feed.jobs, since: .distantFuture, seen: []).filter { $0.mark == .queued }.count == 14)
         desk.elsewhere = { [Briefing.Place(name: "tetrix-lab", jobs: feed.jobs, inbox: [])] }
         #expect(desk.briefing(turns: []).working == model.working)
         #expect(desk.briefing(turns: []).text.contains("Working now: 1 agent is working: Vault secrets on tetrix-lab. 14 jobs are waiting."))
