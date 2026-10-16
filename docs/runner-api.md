@@ -469,7 +469,9 @@ While a turn carries out actions, `GET /v1/events` sends a `step` event when eac
 {"turn":"8d…","index":1,"action":"research","text":"Searching oby for “Runner API”","state":"running","at":"2026-10-12T12:00:00Z"}
 ```
 
-`POST /v1/conversation/stop` asks the turn underway to stop after its current action. The in-flight `POST /v1/plans` then returns a reply describing what it completed. The cancel words `stop` and `never mind` have the same effect. The turn budget is 110 seconds; clients should wait 120 seconds while following its step events.
+`POST /v1/conversation/stop` asks the turn underway to stop after its current action, and answers `{"stopped": true}`. The in-flight `POST /v1/plans` then returns a reply describing what it completed. The cancel words `stop` and `never mind` have the same effect. The turn budget is 110 seconds; clients should wait 120 seconds while following its step events.
+
+`POST /v1/plans/cancel` drops the turn underway instead, and answers `{"cancelled": true}`: the plan its brain is making does nothing when it comes, and the in-flight `POST /v1/plans` answers `none`. What the turn already did stays done. An app sends it before it replaces a turn with new words.
 
 ```json
 {"said": "and the vault one?",
@@ -1257,7 +1259,8 @@ A conversation, as `GET /v1/conversations` lists it and the `conversation` event
 
 **`POST /v1/plans`** takes `conversation`, an `id` (the words join it; `404` if it isn't there), or `"new": true` (they start a new conversation, titled from them); both is `422`. With neither, the words join the latest conversation, or start the first one: the apps from before #493 (the Mac, the iPhone, the Watch) send neither and show one thread, and the notch, the Watch and the talk key carry on the latest conversation (#493). A screen that starts a conversation, like Home, sends `"new": true`. The brain reads only that conversation's turns (or the `turns` the app sends). Every answer, whatever its `kind`, carries `"conversation": "<id>"`, the one the words joined.
 
-- A plan refused with `422` (the brain's plan didn't pass obid's checks) leaves no conversation of its own: one the words started is forgotten again, with its `conversation` event (`deleted`). A conversation that was there already keeps the user's words.
+- A plan obid refuses is never a `422` (#546): obid tells the brain why and lets it try once more, then Codex plans, then keyword rules, which never act on the user's first words (they reply "Oby couldn't think that through: say it again", or ask which repository). The conversation keeps the words and that answer.
+- New words in a conversation replace the turn under way in it, as `POST /v1/plans/cancel` would: its plan does nothing, and its request answers `none`. A turn in another conversation goes on.
 - A conversation deleted while its turn runs stays deleted: the answer still comes, with its `conversation`, and Oby's words aren't kept.
 
 **Jobs remember the conversation that started them.** A job a plan started has `conversation`, the id of the conversation whose words started it, kept when that conversation is deleted, and every `job` event of it carries it, up to the last one (how it ended): show its events in that conversation. A job from `POST /v1/jobs`, or another Obi's review, has `conversation` null. An inbox item names its `job`, so it belongs where its job does. obid doesn't yet write a job's events into its conversation as turns (#351), and work that comes in from elsewhere (a routine, another Oby, GitHub) doesn't yet start a conversation of its own.
@@ -1268,7 +1271,16 @@ A conversation, as `GET /v1/conversations` lists it and the `conversation` event
 
 **Through the gateway.** `GET /v1/conversations`, `PATCH` and `DELETE /v1/conversations/{id}` aren't on the gateway's allowlist (Runner/Routes.swift), like the rest of this section; `GET /v1/conversation` and `POST /v1/plans` are, as before.
 
-**Memory isn't shared between conversations yet.** What the user decides in one conversation ("never touch the Watch target") should hold in all of them (#493). obid's brain has no memory or briefing that could carry it: it reads only the conversation's own turns. Its remembered decisions (below) are the owner's answers to other Obis' requests, not what they say to Oby. Until Oby's memory (#378) comes to obid, a decision said in one conversation doesn't reach the others.
+**Memory isn't shared between conversations yet.** What the user decides in one conversation ("never touch the Watch target") should hold in all of them (#493). obid's brain is briefed on the work (obid only: the brain, below), but the conversation it reads is only that conversation's own turns, and it has no memory that could carry a decision. Its remembered decisions (below) are the owner's answers to other Obis' requests, not what they say to Oby. Until Oby's memory (#378) comes to obid, a decision said in one conversation doesn't reach the others.
+
+### obid only: the brain
+
+obid's `POST /v1/plans` is the Swift runner's brain (Engine/Brain.swift, Engine/Conversation.swift's `Briefing`, `Desk.plan`), ported (#546), with what obid has:
+
+- **The plan.** Every action of the schema, checked by obid with the Swift runner's refusal texts. A refused plan goes back to the brain with the reason and is tried once more; Claude Code retries a transient failure once (exit code 15, an empty answer, a timeout); quick questions think with Haiku (`claude-haiku-5-5`), requests longer than 600 characters and every later step with Sonnet (`claude-sonnet-5-5`); Codex plans when Claude can't, then rules. The brain thinks with each tool's first account. Each brain turn is logged and kept, the last 500, in `home/brain-turns.jsonl` (0600): the words, which adapter planned, the plan, and every failure and refusal before it.
+- **The briefing** is built from obid's own jobs, inbox and accounts. The conversation part is the last 50 turns, each cut to 500 characters. obid has no failure records yet (#445), no usage (each account says "no usage reported yet"), no model settings and no weekly reserves, so those parts say so. What agents wrote (a job's step and result, a permission's ask) is in the quoted `work.md`; when there is one, the brain may read it with Claude Code's Read and nothing else, with `--max-turns 6`, boxed like a job (it sees its own folder and its account's login, never obid's home or the person's); without one it has no tool at all.
+- **The loop**, its `step` events (which also carry `conversation`, the conversation the turn is in), Stop and cancel are as above. Turns in different conversations run side by side.
+- **What a plan may do on obid.** Replies, questions and jobs; `stop_agent`, `set_mode` and `answer_permission`. A job a plan starts can't wait for anything (`start_when` must be empty: #455). The other actions are planned and checked, and answered with why obid can't do them yet: moving a job waits for `POST /v1/jobs/{id}/move` (#447).
 
 ### obid only: Sphere membership
 
