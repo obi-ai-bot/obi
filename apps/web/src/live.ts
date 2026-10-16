@@ -106,14 +106,20 @@ export function synced(s: Live, snap: Snapshot, meanwhile: Event[]): Live {
 // changes in between is lost. The stream is a fetch, not an EventSource, so it can carry the
 // token; when it ends or fails, it starts again after a moment.
 let following: AbortController | null = null;
-let pending: Event[] | null = null;
+let authSession = 0;
+let reconnecting: ReturnType<typeof setTimeout> | null = null;
+const current = (control: AbortController) => following === control && !control.signal.aborted;
 let retry = 0;
+const asked = new Set<string>();
 
 export function connect() {
   if (following || !token()) {
     if (!token()) set({ signedIn: false });
     return;
   }
+  if (reconnecting !== null) clearTimeout(reconnecting);
+  reconnecting = null;
+  asked.clear();
   const control = new AbortController();
   following = control;
   void follow(control);
@@ -123,16 +129,18 @@ async function follow(control: AbortController) {
   set({ connection: 'connecting' });
   try {
     const response = await openEvents(control.signal);
+    if (!current(control)) { void response.body?.cancel().catch(() => {}); return; }
     if (response.status === 401) { signedOut(); return; }
     if (!response.ok || !response.body) throw new ApiError(response.status, `Oby answered ${response.status}.`);
-    pending = [];
+    const pending: Event[] = [];
+    let syncing = true;
     const read = sseReader((name, data) => {
       const e = parseEvent(name, data);
-      if (!e) return;
-      if (pending) pending.push(e);
+      if (!e || !current(control)) return;
+      if (syncing) pending.push(e);
       else set(apply(state, e));
     });
-    void sync();
+    void sync(control, pending, () => { syncing = false; });
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     for (;;) {
       const { value, done } = await reader.read();
@@ -141,43 +149,52 @@ async function follow(control: AbortController) {
     }
     throw new ApiError(0, 'Oby isn’t answering. Trying again…');
   } catch (e) {
-    if (control.signal.aborted) return;
-    if (following === control) following = null;
-    set({ connection: 'down', problem: e instanceof ApiError ? e.message : 'Oby isn’t answering. Trying again…' });
-    setTimeout(connect, Math.min(30_000, 1000 * 2 ** retry++));
+    reconnect(control, e);
   }
 }
 
-async function sync() {
+// A snapshot failure needs the same recovery as a broken stream. Ending this
+// generation also prevents its late HTTP responses from replacing a newer one.
+function reconnect(control: AbortController, e: unknown) {
+  if (!current(control)) return;
+  if (e instanceof ApiError && e.status === 401) { signedOut(); return; }
+  following = null;
+  control.abort();
+  set({ connection: 'down', problem: e instanceof Error ? e.message : 'Oby isn’t answering. Trying again…' });
+  reconnecting = setTimeout(() => { reconnecting = null; connect(); }, Math.min(30_000, 1000 * 2 ** retry++));
+}
+
+async function sync(control: AbortController, pending: Event[], onSynced: () => void) {
   try {
-    const [status, jobs, inbox, turns] = await Promise.all([api.status(), api.jobs(PAGE), api.inbox(), shownTurns()]);
-    const meanwhile = pending ?? [];
-    pending = null;
+    const [status, jobs, inbox, turns] = await Promise.all([api.status(), api.jobs(PAGE), api.inbox(), shownTurns(control)]);
+    if (!current(control)) return;
     retry = 0;
-    set(synced(state, { status, jobs, inbox, turns }, meanwhile));
-    void fetchMissing();
+    set(synced(state, { status, jobs, inbox, turns }, pending));
+    pending.length = 0;
+    onSynced();
+    void fetchMissing(control);
   } catch (e) {
-    pending = null;
-    lost(e);
+    reconnect(control, e);
   }
 }
 
 // The token obid refused (it changed, or the page signed out): forget it, stop following, and
 // ask for it again (SignIn.tsx)
 export function signedOut() {
+  authSession++;
   keepToken(null);
   following?.abort();
   following = null;
-  pending = null;
-  set({ signedIn: false, connection: 'connecting', problem: null });
+  if (reconnecting !== null) clearTimeout(reconnecting);
+  reconnecting = null;
+  retry = 0;
+  set({ signedIn: false, connection: 'connecting', problem: null, status: null,
+    jobs: {}, firstJobs: new Set(), seen: new Set(), inbox: [], turns: [], shown: null, older: false,
+    thinking: false, steps: [], waiting: null, answering: {}, clearedAt: null });
 }
-function lost(e: unknown) {
-  if (e instanceof ApiError && e.status === 401) { signedOut(); return; }
-  set({ connection: 'down', problem: e instanceof Error ? e.message : String(e) });
-}
-
 // The token the page was given, once obid has taken it: kept for this tab, and the page follows obid
 export function signedIn(value: string) {
+  signedOut();
   keepToken(value);
   set({ signedIn: true, problem: null });
   connect();
@@ -185,14 +202,15 @@ export function signedIn(value: string) {
 
 // Jobs the inbox or the conversation names that aren't among the latest: fetched one by one
 // (GET /v1/jobs/{id} answers any job the runner ever had).
-const asked = new Set<string>();
-async function fetchMissing() {
+async function fetchMissing(control = following) {
   const ids = new Set([...state.inbox.map((i) => i.job), ...state.turns.flatMap((t) => t.jobs)]);
   for (const id of ids) {
+    if (following !== control || control?.signal.aborted) return;
     if (!id || state.jobs[id] || asked.has(id)) continue;
     asked.add(id);
     try {
       const job = await api.job(id);
+      if (following !== control || control?.signal.aborted) return;
       set({ jobs: { ...state.jobs, [job.id]: job } });
     } catch { /* gone: nothing to show for it */ }
   }
@@ -211,10 +229,11 @@ const failed = (e: unknown) => {
 };
 
 // The turns of the conversation the page shows, or, with none (or it's gone), of the latest
-async function shownTurns() {
+async function shownTurns(control = following, session = authSession) {
   if (state.shown) {
     try { return await api.conversation({ id: state.shown, limit: PAGE }); } catch (e) {
       if (!(e instanceof ApiError && e.status === 404)) throw e;
+      if (session !== authSession || following !== control || control?.signal.aborted) return [];
       set({ shown: null });
     }
   }
@@ -228,24 +247,29 @@ async function shownTurns() {
 export async function ask(said: string, answer?: { question: string; option: string }) {
   const words = said.trim();
   if (!words || state.thinking) return;
+  const session = authSession;
   set({ thinking: true, steps: [], waiting: null });
   try {
     // in the conversation the page shows, so its words never land in another
     const a = await api.plan(words, answer, state.shown ?? undefined);
+    if (session !== authSession) return;
     set(withNew(state, a.jobs));
     if (a.kind === 'question') set({ waiting: { said: a.said, question: a.question } });
     // the first conversation, which the page now shows; or the stream down meanwhile: the
     // conversation as it is now
     if ((!state.shown && a.conversation) || state.connection !== 'live') {
       if (!state.shown && a.conversation) set({ shown: a.conversation });
-      set({ turns: (await shownTurns()).sort(byAt) });
+      const turns = await shownTurns();
+      if (session !== authSession) return;
+      set({ turns: turns.sort(byAt) });
     }
   } catch (e) {
+    if (session !== authSession) return;
     // the conversation it showed is gone: the latest from now on
     if (e instanceof ApiError && e.status === 404 && state.shown) set({ shown: null, turns: [], older: false });
     failed(e);
   } finally {
-    set({ thinking: false, steps: [] });
+    if (session === authSession) set({ thinking: false, steps: [] });
   }
 }
 // Oby's question answered: with one of its options, or in your own words
@@ -257,46 +281,57 @@ export function answerQuestion(option: string) {
 
 // The turns before the first one shown
 export async function loadOlder() {
+  const session = authSession;
   const first = state.turns[0];
   if (!first) return;
   try {
     const turns = await api.conversation({ before: first.id, limit: PAGE });
+    if (session !== authSession) return;
     set({ turns: [...turns, ...state.turns].sort(byAt), older: turns.length >= PAGE });
     void fetchMissing();
-  } catch (e) { failed(e); }
+  } catch (e) { if (session === authSession) failed(e); }
 }
 
 // Told the job's agent something (POST /v1/jobs/{id}/messages)
 export async function tellJob(id: string, text: string) {
   const t = text.trim();
   if (!t) return;
+  const session = authSession;
   try {
-    set(withNew(state, [await api.message(id, t)]));
-  } catch (e) { failed(e); }
+    const job = await api.message(id, t);
+    if (session === authSession) set(withNew(state, [job]));
+  } catch (e) { if (session === authSession) failed(e); }
 }
 
 export async function stopJob(id: string) {
+  const session = authSession;
   try {
-    set(withNew(state, [await api.stop(id)]));
-  } catch (e) { failed(e); }
+    const job = await api.stop(id);
+    if (session === authSession) set(withNew(state, [job]));
+  } catch (e) { if (session === authSession) failed(e); }
 }
 
 export async function dismissJob(id: string) {
+  const session = authSession;
   try {
-    set(withNew(state, [await api.dismiss(id)]));
-  } catch (e) { failed(e); }
+    const job = await api.dismiss(id);
+    if (session === authSession) set(withNew(state, [job]));
+  } catch (e) { if (session === authSession) failed(e); }
 }
 
 // A decision answered (POST /v1/inbox/{id}/answer): Later puts it off an hour
 export async function answerItem(taskId: string, itemId: string, option: string) {
+  const session = authSession;
   set({ answering: { ...state.answering, [taskId]: option } });
   try {
     const body = option === 'Later' ? { later: new Date(Date.now() + 3600_000).toISOString().replace(/\.\d+Z$/, 'Z') } : { answer: option };
     const item = await api.answer(itemId, body);
+    if (session !== authSession) return;
     // settled, it leaves the inbox; put off, it's updated, unless an event settled it meanwhile
     if (item.state === 'done' || state.inbox.some((i) => i.id === item.id)) set(apply(state, { kind: 'inbox', item }));
     if (option === 'Later') set({ answering: omit(state.answering, taskId) });
   } catch (e) {
+    if (session !== authSession) return;
     set({ answering: omit(state.answering, taskId) });
     failed(e);
   }

@@ -330,6 +330,7 @@ impl Conversations {
     ) -> Result<Turn, Error> {
         let sequence = next_sequence(threads);
         let thread = &mut threads[index];
+        let kept = thread.clone();
         let turn = Turn {
             id: new_id(),
             who: who.into(),
@@ -342,7 +343,10 @@ impl Conversations {
         let excess = thread.turns.len().saturating_sub(KEPT);
         thread.turns.drain(..excess);
         thread.sequence = sequence;
-        self.write(thread).map_err(Error::Io)?;
+        if let Err(error) = self.write(thread) {
+            *thread = kept;
+            return Err(Error::Io(error));
+        }
         self.events.send("conversation", thread.summary());
         self.events
             .send("turn", serde_json::to_value(&turn).unwrap_or_default());
@@ -660,6 +664,65 @@ mod tests {
         assert_eq!(titled("one\r\ntwo"), "One");
         assert_eq!(titled("one\u{2028}two"), "One");
         assert_eq!(titled("tab\there"), "Tab here");
+    }
+
+    #[test]
+    fn failed_append_keeps_pruned_turns_sequence_and_events_unchanged() {
+        let home = std::env::temp_dir().join(format!("obid-conversation-{}", uuid::Uuid::new_v4()));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(home.clone());
+        let events = crate::events::Events::new();
+        let conversations = super::Conversations::open(&home, events.clone());
+        let id = conversations
+            .begin(super::Target::New, "first".into())
+            .unwrap()
+            .conversation;
+        {
+            let mut threads = conversations.lock();
+            let thread = &mut threads[0];
+            let first = thread.turns[0].clone();
+            thread.turns = (0..super::KEPT)
+                .map(|i| super::Turn {
+                    id: i.to_string(),
+                    text: format!("kept {i}"),
+                    ..first.clone()
+                })
+                .collect();
+            conversations.write(thread).unwrap();
+        }
+        let before = serde_json::to_value(&*conversations.lock()).unwrap();
+        let mut received = events.subscribe();
+        let saved = home.join("saved");
+        std::fs::rename(&conversations.dir, &saved).unwrap();
+        std::fs::write(&conversations.dir, b"not a directory").unwrap();
+        assert!(matches!(
+            conversations.append(&id, "oby", "rejected".into(), vec![]),
+            Err(super::Error::Io(_))
+        ));
+        assert_eq!(
+            serde_json::to_value(&*conversations.lock()).unwrap(),
+            before
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        std::fs::remove_file(&conversations.dir).unwrap();
+        std::fs::rename(&saved, &conversations.dir).unwrap();
+        conversations
+            .append(&id, "oby", "accepted".into(), vec![])
+            .unwrap();
+        let threads = conversations.lock();
+        assert_eq!(threads[0].turns.len(), super::KEPT);
+        assert_eq!(threads[0].turns[0].text, "kept 1");
+        assert_eq!(threads[0].turns.last().unwrap().text, "accepted");
+        assert!(!threads[0].turns.iter().any(|turn| turn.text == "rejected"));
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

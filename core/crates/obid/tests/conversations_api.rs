@@ -719,3 +719,67 @@ fn past_200_conversations_the_oldest_unpinned_are_forgotten() {
     plan(&obid, json!({"said": "still here", "conversation": ids[5]}));
     assert_eq!(conversations(&obid, "?limit=500").len(), 200);
 }
+
+#[test]
+fn failed_turn_write_does_not_change_the_existing_conversation() {
+    let folder = Folder::new("conversation-write-failure");
+    let (mut obid, config) = obid(&folder);
+    let id = plan(&obid, json!({"said": "kept words", "new": true}))["conversation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let query = format!("?id={id}");
+    let before = turns(&obid, &query);
+    let listed = conversations(&obid, "");
+    let home = Path::new(config["home"].as_str().unwrap());
+    let dir = home.join("conversations");
+    let saved = home.join("conversations-saved");
+    let bytes = std::fs::read(dir.join(format!("{id}.json"))).unwrap();
+    // Fail deterministically even as root: the directory becomes a file.
+    std::fs::rename(&dir, &saved).unwrap();
+    std::fs::write(&dir, b"not a directory").unwrap();
+    let failed = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "rejected words", "conversation": id})),
+    );
+    assert_eq!(failed.status, 500, "{}", failed.text);
+    assert_eq!(
+        turns(&obid, &query),
+        before,
+        "a rejected turn changed memory"
+    );
+    assert_eq!(
+        conversations(&obid, ""),
+        listed,
+        "a rejected turn moved the cursor"
+    );
+    let failed_new = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": "rejected new conversation", "new": true})),
+    );
+    assert_eq!(failed_new.status, 500, "{}", failed_new.text);
+    assert_eq!(conversations(&obid, ""), listed);
+    assert_eq!(
+        std::fs::read(saved.join(format!("{id}.json"))).unwrap(),
+        bytes
+    );
+    std::fs::remove_file(&dir).unwrap();
+    std::fs::rename(&saved, &dir).unwrap();
+    plan(
+        &obid,
+        json!({"said": "accepted after recovery", "conversation": id}),
+    );
+    let after = turns(&obid, &query);
+    assert_eq!(
+        texts(&after),
+        ["kept words", "Fine.", "accepted after recovery", "Fine."]
+    );
+    obid.stop();
+    let mut restarted = start(&folder.0, &config, Some(planner().parent().unwrap()));
+    assert_eq!(turns(&restarted, &query), after);
+    restarted.stop();
+}
