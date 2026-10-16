@@ -138,12 +138,20 @@ final class MacDevice {
 
     /// Removes the runner's connection `name` (Settings › Connectors): the runner's own sentence,
     /// signed after Touch ID, as a publish is. A cancelled Touch ID throws before anything changes.
+    /// The `oby-connection` signature also approves adding a connection, so this Mac signs only
+    /// the sentence that removes this one (`removal`): anything else is refused, unsigned.
     func disconnect(_ name: String, with runner: Runner) async throws {
         let device = try await register(with: runner, again: false)
         let action = try await runner.disconnectAction(name)
+        guard action == Self.removal(name) else {
+            throw RunnerError(message: "The runner asked this Mac to approve something other than disconnecting \(name), so nothing was signed.")
+        }
         let approval = try await key.approveConnection(action: action, device: device)
         try await runner.disconnect(name, approval: approval)
     }
+
+    /// The runner's sentence for removing connection `name` (Runner/Connections.swift, `Connection.removal`).
+    nonisolated static func removal(_ name: String) -> String { "Disconnect \(name)." }
 
     private static func idKey(_ runner: Runner) -> String { "device.\(runner.base.host() ?? runner.base.absoluteString)" }
 }
