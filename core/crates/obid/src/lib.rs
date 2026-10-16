@@ -8,10 +8,12 @@
 pub mod acp;
 pub mod agent;
 pub mod api;
+pub mod brain;
 pub mod clear;
 pub mod codex;
 pub mod config;
 pub mod conn;
+pub mod conversation;
 pub mod devices;
 pub mod events;
 pub mod git;
@@ -190,6 +192,7 @@ pub async fn serve(
     jobs.use_plugins(plugins.clone());
     let cleared = clear::Cleared::open(&config.home);
     let devices = devices::Devices::open(&config.home);
+    let conversation = conversation::Conversation::open(&config.home, events.clone());
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -199,6 +202,7 @@ pub async fn serve(
         devices,
         jobs: jobs.clone(),
         events,
+        conversation,
         link: link.clone(),
         plugins: plugins.clone(),
         stopping: stopping_rx.clone(),

@@ -104,6 +104,8 @@ pub struct Job {
     pub effort: Option<String>,
     pub notes: Option<Vec<String>>,
     pub files: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<String>>,
     pub limit: Option<String>,
     pub start_commit: Option<String>,
     pub mode: Option<String>,
@@ -175,6 +177,7 @@ impl Job {
             effort: None,
             notes: None,
             files: None,
+            attachments: None,
             limit: None,
             start_commit: None,
             mode: None,

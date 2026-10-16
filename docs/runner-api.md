@@ -534,6 +534,8 @@ Every Lead turn is logged on the runner (the words, the plan or why it was refus
 
 One thread for every device (#11): the conversation the runner keeps, which every `POST /v1/plans` joins, whichever app sent it. The runner keeps the last 500 turns in `oby.sqlite`, the oldest pruned; the brain reads the last 50 of them. Answers one page, oldest first:
 
+obid keeps the same 500-turn thread in its private `home/conversation.json`; its API and events have the same shape.
+
 ```json
 [{"id": "7c1e2f30-…", "who": "user", "text": "Review oby PR #33", "at": "2026-10-11T09:12:00Z", "jobs": []},
  {"id": "9a4b5c60-…", "who": "oby", "text": "The route is in Runner/API.swift.", "at": "2026-10-11T09:12:04Z", "jobs": [], "details": "Read [Runner/API.swift](https://github.com/deskree-inc/oby/blob/<sha>/Runner/API.swift#L1)."}]
