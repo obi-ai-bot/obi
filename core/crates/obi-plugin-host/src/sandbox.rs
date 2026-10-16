@@ -33,9 +33,9 @@
 //!   socket aren't there; only the folder the name resolver's `resolv.conf` lives in (and
 //!   `systemd-resolved`'s) is bound back in, read-only. Its processes are in their own PID
 //!   and IPC namespaces, which end with its first process, so nothing it started outlives it,
-//!   whatever left its process group or session. Unix sockets in the abstract namespace belong to the network
-//!   namespace, which the plug-in shares with the machine because it has the network: a
-//!   service listening on one (an X server, an old D-Bus) is still reachable.
+//!   whatever left its process group or session. Its network namespace is its own, with
+//!   slirp4netns for the hosts it talks to, so an abstract-namespace Unix socket on the host
+//!   is not reachable.
 //!
 //! On macOS the temporary folders `/private/tmp`, `/private/var/tmp` and `/private/var/folders`
 //! (which holds every user's `TMPDIR` and caches) can't be read. Of the folders above its own
@@ -107,7 +107,7 @@ if [ -z "$child" ]; then
   wait "$bpid" 2>/dev/null
   exit 1
 fi
-slirp4netns --configure --mtu=65520 "$child" tap0 >"$ready.log" 2>&1 &
+slirp4netns --configure --mtu=65520 --userns-path="/proc/$child/ns/user" "$child" tap0 >"$ready.log" 2>&1 &
 slirp=$!
 i=0
 while [ "$i" -lt 50 ]; do
@@ -404,6 +404,10 @@ impl Sandbox {
                     "--unshare-pid",
                     "--unshare-ipc",
                     "--unshare-net",
+                    "--uid",
+                    "0",
+                    "--gid",
+                    "0",
                     "--new-session",
                     "--ro-bind",
                     "/",

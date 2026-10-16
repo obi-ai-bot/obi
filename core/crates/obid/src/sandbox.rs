@@ -99,7 +99,7 @@ if [ -z "$child" ]; then
   wait "$bpid" 2>/dev/null
   exit 1
 fi
-slirp4netns --configure --mtu=65520 "$child" tap0 >"$ready.log" 2>&1 &
+slirp4netns --configure --mtu=65520 --userns-path="/proc/$child/ns/user" "$child" tap0 >"$ready.log" 2>&1 &
 slirp=$!
 i=0
 while [ "$i" -lt 50 ]; do
@@ -381,8 +381,18 @@ fn bubblewrap_args(spec: &Spec) -> Vec<OsString> {
     ]);
     // Always a network namespace of its own. With no network, nothing is set up in it. With
     // network, the launcher outside starts slirp4netns in it, so the host's abstract Unix
-    // sockets stay unreachable and the model's API does not.
+    // sockets stay unreachable and the model's API does not. bubblewrap 0.11 leaves the
+    // sandbox with no capabilities, so slirp can enter that namespace only when the user is
+    // uid 0 inside it (`--userns-path`); files it creates are still the user's outside.
     push(&["--unshare-net".as_ref()]);
+    if spec.network {
+        push(&[
+            "--uid".as_ref(),
+            "0".as_ref(),
+            "--gid".as_ref(),
+            "0".as_ref(),
+        ]);
+    }
     push(&["--ro-bind".as_ref(), "/".as_ref(), "/".as_ref()]);
     push(&[
         "--dev".as_ref(),
