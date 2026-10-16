@@ -9,6 +9,7 @@ pub mod briefing;
 pub mod plan;
 pub mod planner;
 pub mod rules;
+pub mod turn;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,7 +28,6 @@ use crate::api::{ApiError, Shared};
 use crate::conversation::{Target, Turn};
 use actions::{Asked, Talk};
 use plan::Context;
-use planner::{Planner, Record, Room};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,6 +82,25 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
         (None, false) => Target::Latest,
     };
     let turns = validate_turns(req.turns)?;
+    // A bare "never mind", "stop" or "cancel" never reaches the brain: it stops the turn under
+    // way, after the action it's doing, and is answered with nothing (no job stops on a word).
+    if req.answer.is_none() && turn::cancels(words) {
+        let named = match &target {
+            Target::Id(id) => Some(id.clone()),
+            _ => None,
+        };
+        shared.turns.stop(named.as_deref());
+        let conversation = named
+            .or_else(|| shared.turns.latest_conversation())
+            .or_else(|| shared.conversations.latest_id());
+        return Ok((
+            StatusCode::OK,
+            axum::Json(
+                json!({"kind": "none", "jobs": [], "drafts": [], "conversation": conversation}),
+            ),
+        )
+            .into_response());
+    }
     let said = req
         .answer
         .map(|a| {
@@ -92,38 +111,41 @@ pub async fn plan(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Resp
         })
         .unwrap_or_else(|| words.to_owned());
     let begun = shared.conversations.begin(target, said.clone())?;
-    let conversation = begun.conversation;
     let given = turns.unwrap_or(begun.before);
-    let asked = Asked {
-        said: &said,
-        attachments: &attachments,
-        conversation: &conversation,
-    };
-    let context = context(&shared, &given);
-    let room = Room {
-        root: shared.config.home.join("plans"),
-        jobs: shared.jobs.clone(),
-    };
-    let planner = Planner {
-        adapters: Planner::of(&shared.config, &room),
-        falls_back_to_rules: true,
-    };
-    let planned = planner.plan(&said, &context, &|| false).await;
-    Record::new(&said, &planned).keep(&shared.config.home);
-    let talk = if let Some(refusal) = rules::acting_refusal(&planned, 0) {
-        Talk::reply(refusal)
-    } else if planned.plan.action.acts() {
-        Talk::reply(actions::act(&shared, &planned.plan).await.text())
-    } else {
-        actions::answer(&shared, &planned, &asked, &|| true).await
-    };
-    let details = matches!(
-        planned.plan.action,
-        plan::Action::ReplyOnly | plan::Action::AskUser
-    )
-    .then(|| planned.plan.details.clone())
-    .flatten();
-    respond(&shared, &conversation, talk, details)
+    let control = shared.turns.begin(&begun.turn, &begun.conversation);
+    // The turn goes on by itself: a client that stops waiting can't be told from a slow one, so
+    // what the plan does still happens, and is kept (docs/runner-api.md, `POST /v1/plans`).
+    let turn = tokio::spawn(async move {
+        let conversation = begun.conversation;
+        let asked = Asked {
+            said: &said,
+            attachments: &attachments,
+            conversation: &conversation,
+        };
+        let answered = turn::run(&shared, &said, &given, &asked, &control).await;
+        shared.turns.end(&control);
+        respond(&shared, &conversation, answered.talk, answered.details)
+    });
+    turn.await.map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Oby's brain stopped before it answered.",
+        )
+    })?
+}
+
+/// `POST /v1/conversation/stop`: the turn under way ends after the action it's doing, and its
+/// `POST /v1/plans` answers with what it did.
+pub async fn stop(State(shared): State<Arc<Shared>>) -> Response {
+    shared.turns.stop(None);
+    (StatusCode::OK, axum::Json(json!({"stopped": true}))).into_response()
+}
+
+/// `POST /v1/plans/cancel`: the turn under way is dropped: what its plan would do doesn't
+/// happen, and its answer is `none`. What it did already stays done.
+pub async fn cancel(State(shared): State<Arc<Shared>>) -> Response {
+    shared.turns.cancel(None);
+    (StatusCode::OK, axum::Json(json!({"cancelled": true}))).into_response()
 }
 
 /// The answer, as `POST /v1/plans` sends it, once Oby's words joined the conversation.
@@ -178,7 +200,7 @@ fn respond(
 
 /// What the brain may choose from (`Desk.brainContext`): the accounts, the repositories, the ids
 /// each action may name, and the briefing with `turns` as the conversation so far.
-fn context(shared: &Shared, turns: &[Turn]) -> Context {
+pub(super) fn context(shared: &Shared, turns: &[Turn]) -> Context {
     let config = &shared.config;
     let now = obi_protocol::time::now();
     let tools = tool_accounts(config);

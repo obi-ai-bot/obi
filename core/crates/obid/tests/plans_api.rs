@@ -449,6 +449,7 @@ fn the_brain_reads_the_conversation_and_may_stop_one_job() {
         &[
             reply("Vault secrets is running its tests."),
             stop_plan(&[id]),
+            reply(""),
         ],
     );
     let first = said(&obid, "how are the jobs going?");
@@ -596,4 +597,344 @@ fn a_brain_that_may_read_is_boxed() {
     queue(&obid, &[peek]);
     assert_eq!(said(&obid, "anything to read?")["text"], "hidden");
     assert!(read(calls(&obid)[1].join("args")).contains("--allowedTools\nRead\n"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The loop (#546, step 3): several actions in one turn, their step events, Stop and cancel.
+
+fn set_mode(id: &str, mode: &str) -> String {
+    json!({"action": "set_mode", "reply": "", "dispatches": [], "question": null,
+           "jobs": [id], "mode": mode})
+    .to_string()
+}
+
+/// "1:set_mode:running", for comparing step events.
+fn steps(events: &[serde_json::Value]) -> Vec<String> {
+    events
+        .iter()
+        .map(|e| {
+            format!(
+                "{}:{}:{}",
+                e["index"],
+                e["action"].as_str().unwrap(),
+                e["state"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+/// ConversationStepsTests.aTwoStepTurnSendsEachRunningAndDoneEventInOrder, and #546's acceptance:
+/// the events show each step running, then done, in order; the brain hears what it did.
+#[test]
+fn a_two_step_turn_sends_each_running_and_done_event_in_order() {
+    let folder = Folder::new("brain-two-steps");
+    let obid = started(&folder);
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let events = follow_events(&obid);
+    queue(
+        &obid,
+        &[
+            set_mode(&id, "ask"),
+            set_mode(&id, "acceptEdits"),
+            reply("Done."),
+        ],
+    );
+    let answer = said(&obid, "change the mode twice");
+    assert_eq!(
+        answer["text"],
+        "Vault secrets is in Ask mode now. Vault secrets is in Accept edits mode now. Done."
+    );
+    let heard = events_named(&events, "step", 10, |got| got.len() == 4);
+    assert_eq!(
+        steps(&heard),
+        [
+            "1:set_mode:running",
+            "1:set_mode:done",
+            "2:set_mode:running",
+            "2:set_mode:done"
+        ]
+    );
+    let turn = turn_of(&obid, "change the mode twice");
+    assert!(
+        heard
+            .iter()
+            .all(|e| e["turn"] == turn.as_str() && e["text"] == "Changing permission mode")
+    );
+    assert!(heard.iter().all(|e| e["at"].is_string()));
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["mode"], "acceptEdits");
+    // Each later step tells the brain what was done, and thinks with Sonnet.
+    let calls = calls(&obid);
+    assert_eq!(calls.len(), 3);
+    let second = read(calls[1].join("input"));
+    assert!(second.contains("The user says now:\nchange the mode twice\n\n(Oby already did this for the request, step by step: Vault secrets is in Ask mode now.\n"), "{second}");
+    assert!(read(calls[1].join("args")).contains("--model\nclaude-sonnet-5-5\n"));
+}
+
+/// The id of the user's turn that said `words`.
+fn turn_of(obid: &Obid, words: &str) -> String {
+    call(obid, "GET", "/v1/conversation?limit=500", None)
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["who"] == "user" && t["text"] == words)
+        .map(|t| t["id"].as_str().unwrap().to_owned())
+        .unwrap()
+}
+
+/// The same action twice in one turn is done once: the brain only repeated itself.
+#[test]
+fn a_repeated_action_ends_the_turn() {
+    let folder = Folder::new("brain-repeat");
+    let obid = started(&folder);
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    queue(
+        &obid,
+        &[
+            set_mode(&id, "ask"),
+            set_mode(&id, "ask"),
+            reply("Never heard."),
+        ],
+    );
+    assert_eq!(
+        said(&obid, "ask me before anything")["text"],
+        "Vault secrets is in Ask mode now."
+    );
+    assert_eq!(calls(&obid).len(), 2);
+}
+
+/// ConversationStepsTests.stoppingAfterTheFirstStepDoesNotStartAnotherAction, and #546's
+/// acceptance: a stop after step one starts nothing more, and the answer says what was done.
+#[test]
+fn stopping_after_the_first_step_does_not_start_another_action() {
+    let folder = Folder::new("brain-stop-steps");
+    let obid = started(&folder);
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let events = follow_events(&obid);
+    queue(
+        &obid,
+        &[
+            set_mode(&id, "ask"),
+            format!("SLEEP 2 {}", set_mode(&id, "acceptEdits")),
+        ],
+    );
+    let answer = std::thread::scope(|scope| {
+        let asking = scope.spawn(|| said(&obid, "change the mode, then change it again"));
+        let first = events_named(&events, "step", 10, |got| got.len() == 2);
+        assert_eq!(steps(&first), ["1:set_mode:running", "1:set_mode:done"]);
+        let stopped = call(&obid, "POST", "/v1/conversation/stop", None);
+        assert_eq!(stopped.body, json!({"stopped": true}));
+        asking.join().unwrap()
+    });
+    assert_eq!(answer["text"], "Vault secrets is in Ask mode now.");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(events.try_iter().all(|(name, _)| name != "step"));
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["mode"], "ask");
+    let turns = call(&obid, "GET", "/v1/conversation", None).body;
+    assert_eq!(
+        turns.as_array().unwrap().last().unwrap()["text"],
+        "Vault secrets is in Ask mode now."
+    );
+}
+
+/// BrainRetryTests.cancellationDoesNotRestartClaude: a turn stopped while Claude failed isn't
+/// tried again.
+#[test]
+fn a_stop_does_not_restart_claude() {
+    let folder = Folder::new("brain-stop-retry");
+    let obid = started(&folder);
+    queue(&obid, &["SLEEP 1 EXIT 15".into(), reply("Never.")]);
+    let answer = std::thread::scope(|scope| {
+        let asking = scope.spawn(|| said(&obid, "hello"));
+        within(5, "the brain is asked", || {
+            (calls(&obid).len() == 1).then_some(())
+        });
+        call(&obid, "POST", "/v1/conversation/stop", None);
+        asking.join().unwrap()
+    });
+    assert_eq!(answer["kind"], "none", "{answer}");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(calls(&obid).len(), 1);
+    let refused = records(&obid).pop().unwrap()["refused"].to_string();
+    assert!(
+        refused.contains("claude stopped: the turn ended"),
+        "{refused}"
+    );
+}
+
+/// ConversationTests.aCancelledTurnStopsNothing: cancelled while the brain thought, its plan (a
+/// stop) does nothing when it comes, and the turn is kept with why.
+#[test]
+fn a_cancelled_turn_stops_nothing() {
+    let folder = Folder::new("brain-cancelled");
+    let obid = started(&folder);
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    queue(&obid, &[format!("SLEEP 1 {}", stop_plan(&[&id]))]);
+    let answer = std::thread::scope(|scope| {
+        let asking = scope.spawn(|| said(&obid, "cancel the vault job"));
+        within(5, "the brain is asked", || {
+            (calls(&obid).len() == 1).then_some(())
+        });
+        let cancelled = call(&obid, "POST", "/v1/plans/cancel", None);
+        assert_eq!(cancelled.body, json!({"cancelled": true}));
+        asking.join().unwrap()
+    });
+    assert_eq!(answer["kind"], "none", "{answer}");
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["status"], "running");
+    assert_eq!(
+        records(&obid).pop().unwrap()["refused"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap(),
+        "the turn was cancelled before the plan came: nothing done"
+    );
+}
+
+/// ConversationTests.aReplacedTurnStopsNothing: new words in the same conversation replace the
+/// turn under way; its plan does nothing, and the new one answers.
+#[test]
+fn a_replaced_turn_stops_nothing() {
+    let folder = Folder::new("brain-replaced");
+    let obid = started(&folder);
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    queue(
+        &obid,
+        &[
+            format!("SLEEP 1 {}", stop_plan(&[&id])),
+            reply("Still running."),
+        ],
+    );
+    let (first, second) = std::thread::scope(|scope| {
+        let asking = scope.spawn(|| said(&obid, "cancel the vault job"));
+        within(5, "the brain is asked", || {
+            (calls(&obid).len() == 1).then_some(())
+        });
+        let second = said(&obid, "how is it going?");
+        (asking.join().unwrap(), second)
+    });
+    assert_eq!(second["text"], "Still running.");
+    assert_eq!(first["kind"], "none", "{first}");
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["status"], "running");
+}
+
+/// ConversationTests.neverMindAndStopEndTheTurnAndStopNoJob: a bare "never mind" or "stop" never
+/// reaches the brain and stops no job; with a turn under way, it stops that turn.
+#[test]
+fn never_mind_and_stop_end_the_turn_and_stop_no_job() {
+    let folder = Folder::new("brain-never-mind");
+    let obid = started(&folder);
+    let id = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for words in ["stop", "Cancel.", "never mind"] {
+        let answer = said(&obid, words);
+        assert_eq!(answer["kind"], "none", "{words}: {answer}");
+    }
+    assert!(calls(&obid).is_empty());
+    assert_eq!(call(&obid, "GET", "/v1/conversation", None).body, json!([]));
+    queue(&obid, &[format!("SLEEP 1 {}", stop_plan(&[&id]))]);
+    let answer = std::thread::scope(|scope| {
+        let asking = scope.spawn(|| said(&obid, "stop the vault job"));
+        within(5, "the brain is asked", || {
+            (calls(&obid).len() == 1).then_some(())
+        });
+        assert_eq!(said(&obid, "never mind")["kind"], "none");
+        asking.join().unwrap()
+    });
+    assert_eq!(answer["kind"], "none", "{answer}");
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["status"], "running");
+    assert_eq!(calls(&obid).len(), 1);
+}
+
+/// StopTests.stopAgentStopsRunningAndQueuedJobs and oneJobIsOneJob: "stop everything" stops every
+/// job, running or queued, and says how many.
+#[test]
+fn stop_everything_stops_running_and_queued_jobs() {
+    let folder = Folder::new("brain-stop-all");
+    let obid = started(&folder);
+    let settings = call(
+        &obid,
+        "PUT",
+        "/v1/settings/jobs",
+        Some(&json!({"maxRunning": 1})),
+    );
+    assert_eq!(settings.status, 200, "{}", settings.text);
+    let first = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let queued = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(&json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "SLEEP", "title": "Watch home"}})),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        call(&obid, "GET", &format!("/v1/jobs/{queued}"), None).body["status"],
+        "queued"
+    );
+    // The brain plans the stop twice: the second is the same action, so the turn ends.
+    queue(&obid, &[stop_plan(&[]), stop_plan(&[])]);
+    assert_eq!(said(&obid, "stop everything")["text"], "Stopped 2 jobs.");
+    for id in [&first, &queued] {
+        assert_eq!(
+            call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body["status"],
+            "stopped"
+        );
+    }
+    // Nothing runs: the brain may still say stop everything, and hears so.
+    queue(&obid, &[stop_plan(&[]), reply("")]);
+    assert_eq!(
+        said(&obid, "stop everything")["text"],
+        "Nothing is running."
+    );
+    // One job is one job.
+    running(&obid, "Watch home");
+    queue(&obid, &[stop_plan(&[]), reply("")]);
+    assert_eq!(said(&obid, "stop everything")["text"], "Stopped 1 job.");
+}
+
+/// #538: an action that couldn't happen ends the turn, and its step is `failed`: decided from
+/// the action's outcome, never from how its words begin.
+#[test]
+fn a_failed_action_ends_the_turn_and_its_step_fails() {
+    let folder = Folder::new("brain-failed-step");
+    let obid = started(&folder);
+    let id = running(&obid, "Vault secrets")["id"].as_str().unwrap().to_owned();
+    let events = follow_events(&obid);
+    let move_it = json!({"action": "move_job", "reply": "", "dispatches": [], "question": null,
+                         "jobs": [id], "move": {"agent": "claude", "account": "auto", "model": "claude-opus-5-5"}});
+    queue(&obid, &[move_it.to_string(), reply("Never heard.")]);
+    let answer = said(&obid, "use Opus for the vault job");
+    let heard = events_named(&events, "step", 10, |got| got.len() == 2);
+    assert_eq!(steps(&heard), ["1:move_job:running", "1:move_job:failed"]);
+    assert_eq!(heard[0]["text"], "Moving Vault secrets to Claude Code");
+    assert!(answer["text"].as_str().unwrap().contains("obid can't"), "{answer}");
+    assert_eq!(calls(&obid).len(), 1);
 }

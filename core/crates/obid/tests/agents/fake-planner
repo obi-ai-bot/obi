@@ -8,7 +8,7 @@
 #                  EXIT <code> <stderr…>   prints the words on stderr, nothing on stdout, exits
 #                  PRINT <text>            prints the text as it is, and exits 0
 #                  FAIL <code> <text>      prints the text as it is, and exits with the code
-#                  SLEEP <seconds> <plan>  waits, then answers the plan
+#                  SLEEP <seconds> <line>  waits, then does what the rest of the line says
 #                  PEEK <path>             replies "read" when it could read the file, else "hidden"
 #                  <plan>                  answers {"structured_output": <plan>}
 #                When it's empty, the words the user says now choose (below).
@@ -37,6 +37,15 @@ if [ -s "$state/plans" ]; then
   mv "$state/plans.next" "$state/plans"
 fi
 rmdir "$state/lock"
+while :; do
+  case "$line" in
+    "SLEEP "*)
+      rest=${line#SLEEP }
+      sleep "${rest%% *}"
+      line=${rest#* } ;;
+    *) break ;;
+  esac
+done
 case "$line" in
   "EXIT "*)
     set -- $line
@@ -51,10 +60,6 @@ case "$line" in
   "PEEK "*)
     if cat "${line#PEEK }" >/dev/null 2>&1; then seen=read; else seen=hidden; fi
     line="{\"action\":\"reply_only\",\"reply\":\"$seen\",\"dispatches\":[],\"question\":null}" ;;
-  "SLEEP "*)
-    rest=${line#SLEEP }
-    sleep "${rest%% *}"
-    line=${rest#* } ;;
 esac
 if [ -n "$line" ]; then
   printf '{"structured_output":%s}\n' "$line"

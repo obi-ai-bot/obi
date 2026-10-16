@@ -211,6 +211,7 @@ pub async fn serve(
         jobs: jobs.clone(),
         events,
         conversations,
+        turns: brain::turn::Turns::default(),
         link: link.clone(),
         plugins: plugins.clone(),
         pages: web::Sessions::default(),
