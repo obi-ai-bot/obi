@@ -127,6 +127,16 @@ pub struct Job {
     /// modes").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<crate::permissions::Permission>,
+    /// The latest Mac checks, kept on the job and sent on its JSON/event (`runner-api.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac_check: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_check: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_ran: Option<Value>,
+    /// Per-job bearer for `POST` and `GET /v1/agent/apple-check`; never sent to the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_token: Option<String>,
     /// The owner's words (`POST /v1/jobs/{id}/messages`) the agent hasn't heard yet: its next
     /// turn's prompt. Never in the API's job (`notes` has them all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -189,6 +199,10 @@ impl Job {
             review_result: None,
             obi_request: None,
             permission: None,
+            mac_check: None,
+            apple_check: None,
+            apple_ran: None,
+            apple_token: None,
             heard: Vec::new(),
             asked: false,
         }
@@ -301,11 +315,11 @@ impl Job {
             "limit": self.limit,
             "startCommit": self.start_commit,
             "firstSwiftBuildSeconds": null,
-            "macCheck": null,
+            "macCheck": mac_check_json(self.mac_check.clone(), "merge"),
             // obid never merges (runner-api.md, "obid only: what obid leaves out").
             "mergeError": null,
-            "appleCheck": null,
-            "appleRan": null,
+            "appleCheck": mac_check_json(self.apple_check.clone(), "apple"),
+            "appleRan": mac_check_json(self.apple_ran.clone(), "apple"),
             "tetrix": null,
             "moves": [],
             "xcodeCloud": null,
@@ -441,6 +455,30 @@ impl Job {
         let total = stages.len();
         json!({"stages": stages, "number": position + 1, "total": total})
     }
+}
+
+fn mac_check_json(check: Option<Value>, kind: &str) -> Value {
+    let Some(mut check) = check else {
+        return Value::Null;
+    };
+    if check["kind"].is_null() {
+        check["kind"] = json!(kind);
+    }
+    for key in [
+        "started",
+        "finished",
+        "mac",
+        "steps",
+        "failures",
+        "checkRun",
+        "comment",
+        "postError",
+    ] {
+        if check.get(key).is_none() {
+            check[key] = Value::Null;
+        }
+    }
+    check
 }
 
 #[cfg(test)]

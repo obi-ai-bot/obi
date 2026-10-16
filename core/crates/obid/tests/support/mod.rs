@@ -247,13 +247,23 @@ pub struct Answer {
 
 /// One request to obid, with its token.
 pub fn call(obid: &Obid, method: &str, target: &str, body: Option<&Value>) -> Answer {
+    call_with_token(obid, TOKEN, method, target, body)
+}
+
+pub fn call_with_token(
+    obid: &Obid,
+    token: &str,
+    method: &str,
+    target: &str,
+    body: Option<&Value>,
+) -> Answer {
     let body = body.map(Value::to_string);
     let mut stream = TcpStream::connect(("127.0.0.1", obid.port)).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(150)))
         .unwrap();
     let mut text = format!(
-        "{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n"
+        "{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n"
     );
     match &body {
         Some(body) => text.push_str(&format!(
