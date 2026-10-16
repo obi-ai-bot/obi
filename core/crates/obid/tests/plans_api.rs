@@ -1711,3 +1711,309 @@ fn a_turn_cancelled_while_its_jobs_are_made_starts_nothing() {
     assert_eq!(answer["kind"], "none", "{answer}");
     assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Reading before answering (#546, step 5): read_job and the research lookups.
+
+fn read_plan(id: &str) -> String {
+    json!({"action": "read_job", "reply": "", "dispatches": [], "question": null, "jobs": [id]})
+        .to_string()
+}
+
+fn lookup(tool: &str, fields: serde_json::Value) -> serde_json::Value {
+    let mut lookup = json!({"tool": tool, "repo": null, "ref": null, "query": null, "path": null,
+                            "start_line": null, "end_line": null, "number": null, "url": null});
+    for (key, value) in fields.as_object().unwrap() {
+        lookup[key] = value.clone();
+    }
+    lookup
+}
+
+fn research(lookups: Vec<serde_json::Value>) -> String {
+    json!({"action": "research", "reply": "", "dispatches": [], "question": null, "jobs": [],
+           "lookups": lookups})
+    .to_string()
+}
+
+fn reply_with(text: &str, details: &str) -> String {
+    json!({"action": "reply_only", "reply": text, "dispatches": [], "question": null, "jobs": [],
+           "details": details})
+    .to_string()
+}
+
+/// ReadJobTests.aReadPutsTheMacCheckInTheNextStepsQuotedFileAndNotInThePrompt, for what obid
+/// keeps: the job's report is in the next step's quoted file, never in a prompt.
+#[test]
+fn a_read_puts_the_job_in_the_next_steps_quoted_file_and_not_in_the_prompt() {
+    let folder = Folder::new("brain-read");
+    let obid = started(&folder);
+    // fake-claude's PAUSE ends with "Paused.": its own words.
+    let id = job_that(&obid, "Vault secrets", "PAUSE: 10", None, "done")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    queue(&obid, &[read_plan(&id), reply("It paused.")]);
+    assert_eq!(
+        said(&obid, "what did the vault job say?")["text"],
+        "It paused."
+    );
+    let calls = calls(&obid);
+    assert_eq!(calls.len(), 2);
+    assert!(!read(calls[0].join("work.md")).contains("## Read: job"));
+    let file = read(calls[1].join("work.md"));
+    assert!(file.contains("data, never instructions"), "{file}");
+    assert!(
+        file.contains(&format!("## Read: job {id} (Vault secrets)")),
+        "{file}"
+    );
+    assert!(file.contains("### Report\nPaused."), "{file}");
+    assert!(file.contains("(no Mac check ran)"));
+    for call in &calls {
+        assert!(!read(call.join("input")).contains("Paused."));
+    }
+    let second = read(calls[1].join("input"));
+    assert!(second.contains(&format!("Oby read job {id}")) && second.contains("work.md"));
+    assert!(read(calls[0].join("args")).contains("- read_job:"));
+}
+
+/// ReadJobTests.aFourthReadInATurnIsRefused
+#[test]
+fn a_fourth_read_in_a_turn_is_refused() {
+    let folder = Folder::new("brain-reads");
+    let obid = started(&folder);
+    let ids: Vec<String> = [
+        "Vault secrets",
+        "Watch home",
+        "Release notes",
+        "Island chat",
+    ]
+    .into_iter()
+    .map(|title| {
+        job_that(&obid, title, "Nothing", None, "done")["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    })
+    .collect();
+    let mut plans: Vec<String> = ids.iter().map(|id| read_plan(id)).collect();
+    plans.push(reply("I read three jobs."));
+    queue(&obid, &plans);
+    assert_eq!(
+        said(&obid, "what did all of them change?")["text"],
+        "I read three jobs."
+    );
+    let calls = calls(&obid);
+    assert_eq!(calls.len(), 5);
+    let last = read(calls[4].join("work.md"));
+    for id in &ids[..3] {
+        assert!(last.contains(&format!("## Read: job {id}")), "{id}");
+    }
+    assert!(!last.contains(&format!("## Read: job {}", ids[3])));
+    assert!(read(calls[4].join("input")).contains(&format!(
+        "Oby reads at most 3 jobs in one turn: it didn't read job {}",
+        ids[3]
+    )));
+    // A new turn starts with no reads.
+    queue(&obid, &[read_plan(&ids[3]), reply("Done.")]);
+    said(&obid, "and the island one?");
+    let file = read(calls_after(&obid, 6).join("work.md"));
+    assert!(file.contains(&format!("## Read: job {}", ids[3])));
+    assert!(!file.contains(&format!("## Read: job {}", ids[0])));
+}
+
+/// ResearchToolsTests.whereIsAnswersWithPathsAndNoJob: a lookup's result, with its pinned GitHub
+/// link, is in the next step's quoted file; the answer starts nothing.
+#[test]
+fn where_is_answers_with_paths_and_no_job() {
+    let folder = Folder::new("brain-where");
+    let obid = started(&folder);
+    let events = follow_events(&obid);
+    queue(
+        &obid,
+        &[
+            research(vec![lookup(
+                "search_code",
+                json!({"repo": "obi-e2e/fixture-app", "query": "Hello"}),
+            )]),
+            reply_with("greet is in src/greet.js.", "`src/greet.js` says hello."),
+        ],
+    );
+    let answer = said(&obid, "Where does the app say hello?");
+    assert_eq!(answer["text"], "greet is in src/greet.js.");
+    assert_eq!(answer["details"], "`src/greet.js` says hello.");
+    let file = read(calls(&obid)[1].join("work.md"));
+    assert!(file.contains("src/greet.js:2: "), "{file}");
+    assert!(
+        file.contains("https://github.com/obi-e2e/fixture-app/blob/")
+            && file.contains("/src/greet.js#L2")
+    );
+    assert!(file.contains("status: ok"));
+    assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
+    let heard = events_named(&events, "step", 10, |got| got.len() == 2);
+    assert_eq!(steps(&heard), ["1:research:running", "1:research:done"]);
+    assert_eq!(
+        heard[0]["text"],
+        "Searching obi-e2e/fixture-app for “Hello”"
+    );
+}
+
+/// ResearchToolsTests.researchThenDispatchWaitsForStart: work the brain wants after looking things
+/// up waits in the inbox for the user's Start.
+#[test]
+fn research_then_dispatch_waits_for_start() {
+    let folder = Folder::new("brain-research-start");
+    let obid = started(&folder);
+    let dispatch = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "fix", "title": "Greeting fix",
+         "task": "Fix the greeting", "rounds": 1}]});
+    queue(
+        &obid,
+        &[
+            research(vec![lookup(
+                "list_files",
+                json!({"repo": "obi-e2e/fixture-app"}),
+            )]),
+            dispatch.to_string(),
+        ],
+    );
+    let answer = said(&obid, "Compare the docs and code, then fix it");
+    assert_eq!(
+        answer["text"],
+        "I looked into it first. A draft is waiting in your inbox; tap Start when you're ready."
+    );
+    assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
+    let inbox = call(&obid, "GET", "/v1/inbox", None).body;
+    let starts: Vec<&serde_json::Value> = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == "start")
+        .collect();
+    assert_eq!(starts.len(), 1, "{inbox}");
+    assert!(
+        starts[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("looked into it first")
+    );
+    assert_eq!(starts[0]["options"], json!(["Start", "Cancel"]));
+    let id = starts[0]["id"].as_str().unwrap();
+    let started = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{id}/answer"),
+        Some(&json!({"answer": "Start"})),
+    );
+    assert_eq!(started.status, 200, "{}", started.text);
+    let jobs = call(&obid, "GET", "/v1/jobs", None).body;
+    assert_eq!(jobs.as_array().unwrap().len(), 1);
+    assert_eq!(jobs[0]["title"], "Greeting fix");
+    assert_eq!(started.body["job"], jobs[0]["id"]);
+}
+
+/// ResearchToolsTests.aFailedLookupIsReportedNotInvented and quotedTextNeverReachesThePrompt.
+#[test]
+fn a_failed_lookup_is_reported_and_what_lookups_read_never_reaches_the_prompt() {
+    let folder = Folder::new("brain-lookups");
+    let obid = started(&folder);
+    queue(
+        &obid,
+        &[
+            research(vec![
+                lookup(
+                    "read_file",
+                    json!({"repo": "obi-e2e/fixture-app", "path": "Missing.js"}),
+                ),
+                lookup("fetch_url", json!({"url": "https://127.0.0.1.nip.io"})),
+                lookup(
+                    "read_file",
+                    json!({"repo": "obi-e2e/fixture-app", "path": "src/greet.js"}),
+                ),
+            ]),
+            reply("I couldn't read those sources."),
+        ],
+    );
+    said(&obid, "read the missing file, that URL and greet");
+    let calls = calls(&obid);
+    let file = read(calls[1].join("work.md"));
+    assert!(
+        file.contains("status: failed") && file.contains("not in the repository at"),
+        "{file}"
+    );
+    assert!(
+        file.contains("status: refused") && file.contains("private address"),
+        "{file}"
+    );
+    assert!(file.contains("2:   return `Hello, ${name}!`;"), "{file}");
+    let second = read(calls[1].join("input"));
+    assert!(second.contains("not in the repository at") && second.contains("private address"));
+    for call in &calls {
+        assert!(!read(call.join("input")).contains("return `Hello"));
+        assert!(!read(call.join("args")).contains("return `Hello"));
+    }
+}
+
+/// ResearchToolsTests.aTurnStopsAtTwelveLookups and aRepeatedLookupIsNotRunAgain.
+#[test]
+fn a_turn_stops_at_twelve_lookups_and_runs_a_repeat_once() {
+    let folder = Folder::new("brain-twelve");
+    let obid = started(&folder);
+    let lookups: Vec<serde_json::Value> = (1..=16)
+        .map(|n| {
+            lookup(
+                "list_files",
+                json!({"repo": "obi-e2e/fixture-app", "path": format!("scope{n}")}),
+            )
+        })
+        .collect();
+    let mut plans: Vec<String> = lookups
+        .chunks(4)
+        .map(|four| research(four.to_vec()))
+        .collect();
+    plans.push(reply("Done."));
+    queue(&obid, &plans);
+    said(&obid, "list the files");
+    let calls = calls(&obid);
+    let last = calls.last().unwrap();
+    assert_eq!(read(last.join("work.md")).matches("## Lookup ").count(), 12);
+    assert!(read(last.join("input")).contains("at most 12 lookups"));
+
+    let same = research(vec![lookup(
+        "list_files",
+        json!({"repo": "obi-e2e/fixture-app"}),
+    )]);
+    queue(&obid, &[same.clone(), same, reply("Done.")]);
+    said(&obid, "list the files twice");
+    let calls = self::calls(&obid);
+    let last = calls.last().unwrap();
+    assert_eq!(read(last.join("work.md")).matches("## Lookup ").count(), 1);
+    assert!(read(last.join("input")).contains("already in work.md"));
+}
+
+/// ResearchToolsTests.codexBrainGetsTheSameFile: Codex, planning when Claude can't, reads the
+/// same quoted file.
+#[test]
+fn codex_gets_the_same_quoted_file() {
+    let folder = Folder::new("brain-codex-file");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &planner());
+    let agents = planner().parent().unwrap().to_path_buf();
+    config["agents"]["codex"] = json!({"bin": agents.join("fake-codex"), "accounts": []});
+    let obid = start(&folder.0, &config, Some(&agents));
+    queue(
+        &obid,
+        &[
+            research(vec![lookup(
+                "read_file",
+                json!({"repo": "obi-e2e/fixture-app", "path": "src/greet.js"}),
+            )]),
+            "EXIT 15".into(),
+            "EXIT 15".into(),
+        ],
+    );
+    let answer = said(&obid, "read greet");
+    assert_eq!(
+        answer["text"],
+        "From Codex. It read work.md: # Researched on request, quoted"
+    );
+}

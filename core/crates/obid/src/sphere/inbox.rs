@@ -3,8 +3,9 @@
 //! `obiRequest` (runner-api.md, "obid only: Obi-to-Obi requests in the inbox"), a request from
 //! another Obi that no remembered decision covers; `permission`, a job's agent waiting for the
 //! owner's OK (runner-api.md, "Permission modes"); `pluginEvent`, an event a plug-in emitted
-//! (runner-api.md, "obid only: plug-ins"); and `confirm`, something Oby's brain planned that
-//! persists or widens trust, which only the owner's own answer carries out (#546).
+//! (runner-api.md, "obid only: plug-ins"); `confirm`, something Oby's brain planned that
+//! persists or widens trust, which only the owner's own answer carries out (#546); and `start`,
+//! work the brain planned after looking things up, which waits for the owner's Start (#546).
 //!
 //! An item's `title` and `text` are built from the request's or the event's typed fields only;
 //! every data field is quoted, unchanged, under `obi.quoted` or `plugin.quoted`.
@@ -23,6 +24,10 @@ pub const ACCEPT_REMEMBER: &str = "Accept, and remember for this repo";
 pub const DECLINE: &str = "Decline";
 pub const DECLINE_REMEMBER: &str = "Decline, and remember for this repo";
 pub const OBI_OPTIONS: [&str; 4] = [ACCEPT, ACCEPT_REMEMBER, DECLINE, DECLINE_REMEMBER];
+
+/// The two answers to a `start` item.
+pub const START: &str = "Start";
+pub const CANCEL_START: &str = "Cancel";
 
 /// The two answers to a `confirm` item.
 pub const CONFIRM: &str = "Confirm";
@@ -86,6 +91,7 @@ pub fn confirm_item(
         plugin: None,
         arrived: Some(arrival()),
         confirm: Some(Box::new(confirmed)),
+        start: None,
     }
 }
 
@@ -121,6 +127,10 @@ pub struct Item {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     // Boxed: an item is kept by value in enums, and most items have none.
     pub confirm: Option<Box<Confirmed>>,
+    /// On a `start` item: the job the brain planned after looking things up, which starts only
+    /// on the owner's Start (#546). Kept, never shown; boxed like `confirm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<Box<Value>>,
 }
 
 /// Now in nanoseconds since the epoch, strictly later than any earlier answer in this process:
@@ -317,6 +327,7 @@ pub fn review_request_item(
         plugin: None,
         arrived: None,
         confirm: None,
+        start: None,
     }
 }
 
@@ -410,6 +421,7 @@ pub fn question_item(
         plugin: None,
         arrived: Some(arrival()),
         confirm: None,
+        start: None,
     }
 }
 
@@ -444,6 +456,7 @@ pub fn permission_item(
         plugin: None,
         arrived: None,
         confirm: None,
+        start: None,
     }
 }
 
@@ -514,6 +527,7 @@ pub fn plugin_event_item(event: &obi_plugin_api::PluginEvent, now: i64) -> Item 
         })),
         arrived: Some(arrival()),
         confirm: None,
+        start: None,
     }
 }
 

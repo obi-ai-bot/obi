@@ -63,15 +63,17 @@ pub struct Asked<'a> {
 /// A plan that answers rather than acts: a reply, a question, or jobs it starts (#269). `live` is
 /// asked right before the jobs start: the issues' files take network time, and a turn cancelled
 /// meanwhile starts nothing.
+/// After research (`researched`), the jobs a plan names wait for the user's Start instead.
 pub async fn answer(
     shared: &Arc<Shared>,
     planned: &Planned,
     asked: &Asked<'_>,
+    researched: bool,
     live: &(dyn Fn() -> bool + Send + Sync),
 ) -> Talk {
     let plan = &planned.plan;
     match plan.action {
-        Action::Dispatch => dispatch(shared, plan, asked, live).await,
+        Action::Dispatch => dispatch(shared, plan, asked, researched, live).await,
         Action::AskUser => match &plan.question {
             Some(question) => Talk::Question {
                 said: asked.said.to_owned(),
@@ -101,6 +103,7 @@ async fn dispatch(
     shared: &Arc<Shared>,
     plan: &Plan,
     asked: &Asked<'_>,
+    researched: bool,
     live: &(dyn Fn() -> bool + Send + Sync),
 ) -> Talk {
     let mut files = vec![];
@@ -148,6 +151,24 @@ async fn dispatch(
             mode: d.mode.map(|m| m.as_str().to_owned()),
             ..NewJob::default()
         };
+        // Work found by research waits in the inbox for the user's Start (#374).
+        if researched {
+            let title = d
+                .title
+                .clone()
+                .unwrap_or_else(|| super::briefing::line(&d.task, 60));
+            let about =
+                d.pr.map(|pr| format!(" PR #{pr}"))
+                    .or_else(|| d.issue.map(|issue| format!(" #{issue}")))
+                    .unwrap_or_default();
+            let repo = d.repo.rsplit('/').next().unwrap_or(&d.repo);
+            let text = format!(
+                "Oby looked into it first. Start {} {repo}{about} ({title})?",
+                d.kind.as_str()
+            );
+            shared.link.propose(&new, title, text);
+            continue;
+        }
         // A job that would never ask the owner anything widens trust: only their own Confirm
         // starts it (the owner's decision of 2026-10-16; review on #551).
         if new.mode.as_deref() == Some("bypass") {
@@ -182,6 +203,11 @@ async fn dispatch(
                 return Talk::Reply { text, jobs };
             }
         }
+    }
+    if researched {
+        return Talk::reply(
+            "I looked into it first. A draft is waiting in your inbox; tap Start when you're ready.",
+        );
     }
     let mut text = match (started.is_empty(), plan.reply.is_empty()) {
         (true, _) => String::new(),

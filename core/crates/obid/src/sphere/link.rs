@@ -2489,6 +2489,75 @@ impl Link {
         }
     }
 
+    /// Work the brain planned after looking things up waits for the owner's Start, as a `start`
+    /// item (Engine/Inbox.swift, `Inbox.proposal`): nothing starts until they say so.
+    pub fn propose(&self, new: &crate::jobs::NewJob, title: String, text: String) -> Item {
+        let item = Item {
+            id: format!("start-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+            kind: "start".into(),
+            job: String::new(),
+            title,
+            text,
+            options: vec![inbox::START.into(), inbox::CANCEL_START.into()],
+            details: Some(vec![
+                "Starts it now, as planned.".into(),
+                "Drops the plan. Nothing starts; say it another way.".into(),
+            ]),
+            recommended: Some(0),
+            created: time::now(),
+            done: None,
+            later: None,
+            answer: None,
+            obi: None,
+            plugin: None,
+            arrived: Some(inbox::arrival()),
+            confirm: None,
+            start: serde_json::to_value(new).ok().map(Box::new),
+        };
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        item
+    }
+
+    /// `POST /v1/inbox/{id}/answer` on a `start` item: Start queues the job as planned; Cancel,
+    /// done or later start nothing.
+    fn answer_start(
+        &self,
+        mut item: Item,
+        answer: Option<String>,
+        later: Option<i64>,
+    ) -> Result<Value, ApiError> {
+        if let Some(at) = later {
+            item.later = Some(at);
+        } else {
+            if let Some(answer) = &answer {
+                if answer != inbox::START && answer != inbox::CANCEL_START {
+                    return Err(api(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("The answer is {} or {}.", inbox::START, inbox::CANCEL_START),
+                    ));
+                }
+                if answer == inbox::START {
+                    let new: crate::jobs::NewJob = item
+                        .start
+                        .clone()
+                        .and_then(|s| serde_json::from_value(*s).ok())
+                        .ok_or_else(|| api(StatusCode::CONFLICT, "That plan was lost."))?;
+                    let job = self
+                        .jobs
+                        .create(new)
+                        .map_err(|e| api(StatusCode::UNPROCESSABLE_ENTITY, e.0))?;
+                    item.job = job.id;
+                }
+            }
+            item.done = Some(time::now());
+            item.answer = answer;
+        }
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        Ok(item.to_json())
+    }
+
     /// The inbox item `id`, whatever its state.
     pub fn item(&self, id: &str) -> Option<Item> {
         self.lock().inbox.get(id).cloned()
@@ -2592,6 +2661,14 @@ impl Link {
                     Given::Answer(answer) => self.answer_permission_item(item, Some(answer), None),
                     Given::Done => self.answer_permission_item(item, None, None),
                     Given::Later(at) => self.answer_permission_item(item, None, Some(at)),
+                };
+            }
+            if item.kind == "start" {
+                drop(state);
+                return match given {
+                    Given::Answer(answer) => self.answer_start(item, Some(answer), None),
+                    Given::Done => self.answer_start(item, None, None),
+                    Given::Later(at) => self.answer_start(item, None, Some(at)),
                 };
             }
             if item.kind == "pluginEvent" {

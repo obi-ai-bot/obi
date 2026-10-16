@@ -1808,6 +1808,30 @@ mod tests {
         }
     }
 
+    /// ReadJobTests.readJobPlansAreChecked
+    #[test]
+    fn read_job_plans_are_checked() {
+        let context = Context {
+            accounts: BTreeMap::from([("claude".into(), vec!["default".into()])]),
+            repos: vec!["deskree-inc/oby".into()],
+            movable: vec!["aaaa1111".into(), "bbbb2222".into()],
+            ..Context::default()
+        };
+        let mut read = Plan::of(Action::ReadJob, "");
+        read.jobs = Some(vec!["aaaa1111".into()]);
+        assert!(read.problems(&context, "zq9").is_empty());
+        read.jobs = Some(vec!["zz".into()]);
+        assert_eq!(
+            read.problems(&context, "zq9"),
+            ["zz isn't a job Oby can read"]
+        );
+        read.jobs = Some(vec!["aaaa1111".into(), "bbbb2222".into()]);
+        assert_eq!(read.problems(&context, "zq9"), ["read_job names one job"]);
+        assert!(schema(&context).to_string().contains("read_job"));
+        // It changes nothing, so the loop doesn't count it as an action that did something.
+        assert!(!Action::ReadJob.acts() && !Action::Research.acts());
+    }
+
     /// FinishFromPRTests.finishingAnIssueFromAPullRequestIsAValidFixBuildOrTest and
     /// theBrainIsToldToDispatchFromThePullRequestsHead.
     #[test]
