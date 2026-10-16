@@ -82,8 +82,9 @@ ready=$1
 shift
 rm -f "$ready" "$ready.log"
 # An explicit stdin redirect: a background command otherwise gets /dev/null, and the
-# program inside the sandbox would see its stdin close.
-"$@" <&0 &
+# program inside the sandbox would see its stdin close. bash would also hand the
+# program SHLVL and _, which are not part of the sandbox environment.
+env -u SHLVL -u _ "$@" <&0 &
 bpid=$!
 child=
 i=0
@@ -468,7 +469,7 @@ impl Sandbox {
                     // the plug-in's environment is the four variables only.
                     .args(["--", "/bin/sh", "-c", NET_WAIT, "net-wait"])
                     .arg(&ready)
-                    .args(["env", "-u", "PWD", "--"])
+                    .args(["env", "-u", "PWD", "-u", "SHLVL", "-u", "_", "--"])
                     .arg(&launch.program)
                     .args(&launch.args);
                 // bash, not dash: a background command keeps the plug-in's stdin only
