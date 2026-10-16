@@ -80,10 +80,19 @@ nonisolated enum Shell {
         var run: @Sendable (_ arguments: [String], _ env: [String: String?]) async throws -> Output
     }
     @TaskLocal static var stand: Stand?
+    /// The directory and stdin of the run a stand plays, for a stand-in tool that reads them
+    /// (a fake `claude` reading its quoted file).
+    struct Call: Sendable {
+        var directory: URL?
+        var input: Data?
+    }
+    @TaskLocal static var call: Call?
 
     private static func launch(_ arguments: [String], in directory: URL?, input: Data?,
                                env: [String: String?], timeout: TimeInterval) async throws -> Output {
-        if let stand { return try await stand.run(arguments, env) }
+        if let stand {
+            return try await $call.withValue(Call(directory: directory, input: input)) { try await stand.run(arguments, env) }
+        }
         let running = Running()
         return try await withTaskCancellationHandler {
             try await run(arguments, in: directory, input: input, env: env, timeout: timeout, running: running)

@@ -701,10 +701,12 @@ nonisolated struct ClaudeBrain: ModelAwareBrainAdapter, SelfRetryingBrainAdapter
         defer { try? FileManager.default.removeItem(at: directory) }
         // What agents wrote is a quoted file it may read, with the vault's secrets taken out too;
         // with nothing to read, it has no tool at all. Boxed like the Lead: it sees that directory only.
+        // --json-schema is a StructuredOutput tool the model calls, and a call that misses the schema
+        // costs a turn too: six turns are a read, two more reads, and three tries at the plan (#535).
         var tools: [String] = ["--tools", ""]
         if let quoted {
             try vault.forAgent(quoted).write(to: directory.appending(path: Self.quotedFile), atomically: true, encoding: .utf8)
-            tools = ["--tools", "Read", "--allowedTools", "Read", "--max-turns", "3"]
+            tools = ["--tools", "Read", "--allowedTools", "Read", "--max-turns", "6"]
         }
         let argv = Agents.sandboxed(
             ["claude", "-p", "--model", model] + tools + ["--strict-mcp-config", "--setting-sources", "",
@@ -713,24 +715,29 @@ nonisolated struct ClaudeBrain: ModelAwareBrainAdapter, SelfRetryingBrainAdapter
             in: nil, own: home ?? "\(Agents.home)/.claude", reading: [directory.path])
         let deadline = Date.now.addingTimeInterval(timeout)
         var failures: [String] = []
+        var input = user
         for attempt in 1...2 {
             try Task.checkCancellation()
             let remaining = deadline.timeIntervalSinceNow
             guard remaining > 0 else { break }
             // Reserve half of the budget for the one retry when the first process reaches its timeout.
             let attemptTimeout = attempt == 1 ? remaining / 2 : remaining
-            let result = try await Shell.run(argv, in: directory, input: Data(user.utf8), env: environment, timeout: attemptTimeout)
+            let result = try await Shell.run(argv, in: directory, input: Data(input.utf8), env: environment, timeout: attemptTimeout)
             try Task.checkCancellation()
             // It can report success without structured_output, so the field is what counts.
-            if let reply = try? JSONSerialization.jsonObject(with: result.out) as? [String: Any],
-               let plan = reply["structured_output"] as? [String: Any] {
+            let reply = try? JSONSerialization.jsonObject(with: result.out) as? [String: Any]
+            if let plan = reply?["structured_output"] as? [String: Any] {
                 return try JSONSerialization.data(withJSONObject: plan)
             }
-            let reason = result.timedOut ? "timeout" : result.status == 15 ? "exit code 15" : result.text.isEmpty ? "empty" : "exit code \(result.status)"
+            // Out of turns before the StructuredOutput call took: one more try, told to read less.
+            let outOfTurns = reply?["subtype"] as? String == "error_max_turns"
+            let reason = result.timedOut ? "timeout" : outOfTurns ? "error_max_turns" : result.status == 15 ? "exit code 15" : result.text.isEmpty ? "empty" : "exit code \(result.status)"
             let stderr = result.err.isEmpty ? "<empty>" : String(result.err.suffix(1000))
             failures.append("attempt \(attempt): \(reason), stderr: \(stderr)")
-            // One retry covers empty answers, Claude's exit 15, and a process that reaches its timeout.
-            guard attempt == 1, result.text.isEmpty || result.status == 15 || result.timedOut else { break }
+            // One retry covers empty answers, Claude's exit 15, a process that reaches its timeout,
+            // and a run that ran out of turns.
+            guard attempt == 1, result.text.isEmpty || result.status == 15 || result.timedOut || outOfTurns else { break }
+            if outOfTurns { input = user + "\n\nYour last attempt ran out of turns: read only what you need, then answer." }
         }
         throw Shell.Failure(message: "claude returned no plan after retry: " + failures.joined(separator: "; "))
     }
