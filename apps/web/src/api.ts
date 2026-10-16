@@ -1,5 +1,6 @@
 // A typed client of the runner API (docs/runner-api.md), limited to what obid serves and this app
-// shows: the status, jobs, the conversation, plans, the inbox and the event stream. Every call
+// shows: the status, jobs, the conversation, plans, the inbox, the event stream, and the plug-ins
+// and connections Settings › Connectors reads. Every call
 // goes to the page's own origin (obid serves this page at /app/; in dev, Vite's proxy passes /v1
 // on) with `Authorization: Bearer <token>`: the API takes nothing else. The token is in the page's
 // session storage, which only this origin (this port on 127.0.0.1) reads, put there by obid's
@@ -83,6 +84,9 @@ export type Account = {
   fiveHourResets: string | null;
   sevenDayResets: string | null;
   running: number;
+  // whether the account's agents have Tetrix's MCP server, or null before the runner knows;
+  // older runners don't send it
+  tetrix?: boolean | null;
 };
 export type Status = {
   runner: { version: string; host: string; engine?: string };
@@ -92,6 +96,25 @@ export type Status = {
   running: number;
   clearedAt: string | null;
   permissions: { mode: string };
+  // who the runner's own GitHub calls act as ('app' or 'owner'), and whether its check runs reach
+  // pull requests ('ok', 'missing permission', 'no app'); older runners send neither
+  github?: string;
+  checks?: string;
+};
+
+// "obid only: plug-ins": one plug-in obid found, enabled or not
+export type Plugin = { id: string; name: string; version: string | null; kinds: string[]; enabled: boolean; state: string; lastError: string | null };
+
+// "Connection": an app or API the runner's agents use through its broker; the secret only by name
+export type ConnectedApp = {
+  name: string;
+  mcp: string | null;
+  api: string | null;
+  secret: string;
+  header: string | null;
+  created: string;
+  secretSaved: boolean;
+  lastUsed: string | null;
 };
 
 // "POST /v1/plans"
@@ -189,6 +212,9 @@ export const api = {
   // words to Oby, in `conversation` (left out: the latest)
   plan: (said: string, answer?: { question: string; option: string }, conversation?: string) =>
     call<PlanAnswer>('POST', '/v1/plans', { said, ...(answer ? { answer } : {}), ...(conversation ? { conversation } : {}) }),
+  // Settings › Connectors (#518), read only: obid's plug-ins, and the runner's connections
+  plugins: () => call<Plugin[]>('GET', '/v1/obid/plugins'),
+  connections: () => call<ConnectedApp[]>('GET', '/v1/connections'),
 };
 
 // The event stream (GET /v1/events), with the token in its header, which EventSource can't send:

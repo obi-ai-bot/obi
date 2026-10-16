@@ -6,6 +6,7 @@ import { keepToken } from './api';
 import { usePreview, setPreview } from './preview';
 import { AGENTS, ARCHIVE_AFTER, getArchiveAfter, onArchiveAfter, setArchiveAfter } from './tasks';
 import { fullness } from './Composer';
+import Connectors from './ConnectorsView';
 import type { Agent } from './api';
 
 // how long the way out takes (the sink animation in app.css)
@@ -13,16 +14,16 @@ const LEAVE_MS = 220;
 
 // Settings' pages, from Wellington's Mac app as Sangam's design has them, as far as obid serves
 // them: this browser's own (General), then what obid's status says (Runner, Accounts, Models),
-// read-only: changing them is the Mac app's, or obid's configuration. Connectors (#498) shows only
-// with "Show screens still being built". Remote access, Vault and About wait for their API.
-const PAGES_ALL = [
+// read-only: changing them is the Mac app's, or obid's configuration, and Connectors (#518), what
+// obid is connected to, read-only too. Remote access, Vault and About wait for their API.
+const PAGES_ALL: readonly { id: string; label: string; preview?: true }[] = [
   { id: 'general', label: 'General' },
   { id: 'runner', label: 'Runner' },
   { id: 'accounts', label: 'Accounts' },
   { id: 'models', label: 'Models' },
-  { id: 'connectors', label: 'Connectors', preview: true },
-] as const;
-export const settingsPages = (preview: boolean) => PAGES_ALL.filter((p) => preview || !('preview' in p));
+  { id: 'connectors', label: 'Connectors' },
+];
+export const settingsPages = (preview: boolean) => PAGES_ALL.filter((p) => preview || !p.preview);
 export const settingsLabel = (id: string) => PAGES_ALL.find((p) => p.id === id)?.label ?? 'Settings';
 
 // How freely a job's agent works, each with its line (RunnerMode in the Mac app)
@@ -95,7 +96,7 @@ function General() {
         <Select value={archiveAfter} onChange={setArchiveAfter} label="Archive completed" options={ARCHIVE_AFTER.map((a) => [a.id, a.label] as const)} />
       </Row>
     </Group>
-    <Group i={2} footer="The Obysphere (#497), its knowledge (#495) and Connectors (#498) have no backend in obid yet, and the list of your conversations is still to come (obid keeps them since #493; this page shows the latest). Shown, each says so and shows nothing made up.">
+    <Group i={2} footer="The Obysphere (#497) and its knowledge (#495) have no backend in obid yet, and the list of your conversations is still to come (obid keeps them since #493; this page shows the latest). Shown, each says so and shows nothing made up.">
       <Row label="Show screens still being built"><Switch on={preview} onChange={setPreview} label="Show screens still being built" /></Row>
     </Group>
     <Group i={3} footer="This tab keeps obid's token until it closes, signs out, or obid's token changes. Other tabs ask for it again.">
@@ -177,13 +178,6 @@ function Models() {
       const m = models[g];
       return <Row key={g} label={AGENTS[g].name} about={[m.effort && `Effort ${m.effort}`, m.complexEffort && `complex jobs ${m.complexEffort}`].filter(Boolean).join(', ') || undefined}><Value>{m.model}</Value></Row>;
     })}
-  </Group>;
-}
-
-// Connectors (#498): nothing yet
-function Connectors() {
-  return <Group i={1} footer="One page for everything Oby is connected to comes with #498.">
-    <Row label={<span className="set-none">No connectors yet</span>} />
   </Group>;
 }
 
