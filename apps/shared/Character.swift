@@ -16,7 +16,9 @@ final class ObyCharacter {
     /// it may flash while the page loads.
     private(set) var ready = false
 
-    init() {
+    /// `query` is the page's: the notch's size by default; the window's Home asks for its embedded
+    /// look (`embed`, no playground, a transparent page) at Sangam's size.
+    init(query: String = "size=1.25") {
         var config = WebPage.Configuration()
         config.urlSchemeHandlers[URLScheme("oby")!] = CharacterFiles()
         config.userContentController.add(events, name: "oby")
@@ -24,7 +26,7 @@ final class ObyCharacter {
         events.received = { [weak self] event in if event == "ready" { self?.ready = true } }
         Task {
             do {
-                for try await event in page.load(URLRequest(url: URL(string: "oby://character/oby.html?size=1.25")!))
+                for try await event in page.load(URLRequest(url: URL(string: "oby://character/oby.html?\(query)")!))
                 where event == .finished {
                     loaded = true
                     applyPause()

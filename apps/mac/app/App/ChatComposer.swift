@@ -101,6 +101,11 @@ struct ComposerEditor: NSViewRepresentable {
     var focusRequest = 0
     let onSend: () -> Void
     let onStop: () -> Bool
+    /// The window's message box sets its text on a taller line, as Sangam's design does; the
+    /// notch keeps the font's own.
+    var lineHeight: CGFloat? = nil
+    var textColor: NSColor = .white
+    var label = "Message Oby"
 
     final class Editor: NSTextView {
         var send: () -> Void = {}
@@ -155,8 +160,18 @@ struct ComposerEditor: NSViewRepresentable {
         editor.isRichText = false
         editor.allowsUndo = true
         editor.font = .systemFont(ofSize: 15)
-        editor.textColor = .white
-        editor.insertionPointColor = .white
+        editor.textColor = textColor
+        editor.insertionPointColor = textColor
+        if let lineHeight {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.minimumLineHeight = lineHeight
+            paragraph.maximumLineHeight = lineHeight
+            editor.defaultParagraphStyle = paragraph
+            // The extra room goes above the letters: half of it back under them, so they sit in the line's middle.
+            let offset = (lineHeight - NSFont.systemFont(ofSize: 15).boundingRectForFont.height) / 4
+            editor.typingAttributes = [.font: NSFont.systemFont(ofSize: 15), .foregroundColor: textColor,
+                                       .paragraphStyle: paragraph, .baselineOffset: max(0, offset)]
+        }
         editor.drawsBackground = false
         editor.textContainerInset = .zero
         editor.textContainer?.lineFragmentPadding = 0
@@ -167,7 +182,7 @@ struct ComposerEditor: NSViewRepresentable {
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.containerSize = NSSize(width: 300, height: CGFloat.greatestFiniteMagnitude)
-        editor.setAccessibilityLabel("Message Oby")
+        editor.setAccessibilityLabel(label)
         scroll.documentView = editor
         return scroll
     }
