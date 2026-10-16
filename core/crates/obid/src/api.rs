@@ -156,6 +156,12 @@ pub fn router(shared: Arc<Shared>) -> Router {
             "/v1/obid/plugins/{id}",
             axum::routing::put(crate::plugins::set),
         )
+        // The web app (apps/web) and how a browser signs in to it (crate::web).
+        .route("/app", get(crate::web::bare))
+        .route("/app/", get(crate::web::index))
+        .route("/app/{*path}", get(crate::web::file))
+        .route(crate::web::SIGN_IN, post(crate::web::sign_in))
+        .route("/app/sign-out", post(crate::web::sign_out))
         .route("/v1/obid/decisions", get(crate::sphere::routes::decisions))
         .route(
             "/v1/obid/decisions/{id}",
@@ -199,8 +205,15 @@ pub const NO_TOKEN: &str = "This runner answers only requests with its API token
 /// web page can't reach obid through a name that resolves to 127.0.0.1), then it must carry the
 /// API token (`401` otherwise). Unlike a Mac runner's gate (Runner/API.swift, `Gate.admit`), OAuth
 /// discovery paths get no exception: runner-api.md, "obid only: configuration", says anything
-/// without the token is `401`, so they are `401` without it and `404` with it.
+/// without the token is `401`, so they are `401` without it and `404` with it. obid's own web page
+/// signs in instead with the session cookie (crate::web), and the sign-in form itself checks the
+/// token it is sent; without either, the page is the sign-in form, still `401`.
 async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -> Response {
+    if crate::web::is_sign_in(request.method(), request.uri())
+        && loopback_request(request.uri(), request.headers())
+    {
+        return next.run(request).await;
+    }
     let agent_check = request.uri().path() == "/v1/agent/apple-check";
     let admitted = admit(request.uri(), request.headers(), &shared.token).or_else(|error| {
         if !agent_check || !loopback_request(request.uri(), request.headers()) {
@@ -217,8 +230,25 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
             Err(error)
         }
     });
+    let admitted = admitted.or_else(|error| {
+        let (method, uri, headers) = (request.method(), request.uri(), request.headers());
+        if error.status == StatusCode::UNAUTHORIZED
+            && crate::web::admitted(method, uri, headers, &shared.token)
+        {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    });
     match admitted {
         Ok(()) => next.run(request).await,
+        Err(error)
+            if error.status == StatusCode::UNAUTHORIZED
+                && request.method() == axum::http::Method::GET
+                && crate::web::is_app(request.uri().path()) =>
+        {
+            crate::web::sign_in_page(None)
+        }
         Err(error) => error.into_response(),
     }
 }

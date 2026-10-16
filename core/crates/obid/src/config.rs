@@ -10,6 +10,7 @@
 //!  "repos": [{"repo": "obi-e2e/fixture-app", "remote": "file:///abs/path/remote.git", "defaultBranch": "main", "check": "node --test"}],
 //!  "allowFileRemotes": false,
 //!  "bundledPlugins": "/abs/path/obi/plugins",
+//!  "web": "/abs/path/obi/apps/web/dist",
 //!  "telemetry": false}
 //! ```
 //!
@@ -62,6 +63,8 @@ struct File {
     allow_file_remotes: bool,
     #[serde(default)]
     bundled_plugins: Option<PathBuf>,
+    #[serde(default)]
+    web: Option<PathBuf>,
     #[serde(default)]
     telemetry: bool,
 }
@@ -129,6 +132,9 @@ pub struct Config {
     /// missing, disabled (docs/ARCHITECTURE.md 5.3, step 1): `bundledPlugins`, or when it is left
     /// out [`default_bundled_plugins`].
     pub bundled_plugins: PathBuf,
+    /// The built web app (`apps/web/dist`) obid serves at `/app/` (crate::web): `web`, or when it
+    /// is left out [`default_web`].
+    pub web: PathBuf,
     /// False unless the owner turns it on; obid sends nothing to anyone otherwise.
     pub telemetry: bool,
 }
@@ -137,6 +143,12 @@ pub struct Config {
 /// of the repository this obid was built from (`core/crates/obid/../../../plugins`).
 pub fn default_bundled_plugins() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../plugins")
+}
+
+/// Where the built web app is when the configuration doesn't say: `apps/web/dist` in the
+/// repository this obid was built from (`core/crates/obid/../../../apps/web/dist`).
+pub fn default_web() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/web/dist")
 }
 
 impl Config {
@@ -269,6 +281,13 @@ impl Config {
                 "bundledPlugins is {dir:?}: it must be an absolute path, the folder of the plug-ins obid ships."
             ));
         }
+        if let Some(dir) = &file.web
+            && !dir.is_absolute()
+        {
+            return invalid(format!(
+                "web is {dir:?}: it must be an absolute path, the folder of the built web app (apps/web/dist)."
+            ));
+        }
 
         Ok(Config {
             listen,
@@ -278,6 +297,7 @@ impl Config {
             repos: file.repos,
             allow_file_remotes: file.allow_file_remotes,
             bundled_plugins: file.bundled_plugins.unwrap_or_else(default_bundled_plugins),
+            web: file.web.unwrap_or_else(default_web),
             telemetry: file.telemetry,
         })
     }
@@ -529,6 +549,16 @@ mod tests {
         assert!(
             problem(&with(serde_json::json!({"bundledPlugins": "plugins"}))).contains("absolute")
         );
+    }
+
+    #[test]
+    fn the_web_app_is_the_repositorys_unless_given() {
+        let config = Config::parse(&with(serde_json::json!({}))).unwrap();
+        assert_eq!(config.web, default_web());
+        assert!(config.web.ends_with("apps/web/dist"), "{:?}", config.web);
+        let config = Config::parse(&with(serde_json::json!({"web": "/opt/obi/web"}))).unwrap();
+        assert_eq!(config.web, PathBuf::from("/opt/obi/web"));
+        assert!(problem(&with(serde_json::json!({"web": "dist"}))).contains("absolute"));
     }
 
     #[test]
