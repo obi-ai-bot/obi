@@ -117,7 +117,7 @@ final class RunnerFeed {
     /// Settings › Runner says "This Mac" (#283): the runner is the login item on this Mac, at
     /// `LocalRunner.url`, with its own token; this Mac's desk then plans and runs nothing itself.
     private(set) var local = false
-    /// The local runner's token, read from its keychain item once it has started (Engine/LocalRunner.swift).
+    /// The local runner's token, read from obid's private file or the Swift runner's keychain.
     @ObservationIgnored private var token: String?
     /// Settings › Runner changed which runner is followed, with whether it's the one on this Mac.
     @ObservationIgnored var onFollow: (_ local: Bool) -> Void = { _ in }
@@ -222,7 +222,7 @@ final class RunnerFeed {
 
     /// Follows the runner's events and, once it's following, fetches the jobs and the inbox; after
     /// any drop it tries again, waiting a little longer each time, up to half a minute. The runner
-    /// on this Mac is followed once its keychain token exists (it writes it when it first starts):
+    /// on this Mac is followed once its file or keychain token exists:
     /// until then the line says so, and the next try reads it again.
     private func run() async {
         var wait = 1.0
@@ -285,6 +285,9 @@ final class RunnerFeed {
                 }
             } catch {
                 if Task.isCancelled { return }
+                if local, let denied = error as? RunnerError, denied.status == 401 {
+                    token = LocalRunner.token(excluding: token)
+                }
                 if !down { Logger.feed.error("following the runner failed: \(error.localizedDescription, privacy: .public)") }
                 connection = .offline(error.localizedDescription)
             }

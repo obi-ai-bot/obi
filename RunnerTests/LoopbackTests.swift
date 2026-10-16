@@ -163,6 +163,50 @@ struct LocalRunnerTests {
         #expect(fresh != token)
     }
 
+    @Test func readsObidsPrivateFileAndFallsBackAfterARefusal() throws {
+        let root = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let legacy = String(repeating: "ab", count: 32)
+        let store = MemoryTokens(legacy)
+        let path = root.appending(path: "api-token")
+        let token = String(repeating: "x", count: 40)
+        #expect(LocalRunner.token(home: root, fallback: store) == legacy)
+        try Data((token + "\r\n").utf8).write(to: path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        #expect(LocalRunner.token(home: root, fallback: store) == token)
+        #expect(LocalRunner.token(home: root, fallback: store, excluding: token) == legacy)
+        #expect(LocalRunner.token(home: root, fallback: MemoryTokens(token), excluding: token) == nil)
+        let rotated = String(repeating: "y", count: 32)
+        try Data(rotated.utf8).write(to: path)
+        #expect(LocalRunner.token(home: root, fallback: store, excluding: token) == rotated)
+        // The Swift runner still makes its token in the keychain store only.
+        #expect(try LocalRunner.makeToken(in: store) == legacy)
+    }
+
+    @Test func refusesUnsafeOrMalformedObidTokenFiles() throws {
+        let root = try temporaryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appending(path: "api-token")
+        let token = String(repeating: "x", count: 40)
+        for text in ["", String(token.prefix(31)), " " + token, "\n" + token,
+                     token + " ", token + "\nmore", token + "é", String(repeating: "x", count: 4097)] {
+            try Data(text.utf8).write(to: path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+            #expect(LocalRunner.obidToken(in: root) == nil)
+        }
+        try Data(token.utf8).write(to: path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path.path)
+        #expect(LocalRunner.obidToken(in: root) == nil)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        let real = root.appending(path: "real")
+        try FileManager.default.moveItem(at: path, to: real)
+        try FileManager.default.createSymbolicLink(at: path, withDestinationURL: real)
+        #expect(LocalRunner.obidToken(in: root) == nil)
+        try FileManager.default.removeItem(at: path)
+        try FileManager.default.createDirectory(at: path, withIntermediateDirectories: false)
+        #expect(LocalRunner.obidToken(in: root) == nil)
+    }
+
     @Test func readsTheBearerToken() {
         let token = String(repeating: "0f", count: 32)
         #expect(Gate<BasicRequestContext>.bearer("Bearer \(token)") == token)

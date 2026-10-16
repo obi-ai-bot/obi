@@ -1168,6 +1168,20 @@ obid serve --config /path/to/config.json
 
 The API token is the one in `home/api-token` (0600, at least 32 visible characters): obid makes it on first start, or takes the one put there before it starts. The shells on the same machine read it there. It is never in obid's environment or arguments, where any process of the same user can read it (on macOS through `KERN_PROCARGS2`, which no sandbox holds back; #439): obid refuses to start when `OBID_API_TOKEN` is set, saying to put the token in that file instead. The same holds for every secret obid holds: none is ever in its environment or arguments, nor in a child's. Every request sends `Authorization: Bearer <token>`; anything else is `401`. `GET /v1/status` adds `"engine": "obid"` to `runner`. On SIGTERM or SIGINT obid stops taking requests, leaves its jobs as a restart would (After any restart, above) and exits 0 within 10 seconds.
 
+**The Mac app on the same Mac (#440).** For Settings › Runner › This Mac, set obid's `home` to
+`~/Library/Application Support/Oby/Runner` (expanded to an absolute path in the JSON) and leave
+`listen` out, or use `127.0.0.1:7777`. This is `LocalRunner.home`, also where the app opens device
+pairing. The app reads `api-token` there directly: no token in a process's environment or
+arguments, no copy in UserDefaults, and no change to how the app starts. The file must be a
+regular file owned by the current user with no group or other permissions (normally 0600),
+at most 4096 bytes, and contain at least 32 visible ASCII characters with only optional trailing
+CR/LF. Links, directories and malformed or exposed files are ignored. The existing Swift runner
+continues using its keychain item (`com.deskree.oby.runner`, account `token`); that credential is
+the fallback when no usable obid file exists or the server refuses its token with 401. A refused
+credential is refreshed, so a stale file does not prevent connecting to a running Swift runner,
+and rotating obid's token does not require restarting the app. Other obid homes and ports remain
+valid for other clients; This Mac mode uses the fixed home and address above.
+
 ### obid only: Sphere membership
 
 The Obi's place in one Sphere: its key, its owner-signed agent card, its owner's delegation, and the token it exchanges them for (spec `identity.md`). One Sphere per obid in this version.

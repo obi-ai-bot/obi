@@ -6,19 +6,11 @@
 // (apps/shared/Runner.swift), every answer is read into the app's own types. What it saw goes to
 // stdout, one line each; the test reads them.
 //
-// OBID_URL is obid's address and OBID_TOKEN its API token. The Mac app reads the token of the
-// runner on this Mac from its keychain item (Engine/LocalRunner.swift, `token(from:)`); here the
-// same function reads it from a store that holds obid's.
+// OBID_URL is the test listener's address; OBID_HOME is its non-secret home path. The app's
+// production default is LocalRunner.home. No API token is passed in argv or the environment.
 
 import CryptoKit
 import Foundation
-
-/// A store holding one token, as the keychain item `com.deskree.oby.runner` holds a Mac runner's.
-nonisolated struct GivenToken: LocalTokenStore {
-    let token: String
-    func read() throws -> String? { token }
-    func write(_ token: String) throws {}
-}
 
 func say(_ line: String) {
     FileHandle.standardOutput.write(Data((line + "\n").utf8))
@@ -37,11 +29,16 @@ func answered(_ call: () async throws -> Void) async -> String {
 }
 
 let environment = ProcessInfo.processInfo.environment
-// RunnerFeed.run: `if local, token == nil { token = LocalRunner.token() }`. A token that isn't
-// one (64 hex characters) is none, and the app waits for the runner to make it.
-guard let token = LocalRunner.token(from: GivenToken(token: environment["OBID_TOKEN"] ?? "")) else {
+// The same discovery as RunnerFeed: a private api-token file, then the legacy keychain.
+// The test's empty fallback avoids accessing the person's real keychain.
+guard let home = environment["OBID_HOME"],
+      let token = LocalRunner.token(home: URL(filePath: home), fallback: MemoryTokens()) else {
     say("token refused")
     exit(1)
+}
+if environment["OBID_TOKEN_ONLY"] == "1" {
+    say("token read")
+    exit(0)
 }
 // RunnerFeed.runner(_:token:local:): the URL, trimmed, with a host, and the token.
 guard let url = URL(string: (environment["OBID_URL"] ?? "").trimmingCharacters(in: .whitespaces)), url.host() != nil else {
