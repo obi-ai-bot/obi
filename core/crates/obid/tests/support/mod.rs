@@ -4,7 +4,8 @@
 //! The fake Sphere speaks sphere-api.md's calls that an Obi makes (redeem, the token exchange, the
 //! directory, send, deliveries, ack) with the spec's own checks from obi-protocol, and it records
 //! what it was sent. A test can make it refuse sends with `429 rate_limited` (D3) or a policy
-//! refusal, and queue a delivery it never checked, as a misbehaving relay would.
+//! refusal, hold its answer to a send it already recorded, and queue a delivery it never checked,
+//! as a misbehaving relay would.
 
 #![allow(dead_code)]
 
@@ -587,6 +588,9 @@ pub struct SphereState {
     pub deny_requests: bool,
     /// Every send's body as it arrived, with its sender and the status answered.
     pub sends: Vec<(String, String, u16)>,
+    /// The next send of this type is recorded and delivered, and its answer waits until the test
+    /// lets it go: a slow way back to the sender (`FakeSphere::hold_next`).
+    pub hold: Option<(String, Arc<tokio::sync::Notify>)>,
 }
 
 #[derive(Clone)]
@@ -633,6 +637,14 @@ impl FakeSphere {
 
     pub fn lock(&self) -> std::sync::MutexGuard<'_, SphereState> {
         self.state.lock().unwrap()
+    }
+
+    /// Holds the answer to the next send of type `kind`: the Sphere records it and delivers it,
+    /// and answers the sender only once the test calls `notify_one` on what this returns.
+    pub fn hold_next(&self, kind: &str) -> Arc<tokio::sync::Notify> {
+        let release = Arc::new(tokio::sync::Notify::new());
+        self.lock().hold = Some((kind.to_owned(), release.clone()));
+        release
     }
 
     /// An invitation for `obi` of `owner`: its id and secret.
@@ -830,23 +842,35 @@ async fn members(State(state): State<Arc<Mutex<SphereState>>>, headers: HeaderMa
     axum::Json(json!({"sphere": SPHERE, "members": state.members})).into_response()
 }
 
+/// An answer the Sphere holds until the test lets it go.
+#[derive(Clone)]
+struct Held(Arc<tokio::sync::Notify>);
+
 async fn send(
     State(state): State<Arc<Mutex<SphereState>>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    let response = record(&state, &headers, &body);
+    if let Some(Held(release)) = response.extensions().get::<Held>().cloned() {
+        release.notified().await;
+    }
+    response
+}
+
+fn record(state: &Mutex<SphereState>, headers: &HeaderMap, body: &[u8]) -> Response {
     let mut state = state.lock().unwrap();
-    let Some(sender) = bearer(&state, &headers) else {
+    let Some(sender) = bearer(&state, headers) else {
         return sphere_error(StatusCode::UNAUTHORIZED, "unauthorized", "no token");
     };
-    let text = String::from_utf8_lossy(&body).into_owned();
+    let text = String::from_utf8_lossy(body).into_owned();
     let answer = |state: &mut SphereState, status: StatusCode, response: Response| {
         state
             .sends
             .push((sender.clone(), text.clone(), status.as_u16()));
         response
     };
-    let Ok(env) = serde_json::from_slice::<Value>(&body) else {
+    let Ok(env) = serde_json::from_slice::<Value>(body) else {
         return answer(
             &mut state,
             StatusCode::BAD_REQUEST,
@@ -962,11 +986,11 @@ async fn send(
         false,
     ));
     let sent = json!({"id": env["id"], "seq": seq, "entry_hash": entry["hash"], "recorded_at": recorded_at});
-    answer(
-        &mut state,
-        StatusCode::ACCEPTED,
-        (StatusCode::ACCEPTED, axum::Json(sent)).into_response(),
-    )
+    let mut response = (StatusCode::ACCEPTED, axum::Json(sent)).into_response();
+    if let Some((_, release)) = state.hold.take_if(|(held, _)| *held == kind) {
+        response.extensions_mut().insert(Held(release));
+    }
+    answer(&mut state, StatusCode::ACCEPTED, response)
 }
 
 async fn deliveries(

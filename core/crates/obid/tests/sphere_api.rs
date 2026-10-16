@@ -70,6 +70,21 @@ fn exchange(obid: &Obid, id: &str) -> Value {
     get(obid, &format!("/v1/obid/sphere/exchanges/{id}"))
 }
 
+/// An exchange's messages, `(direction, type)`, oldest first.
+fn kinds(exchange: &Value) -> Vec<(String, String)> {
+    exchange["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["direction"].as_str().unwrap().into(),
+                m["envelope"]["type"].as_str().unwrap().into(),
+            )
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_request_waits_for_the_owner_and_the_remembered_decision_answers_the_next() {
     let folder = Folder::new("remember");
@@ -113,6 +128,8 @@ async fn a_request_waits_for_the_owner_and_the_remembered_decision_answers_the_n
     // The Sphere refuses A's next two sends with 429 rate_limited (D3): obid waits as
     // Retry-After says and sends the same bytes again.
     sphere.lock().rate_limit.insert("obi-wellington".into(), 2);
+    // And it holds its answer to the result: ernesto has the result before obid hears it went.
+    let result_answer = sphere.hold_next("result");
     let answered = tokio::task::block_in_place(|| answer(&obid, &item, ACCEPT_REMEMBER));
     assert_eq!(answered["state"], "done");
     assert_eq!(answered["answer"], ACCEPT_REMEMBER);
@@ -157,25 +174,34 @@ async fn a_request_waits_for_the_owner_and_the_remembered_decision_answers_the_n
         );
     }
 
-    let done = tokio::task::block_in_place(|| exchange(&obid, &cid));
+    // Until the Sphere's answer comes, the exchange is done with its result, and the result isn't
+    // in its messages yet: they list what the Sphere took, once obid has its answer
+    // (docs/runner-api.md, exchanges). Reading the exchange as soon as ernesto has the result is
+    // no proof that obid heard back, so the test lets the answer go and waits for it.
+    let built = tokio::task::block_in_place(|| exchange(&obid, &cid));
+    assert_eq!(built["state"], "done");
+    assert_eq!(built["result"], expected_result());
+    assert_eq!(
+        kinds(&built),
+        [
+            ("received".into(), "review_request".into()),
+            ("sent".into(), "accept".into())
+        ]
+    );
+    result_answer.notify_one();
+    let done = tokio::task::block_in_place(|| {
+        within(20, "the sent result in the exchange's messages", || {
+            let done = exchange(&obid, &cid);
+            (kinds(&done).len() == 3).then_some(done)
+        })
+    });
     assert_eq!(done["state"], "done");
     assert_eq!(done["decidedBy"], "inbox");
     assert_eq!(done["rule"], Value::Null);
     assert_eq!(done["publishScan"], json!({"ran": true, "clean": true}));
     assert_eq!(done["result"], expected_result());
-    let kinds: Vec<(String, String)> = done["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| {
-            (
-                m["direction"].as_str().unwrap().into(),
-                m["envelope"]["type"].as_str().unwrap().into(),
-            )
-        })
-        .collect();
     assert_eq!(
-        kinds,
+        kinds(&done),
         [
             ("received".into(), "review_request".into()),
             ("sent".into(), "accept".into()),
@@ -189,10 +215,16 @@ async fn a_request_waits_for_the_owner_and_the_remembered_decision_answers_the_n
             "every message is the one the Sphere recorded, signature and all"
         );
     }
+    // The job ends after its result's first send (docs/runner-api.md, review jobs, steps 8 and 9):
+    // a moment after the exchange lists it.
     let j1 = done["job"].as_str().unwrap().to_owned();
-    let job = tokio::task::block_in_place(|| get(&obid, &format!("/v1/jobs/{j1}")));
+    let job = tokio::task::block_in_place(|| {
+        within(20, "the review job done", || {
+            let job = get(&obid, &format!("/v1/jobs/{j1}"));
+            (job["status"] == "done").then_some(job)
+        })
+    });
     assert_eq!(job["kind"], "review");
-    assert_eq!(job["status"], "done");
     assert_eq!(job["obi"]["correlationId"], cid);
     assert_eq!(job["obi"]["fromOwner"], "ernesto");
     assert_eq!(job["publishError"], Value::Null);
