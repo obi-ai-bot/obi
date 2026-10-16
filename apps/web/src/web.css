@@ -1,0 +1,36 @@
+/* What the web app adds to Sangam's look (tokens.css, app.css, kept as they are): how the page
+   stands with obid, the conversation's earlier messages, and Oby's longer answers. */
+
+/* connecting, or why obid can't be reached, or what last went wrong: a quiet line at the top */
+.connection {
+  position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 50;
+  margin: 0; padding: 6px 14px; max-width: min(560px, calc(100vw - 32px));
+  border-radius: var(--radius-pill); border: 1px solid var(--surface-edge); background: var(--surface);
+  color: var(--text); font-size: var(--text-md); line-height: 20px; text-align: center;
+}
+.connection.is-down { color: var(--ink); border-color: color-mix(in srgb, var(--over) 45%, transparent); }
+
+/* the conversation: the turns before the first one shown, and an empty thread */
+.chat-older {
+  display: block; margin: 0 auto 16px; padding: 6px 14px; border: 1px solid var(--line); border-radius: var(--radius-pill);
+  background: none; color: var(--text); font: inherit; font-size: var(--text-md); cursor: pointer;
+}
+.chat-older:hover { border-color: var(--line-strong); color: var(--ink); }
+.chat-empty { margin: 24px 4px; color: var(--muted); font-size: var(--text-base); text-align: center; }
+
+/* Oby's longer answer, under its short one */
+.msg-details { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--divider); color: var(--text); font-size: var(--text-md); }
+
+/* a form inside a menu (sign out) takes no room of its own */
+.row-menu form, .set-control form { display: contents; }
+
+/* the page asking for obid's token (SignIn.tsx), as obid's own sign-in form looks */
+.sign-in { width: min(380px, calc(100vw - 32px)); margin: 0 auto; padding-top: 30vh; color: var(--ink); }
+.sign-in h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; }
+.sign-in p { color: var(--text); margin: 0 0 20px; line-height: 1.45; }
+.sign-in code { color: var(--ink); }
+.sign-in form { display: flex; gap: 8px; }
+.sign-in input { flex: 1; min-width: 0; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--chip); color: inherit; font: inherit; }
+.sign-in input:focus { outline: none; border-color: var(--line-focus); }
+.sign-in button { padding: 9px 16px; border: 0; border-radius: 10px; background: var(--ink); color: var(--bg); font: inherit; font-weight: 600; cursor: pointer; }
+.sign-in .sign-in-problem { color: var(--danger); margin: 12px 0 0; }

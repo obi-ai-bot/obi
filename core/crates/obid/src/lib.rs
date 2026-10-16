@@ -34,6 +34,7 @@ pub mod settings;
 pub mod sphere;
 pub mod store;
 pub mod token;
+pub mod web;
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -206,6 +207,7 @@ pub async fn serve(
         conversations,
         link: link.clone(),
         plugins: plugins.clone(),
+        pages: web::Sessions::default(),
         stopping: stopping_rx.clone(),
     });
     let app = api::router(shared);
