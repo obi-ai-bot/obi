@@ -1,0 +1,37 @@
+{
+  "name": "oby-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Oby desktop app",
+  "main": "out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "web": "vite",
+    "typecheck": "tsc --noEmit",
+    "build:native": "node-gyp rebuild --directory native/window-style --target=$(node -p \"require('electron/package.json').version\") --dist-url=https://electronjs.org/headers",
+    "postinstall": "node -e \"process.platform==='darwin'&&process.exit(1)\" || npm run build:native"
+  },
+  "dependencies": {
+    "@lexical/react": "0.52.0",
+    "@lexical/text": "0.52.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "lexical": "0.52.0",
+    "lucide-react": "^1.55.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.7.0",
+    "electron-vite": "^5.0.0",
+    "node-gyp": "^12.4.0",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.7"
+  }
+}
