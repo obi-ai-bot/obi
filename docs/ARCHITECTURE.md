@@ -83,7 +83,7 @@ What crosses into Oby, and what it may become:
 | Comes from | Arrives as | May become |
 |---|---|---|
 | The owner (a shell, the MCP server) | Runner API calls with the API token | Anything the API offers: goals, answers, settings, publishing by hand with a device signature. |
-| Another Oby | A signed, typed action through the Sphere, checked against the spec (schema, signature, expiry, policy) | Only what the receiver's decision rule allows (spec `protocol.md` section 11): an inbox item, or work a remembered decision covers, and then only the typed reply to that action. Never a merge, a push, a published change, a changed setting or a changed decision. |
+| Another Oby | A signed, typed action through the Sphere, checked against the spec (schema, signature, expiry, policy) | Only what the receiver's decision rule allows (spec `protocol.md` section 11): an inbox item, work a remembered decision covers, or, for a `question`, an `answer` the Oby writes by itself from what one of its owner's sharing rules allows (a model run on the owner's account, limited per sender), and then only the typed reply to that action. Never a merge, a push, a published change, a changed setting or a changed decision. |
 | GitHub, Slack, web pages, plug-ins, other people | Data | Quoted to agents as files (`.obi/inputs/`, `.obi/context/`), shown to the owner. Never part of a prompt's instructions. |
 | Agents (their output, their questions) | Data and typed requests (permission prompts, `QUESTION:` lines) | What `obid`'s fixed rules and the owner's saved rules allow; everything else waits in the inbox. |
 

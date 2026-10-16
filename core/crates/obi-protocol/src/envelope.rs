@@ -109,6 +109,7 @@ pub fn semantic_problems(envelope: &Value) -> Vec<String> {
     if kind == "result" {
         problems.extend(result_problems(body));
     }
+    problems.extend(ref_problems(body));
     for finding in body
         .get("findings")
         .and_then(Value::as_array)
@@ -124,6 +125,30 @@ pub fn semantic_problems(envelope: &Value) -> Vec<String> {
                 "finding {}: end_line before line",
                 text(finding, "id")
             ));
+        }
+    }
+    problems
+}
+
+/// The references in one list (`about`, `refs`) are distinct, repositories compared ignoring
+/// ASCII case (protocol.md section 5.9): `Acme/App` and `acme/app` name the same repository.
+pub fn ref_problems(body: &Value) -> Vec<String> {
+    let mut problems = Vec::new();
+    for list in ["about", "refs"] {
+        let mut seen = std::collections::HashSet::new();
+        for reference in body
+            .get(list)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let mut key = reference.clone();
+            if let Some(repo) = key.get("repo").and_then(Value::as_str) {
+                key["repo"] = Value::String(repo.to_ascii_lowercase());
+            }
+            if !seen.insert(jcs::canonicalize(&key).unwrap_or_default()) {
+                problems.push(format!("{list}: the same reference twice"));
+            }
         }
     }
     problems

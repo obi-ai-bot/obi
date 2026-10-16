@@ -11,7 +11,7 @@
     "text": { "$ref": "../common.schema.json#/$defs/block_text", "x-obi-text": "data", "minLength": 1, "maxLength": 2000, "description": "The answer." },
     "refs": { "$ref": "../common.schema.json#/$defs/refs", "description": "What the answer draws on." },
     "choice": { "type": "integer", "minimum": 0, "maximum": 2, "description": "The index of the choice picked, when the question had choices." },
-    "by_rule": { "$ref": "../common.schema.json#/$defs/rule_id", "description": "The owner's sharing rule that let the Obi answer by itself. Only with by: obi." }
+    "by_rule": { "$ref": "../common.schema.json#/$defs/rule_id", "description": "The one sharing rule of its owner the Obi answered under. Only with by: obi." }
   },
   "if": { "required": ["by"], "properties": { "by": { "const": "owner" } } },
   "then": { "not": { "required": ["by_rule"] } }
