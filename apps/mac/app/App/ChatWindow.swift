@@ -71,6 +71,12 @@ final class ChatWindow: NSObject, NSWindowDelegate {
 final class ChatState {
     var selection = ChatSelection.oby
     var composerFocusRequest = 0
+    /// When this state began, and the job rows opened since: a job created after it and not
+    /// opened yet is new (#496), its row and its kind's chip with a blue dot.
+    let since = Date.now
+    var seen: Set<String> = []
+    /// The kind of work's page a job was opened from, so Back goes there again; nil for Oby.
+    var openedFrom: WorkType?
 
     func open(job: (id: String, local: Bool)? = nil) {
         selection = job.map { .job(id: $0.id, local: $0.local) } ?? .oby
@@ -91,7 +97,7 @@ struct ChatView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            SidebarView(model: model, selection: selection, onOpenSettings: onOpenSettings)
+            SidebarView(model: model, selection: selection, since: state.since, seen: state.seen, onOpenSettings: onOpenSettings)
                 .frame(width: 272)
             middle.frame(maxWidth: .infinity, maxHeight: .infinity)
             if liveExpanded {
@@ -102,14 +108,28 @@ struct ChatView: View {
         .background(OBYStyle.window)
         .preferredColorScheme(.dark)
         .ignoresSafeArea()
+        // Opened: its blue dot goes.
+        .onChange(of: state.selection, initial: true) { old, new in
+            if case .job(let id, let local) = new {
+                state.seen.insert(SidebarSections.JobRow.id(id, local: local))
+                if case .group(let kind) = old { state.openedFrom = kind } else if old != new { state.openedFrom = nil }
+            }
+        }
     }
 
     @ViewBuilder private var middle: some View {
         switch state.selection {
         case .oby:
-            ConversationColumn(model: model, liveExpanded: $liveExpanded, composerFocusRequest: state.composerFocusRequest, onOpenJob: { state.selection = .job(id: $0, local: $1) })
+            ConversationColumn(model: model, liveExpanded: $liveExpanded, composerFocusRequest: state.composerFocusRequest,
+                               kinds: WorkList.groups(model.work(since: state.since, seen: state.seen), by: .type),
+                               onOpenJob: { state.selection = .job(id: $0, local: $1) },
+                               onOpenGroup: { state.selection = .group($0) })
         case .job(let id, let local):
-            JobPane(model: model, id: id, local: local, onBack: { state.selection = .oby })
+            JobPane(model: model, id: id, local: local, onBack: { state.selection = state.openedFrom.map(ChatSelection.group) ?? .oby })
+        case .group(let kind):
+            GroupPane(model: model, kind: kind, items: model.work(since: state.since, seen: state.seen).filter { $0.type == kind },
+                      onOpenJob: { state.selection = .job(id: $0, local: $1) }, onBack: { state.selection = .oby })
+                .id(kind)
         case .channels:
             placeholder("# channels", SidebarSections.channelsEmpty, detail: "A channel is where you, your team and your Obys post heads-ups, and where other Obys ask yours for a review.")
         case .obys:
@@ -134,7 +154,11 @@ private struct ConversationColumn: View {
     let model: IslandModel
     @Binding var liveExpanded: Bool
     let composerFocusRequest: Int
+    /// Home's chips (#496): every kind of work with something in it, whatever the side panel groups by.
+    let kinds: [WorkList.Group<SidebarSections.JobRow>]
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
+    let onOpenGroup: (WorkType) -> Void
+    @AppStorage(GroupBy.key) private var groupBy = GroupBy.type
     @State private var text = ""
     struct ReplyTarget {
         var title: String
@@ -167,6 +191,11 @@ private struct ConversationColumn: View {
                 }
                 .buttonStyle(.plain).accessibilityValue(liveExpanded ? "Open" : "Closed")
                 Menu {
+                    Picker("Group by", selection: $groupBy) {
+                        ForEach(GroupBy.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.inline)
+                    Divider()
                     Button("Accounts") { SettingsSelection.open(.accounts) }
                     Button("Integrations") { SettingsSelection.open(.runner) }
                     Button("Settings") { SettingsSelection.open(.general) }
@@ -176,6 +205,7 @@ private struct ConversationColumn: View {
             .padding(.horizontal, OBYStyle.Space.xl).padding(.top, 46).padding(.bottom, OBYStyle.Space.lg)
             .accessibilityAddTraits(.isHeader)
             thread
+            if !kinds.isEmpty { chips.padding(.horizontal, 28).padding(.top, OBYStyle.Space.md) }
             composer.padding(.horizontal, 28).padding(.vertical, 16)
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { columnHeight = $0 }
@@ -184,6 +214,33 @@ private struct ConversationColumn: View {
         .onAppear { typing = true; model.markChatRead() }
         .onChange(of: composerFocusRequest) { typing = true }
         .onChange(of: model.thread.last?.id) { if model.chatWindowVisible { model.markChatRead() } }
+    }
+
+    /// A chip per kind of work, opening its page: a blue dot when it holds a new task, an orange
+    /// one when something in it needs you; both can show.
+    private var chips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: OBYStyle.Space.sm) {
+                ForEach(kinds) { kind in
+                    Button { if let type = kind.type { onOpenGroup(type) } } label: {
+                        HStack(spacing: 6) {
+                            if kind.fresh { Circle().fill(.blue).frame(width: 6, height: 6).accessibilityLabel("New") }
+                            if kind.needs > 0 { Circle().fill(.orange).frame(width: 6, height: 6).accessibilityLabel("Needs you") }
+                            Text(kind.label).font(OBYStyle.small.weight(.medium))
+                        }
+                        .padding(.horizontal, OBYStyle.Space.md).padding(.vertical, OBYStyle.Space.sm)
+                        .background(OBYStyle.surface, in: Capsule())
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            .frame(maxWidth: OBYStyle.threadWidth, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Your tasks")
     }
 
     // MARK: The thread

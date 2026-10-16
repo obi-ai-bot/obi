@@ -3,8 +3,8 @@ import Testing
 @testable import Oby
 
 /// The window's sidebar and Live column (#11, apps/mac/app/App/Sidebar.swift, apps/mac/app/App/LivePanel.swift):
-/// Agents lists what runs and what needs you, Channels and Obys say honestly that they're not
-/// here yet, and the counts match the header's.
+/// Channels and Obys say honestly that they're not here yet, and the counts match the header's.
+/// The work's groups are WorkGroupsTests'.
 struct SidebarTests {
     let now = Date(timeIntervalSince1970: 1_791_582_173)
 
@@ -14,32 +14,6 @@ struct SidebarTests {
         job.status = status
         job.title = "Job \(id)"
         return job
-    }
-
-    @Test func agentsAreTheJobsRunningAndTheOnesThatNeedYou() {
-        let running = job("r1", status: .running, created: 300)
-        let queued = job("q1", status: .queued, created: 100)
-        let failed = job("f1", status: .failed, created: 200)
-        var dismissed = job("d1", status: .failed, created: 50)
-        dismissed.dismissed = now
-        let done = job("ok", status: .done, created: 10)
-        let away = job("a1", status: .running, created: 150, agent: "codex")
-        let rows = SidebarSections.agents(local: [running, queued, failed, dismissed, done], runner: [away])
-        // Newest first, this Mac's and the runner's together; dismissed and finished jobs stay out.
-        #expect(rows.map(\.job.id) == ["q1", "a1", "f1", "r1"])
-        #expect(rows.map(\.dot) == [.working, .working, .needsYou, .working])
-        #expect(rows.map(\.local) == [true, false, true, true])
-        #expect(rows.map(\.id) == ["mac/q1", "runner/a1", "mac/f1", "mac/r1"])
-        #expect(SidebarSections.activeLine(rows) == "4 active" && SidebarSections.activeLine([]) == "None")
-        #expect(SidebarSections.agents(local: [done], runner: []).isEmpty)
-    }
-
-    @Test func agentChatsOrderByLatestActivityWithStableTies() {
-        var old = job("old", status: .running, created: 600)
-        old.started = now
-        let recent = job("recent", status: .queued, created: 10)
-        #expect(SidebarSections.agents(local: [recent, old], runner: []).map(\.job.id) == ["old", "recent"])
-        #expect(SidebarSections.agents(local: [job("b", status: .running), job("a", status: .running)], runner: []).map(\.job.id) == ["a", "b"])
     }
 
     @MainActor @Test func openChatAlwaysReturnsToThePinnedObyThread() {
