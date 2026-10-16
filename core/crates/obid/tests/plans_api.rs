@@ -1437,3 +1437,277 @@ fn no_vault_secret_reaches_the_brain_and_an_unreadable_vault_runs_none() {
         "{turns}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The actions on jobs and the inbox (#546, step 4).
+
+/// A job from `POST /v1/jobs` with `task`, once its status is `status`.
+fn job_that(
+    obid: &Obid,
+    title: &str,
+    task: &str,
+    mode: Option<&str>,
+    status: &str,
+) -> serde_json::Value {
+    let mut job =
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": task, "title": title});
+    if let Some(mode) = mode {
+        job["mode"] = json!(mode);
+    }
+    let answer = call(obid, "POST", "/v1/jobs", Some(&json!({"job": job})));
+    assert!(
+        answer.status == 200 || answer.status == 201,
+        "{}",
+        answer.text
+    );
+    let id = answer.body["id"].as_str().unwrap().to_owned();
+    within(30, &format!("the job is {status}"), || {
+        let job = call(obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["status"] == status).then_some(job)
+    })
+}
+
+fn on_jobs(action: &str, ids: &[&str]) -> String {
+    json!({"action": action, "reply": "", "dispatches": [], "question": null, "jobs": ids})
+        .to_string()
+}
+
+fn get_job(obid: &Obid, id: &str) -> serde_json::Value {
+    call(obid, "GET", &format!("/v1/jobs/{id}"), None).body
+}
+
+/// JobActionTests.tryAgainRestartsAFailedJob, dismissLetsAJobGo, eachActionReportsItsSteps and
+/// oneMessageTriesTheFailedJobAgainAndDismissesTheOldOne: one message tries a failed job again
+/// and lets another go, each a step, and the brain hears what was done between them.
+#[test]
+fn one_message_tries_a_failed_job_again_and_dismisses_the_old_one() {
+    let folder = Folder::new("brain-try-again");
+    let obid = started(&folder);
+    let notch = job_that(&obid, "Notch three screens", "FAIL", None, "failed");
+    let old = job_that(&obid, "Old PR job", "FAIL", None, "failed");
+    let (notch, old) = (notch["id"].as_str().unwrap(), old["id"].as_str().unwrap());
+    let events = follow_events(&obid);
+    queue(
+        &obid,
+        &[
+            on_jobs("retry_job", &[notch]),
+            on_jobs("dismiss_job", &[old]),
+            reply(""),
+        ],
+    );
+    let answer = said(&obid, "try the notch job again and dismiss the old PR job");
+    let text = answer["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Started Notch three screens again on Claude Code · Stub.")
+            && text.ends_with("Let Old PR job go."),
+        "{text}"
+    );
+    let heard = events_named(&events, "step", 10, |got| got.len() == 4);
+    let texts: Vec<&str> = heard.iter().map(|e| e["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        texts,
+        [
+            "Trying Notch three screens again",
+            "Trying Notch three screens again",
+            "Letting Old PR job go",
+            "Letting Old PR job go"
+        ]
+    );
+    assert_eq!(
+        steps(&heard),
+        [
+            "1:retry_job:running",
+            "1:retry_job:done",
+            "2:dismiss_job:running",
+            "2:dismiss_job:done"
+        ]
+    );
+    assert!(get_job(&obid, old)["dismissed"].is_string());
+    let notes = get_job(&obid, notch)["notes"].to_string();
+    assert!(
+        notes.contains("Try again, picking up where you left off."),
+        "{notes}"
+    );
+    let calls = calls(&obid);
+    assert_eq!(calls.len(), 3);
+    assert!(read(calls[1].join("input")).contains("Started Notch three screens again"));
+}
+
+/// JobActionTests.aJobThatIsStillRunningCantBeTriedAgain, aJobThatNeedsNothingSaysWhyItStays and
+/// startNowStartsAJobWaitingForItsStartWhen's last half: what can't happen says why, and fails.
+#[test]
+fn what_a_job_can_t_do_says_why() {
+    let folder = Folder::new("brain-cant");
+    let obid = started(&folder);
+    let vault = running(&obid, "Vault secrets")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let done = job_that(&obid, "Finished work", "Nothing", None, "done")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    queue(&obid, &[on_jobs("retry_job", &[&vault])]);
+    assert_eq!(
+        said(&obid, "try the vault job again")["text"],
+        "Couldn't try Vault secrets again: it's still running."
+    );
+    queue(&obid, &[on_jobs("dismiss_job", &[&done])]);
+    assert_eq!(
+        said(&obid, "dismiss the finished one")["text"],
+        "Couldn't let Finished work go: This job doesn't need you: there's nothing to dismiss."
+    );
+    // obid starts every job at once: none waits for a Start when (#455).
+    queue(&obid, &[on_jobs("start_now", &[&vault])]);
+    assert_eq!(
+        said(&obid, "start the vault job anyway")["text"],
+        "Couldn't start Vault secrets: it isn't waiting for a Start when."
+    );
+    assert_eq!(calls(&obid).len(), 3);
+}
+
+/// JobActionTests.answeringAnInboxItemSettlesIt and anItemTakesTheUsersOwnWords: the brain names
+/// an inbox item by its id from the briefing, with an option by its number or the user's words.
+#[test]
+fn answering_an_inbox_item_settles_it() {
+    let folder = Folder::new("brain-inbox");
+    let obid = started(&folder);
+    let ask = r#"ASKS: [{"tool": "Bash", "input": {"command": "make lint"}}, {"tool": "Bash", "input": {"command": "make test"}}]"#;
+    let job = job_that(&obid, "Vault secrets", ask, Some("ask"), "running");
+    let id = job["id"].as_str().unwrap().to_owned();
+    let item = within(30, "a permission waits", || {
+        call(&obid, "GET", "/v1/inbox", None)
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["job"] == id.as_str() && i["text"] == "Run make lint")
+            .cloned()
+    });
+    let item_id = item["id"].as_str().unwrap().to_owned();
+    let answer = |option: serde_json::Value, words: serde_json::Value, item: &str| {
+        json!({"action": "answer_inbox", "reply": "", "dispatches": [], "question": null, "jobs": [],
+               "item": item, "option": option, "answer": words})
+        .to_string()
+    };
+    queue(&obid, &[answer(json!(1), json!(null), &item_id), reply("")]);
+    assert_eq!(
+        said(&obid, "allow the vault job's command")["text"],
+        "Answered Vault secrets's item: Allow."
+    );
+    assert!(read(calls(&obid)[0].join("input")).contains(&format!("Item id {item_id}.")));
+    let settled = call(&obid, "GET", "/v1/inbox?state=done", None).body;
+    assert!(
+        settled
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["id"] == item_id.as_str() && i["answer"] == "Allow")
+    );
+    // The next one, in the user's own words: "allow" is the item's own option, whatever its case.
+    let next = within(30, "the next permission waits", || {
+        call(&obid, "GET", "/v1/inbox", None)
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["job"] == id.as_str() && i["text"] == "Run make test")
+            .cloned()
+    });
+    let next_id = next["id"].as_str().unwrap().to_owned();
+    queue(
+        &obid,
+        &[answer(json!(null), json!("allow"), &next_id), reply("")],
+    );
+    assert_eq!(
+        said(&obid, "allow that too")["text"],
+        "Answered Vault secrets's item: Allow."
+    );
+    let ended = within(30, "the job ends", || {
+        let job = get_job(&obid, &id);
+        (job["status"] == "done").then_some(job)
+    });
+    assert_eq!(ended["summary"], "answers: allow, allow");
+}
+
+/// set_setting: of the settings, obid keeps how many jobs run at once.
+#[test]
+fn the_brain_changes_how_many_jobs_run_at_once() {
+    let folder = Folder::new("brain-setting");
+    let obid = started(&folder);
+    let setting = json!({"action": "set_setting", "reply": "", "dispatches": [], "question": null,
+                         "setting": {"agent": null, "model": null, "effort": null, "complex_effort": null,
+                                     "max_running": 3, "account": null, "lift": null}});
+    queue(&obid, &[setting.to_string(), reply("")]);
+    assert_eq!(
+        said(&obid, "only three jobs at once")["text"],
+        "Changed jobs at once from 6 to 3."
+    );
+    assert_eq!(
+        call(&obid, "GET", "/v1/settings/jobs", None).body["maxRunning"],
+        3
+    );
+    assert!(read(calls(&obid)[1].join("input")).contains("- Jobs at once: 3 (1 to 20)"));
+}
+
+/// NoDispatchCardTests.aPlanStartsItsJobsAndLinksThemToTheTurn: a plan's jobs start as it's made,
+/// with their issue's files, joined to Oby's turn, and Oby says what started.
+#[test]
+fn a_plan_starts_its_jobs_and_links_them_to_the_turn() {
+    let folder = Folder::new("brain-no-card");
+    let obid = started(&folder);
+    let two = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "base_branch": null, "pr": null, "issue": 176,
+         "epic": null, "kind": "fix", "title": "Login screen", "task": "Fix #176", "inputs": [], "rounds": 1, "check": null,
+         "complexity": "routine", "start_when": [], "mode": null, "reads": null},
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "base_branch": null, "pr": 33, "issue": null,
+         "epic": null, "kind": "review", "title": null, "task": "Review PR #33", "inputs": [], "rounds": 1, "check": null,
+         "complexity": "routine", "start_when": [], "mode": null, "reads": null}]});
+    queue(&obid, &[two.to_string()]);
+    let answer = said(&obid, "fix fixture-app #176 and review PR 33");
+    assert_eq!(
+        answer["text"],
+        "On it. Claude Code is fixing fixture-app #176 (Login screen) on Stub, and Claude Code is reviewing fixture-app PR #33 on Stub."
+    );
+    let jobs = answer["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(
+        jobs[0]["files"],
+        json!([
+            "Engine/Accounts.swift",
+            "Engine/Review.swift",
+            "RunnerTests/"
+        ])
+    );
+    let ids: Vec<&str> = jobs.iter().map(|j| j["id"].as_str().unwrap()).collect();
+    let turns = call(&obid, "GET", "/v1/conversation", None).body;
+    assert_eq!(
+        turns.as_array().unwrap().last().unwrap()["jobs"],
+        json!(ids)
+    );
+    assert_eq!(call(&obid, "GET", "/v1/inbox", None).body, json!([]));
+}
+
+/// NoDispatchCardTests.aCancelledOrLateTurnStartsNothing: a turn cancelled while its jobs' issues
+/// were read starts nothing.
+#[test]
+fn a_turn_cancelled_while_its_jobs_are_made_starts_nothing() {
+    let folder = Folder::new("brain-cancel-files");
+    let obid = started(&folder);
+    let slow = json!({"action": "dispatch", "reply": "On it.", "question": null, "jobs": [], "dispatches": [
+        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "issue": 777, "kind": "fix",
+         "title": "Slow issue", "task": "Fix #777", "rounds": 1}]});
+    queue(&obid, &[slow.to_string()]);
+    let answer = std::thread::scope(|scope| {
+        let asking = scope.spawn(|| said(&obid, "fix fixture-app #777"));
+        within(5, "the brain is asked", || {
+            (calls(&obid).len() == 1).then_some(())
+        });
+        // gh takes 2 seconds to read issue 777.
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        call(&obid, "POST", "/v1/plans/cancel", None);
+        asking.join().unwrap()
+    });
+    assert_eq!(answer["kind"], "none", "{answer}");
+    assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
+}

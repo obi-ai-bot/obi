@@ -177,7 +177,7 @@ async fn dispatch(
             Err(refused) => {
                 let mut text = refused.0;
                 if !started.is_empty() {
-                    text = format!("{} {text}", started_line(&started));
+                    text = format!("{} {text}", started_line(shared, &started));
                 }
                 return Talk::Reply { text, jobs };
             }
@@ -185,7 +185,7 @@ async fn dispatch(
     }
     let mut text = match (started.is_empty(), plan.reply.is_empty()) {
         (true, _) => String::new(),
-        (false, true) => started_line(&started),
+        (false, true) => started_line(shared, &started),
         (false, false) => plan.reply.clone(),
     };
     if !waiting.is_empty() {
@@ -235,16 +235,89 @@ pub fn describe(new: &NewJob) -> String {
     what
 }
 
-/// "Started 2 jobs: Vault secrets, Watch home."
-fn started_line(jobs: &[Job]) -> String {
-    let names: Vec<String> = jobs.iter().map(Job::short_title).collect();
+/// What started, in Oby's voice (`Desk.startedLine`): "On it. Claude Code is fixing oby #12
+/// (Login screen) on Deskree, and Claude Code is reviewing oby PR #33 on Deskree."
+fn started_line(shared: &Shared, jobs: &[Job]) -> String {
+    let parts: Vec<String> = jobs
+        .iter()
+        .map(|job| {
+            let doing = match job.kind.as_str() {
+                "review" => "reviewing",
+                "fix" => "fixing",
+                "build" => "building",
+                "test" => "testing",
+                "investigate" => "investigating",
+                "research" => "researching",
+                other => other,
+            };
+            format!(
+                "{} is {doing} {} on {}",
+                tool_name(&job.agent),
+                what(job),
+                account_name(shared, &job.account)
+            )
+        })
+        .collect();
+    format!("On it. {}.", list(&parts))
+}
+
+/// "oby #12 (Login screen)", "oby PR #33".
+fn what(job: &Job) -> String {
+    let mut what = job.repo_name().to_owned();
+    if let Some(pr) = job.pr {
+        what.push_str(&format!(" PR #{pr}"));
+    } else if let Some(issue) = job.issue {
+        what.push_str(&format!(" #{issue}"));
+    }
+    if let Some(title) = job.title.as_deref().filter(|t| !t.trim().is_empty()) {
+        what.push_str(&format!(" ({title})"));
+    }
+    what
+}
+
+/// "a", "a, and b", "a, b, and c".
+fn list(parts: &[String]) -> String {
+    match parts {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
+
+fn tool_name(agent: &str) -> &str {
+    crate::agent::Tool::from_id(agent).map_or(agent, |t| t.name())
+}
+
+/// An account's name, by its id.
+fn account_name(shared: &Shared, id: &str) -> String {
+    let agents = &shared.config.agents;
+    [&agents.claude, &agents.codex, &agents.cursor]
+        .into_iter()
+        .flatten()
+        .flat_map(|a| a.accounts.iter())
+        .find(|a| a.id == id)
+        .map_or_else(
+            || match id {
+                "default" => "Default".to_owned(),
+                "codex" => "Codex".to_owned(),
+                other => other.to_owned(),
+            },
+            |a| a.name.clone(),
+        )
+}
+
+/// "Claude Code · Personal": where a job runs.
+fn place(shared: &Shared, job: &Job) -> String {
     format!(
-        "Started {} job{}: {}.",
-        jobs.len(),
-        if jobs.len() == 1 { "" } else { "s" },
-        names.join(", ")
+        "{} · {}",
+        tool_name(&job.agent),
+        account_name(shared, &job.account)
     )
 }
+
+/// What a job hears when the user tries it again (`Inbox.tryAgainMessage`).
+pub const TRY_AGAIN: &str =
+    "Try again, picking up where you left off. Finish with a short summary as asked.";
 
 /// Carries out an action that changes something, and says what happened.
 pub async fn act(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
@@ -252,10 +325,178 @@ pub async fn act(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
         Action::StopAgent => stop(shared, plan),
         Action::SetMode => set_mode(shared, plan),
         Action::AnswerPermission => answer_permission(shared, plan),
+        Action::RetryJob | Action::DismissJob | Action::StartNow => on_jobs(shared, plan),
+        Action::AnswerInbox => answer_inbox(shared, plan).await,
+        Action::SetSetting => set_setting(shared, plan),
+        Action::MoveJob => {
+            let names: Vec<String> = plan
+                .named()
+                .iter()
+                .map(|id| shared.jobs.get(id).map_or(id.clone(), |j| j.short_title()))
+                .collect();
+            Outcome::Failed(format!(
+                "Couldn't move {}: obid can't move a job to another tool, account or model yet (#447).",
+                if names.len() == 1 {
+                    "it".to_owned()
+                } else {
+                    names.join(", ")
+                }
+            ))
+        }
+        Action::AskReviewAgain => Outcome::Failed(
+            "Couldn't ask for another review: obid follows no pull request yet.".into(),
+        ),
         other => Outcome::Failed(format!(
-            "Couldn't do that: obid can't {} yet.",
-            other.as_str().replace('_', " ")
+            "Couldn't do that: {} is only for Oby's event orchestrator.",
+            other.as_str()
         )),
+    }
+}
+
+/// retry_job, dismiss_job and start_now (Engine/JobActions.swift, `actOnJobs`), one line per
+/// job. It failed when nothing happened to any of them.
+fn on_jobs(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
+    let ids = plan.named();
+    if ids.is_empty() {
+        return Outcome::Failed("Say which job.".into());
+    }
+    let mut lines: Vec<String> = vec![];
+    let mut any = false;
+    for id in ids {
+        let Some(job) = shared.jobs.get(id) else {
+            lines.push(if ids.len() == 1 {
+                "That job isn't here any more.".into()
+            } else {
+                format!("Couldn't do that for {id}: it isn't here any more.")
+            });
+            continue;
+        };
+        let name = job.short_title();
+        let (line, done) = match plan.action {
+            Action::RetryJob => retry(shared, &job),
+            Action::DismissJob => match shared.jobs.dismiss(id) {
+                Some(Ok(_)) => (format!("Let {name} go."), true),
+                Some(Err(refused)) => (format!("Couldn't let {name} go: {}", refused.0), false),
+                None => ("That job isn't here any more.".into(), false),
+            },
+            // obid starts every job at once (#455): none waits for a Start when.
+            _ => (
+                format!("Couldn't start {name}: it isn't waiting for a Start when."),
+                false,
+            ),
+        };
+        any |= done;
+        lines.push(line);
+    }
+    let text = lines.join(" ");
+    if any {
+        Outcome::Done(text)
+    } else {
+        Outcome::Failed(text)
+    }
+}
+
+/// Runs a job that failed or was cut off again, where it left off (`Desk.retry`): obid has no
+/// failed-job inbox item, so it tells the job's agent to try again, which picks its session up.
+fn retry(shared: &Arc<Shared>, job: &Job) -> (String, bool) {
+    let name = job.short_title();
+    if job.status.is_active() {
+        return (
+            format!("Couldn't try {name} again: it's still running."),
+            false,
+        );
+    }
+    if !matches!(
+        job.status,
+        crate::job::Status::Failed | crate::job::Status::Interrupted
+    ) {
+        return (
+            format!("Couldn't try {name} again: it didn't fail, and no round is waiting for you."),
+            false,
+        );
+    }
+    match shared.jobs.message(&job.id, TRY_AGAIN) {
+        Some(Ok(job)) => (
+            format!("Started {name} again on {}.", place(shared, &job)),
+            true,
+        ),
+        Some(Err(refused)) => (format!("Couldn't try {name} again: {}", refused.0), false),
+        None => ("That job isn't here any more.".into(), false),
+    }
+}
+
+/// answer_inbox: an item of the inbox, with one of its options or the user's own words
+/// (`Desk.answerInbox`).
+async fn answer_inbox(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
+    let Some(id) = plan.item.as_deref() else {
+        return Outcome::Failed("Say which inbox item to answer.".into());
+    };
+    let Some(item) = shared.link.item(id) else {
+        return Outcome::Failed("That inbox item isn't here any more.".into());
+    };
+    if item.done.is_some() {
+        return Outcome::Failed(format!(
+            "Couldn't answer {}: it's done already.",
+            item.title
+        ));
+    }
+    let mut words = plan.answer.as_deref().unwrap_or("").trim().to_owned();
+    if let Some(option) = plan.option {
+        let Some(chosen) = usize::try_from(option - 1)
+            .ok()
+            .and_then(|i| item.options.get(i))
+        else {
+            return Outcome::Failed(format!(
+                "Couldn't answer {}: it has {} option{}, not {option}.",
+                item.title,
+                item.options.len(),
+                if item.options.len() == 1 { "" } else { "s" }
+            ));
+        };
+        words = chosen.clone();
+    } else if let Some(matched) = item
+        .options
+        .iter()
+        .find(|o| o.to_lowercase() == words.to_lowercase())
+    {
+        words = matched.clone();
+    }
+    // Every option of obid's items is Oby's own words, so it's said; the user's words aren't.
+    let said = if item.options.contains(&words) {
+        format!(": {words}")
+    } else {
+        ", with your words".to_owned()
+    };
+    let body = serde_json::json!({"answer": words}).to_string();
+    match shared.link.answer(id, body.as_bytes()).await {
+        Ok(_) => Outcome::Done(format!("Answered {}'s item{said}.", item.title)),
+        Err(e) => Outcome::Failed(format!(
+            "Couldn't answer {}'s item: {}",
+            item.title, e.message
+        )),
+    }
+}
+
+/// set_setting: of what Settings has, obid keeps only how many jobs run at once.
+fn set_setting(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
+    let Some(setting) = &plan.setting else {
+        return Outcome::Failed("Couldn't change settings: the setting was missing.".into());
+    };
+    let Some(max) = setting.max_running else {
+        return Outcome::Failed(
+            "Couldn't change that: obid has no model settings or weekly reserves yet.".into(),
+        );
+    };
+    let old = shared.jobs.max_running();
+    match u32::try_from(max).map(|max| shared.jobs.set_max_running(max)) {
+        Ok(Ok(new)) => Outcome::Done(format!("Changed jobs at once from {old} to {new}.")),
+        Ok(Err(crate::jobs::SettingsError::Refused(why))) => {
+            Outcome::Failed(format!("Couldn't change jobs at once: {why}"))
+        }
+        Ok(Err(crate::jobs::SettingsError::Unkept(e))) => Outcome::Failed(format!(
+            "Couldn't change jobs at once: it couldn't be kept ({e})."
+        )),
+        Err(_) => Outcome::Failed("Couldn't change jobs at once: maxRunning is 1 to 20.".into()),
     }
 }
 

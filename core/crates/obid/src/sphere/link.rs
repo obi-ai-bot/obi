@@ -2489,6 +2489,11 @@ impl Link {
         }
     }
 
+    /// The inbox item `id`, whatever its state.
+    pub fn item(&self, id: &str) -> Option<Item> {
+        self.lock().inbox.get(id).cloned()
+    }
+
     /// The items waiting for the owner now (not done, and not put off past `now`), in the order
     /// they came: what the brain is told about the inbox (#546).
     pub fn waiting_items(&self, now: i64) -> Vec<Item> {
