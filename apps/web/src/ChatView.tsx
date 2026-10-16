@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import ObyFaceLive from './ObyFaceLive';
 import StatusDot from './StatusDot';
@@ -8,7 +8,7 @@ import Composer, { typingIn } from './Composer';
 import Formatted from './Formatted';
 import { tokenize } from './textTokens';
 import { answerQuestion, ask, loadOlder, markSeen, openConversation, tellJob, useLive, type Live } from './live';
-import { NEW, startOf, toMessage, useChat, type Message } from './chats';
+import { NEW, isNew, startOf, toMessage, useChat, type Message } from './chats';
 import { AGENTS, metaOf, useTasks, type Task } from './tasks';
 
 // how long the way out takes (the sink animation in app.css)
@@ -66,13 +66,17 @@ export default function ChatView({ id, kind = 'task', leaving, covered = false, 
   const j = task?.job;
   const { list, onScroll, thumbProps } = useScrollThumb<HTMLElement>();
   const agent = j?.agent ? AGENTS[j.agent].name : 'Oby';
-  // the conversation this layer is for, until the page shows it (on top again after another
-  // conversation was opened over it): nothing of the other one meanwhile
-  const mine = kind === 'oby' && (id === NEW || live.shown === id);
-  const listed = live.conversations.some((c) => c.id === id);
+  // The conversation this layer is for: `id`, shown again when it's on top again after another
+  // was opened over it (nothing of that other one meanwhile). NEW until its words start one, which
+  // it then is; deleted (here or elsewhere), NEW again, so the next words start one shown here.
+  const [own, setOwn] = useState(id);
+  const listed = live.conversations.some((c) => c.id === own);
   useEffect(() => {
-    if (kind === 'oby' && !covered && !leaving && id !== NEW && listed) void openConversation(id);
-  }, [kind, id, covered, leaving, listed]);
+    if (kind !== 'oby' || covered || leaving) return;
+    if (isNew(own)) { if (live.shown) setOwn(live.shown); } else if (!listed) setOwn(NEW);
+    else void openConversation(own);
+  }, [kind, own, covered, leaving, listed, live.shown]);
+  const mine = kind === 'oby' && (isNew(own) || live.shown === own);
   // Oby's question back, when it asked it in this conversation
   const waiting = !task && mine && live.waiting && live.waiting.conversation === live.shown ? live.waiting : null;
   // a task's: what came before, the decision (if any) where things stand

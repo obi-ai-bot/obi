@@ -9,7 +9,10 @@ import { item, job, state, storage } from './fixtures';
 const NOW = Date.parse('2026-10-16T10:30:00Z');
 const fromOby = (owner: string) => ({ correlationId: 'c', from: `obi-${owner}`, fromOwner: owner, requestId: 'r' });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  setGroupBy('type');
+  vi.unstubAllGlobals();
+});
 
 describe('by type', () => {
   it('a review request, an issue fix and a typed task land in three groups, in the design’s order', () => {

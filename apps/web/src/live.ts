@@ -20,9 +20,13 @@ export type Live = {
   shown: string | null;        // which conversation that is: the latest when the page opened, the
                                // one picked in the side panel, or the one its words started; null
                                // for none yet (New, or none at all): its next words start one
+  picked: boolean;             // shown was picked (opened, New, or started by its words), not the
+                               // latest the page found: a reconnect keeps it
   older: boolean;              // turns before the first one shown
+  allJobs: boolean;            // the page has every job (it fetched fewer than a page of them)
   thinking: boolean;           // a plan from this page is under way
   asking: string | null;       // the conversation that plan is in; null: one it's starting
+  saying: string | null;       // the words of that plan, to know its first turn by
   steps: Step[];               // what the turn under way is doing
   // Oby's question back, in the conversation it asked in, until answered
   waiting: { said: string; question: Question; conversation: string | null } | null;
@@ -33,8 +37,8 @@ export type Live = {
 const PAGE = 100;
 let state: Live = {
   signedIn: !!token(), connection: 'connecting', problem: null, status: null, jobs: {}, firstJobs: new Set(), seen: new Set(),
-  inbox: [], conversations: [], turns: [], shown: null, older: false, thinking: false, asking: null, steps: [], waiting: null,
-  answering: {}, clearedAt: null,
+  inbox: [], conversations: [], turns: [], shown: null, picked: false, older: false, allJobs: true, thinking: false, asking: null,
+  saying: null, steps: [], waiting: null, answering: {}, clearedAt: null,
 };
 const listeners = new Set<() => void>();
 const set = (patch: Partial<Live>) => { state = { ...state, ...patch }; listeners.forEach((l) => l()); };
@@ -48,6 +52,8 @@ export const load = (next: Live) => set(next);
 setInterval(() => set({}), 30_000);
 
 const byAt = (a: Turn, b: Turn) => a.at.localeCompare(b.at);
+// turns fetched, with those an event brought meanwhile, once each
+const merged = (fetched: Turn[], had: Turn[]) => [...had.filter((t) => !fetched.some((f) => f.id === t.id)), ...fetched].sort(byAt);
 const isOpen = (i: InboxItem) => i.state !== 'done';
 
 // One event over a snapshot
@@ -64,13 +70,13 @@ export function apply(s: Live, e: Event): Live {
     case 'turn': {
       // obid keeps many conversations (#493) and this page shows one: a turn of another
       // (someone else started it, or it's in the side panel's list) stays out of it. With none
-      // shown, the first one to speak is it only while this page's words are starting one.
+      // shown, a conversation is taken in only by the turn of this page's own words starting it.
       const from = e.turn.conversation;
       if (from && s.shown && from !== s.shown) return s;
-      if (from && !s.shown && !(s.thinking && s.asking === null)) return s;
+      const starting = !!from && !s.shown;
+      if (starting && !(s.thinking && s.asking === null && e.turn.who === 'user' && e.turn.text.trim() === s.saying)) return s;
       const rest = s.turns.filter((t) => t.id !== e.turn.id);
-      const adopted = !s.shown && from ? from : s.shown;
-      return { ...s, shown: adopted, asking: s.thinking && !s.asking && adopted ? adopted : s.asking, turns: [...rest, e.turn].sort(byAt) };
+      return { ...s, shown: starting ? from! : s.shown, asking: starting ? from! : s.asking, turns: [...rest, e.turn].sort(byAt) };
     }
     case 'conversation':
       return { ...s, conversations: ordered([...s.conversations.filter((c) => c.id !== e.conversation.id), e.conversation]) };
@@ -101,15 +107,19 @@ export function withNew(s: Live, jobs: Job[]): Live {
 
 // What to show, fetched once the stream answered, with the events that came meanwhile applied
 // over it in the order they came.
-export type Snapshot = { status: Status; jobs: Job[]; inbox: InboxItem[]; turns: Turn[]; conversations: Conversation[] };
+// turnsOf: the conversation `turns` are of (left out: the latest, when the page picked none)
+export type Snapshot = { status: Status; jobs: Job[]; inbox: InboxItem[]; turns: Turn[]; conversations: Conversation[]; turnsOf?: string | null };
 export function synced(s: Live, snap: Snapshot, meanwhile: Event[]): Live {
   let next: Live = {
     ...s, connection: 'live', problem: null, status: snap.status, clearedAt: snap.status.clearedAt,
     firstJobs: s.status ? s.firstJobs : new Set(snap.jobs.map((j) => j.id)),
     jobs: { ...s.jobs, ...Object.fromEntries(snap.jobs.map((j) => [j.id, j])) },
-    inbox: snap.inbox.filter(isOpen), turns: [...snap.turns].sort(byAt), older: snap.turns.length >= PAGE,
-    conversations: ordered(snap.conversations),
-    shown: snap.turns[0]?.conversation ?? s.shown,
+    inbox: snap.inbox.filter(isOpen), conversations: ordered(snap.conversations), allJobs: snap.jobs.length < PAGE,
+    // the one it picked stays, and so do its turns when the snapshot is of another (it moved
+    // meanwhile); otherwise the latest
+    ...(s.picked
+      ? (snap.turnsOf === s.shown ? { turns: merged(snap.turns, s.turns), older: snap.turns.length >= PAGE } : {})
+      : { shown: snap.turns[0]?.conversation ?? s.shown, turns: [...snap.turns].sort(byAt), older: snap.turns.length >= PAGE }),
   };
   for (const e of meanwhile) next = apply(next, e);
   return next;
@@ -180,10 +190,11 @@ function reconnect(control: AbortController, e: unknown) {
 
 async function sync(control: AbortController, pending: Event[], onSynced: () => void) {
   try {
+    const turnsOf = state.picked ? state.shown : undefined;
     const [status, jobs, inbox, turns, conversations] = await Promise.all([api.status(), api.jobs(PAGE), api.inbox(), shownTurns(control), allConversations()]);
     if (!current(control)) return;
     retry = 0;
-    set(synced(state, { status, jobs, inbox, turns, conversations }, pending));
+    set(synced(state, { status, jobs, inbox, turns, conversations, turnsOf }, pending));
     pending.length = 0;
     onSynced();
     void fetchMissing(control);
@@ -203,8 +214,8 @@ export function signedOut() {
   reconnecting = null;
   retry = 0;
   set({ signedIn: false, connection: 'connecting', problem: null, status: null,
-    jobs: {}, firstJobs: new Set(), seen: new Set(), inbox: [], conversations: [], turns: [], shown: null, older: false,
-    thinking: false, asking: null, steps: [], waiting: null, answering: {}, clearedAt: null });
+    jobs: {}, firstJobs: new Set(), seen: new Set(), inbox: [], conversations: [], turns: [], shown: null, picked: false, older: false,
+    allJobs: true, thinking: false, asking: null, saying: null, steps: [], waiting: null, answering: {}, clearedAt: null });
 }
 // The token the page was given, once obid has taken it: kept for this tab, and the page follows obid
 export function signedIn(value: string) {
@@ -242,16 +253,19 @@ const failed = (e: unknown) => {
   else say(e instanceof Error ? e.message : String(e));
 };
 
-// The turns of the conversation the page shows, or, with none (or it's gone), of the latest
+// The turns of the conversation the page shows; with none picked, of the latest; with none on
+// purpose (New, or it was deleted), none
 async function shownTurns(control = following, session = authSession) {
   if (state.shown) {
-    try { return await api.conversation({ id: state.shown, limit: PAGE }); } catch (e) {
+    const id = state.shown;
+    try { return await api.conversation({ id, limit: PAGE }); } catch (e) {
       if (!(e instanceof ApiError && e.status === 404)) throw e;
       if (session !== authSession || following !== control || control?.signal.aborted) return [];
-      set({ shown: null });
+      if (state.shown === id) set({ shown: null, picked: true });
+      return [];
     }
   }
-  return api.conversation({ limit: PAGE });
+  return state.picked ? [] : api.conversation({ limit: PAGE });
 }
 
 // Every conversation, a page at a time (obid keeps 200, more only when pinned); one per id, as a
@@ -279,7 +293,7 @@ export async function ask(said: string, answer?: { question: string; option: str
   const session = authSession;
   if (opts.new && state.shown) newConversation();
   const target = opts.new ? null : opts.conversation !== undefined ? opts.conversation : state.shown;
-  set({ thinking: true, asking: target, steps: [], waiting: null });
+  set({ thinking: true, asking: target, saying: words, picked: true, steps: [], waiting: null });
   try {
     const a = await api.plan(words, answer, target ? { conversation: target } : { new: true });
     if (session !== authSession) return;
@@ -291,11 +305,11 @@ export async function ask(said: string, answer?: { question: string; option: str
       set({ shown: a.conversation });
       const turns = await shownTurns();
       if (session !== authSession || state.shown !== a.conversation) return;
-      set({ turns: turns.sort(byAt) });
+      set({ turns: merged(turns, state.turns) });
     } else if (here && state.connection !== 'live') {
       const turns = await shownTurns();
       if (session !== authSession || state.shown !== target) return;
-      set({ turns: turns.sort(byAt) });
+      set({ turns: merged(turns, state.turns) });
     }
   } catch (e) {
     if (session !== authSession) return;
@@ -303,7 +317,7 @@ export async function ask(said: string, answer?: { question: string; option: str
     if (e instanceof ApiError && e.status === 404 && target && state.shown === target) set({ shown: null, turns: [], older: false });
     failed(e);
   } finally {
-    if (session === authSession) set({ thinking: false, asking: null, steps: [] });
+    if (session === authSession) set({ thinking: false, asking: null, saying: null, steps: [] });
   }
 }
 // Oby's question answered: with one of its options, or in your own words, in the conversation
@@ -316,26 +330,31 @@ export function answerQuestion(option: string) {
 
 // --- The conversations (#493): opened from the side panel, started anew, renamed, pinned, deleted
 
-// One conversation's turns, shown instead of the one before
+// One conversation's turns, shown instead of the one before. Already shown with its turns (every
+// conversation has one), or on its way: nothing to do; one that failed to load loads again.
+let opening: string | null = null;
 export async function openConversation(id: string) {
-  if (state.shown === id) return;
+  if ((state.shown === id && state.turns.length) || opening === id) return;
   const session = authSession;
-  set({ shown: id, turns: [], older: false });
+  opening = id;
+  set({ shown: id, picked: true, turns: state.shown === id ? state.turns : [], older: false });
   try {
     const turns = await api.conversation({ id, limit: PAGE });
     if (session !== authSession || state.shown !== id) return;
-    set({ turns: [...turns].sort(byAt), older: turns.length >= PAGE });
+    set({ turns: merged(turns, state.turns), older: turns.length >= PAGE });
     void fetchMissing();
   } catch (e) {
     if (session !== authSession) return;
     // gone meanwhile: off the list, nothing shown
     if (e instanceof ApiError && e.status === 404) set(apply(state, { kind: 'conversationGone', id }));
     failed(e);
+  } finally {
+    if (opening === id) opening = null;
   }
 }
 // New: none shown, so the next words start one
 export function newConversation() {
-  set({ shown: null, turns: [], older: false });
+  set({ shown: null, picked: true, turns: [], older: false });
 }
 
 const edited = (id: string, change: Partial<Conversation>) =>
@@ -344,7 +363,10 @@ const edited = (id: string, change: Partial<Conversation>) =>
 // back if obid refuses it
 export async function renameConversation(id: string, title: string) {
   const was = state.conversations.find((c) => c.id === id);
-  const t = title.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').trim().slice(0, 100).trim();
+  // obid's rules: one line, no control character, at most 100 characters (code points, so never
+  // half an emoji)
+  const line = title.replace(/[\p{Cc}\u2028\u2029]+/gu, ' ').replace(/ {2,}/g, ' ').trim();
+  const t = Array.from(line).slice(0, 100).join('').trim();
   if (!was || !t || t === was.title) return;
   await change(id, { title: t }, { title: was.title });
 }
@@ -354,16 +376,21 @@ export async function pinConversation(id: string, pinned: boolean) {
   if (!was || was.pinned === pinned) return;
   await change(id, { pinned }, { pinned: was.pinned });
 }
+// Only what it changed is taken from obid's answer, and put back on a refusal only while nothing
+// changed it since: a rename and a pin in quick succession don't undo each other (the
+// `conversation` events bring the rest)
 async function change(id: string, to: { title?: string; pinned?: boolean }, back: Partial<Conversation>) {
   const session = authSession;
   edited(id, to);
+  const keys = Object.keys(to) as ('title' | 'pinned')[];
+  const still = () => { const c = state.conversations.find((x) => x.id === id); return !!c && keys.every((k) => c[k] === to[k]); };
   try {
     const c = await api.editConversation(id, to);
-    if (session === authSession && state.conversations.some((x) => x.id === id)) set(apply(state, { kind: 'conversation', conversation: c }));
+    if (session === authSession && still()) edited(id, Object.fromEntries(keys.map((k) => [k, c[k]])));
   } catch (e) {
     if (session !== authSession) return;
     if (e instanceof ApiError && e.status === 404) set(apply(state, { kind: 'conversationGone', id }));
-    else edited(id, back);
+    else if (still()) edited(id, back);
     failed(e);
   }
 }
@@ -386,11 +413,12 @@ export async function deleteConversation(id: string) {
 // The turns before the first one shown
 export async function loadOlder() {
   const session = authSession;
-  const first = state.turns[0];
+  const first = state.turns[0], of = state.shown;
   if (!first) return;
   try {
     const turns = await api.conversation({ before: first.id, limit: PAGE });
-    if (session !== authSession) return;
+    // signed out, or another conversation shown meanwhile: not for this one
+    if (session !== authSession || state.shown !== of) return;
     set({ turns: [...turns, ...state.turns].sort(byAt), older: turns.length >= PAGE });
     void fetchMissing();
   } catch (e) { if (session === authSession) failed(e); }

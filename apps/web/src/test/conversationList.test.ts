@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseEvent, type Conversation } from '../api';
-import { aboutOf, listOf, ordered, startedIn } from '../chats';
-import { apply, ask, deleteConversation, live, load, newConversation, openConversation, pinConversation, renameConversation, signedOut, synced } from '../live';
+import { aboutOf, isNew, listOf, newStep, ordered, startedIn } from '../chats';
+import { apply, ask, connect, deleteConversation, live, load, loadOlder, newConversation, openConversation, pinConversation, renameConversation, signedOut, synced } from '../live';
 import { job, state, storage, turn } from './fixtures';
 
 // The side panel's Conversations (#493): obid's conversations, newest first, Pinned above Recent;
@@ -158,7 +158,7 @@ describe('acting on one', () => {
   });
 
   it('a new one’s first turn is taken in while Oby thinks; another device’s new one is not', () => {
-    let s = state({ shown: null, thinking: true, asking: null });
+    let s = state({ shown: null, thinking: true, asking: null, saying: 'Fix it' });
     s = apply(s, { kind: 'turn', turn: turn({ id: 'c1', conversation: C }) });
     expect(s.shown).toBe(C);
     expect(s.asking).toBe(C);
@@ -182,5 +182,151 @@ describe('acting on one', () => {
     await asking;
     expect(live().shown).toBe(B);
     expect(live().turns.map((t) => t.id)).toEqual(['b1']);
+  });
+
+  it('another device’s turn that comes first while this page starts one is not taken for it', () => {
+    let s = state({ shown: null, thinking: true, asking: null, saying: 'how are the jobs?' });
+    s = apply(s, { kind: 'turn', turn: turn({ id: 'b1', conversation: B, text: 'from the notch' }) });
+    expect(s.shown).toBeNull();
+    s = apply(s, { kind: 'turn', turn: turn({ id: 'c1', conversation: C, text: 'how are the jobs?' }) });
+    expect(s.shown).toBe(C);
+    expect(s.turns.map((t) => t.id)).toEqual(['c1']);
+  });
+
+  it('a turn of the conversation it moved to doesn’t make the one being started look like it', () => {
+    const s = apply(state({ shown: B, thinking: true, asking: null }), { kind: 'turn', turn: turn({ id: 'b1', conversation: B }) });
+    expect(s.asking).toBeNull();
+  });
+
+  it('deleted while open, its next words start a new conversation, shown there', async () => {
+    vi.stubGlobal('sessionStorage', storage({ 'oby.token': 't' }));
+    load(state({ conversations: [convo()], shown: A, picked: true, turns: [turn({ conversation: A })] }));
+    load(apply(live(), { kind: 'conversationGone', id: A }));
+    const fetch = vi.fn(async (path: string) => (path === '/v1/plans'
+      ? json({ kind: 'reply', text: 'Fine.', jobs: [], drafts: [], conversation: C })
+      : json([turn({ id: 'c1', conversation: C, text: 'and now?' })])));
+    vi.stubGlobal('fetch', fetch);
+    await ask('and now?');
+    expect(body(fetch.mock.calls[0])).toEqual({ said: 'and now?', new: true });
+    expect(live().shown).toBe(C);
+    expect(live().turns.map((t) => t.id)).toEqual(['c1']);
+  });
+
+  it('a delete obid refuses puts it back', async () => {
+    vi.stubGlobal('sessionStorage', storage({ 'oby.token': 't' }));
+    load(state({ conversations: [convo(), convo({ id: B, lastActivity: '2026-10-16T08:00:00Z' })] }));
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'Couldn’t write it.' }, 500)));
+    await deleteConversation(A);
+    expect(live().conversations.map((c) => c.id)).toEqual([A, B]);
+    expect(live().problem).toBe('Couldn’t write it.');
+  });
+
+  it('one gone when opened comes off the list', async () => {
+    vi.stubGlobal('sessionStorage', storage({ 'oby.token': 't' }));
+    load(state({ conversations: [convo(), convo({ id: B })], shown: A }));
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'No such conversation.' }, 404)));
+    await openConversation(B);
+    expect(live().conversations.map((c) => c.id)).toEqual([A]);
+    expect(live().shown).toBeNull();
+  });
+
+  it('one that failed to open opens again when picked again', async () => {
+    vi.stubGlobal('sessionStorage', storage({ 'oby.token': 't' }));
+    load(state({ conversations: [convo(), convo({ id: B })], shown: A }));
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'Oby answered 500.' }, 500)));
+    await openConversation(B);
+    vi.stubGlobal('fetch', vi.fn(async () => json([turn({ id: 'b1', conversation: B })])));
+    await openConversation(B);
+    expect(live().turns.map((t) => t.id)).toEqual(['b1']);
+  });
+
+  it('a turn that comes while it opens isn’t lost', async () => {
+    vi.stubGlobal('sessionStorage', storage({ 'oby.token': 't' }));
+    load(state({ conversations: [convo(), convo({ id: B })], shown: A }));
+    let reply!: () => void;
+    const replied = new Promise<void>((r) => { reply = r; });
+    vi.stubGlobal('fetch', vi.fn(async () => { await replied; return json([turn({ id: 'b1', conversation: B })]); }));
+    const opening = openConversation(B);
+    load(apply(live(), { kind: 'turn', turn: turn({ id: 'b2', conversation: B, at: '2026-10-16T10:05:00Z' }) }));
+    reply();
+    await opening;
+    expect(live().turns.map((t) => t.id)).toEqual(['b1', 'b2']);
+  });
+
+  it('earlier messages of one it left don’t come into the one it moved to', async () => {
+    vi.stubGlobal('sessionStorage', storage({ 'oby.token': 't' }));
+    load(state({ conversations: [convo(), convo({ id: B })], shown: A, turns: [turn({ id: 'a2', conversation: A })], older: true }));
+    let reply!: () => void;
+    const replied = new Promise<void>((r) => { reply = r; });
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path.includes('before=')) { await replied; return json([turn({ id: 'a1', conversation: A, at: '2026-10-16T09:00:00Z' })]); }
+      return json([turn({ id: 'b1', conversation: B })]);
+    }));
+    const older = loadOlder();
+    await openConversation(B);
+    reply();
+    await older;
+    expect(live().turns.map((t) => t.id)).toEqual(['b1']);
+  });
+
+  it('on New, a reconnect doesn’t put the latest conversation in its place', () => {
+    const s = synced(state({ shown: null, picked: true }), { status: state().status!, jobs: [], inbox: [], turns: [turn({ id: 'a1', conversation: A })], conversations: [convo()] }, []);
+    expect(s.shown).toBeNull();
+    expect(s.turns).toEqual([]);
+  });
+
+  it('a snapshot of the conversation it left doesn’t replace the one it opened meanwhile', () => {
+    const s = synced(state({ shown: B, picked: true, turns: [turn({ id: 'b1', conversation: B })] }), { status: state().status!, jobs: [], inbox: [], turns: [turn({ id: 'a1', conversation: A })], conversations: [convo()] }, []);
+    expect(s.shown).toBe(B);
+    expect(s.turns.map((t) => t.id)).toEqual(['b1']);
+  });
+
+  it('pages through every conversation by cursor, one per id', async () => {
+    vi.stubGlobal('sessionStorage', storage({ 'oby.token': 't' }));
+    load(state({ status: null, connection: 'connecting' }));
+    const first = Array.from({ length: 200 }, (_, i) => convo({ id: `c${i}`, cursor: `0-${1000 - i}`, lastActivity: `2026-10-16T09:${String(i % 60).padStart(2, '0')}:00Z` }));
+    const fetch = vi.fn(async (path: string) => {
+      if (path === '/v1/events') return new Response(new ReadableStream(), { status: 200 });
+      if (path === '/v1/status') return json(state().status);
+      if (path === '/v1/conversations?limit=200') return json(first);
+      if (path === '/v1/conversations?after=0-801&limit=200') return json([convo({ id: 'c199', cursor: '0-801' }), convo({ id: 'last', cursor: '0-1' })]);
+      return json([]);
+    });
+    vi.stubGlobal('fetch', fetch);
+    connect();
+    for (let i = 0; i < 100 && live().connection !== 'live'; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(live().conversations).toHaveLength(201);
+    expect(fetch.mock.calls.map((c) => c[0])).toContain('/v1/conversations?after=0-801&limit=200');
+  });
+});
+
+describe('New', () => {
+  it('is a page of its own each time, never the one a first New started (which is a conversation by now)', () => {
+    const a = newStep(), b = newStep();
+    expect(a).not.toBe(b);
+    expect(isNew(a) && isNew(b)).toBe(true);
+    expect(isNew(A)).toBe(false);
+  });
+});
+
+describe('a conversation’s line in the list', () => {
+  it('counts its tasks only when the page has every job since it started', () => {
+    // the oldest job the page has started at 08:00
+    const jobs = { j0: job({ id: 'j0', created: '2026-10-16T08:00:00Z' }), j1: job({ conversation: A, created: '2026-10-16T10:00:00Z' }) };
+    expect(aboutOf(state({ jobs, allJobs: false }), convo({ created: '2026-10-16T09:00:00Z' }))).toBe('Started 1 task');
+    expect(aboutOf(state({ jobs, allJobs: false }), convo({ created: '2026-10-15T09:00:00Z' }))).toBeUndefined();
+    expect(aboutOf(state({ jobs, allJobs: true }), convo({ created: '2026-10-15T09:00:00Z' }))).toBe('Started 1 task');
+  });
+
+  it('a rename keeps to obid’s rules: one line, control characters out, 100 characters, never half an emoji', async () => {
+    vi.stubGlobal('sessionStorage', storage({ 'oby.token': 't' }));
+    load(state({ conversations: [convo()] }));
+    const fetch = vi.fn(async (_path: string) => json(convo()));
+    vi.stubGlobal('fetch', fetch);
+    await renameConversation(A, 'Vault\u0085 keys\nand more');
+    expect(body(fetch.mock.calls[0]).title).toBe('Vault keys and more');
+    await renameConversation(A, `${'a'.repeat(99)}😀😀`);
+    expect(Array.from(body(fetch.mock.calls[1]).title as string)).toHaveLength(100);
+    expect(body(fetch.mock.calls[1]).title).toBe(`${'a'.repeat(99)}😀`);
   });
 });

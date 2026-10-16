@@ -10,7 +10,7 @@ import Composer from './Composer';
 import ArchiveView from './ArchiveView';
 import SettingsView, { settingsLabel } from './SettingsView';
 import KnowledgeView, { knowledgeLabel } from './KnowledgeView';
-import { NEW, startOf, startedIn, titleOf } from './chats';
+import { isNew, newStep, startOf, startedIn, titleOf } from './chats';
 import { ask, newConversation, openConversation, tellJob, useLive } from './live';
 import { chipOf, countOf, firstTab, typeById, typesOn, useTasks, type Tab } from './tasks';
 
@@ -39,7 +39,7 @@ function rubberBand(w: number) {
 
 // Where you are, as the steps that got you there (the title bar's trail): a
 // kind of work's cards, a task's page, a task's own thread, a conversation
-// with Oby (by its id, or NEW for one its first words will start), the archive,
+// with Oby (by its id, or a new one's step, newStep, for one its first words will start), the archive,
 // Settings, an Obysphere's knowledge. Each
 // opens over the one before; the trail follows the way you came, not a fixed
 // hierarchy (a task from the side panel is just the task; from a chip, the kind
@@ -121,11 +121,11 @@ export default function Home() {
   // open straight away
   const askOby = (text: string) => {
     void ask(text, undefined, { new: true });
-    start({ kind: 'talk', id: NEW });
+    start({ kind: 'talk', id: newStep() });
   };
   // a conversation from the side panel; New conversation: an empty one, which its words start
   const openTalk = (id: string) => { void openConversation(id); start({ kind: 'talk', id }); };
-  const startTalk = () => { newConversation(); start({ kind: 'talk', id: NEW }); };
+  const startTalk = () => { newConversation(); start({ kind: 'talk', id: newStep() }); };
   // said in a task page's message box: to its agent (POST /v1/jobs/{id}/messages), and its own
   // thread opens over the page, where what you said shows
   const tellFromTask = (id: string, text: string) => {
@@ -190,7 +190,8 @@ export default function Home() {
     if (l.kind === 'group') return typeById(l.id).label;
     if (l.kind === 'task') return tasks.find((k) => k.id === l.id)?.title ?? '';
     if (l.kind === 'thread') { const t = tasks.find((k) => k.id === l.id); return t ? `About ${t.title}` : ''; }
-    if (l.kind === 'talk') return titleOf(store, l.id === NEW ? store.shown : l.id);
+    // a new one, or one deleted under it: the one its words started, if they did
+    if (l.kind === 'talk') return titleOf(store, isNew(l.id) || !store.conversations.some((c) => c.id === l.id) ? store.shown : l.id);
     if (l.kind === 'archive') return 'Archived';
     if (l.kind === 'settings') return settingsLabel(l.id);
     return knowledgeLabel;

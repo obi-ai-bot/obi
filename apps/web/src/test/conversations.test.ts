@@ -30,7 +30,7 @@ describe('the conversation the page shows', () => {
 
   it('with none shown, the conversation its own words start is the one it shows; another device’s stays in the list', () => {
     expect(apply(state({ shown: null }), { kind: 'turn', turn: turn({ id: 'b0', conversation: B }) }).turns).toEqual([]);
-    let s = apply(state({ shown: null, thinking: true, asking: null }), { kind: 'turn', turn: turn({ id: 'a1', conversation: A }) });
+    let s = apply(state({ shown: null, thinking: true, asking: null, saying: 'Fix it' }), { kind: 'turn', turn: turn({ id: 'a1', conversation: A }) });
     expect(s.shown).toBe(A);
     s = apply(s, { kind: 'turn', turn: turn({ id: 'b1', conversation: B }) });
     expect(s.turns.map((t) => t.id)).toEqual(['a1']);

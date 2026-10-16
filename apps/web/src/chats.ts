@@ -15,8 +15,12 @@ import { useLive, type Live } from './live';
 // shown as cards under it. details: Oby's longer answer under its short one.
 export type Message = { id: string; who: string; text: string; ago?: number; jobs?: string[]; details?: string };
 export type Chat = { id: string | null; title: string; said: Message[]; typing: boolean; step?: string };
-// the conversation step of a page that's starting one: none shown until its first words land
+// the conversation step of a page that's starting one: none shown until its first words land.
+// Each New is a step of its own (newStep), so a second New never reuses the first one's page.
 export const NEW = 'new';
+let news = 0;
+export const newStep = () => `${NEW}:${++news}`;
+export const isNew = (id: string) => id === NEW || id.startsWith(`${NEW}:`);
 export const NEW_TITLE = 'New conversation';
 
 // The list's order: pinned first, then by their latest turn, newest first (obid's own order, which
@@ -32,9 +36,14 @@ export function listOf(s: Live, query: string): { pinned: Conversation[]; recent
   return { pinned: found.filter((c) => c.pinned), recent: found.filter((c) => !c.pinned) };
 }
 
-// A row's line under its title: the tasks it started (the jobs that name it), if any
+// A row's line under its title: the tasks it started (the jobs that name it), if any. Only when
+// the page has every job since it started (it fetches the latest page of jobs), so it never says
+// fewer than there are.
 export function aboutOf(s: Live, c: Conversation): string | undefined {
-  const n = Object.values(s.jobs).filter((j) => j.conversation === c.id).length;
+  const jobs = Object.values(s.jobs);
+  const oldest = jobs.reduce<string | null>((o, j) => (o === null || j.created < o ? j.created : o), null);
+  if (!s.allJobs && (oldest === null || c.created < oldest)) return undefined;
+  const n = jobs.filter((j) => j.conversation === c.id).length;
   return n ? `Started ${n} task${n === 1 ? '' : 's'}` : undefined;
 }
 
