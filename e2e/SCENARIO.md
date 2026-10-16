@@ -21,7 +21,7 @@ make e2e-live     # the real Claude Code adapter: a person runs it on a Mac (see
 | `OBI_E2E_RUN_DIR` | a new folder under the system's temp folder | Where the run keeps everything it makes. |
 | `OBI_E2E_KEEP` | unset | `1` keeps the run folder afterwards, for reading the logs. |
 
-Needs: Node 22 or later, pnpm, git, and a Rust toolchain (`cargo`) once `core/` exists. Nothing else at run time: no network beyond 127.0.0.1, no GitHub, no model (building obid and installing obi-sphere's packages may fetch dependencies first).
+Needs: Node 22.18 or later (obi-sphere’s minimum, which also meets the pinned pnpm’s requirement), pnpm, git, and a Rust toolchain (`cargo`) once `core/` exists. Nothing else at run time: no network beyond 127.0.0.1, no GitHub, no model (building obid and installing obi-sphere's packages may fetch dependencies first).
 
 The harness is [`e2e/run.mjs`](run.mjs). It runs five **preflight** checks (Node, git, the fixture repository, the stub agent, and that this document, `e2e/fixtures/messages/` and the harness's values in `e2e/lib/` agree and the messages validate against the spec; these pass today), then the eight **steps** below in order, prints one line per check, and exits 0 only when all of them pass. A step whose body isn't written yet prints `step N (<title>): not implemented`. Every step builds on the ones before it, so a written step after one that failed or isn't written yet prints `not run`, naming that step. Every process the harness starts runs in its own process group, and when the run ends, whatever ended it (a pass, a failure, an exception, SIGINT or SIGTERM), the harness sends each group still running SIGTERM, then SIGKILL 10 seconds later.
 
