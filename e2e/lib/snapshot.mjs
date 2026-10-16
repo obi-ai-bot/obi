@@ -2,7 +2,7 @@
 // every file under a folder, by path, size and SHA-256. Taken before step 1 and after step 8.
 
 import { createHash } from "node:crypto";
-import { lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readdirSync, readlinkSync, readSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 // The folders step 8.4.1 leaves out of each snapshot, as SCENARIO.md's table lists them. Each is a
@@ -34,22 +34,53 @@ export function excluded(rel, patterns) {
   return false;
 }
 
+// Snapshot I/O is the harness's responsibility, even when a scenario step takes the snapshot.
+export class SnapshotError extends Error {
+  constructor(path, cause) {
+    super(`snapshot ${path}: ${cause.message}`, { cause });
+    this.name = "SnapshotError";
+  }
+}
+
+// Feed SHA-256 bounded chunks: readFileSync cannot read files larger than 2 GiB.
+function hashFile(path, buffer) {
+  const fd = openSync(path, "r");
+  try {
+    const hash = createHash("sha256");
+    let size;
+    while ((size = readSync(fd, buffer, 0, buffer.length, null)) !== 0) {
+      hash.update(buffer.subarray(0, size));
+    }
+    return hash.digest("hex");
+  } finally {
+    closeSync(fd);
+  }
+}
+
 // Every file under `root` but the folders `skip` excludes (patterns as above), with its size and
 // SHA-256 (a symbolic link: its target).
 export function snapshot(root, skip = []) {
   const files = new Map();
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  let currentPath = root;
   const walk = (dir) => {
+    currentPath = dir;
     for (const name of readdirSync(dir)) {
       const path = join(dir, name);
+      currentPath = path;
       const rel = relative(root, path).split(sep).join("/");
       const stat = lstatSync(path);
       if (stat.isDirectory()) {
         if (!excluded(rel, skip)) walk(path);
       } else if (stat.isSymbolicLink()) files.set(rel, `link ${readlinkSync(path)}`);
-      else files.set(rel, `${stat.size} ${createHash("sha256").update(readFileSync(path)).digest("hex")}`);
+      else files.set(rel, `${stat.size} ${hashFile(path, buffer)}`);
     }
   };
-  walk(root);
+  try {
+    walk(root);
+  } catch (cause) {
+    throw new SnapshotError(currentPath, cause);
+  }
   return files;
 }
 

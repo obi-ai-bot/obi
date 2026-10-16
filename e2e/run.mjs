@@ -28,6 +28,7 @@ import { FIXTURE, buildFixture, git } from "./lib/fixture.mjs";
 import {
   AGENT_FLAGS, BRIEF, CANARY, EXPECTED_FINDINGS, EXPECTED_RESULT, OBIS, STUB_PROMPT,
 } from "./lib/scenario.mjs";
+import { SnapshotError } from "./lib/snapshot.mjs";
 import { scenarioDocProblems } from "./lib/scenario-doc.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -344,7 +345,7 @@ async function run() {
     } catch (e) {
       failures++;
       blockedBy = `step ${step.n} failed`;
-      console.log(`  FAIL  ${label}: ${e.message} [${step.by}]`);
+      console.log(`  FAIL  ${label}: ${e.message} [${e instanceof SnapshotError ? "harness snapshot" : step.by}]`);
     }
   }
 
