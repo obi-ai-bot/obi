@@ -15,6 +15,12 @@ nonisolated struct Approval: Encodable, Equatable, Sendable {
     static func message(job: String, action: String, signedAt: String) -> Data {
         Data("oby-publish\n\(job)\n\(action)\n\(signedAt)".utf8)
     }
+
+    /// What a device signs to change the runner's connections (docs/runner-api.md, "Connection"):
+    /// another prefix than a publish's, so neither signature passes for the other.
+    static func connectionMessage(action: String, signedAt: String) -> Data {
+        Data("oby-connection\n\(action)\n\(signedAt)".utf8)
+    }
 }
 
 /// The device's publishing key: the iPhone's behind Face ID, the Mac's behind Touch ID. It lives in
@@ -41,6 +47,13 @@ nonisolated enum DeviceKey {
     static func approve(job: String, action: String, device: String, context: LAContext) throws -> Approval {
         let signedAt = ISO8601DateFormatter().string(from: .now)
         let signature = try sign(Approval.message(job: job, action: action, signedAt: signedAt), context: context)
+        return Approval(device: device, action: action, signedAt: signedAt, signature: signature)
+    }
+
+    /// Signs one change to the runner's connections with `context`, as `approve` signs a publish.
+    static func approveConnection(action: String, device: String, context: LAContext) throws -> Approval {
+        let signedAt = ISO8601DateFormatter().string(from: .now)
+        let signature = try sign(Approval.connectionMessage(action: action, signedAt: signedAt), context: context)
         return Approval(device: device, action: action, signedAt: signedAt, signature: signature)
     }
 
