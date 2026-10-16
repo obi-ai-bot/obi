@@ -3367,7 +3367,7 @@ impl Jobs {
 /// nothing to publish.
 fn publish_action_of(job: &Job) -> Result<(String, String), String> {
     match (&job.base, job.can_publish()) {
-        (Some(base), true) => Ok((crate::publish::action(&job, base), base.clone())),
+        (Some(base), true) => Ok((crate::publish::action(job, base), base.clone())),
         _ => Err(if job.dismissed.is_some() {
             "It was dismissed: there's nothing to publish.".into()
         } else if job.status != Status::Done {
