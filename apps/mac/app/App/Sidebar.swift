@@ -1,18 +1,6 @@
 import AppKit
 import SwiftUI
 
-/// What the window shows in its middle column (apps/mac/app/App/ChatWindow.swift).
-nonisolated enum ChatSelection: Hashable, Sendable {
-    /// The conversation with Oby.
-    case oby
-    /// One job's screen: its id, and whether it's this Mac's own (else the runner's).
-    case job(id: String, local: Bool)
-    case channels
-    case obys
-    /// A kind of work's page (#496): its Running and Completed tabs.
-    case group(WorkType)
-}
-
 /// The sidebar's sections, as the window lists them: what each row says, with no view in the
 /// way, so the tests read them (apps/mac/tests/SidebarTests.swift).
 nonisolated enum SidebarSections {
@@ -24,16 +12,12 @@ nonisolated enum SidebarSections {
         static func id(_ job: String, local: Bool) -> String { (local ? "mac/" : "runner/") + job }
     }
 
-    /// What Channels says until F11 brings them, and Obys until F12: honest empty states, no fake data.
-    static let channelsEmpty = "Team channels come with F11."
-    static let obysEmpty = "Other people's Obys come with F12."
-
-    /// What Oby's pinned row says under its name: the last message, or a hello.
+    /// What the conversation's icon says under the pointer: the last message, or a hello.
     static func obyPreview(_ last: String?) -> String {
         last ?? "Say hello to Oby"
     }
 
-    /// What VoiceOver reads for Oby's pinned row: what it shows, and an unread reply.
+    /// What VoiceOver reads for the conversation's icon: what it says, and an unread reply.
     static func obyLabel(last: String?, unread: Bool) -> String {
         "Oby, \(obyPreview(last))" + (unread ? ", unread reply" : "")
     }
@@ -75,212 +59,421 @@ extension IslandModel {
     }
 }
 
-/// A messenger chat list: pinned Oby with a preview and unread dot, the work grouped by kind or by
-/// status (#496, Home's ⋮ picks), and account/settings links below.
+
+/// The side panel (Sangam's Sidebar.tsx): the icon strip on the far left (Home, the conversation
+/// with Oby, your account at the foot), and beside it Home's work, grouped by kind or by status
+/// (#496, its ⋮ picks), each group folding open to its tasks. It opens from the left and pushes
+/// the view over.
 struct SidebarView: View {
     let model: IslandModel
-    @State private var search = ""
-    @Binding var selection: ChatSelection
-    /// When the window's state began and the rows opened since, for the blue "new" mark.
-    let since: Date
-    let seen: Set<String>
+    let state: ChatState
+    let width: CGFloat
+    let onNewTask: () -> Void
     let onOpenSettings: (SettingsTab) -> Void
     @AppStorage(GroupBy.key) private var groupBy = GroupBy.type
-    /// Groups folded away; while searching, every group with a match opens.
-    @State private var folded: Set<String> = []
-    /// Groups showing all their done tasks (Show more), not just the latest few.
-    @State private var more: Set<String> = []
+    @State private var search = ""
+    @State private var searching = false
+    @FocusState private var searchFocused: Bool
+    /// Groups folded away (while searching, every group with a match opens), and those showing
+    /// all their done tasks: the window's, so closing the panel keeps them.
+    private var folded: Set<String> { state.folded }
+    private var more: Set<String> { state.more }
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
+    private var work: [WorkList.Item<SidebarSections.JobRow>] { model.work(since: state.since, seen: state.seen) }
     private var groups: [WorkList.Group<SidebarSections.JobRow>] {
-        let items = model.work(since: since, seen: seen).filter {
-            search.isEmpty || $0.job.job.heading.localizedCaseInsensitiveContains(search)
-                || $0.job.job.agentName.localizedCaseInsensitiveContains(search)
+        let query = search.trimmingCharacters(in: .whitespaces)
+        let items = work.filter {
+            query.isEmpty || $0.job.job.heading.localizedCaseInsensitiveContains(query)
+                || $0.job.job.agentName.localizedCaseInsensitiveContains(query)
         }
         return WorkList.groups(items, by: groupBy)
     }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            TextField("Search chats", text: $search)
-                .textFieldStyle(.plain).font(OBYStyle.small)
-                .padding(10).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
-                .padding(.horizontal, 14).padding(.top, 46).padding(.bottom, 12)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    if search.isEmpty || "Oby".localizedCaseInsensitiveContains(search) || (model.thread.last?.text.localizedCaseInsensitiveContains(search) ?? false) { obyRow }
-                    ForEach(groups) { group($0) }
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, 4)
-                .padding(.bottom, 16)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                link("Accounts", symbol: "key") { onOpenSettings(.accounts) }
-                link("Integrations", symbol: "link") { onOpenSettings(.runner) }
-                link("Settings", symbol: "gearshape") { onOpenSettings(.general) }
-            }
-            .padding(.horizontal, 14)
-            .padding(.bottom, 12)
-            Divider().overlay(.white.opacity(0.08))
-            you.padding(.horizontal, 14).padding(.vertical, 14)
+        HStack(spacing: 0) {
+            IconStrip(model: model, state: state, work: work, onOpenSettings: onOpenSettings)
+            content
         }
-        .background(OBYStyle.sidebar)
+        .frame(width: width)
+        .frame(maxHeight: .infinity)
+        .overlay(alignment: .trailing) { Tokens.edge.frame(width: 1) }
     }
 
-    private var preview: String {
-        let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count + feed.chatPermissions.count { $0.waits(at: .now) }
-        if waiting > 0 { return "Waiting on your yes" }
-        if model.working > 0 { return "\(model.working) working" }
-        return SidebarSections.obyPreview(model.thread.last?.text)
-    }
-
-    private var obyRow: some View {
-        Button { selection = .oby } label: {
-            HStack(spacing: 12) {
-                ObyFace(size: 40).background(OBYStyle.surface, in: Circle()).clipShape(Circle())
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Oby").font(OBYStyle.body.weight(.bold))
-                    Text(preview).lineLimit(1).font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
-                }
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Text("Home").font(Tokens.font(Tokens.textTitle, .semibold)).foregroundStyle(Tokens.ink)
+                    .lineLimit(1).frame(height: 32).padding(.horizontal, 10)
+                    .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 0)
-                VStack(alignment: .trailing, spacing: 8) {
-                    if let last = model.thread.last {
-                        Text(Date.now.timeIntervalSince(last.date) < 60 ? "now" : ConversationModel.clock(last.date)).font(OBYStyle.caption).foregroundStyle(OBYStyle.tertiary)
+                Menu {
+                    Picker("Group by", selection: $groupBy) {
+                        ForEach(GroupBy.allCases, id: \.self) { Text($0.label).tag($0) }
                     }
-                    let waiting = IslandInbox.entries(desk: desk, feed: feed, now: .now).count + feed.chatPermissions.count { $0.waits(at: .now) }
-                    if waiting > 0 {
-                        Text("\(waiting)").font(OBYStyle.caption.weight(.semibold))
-                            .padding(.horizontal, OBYStyle.Space.sm).padding(.vertical, OBYStyle.Space.xs)
-                            .background(OBYStyle.accent, in: Capsule()).accessibilityLabel("\(waiting) waiting for you")
-                    } else if model.unreadReply {
-                        Circle().fill(Color.accentColor).frame(width: 7, height: 7).accessibilityLabel("Unread reply")
+                    .pickerStyle(.inline)
+                } label: { IconButton(symbol: "ellipsis", rotated: true) }
+                    .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+                    .accessibilityLabel("Home options")
+            }
+            .padding(.bottom, 12)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    if searching { searchField.transition(.opacity.combined(with: .move(edge: .top))) }
+                    PanelRow(symbol: "plus", title: "New task", action: onNewTask).padding(.bottom, 8)
+                    ForEach(groups) { group($0) }
+                    if groups.isEmpty {
+                        Text(search.isEmpty ? "Nothing here yet. Ask Oby for something and it shows up here." : "No tasks match “\(search)”")
+                            .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
                     }
                 }
+                .padding(.bottom, 8)
             }
-            .padding(.horizontal, 10).padding(.vertical, 10)
-            .background(selection == .oby ? OBYStyle.selection : .clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .contentShape(Rectangle())
+            .scrollIndicators(.never)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(SidebarSections.obyLabel(last: model.thread.last?.text, unread: model.unreadReply))
+        .padding(.horizontal, 16).padding(.top, state.chrome.bar)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Search, on the panel icon's row at the panel's right edge.
+        .overlay(alignment: .topTrailing) {
+            IconButton(symbol: "magnifyingglass", on: searching) {
+                withAnimation(Tokens.warm) { searching.toggle() }
+                if !searching { search = "" }
+            }
+            .accessibilityLabel("Search")
+            .padding(.trailing, 10).padding(.top, (state.chrome.bar - 32) / 2)
+        }
+        .background(alignment: .top) { WindowDragArea().frame(height: state.chrome.bar) }
     }
 
-    /// One group: its header folds it (an orange dot when something in it needs you, its count when
-    /// anything's open), then its rows, then Show more past the latest done ones.
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").font(Tokens.font(12)).foregroundStyle(Tokens.muted)
+            TextField("Search", text: $search).textFieldStyle(.plain).font(Tokens.font(Tokens.textMd))
+                .foregroundStyle(Tokens.ink).focused($searchFocused)
+                .onExitCommand { withAnimation(Tokens.warm) { searching = false }; search = "" }
+                .onAppear { DispatchQueue.main.async { searchFocused = true } }
+        }
+        .padding(.horizontal, 10).frame(height: 34)
+        .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(searchFocused ? Tokens.lineFocus : Tokens.line) }
+        .padding(.bottom, 8)
+    }
+
+    /// One group: its label folds it (a chevron after it; folded, an orange dot when something in it
+    /// needs you; its count when anything's open), then its rows, then Show more past the latest done.
     private func group(_ group: WorkList.Group<SidebarSections.JobRow>) -> some View {
         let open = !folded.contains(group.id) || !search.isEmpty
         let shown = WorkList.shown(group, more: more.contains(group.id))
-        return VStack(alignment: .leading, spacing: 2) {
-            Button { folded.formSymmetricDifference([group.id]) } label: {
-                HStack(spacing: 6) {
-                    Text(group.label).font(OBYStyle.caption.weight(.medium)).foregroundStyle(.white.opacity(0.45))
-                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(.white.opacity(0.35))
-                        .rotationEffect(.degrees(open ? 0 : -90)).accessibilityHidden(true)
-                    Spacer()
-                    if group.needs > 0 {
-                        Circle().fill(.orange).frame(width: 6, height: 6)
-                            .accessibilityLabel("\(group.needs) need\(group.needs == 1 ? "s" : "") you")
-                    }
-                    if group.count > 0 {
-                        Text("\(group.count)").font(OBYStyle.caption).foregroundStyle(.white.opacity(0.45))
-                            .accessibilityLabel("\(group.count) \(group.countLabel)")
-                    }
-                }
-                .padding(.horizontal, 10).padding(.bottom, 4)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityAddTraits(.isHeader)
-            .accessibilityValue(open ? "Open" : "Folded")
-            .contextMenu {
-                if let kind = group.type { Button("Open \(group.label)") { selection = .group(kind) } }
+        return VStack(alignment: .leading, spacing: 1) {
+            GroupHead(group: group, open: open) {
+                withAnimation(Tokens.warm) { state.folded.formSymmetricDifference([group.id]) }
+            } onOpen: {
+                if let kind = group.type { state.trail.start(.group(kind)) }
             }
             if open {
-                ForEach(shown.rows) { row($0) }
+                ForEach(shown.rows) { TaskRow(item: $0, model: model, state: state) }
                 if shown.hidden > 0 {
-                    Button(more.contains(group.id) ? "Show less" : "Show \(shown.hidden) more") { more.formSymmetricDifference([group.id]) }
-                        .buttonStyle(.plain).font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary)
-                        .padding(.horizontal, 10).padding(.vertical, 4)
+                    Button(more.contains(group.id) ? "Show less" : "Show \(shown.hidden) more") { state.more.formSymmetricDifference([group.id]) }
+                        .buttonStyle(PanelButtonStyle(color: Tokens.muted, font: Tokens.font(Tokens.textSm), height: 30))
                 }
+                Color.clear.frame(height: 12)
             }
         }
-    }
-
-    private func row(_ item: WorkList.Item<SidebarSections.JobRow>) -> some View {
-        let job = item.job.job, local = item.job.local
-        let picked = selection == .job(id: job.id, local: local)
-        return Button { selection = .job(id: job.id, local: local) } label: {
-            HStack(spacing: 10) {
-                AgentMark(agent: job.agent).font(.system(size: 14, weight: .semibold)).frame(width: 18)
-                Text(job.heading).font(.system(size: 14, weight: .medium)).lineLimit(1)
-                    .foregroundStyle(item.status == .done ? OBYStyle.secondary : OBYStyle.primary)
-                Spacer(minLength: 6)
-                WorkMarkView(mark: item.mark)
-            }
-            .padding(.horizontal, 10).padding(.vertical, 7)
-            .background(.white.opacity(picked ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(local ? "On this Mac" : "On \(feed.name)")
-    }
-
-    private func emptyRow(_ text: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(text).font(OBYStyle.small).foregroundStyle(OBYStyle.tertiary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(.white.opacity(selected ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func link(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: symbol).font(.system(size: 14, weight: .medium))
-                .labelStyle(.titleAndIcon)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10).padding(.vertical, 7)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// You: your name on this Mac, and who pays for the first account (the team), else this Mac.
-    private var you: some View {
-        let name = NSFullUserName()
-        let payer = desk.accounts.accounts.map(\.account.payer).first { !$0.isEmpty } ?? feed.host.map { "Runner: \($0)" } ?? "This Mac"
-        return HStack(spacing: 12) {
-            Text(SidebarSections.initials(name)).font(.system(size: 12, weight: .semibold))
-                .frame(width: 40, height: 40).background(.white.opacity(0.12), in: Circle())
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                Text(payer).font(OBYStyle.caption).foregroundStyle(OBYStyle.secondary).lineLimit(1)
-            }
-        }
-        .accessibilityElement(children: .combine)
+        .padding(.top, 4)
     }
 }
 
-/// A task's one mark at the end of its row (#496): blue while new, orange when it needs you, gray
-/// while working, nothing while queued (the spot stays, so rows line up), a small check when done.
+/// A group's label row: 12-point label, a chevron right after it (down while open, up folded),
+/// then at the right the orange dot (folded) and the count.
+private struct GroupHead: View {
+    let group: WorkList.Group<SidebarSections.JobRow>
+    let open: Bool
+    let onToggle: () -> Void
+    let onOpen: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 4) {
+                Text(group.label).font(Tokens.font(Tokens.textSm)).lineLimit(1).layoutPriority(1)
+                Image(systemName: "chevron.down").font(Tokens.font(9, .semibold))
+                    .rotationEffect(.degrees(open ? 0 : 180)).accessibilityHidden(true)
+                Spacer(minLength: 4)
+                if !open && group.needs > 0 {
+                    Circle().fill(Tokens.needs).frame(width: 6, height: 6)
+                        .accessibilityLabel("\(group.needs) need\(group.needs == 1 ? "s" : "") you")
+                }
+                if group.count > 0 {
+                    Text("\(group.count)").font(Tokens.font(Tokens.textSm)).monospacedDigit()
+                        .accessibilityLabel("\(group.count) \(group.countLabel)")
+                }
+            }
+            .foregroundStyle(hovering ? Tokens.text : Tokens.label)
+            .padding(.horizontal, 10).frame(height: 26)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(Tokens.fade, value: hovering)
+        .accessibilityAddTraits(.isHeader)
+        .accessibilityValue(open ? "Open" : "Folded")
+        .contextMenu { if group.type != nil { Button("Open \(group.label)", action: onOpen) } }
+    }
+}
+
+/// A task on Home: its agent's mark, its name, and at the end its state; on hover its ⋮ in the
+/// same spot. Open while it's working, dimmed once it's done.
+private struct TaskRow: View {
+    let item: WorkList.Item<SidebarSections.JobRow>
+    let model: IslandModel
+    let state: ChatState
+    @State private var hovering = false
+
+    private var job: Job { item.job.job }
+    private var local: Bool { item.job.local }
+    private var step: WindowStep { .job(id: job.id, local: local) }
+    private var picked: Bool { state.trail.shows(job: job.id, local: local) }
+    private var done: Bool { item.status == .done }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: open) {
+                HStack(spacing: 8) {
+                    AgentMark(agent: job.agent).font(Tokens.font(12, .semibold)).frame(width: 14)
+                        .foregroundStyle(done ? Tokens.doneTitle : Tokens.muted)
+                    Text(job.heading).font(Tokens.font(Tokens.textBase))
+                        .foregroundStyle(hovering || picked ? .white : done ? Tokens.doneTitle : Tokens.openTitle)
+                        .fadeOut()
+                }
+                .padding(.leading, 10).frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(job.heading), \(item.mark.rawValue)")
+            ZStack {
+                WorkMarkView(mark: item.mark).opacity(hovering ? 0 : 1)
+                if hovering { menu }
+            }
+            .frame(width: 22).padding(.leading, 4).padding(.trailing, 5)
+        }
+        .frame(height: 34)
+        .background(picked ? Tokens.active : hovering ? Tokens.hover : .clear, in: RoundedRectangle(cornerRadius: Tokens.rowRadius, style: .continuous))
+        .onHover { hovering = $0 }
+        .animation(Tokens.fade, value: hovering)
+        .help(local ? "On this Mac" : "On \(model.feed.name)")
+        .contextMenu { actions }
+    }
+
+    private func open() {
+        state.trail.start(step)
+    }
+
+    private var menu: some View {
+        Menu { actions } label: {
+            Image(systemName: "ellipsis").rotationEffect(.degrees(90)).font(Tokens.font(12, .medium))
+                .foregroundStyle(Tokens.text).frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+        .accessibilityLabel("More for \(job.heading)")
+    }
+
+    @ViewBuilder private var actions: some View {
+        Button("View details") { open() }
+        if ConversationModel.started(job.id, in: model.thread) {
+            Button("Go to conversation") { state.trail.start(step, .talk) }
+        }
+        if job.isActive { Button("Stop") { model.stopChatJob(job.id, local: local) } }
+    }
+}
+
+/// The far-left column: one icon per place (Home, the conversation with Oby), your account's
+/// picture at the foot, which opens your account's menu (Settings is in it).
+private struct IconStrip: View {
+    let model: IslandModel
+    let state: ChatState
+    let work: [WorkList.Item<SidebarSections.JobRow>]
+    let onOpenSettings: (SettingsTab) -> Void
+
+    private var homeDot: Color? {
+        if work.contains(where: { $0.status == .needs }) { return Tokens.needs }
+        return work.contains(where: \.fresh) ? Tokens.unread : nil
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            RailButton(symbol: "house", label: "Home", on: state.trail.isHome, dot: homeDot) { state.trail.closeAll() }
+            RailButton(symbol: "bubble.left.and.bubble.right", label: "Conversation with Oby", on: state.trail.top == .talk,
+                       dot: model.unreadReply ? Tokens.unread : nil) { state.open() }
+                .accessibilityLabel(SidebarSections.obyLabel(last: model.thread.last?.text, unread: model.unreadReply))
+            Spacer(minLength: 0)
+            account
+        }
+        .padding(.top, state.chrome.bar).padding(.bottom, 10)
+        .frame(width: Tokens.rail)
+        .frame(maxHeight: .infinity)
+        .overlay(alignment: .trailing) { Tokens.edge.frame(width: 1).padding(.top, state.chrome.bar) }
+        .background(alignment: .top) { WindowDragArea().frame(height: state.chrome.bar) }
+    }
+
+    /// You: your name on this Mac, and who pays for the first account (the team), else this Mac.
+    private var account: some View {
+        let name = NSFullUserName()
+        let payer = model.desk.accounts.accounts.map(\.account.payer).first { !$0.isEmpty }
+            ?? model.feed.host.map { "Runner: \($0)" } ?? "This Mac"
+        return Menu {
+            Section("\(name) · \(payer)") {
+                Button("Accounts…") { onOpenSettings(.accounts) }
+                Button("Integrations…") { onOpenSettings(.runner) }
+            }
+            Divider()
+            Button("Settings…") { onOpenSettings(.general) }
+        } label: {
+            Text(SidebarSections.initials(name)).font(Tokens.font(10, .semibold)).foregroundStyle(.white.opacity(0.92))
+                .frame(width: 24, height: 24).background(Tokens.avatar(name), in: Circle())
+                .frame(width: 32, height: 32).contentShape(Rectangle())
+        }
+        .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+        .help("Account")
+        .accessibilityLabel("\(name)’s account")
+    }
+}
+
+/// An icon in the strip: muted at rest, lit hovered, filled and lit while its place shows; a dot
+/// centred under it when something there is new (blue) or needs you (orange).
+private struct RailButton: View {
+    let symbol: String
+    let label: String
+    let on: Bool
+    var dot: Color?
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: on ? "\(symbol).fill" : symbol).font(Tokens.font(15))
+                .foregroundStyle(on ? Tokens.ink : hovering ? Tokens.text : Tokens.railIcon)
+                .frame(width: 32, height: 32)
+                .background(on ? Tokens.active : hovering ? Tokens.hover : .clear, in: RoundedRectangle(cornerRadius: Tokens.iconRadius, style: .continuous))
+                .overlay(alignment: .bottom) {
+                    if let dot { Circle().fill(dot).frame(width: 5, height: 5).offset(y: 4).accessibilityHidden(true) }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(Tokens.fade, value: hovering)
+        .help(label)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+}
+
+/// A 32-point icon button (Sangam's `.icon-button`): muted, lit hovered, filled while on.
+struct IconButton: View {
+    let symbol: String
+    var rotated = false
+    var on = false
+    var size: CGFloat = 32
+    var action: (() -> Void)?
+    @State private var hovering = false
+
+    var body: some View {
+        if let action {
+            Button(action: action) { face }.buttonStyle(.plain)
+        } else {
+            face
+        }
+    }
+
+    private var face: some View {
+        Image(systemName: symbol).font(Tokens.font(14, .medium)).rotationEffect(.degrees(rotated ? 90 : 0))
+            .foregroundStyle(on || hovering ? Tokens.text : Tokens.muted)
+            .frame(width: size, height: size)
+            .background(on ? Tokens.active : hovering ? Tokens.hover : .clear, in: RoundedRectangle(cornerRadius: Tokens.iconRadius, style: .continuous))
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .animation(Tokens.fade, value: hovering)
+    }
+}
+
+/// A row in the side panel that starts something (New task): an icon and a label.
+private struct PanelRow: View {
+    let symbol: String
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: symbol).font(Tokens.font(13, .regular)).frame(width: 16)
+                Text(title).font(Tokens.font(Tokens.textBase)).lineLimit(1)
+            }
+        }
+        .buttonStyle(PanelButtonStyle(color: Tokens.item, font: Tokens.font(Tokens.textBase), height: 34))
+    }
+}
+
+/// A full-width side panel button: its colour at rest, ink on a faint fill hovered.
+struct PanelButtonStyle: ButtonStyle {
+    var color: Color
+    var font: Font
+    var height: CGFloat
+
+    func makeBody(configuration: Configuration) -> some View { Styled(configuration: configuration, style: self) }
+
+    private struct Styled: View {
+        let configuration: Configuration
+        let style: PanelButtonStyle
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label.font(style.font)
+                .foregroundStyle(hovering ? Tokens.ink : style.color)
+                .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: style.height, maxHeight: style.height, alignment: .leading)
+                .background(hovering || configuration.isPressed ? Tokens.hover : .clear, in: RoundedRectangle(cornerRadius: Tokens.rowRadius, style: .continuous))
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+                .animation(Tokens.fade, value: hovering)
+        }
+    }
+}
+
+/// A task's one mark at the end of its row (#496, Sangam's StatusDot): an 8-point dot, blue while
+/// new, orange when it needs you, grey and pulsing slowly while working; nothing while queued (the
+/// spot stays, so rows line up); a small grey check once done.
 struct WorkMarkView: View {
     let mark: WorkMark
+    var dot: CGFloat = 8
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
             switch mark {
-            case .new: Circle().fill(.blue).frame(width: 8, height: 8)
-            case .needs: Circle().fill(.orange).frame(width: 8, height: 8)
-            case .working: Circle().fill(.gray).frame(width: 8, height: 8)
+            case .new: Circle().fill(Tokens.unread).frame(width: dot, height: dot)
+            case .needs: Circle().fill(Tokens.needs).frame(width: dot, height: dot)
+            case .working:
+                if reduceMotion {
+                    Circle().fill(Tokens.working).frame(width: dot, height: dot).opacity(0.8)
+                } else {
+                    PhaseAnimator([0.2, 1.0]) { level in
+                        Circle().fill(Tokens.working).frame(width: dot, height: dot).opacity(level)
+                    } animation: { _ in .easeInOut(duration: 0.8) }
+                }
             case .queued: Color.clear
-            case .done: Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(OBYStyle.tertiary)
+            case .done: Image(systemName: "checkmark").font(Tokens.font(9, .semibold)).foregroundStyle(Tokens.check)
             }
         }
         .frame(width: 12, height: 12)
         .accessibilityElement()
         .accessibilityLabel(mark.rawValue)
+    }
+}
+
+/// Empty room in the window's chrome that drags the window, as a title bar does.
+struct WindowDragArea: View {
+    var body: some View {
+        Color.clear.contentShape(Rectangle()).gesture(WindowDragGesture())
     }
 }

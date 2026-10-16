@@ -1,0 +1,99 @@
+import AppKit
+import Foundation
+import SwiftUI
+import Testing
+@testable import Oby
+
+/// Pictures of the window for a pull request, against Sangam's design: off unless `OBY_SCREENS`
+/// names a folder (`TEST_RUNNER_OBY_SCREENS=… xcodebuild test -only-testing:MacTests/WindowScreens`),
+/// with a shell taking each picture as its window's number lands in `windows.txt` there.
+/// The window is the real one (ChatWindow.make, its title bar and toolbar), with made-up jobs on a
+/// feed that talks to no runner, so no one's work is in the pictures.
+@MainActor
+@Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["OBY_SCREENS"] != nil))
+struct WindowScreens {
+    let folder = URL(fileURLWithPath: ProcessInfo.processInfo.environment["OBY_SCREENS"] ?? NSTemporaryDirectory())
+    let now = Date.now
+
+    func job(_ id: String, _ title: String, kind: Plan.Kind = .build, status: Job.Status, issue: Int? = nil, ago: TimeInterval,
+             repo: String = "deskree-inc/oby", agent: String = "claude", question: Bool = false) -> Job {
+        var job = Job(id: id, request: title, agent: agent, account: "deskree", repo: repo, branch: "oby/\(id)", base: "dev",
+                      pr: nil, kind: kind, task: title, created: now - ago)
+        job.status = status
+        job.title = title
+        job.issue = issue
+        if question { job.question = Plan.Question(text: "Post this review as you?", options: []) }
+        if status == .done || status == .failed { job.finished = now - ago + 600 }
+        return job
+    }
+
+    /// The scene: a few reviews, issues and tasks, some needing you.
+    func model() -> IslandModel {
+        let feed = RunnerFeed()
+        let jobs = [
+            job("r1", "#251 settings layout", kind: .review, status: .running, ago: 3600, question: true),
+            job("r2", "#412 retry jitter", kind: .review, status: .running, ago: 1080, repo: "deskree-inc/tetrix-ee"),
+            job("r3", "#398 graph test", kind: .review, status: .done, ago: 9000),
+            job("r4", "#405 usage meter", kind: .review, status: .done, ago: 12000),
+            job("i1", "Search ignores accents", status: .running, issue: 488, ago: 2400, question: true),
+            job("i2", "#251 Attention queue", status: .running, issue: 251, ago: 900, agent: "codex"),
+            job("i3", "Flaky timezone test", status: .done, issue: 470, ago: 20000),
+            job("t1", "Dark mode flashes on launch", status: .queued, ago: 300),
+            job("t2", "Bump Sparkle to 2.9.6", status: .done, ago: 30000),
+        ]
+        for job in jobs.reversed() { feed.apply(job) }
+        return IslandModel(desk: Desk(), feed: feed, availability: MacAvailability())
+    }
+
+    /// Opens the window on `state`, lets it settle, and saves what's on it as `name`.png.
+    /// The panel's settings live in the app's own defaults (the test host is the app): set for a
+    /// picture, then put back as they were.
+    func withPanel(open: Bool, _ work: () async throws -> Void) async throws {
+        let defaults = UserDefaults.standard, keys = ["ObySidebarOpen", "ObySidebarWidth"]
+        let before = keys.map { defaults.object(forKey: $0) }
+        defer { for (key, value) in zip(keys, before) { if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) } } }
+        defaults.set(open, forKey: "ObySidebarOpen")
+        defaults.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
+        try await work()
+    }
+
+    func shoot(_ name: String, model: IslandModel, state: ChatState, sidebar: Bool = true) async throws {
+        try await withPanel(open: sidebar) { try await picture(name, model: model, state: state) }
+    }
+
+    private func picture(_ name: String, model: IslandModel, state: ChatState) async throws {
+        // Oby itself, from the app's bundled character, once it has drawn.
+        let character = ObyCharacter(query: "embed&size=1.23")
+        let window = ChatWindow.make(ChatView(model: model, state: state, character: character, onOpenSettings: { _ in }))
+        window.setFrameOrigin(NSPoint(x: 40, y: 40))
+        window.orderFrontRegardless()
+        defer { window.close() }
+        ChatWindow.measureLights(window, into: state)
+        for _ in 0..<50 where !character.ready { try await Task.sleep(for: .milliseconds(100)) }
+        try await Task.sleep(for: .milliseconds(1200))
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "\(name).png")
+        // The test host has no Screen Recording, so it names the window and the shell that ran the
+        // tests takes the picture (`screencapture -l`), watching `windows.txt`.
+        let list = folder.appending(path: "windows.txt")
+        let line = Data("\(name) \(window.windowNumber)\n".utf8)
+        if let handle = try? FileHandle(forWritingTo: list) { handle.seekToEndOfFile(); handle.write(line); try handle.close() }
+        else { try line.write(to: list) }
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: file.path) { try await Task.sleep(for: .milliseconds(200)) }
+        #expect(FileManager.default.fileExists(atPath: file.path), "screencapture made no \(name).png")
+    }
+
+    @Test func home() async throws {
+        try await shoot("mac-home", model: model(), state: ChatState())
+    }
+
+    @Test func homeWithThePanelClosed() async throws {
+        try await shoot("mac-home-closed", model: model(), state: ChatState(), sidebar: false)
+    }
+
+    @Test func group() async throws {
+        let state = ChatState()
+        state.trail.start(.group(.review))
+        try await shoot("mac-group", model: model(), state: state)
+    }
+}

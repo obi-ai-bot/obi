@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import Oby
 
-/// The window's sidebar and Live column (#11, apps/mac/app/App/Sidebar.swift, apps/mac/app/App/LivePanel.swift):
-/// Channels and Obys say honestly that they're not here yet, and the counts match the header's.
+/// The window's side panel (#11, apps/mac/app/App/Sidebar.swift) and Live's helpers
+/// (apps/mac/app/App/LivePanel.swift): the counts match the header's.
 /// The work's groups are WorkGroupsTests'.
 struct SidebarTests {
     let now = Date(timeIntervalSince1970: 1_791_582_173)
@@ -16,22 +16,25 @@ struct SidebarTests {
         return job
     }
 
-    @MainActor @Test func openChatAlwaysReturnsToThePinnedObyThread() {
+    /// Opening the window from the notch lands on the conversation, or on the job it names, from a
+    /// fresh start: whatever was open before leaves.
+    @MainActor @Test func openChatAlwaysReturnsToTheConversation() {
         let state = ChatState()
-        #expect(state.selection == .oby)
+        #expect(state.trail.isHome)
         state.open(job: ("job", true))
-        #expect(state.selection == .job(id: "job", local: true))
+        #expect(state.trail.steps == [.job(id: "job", local: true)])
+        state.trail.push(.talk)
         state.open()
-        #expect(state.selection == .oby)
+        #expect(state.trail.steps == [.talk])
+        state.newTask()
+        #expect(state.trail.isHome && state.homeFocusRequest == 1)
     }
 
-    @Test func channelsAndObysSayTheyAreNotHereYet() {
-        #expect(SidebarSections.channelsEmpty == "Team channels come with F11.")
-        #expect(SidebarSections.obysEmpty == "Other people's Obys come with F12.")
+    @Test func initialsForTheAccountPicture() {
         #expect(SidebarSections.initials("Wellington Prado") == "WP" && SidebarSections.initials("oby") == "O" && SidebarSections.initials("") == "?")
     }
 
-    /// Oby's pinned row previews the last message, and VoiceOver reads it with an unread reply.
+    /// The conversation's icon says the last message under the pointer, and VoiceOver reads it with an unread reply.
     @Test func obysRowPreviewsTheLastMessage() {
         #expect(SidebarSections.obyPreview(nil) == "Say hello to Oby" && SidebarSections.obyPreview("Done.") == "Done.")
         #expect(SidebarSections.obyLabel(last: "Done.", unread: true) == "Oby, Done., unread reply")
