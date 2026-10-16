@@ -3065,7 +3065,7 @@ fn sandbox_succeeded(status: &std::process::ExitStatus, env: &[(OsString, OsStri
 
 /// Where the tool's own login is: the `HOME` obid was started with, as the tool itself would look
 /// when the person runs it, else the password database's.
-fn login_home() -> Option<PathBuf> {
+pub(crate) fn login_home() -> Option<PathBuf> {
     let homes = person_homes();
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -3081,7 +3081,11 @@ fn login_home() -> Option<PathBuf> {
 /// ([`forget_login_secrets`]); the rest is copied once, then the job's own. Answers the names to
 /// show in the job's `HOME`. On macOS a login that lives only in the keychain is not copied: the
 /// job uses `.credentials.json`, which sign-in writes when the keychain's files are denied.
-fn copy_login(home: Option<&Path>, login: &Path, tool: Tool) -> std::io::Result<Vec<&'static str>> {
+pub(crate) fn copy_login(
+    home: Option<&Path>,
+    login: &Path,
+    tool: Tool,
+) -> std::io::Result<Vec<&'static str>> {
     let (shown, secret, once): (&[&'static str], &[&str], &[&str]) = match tool {
         Tool::Codex => (&[".codex"], &[".codex/auth.json"], &[".codex/config.toml"]),
         _ => (

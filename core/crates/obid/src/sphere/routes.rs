@@ -1,5 +1,5 @@
-//! The routes of Obi-to-Obi work: `/v1/obid/sphere…`, `/v1/obid/decisions…` and the inbox
-//! (`GET /v1/inbox`, `POST /v1/inbox/{id}/answer`).
+//! The routes of Obi-to-Obi work: `/v1/obid/sphere…`, `/v1/obid/decisions…`, `/v1/obid/sharing…`
+//! and the inbox (`GET /v1/inbox`, `POST /v1/inbox/{id}/answer`).
 
 use std::sync::Arc;
 
@@ -143,4 +143,37 @@ pub async fn answer(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     Ok(json(StatusCode::OK, shared.link.answer(&id, &body).await?))
+}
+
+/// `GET /v1/obid/sharing`.
+pub async fn sharing(State(shared): State<Arc<Shared>>) -> Response {
+    json(StatusCode::OK, shared.link.sharing_json())
+}
+
+/// `POST /v1/obid/sharing/rules`.
+pub async fn add_rule(
+    State(shared): State<Arc<Shared>>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    Ok(json(StatusCode::CREATED, shared.link.add_rule(&body)?))
+}
+
+/// `DELETE /v1/obid/sharing/rules/{id}`.
+pub async fn forget_rule(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    if shared.link.forget_rule(&id) {
+        Ok(StatusCode::NO_CONTENT.into_response())
+    } else {
+        Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "There's no such sharing rule.",
+        ))
+    }
+}
+
+/// `PUT /v1/obid/sharing/limits`.
+pub async fn limits(State(shared): State<Arc<Shared>>, body: Bytes) -> Result<Response, ApiError> {
+    Ok(json(StatusCode::OK, shared.link.set_limits(&body)?))
 }

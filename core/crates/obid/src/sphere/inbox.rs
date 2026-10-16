@@ -245,6 +245,98 @@ pub fn review_request_item(
     }
 }
 
+/// The two buttons of a question's item: the owner answers it in words of their own, or declines.
+pub const QUESTION_OPTIONS: [&str; 2] = [DECLINE, DECLINE_REMEMBER];
+
+/// A typed reference in words: `acme/app`, `acme/app pull request #7`, `acme/app issue #3`,
+/// `acme/app job 9f08fd10`.
+pub fn ref_words(r: &Value) -> String {
+    let repo = r["repo"].as_str().unwrap_or("");
+    match r["kind"].as_str().unwrap_or("") {
+        "pr" => format!("{repo} pull request #{}", r["pr"]),
+        "issue" => format!("{repo} issue #{}", r["issue"]),
+        "job" => format!("{repo} job {}", r["job"].as_str().unwrap_or("")),
+        _ => repo.to_owned(),
+    }
+}
+
+/// The `obiRequest` item for the `question` of `exchange` (its body already checked against the
+/// spec), about `repos` (the repositories its `about` names that obid could check: protocol.md
+/// 5.2 and 5.9), `referenced` the jobs it names that are obid's own. `title` and `text` come from
+/// the typed fields only: the asker and what the references name, a job reference only when it
+/// is one of `referenced` (the rest stay under `obi.about`). Its words, and its choices, are
+/// quoted under `obi.quoted`, never made buttons: the owner answers in words, or picks a choice
+/// by its words.
+pub fn question_item(
+    exchange: &super::exchange::Exchange,
+    repos: &[String],
+    referenced: &[String],
+    now: i64,
+) -> Item {
+    let correlation_id = exchange.correlation_id.as_str();
+    let from = exchange.peer.as_str();
+    let from_owner = exchange.peer_owner.as_deref().unwrap_or("");
+    let body = &exchange.request["body"];
+    let expires_at = exchange.request["expires_at"].as_str().unwrap_or("");
+    let about: Vec<&Value> = body["about"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| {
+            r["kind"] != "job"
+                || r["job"]
+                    .as_str()
+                    .is_some_and(|j| referenced.iter().any(|k| k == j))
+        })
+        .collect();
+    let named: Vec<String> = about.iter().map(|r| ref_words(r)).collect();
+    let on = if named.is_empty() {
+        String::new()
+    } else {
+        format!(" about {}", named.join(", "))
+    };
+    let never = match repos {
+        [] => format!(
+            "Say no, and say no to every question from {from_owner} from now on without asking."
+        ),
+        _ => format!(
+            "Say no, and say no to {from_owner}'s questions about {} from now on without asking.",
+            repos.join(", ")
+        ),
+    };
+    Item {
+        id: format!("obi-{correlation_id}"),
+        kind: "obiRequest".into(),
+        job: String::new(),
+        title: format!("Question from {from_owner}"),
+        text: format!(
+            "{from_owner}'s Obi ({from}) asks a question{on}, quoted below. Answer it in your own words, or say no."
+        ),
+        options: QUESTION_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
+        details: Some(vec!["Say no this time.".into(), never]),
+        recommended: None,
+        created: now,
+        done: None,
+        later: None,
+        answer: None,
+        obi: Some(json!({
+            "correlationId": correlation_id,
+            "from": from,
+            "fromOwner": from_owner,
+            "type": "question",
+            "about": body.get("about").cloned().unwrap_or(Value::Null),
+            "repos": repos,
+            "expiresAt": expires_at,
+            "quoted": {
+                "text": body["text"],
+                "choices": body.get("choices").cloned().unwrap_or(Value::Null),
+            },
+        })),
+        plugin: None,
+        arrived: Some(arrival()),
+    }
+}
+
 /// The `permission` item for a permission the job's agent waits on (docs/runner-api.md, "Inbox
 /// item"): its title the job's, its text the permission's, and Allow, Always allow (only with a
 /// rule to save) and Deny. Words of the owner's own are a no, and reach the agent.

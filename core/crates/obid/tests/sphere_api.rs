@@ -739,7 +739,7 @@ async fn membership_takes_only_what_checks_out() {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(kept.permissions().mode() & 0o777, 0o600);
         let mut wrong = card_body.clone();
-        wrong["accepts"] = json!(["question"]);
+        wrong["accepts"] = json!(["handoff"]);
         assert_eq!(
             call(&obid, "POST", "/v1/obid/sphere/card", Some(&wrong)).status,
             422
