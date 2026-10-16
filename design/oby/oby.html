@@ -1,0 +1,1917 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oby</title>
+<!-- dev:start -->
+<!-- ?embed (Oby inside an app): mark it before the first paint, so the playground
+     controls never flash on screen while the main script loads -->
+<script>if (new URLSearchParams(location.search).has('embed')) document.documentElement.classList.add('embed');</script>
+<!-- dev:end -->
+<style>
+  /* Oby draws on a transparent background: the host decides what's behind it */
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { -webkit-user-select: none; user-select: none; }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  /* dev:start  the playground (controls); package/build.sh strips every dev block */
+  :root {
+    --bg: #0a0a0b;
+    --ink: #e9e9ea;
+    --muted: #6b6b70;
+    --chip: #1a1a1d;
+    --chip-on: #f2f2f2;
+  }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 12px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  }
+  #ui {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 10px 12px 12px;
+    display: flex; flex-direction: column; gap: 8px; align-items: center;
+  }
+  #sliders { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 18px; }
+  .slider { display: flex; align-items: center; gap: 8px; color: var(--muted); font: 11px/1 "SF Mono", ui-monospace, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
+  .slider input { -webkit-appearance: none; appearance: none; width: 140px; height: 2px; background: #333; border-radius: 2px; outline: none; }
+  .slider input::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--ink); cursor: pointer; }
+  .slider output { width: 34px; text-align: right; }
+  @media (max-width: 520px) { .slider input { width: 90px; } }
+  #label { font: 11px/1 "SF Mono", ui-monospace, Menlo, monospace; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+  #states { display: flex; gap: 6px; }
+  #chips {
+    display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; max-width: 720px;
+  }
+  .chip {
+    appearance: none; border: 0; border-radius: 999px; padding: 5px 10px;
+    background: var(--chip); color: var(--ink); font: inherit; cursor: pointer;
+  }
+  .chip.on { background: var(--chip-on); color: #000; }
+  .chip.auto { border: 1px solid #333; background: transparent; }
+  .chip.auto.on { background: transparent; color: var(--ink); border-color: #777; }
+  body.collapsed #ui { display: none; }
+  #uiToggle {
+    position: fixed; right: 10px; top: 10px; z-index: 2;
+    width: 28px; height: 28px; border-radius: 50%; border: 1px solid #333;
+    background: transparent; color: var(--muted); cursor: pointer;
+    display: grid; place-items: center; padding: 0;
+  }
+  #uiToggle:hover { color: var(--ink); border-color: #777; }
+  body:not(.collapsed) #uiToggle { color: var(--ink); border-color: #777; }
+  @media (max-width: 520px) {
+    #chips { max-width: 360px; gap: 4px; }
+    .chip { padding: 3px 8px; font-size: 11px; }
+  }
+  html.embed #ui, html.embed #uiToggle { display: none; }
+  html.embed body { background: transparent; }
+  /* dev:end */
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="stage"></div>
+<!-- dev:start -->
+<button id="uiToggle" title="Controls" aria-label="Show or hide controls">
+  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+    <path d="M2 4h10M2 10h10"/><circle cx="5" cy="4" r="1.6" fill="#0a0a0b"/><circle cx="9" cy="10" r="1.6" fill="#0a0a0b"/>
+  </svg>
+</button>
+<div id="ui">
+  <div id="label">idle</div>
+  <div id="states"></div>
+  <div id="chips"></div>
+  <div id="sliders">
+    <label class="slider" data-k="size">Size <input type="range" min="0.25" max="1" step="0.01" value="0.56"><output>56%</output></label>
+    <label class="slider" data-k="round">Round <input type="range" min="0.04" max="0.46" step="0.01" value="0.23"><output></output></label>
+    <label class="slider" data-k="width">Width <input type="range" min="0.75" max="1.4" step="0.01" value="0.93"><output></output></label>
+    <label class="slider" data-k="height">Height <input type="range" min="0.75" max="1.4" step="0.01" value="0.75"><output></output></label>
+    <label class="slider" data-k="earLen">Ear length <input type="range" min="0.1" max="0.55" step="0.01" value="0.14"><output></output></label>
+    <label class="slider" data-k="earTip">Ear tip <input type="range" min="0.004" max="0.06" step="0.001" value="0.004"><output></output></label>
+    <button class="chip auto" id="reset">Reset</button>
+  </div>
+</div>
+<!-- dev:end -->
+
+<script type="module">
+import * as THREE from 'three';
+
+/* ---------------------------------------------------------------------------
+   Springs: every animatable value is a damped spring chasing a target.
+   Expressions only set targets; the springs supply overshoot, follow-through
+   and settle, which is where most of the "alive" feel comes from.
+--------------------------------------------------------------------------- */
+const PRESET = {
+  body:   [120, 16],
+  jelly:  [260, 13],
+  face:   [300, 30],
+  mouth:  [320, 28],
+  pop:    [280, 15],
+  snap:   [700, 48],
+  fast:   [500, 30],
+  slow:   [26, 10],
+  drift:  [14, 7.2],
+  blink:  [1600, 75],
+  gaze:   [650, 46],
+  melt:   [55, 13],   // cube shrinking into / growing out of the dots
+  spread: [70, 7],    // dots pulling apart: a little wobble as they pinch off
+  ear:    [200, 11],  // ears: light, a beat behind the head, a small flick before they settle
+};
+
+const DEFAULTS = {
+  // body (cube-local units, radians)
+  x: [0, 'body'], y: [0, 'body'], z: [0, 'body'],
+  rx: [0, 'body'], ry: [0, 'body'], rz: [0, 'body'],
+  sq: [1, 'jelly'], lean: [0, 'body'], leanZ: [0, 'body'],
+  twist: [0, 'body'], inflate: [0.17, 'pop'], scale: [1, 'body'],
+  // face (px in a 512 face canvas, origin at centre)
+  gx: [0, 'gaze'], gy: [0, 'gaze'], eLx: [0, 'gaze'], eRx: [0, 'gaze'],  // per-eye x offset (px): converging on a pointer up close
+  eyeSep: [96, 'face'], eyeY: [-34, 'face'], eyeW: [64, 'face'], eyeH: [112, 'face'], eyeR: [0.92, 'face'],
+  eL: [1, 'face'], eR: [1, 'face'], close: [0, 'face'], blink: [0, 'blink'],
+  lidT: [0, 'face'], lidA: [0, 'face'], happy: [0, 'face'], calm: [0, 'face'], peek: [0, 'face'],
+  swirl: [0, 'face'],  // eyes turn into spinning spirals (Dizzy)
+  // mouth: only Yawn shows one (mouthOn), a dot that opens into a round yawn
+  mouthOn: [0, 'face'], mW: [0, 'mouth'], mO: [0, 'mouth'], mY: [92, 'mouth'], mT: [15, 'mouth'],
+  wall: [0, 'body'],  // invisible wall to hide behind (Hiding)
+  // liquid loader: cube melted away, dots pulled apart, dot size, bouncing
+  dSpread: [0, 'spread'], dR: [0, 'pop'], dBounce: [0, 'body'],
+  // ears (radians), left and right: B = tip tilts back, O = tip tilts out to the
+  // side, T = the ear swivels on its base to face out. Expressions set them with
+  // ears / earL / earR: [B, O, T]; each ear always moves on its own light spring.
+  eLB: [0.1, 'ear'], eRB: [0.1, 'ear'], eLO: [0, 'ear'], eRO: [0, 'ear'], eLT: [0, 'ear'], eRT: [0, 'ear'],
+};
+
+const P = {};
+for (const [k, [v, preset]] of Object.entries(DEFAULTS)) {
+  const [stiff, damp] = PRESET[preset];
+  P[k] = { v, vel: 0, base: v, off: 0, k: stiff, d: damp, preset };
+}
+function resetTargets() {
+  for (const [k, [v, preset]] of Object.entries(DEFAULTS)) {
+    const s = P[k];
+    s.base = v;
+    [s.k, s.d] = PRESET[preset];
+  }
+}
+function stepSprings(dt) {
+  for (const k in P) {
+    const s = P[k];
+    const a = s.k * (s.base + s.off - s.v) - s.d * s.vel;
+    s.vel += a * dt;
+    s.v += s.vel * dt;
+  }
+}
+const V = (k) => P[k].v;
+
+/* ---------------------------------------------------------------------------
+   Deformation of the body and face on the GPU.
+   inflate → cube-to-sphere, twist, squash/stretch (bottom pivot), bend.
+--------------------------------------------------------------------------- */
+const U = {
+  uInflate: { value: 0 }, uTwist: { value: 0 },
+  uSq: { value: 1 }, uLean: { value: 0 }, uLeanZ: { value: 0 },
+  uW: { value: 1 }, uH: { value: 1 },  // body width / height (LOOK)
+};
+
+const DEFORM_GLSL = /* glsl */`
+uniform float uInflate, uTwist, uSq, uLean, uLeanZ, uW, uH;
+vec3 deformP(vec3 p) {
+  p = mix(p, normalize(p) * 0.62, uInflate);
+  p.x *= uW;
+  p.z *= uH;  // as deep as it is tall
+  p.y = (p.y + 0.5) * uH - 0.5;
+  float a = uTwist * p.y; float c = cos(a), s = sin(a);
+  p.xz = vec2(c * p.x + s * p.z, -s * p.x + c * p.z);
+  p.y = (p.y + 0.5) * uSq - 0.5;
+  p.xz *= inversesqrt(uSq);
+  float h = p.y + 0.5;
+  p.x += uLean * h * h;
+  p.z += uLeanZ * h * h;
+  return p;
+}
+vec3 deformN(vec3 p, vec3 n) {
+  n = normalize(n);
+  vec3 r = abs(n.y) < 0.95 ? vec3(0., 1., 0.) : vec3(1., 0., 0.);
+  vec3 t1 = normalize(cross(n, r));
+  vec3 t2 = cross(n, t1);
+  float e = 0.003;
+  vec3 d0 = deformP(p);
+  return normalize(cross(deformP(p + t1 * e) - d0, deformP(p + t2 * e) - d0));
+}
+`;
+
+// An ear bends about its base before it takes the body's deform, so it squashes,
+// leans and twists with the body like part of it. The bend grows toward the
+// tip, so it curls rather than hinging.
+const EAR_GLSL = /* glsl */`
+uniform vec3 uEarBase, uEarTilt; uniform float uEarSide, uEarH;
+mat3 earRot(vec3 p) {
+  float s = 0.35 + 0.65 * clamp((p.y - uEarBase.y) / uEarH, 0., 1.);
+  float b = -uEarTilt.x * s, o = -uEarTilt.y * uEarSide * s, t = uEarTilt.z * uEarSide;
+  mat3 rx = mat3(1., 0., 0., 0., cos(b), sin(b), 0., -sin(b), cos(b));
+  mat3 rz = mat3(cos(o), sin(o), 0., -sin(o), cos(o), 0., 0., 0., 1.);
+  mat3 ry = mat3(cos(t), 0., -sin(t), 0., 1., 0., sin(t), 0., cos(t));  // swivel, whole ear
+  return rz * rx * ry;
+}
+vec3 earP(vec3 p) { return uEarBase + earRot(p) * (p - uEarBase); }
+vec3 earN(vec3 p, vec3 n) { return earRot(p) * n; }
+`;
+
+function deformed(material, { offset = 0, key, ear }) {
+  // an ear's own uniforms (base, tilt), or none for the body and face
+  const pos = ear ? 'earP(position)' : 'position', nor = ear ? 'earN(position, normal)' : 'normal';
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, U, ear);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\n' + DEFORM_GLSL + (ear ? EAR_GLSL : ''))
+      .replace('#include <begin_vertex>',
+        offset
+          ? `vec3 transformed = deformP(${pos}) + deformN(${pos}, ${nor}) * ${offset.toFixed(4)};`
+          : `vec3 transformed = deformP(${pos});`);
+    if (!offset) {
+      shader.vertexShader = shader.vertexShader.replace('#include <beginnormal_vertex>',
+        `vec3 objectNormal = deformN(${pos}, ${nor});\n#ifdef USE_TANGENT\nvec3 objectTangent = vec3(tangent.xyz);\n#endif`);
+    }
+  };
+  material.customProgramCacheKey = () => key;
+  return material;
+}
+
+/* ---------------------------------------------------------------------------
+   Scene
+--------------------------------------------------------------------------- */
+const stage = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, premultipliedAlpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setClearColor(0x000000, 0);
+stage.appendChild(renderer.domElement);
+
+const fxCanvas = document.createElement('canvas');
+stage.appendChild(fxCanvas);
+const fx = fxCanvas.getContext('2d');
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(24, 1, 0.1, 50);
+
+/* The cube is still 3D underneath, but it's drawn nearly flat and outlined in
+   screen space: one pass renders body coverage (R) and face ink (G), then a
+   full-screen composite adds the outline where the blurred coverage crosses
+   0.5, so turning reads as a changing silhouette. The body's R also carries
+   how much light it gets (0.5 = in shadow, 1 = lit) from a soft light above
+   left and in front: the composite turns that into a faint shade on the sides
+   (uShade), so it reads as a solid without visible edges. */
+const LIGHT = new THREE.Vector3(-0.3, 0.45, 1).normalize();  // in view space
+const fillMat = (ear) => {
+  const m = new THREE.MeshBasicMaterial({ color: 0xff0000, toneMapped: false });
+  deformed(m, { key: ear ? 'fill-ear' : 'fill', ear });
+  const base = m.onBeforeCompile;
+  m.onBeforeCompile = (shader, r) => {
+    base(shader, r);
+    shader.uniforms.uLight = { value: LIGHT };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vShadeN;')
+      .replace('#include <project_vertex>', '#include <project_vertex>\nvShadeN = normalize(normalMatrix * ' + (ear ? 'deformN(earP(position), earN(position, normal))' : 'deformN(position, normal)') + ');');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vShadeN;\nuniform vec3 uLight;')
+      .replace('#include <dithering_fragment>', `#include <dithering_fragment>
+        float lit = smoothstep(0.15, 0.85, dot(normalize(vShadeN), uLight));
+        gl_FragColor = vec4(0.5 + 0.5 * lit, 0.0, 0.0, 1.0);`);
+  };
+  return m;
+};
+
+const COMPOSITE_FRAG = /* glsl */`
+precision highp float;
+uniform sampler2D tFill;
+uniform vec2 uRes; uniform float uPx, uLineScale;
+uniform vec4 uWall;      // hiding wall (Hiding): rounded pillar box x0, y0, x1, y1 in framebuffer px
+uniform float uWallOn;
+uniform vec3 uFillCol, uInkCol, uSilCol;
+uniform float uShade;    // how much darker the side away from the light gets
+// liquid loader: the cube's blurred shape is added to three soft dots and the
+// sum is cut at 0.5, so they merge and pinch apart like liquid
+uniform float uLoader;   // 1 while the dots are in play
+uniform float uMelt;     // 0 = all cube, 1 = cube shrunk away, only dots
+uniform vec3 uDot[3];    // x, y, radius in framebuffer px
+uniform float uGoo;      // how far each dot's pull reaches (px): bigger = gooier
+
+// coverage: R is light (0.5-1) wherever the body is, so any R counts as covered
+// light on the body at a pixel (1 where there's no body)
+float litAt(vec4 f) {
+  return f.r > 0.01 ? clamp((f.r / max(1.0 - f.g, 0.02) - 0.5) * 2.0, 0., 1.) : 1.0;
+}
+// blurred coverage; the outline is the band where it crosses 0.5. Also the
+// average light on the covered samples, so the outline takes the shade of
+// the body beside it instead of ringing it in bright white.
+// Two rings of 24 (the inner one at half the radius, turned half a step) and
+// the centre. 12 per ring was enough for the body, but small shapes like the
+// ears slipped between the samples and the outline frayed into streaks there,
+// most of all at the app's small size.
+float blurLit;
+float blurred(vec2 px, float r) {
+  float a = 0.0, l = 0.0;
+  for (int i = 0; i < 49; i++) {
+    float t = float(i) * 0.2618 + (i < 24 ? 0.0 : 0.1309);
+    vec2 o = i == 48 ? vec2(0.0) : vec2(cos(t), sin(t)) * r * (i < 24 ? 1.0 : 0.5);
+    vec4 f = texture2D(tFill, (px + o) / uRes);
+    float c = clamp(step(0.01, f.r) + f.g, 0., 1.);
+    a += c; l += c * litAt(f);
+  }
+  blurLit = a > 0.0 ? l / a : 1.0;
+  return a / 49.0;
+}
+// smooth union: two shapes closer than k grow a liquid bridge between them
+float smin(float a, float b, float k) {
+  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+// the dots as a coverage that ramps over the same width (2r) as the cube's
+// blurred coverage, so the two blend evenly and the outline keeps its width
+float dots(vec2 px, float r) {
+  float d = length(px - uDot[0].xy) - uDot[0].z;
+  d = smin(d, length(px - uDot[1].xy) - uDot[1].z, uGoo);
+  d = smin(d, length(px - uDot[2].xy) - uDot[2].z, uGoo);
+  return 1.0 - smoothstep(-r, r, d);
+}
+
+void main() {
+  vec2 px = gl_FragCoord.xy;
+  vec4 f = texture2D(tFill, px / uRes);
+  float fill = clamp(step(0.01, f.r) + f.g, 0., 1.);
+  // light on the body, undoing the face ink laid over it (R * (1 - ink))
+  vec3 body = uFillCol * (1.0 - uShade * (1.0 - litAt(f)));
+  float r = uPx * uLineScale * 1.35;  // the outline's reach: ~1.5 CSS px at the app's size; keep render()'s copy in step
+  float a = blurred(px, r);
+  float e, ink = f.g;
+  vec3 col;
+  if (uLoader > 0.5) {
+    // the shape is wherever the blend of cube and dots passes 0.5
+    // the shrunken cube fades out completely, so no speck is left behind the dots
+    a = clamp(a * (1.0 - smoothstep(0.8, 0.98, uMelt)) + dots(px, r), 0., 1.);
+    fill = smoothstep(0.44, 0.56, a);
+    ink = min(ink * (1.0 - uMelt), fill);
+    // its shading goes early, by the time it's a small ball, on the body and on
+    // the edge: still on, the shrunken cube shows as a grey speck in the middle dot
+    float unshade = smoothstep(0.0, 0.4, uMelt);
+    body = mix(body, uFillCol, unshade);
+    blurLit = mix(blurLit, 1.0, unshade);
+  }
+  e = 1.0 - smoothstep(0.32, 0.48, abs(a - 0.5));
+  vec3 sil = uSilCol * (1.0 - uShade * (1.0 - blurLit));
+  col = mix(mix(body, uInkCol, ink), sil, e);
+  // premultiplied: the shape keeps its own colour right to its anti-aliased
+  // edge, and only the uncovered part of a pixel shows the outline stroke
+  float alpha = fill + e * (1.0 - fill);
+  vec3 premul = col * fill + sil * e * (1.0 - fill);
+  // worn objects (B): plain ink laid on top, outside the outline entirely
+  float worn = clamp(f.b, 0., 1.);
+  premul = uInkCol * worn + premul * (1.0 - worn);
+  alpha = worn + alpha * (1.0 - worn);
+
+  // wall (Hiding): an invisible pillar in front of the mascot
+  vec2 wc = (uWall.xy + uWall.zw) * 0.5, wh = (uWall.zw - uWall.xy) * 0.5;
+  float wr = 14.0 * uPx;
+  vec2 wq = abs(px - wc) - wh + wr;
+  float wd = length(max(wq, 0.0)) + min(max(wq.x, wq.y), 0.0) - wr;
+  float w = (1.0 - smoothstep(-uPx, uPx, wd)) * uWallOn;
+  premul *= 1.0 - w;  // same as the background: it just hides what's behind it
+  alpha *= 1.0 - w;
+  gl_FragColor = vec4(premul, alpha);
+}`;
+
+// no MSAA: the fill's edge hides under a same-coloured outline whose own edge
+// comes from blurred coverage, so multisampling would cost power for nothing
+const fillRT = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: true });
+
+// colours go straight to the framebuffer, so keep them in sRGB
+const srgb = (hex) => new THREE.Color().setHex(hex, THREE.LinearSRGBColorSpace);
+const compositeMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tFill: { value: fillRT.texture },
+    uRes: { value: new THREE.Vector2(1, 1) }, uPx: { value: 1 }, uLineScale: { value: 1 },
+    uWall: { value: new THREE.Vector4() }, uWallOn: { value: 0 },
+    uLoader: { value: 0 }, uMelt: { value: 0 }, uGoo: { value: 1 },
+    uDot: { value: [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()] },
+    uFillCol: { value: srgb(0xf1f1ee) }, uInkCol: { value: srgb(0x0d0d0e) }, uSilCol: { value: srgb(0xf1f1ee) },
+    uShade: { value: 0.16 },
+  },
+  vertexShader: 'void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: COMPOSITE_FRAG,
+  depthTest: false, depthWrite: false,
+});
+const quadScene = new THREE.Scene();
+const quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+quadScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), compositeMat));
+
+// Rounded cube with an even grid on every face, so twist/bend actually curve the faces.
+function roundedCube(size = 1, radius = 0.13, seg = 40) {
+  const g = new THREE.BoxGeometry(size, size, size, seg, seg, seg);
+  const pos = g.attributes.position, nor = g.attributes.normal;
+  const h = size / 2 - radius, p = new THREE.Vector3(), q = new THREE.Vector3(), n = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    p.fromBufferAttribute(pos, i);
+    q.set(THREE.MathUtils.clamp(p.x, -h, h), THREE.MathUtils.clamp(p.y, -h, h), THREE.MathUtils.clamp(p.z, -h, h));
+    n.subVectors(p, q).normalize();
+    p.copy(q).addScaledVector(n, radius);
+    pos.setXYZ(i, p.x, p.y, p.z);
+    nor.setXYZ(i, n.x, n.y, n.z);
+  }
+  return g;
+}
+
+const BASE_Y = -0.12;
+const rig = new THREE.Group(); scene.add(rig);
+// where the cube would be without backing off from an icky pointer: the
+// distance to the pointer is measured from here, so backing off doesn't feed back
+const home = new THREE.Object3D(); scene.add(home);
+const body = new THREE.Mesh(roundedCube(1, 0.23), fillMat());
+rig.add(body);
+
+// Face: a 2D canvas redrawn every frame, laid on the front face and deformed with it.
+const FACE_PX = 512, FACE_UNITS = 0.8;
+const faceCanvas = document.createElement('canvas');
+faceCanvas.width = faceCanvas.height = FACE_PX;
+const fc = faceCanvas.getContext('2d');
+const faceTex = new THREE.CanvasTexture(faceCanvas);
+faceTex.colorSpace = THREE.SRGBColorSpace;
+faceTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+const faceGeo = new THREE.PlaneGeometry(FACE_UNITS, FACE_UNITS, 24, 24).translate(0, 0, 0.5);
+const faceMat = deformed(new THREE.MeshBasicMaterial({
+  map: faceTex, transparent: true, depthWrite: false,
+  polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, toneMapped: false,
+}), { offset: 0.004, key: 'face' });
+const face = new THREE.Mesh(faceGeo, faceMat);
+face.renderOrder = 2;
+rig.add(face);
+
+// Ears: two small pointed fins growing out of the top, drawn into the same
+// fill pass so the outline wraps body and ears as one shape. Their bases sink
+// into the body. Upright and a little back at rest; they tilt back and splay
+// out, never forward over the face (that's when ears start to read as a pig's).
+// ?noears leaves them off. Length (h) and tip roundness (tipR) come from LOOK.
+const EAR = { x: 0.26, z: -0.04, w: 0.095, d: 0.05, h: 0.14, sink: 0.1, tipIn: 0.55, tipR: 0.004 };
+function earGeometry(side) {
+  // rings up the ear; u runs outward from the middle of the body. The inner edge
+  // stands nearly upright, the outer edge curves in to a tip over the inner half.
+  // The tip is rounded by tipR; much under the outline's blur and the outline
+  // starts to fray into streaks there.
+  const M = 16, pos = [], idx = [], rings = [];
+  const uTip = -EAR.tipIn * EAR.w, R = EAR.tipR;
+  for (const t of [-1, 0, 0.15, 0.3, 0.45, 0.6, 0.72, 0.84, 0.93, 1]) {
+    const k = Math.max(0, t);
+    const uo = EAR.w + (uTip + R - EAR.w) * Math.pow(k, 0.8);
+    const ui = -EAR.w + (uTip - R + EAR.w) * k;
+    rings.push([(uo + ui) / 2, (uo - ui) / 2, Math.max(R * 0.8, EAR.d * Math.pow(1 - k, 0.7)), 0.5 + (t < 0 ? -EAR.sink : t * EAR.h)]);
+  }
+  for (let j = 1; j <= 4; j++) {  // the round cap
+    const a = (j / 4) * Math.PI / 2;
+    rings.push([uTip, R * Math.cos(a), R * 0.8 * Math.cos(a), 0.5 + EAR.h + R * Math.sin(a)]);
+  }
+  for (const [uc, hw, hd, y] of rings) for (let i = 0; i < M; i++) {
+    const a = (i / M) * Math.PI * 2;
+    pos.push(side * (EAR.x + uc + hw * Math.cos(a)), y, EAR.z + hd * Math.sin(a));
+  }
+  for (let r = 0; r < rings.length - 1; r++) for (let i = 0; i < M; i++) {
+    const a = r * M + i, b = r * M + (i + 1) % M, c = a + M, d = b + M;
+    if (side < 0) idx.push(a, b, d, a, d, c); else idx.push(a, d, b, a, c, d);  // mirroring flips the winding
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+const ears = new URLSearchParams(location.search).has('noears') ? [] : [-1, 1].map((side) => {
+  const u = {
+    uEarBase: { value: new THREE.Vector3(side * EAR.x, 0.5, EAR.z) },
+    uEarTilt: { value: new THREE.Vector3() }, uEarSide: { value: side }, uEarH: { value: EAR.h },
+  };
+  const m = new THREE.Mesh(earGeometry(side), fillMat(u));
+  m.userData.u = u;
+  rig.add(m);
+  return m;
+});
+function rebuildEars() {
+  for (const e of ears) {
+    const u = e.userData.u;
+    e.geometry.dispose(); e.geometry = earGeometry(u.uEarSide.value); u.uEarH.value = EAR.h;
+  }
+}
+
+// Point on the deformed body (same maths as the body's vertex shader), so
+// the loader dots stay centred on it while it squashes, leans and twists.
+function deformPoint(x, y, z) {
+  const inf = U.uInflate.value;
+  if (inf) {
+    const l = Math.hypot(x, y, z) || 1;
+    x += (x / l * 0.62 - x) * inf; y += (y / l * 0.62 - y) * inf; z += (z / l * 0.62 - z) * inf;
+  }
+  x *= U.uW.value; z *= U.uH.value;
+  y = (y + 0.5) * U.uH.value - 0.5;
+  const a = U.uTwist.value * y, c = Math.cos(a), sn = Math.sin(a);
+  [x, z] = [c * x + sn * z, -sn * x + c * z];
+  const sq = U.uSq.value;
+  y = (y + 0.5) * sq - 0.5;
+  const inv = 1 / Math.sqrt(sq); x *= inv; z *= inv;
+  const h = y + 0.5;
+  return new THREE.Vector3(x + U.uLean.value * h * h, y, z + U.uLeanZ.value * h * h);
+}
+
+/* dev:start */
+// bump when the defaults change, so saved settings from older builds are dropped once
+const SETTINGS_VERSION = '4';
+try {
+  if (localStorage.getItem('cube.v') !== SETTINGS_VERSION) {
+    Object.keys(localStorage).filter((k) => k.startsWith('cube.')).forEach((k) => localStorage.removeItem(k));
+    localStorage.setItem('cube.v', SETTINGS_VERSION);
+  }
+} catch {}
+/* dev:end */
+/* ---------------------------------------------------------------------------
+   Face drawing (black ink on transparent, 512-unit space centred at 0,0)
+--------------------------------------------------------------------------- */
+const INK = '#00ff00';     // face ink lands in the G channel of the fill pass
+const eyeBuf = document.createElement('canvas'); eyeBuf.width = eyeBuf.height = 512;
+const eb = eyeBuf.getContext('2d');
+
+function pill(ctx, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath(); ctx.roundRect(-w / 2, -h / 2, w, h, r); ctx.fill();
+}
+
+function drawEye(side, time) {
+  const g = eb; // eye buffer, scale 2 → 256-unit space centred
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.clearRect(0, 0, 512, 512);
+  g.setTransform(2, 0, 0, 2, 256, 256);
+  g.fillStyle = INK; g.strokeStyle = INK;
+
+  const per = side < 0 ? V('eL') : V('eR');
+  const H0 = Math.max(V('eyeH'), 1);
+  const hBase = H0 * per;
+  const calm = THREE.MathUtils.clamp(V('calm') - (side > 0 ? V('peek') : 0), 0, 1);  // peek opens the right eye
+  const shut = Math.min(1, Math.max(V('close'), V('blink'), calm));
+  const h = Math.max(hBase * (1 - shut), 11);
+  const squashed = THREE.MathUtils.clamp(1 - h / H0, 0, 1);
+  const w = V('eyeW') * (1 + 0.32 * squashed);
+
+  const swirl = THREE.MathUtils.clamp(V('swirl'), 0, 1);
+  g.globalAlpha = (1 - THREE.MathUtils.clamp((calm - 0.3) / 0.5, 0, 1)) * (1 - swirl);
+  pill(g, w, h, Math.min(w, h) / 2 * V('eyeR'));
+  // swirl: a spinning spiral fades in over the eye, the eyes turning opposite ways
+  if (swirl > 0.01) {
+    g.save(); g.globalAlpha = swirl;
+    g.rotate(time * 9 * side);
+    g.lineWidth = 7; g.lineCap = 'round';
+    const R = Math.min(w, h) / 2 - 3, turns = 2.4;
+    g.beginPath();
+    for (let a = 0; a <= turns * TAU; a += 0.25) { const r = R * a / (turns * TAU); g.lineTo(Math.cos(a) * r, Math.sin(a) * r); }
+    g.stroke(); g.restore();
+    g.globalAlpha = 1 - swirl;
+  }
+  // lids: erase above a sloped line (angry/sad/sleepy)
+  const lidT = V('lidT'), lidA = V('lidA');
+  if (lidT > 0.005 || Math.abs(lidA) > 0.01) {
+    g.globalCompositeOperation = 'destination-out';
+    const y0 = -h / 2 + lidT * h;
+    g.save(); g.translate(0, y0); g.rotate(-side * lidA);
+    g.fillRect(-200, -400, 400, 400);
+    g.restore();
+    g.globalCompositeOperation = 'source-over';
+  }
+  // happy: erase a disc from below, leaving a ^ crescent
+  const hp = V('happy');
+  if (hp > 0.01) {
+    g.globalCompositeOperation = 'destination-out';
+    const rr = w * 0.78;
+    g.beginPath(); g.arc(0, h / 2 + rr - hp * h * 0.78, rr, 0, Math.PI * 2); g.fill();
+    g.globalCompositeOperation = 'source-over';
+  }
+  // catchlight: a small reflection dot in the upper right of an open eye. It's
+  // a light up and to the right of you, so it stays put while the head moves:
+  // turned left, it slides out toward the right edge; turned right, back toward
+  // the middle (never all the way); head down, it rides up; head up, a little down.
+  const shine = THREE.MathUtils.clamp((h - 30) / 40, 0, 1) * (1 - THREE.MathUtils.clamp(V('happy'), 0, 1)) * (1 - calm) * (1 - swirl);
+  if (shine > 0.02) {
+    const C = THREE.MathUtils.clamp, wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+    const turn = C(-wrap(rig.rotation.y) / 0.35, -1, 1), tilt = C(wrap(rig.rotation.x) / 0.22, -1, 1);
+    const dr = Math.min(w, h) * 0.17 * shine;
+    let dx = w * (0.25 + (turn > 0 ? 0.18 : 0.22) * turn), dy = h * (-0.28 - (tilt > 0 ? 0.12 : 0.14) * tilt);
+    // kept inside the eye, sliding round its rounded corner rather than poking out
+    const R = Math.min(w, h) / 2 * V('eyeR'), m = 1;
+    const ix = Math.max(0, w / 2 - dr - m), iy = Math.max(0, h / 2 - dr - m), ir = Math.max(0, R - dr - m);
+    dx = C(dx, -ix, ix); dy = C(dy, -iy, iy);
+    const cx = Math.max(0, ix - ir), cy = Math.max(0, iy - ir);
+    const ox = Math.abs(dx) - cx, oy = Math.abs(dy) - cy;
+    if (ox > 0 && oy > 0 && Math.hypot(ox, oy) > ir) {
+      const k = ir / Math.hypot(ox, oy);
+      dx = Math.sign(dx) * (cx + ox * k); dy = Math.sign(dy) * (cy + oy * k);
+    }
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'destination-out';
+    g.beginPath(); g.arc(dx, dy, dr, 0, Math.PI * 2); g.fill();
+  }
+
+  // calm: eyes closed into a soft ‿, like a content or unwilling dog
+  g.globalCompositeOperation = 'source-over';
+  g.globalAlpha = THREE.MathUtils.clamp((calm - 0.2) / 0.5, 0, 1);
+  if (g.globalAlpha > 0) {
+    const d = 26 * calm;
+    g.lineWidth = 11; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(-w * 0.55, -d * 0.3); g.quadraticCurveTo(0, d, w * 0.55, -d * 0.3); g.stroke();
+  }
+  g.globalAlpha = 1;
+}
+
+// Mouth: only Yawn has one, a dot under the eyes that opens into a round O.
+function drawMouth(ctx) {
+  if (V('mouthOn') < 0.5) return;
+  const o = Math.max(0, V('mO')), r = 6 + Math.max(0, V('mW')) * 0.26 * o;
+  ctx.save();
+  ctx.translate(V('gx') * 0.35, V('gy') * 0.35);
+  ctx.lineWidth = V('mT') * 0.85;
+  ctx.beginPath(); ctx.ellipse(4, 84 + (V('mY') - 92) * 0.5 + r - 6, r * 0.85, r, 0, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+
+// Everything the face drawing reads. When none of it moved by a visible amount,
+// the canvas and its GPU upload are skipped.
+const FACE_KEYS = ['gx', 'gy', 'eLx', 'eRx', 'eyeSep', 'eyeY', 'eyeW', 'eyeH', 'eyeR', 'eL', 'eR', 'close', 'blink',
+  'lidT', 'lidA', 'happy', 'calm', 'peek', 'swirl', 'mouthOn', 'mW', 'mO', 'mY', 'mT'];
+let faceSig = '';
+function drawFace(time) {
+  // spinning spirals change every frame even when nothing else moves
+  const spinning = V('swirl') > 0.02 ? Math.round(time * 30) : 0;
+  const sig = FACE_KEYS.map((k) => Math.round(V(k) * 50)).join() + U.uW.value + U.uH.value + spinning;
+  if (sig === faceSig) return;
+  faceSig = sig;
+  fc.setTransform(1, 0, 0, 1, 0, 0);
+  fc.clearRect(0, 0, FACE_PX, FACE_PX);
+  const s = FACE_PX / 512 * 1.28;
+  fc.setTransform(s, 0, 0, s, FACE_PX / 2, FACE_PX / 2 + 10);
+  fc.scale(1 / U.uW.value, 1 / U.uH.value);
+  fc.fillStyle = INK; fc.strokeStyle = INK;
+  for (const side of [-1, 1]) {
+    drawEye(side, time);
+    const cx = side * V('eyeSep') + V('gx') + V(side < 0 ? 'eLx' : 'eRx'), cy = V('eyeY') + V('gy');
+    fc.drawImage(eyeBuf, cx - 128, cy - 128, 256, 256);
+  }
+  drawMouth(fc);
+  faceTex.needsUpdate = true;
+}
+
+/* ---------------------------------------------------------------------------
+   FX overlay (screen space, anchored to points on the cube)
+--------------------------------------------------------------------------- */
+const particles = [];
+const tmpV = new THREE.Vector3();
+function spawn(type, opts = {}) {
+  const base = { type, t0: clock, life: 1.8, anchor: new THREE.Vector3(0.5, 0.62, 0.3), seed: Math.random(), ...opts };
+  particles.push(base);
+}
+const FX = {
+  z: () => spawn('z', { life: 2.2, anchor: new THREE.Vector3(0.42, 0.55, 0.3) }),
+  q: () => spawn('q', { life: 2.4 }),
+  bang: () => spawn('bang', { life: 1.6, anchor: new THREE.Vector3(0.52, 0.7, 0.3) }),
+  sparkle: () => { for (let i = 0; i < 4; i++) spawn('spark', { life: 1.1, delay: i * 0.12, anchor: new THREE.Vector3((Math.random() < .5 ? -1 : 1) * (0.62 + Math.random() * 0.2), 0.1 + Math.random() * 0.6, 0.3) }); },
+  anger: () => spawn('anger', { life: 2.4, anchor: new THREE.Vector3(0.42, 0.52, 0.5) }),
+  dots: () => spawn('dots', { life: 2.6, anchor: new THREE.Vector3(0, 0.78, 0.2) }),
+  huff: () => spawn('huff', { life: 0.9, anchor: new THREE.Vector3(-0.42, -0.12, 0.55) }),
+  sweat: () => spawn('sweat', { life: 1.8, anchor: new THREE.Vector3(-0.52, 0.42, 0.4) }),
+  stars: () => spawn('stars', { life: 2.4, anchor: new THREE.Vector3(0, 0.66, 0) }),
+};
+// world-space path of the fly in Distracted; after 3s it leaves up and away
+function flyAt(t) {
+  const v = new THREE.Vector3(0.95 * Math.sin(t * 1.7 + 0.6), 0.3 + 0.32 * Math.sin(t * 3.1), 0.7);
+  if (t > 3) { const k = t - 3; v.x += k * k * 3; v.y += k * 1.5; }
+  return v;
+}
+FX.fly = () => spawn('fly', { life: 3.6, path: flyAt });
+const easeOutBack = (t) => 1 + 2.7 * Math.pow(t - 1, 3) + 1.7 * Math.pow(t - 1, 2);
+
+let fxDirty = false;
+function drawFX(unitPx) {
+  const dpr = renderer.getPixelRatio();
+  if (!particles.length && !fxDirty) return;
+  fxDirty = particles.length > 0;
+  fx.setTransform(1, 0, 0, 1, 0, 0);
+  fx.clearRect(0, 0, fxCanvas.width, fxCanvas.height);
+  fx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = fxCanvas.width / dpr, Hh = fxCanvas.height / dpr;
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    const age = clock - p.t0 - (p.delay || 0);
+    if (age > p.life) { particles.splice(i, 1); continue; }
+    if (age < 0) continue;
+    const t = age / p.life;
+    if (p.path) tmpV.copy(p.path(age)); else { tmpV.copy(p.anchor); rig.localToWorld(tmpV); }
+    tmpV.project(camera);
+    let x = (tmpV.x * 0.5 + 0.5) * W, y = (-tmpV.y * 0.5 + 0.5) * Hh;
+    const u = unitPx;
+    const fade = Math.min(1, age * 6) * (1 - Math.max(0, (t - 0.75) / 0.25));
+    fx.save(); fx.globalAlpha = fade; fx.fillStyle = '#f4f4f4'; fx.strokeStyle = '#f4f4f4';
+    fx.lineCap = 'round'; fx.lineJoin = 'round';
+    switch (p.type) {
+      case 'z': {
+        x += u * (0.25 * t + 0.05 * Math.sin(age * 4)); y -= u * 0.45 * t;
+        fx.font = `600 ${u * (0.12 + 0.12 * t)}px -apple-system, system-ui`;
+        fx.fillText('z', x, y); break;
+      }
+      case 'q': case 'bang': {
+        const s = easeOutBack(Math.min(1, age * 3.2));
+        fx.translate(x, y); fx.rotate(Math.sin(age * 5) * 0.12 * (1 - t)); fx.scale(s, s);
+        fx.font = `700 ${u * 0.3}px -apple-system, system-ui`; fx.textAlign = 'center';
+        fx.fillText(p.type === 'q' ? '?' : '!', 0, 0); break;
+      }
+      case 'fly': {
+        const flap = Math.sin(age * 60) > 0 ? 1 : 0.55;
+        fx.beginPath(); fx.arc(x, y, u * 0.022, 0, Math.PI * 2); fx.fill();
+        fx.globalAlpha = fade * 0.6;
+        fx.beginPath(); fx.ellipse(x - u * 0.022, y - u * 0.03 * flap, u * 0.018, u * 0.028 * flap, -0.5, 0, Math.PI * 2); fx.fill();
+        fx.beginPath(); fx.ellipse(x + u * 0.022, y - u * 0.03 * flap, u * 0.018, u * 0.028 * flap, 0.5, 0, Math.PI * 2); fx.fill();
+        break;
+      }
+      case 'huff': {
+        fx.lineWidth = u * 0.018;
+        for (const k of [0, 1]) {
+          const px = x - u * (0.06 + 0.14 * t + k * 0.05), py = y + (k ? 1 : -1) * u * 0.035;
+          fx.beginPath(); fx.arc(px, py, u * (0.025 + 0.02 * t), Math.PI * 0.6, Math.PI * 1.4); fx.stroke();
+        }
+        break;
+      }
+      case 'spark': {
+        const s = u * 0.07 * Math.sin(Math.PI * t);
+        fx.translate(x, y); fx.rotate(age * 2); fx.beginPath();
+        for (let k = 0; k < 4; k++) {
+          const a = k * Math.PI / 2;
+          fx.lineTo(Math.cos(a) * s, Math.sin(a) * s);
+          fx.lineTo(Math.cos(a + Math.PI / 4) * s * 0.28, Math.sin(a + Math.PI / 4) * s * 0.28);
+        }
+        fx.closePath(); fx.fill(); break;
+      }
+      case 'anger': {
+        const s = u * 0.075 * easeOutBack(Math.min(1, age * 4)) * (1 + 0.15 * Math.max(0, Math.sin(age * 14)));
+        fx.translate(x, y); fx.lineWidth = u * 0.022;
+        for (let k = 0; k < 4; k++) {
+          fx.save(); fx.rotate(k * Math.PI / 2); fx.beginPath();
+          fx.moveTo(s * 0.25, -s); fx.quadraticCurveTo(s * 0.25, -s * 0.25, s, -s * 0.25); fx.stroke(); fx.restore();
+        }
+        break;
+      }
+      case 'dots': {
+        for (let k = 0; k < 3; k++) {
+          const b = Math.max(0, Math.sin(age * 7 - k * 0.9));
+          fx.beginPath(); fx.arc(x + (k - 1) * u * 0.1, y - b * u * 0.05, u * 0.026, 0, Math.PI * 2); fx.fill();
+        }
+        break;
+      }
+      case 'stars': {
+        // three sparkles on a flat orbit over the head; the ones behind are smaller
+        for (let k = 0; k < 3; k++) {
+          const a = age * 4.2 + k * TAU / 3, depth = 0.75 + 0.25 * Math.sin(a);
+          const s = u * 0.065 * depth;
+          fx.save(); fx.translate(x + Math.cos(a) * u * 0.34, y - u * 0.05 + Math.sin(a) * u * 0.07); fx.rotate(age * 3);
+          fx.beginPath();
+          for (let j = 0; j < 4; j++) {
+            const b = j * Math.PI / 2;
+            fx.lineTo(Math.cos(b) * s, Math.sin(b) * s);
+            fx.lineTo(Math.cos(b + Math.PI / 4) * s * 0.3, Math.sin(b + Math.PI / 4) * s * 0.3);
+          }
+          fx.closePath(); fx.fill(); fx.restore();
+        }
+        break;
+      }
+      case 'sweat': {
+        y += u * 0.12 * t * t;
+        const s = u * 0.06;
+        fx.translate(x, y); fx.beginPath();
+        fx.moveTo(0, -s * 1.4); fx.quadraticCurveTo(s, 0, 0, s * 0.8); fx.quadraticCurveTo(-s, 0, 0, -s * 1.4);
+        fx.fill(); break;
+      }
+    }
+    fx.restore();
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Expressions. keys: [time, {param: target, fx: name}, preset?]
+   proc(t, add) layers procedural motion (waves, shakes) on top.
+--------------------------------------------------------------------------- */
+const TAU = Math.PI * 2;
+const env = (t, a, b, ramp = 0.25) => Math.max(0, Math.min(1, (t - a) / ramp, (b - t) / ramp));
+
+const EXPRESSIONS = [
+  {
+    name: 'Hello', dur: 3.4,
+    keys: [
+      [0, { sq: 0.93, y: -0.02 }],
+      [0.14, { sq: 1.05, y: 0.04, happy: 0.85, eyeH: 84, eyeW: 72, rz: -0.07, ry: 0.18, ears: [-0.1, -0.1, 0] }],
+      [0.5, { sq: 1, y: 0 }],
+      [2.6, { happy: 0, eyeH: 112, eyeW: 64, rz: 0, ry: 0, ears: [0.1, 0, 0] }],
+    ],
+    proc(t, add) {
+      const e = env(t, 0.35, 2.5, 0.2);
+      add('rz', Math.sin(t * 13 + 1) * 0.018 * e);
+      // the ears wave, one after the other
+      add('eLO', Math.sin(t * 13) * 0.28 * e); add('eRO', -Math.sin(t * 13) * 0.28 * e);
+    },
+  },
+  {
+    // the head turns slightly left, as if pointing an ear at the screen,
+    // while the eyes stay on you
+    name: 'Listening', dur: 3.8,
+    keys: [
+      [0.25, { ry: -0.4, rz: 0.1, z: 0.06, eyeH: 120, eyeW: 68, gx: 16, scale: 1.02 }, 'body'],
+      [0.25, { rx: 0 }, 'face'],  // nods follow more tightly
+      // the near ear pricks up and swivels toward the sound, the other relaxes
+      [0.2, { earL: [-0.12, -0.18, -0.55], earR: [0.25, 0.4, 0.3] }],
+      [3.0, { ry: 0, rz: 0, z: 0, eyeH: 112, eyeW: 64, gx: 0, scale: 1, ears: [0.1, 0, 0] }],
+    ],
+    // one nod, after it has settled into listening; timing varies each time
+    start() {
+      this.nods = [{ at: 1.4 + Math.random() * 0.6, count: Math.random() < 0.6 ? 2 : 1, amp: 0.17 + Math.random() * 0.07 }];
+    },
+    proc(t, add) {
+      for (const n of this.nods) {
+        const ph = (t - n.at) / 0.24;  // one quick dip per 0.24s
+        if (ph > 0 && ph < n.count) add('rx', Math.sin(Math.PI * (ph % 1)) * n.amp);
+      }
+      const e = env(t, 0.5, 2.9, 0.3);
+      // tiny re-aims, like it's zeroing in on the sound; the listening ear too
+      add('ry', Math.sin(t * 1.9) * 0.035 * e);
+      add('rz', Math.sin(t * 1.3 + 1) * 0.02 * e);
+      add('eLT', Math.sin(t * 3.1) * 0.12 * e); add('eLB', Math.max(0, Math.sin(t * 7.3 - 2)) ** 8 * 0.3 * e);
+    },
+  },
+  {
+    // nod of agreement: three clear nods, bigger and quicker than Listening's
+    name: 'Agree', dur: 2.4,
+    keys: [
+      [0, { ry: 0.1, happy: 0.35, eyeH: 100 }, 'body'],
+      [0, { rx: 0 }, 'fast'],
+      [1.9, { ry: 0, happy: 0, eyeH: 112 }],
+    ],
+    proc(t, add) {
+      const ph = (t - 0.2) / 0.3;  // one nod per 0.3s
+      if (ph > 0 && ph < 3) {
+        const dip = Math.sin(Math.PI * (ph % 1));
+        add('rx', dip * 0.26); add('sq', -dip * 0.03); add('gy', dip * 6);
+        add('eLB', dip * 0.25); add('eRB', dip * 0.25);
+      }
+    },
+  },
+  {
+    // disappointed "no": droopy eyes, slow side-to-side shake that fades, a sigh
+    name: 'Disagree', dur: 3.0,
+    keys: [
+      [0, { lidA: -0.32, lidT: 0.22, eyeH: 96, gy: 10, rx: 0.08, fx: 'huff', ears: [0.25, 0.6, 0.1] }, 'body'],
+      [0, { ry: 0 }, 'fast'],
+      [2.4, { lidA: 0, lidT: 0, eyeH: 112, gy: 0, rx: 0, ears: [0.1, 0, 0] }],
+    ],
+    proc(t, add) {
+      const k = t - 0.3;
+      if (k > 0 && k < 1.9) {
+        const decay = 1 - k / 1.9;
+        add('ry', Math.sin(k * 10) * 0.3 * decay);
+        add('rz', Math.sin(k * 10 + 0.6) * 0.03 * decay);
+        add('eLO', Math.sin(k * 10 + 1.2) * 0.2 * decay); add('eRO', -Math.sin(k * 10 + 1.2) * 0.2 * decay);
+      }
+    },
+  },
+  {
+    name: 'Thinking', dur: 4.6,
+    keys: [
+      [0, { gx: -30, gy: -30, rz: 0.11, ry: -0.38, eL: 0.82, lidT: 0.12, fx: 'dots', earL: [0.05, 0.3, 0.5], earR: [-0.05, -0.1, 0] }],
+      [1.5, { gx: 28, gy: -32, ry: 0.32, rz: -0.06, eL: 1, eR: 0.82, earL: [-0.05, -0.1, 0], earR: [0.05, 0.3, 0.5] }],
+      [3.3, { gx: 0, gy: 0, ry: 0, rz: 0, eR: 1, lidT: 0, ears: [0.1, 0, 0] }],
+    ],
+    // a slow twitch in the ear that's turned out, as if mulling it over
+    proc(t, add) { add(t < 1.5 ? 'eLB' : 'eRB', Math.max(0, Math.sin(t * 4.2)) ** 10 * 0.25); },
+  },
+  {
+    name: 'Working', dur: 3.8,
+    keys: [
+      [0, { ry: -0.35, sq: 0.94, gx: -18, eyeH: 96, ears: [0.45, 0.15, 0] }],
+      [0.28, { ry: TAU, y: 0.08, sq: 1.04, gx: 22, eyeH: 104, fx: 'dots' }, 'drift'],
+      [2.4, { y: 0, sq: 1, gx: 0, eyeH: 112, ears: [0.1, 0, 0] }],
+    ],
+    proc(t, add) { add('twist', THREE.MathUtils.clamp(-P.ry.vel * 0.06, -0.35, 0.35)); },
+    end() { if (P.ry.v > Math.PI) P.ry.v -= TAU; },  // unwind the turn, if it got that far
+  },
+  {
+    // spins round like Working while shrinking into a ball, which melts into
+    // three dots like liquid; the dots bounce in a wave while it loads, then run
+    // back together into a ball that swells into the cube as it spins to face you.
+    // wrapUp: where that coming back starts (setState's finish skips to it)
+    name: 'Loading', dur: 6.0, wrapUp: 4.0,
+    keys: [
+      [0, { ry: -0.3, sq: 0.92 }, 'fast'],                                  // wind-up
+      [0.2, { ry: Math.PI, sq: 1, inflate: 1, scale: 0.5, ears: [0.6, 0.2, 0] }, 'body'],  // spins round as it shrinks into a ball
+      [0.5, { dR: 1 }, 'pop'],
+      [0.5, { scale: 0.04 }, 'melt'],                                       // the ball melts...
+      [0.6, { dSpread: 1 }, 'spread'],                                      // ...and pulls apart into dots
+      [1.1, { dBounce: 1 }, 'slow'],
+      [4.0, { dBounce: 0 }, 'fast'],
+      [4.1, { dSpread: 0 }, 'spread'],                                      // dots run back together
+      [4.25, { scale: 0.5 }, 'melt'],                                       // into a ball
+      [4.45, { inflate: 0.17, scale: 1, ry: TAU, ears: [0.1, 0, 0] }, 'body'],  // that swells back into the cube as it spins to face you
+      [4.5, { dR: 0 }, 'body'],
+    ],
+    end() { if (P.ry.v > Math.PI) P.ry.v -= TAU; },  // unwind the turn, if it got that far
+  },
+  {
+    // happy squint with a little chuckle
+    name: 'Grin', dur: 3.0,
+    keys: [
+      [0, { sq: 0.94 }, 'fast'],
+      [0.15, { sq: 1.04, rz: -0.06, happy: 0.3, eyeH: 96, fx: 'sparkle', ears: [-0.05, 0.12, 0] }],
+      [2.3, { sq: 1, rz: 0, happy: 0, eyeH: 112, ears: [0.1, 0, 0] }],
+    ],
+    proc(t, add) {
+      const e = env(t, 0.4, 2.2, 0.2);
+      add('y', Math.abs(Math.sin(t * 11)) * 0.015 * e);
+      add('eLO', Math.abs(Math.sin(t * 11)) * 0.12 * e); add('eRO', Math.abs(Math.sin(t * 11)) * 0.12 * e);
+      add('rz', Math.sin(t * 5.5) * 0.02 * e);
+    },
+  },
+  {
+    name: 'Wink', dur: 2.2,
+    keys: [
+      [0, { rz: -0.06, ry: 0.12, eyeH: 104 }],
+      [0.15, { eR: 0.08, fx: 'sparkle', earR: [0.45, 0.3, 0] }, 'snap'],
+      [0.75, { eR: 1, earR: [0.1, 0, 0] }],
+      [1.5, { rz: 0, ry: 0, eyeH: 112 }],
+    ],
+  },
+  {
+    name: 'Laugh', dur: 3.0,
+    keys: [
+      [0, { rx: -0.14, happy: 1, eyeH: 74, eyeW: 82 }],
+      [2.3, { rx: 0, happy: 0, eyeH: 112, eyeW: 64 }],
+    ],
+    proc(t, add) {
+      const e = env(t, 0.1, 2.3, 0.2);
+      const b = Math.abs(Math.sin(t * 17));
+      add('y', b * 0.045 * e); add('sq', (b - 0.5) * 0.07 * e);
+      add('rz', Math.sin(t * 8.5) * 0.035 * e);
+      add('eLO', (0.15 + b * 0.2) * e); add('eRO', (0.15 + b * 0.2) * e);
+    },
+  },
+  {
+    name: 'Surprised', dur: 2.8,
+    keys: [
+      [0, { sq: 0.88, eyeH: 70, y: -0.02, ears: [0.35, 0.35, 0] }, 'fast'],
+      [0.13, { sq: 1.2, y: 0.14, rx: -0.1, inflate: 0.3, eyeH: 112, eyeW: 102, eyeR: 1, eyeY: -44, fx: 'bang', ears: [-0.15, -0.22, 0] }],
+      [0.55, { sq: 1.03, y: 0.03 }],
+      [2.0, { sq: 1, y: 0, rx: 0, inflate: 0.17, eyeH: 112, eyeW: 64, eyeR: 0.92, eyeY: -34, ears: [0.1, 0, 0] }],
+    ],
+  },
+  {
+    name: 'Confused', dur: 3.2,
+    keys: [
+      [0, { sq: 0.92, rz: 0.14, eyeW: 52, eyeH: 54, eyeR: 1, gx: 10, gy: -6, fx: 'q', earL: [-0.1, -0.2, 0], earR: [0.3, 1.0, 0.3] }],
+      [0.35, { sq: 1 }],
+      [2.4, { rz: 0, eyeW: 64, eyeH: 112, eyeR: 0.92, gx: 0, gy: 0, ears: [0.1, 0, 0] }],
+    ],
+    // the upright ear swivels, unsure where to listen
+    proc(t, add) { add('eLT', Math.sin(t * 5) * 0.35 * env(t, 0.4, 2.3, 0.3)); },
+  },
+  {
+    // "no thanks": nose up, head turned away, eyes shut in a soft ‿;
+    // sneaks one side-eye back at you, then turns away again
+    name: 'Unwilling', dur: 3.8,
+    keys: [
+      [0.3, { ry: -0.65, rx: -0.2, rz: 0.06, calm: 1, fx: 'huff', ears: [0.7, 0.55, 0.2] }, 'body'],
+      [1.7, { ry: -0.45, calm: 0, eyeH: 64, gx: 26, lidT: 0.3, earR: [0.2, 0.2, -0.6] }],
+      [2.2, { ry: -0.72, calm: 1, gx: 0, lidT: 0, eyeH: 112, fx: 'huff', earR: [0.7, 0.55, 0.2] }],
+      [3.1, { ry: 0, rx: 0, rz: 0, calm: 0, ears: [0.1, 0, 0] }],
+    ],
+  },
+  {
+    name: 'Sad', dur: 4.0,
+    keys: [
+      [0, { sq: 0.92, y: -0.04, rx: 0.24, scale: 0.97, gy: 26, lidA: -0.42, lidT: 0.22, eyeH: 94, ears: [0.3, 1.0, 0.15] }, 'slow'],
+      [1.7, { sq: 0.86, ears: [0.35, 1.15, 0.15] }, 'slow'],
+      [2.3, { sq: 0.93, fx: 'sweat' }, 'slow'],
+      [3.2, { sq: 1, y: 0, rx: 0, scale: 1, gy: 0, lidA: 0, lidT: 0, eyeH: 112, ears: [0.1, 0, 0] }],
+    ],
+  },
+  {
+    name: 'Angry', dur: 3.2,
+    keys: [
+      // wind up back, then head down and push forward like a ram
+      [0, { rx: -0.08, z: -0.05, sq: 1.04, ears: [0.3, 0.1, 0] }],
+      [0.22, { rx: 0.24, rz: 0.07, z: 0.12, leanZ: 0.06, scale: 1.03, sq: 0.93, inflate: 0.26, lidA: 0.55, lidT: 0.26, eyeW: 72, eyeH: 96, eyeR: 0.7, fx: 'anger', ears: [1.0, 0.5, -0.3] }],
+      [2.5, { rx: 0, rz: 0, z: 0, leanZ: 0, scale: 1, sq: 1, inflate: 0.17, lidA: 0, lidT: 0, eyeW: 64, eyeH: 112, eyeR: 0.92, ears: [0.1, 0, 0] }],
+    ],
+    proc(t, add) {
+      const e = env(t, 0.3, 2.3, 0.1);
+      add('x', Math.sin(t * 61) * 0.009 * e); add('rz', Math.sin(t * 47) * 0.012 * e);
+      add('eLO', Math.sin(t * 53) * 0.05 * e); add('eRO', Math.sin(t * 59) * 0.05 * e);
+    },
+  },
+  {
+    // drained: slumps, heavy lids, two long sighs
+    name: 'Tired', dur: 4.0,
+    keys: [
+      [0, { sq: 0.9, y: -0.04, rx: 0.14, scale: 0.98, lidT: 0.45, eyeH: 96, ears: [0.25, 0.7, 0.1] }, 'slow'],
+      [0.9, { sq: 1.02, rx: 0.06, lidT: 0.38 }, 'slow'],
+      [1.6, { sq: 0.84, rx: 0.2, lidT: 0.55, fx: 'sweat', ears: [0.3, 0.9, 0.1] }, 'slow'],
+      [2.4, { sq: 0.92 }, 'slow'],
+      [2.9, { sq: 0.82, lidT: 0.6 }, 'slow'],
+      [3.4, { sq: 1, y: 0, rx: 0, scale: 1, lidT: 0, eyeH: 112, ears: [0.1, 0, 0] }],
+    ],
+    proc(t, add) { add('rz', Math.sin(t * 1.1) * 0.03 * env(t, 0.2, 3.4, 0.5)); },
+  },
+  {
+    // big stretchy yawn, a little mouth smack, then sleepy blinks
+    name: 'Yawn', dur: 3.6,
+    keys: [
+      [0, { lidT: 0.3, sq: 0.95 }, 'slow'],
+      // a mouth shows up as a small dot...
+      [0.15, { mouthOn: 1, mW: 18, mO: 0.35, mY: 100 }, 'face'],
+      [0.4, { close: 1 }, 'face'],
+      // ...opens into the big yawn...
+      [0.4, { sq: 1.15, y: 0.04, rx: -0.2, mW: 115, mO: 1, ears: [0.6, 0.45, 0] }, 'slow'],
+      // ...closes back down to the dot with a little smack...
+      [1.6, { sq: 0.92, y: 0, rx: 0.05, mW: 18, mO: 0.35, ears: [0.2, 0.3, 0] }, 'body'],
+      [1.9, { mO: 0.55 }, 'fast'],
+      [2.05, { mO: 0.35 }],
+      [2.3, { close: 0, lidT: 0.25, sq: 1 }, 'slow'],
+      // ...and goes away
+      [2.5, { mouthOn: 0, mW: 0, mO: 0, mY: 92 }, 'face'],
+      [3.0, { lidT: 0, ears: [0.1, 0, 0] }],
+    ],
+  },
+  {
+    // a fly drifts past; eyes and head follow it, then snap back to you
+    name: 'Distracted', dur: 4.0,
+    keys: [
+      [0, { fx: 'fly' }],
+      [3.15, { eyeH: 124, eyeW: 70 }, 'fast'],
+      [3.6, { eyeH: 112, eyeW: 64 }],
+    ],
+    proc(t, add) {
+      const e = env(t, 0.15, 3.1, 0.15), f = flyAt(t);
+      add('gx', THREE.MathUtils.clamp(f.x * 40, -38, 38) * e);
+      add('gy', THREE.MathUtils.clamp(-(f.y - 0.05) * 45, -30, 30) * e);
+      add('ry', f.x * 0.4 * e);
+      add('rx', -(f.y - 0.05) * 0.25 * e);
+      // both ears swivel after it, the near one more
+      add('eLT', THREE.MathUtils.clamp(-f.x * 0.9, -0.7, 0.7) * e); add('eRT', THREE.MathUtils.clamp(f.x * 0.9, -0.7, 0.7) * e);
+    },
+  },
+  {
+    // a wall slides in; it scoots behind it, half hidden, and peeks out twice
+    name: 'Hiding', dur: 6.8,
+    keys: [
+      // no turn and no bend: just slides and tilts, so the face stays flat to you
+      [0, { wall: 1 }, 'snap'],
+      [0.1, { eyeH: 124, eyeW: 70, ears: [0.65, 0.25, 0] }, 'fast'],
+      [0.15, { z: -0.08, scale: 0.88, sq: 0.97, eyeH: 104, eyeW: 66 }, 'body'],  // steps back where it stands
+      [0.2, { gx: -34, gy: 4 }, 'gaze'],                                           // glances at the wall
+      [0.55, { x: -0.75 }, 'body'],                                                 // then slides behind the wall
+      [1.0, { gx: 10, gy: 0 }, 'gaze'],                                             // and looks back at you
+      // hesitant peek: edges out a little, thinks better of it, then slowly leans out
+      [1.4, { x: -0.62, rz: -0.08 }, 'slow'],
+      [1.95, { x: -0.74, rz: -0.02 }, 'slow'],
+      [2.3, { x: -0.32, rz: -0.3, gx: -8, gy: -4, ears: [0.05, -0.05, 0] }, 'drift'],
+      [3.6, { x: -0.8, rz: 0, gx: 12, ears: [0.65, 0.25, 0] }, 'face'],  // ducks back, no overshoot
+      [3.65, { blink: 1 }, 'blink'], [3.75, { blink: 0 }, 'blink'],
+      [4.3, { x: -0.4, rz: -0.24, gx: -6, gy: 2, ears: [0.3, 0.1, 0] }, 'drift'],  // smaller, shyer peek
+      [5.3, { x: 0, rz: 0, gx: 0, gy: 0, ears: [0.1, 0, 0] }, 'body'],                                  // comes out
+      [5.75, { z: 0, scale: 1, sq: 1, eyeH: 112, eyeW: 64 }, 'body'],                // and steps forward again
+      [6.5, { wall: 0 }, 'snap'],  // only once it's clear of the edge
+    ],
+    proc(t, add) {
+      // tiny nervous shuffle while tucked in
+      const e = env(t, 0.9, 5.2, 0.2);
+      add('x', Math.sin(t * 5.3) * 0.006 * e);
+      // cancel most of the usual drag-bend from sliding sideways, so it doesn't stretch
+      add('lean', THREE.MathUtils.clamp(P.x.vel * 0.5, -0.25, 0.25) * 0.85);
+    },
+  },
+  {
+    // dog-style: fights sleep (head droops then jerks up, twice), flops down
+    // with a sigh, breathes slow with a dream twitch, then lazily lifts its head
+    name: 'Sleepy', dur: 6.8,
+    noBlink: true,
+    keys: [
+      [0, { lidT: 0.4, gy: 10, eyeH: 96, ears: [0.2, 0.45, 0] }, 'slow'],
+      [2.4, { sq: 0.84, y: -0.07, rx: 0.16, close: 1, lidT: 0.5, gy: 0, fx: 'huff', ears: [0.35, 1.0, 0.1] }, 'body'],
+      [2.65, { sq: 0.88 }, 'slow'],
+      [3.0, { fx: 'z' }], [4.1, { fx: 'z' }], [5.2, { fx: 'z' }],
+      [5.8, { close: 0, lidT: 0.45, sq: 1, y: 0, rx: 0.04 }, 'slow'],
+      [5.8, { ears: [0.1, 0, 0] }],
+      [6.4, { lidT: 0, rx: 0, eyeH: 112 }, 'face'],
+    ],
+    start() {
+      const b1 = 0.2 + Math.random() * 0.2;
+      this.bobs = [b1, b1 + 0.8 + Math.random() * 0.25];
+    },
+    proc(t, add) {
+      // fighting sleep: slow droop with eyes closing, then a quick jerk back up
+      for (const b of this.bobs) {
+        const p = t - b;
+        if (p > 0 && p < 0.55) { const k = (p / 0.55) ** 2; add('rx', 0.22 * k); add('close', 0.7 * k); }
+        else if (p >= 0.55 && p < 0.8) { const k = 1 - (p - 0.55) / 0.25; add('rx', 0.22 * k - 0.04 * (1 - k)); add('close', 0.7 * k); }
+      }
+      // asleep: slow deep breaths, and a little dream twitch
+      const e = env(t, 2.7, 5.7, 0.4);
+      add('sq', Math.sin(t * 2.2) * 0.03 * e);
+      add('y', Math.sin(t * 2.2) * 0.008 * e);
+      const twitch = Math.exp(-(((t - 4.6) * 9) ** 2));
+      add('rz', twitch * 0.025); add('sq', twitch * -0.03); add('eRB', twitch * 0.35);
+      // the ears sag a little more each time it nods off
+      for (const b of this.bobs) { const p = t - b; if (p > 0 && p < 0.8) { const k = Math.sin(Math.PI * Math.min(1, p / 0.8)); add('eLO', 0.3 * k); add('eRO', 0.3 * k); } }
+    },
+  },
+];
+const IDLE = { name: 'Idle', dur: Infinity, keys: [], follow: true };
+
+// keys may be listed out of order; play them in time order
+for (const e of EXPRESSIONS) e.keys.sort((a, b) => a[0] - b[0]);
+
+/* ---------------------------------------------------------------------------
+   Runner
+--------------------------------------------------------------------------- */
+let clock = 0, cur = IDLE, curT = 0, idleUntil = 0;
+let nextBlink = 1.5, blinkEnd = -1, nextSaccade = 0.5;
+let glanceEnd = -1, glanced = false;
+const faceC = new THREE.Vector3(), faceE = new THREE.Vector3(), faceH = new THREE.Vector3();  // face centre, edge, and centre without the ick backing off
+const pointer = { x: 0, y: 0, active: false, t: 0, px: 0, py: 0 };  // t: when it last moved; px, py: where, in CSS px
+// When the pointer stops: after STILL_GLANCE seconds Oby looks up at you once,
+// as if waiting, then back at the pointer; after STILL_LET_GO it gives up and
+// looks around on its own. Any movement picks the pointer up again.
+const STILL_GLANCE = 1.2, STILL_LET_GO = 6;
+// Shrinking back from a pointer near the face: how close it is (k) and the
+// direction to it. It builds up over ICK_IN seconds and lets go over ICK_OUT,
+// and only a pointer that lingers or moves slowly counts: from ICK_SLOW px/s
+// it weakens, gone by ICK_FAST, so a quick swipe across the face is just
+// followed. It moves the body directly, not through the springs, so it can't wobble.
+const ick = { k: 0, x: 0, y: 0 }, ICK_IN = 0.5, ICK_OUT = 0.35, ICK_TURN = 0.7, ICK_SLOW = 20, ICK_FAST = 130;
+// how strongly it reacts, all of it at once: backing off, the squint, the side-eye, the ears
+const ICK_GAIN = 1.3;
+// how fast the pointer moves (px/s), from the distance it covers each frame
+let pointerTravel = 0, pointerSpeed = 0;
+let earPerk = 0, nextFlick = 3;  // ears: how pricked up they are (eased), when one next flicks
+// Attention: Oby watches the pointer for a while, then minds its own business
+// (looks around, fidgets), back and forth, each for a random stretch: about an
+// eighth of the time watching. Moving the pointer doesn't end a break. The pointer
+// coming close to its face, or a poke, does. A click (oby.notice) only draws a
+// glance: it looks, then goes back to what it was doing. While the
+// host holds its attention (oby.attend(true), e.g. the pointer over something
+// Oby is presenting) it watches the whole time. Back from being paused (e.g.
+// hidden behind another view) it starts with a break.
+const WATCH = [2, 4], WANDER = [14, 26], NOTICE = [0.8, 1.4], AFTER_PAUSE = WANDER, AFTER_HOLD = [1, 3], NOTICE_NEAR = 1.4;
+const rand = (a, b) => (a === b ? a : a + Math.random() * (b - a));  // a === b also covers Infinity (quiet)
+const attn = { watching: false, until: rand(...AFTER_PAUSE), held: false };
+function watch(secs) {
+  attn.watching = true; attn.until = clock + (secs ?? rand(...WATCH));
+  glanced = false; glanceEnd = -1;
+  if (fidget && cur !== IDLE) { particles.length = 0; rest(); }  // drop the fidget, look
+}
+function wander(secs) { attn.watching = false; attn.until = clock + (secs ?? rand(...WANDER)); }
+
+function applyKey(k) {
+  const [, vals, preset] = k;
+  for (const [name, val] of Object.entries(vals)) {
+    if (name === 'fx') { FX[val]?.(); continue; }
+    if (name === 'ears' || name === 'earL' || name === 'earR') {
+      // [back, out, turn]; ears keep their own spring whatever the key's preset
+      for (const c of name === 'ears' ? 'LR' : name[3]) val.forEach((v, i) => { if (v != null) P['e' + c + 'BOT'[i]].base = v; });
+      continue;
+    }
+    const s = P[name]; if (!s) continue;
+    s.base = val;
+    if (preset) [s.k, s.d] = PRESET[preset];
+  }
+}
+function play(expr) {
+  fidget = false;
+  if (cur !== IDLE) {
+    const completed = curT > cur.dur;
+    if (oneShot?.expr === cur) { oneShot.resolve(completed); oneShot = null; }
+    emit('end', { name: cur.name, completed });
+  }
+  cur.end?.();
+  resetTargets();
+  cur = expr; curT = 0;
+  expr.start?.();
+  if (expr !== IDLE) { particles.length = 0; emit('expression', { name: expr.name }); }
+  for (const k of expr.keys) if (k[0] <= 0) applyKey(k);
+  showPlaying();
+}
+function goIdle(hold) { play(IDLE); idleUntil = clock + hold; }
+// Skip ahead to where the expression playing wraps up (its wrapUp time), the
+// keys on the way applied at once, so it comes back from wherever it is now
+function wrapUp() {
+  const at = cur.wrapUp;
+  if (at == null || curT >= at) return;
+  for (const k of cur.keys) if (k[0] > curT && k[0] < at) applyKey(k);
+  curT = at - 1e-4;  // the key at wrapUp itself is applied on the next step
+}
+
+/* ---------------------------------------------------------------------------
+   States: what Oby does on its own until the app says otherwise. Each is a
+   pool of expressions with a pause between them (seconds); in the pauses it
+   idles: breathes, blinks, follows the pointer. Change them here.
+--------------------------------------------------------------------------- */
+const STATES = {
+  idle:      { pool: ['Distracted', 'Wink', 'Grin', 'Yawn', 'Hiding', 'Sleepy'], gap: [7, 16] },
+  listening: { pool: ['Listening'], gap: [0, 0] },
+  thinking:  { pool: ['Thinking'], gap: [0, 0] },
+  working:   { pool: ['Working', 'Loading'], gap: [0.3, 0.8] },
+  loading:   { pool: ['Loading'], gap: [0, 0] },
+  quiet:     { pool: [], gap: [Infinity, Infinity] },  // idles only, never acts on its own
+};
+let state = 'idle', oneShot = null, lastPicked = null;
+let fidget = false;  // the running expression is idle fidgeting, cut short when Oby starts watching
+const findExpr = (name) => EXPRESSIONS.find((e) => e.name.toLowerCase() === String(name).toLowerCase());
+function nextFromState() {
+  const pool = STATES[state].pool.map(findExpr).filter(Boolean);
+  if (!pool.length) { goIdle(Infinity); return; }
+  let e = pool[Math.floor(Math.random() * pool.length)];
+  if (pool.length > 1 && e === lastPicked) e = pool[(pool.indexOf(e) + 1) % pool.length];
+  lastPicked = e;
+  play(e);
+  fidget = state === 'idle';
+}
+// after an expression: pause as long as the state says, then pick the next
+function rest() { const [a, b] = STATES[state].gap; goIdle(rand(a, b)); }
+function enterState() { if (STATES[state].gap[0] === 0) nextFromState(); else rest(); }
+
+/* ---------------------------------------------------------------------------
+   The API the app calls. In the page: window.oby. From a native WKWebView:
+   evaluateJavaScript("oby.setState('thinking')"). From a parent page around
+   an <iframe>: postMessage({ setState: 'thinking' }), { play: 'Agree' },
+   { pause: true }, { look: { x, y } } or { look: null }, { notice: { x, y } },
+   { attend: true }. Events go out to oby.on() listeners, to
+   webkit.messageHandlers.oby (native), and to the parent page as { oby: event, ... }.
+--------------------------------------------------------------------------- */
+const listeners = {};
+// Events go out once the current step is done, so a listener sees Oby settled
+// and can safely call it back (e.g. play something when an expression ends).
+function emit(event, data = {}) {
+  queueMicrotask(() => {
+    // a throwing listener mustn't take the others (or the posts) down with it
+    for (const fn of listeners[event] || []) try { fn(data); } catch (err) { console.error(err); }
+    const msg = { oby: event, ...data };
+    window.webkit?.messageHandlers?.oby?.postMessage(msg);
+    if (window.parent !== window) window.parent.postMessage(msg, '*');
+  });
+}
+const oby = {
+  states: Object.keys(STATES),
+  expressions: EXPRESSIONS.map((e) => e.name),
+  get state() { return state; },
+  get playing() { return cur === IDLE ? null : cur.name; },
+  // Switch what Oby does on its own. Waits for an expression started with
+  // play() to finish first, unless { now: true }. Asking for the state it's
+  // already in does nothing, unless { now: true } (then it starts over).
+  // { finish: true }: whatever is playing comes to its end first, skipping ahead
+  // to where it wraps up if it has one (Loading: the dots running back together
+  // into Oby); 'end' fires when it's done.
+  setState(name, { now = false, finish = false } = {}) {
+    name = String(name).toLowerCase();
+    if (!Object.hasOwn(STATES, name)) throw new Error(`oby: no state "${name}". States: ${oby.states.join(', ')}`);
+    if (name === state && !now) return;
+    if (name !== state) { state = name; emit('state', { state }); }
+    showPlaying();
+    if (finish && cur !== IDLE) { wrapUp(); return; }
+    if (oneShot && !now) return;
+    enterState();
+  },
+  // Play one expression now, then go back to the current state. Resolves
+  // true when it finished, false if something else cut it off.
+  play(name) {
+    const expr = findExpr(name);
+    if (!expr) return Promise.reject(new Error(`oby: no expression "${name}". Expressions: ${oby.expressions.join(', ')}`));
+    return new Promise((resolve) => { play(expr); oneShot = { expr, resolve }; });
+  },
+  pause(p) { hostPaused = !!p; syncPaused(); },
+  // Point Oby's gaze at a spot given in this page's CSS pixels, like
+  // clientX/clientY; it may lie outside the frame (a host app tracking the
+  // cursor across the screen). null lets go: Oby looks around on its own.
+  look(x, y) {
+    hostLooks = true;
+    if (x == null) { pointer.active = false; return; }
+    pointer.x = soften((x / innerWidth) * 2 - 1); pointer.y = soften(-((y / innerHeight) * 2 - 1));
+    moved(x, y);
+  },
+  // Something happened there (a click): Oby glances at it, then goes back to
+  // its own business. Same coordinates as look().
+  notice(x, y) { oby.look(x, y); watch(rand(...NOTICE)); },
+  // Hold Oby's attention (true): it watches the pointer the whole time, still or
+  // not. Let go (false): it keeps watching a moment, then goes back to its rhythm.
+  attend(on) {
+    attn.held = !!on;
+    if (attn.held) watch(); else if (attn.watching) attn.until = clock + rand(...AFTER_HOLD);
+  },
+  on(event, fn) { (listeners[event] ||= []).push(fn); return () => { listeners[event] = listeners[event].filter((f) => f !== fn); }; },
+};
+window.oby = oby;
+addEventListener('message', (e) => {
+  const d = e.data;
+  // only the page Oby is embedded in may drive it
+  if (e.source !== window.parent || window.parent === window) return;
+  if (!d || typeof d !== 'object' || 'oby' in d) return;
+  try {
+    if (d.setState) oby.setState(d.setState, d);
+    if (d.play) oby.play(d.play).catch(() => {});
+    if ('pause' in d) oby.pause(d.pause);
+    if ('look' in d) d.look ? oby.look(d.look.x, d.look.y) : oby.look(null);
+    if (d.notice) oby.notice(d.notice.x, d.notice.y);
+    if ('attend' in d) oby.attend(d.attend);
+  } catch (err) { console.warn(err.message); }
+});
+
+/* ---------------------------------------------------------------------------
+   Poking: click the mascot. 1-3 pokes: startled bounce. 4-5: angry.
+   6+: turns away with its eyes shut and only twitches. Leave it alone for
+   6s and it forgets.
+--------------------------------------------------------------------------- */
+const POKE_SURPRISE = {
+  name: 'Poked', dur: 1.3,
+  keys: [
+    [0, { sq: 0.93, y: -0.01, eyeH: 90, ears: [0.35, 0.3, 0] }, 'fast'],
+    [0.08, { sq: 1.05, y: 0.06, eyeH: 126, eyeW: 92, eyeR: 1, fx: 'bang', ears: [-0.15, -0.2, 0] }, 'fast'],
+    [0.3, { y: 0, sq: 1 }, 'body'],
+    [0.95, { eyeH: 112, eyeW: 64, eyeR: 0.92, ears: [0.1, 0, 0] }],
+  ],
+};
+const POKE_ANGRY = {
+  name: 'Annoyed', dur: 2.2,
+  keys: [
+    // the same head-down ram push as Angry, just quicker to start
+    [0, { sq: 1.04, rx: -0.08, z: -0.05, ears: [0.3, 0.1, 0] }, 'fast'],
+    [0.14, { rx: 0.24, rz: 0.07, z: 0.12, leanZ: 0.06, scale: 1.03, sq: 0.93, inflate: 0.26, lidA: 0.55, lidT: 0.26, eyeW: 72, eyeH: 96, eyeR: 0.7, fx: 'anger', ears: [1.0, 0.5, -0.3] }],
+    [1.7, { rx: 0, rz: 0, z: 0, leanZ: 0, scale: 1, sq: 1, inflate: 0.17, lidA: 0, lidT: 0, eyeW: 64, eyeH: 112, eyeR: 0.92, ears: [0.1, 0, 0] }],
+  ],
+  proc(t, add) {
+    const e = env(t, 0.15, 1.6, 0.1);
+    add('x', Math.sin(t * 61) * 0.004 * e); add('rz', Math.sin(t * 47) * 0.005 * e);
+  },
+};
+// Ignoring: turns away with eyes shut. Left alone, it cracks the right eye open
+// to check on you, then shakes it off like a wet dog and is back to normal.
+const SHAKE_AT = 3.0;
+const POKE_IGNORE = {
+  name: 'Ignoring you', dur: 5.1,
+  keys: [
+    [0, { ry: -0.75, rx: -0.18, rz: 0.06, calm: 1, fx: 'huff', ears: [0.7, 0.6, 0.2] }, 'body'],
+    [1.8, { peek: 1, gx: 26, lidT: 0.25, ry: -0.6, earR: [0.2, 0.2, -0.6] }],  // and an ear turns back to you
+    [SHAKE_AT, { ry: 0, rx: 0, rz: 0, x: 0, twist: 0, calm: 0, peek: 0, gx: 0, lidT: 0, close: 1, ears: [0.1, 0, 0] }, 'snap'],
+    [SHAKE_AT + 1.25, { close: 0, sq: 1.04 }, 'face'],
+    [SHAKE_AT + 1.55, { sq: 1 }, 'body'],
+  ],
+  proc(t, add) {
+    // shake: fast side-to-side turns that die down, with the body twisting a beat behind
+    const k = t - SHAKE_AT;
+    if (k > 0 && k < 1.2) {
+      const decay = Math.pow(1 - k / 1.2, 1.5);
+      // about 4.5 shakes a second; the springs soften these to roughly ±26° turn
+      // and ±10° roll at the peak
+      const w = k * 28;
+      add('ry', Math.sin(w) * 0.9 * decay);
+      add('rz', Math.sin(w + 0.4) * 0.35 * decay);
+      add('twist', Math.sin(w - 0.9) * 0.8 * decay);
+      add('x', Math.sin(w + 0.4) * 0.08 * decay);
+      add('y', Math.abs(Math.sin(w)) * 0.03 * decay);
+    }
+    if (t > SHAKE_AT + 1.8) pokes = 0;  // shaken off: start fresh
+  },
+};
+// Dizzy: spin the pointer round and round and Oby's eyes turn to spirals, stars
+// circle its head and it sways; then it shakes its head to snap out of it.
+const DIZZY_SHAKE = 2.3;
+const DIZZY = {
+  name: 'Dizzy', dur: 4.1,
+  keys: [
+    [0, { swirl: 1, eyeW: 84, eyeH: 84, eyeR: 1, sq: 0.95, fx: 'stars', ears: [0.2, 0.55, 0] }, 'face'],
+    [DIZZY_SHAKE, { swirl: 0, close: 1, sq: 1, ears: [0.1, 0, 0] }, 'snap'],
+    [DIZZY_SHAKE + 1.2, { close: 0, eyeW: 64, eyeH: 112, eyeR: 0.92, sq: 1.04 }, 'face'],
+    [DIZZY_SHAKE + 1.5, { sq: 1 }, 'body'],
+  ],
+  proc(t, add) {
+    // woozy: the head lolls round in a slow circle, the eyes drift with it
+    const e = env(t, 0, DIZZY_SHAKE, 0.4), w = t * 5.5;
+    add('rz', Math.sin(w) * 0.16 * e); add('rx', Math.cos(w) * 0.1 * e);
+    add('x', Math.sin(w) * 0.04 * e); add('lean', Math.sin(w) * 0.12 * e); add('leanZ', Math.cos(w) * 0.08 * e);
+    add('gx', Math.sin(w * 1.3) * 10 * e); add('gy', Math.cos(w * 1.3) * 6 * e);
+    add('eLO', Math.sin(w * 1.6) * 0.3 * e); add('eRO', Math.sin(w * 1.6 + 1.3) * 0.3 * e);  // the ears wobble out of step
+    // then a quick shake that dies down, eyes squeezed shut
+    shakeOff(t - DIZZY_SHAKE - 0.05, add);
+  },
+};
+// A quick shake of the head that dies down over 1.1 s, k seconds in: snapping out
+// of being dizzy or whipped about.
+function shakeOff(k, add) {
+  if (k <= 0 || k >= 1.1) return;
+  const decay = Math.pow(1 - k / 1.1, 1.5), s = k * 28;
+  add('ry', Math.sin(s) * 0.8 * decay); add('rz', Math.sin(s + 0.4) * 0.3 * decay);
+  add('twist', Math.sin(s - 0.9) * 0.7 * decay); add('x', Math.sin(s + 0.4) * 0.06 * decay);
+}
+// Whipped about: following the pointer as it swings side to side, fast, a few
+// times over. It squeezes its eyes shut and shakes its head clear, then stops
+// following for a while, like anyone would after that: you don't go back in.
+const WHIP = {
+  name: 'Shaking it off', dur: 1.6,
+  keys: [
+    [0, { close: 1, gx: 0, gy: 0, ears: [0.1, 0, 0] }, 'snap'],
+    [1.15, { close: 0, sq: 1.04 }, 'face'],
+    [1.45, { sq: 1 }, 'body'],
+  ],
+  proc(t, add) { shakeOff(t - 0.05, add); },
+};
+// Swings: each time the pointer turns back the other way after a fast swing
+// (WHIP_SWING px or more, in under WHIP_FAST s) counts one; the count leaks away
+// over about WHIP_LEAK s. WHIP_AT of them while Oby is watching and it's had enough;
+// it can happen again as soon as the shake is over (WHIP_REST s), every time.
+const WHIP_SWING = 60, WHIP_FAST = 0.3, WHIP_LEAK = 0.8, WHIP_AT = 4, WHIP_REST = 2;
+const whip = { x: null, dir: 0, run: 0, from: 0, n: 0, t: 0, calmUntil: 0 };
+function trackWhip(px) {
+  if (whip.x === null) { whip.x = px; return; }
+  const dx = px - whip.x;
+  if (Math.abs(dx) < 2) return;
+  whip.x = px;
+  const dir = Math.sign(dx);
+  if (dir === whip.dir) { whip.run += Math.abs(dx); return; }
+  // turned back: was that swing a fast one?
+  if (whip.run >= WHIP_SWING && clock - whip.from < WHIP_FAST) {
+    whip.n = whip.n * Math.exp(-(clock - whip.t) / WHIP_LEAK) + 1;
+    whip.t = clock;
+  }
+  whip.dir = dir; whip.run = Math.abs(dx); whip.from = clock;
+  if (whip.n >= WHIP_AT && attn.watching && !attn.held && cur === IDLE && clock > whip.calmUntil) {
+    whip.n = 0; whip.calmUntil = clock + WHIP_REST;
+    wander();  // a full break: it's done following you for now
+    play(WHIP);
+  }
+}
+// How much the pointer's path has turned lately: a sum of its turns that leaks
+// away over about a second. Past ~2 full turns, fast, Oby gets dizzy.
+const SPIN_LEAK = 1.2, SPIN_DIZZY = 12, SPIN_REST = 8;
+const spin = { x: 0, y: 0, a: null, t: 0, total: 0, calmUntil: 0 };
+function trackSpin(px, py) {
+  const dx = px - spin.x, dy = py - spin.y;
+  if (dx * dx + dy * dy < 16) return;  // ignore jitter under 4px
+  spin.x = px; spin.y = py;
+  const a = Math.atan2(dy, dx), dt = clock - spin.t;
+  spin.t = clock;
+  if (spin.a === null || dt > 0.25) spin.total = 0;  // the pointer paused: start over
+  else {
+    let d = a - spin.a; d -= TAU * Math.round(d / TAU);
+    // a sharp about-turn is shaking back and forth, not going round
+    spin.total = spin.total * Math.exp(-dt / SPIN_LEAK) + (Math.abs(d) < 2 ? d : 0);
+  }
+  spin.a = a;
+  if (Math.abs(spin.total) > SPIN_DIZZY && cur === IDLE && clock > spin.calmUntil) {
+    spin.total = 0; spin.calmUntil = clock + SPIN_REST;
+    play(DIZZY);
+  }
+}
+
+let pokes = 0, lastPoke = -99;
+const pixel = new Uint8Array(4);
+function onMascot(clientX, clientY) {
+  const dpr = renderer.getPixelRatio();
+  const x = Math.floor(clientX * dpr), y = Math.floor((innerHeight - clientY) * dpr);
+  // only inside the drawn box: the fill pass leaves stale pixels outside it
+  if (x < box.x0 || x > box.x1 || y < box.y0 || y > box.y1) return false;
+  renderer.readRenderTargetPixels(fillRT, x, y, 1, 1, pixel);
+  return pixel[0] > 0 || pixel[1] > 0;  // body (R) or its eyes and mouth (G), which overwrite the body's R
+}
+function poke() {
+  watch();
+  if (clock - lastPoke > 6) pokes = 0;
+  pokes++; lastPoke = clock;
+  emit('poke', { count: pokes });
+  if (pokes >= 6) {
+    // poked again while ignoring (even mid-peek): back to ignoring, small twitch
+    const again = cur === POKE_IGNORE;
+    play(POKE_IGNORE);
+    if (again) { P.sq.vel -= 0.8; P.rz.vel += 0.4; }
+  } else if (pokes >= 4) {
+    play(POKE_ANGRY);
+  } else {
+    // tilt toward a different side each time
+    POKE_SURPRISE.keys[1][1].rz = pokes % 2 ? -0.04 : 0.04;
+    play(POKE_SURPRISE);
+  }
+}
+stage.addEventListener('pointerdown', (e) => {
+  if (onMascot(e.clientX, e.clientY)) poke();
+});
+
+function update(dt) {
+  const prev = curT;
+  curT += dt;
+  for (const k of cur.keys) if (k[0] > prev && k[0] <= curT) applyKey(k);
+
+  if (cur === IDLE) {
+    // while idle and watching the pointer, hold the fidgets until it lets go
+    if (clock > idleUntil && !(state === 'idle' && attn.watching)) nextFromState();
+  } else if (curT > cur.dur) {
+    rest();
+  }
+
+  for (const k in P) P[k].off = 0;
+  const add = (k, v) => { P[k].off += v; };
+  cur.proc?.(curT, add);
+
+  // idle life: breathing + bob always on
+  add('sq', Math.sin(clock * 2.2) * 0.012);
+  add('y', Math.sin(clock * 1.5) * 0.014);
+  add('lean', Math.sin(clock * 1.1) * 0.03 - THREE.MathUtils.clamp(P.x.vel * 0.5, -0.25, 0.25));
+  add('leanZ', -THREE.MathUtils.clamp(P.rx.vel * 0.12, -0.2, 0.2));
+  add('sq', THREE.MathUtils.clamp(P.y.vel * 0.1, -0.12, 0.14));
+  if (cur.name !== 'Working') add('twist', Math.sin(clock * 0.9) * 0.05 - THREE.MathUtils.clamp(P.ry.vel * 0.1, -0.3, 0.3));
+
+  pointerSpeed += (pointerTravel / Math.max(dt, 1e-3) - pointerSpeed) * (1 - Math.exp(-dt / 0.12));
+  pointerTravel = 0;
+  let ickT = 0, ickX = 0, ickY = 0;
+  // take turns: watch the pointer, then a break, then watch again (if it's around)
+  if (clock > attn.until && !attn.held) { if (attn.watching || !pointer.active) wander(); else watch(); }
+  if (cur.follow) {
+    // where the pointer is from the face, in face half-widths; measured from
+    // where the face would be without backing off (see ick)
+    let c, half = 1, hx = 0, hy = 0, hd = Infinity;
+    if (pointer.active) {
+      c = rig.localToWorld(faceC.set(0, 0.05, 0.5 * U.uH.value)).project(camera);
+      const e = rig.localToWorld(faceE.set(0.47 * U.uW.value, 0.05, 0.5 * U.uH.value)).project(camera);
+      half = Math.max(Math.abs(e.x - c.x) * innerWidth / 2, 1);
+      const h = home.localToWorld(faceH.set(0, 0.05, 0.5 * U.uH.value)).project(camera);
+      hx = (pointer.x - h.x) * innerWidth / 2 / half;
+      hy = (pointer.y - h.y) * innerHeight / 2 / half;
+      hd = Math.hypot(hx, hy);
+      if (!attn.watching && hd < NOTICE_NEAR) watch();  // right by its face: hard to ignore
+    }
+    if (pointer.active && attn.watching) {
+      // pointer gone still: once, drop it for ~1-1.8s and face front, as if waiting
+      const still = clock - pointer.t;
+      if (still > STILL_LET_GO && !attn.held) { pointer.active = false; glanceEnd = -1; }
+      else if (still > STILL_GLANCE && !glanced) { glanced = true; glanceEnd = clock + 1 + Math.random() * 0.8; }
+      if (glanceEnd > 0 && clock > glanceEnd) glanceEnd = -1;
+      const f = glanceEnd > 0 ? 0 : 1;
+      // eyes stop near the edge of the face; past that only the head keeps turning
+      const ex = THREE.MathUtils.clamp(pointer.x, -1.1, 1.1), ey = THREE.MathUtils.clamp(pointer.y, -1.1, 1.1);
+      add('gx', ex * 34 * f); add('gy', -ey * 22 * f);
+      // the head turns to the pointer too, but not to an icky one up close:
+      // then the head turns away and the eyes side-eye it instead
+      const turn = f * Math.max(0, 1 - ick.k * 2);
+      add('ry', pointer.x * 0.28 * turn); add('rx', -pointer.y * 0.16 * turn);
+      add('gx', ick.x * 12 * ICK_GAIN); add('gy', -ick.y * 8 * ICK_GAIN);
+      // pointer right on the face: each eye turns toward it, the farther eye more,
+      // like ours converge on something up close
+      const ux = (pointer.x - c.x) * innerWidth / 2 / half;
+      const d = Math.hypot(ux * half, (pointer.y - c.y) * innerHeight / 2) / half;
+      const near = (1 - THREE.MathUtils.smoothstep(d, 0.45, 1)) * f;
+      const eyeU = 0.35;  // eye centres, in half-widths from the face centre
+      add('eLx', THREE.MathUtils.clamp(10 * (ux + eyeU), -7, 7) * near);
+      add('eRx', THREE.MathUtils.clamp(10 * (ux - eyeU), -7, 7) * near);
+      // as if the pointer had something icky on it: full strength over the
+      // face, fading out gradually to ~1.3 face-widths outside it (applied below, eased)
+      ickT = (1 - THREE.MathUtils.smoothstep(hd, 0.6, 2.3)) * (1 - THREE.MathUtils.smoothstep(pointerSpeed, ICK_SLOW, ICK_FAST));
+      if (ickT > 0.001) {
+        // towards the pointer; over the middle of the face it fades to nothing,
+        // so small moves across the centre don't swing it from side to side
+        ickX = hx / Math.max(hd, 1) * ickT; ickY = hy / Math.max(hd, 1) * ickT;
+      }
+    } else if (clock > nextSaccade) {
+      P.gx.base = (Math.random() - 0.5) * 50; P.gy.base = (Math.random() - 0.5) * 22;
+      P.ry.base = P.gx.base * 0.004;
+      nextSaccade = clock + 0.8 + Math.random() * 2.2;
+    }
+  }
+
+  // ease into and out of the recoil, so a pointer darting round the face
+  // doesn't jerk Oby about; eyes squint, repulsed, while it's close
+  const ea = 1 - Math.exp(-dt / (ickT > ick.k ? ICK_IN : ICK_OUT));
+  // which way to back off changes slowly: it's already recoiling, so the pointer
+  // switching sides over its face makes it drift across, not flinch
+  const ed = 1 - Math.exp(-dt / ICK_TURN);
+  ick.k += (ickT - ick.k) * ea; ick.x += (ickX - ick.x) * ed; ick.y += (ickY - ick.y) * ed;
+  if (ick.k > 0.001) { add('lidT', 0.14 * ICK_GAIN * ick.k); add('lidA', 0.14 * ICK_GAIN * ick.k); }  // a repulsed squint
+
+  if (!cur.noBlink && clock > nextBlink) { P.blink.base = 1; blinkEnd = clock + 0.075; nextBlink = clock + 2.2 + Math.random() * 3.5; if (Math.random() < 0.2) nextBlink = clock + 0.3; }
+  if (blinkEnd > 0 && clock > blinkEnd) { P.blink.base = 0; blinkEnd = -1; }
+
+  // ears, on top of what the expression sets: pricked up while watching you,
+  // pinned back from an icky pointer, and trailing the head (a hop splays
+  // them, a roll or slide swings them the other way)
+  const C = THREE.MathUtils.clamp;
+  earPerk += ((cur.follow && attn.watching && pointer.active ? 1 : 0) - earPerk) * (1 - Math.exp(-dt / 0.4));
+  const back = 0.7 * ICK_GAIN * ick.k - 0.1 * earPerk, out = 0.35 * ICK_GAIN * ick.k - 0.06 * earPerk + C(P.y.vel * 0.6, -0.15, 0.3);
+  const sway = C(P.rz.vel * 0.5 - P.x.vel * 0.8, -0.3, 0.3);
+  add('eLB', back); add('eRB', back); add('eLO', out - sway); add('eRO', out + sway);
+  // now and then, idle, one ear flicks
+  if (cur === IDLE && clock > nextFlick) { P[Math.random() < 0.5 ? 'eLB' : 'eRB'].vel += 7; nextFlick = clock + rand(4, 11); }
+
+  // integrate at 240 Hz for stable stiff springs
+  const n = Math.ceil(dt / (1 / 240));
+  for (let i = 0; i < n; i++) stepSprings(dt / n);
+}
+
+function applyToScene() {
+  U.uInflate.value = V('inflate'); U.uTwist.value = V('twist');
+  U.uSq.value = Math.max(0.3, V('sq')); U.uLean.value = V('lean'); U.uLeanZ.value = V('leanZ');
+  // keeping its distance from an icky pointer: backs away from it and a little
+  // further from you, with a slight tilt away
+  const g = ICK_GAIN;
+  rig.position.set(V('x') - ick.x * 0.22 * g, BASE_Y + V('y') - ick.y * 0.1 * g, V('z') - ick.k * 0.12 * g);
+  rig.rotation.set(V('rx') + ick.y * 0.08 * g, V('ry') + V('gx') * 0.0018 - ick.x * 0.3 * g, V('rz') + ick.x * 0.09 * g, 'YXZ');
+  rig.scale.setScalar(V('scale'));
+  home.position.set(V('x'), BASE_Y + V('y'), V('z'));
+  home.rotation.set(V('rx'), V('ry') + V('gx') * 0.0018, V('rz'), 'YXZ');
+  home.scale.copy(rig.scale);
+  for (const e of ears) {
+    const l = e.userData.u.uEarSide.value < 0;
+    // never tipped forward over the face: that's when they read as a pig's
+    e.userData.u.uEarTilt.value.set(Math.max(-0.15, V(l ? 'eLB' : 'eRB')), V(l ? 'eLO' : 'eRO'), V(l ? 'eLT' : 'eRT'));
+  }
+  home.updateMatrixWorld();
+  updateWall();
+}
+// Pillar (world units): it never moves; its right edge sits just past the
+// cube's left side, so the cube has to walk over to hide behind it.
+const WALL = { x: -0.53, w: 0.8, top: 0.62, bottom: -0.8 };
+function updateWall() {
+  const k = V('wall'), u = compositeMat.uniforms;
+  u.uWallOn.value = k > 0.5 ? 1 : 0;
+  if (k <= 0.5) return;
+  const x1 = WALL.x;
+  const toPx = (x, y) => {
+    const p = new THREE.Vector3(x, y, 0).project(camera), r = renderer.getPixelRatio();
+    return [(p.x * 0.5 + 0.5) * innerWidth * r, (p.y * 0.5 + 0.5) * innerHeight * r];
+  };
+  const [ax, ay] = toPx(x1 - WALL.w, WALL.bottom), [bx, by] = toPx(x1, WALL.top);
+  u.uWall.value.set(ax, ay, bx, by);
+}
+
+/* ---------------------------------------------------------------------------
+   Pointer and look
+--------------------------------------------------------------------------- */
+function moved(px, py) {
+  if (pointer.active) pointerTravel += Math.hypot(px - pointer.px, py - pointer.py);
+  pointer.px = px; pointer.py = py;
+  pointer.active = true; pointer.t = clock; glanced = false; glanceEnd = -1;
+  trackSpin(px, py); trackWhip(px);
+}
+// Past the frame's edge the head keeps turning, easing off the further out the
+// pointer goes (1.18x the edge one frame-width out, 1.26x at four), topping
+// out at 1.35x so a cursor across the screen doesn't wrench the head round.
+const soften = (v) => (Math.abs(v) <= 1 ? v : Math.sign(v) * (1.35 - 0.35 / Math.abs(v)));
+// Oby follows the pointer inside its own frame, until the host starts feeding
+// it with look(): from then on that's the only source, so the two never fight
+// at the frame's edge.
+let hostLooks = false;
+addEventListener('pointermove', (e) => {
+  if (hostLooks) return;
+  pointer.x = (e.clientX / innerWidth) * 2 - 1; pointer.y = -((e.clientY / innerHeight) * 2 - 1);
+  moved(e.clientX, e.clientY);
+});
+document.addEventListener('pointerleave', () => { if (!hostLooks) pointer.active = false; });
+
+// The look everyone gets. ?size=1.4 makes Oby bigger in its frame (lines thin
+// out a little as it shrinks); at 1 it leaves room around it to move.
+const params = new URLSearchParams(location.search);
+const LOOK = { size: parseFloat(params.get('size')) || 1, round: 0.23, width: 0.93, height: 0.75, earLen: 0.14, earTip: 0.004 };
+let size = LOOK.size;
+function setSize(v) {
+  size = v;
+  compositeMat.uniforms.uLineScale.value = 0.5 + 0.5 * v;
+  resize();
+}
+// Shape: corner roundness rebuilds the body; width/height feed the deform.
+const SHAPE = {
+  round: (v) => { body.geometry.dispose(); body.geometry = roundedCube(1, v); },
+  width: (v) => { U.uW.value = v; },
+  height: (v) => { U.uH.value = v; },
+  earLen: (v) => { EAR.h = v; rebuildEars(); },
+  earTip: (v) => { EAR.tipR = v; rebuildEars(); },
+};
+for (const [k, apply] of Object.entries(SHAPE)) apply(LOOK[k]);
+let showPlaying = () => {};  // the playground shows what's playing
+
+let unitPx = 100;
+function resize() {
+  const w = innerWidth, h = innerHeight, dpr = renderer.getPixelRatio();
+  renderer.setSize(w, h, false);
+  const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+  fillRT.setSize(bw, bh);
+  compositeMat.uniforms.uRes.value.set(bw, bh);
+  compositeMat.uniforms.uPx.value = dpr;
+  fxCanvas.width = w * dpr; fxCanvas.height = h * dpr;
+  camera.aspect = w / h;
+  // fit a 2.6 x 2.6 unit box regardless of aspect; leave room for the chip bar
+  const uiH = document.getElementById('ui')?.offsetHeight || 0;
+  const fitH = 2.6 * h / Math.max(1, h - uiH);
+  const needH = Math.max(fitH, 2.6 / camera.aspect) / size;
+  const dist = needH / 2 / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const shift = (uiH / h) * needH / 2;
+  camera.position.set(0, -shift, dist);
+  camera.lookAt(0, -shift, 0);
+  camera.updateProjectionMatrix();
+  unitPx = h / needH;
+}
+addEventListener('resize', resize);
+setSize(size);
+
+/* dev:start ----------------------------------------------------------------
+   Playground: state buttons, expression buttons, look sliders (saved in this
+   browser), and a toggle to hide them. ?embed hides all of it.
+--------------------------------------------------------------------------- */
+{
+  let nextIdx = 0;
+  const embedded = params.has('embed');
+  const label = document.getElementById('label');
+  const chips = document.getElementById('chips');
+  const stateChips = document.getElementById('states');
+  for (const name of Object.keys(STATES)) {
+    const b = document.createElement('button');
+    b.className = 'chip auto'; b.textContent = name; b.dataset.state = name;
+    b.onclick = () => oby.setState(name, { now: true });
+    stateChips.appendChild(b);
+  }
+  EXPRESSIONS.forEach((e, i) => {
+    const b = document.createElement('button');
+    b.className = 'chip'; b.textContent = e.name; b.dataset.i = i;
+    b.onclick = () => oby.play(e.name);
+    chips.appendChild(b);
+  });
+  showPlaying = () => {
+    label.textContent = `${state} · ${cur === IDLE ? 'idle' : cur.name}`;
+    for (const b of chips.querySelectorAll('.chip[data-i]')) b.classList.toggle('on', EXPRESSIONS[b.dataset.i] === cur);
+    for (const b of stateChips.children) b.classList.toggle('on', b.dataset.state === state);
+  };
+  addEventListener('keydown', (e) => {
+    if (e.key === ' ' || e.key === 'ArrowRight') { oby.play(EXPRESSIONS[nextIdx].name); nextIdx = (nextIdx + 1) % EXPRESSIONS.length; }
+  });
+
+  if (params.has('nochips')) document.getElementById('ui').style.display = 'none';
+  // ?embed hides the controls in CSS (html.embed), before the first paint
+  // Controls toggle: hidden by default in the menu bar app (loaded from a file),
+  // open in the browser; the choice is remembered.
+  let open = location.protocol !== 'file:';
+  try { const saved = localStorage.getItem('cube.ui'); if (saved !== null) open = saved === '1'; } catch {}
+  document.body.classList.toggle('collapsed', !open);
+  document.getElementById('uiToggle').onclick = () => {
+    const nowOpen = document.body.classList.toggle('collapsed') === false;
+    try { localStorage.setItem('cube.ui', nowOpen ? '1' : '0'); } catch {}
+    resize();
+  };
+
+  // Sliders: start from LOOK (size starts smaller here, to leave room for the
+  // controls), then whatever this browser saved. Reset goes back to the start.
+  const fmt = {
+    size: (v) => Math.round(v * 100) + '%',
+    round: (v) => Math.round((v - 0.04) / 0.42 * 100) + '%',
+    width: (v) => v.toFixed(2) + '×',
+    height: (v) => v.toFixed(2) + '×',
+    earLen: (v) => v.toFixed(2),
+    earTip: (v) => Math.round((v - 0.004) / 0.056 * 100) + '%',  // how round the tip is
+  };
+  const apply = { size: setSize, ...SHAPE };
+  for (const k of Object.keys(fmt)) {
+    const input = document.querySelector(`[data-k=${k}] input`), out = document.querySelector(`[data-k=${k}] output`);
+    if (k !== 'size') input.defaultValue = LOOK[k];
+    input.value = embedded && k === 'size' ? LOOK.size : input.defaultValue;
+    if (!embedded) {
+      let saved = NaN;
+      try { saved = parseFloat(localStorage.getItem('cube.' + k)); } catch {}
+      if (!Number.isNaN(saved)) input.value = saved;
+    }
+    const set = (v) => {
+      apply[k](v);
+      out.textContent = fmt[k](v);
+      if (!embedded) try { localStorage.setItem('cube.' + k, v); } catch {}
+    };
+    input.addEventListener('input', () => set(parseFloat(input.value)));
+    set(embedded && k === 'size' ? LOOK.size : parseFloat(input.value));  // ?size can go past the slider's max
+  }
+  document.getElementById('reset').onclick = () => {
+    for (const input of document.querySelectorAll('.slider input')) {
+      input.value = input.defaultValue;
+      input.dispatchEvent(new Event('input'));
+    }
+  };
+}
+/* dev:end */
+
+// Loader dots, in framebuffer px around the body's centre.
+const DOT_GAP = 0.4, DOT_R = 0.1;  // world units
+const bodyMid = new THREE.Vector3();
+function updateLoader() {
+  const u = compositeMat.uniforms, k = V('dR');
+  u.uLoader.value = k > 0.01 ? 1 : 0;
+  if (!u.uLoader.value) return;
+  // the cube melts away by shrinking; this is how far it's gone (fades the eyes,
+  // and lets the 3D pass be skipped once it's all dots)
+  u.uMelt.value = THREE.MathUtils.clamp(1 - (V('scale') - 0.04) / 0.46, 0, 1);
+  const bw = fillRT.width, bh = fillRT.height, ppu = unitPx * renderer.getPixelRatio();
+  rig.updateMatrixWorld();
+  bodyMid.copy(deformPoint(0, 0, 0)).applyMatrix4(rig.matrixWorld).project(camera);
+  const cx = (bodyMid.x * 0.5 + 0.5) * bw, cy = (bodyMid.y * 0.5 + 0.5) * bh;
+  const spread = V('dSpread'), R0 = DOT_R * ppu;
+  // bunched up the dots are bigger, so together they fill the blob they came from
+  const R = Math.max(0, R0 * (1 + 0.9 * (1 - spread)) * k);
+  u.uGoo.value = R0 * 0.8;
+  u.uDot.value.forEach((d, i) => {
+    const hop = V('dBounce') * 0.14 * ppu * Math.max(0, Math.sin(clock * 7 - i * 0.9));
+    d.set(cx + (i - 1) * DOT_GAP * ppu * spread, cy + hop, R);
+  });
+}
+
+// Only the box around the cube is drawn; the rest of the canvas stays
+// transparent. The fill pass covers a wider box than the composite, so the
+// outline never samples stale pixels.
+const corner = new THREE.Vector3(), box = { x0: 0, y0: 0, x1: 0, y1: 0 };
+function cubeBox() {
+  const bw = fillRT.width, bh = fillRT.height;
+  const hx = 0.5 * U.uW.value * 1.3 + 0.12, top = -0.5 + U.uH.value * (ears.length ? 1.4 + EAR.h : 1.35);  // room for the ears
+  rig.updateMatrixWorld();
+  box.x0 = box.y0 = Infinity; box.x1 = box.y1 = -Infinity;
+  for (const x of [-hx, hx]) for (const y of [-0.62, top]) for (const z of [-0.65, 0.65]) {
+    corner.set(x, y, z).applyMatrix4(rig.matrixWorld).project(camera);
+    const px = (corner.x * 0.5 + 0.5) * bw, py = (corner.y * 0.5 + 0.5) * bh;
+    box.x0 = Math.min(box.x0, px); box.x1 = Math.max(box.x1, px);
+    box.y0 = Math.min(box.y0, py); box.y1 = Math.max(box.y1, py);
+  }
+  if (compositeMat.uniforms.uLoader.value) {
+    const pad = compositeMat.uniforms.uGoo.value * 2 + 16;
+    for (const d of compositeMat.uniforms.uDot.value) {
+      box.x0 = Math.min(box.x0, d.x - d.z - pad); box.x1 = Math.max(box.x1, d.x + d.z + pad);
+      box.y0 = Math.min(box.y0, d.y - d.z - pad); box.y1 = Math.max(box.y1, d.y + d.z + pad);
+    }
+  }
+}
+function scissor(target, m) {
+  const bw = fillRT.width, bh = fillRT.height;
+  const x0 = Math.max(0, Math.floor(box.x0 - m)), y0 = Math.max(0, Math.floor(box.y0 - m));
+  const x1 = Math.min(bw, Math.ceil(box.x1 + m)), y1 = Math.min(bh, Math.ceil(box.y1 + m));
+  if (target) target.scissor.set(x0, y0, Math.max(0, x1 - x0), Math.max(0, y1 - y0));
+  else { const r = renderer.getPixelRatio(); renderer.setScissor(x0 / r, y0 / r, Math.max(0, x1 - x0) / r, Math.max(0, y1 - y0) / r); }
+}
+fillRT.scissorTest = true;
+renderer.setScissorTest(true);
+function render() {
+  updateLoader();
+  cubeBox();
+  const r = compositeMat.uniforms.uPx.value * compositeMat.uniforms.uLineScale.value * 1.35;  // same as the composite's r
+  scissor(fillRT, 2 * r + 8);
+  // while it's only dots, the cube isn't drawn at all
+  if (compositeMat.uniforms.uMelt.value < 0.995 || !compositeMat.uniforms.uLoader.value) {
+    renderer.setRenderTarget(fillRT); renderer.clear(); renderer.render(scene, camera);
+  }
+  renderer.setRenderTarget(null);
+  // the whole canvas is cleared once, then only the box is redrawn
+  renderer.setScissor(0, 0, innerWidth, innerHeight); renderer.clear();
+  scissor(null, r + 4);
+  renderer.render(quadScene, quadCam);
+}
+
+// 30fps always (the springs keep motion smooth at that rate), and nothing at
+// all while hidden.
+const FRAME_MS = 1000 / 30;
+let last = performance.now(), rafId = 0, paused = false;
+// drawn once: 'ready' tells the host, which can show the frame from then on
+// (shown before, it may be painted over until Oby's first frame is on it)
+let drawn = false;
+function frame(now) {
+  rafId = requestAnimationFrame(frame);
+  if (now - last < FRAME_MS - 2) return;
+  const dt = Math.min(1 / 20, (now - last) / 1000); last = now;
+  clock += dt;
+  update(dt);
+  applyToScene();
+  drawFace(clock);
+  render();
+  drawFX(unitPx);
+  if (!drawn) { drawn = true; emit('ready'); }
+}
+function setPaused(p) {
+  if (p === paused) return;
+  paused = p;
+  cancelAnimationFrame(rafId);
+  if (!p) { last = performance.now(); rafId = requestAnimationFrame(frame); wander(rand(...AFTER_PAUSE)); }
+}
+// Runs only while the host hasn't paused it (oby.pause) and the page is visible.
+let hostPaused = false;
+const syncPaused = () => setPaused(hostPaused || document.hidden);
+document.addEventListener('visibilitychange', syncPaused);
+enterState();
+rafId = requestAnimationFrame(frame);
+
+/* dev:start */
+// debug hooks for screenshots
+window.__cube = { play: (n) => play(EXPRESSIONS.find((e) => e.name === n)), P, EXPRESSIONS, pointer, spin, ick, attn, rig, camera, get cur() { return cur.name; }, get clock() { return clock; },
+  step(dt) { clock += dt; update(dt); applyToScene(); drawFace(clock); render(); drawFX(unitPx); } };  // step(dt): draw one frame by hand, for tests
+/* dev:end */
+</script>
+</body>
+</html>

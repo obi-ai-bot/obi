@@ -1,0 +1,6 @@
+node_modules/
+out/
+native/*/build/
+
+# the app icon and the script that draws it (the repository ignores build/ folders)
+!build/
