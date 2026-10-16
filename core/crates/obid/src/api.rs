@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axum::Router;
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -42,6 +42,8 @@ pub struct Shared {
     pub link: Arc<crate::sphere::Link>,
     /// The plug-in host (`GET` and `PUT /v1/obid/plugins`).
     pub plugins: Arc<crate::plugins::Plugins>,
+    /// The browsers signed in to the web app's own files (crate::web): nothing under `/v1`.
+    pub pages: crate::web::Sessions,
     /// True once obid is stopping: streams end.
     pub stopping: tokio::sync::watch::Receiver<bool>,
 }
@@ -161,7 +163,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/app/", get(crate::web::index))
         .route("/app/{*path}", get(crate::web::file))
         .route(crate::web::SIGN_IN, post(crate::web::sign_in))
-        .route("/app/sign-out", post(crate::web::sign_out))
+        .route(crate::web::SIGN_OUT, post(crate::web::sign_out))
         .route("/v1/obid/decisions", get(crate::sphere::routes::decisions))
         .route(
             "/v1/obid/decisions/{id}",
@@ -205,15 +207,18 @@ pub const NO_TOKEN: &str = "This runner answers only requests with its API token
 /// web page can't reach obid through a name that resolves to 127.0.0.1), then it must carry the
 /// API token (`401` otherwise). Unlike a Mac runner's gate (Runner/API.swift, `Gate.admit`), OAuth
 /// discovery paths get no exception: runner-api.md, "obid only: configuration", says anything
-/// without the token is `401`, so they are `401` without it and `404` with it. obid's own web page
-/// signs in instead with the session cookie (crate::web), and the sign-in form itself checks the
-/// token it is sent; without either, the page is the sign-in form, still `401`.
+/// without the token is `401`, so they are `401` without it and `404` with it. The one exception
+/// is the web app's own files (crate::web): a browser that signed in with the token opens them
+/// with its page session, which admits nothing else; signing in and out pass on a loopback `Host`
+/// alone. Without the token or a session, a page under `/app` is the sign-in form, still `401`.
+/// Every `/v1` answer is `Cache-Control: no-store` (unless it says otherwise) and `nosniff`.
 async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -> Response {
-    if crate::web::is_sign_in(request.method(), request.uri())
+    if crate::web::is_open(request.method(), request.uri())
         && loopback_request(request.uri(), request.headers())
     {
         return next.run(request).await;
     }
+    let api = request.uri().path().starts_with("/v1/");
     let agent_check = request.uri().path() == "/v1/agent/apple-check";
     let admitted = admit(request.uri(), request.headers(), &shared.token).or_else(|error| {
         if !agent_check || !loopback_request(request.uri(), request.headers()) {
@@ -233,14 +238,14 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
     let admitted = admitted.or_else(|error| {
         let (method, uri, headers) = (request.method(), request.uri(), request.headers());
         if error.status == StatusCode::UNAUTHORIZED
-            && crate::web::admitted(method, uri, headers, &shared.token)
+            && crate::web::admitted(method, uri, headers, &shared.pages)
         {
             Ok(())
         } else {
             Err(error)
         }
     });
-    match admitted {
+    let mut response = match admitted {
         Ok(()) => next.run(request).await,
         Err(error)
             if error.status == StatusCode::UNAUTHORIZED
@@ -250,7 +255,18 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
             crate::web::sign_in_page(None)
         }
         Err(error) => error.into_response(),
+    };
+    if api {
+        let headers = response.headers_mut();
+        if !headers.contains_key(header::CACHE_CONTROL) {
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        }
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
     }
+    response
 }
 
 /// Throws the refusal, or lets the request through.

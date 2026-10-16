@@ -1,7 +1,8 @@
 //! The web app as obid serves it (docs/runner-api.md, "obid only: the web app"), asked over HTTP
-//! as a browser asks: without the token the page and the API are both `401`, the page signs in
-//! with a form and gets a session cookie that isn't the token, and that cookie opens the page and
-//! the API only from obid's own page.
+//! as a browser asks, and as anything else on the machine could: without the token the page and
+//! the API are both `401`; the page signs in with a form and gets a random session for its own
+//! files; that session, however it's sent and whatever headers come with it, opens nothing under
+//! `/v1`, which takes only the token; and signing out ends it.
 
 mod support;
 
@@ -93,8 +94,8 @@ fn raw(obid: &Obid, method: &str, target: &str, headers: &[(&str, &str)], body: 
     }
 }
 
-/// The session cookie the sign-in form gives, as `obid-session=<value>`.
-fn sign_in(obid: &Obid) -> String {
+/// Signs in with the form: the answer, and the session it gives as `name=value`.
+fn sign_in(obid: &Obid) -> (Reply, String) {
     let reply = raw(
         obid,
         "POST",
@@ -106,17 +107,25 @@ fn sign_in(obid: &Obid) -> String {
         &format!("token={TOKEN}%0A"),
     );
     assert_eq!(reply.status, 303, "{}", reply.head);
-    assert_eq!(reply.header("location").as_deref(), Some("/app/"));
-    let cookie = reply.header("set-cookie").expect("a session cookie");
-    for part in ["Path=/", "HttpOnly", "SameSite=Strict", "Max-Age=2592000"] {
-        assert!(cookie.contains(part), "{part} in {cookie}");
-    }
-    assert!(
-        !cookie.contains(TOKEN),
-        "the cookie holds the token: {cookie}"
-    );
-    cookie.split(';').next().unwrap().to_owned()
+    let cookie = reply.header("set-cookie").expect("a page session");
+    let pair = cookie.split(';').next().unwrap().to_owned();
+    (reply, pair)
 }
+
+/// What obid answers without the token: every method the API has, on a few of its routes.
+const API: [(&str, &str, &str); 11] = [
+    ("GET", "/v1/status", ""),
+    ("GET", "/v1/events", ""),
+    ("GET", "/v1/jobs", ""),
+    ("GET", "/v1/conversation", ""),
+    ("GET", "/v1/obid/plugins", ""),
+    ("POST", "/v1/stop-all", ""),
+    ("POST", "/v1/plans", "{\"said\": \"stop everything\"}"),
+    ("PUT", "/v1/settings/permissions", "{\"mode\": \"bypass\"}"),
+    ("PUT", "/v1/settings/jobs", "{\"maxRunning\": 1}"),
+    ("DELETE", "/v1/permissions/rules/r1", ""),
+    ("POST", "/v1/inbox/i1/answer", "{\"done\": true}"),
+];
 
 #[test]
 fn without_the_token_the_page_and_the_api_are_401() {
@@ -233,6 +242,23 @@ fn the_token_opens_the_page() {
         Some("nosniff")
     );
 
+    // The API's answers aren't kept by the browser, and aren't read as anything but what they say.
+    let status = raw(
+        &obid,
+        "GET",
+        "/v1/status",
+        &[("Authorization", &bearer)],
+        "",
+    );
+    assert_eq!(status.status, 200);
+    assert_eq!(status.header("cache-control").as_deref(), Some("no-store"));
+    assert_eq!(
+        status.header("x-content-type-options").as_deref(),
+        Some("nosniff")
+    );
+    let refused = raw(&obid, "GET", "/v1/status", &[], "");
+    assert_eq!(refused.header("cache-control").as_deref(), Some("no-store"));
+
     let script = raw(
         &obid,
         "GET",
@@ -288,69 +314,156 @@ fn the_token_opens_the_page() {
 }
 
 #[test]
-fn the_cookie_opens_the_page_and_the_api_only_from_obids_own_page() {
-    let folder = Folder::new("web-cookie");
+fn signing_in_opens_a_random_session_for_the_pages_files() {
+    let folder = Folder::new("web-sign-in");
     let dist = web(&folder);
     let obid = obid(&folder, Some(&dist));
-    let cookie = sign_in(&obid);
-
-    let from = |site: &str| -> Vec<(&str, String)> {
-        let mut h = vec![("Cookie", cookie.clone())];
-        if !site.is_empty() {
-            h.push(("Sec-Fetch-Site", site.to_owned()));
-        }
-        h
-    };
-    let ask = |method: &str, target: &str, site: &str| {
-        let h = from(site);
-        let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        raw(&obid, method, target, &h, "")
-    };
-
-    // obid's own page: the page, its files, the API, the event stream's answer.
-    assert_eq!(ask("GET", "/app/", "same-origin").status, 200);
-    assert_eq!(ask("GET", "/app/assets/app.js", "same-origin").status, 200);
-    let status = ask("GET", "/v1/status", "same-origin");
-    assert_eq!(status.status, 200, "{}", status.body);
-    let status: Value = serde_json::from_str(&status.body).unwrap();
-    assert_eq!(status["runner"]["engine"], "obid");
-    assert_eq!(ask("GET", "/v1/jobs", "same-origin").status, 200);
-    assert_eq!(ask("GET", "/v1/inbox", "same-origin").status, 200);
-    assert_eq!(ask("GET", "/v1/conversation", "same-origin").status, 200);
-    assert_eq!(ask("POST", "/v1/stop-all", "same-origin").status, 200);
-    // The address typed into the browser: the page opens; the API doesn't.
-    assert_eq!(ask("GET", "/app/", "none").status, 200);
-    assert_eq!(ask("GET", "/v1/status", "none").status, 401);
-    // Another site, another server on 127.0.0.1, or no browser at all: 401, the page included.
-    for site in ["cross-site", "same-site", ""] {
-        assert_eq!(ask("GET", "/v1/status", site).status, 401, "{site:?}");
-        assert_eq!(ask("POST", "/v1/stop-all", site).status, 401, "{site:?}");
-        assert_eq!(ask("GET", "/app/", site).status, 401, "{site:?}");
+    let (reply, cookie) = sign_in(&obid);
+    assert_eq!(reply.header("location").as_deref(), Some("/app/"));
+    let set = reply.header("set-cookie").unwrap();
+    for part in ["Path=/app;", "HttpOnly", "SameSite=Strict"] {
+        assert!(set.contains(part), "{part} in {set}");
     }
-    // The token itself as the cookie isn't a session.
-    let raw_token = raw(
+    // It ends with the browser's session, and holds nothing derived from the token: each sign-in
+    // opens a session of its own, at random.
+    assert!(
+        !set.contains("Max-Age") && !set.contains("Expires"),
+        "{set}"
+    );
+    assert!(!set.contains(TOKEN), "the cookie holds the token: {set}");
+    let (_, again) = sign_in(&obid);
+    assert_ne!(cookie, again);
+    // It opens the page's own files, which hold no data.
+    for target in ["/app/", "/app/assets/app.js", "/app/oby/oby.html"] {
+        let reply = raw(&obid, "GET", target, &[("Cookie", &cookie)], "");
+        assert_eq!(reply.status, 200, "{target}");
+    }
+    // Neither the token nor a session's value reaches obid's log.
+    let log = obid.log();
+    assert!(!log.contains(TOKEN));
+    for c in [&cookie, &again] {
+        assert!(!log.contains(c.split_once('=').unwrap().1));
+    }
+}
+
+#[test]
+fn a_page_session_opens_nothing_under_v1_whatever_headers_come_with_it() {
+    let folder = Folder::new("web-no-api");
+    let dist = web(&folder);
+    let obid = obid(&folder, Some(&dist));
+    let (_, cookie) = sign_in(&obid);
+
+    // Not with the cookie alone, and not with the headers a browser would add, which anything else
+    // on the machine (a local server that got the cookie) can send too.
+    let forged: [&[(&str, &str)]; 4] = [
+        &[("Cookie", &cookie)],
+        &[("Cookie", &cookie), ("Sec-Fetch-Site", "same-origin")],
+        &[
+            ("Cookie", &cookie),
+            ("Sec-Fetch-Site", "same-origin"),
+            ("Origin", "http://127.0.0.1:7811"),
+            ("Sec-Fetch-Mode", "cors"),
+        ],
+        &[("Cookie", &cookie), ("Sec-Fetch-Site", "none")],
+    ];
+    for headers in forged {
+        for (method, target, body) in API {
+            let mut h = headers.to_vec();
+            if !body.is_empty() {
+                h.push(("Content-Type", "application/json"));
+            }
+            let reply = raw(&obid, method, target, &h, body);
+            assert_eq!(
+                reply.status, 401,
+                "{method} {target} with {headers:?}: {}",
+                reply.head
+            );
+        }
+    }
+    // What those calls would have changed is as it was.
+    let bearer = format!("Bearer {TOKEN}");
+    let jobs = raw(
         &obid,
         "GET",
-        "/v1/status",
-        &[
-            ("Cookie", &format!("obid-session={TOKEN}")),
-            ("Sec-Fetch-Site", "same-origin"),
-        ],
+        "/v1/settings/jobs",
+        &[("Authorization", &bearer)],
         "",
     );
-    assert_eq!(raw_token.status, 401);
+    assert!(!jobs.body.contains("\"maxRunning\":1"), "{}", jobs.body);
 
-    // Signing out forgets it.
-    let out = ask("POST", "/app/sign-out", "same-origin");
+    // The API takes the token: the same reads get past the gate with it.
+    for (method, target, body) in API {
+        if target == "/v1/events" || method != "GET" {
+            continue;
+        }
+        let reply = raw(&obid, method, target, &[("Authorization", &bearer)], body);
+        assert_eq!(reply.status, 200, "{method} {target}: {}", reply.head);
+    }
+}
+
+#[test]
+fn signing_out_ends_the_session() {
+    let folder = Folder::new("web-sign-out");
+    let dist = web(&folder);
+    let obid = obid(&folder, Some(&dist));
+    let (_, cookie) = sign_in(&obid);
+    let (_, other) = sign_in(&obid);
+    // As a browser opens the page from a typed address, and signs out from it.
+    const TYPED: (&str, &str) = ("Sec-Fetch-Site", "none");
+    assert_eq!(
+        raw(&obid, "GET", "/app/", &[("Cookie", &cookie), TYPED], "").status,
+        200
+    );
+    // The cookie a browser holds, or anything that copied it, opens nothing once signed out; the
+    // other session is untouched.
+    let out = raw(
+        &obid,
+        "POST",
+        "/app/sign-out",
+        &[("Cookie", &cookie), ("Sec-Fetch-Site", "same-origin")],
+        "",
+    );
     assert_eq!(out.status, 303);
     assert!(out.header("set-cookie").unwrap().contains("Max-Age=0"));
-    // Signing out needs the session too: another site can't sign the page out.
-    assert_eq!(ask("POST", "/app/sign-out", "cross-site").status, 401);
+    assert_eq!(
+        raw(&obid, "GET", "/app/", &[("Cookie", &cookie), TYPED], "").status,
+        401
+    );
+    assert_eq!(
+        raw(&obid, "GET", "/app/", &[("Cookie", &other), TYPED], "").status,
+        200
+    );
+    // Signing out with no session (another site's page asking, say) ends nothing else.
+    let elsewhere = raw(
+        &obid,
+        "POST",
+        "/app/sign-out",
+        &[("Sec-Fetch-Site", "cross-site")],
+        "",
+    );
+    assert_eq!(elsewhere.status, 303);
+    assert_eq!(
+        raw(&obid, "GET", "/app/", &[("Cookie", &other), TYPED], "").status,
+        200
+    );
+}
 
-    // The session's value never reaches obid's log.
-    let value = cookie.split_once('=').unwrap().1;
-    assert!(!obid.log().contains(value));
-    assert!(!obid.log().contains(TOKEN));
+#[test]
+fn a_session_ends_when_obid_stops() {
+    let folder = Folder::new("web-restart");
+    let dist = web(&folder);
+    let mut first = obid(&folder, Some(&dist));
+    let (_, cookie) = sign_in(&first);
+    assert_eq!(
+        raw(&first, "GET", "/app/", &[("Cookie", &cookie)], "").status,
+        200
+    );
+    first.stop();
+    let second = obid(&folder, Some(&dist));
+    assert_eq!(
+        raw(&second, "GET", "/app/", &[("Cookie", &cookie)], "").status,
+        401
+    );
 }
 
 #[test]
