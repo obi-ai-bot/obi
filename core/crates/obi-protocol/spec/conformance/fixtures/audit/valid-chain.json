@@ -189,22 +189,26 @@
           "expires_at": "2026-10-14T13:00:00Z",
           "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
           "body": {
-            "goal": "Decide the rounding rule",
-            "question": "Should average() round to two decimals?",
+            "text": "Should average() round to two decimals?",
+            "about": [
+              {
+                "kind": "repo",
+                "repo": "obi-conf/fixture-app"
+              }
+            ],
             "choices": [
               "Yes",
               "No"
-            ],
-            "repo": "obi-conf/fixture-app"
+            ]
           },
-          "signature": "TGqEkDlaCVZKIUx4t0apQ8tf563QworQVHhyHafW5kbvN33AhyK5BT61NHBYYpGUK9pxlIDBgbHES38-ZINABA"
+          "signature": "kDZQ-RrKYdryNszQor36mHNhv9qrTu9HPTXv7h9-LGmcFsUayIBPYBII926s1ALWMPhQNzK2j3LDRNc6KV4UAg"
         },
-        "hash": "cdf9a4bd6077c52828aaf7911f38aef4257f524fcc63171bc0f11beff38c48f8"
+        "hash": "84c51fed9a91b7d46dd3ad298095b14d66a31a086068035c1ad17a02de95e276"
       },
       {
         "sphere": "conf-sphere",
         "seq": 6,
-        "prev": "cdf9a4bd6077c52828aaf7911f38aef4257f524fcc63171bc0f11beff38c48f8",
+        "prev": "84c51fed9a91b7d46dd3ad298095b14d66a31a086068035c1ad17a02de95e276",
         "recorded_at": "2026-10-14T11:59:06Z",
         "envelope": {
           "protocol": "obi/0.1",
@@ -218,22 +222,21 @@
           "expires_at": "2026-10-14T13:00:00Z",
           "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
           "body": {
-            "goal": "Pick a reviewer",
-            "question": "Who should review the next change?"
+            "text": "Who should review the next change?"
           },
-          "signature": "sBAt94CRJCO0O0OQf8UiMfXzgN4pCPHJEeY9G6zkzO18XQPLwxpxO_FGeSrNZvgcqdMKcckHzgLmDVGUt0sEDw"
+          "signature": "kNaLwC6BUXKg8ODBGxzIFTbaU9gMH__jamkFMyo7v5Rs4BdyY6gKBefGaM_2Dh8qI0vLMSiOplDpp4zPilYUCQ"
         },
-        "hash": "64cc8c5d66ae5798c13784682b7a984778e70331fbf3fcb30e98657eb797c6e8"
+        "hash": "dc91a1417cb48ef4ad4e9d0f292134d568f0aa07a7914694cc5c1025da0a3bd5"
       },
       {
         "sphere": "conf-sphere",
         "seq": 7,
-        "prev": "64cc8c5d66ae5798c13784682b7a984778e70331fbf3fcb30e98657eb797c6e8",
+        "prev": "dc91a1417cb48ef4ad4e9d0f292134d568f0aa07a7914694cc5c1025da0a3bd5",
         "recorded_at": "2026-10-14T11:59:07Z",
         "envelope": {
           "protocol": "obi/0.1",
           "id": "56ea3f14-7d0b-8cd0-8439-861dccd51da4",
-          "type": "result",
+          "type": "answer",
           "from": "obi-a",
           "to": "obi-b",
           "sphere": "conf-sphere",
@@ -243,14 +246,13 @@
           "expires_at": "2026-10-14T13:00:00Z",
           "key_id": "ed25519:HAhBXFX_KPyGvYSeI-mWqYTBrGCjxRegv6GepSVZj8Q",
           "body": {
-            "for": "question",
-            "outcome": "answered",
-            "answer": "No: keep full precision.",
+            "by": "owner",
+            "text": "No: keep full precision.",
             "choice": 1
           },
-          "signature": "J_BgHyl7DtmeAAKgGkGFv4JidXMUQL2NmiwIQWjsp6i9qiegGxQjYLCovgxyGcT3zDbzIhWkXAtq38a3U_BYBw"
+          "signature": "_xW-S9rU7iWY2W61t8t0nXS_uZSdkuaiI5vfWbOE_CjhXLwpIitVjo5Kr3yrn_8_BrsMeyg5Eb5efZReITo8AA"
         },
-        "hash": "2ba29735c83fbfa664a5c8a458a684d6ccec959a8295df64d4678c24ef25f1f4"
+        "hash": "7b4f110ef6ec488ad164114031522e8851a72160b7a72b472f834cbb87c05ce4"
       }
     ]
   }

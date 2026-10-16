@@ -22,7 +22,7 @@
   },
   "input": {
     "protocol": "obi/0.1",
-    "id": "3c986055-7bdf-805b-8305-c05f11a9f9af",
+    "id": "df13630f-8774-869d-82f9-316c5ced9769",
     "type": "question",
     "from": "obi-b",
     "to": "obi-a",
@@ -32,14 +32,18 @@
     "expires_at": "2026-10-14T13:00:00Z",
     "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
     "body": {
-      "goal": "Decide the rounding rule",
-      "question": "Should average() round to two decimals?",
+      "text": "Should average() round to two decimals?",
+      "about": [
+        {
+          "kind": "repo",
+          "repo": "obi-conf/fixture-app"
+        }
+      ],
       "choices": [
         "Yes",
         "No"
-      ],
-      "repo": "obi-conf/fixture-app"
+      ]
     },
-    "signature": "JUBqSqLJr67rNDpgZ_XmR7-__UA6wFkLrrvIcdd5LVIvGGO2DZUPJIDySUzbcg8IpZ9r3UN52xjLxXZ5krzjBg"
+    "signature": "6bgZiQvqR7VZeJ_zqHByvHsjGL7gaOQVCQd2wnuOYnlmBDQMG_oTHwWgc3U4vQLVq4-kpVv4lPTvkoTXjNncCg"
   }
 }

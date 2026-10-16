@@ -38,9 +38,9 @@ pub const ZERO_HASH: &str = "000000000000000000000000000000000000000000000000000
 /// The action types that start an exchange.
 pub const REQUEST_TYPES: [&str; 3] = ["review_request", "question", "handoff"];
 /// The action types that answer one.
-pub const REPLY_TYPES: [&str; 4] = ["status", "accept", "decline", "result"];
+pub const REPLY_TYPES: [&str; 5] = ["status", "accept", "decline", "result", "answer"];
 /// The replies that end an exchange.
-pub const TERMINAL_TYPES: [&str; 2] = ["decline", "result"];
+pub const TERMINAL_TYPES: [&str; 3] = ["decline", "result", "answer"];
 
 /// How much a finding matters: nit 1, minor 2, major 3, blocker 4.
 pub fn severity_rank(severity: &str) -> Option<u8> {

@@ -46,22 +46,26 @@
           "expires_at": "2026-10-14T13:00:00Z",
           "key_id": "ed25519:H-9yFl9PSNCrT9XfIJgvS57h-Jk8tKrfXycR3Szmivo",
           "body": {
-            "goal": "Decide the rounding rule",
-            "question": "Should average() round to two decimals?",
+            "text": "Should average() round to two decimals?",
+            "about": [
+              {
+                "kind": "repo",
+                "repo": "obi-conf/fixture-app"
+              }
+            ],
             "choices": [
               "Yes",
               "No"
-            ],
-            "repo": "obi-conf/fixture-app"
+            ]
           },
-          "signature": "TGqEkDlaCVZKIUx4t0apQ8tf563QworQVHhyHafW5kbvN33AhyK5BT61NHBYYpGUK9pxlIDBgbHES38-ZINABA"
+          "signature": "kDZQ-RrKYdryNszQor36mHNhv9qrTu9HPTXv7h9-LGmcFsUayIBPYBII926s1ALWMPhQNzK2j3LDRNc6KV4UAg"
         },
-        "hash": "e105e7642746d065c0037d74451a9af33536b7c63f46a70b783c7ab471bc1f41"
+        "hash": "448a3a0d5c12b19f014937b8a4f0f6d913ebb565968cf6ef3bee9a09a4d01d45"
       },
       {
         "sphere": "conf-sphere",
         "seq": 2,
-        "prev": "e105e7642746d065c0037d74451a9af33536b7c63f46a70b783c7ab471bc1f41",
+        "prev": "448a3a0d5c12b19f014937b8a4f0f6d913ebb565968cf6ef3bee9a09a4d01d45",
         "recorded_at": "2026-10-14T11:59:02Z",
         "envelope": {
           "protocol": "obi/0.1",
@@ -114,7 +118,7 @@
           },
           "signature": "dC6afHUXRRTX5fOItdNJ5vLdkdw3KTGP8-lQaZX44EHrZAQoF2oGdJvT80QEZeUe1I0lRAdnWU2us87GBm9RDg"
         },
-        "hash": "2bfb1dde12e5ea4f59869752fe3f2b409a4750574da62d0741b762ce16b425e1"
+        "hash": "7db2c7aac754d2010a9d12547ad60a4591fdf6b372038b613c51317e9c615fbd"
       }
     ]
   }

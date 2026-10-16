@@ -88,8 +88,8 @@ impl Exchange {
             .and_then(obi_protocol::time::parse)
     }
 
-    /// Whether the exchange has ended: a `decline` or `result` was sent or received, or built and
-    /// waiting to be sent.
+    /// Whether the exchange has ended: a `decline`, `result` or `answer` was sent or received, or
+    /// built and waiting to be sent.
     pub fn ended(&self) -> bool {
         self.messages
             .iter()

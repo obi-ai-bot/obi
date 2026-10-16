@@ -118,6 +118,65 @@
       "minimum": 1,
       "maximum": 1000000000
     },
+    "job_id": {
+      "description": "A job's id, as the Obi that runs it names it. Opaque to everyone else.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "ref": {
+      "description": "A typed reference to what a question is about or what an answer draws on: a repository, a pull request, an issue, or a job of the answering Obi. Never a URL, a path or a command (spec/protocol.md, 'References').",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "repo"],
+          "properties": {
+            "kind": { "const": "repo" },
+            "repo": { "$ref": "#/$defs/repo" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "repo", "pr"],
+          "properties": {
+            "kind": { "const": "pr" },
+            "repo": { "$ref": "#/$defs/repo" },
+            "pr": { "$ref": "#/$defs/pr_number" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "repo", "issue"],
+          "properties": {
+            "kind": { "const": "issue" },
+            "repo": { "$ref": "#/$defs/repo" },
+            "issue": { "$ref": "#/$defs/issue_number" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "repo", "job"],
+          "properties": {
+            "kind": { "const": "job" },
+            "repo": { "$ref": "#/$defs/repo" },
+            "job": { "$ref": "#/$defs/job_id" }
+          }
+        }
+      ]
+    },
+    "refs": {
+      "description": "1 to 10 distinct references.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/ref" }
+    },
     "line_number": {
       "description": "A 1-based line number.",
       "type": "integer",
@@ -136,7 +195,7 @@
     },
     "action_type": {
       "description": "Every action type. There is no free-text message type.",
-      "enum": ["review_request", "question", "handoff", "status", "accept", "decline", "result"]
+      "enum": ["review_request", "question", "handoff", "status", "accept", "decline", "result", "answer"]
     },
     "request_type": {
       "description": "The action types that start an exchange.",

@@ -101,7 +101,8 @@
               "status",
               "accept",
               "decline",
-              "result"
+              "result",
+              "answer"
             ]
           }
         }
@@ -241,6 +242,25 @@
         "properties": {
           "body": {
             "$ref": "actions/result.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "answer"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "$ref": "actions/answer.schema.json"
           }
         }
       }
