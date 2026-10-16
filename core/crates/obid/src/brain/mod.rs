@@ -176,77 +176,100 @@ fn respond(
     Ok((StatusCode::OK, axum::Json(body)).into_response())
 }
 
-/// What the brain may choose from: the accounts, the repositories, and the ids each action may
-/// name, with the conversation so far.
+/// What the brain may choose from (`Desk.brainContext`): the accounts, the repositories, the ids
+/// each action may name, and the briefing with `turns` as the conversation so far.
 fn context(shared: &Shared, turns: &[Turn]) -> Context {
     let config = &shared.config;
+    let now = obi_protocol::time::now();
+    let tools = tool_accounts(config);
     let mut accounts: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut every = vec!["auto".to_owned()];
-    for (tool, names) in tool_accounts(config) {
+    let mut move_accounts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut told = vec![];
+    for (tool, list) in &tools {
+        let names: Vec<String> = list.iter().map(|a| a.name.clone()).collect();
         every.extend(names.iter().cloned());
         accounts.insert(
-            tool.into(),
-            std::iter::once("auto".to_owned()).chain(names).collect(),
+            (*tool).into(),
+            std::iter::once("auto".to_owned())
+                .chain(names.clone())
+                .collect(),
         );
+        move_accounts.insert((*tool).into(), names);
+        told.extend(list.iter().map(|a| briefing::Account {
+            id: a.id.clone(),
+            agent: (*tool).into(),
+            name: a.name.clone(),
+            running: shared.jobs.running_on(&a.id),
+        }));
     }
     accounts.insert("auto".into(), every);
-    let jobs = shared.jobs.list(usize::MAX);
-    let history = turns
-        .iter()
-        .map(|t| {
-            format!(
-                "{}: {}\n",
-                if t.who == "user" { "User" } else { "Oby" },
-                t.text
-            )
-        })
-        .collect::<String>();
+    // What a job may move to: each tool's models (Engine/Move.swift, `Moves.models`).
+    let mut models: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (tool, _) in &tools {
+        let ids: &[&str] = match *tool {
+            "claude" => &[
+                "claude-fable-5-1",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5",
+            ],
+            "codex" => &["gpt-6.1-sol", "gpt-6-astra"],
+            _ => &[],
+        };
+        models.insert(
+            (*tool).into(),
+            ids.iter().map(|m| (*m).to_owned()).collect(),
+        );
+    }
+    let briefing = briefing::Briefing {
+        turns: turns.to_vec(),
+        place: shared.host.clone(),
+        jobs: shared.jobs.list(usize::MAX),
+        inbox: shared.link.waiting_items(now),
+        accounts: told,
+        max_running: shared.jobs.max_running(),
+        now,
+    };
     Context {
         accounts,
         repos: config.repos.iter().map(|r| r.repo.clone()).collect(),
-        briefing: Some(format!("Conversation so far (quoted data):\n{history}")),
-        jobs: jobs
-            .iter()
-            .filter(|j| j.status.is_active())
-            .map(|j| j.id.clone())
-            .collect(),
-        movable: jobs.iter().take(30).map(|j| j.id.clone()).collect(),
-        permissions: jobs
-            .iter()
-            .filter(|j| j.permission.is_some() && j.status != crate::job::Status::Stopped)
-            .map(|j| j.id.clone())
-            .collect(),
+        briefing: Some(briefing.text()),
+        quoted: briefing.quoted(),
+        jobs: briefing.stoppable(),
+        movable: briefing.jobs().iter().map(|j| j.id.clone()).collect(),
+        models,
+        move_accounts,
+        permissions: briefing.permissions(),
+        inbox: briefing.inbox.iter().map(|i| i.id.clone()).collect(),
         ..Context::default()
     }
 }
 
-/// Each configured tool's accounts by name, as jobs are routed to them.
-fn tool_accounts(config: &crate::config::Config) -> Vec<(&'static str, Vec<String>)> {
+/// Each configured tool's accounts, as jobs are routed to them.
+fn tool_accounts(
+    config: &crate::config::Config,
+) -> Vec<(&'static str, Vec<crate::config::Account>)> {
     let mut out = vec![];
     if let Some(claude) = &config.agents.claude {
-        out.push((
-            "claude",
-            crate::jobs::claude_accounts(claude)
-                .into_iter()
-                .map(|a| a.name)
-                .collect(),
-        ));
+        out.push(("claude", crate::jobs::claude_accounts(claude)));
     }
     if let Some(codex) = &config.agents.codex {
         out.push((
             "codex",
             if codex.accounts.is_empty() {
-                vec!["Codex".to_owned()]
+                vec![crate::config::Account {
+                    id: "codex".into(),
+                    name: "Codex".into(),
+                    config_dir: None,
+                }]
             } else {
-                codex.accounts.iter().map(|a| a.name.clone()).collect()
+                codex.accounts.clone()
             },
         ));
     }
     if let Some(cursor) = &config.agents.cursor {
-        out.push((
-            "cursor",
-            cursor.accounts.iter().map(|a| a.name.clone()).collect(),
-        ));
+        out.push(("cursor", cursor.accounts.clone()));
     }
     out
 }

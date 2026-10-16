@@ -478,12 +478,12 @@ fn the_single_thread_from_before_becomes_the_first_conversation() {
     let kept: Value = serde_json::from_slice(&std::fs::read(&aside).unwrap()).unwrap();
     assert_eq!(kept, old_thread());
 
-    // An app from before carries it on, and the brain reads it.
+    // An app from before carries it on, and the brain reads it, each turn on one line.
     let answer = plan(&obid, json!({"said": "hello"}));
     assert_eq!(answer["conversation"], id);
     let prompt = std::fs::read_to_string(folder.0.join("env-home/plan-input")).unwrap();
     assert!(
-        prompt.contains("User: review oby PR #33\nplease\nOby: On it.\nUser: and the vault one?"),
+        prompt.contains("User: review oby PR #33 please\nOby: On it.\nUser: and the vault one?"),
         "{prompt}"
     );
     assert_eq!(turns(&obid, "").len(), 5);

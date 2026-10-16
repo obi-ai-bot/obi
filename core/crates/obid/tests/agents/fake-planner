@@ -9,6 +9,7 @@
 #                  PRINT <text>            prints the text as it is, and exits 0
 #                  FAIL <code> <text>      prints the text as it is, and exits with the code
 #                  SLEEP <seconds> <plan>  waits, then answers the plan
+#                  PEEK <path>             replies "read" when it could read the file, else "hidden"
 #                  <plan>                  answers {"structured_output": <plan>}
 #                When it's empty, the words the user says now choose (below).
 #   calls/<n>/   what call n got: args (one per line), input (stdin), pwd, and work.md when
@@ -47,6 +48,9 @@ case "$line" in
     rest=${line#FAIL }
     printf '%s\n' "${rest#* }"
     exit "${rest%% *}" ;;
+  "PEEK "*)
+    if cat "${line#PEEK }" >/dev/null 2>&1; then seen=read; else seen=hidden; fi
+    line="{\"action\":\"reply_only\",\"reply\":\"$seen\",\"dispatches\":[],\"question\":null}" ;;
   "SLEEP "*)
     rest=${line#SLEEP }
     sleep "${rest%% *}"

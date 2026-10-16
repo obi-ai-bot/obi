@@ -2387,6 +2387,24 @@ impl Link {
         Value::Array(items.into_iter().map(Item::to_json).collect())
     }
 
+    /// The items waiting for the owner now (not done, and not put off past `now`), in the order
+    /// they came: what the brain is told about the inbox (#546).
+    pub fn waiting_items(&self, now: i64) -> Vec<Item> {
+        let state = self.lock();
+        let mut items: Vec<Item> = state
+            .inbox
+            .values()
+            .filter(|i| i.done.is_none() && i.later.is_none_or(|later| later <= now))
+            .cloned()
+            .collect();
+        items.sort_by(|a, b| {
+            a.arrival_order()
+                .cmp(&b.arrival_order())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        items
+    }
+
     /// `POST /v1/inbox/{id}/answer`.
     pub async fn answer(self: &Arc<Self>, id: &str, body: &[u8]) -> Result<Value, ApiError> {
         let map = object(body, &["answer", "done", "later"])?;

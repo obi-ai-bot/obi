@@ -394,3 +394,206 @@ fn codex_plans_when_claude_cannot() {
             .starts_with("claude failed: claude returned no plan after retry")
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The briefing (#546, step 2): what the brain is told before the user's words.
+
+/// A job whose agent works until it's stopped, titled `title`, running.
+fn running(obid: &Obid, title: &str) -> serde_json::Value {
+    let answer = call(
+        obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "investigate",
+                             "task": "SLEEP", "title": title}}),
+        ),
+    );
+    assert!(
+        answer.status == 200 || answer.status == 201,
+        "{}",
+        answer.text
+    );
+    let id = answer.body["id"].as_str().unwrap().to_owned();
+    within(30, "the job runs", || {
+        let job = call(obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+        (job["status"] == "running" && !job["step"].as_str().unwrap_or("").is_empty())
+            .then_some(job)
+    })
+}
+
+fn host(obid: &Obid) -> String {
+    call(obid, "GET", "/v1/status", None).body["runner"]["host"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn stop_plan(ids: &[&str]) -> String {
+    json!({"action": "stop_agent", "reply": "", "dispatches": [], "question": null,
+           "jobs": ids, "all": ids.is_empty()})
+    .to_string()
+}
+
+/// ConversationTests.theBrainReadsTheConversationAndMayStopOneJob, and #546's acceptance: "how
+/// are the jobs going?" with a running job is told about it, and "cancel it" right after stops it.
+#[test]
+fn the_brain_reads_the_conversation_and_may_stop_one_job() {
+    let folder = Folder::new("brain-briefing");
+    let obid = started(&folder);
+    let job = running(&obid, "Vault secrets");
+    let id = job["id"].as_str().unwrap();
+    let step = job["step"].as_str().unwrap();
+    queue(
+        &obid,
+        &[
+            reply("Vault secrets is running its tests."),
+            stop_plan(&[id]),
+        ],
+    );
+    let first = said(&obid, "how are the jobs going?");
+    assert_eq!(first["text"], "Vault secrets is running its tests.");
+    let calls = calls(&obid);
+    let input = read(calls[0].join("input"));
+    assert!(input.starts_with("# What Oby knows right now"), "{input}");
+    assert!(input.contains("## The conversation so far\n\n(Nothing yet.)"));
+    assert!(input.contains(&format!(
+        "{id} · Vault secrets · obi-e2e/fixture-app · Claude Code · Stub · running on {}",
+        host(&obid)
+    )));
+    assert!(
+        input
+            .trim_end()
+            .ends_with("The user says now:\nhow are the jobs going?")
+    );
+    // The agent's step is in the quoted file the brain may read, never in the prompt; with it,
+    // the brain has Read and nothing else, and room to read and answer (#535).
+    assert!(!input.contains(step), "{input}");
+    let quoted = read(calls[0].join("work.md"));
+    assert!(
+        quoted.contains(&format!("## Job {id} (Vault secrets)\nStep now: {step}")),
+        "{quoted}"
+    );
+    let args = read(calls[0].join("args"));
+    assert!(
+        args.contains("--tools\nRead\n--allowedTools\nRead\n--max-turns\n6\n"),
+        "{args}"
+    );
+    assert!(args.contains("quoted in the file work.md"));
+    // It thought in a folder of its own, gone since.
+    let pwd = PathBuf::from(read(calls[0].join("pwd")).trim());
+    assert!(
+        pwd.starts_with(obid.home.join("plans")),
+        "{}",
+        pwd.display()
+    );
+    assert!(!pwd.exists());
+
+    let second = said(&obid, "cancel it");
+    assert_eq!(second["text"], "Stopped Vault secrets.");
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["status"], "stopped");
+    let again = read(calls_after(&obid, 1).join("input"));
+    assert!(
+        again.contains("User: how are the jobs going?\nOby: Vault secrets is running its tests.\n"),
+        "{again}"
+    );
+}
+
+/// The `n`th call (from 0), however many there are now.
+fn calls_after(obid: &Obid, n: usize) -> PathBuf {
+    calls(obid)[n].clone()
+}
+
+/// ConversationTests.theReplyNeverContradictsTheHeaderAboutRunningJobs: with an agent working,
+/// Oby never says nothing is running; it says what the header counts.
+#[test]
+fn the_reply_never_contradicts_the_header_about_running_jobs() {
+    let folder = Folder::new("brain-header");
+    let obid = started(&folder);
+    let job = running(&obid, "Vault secrets");
+    let id = job["id"].as_str().unwrap();
+    let host = host(&obid);
+    queue(
+        &obid,
+        &[
+            reply("No jobs are running right now."),
+            reply("No jobs failed; Vault secrets is still running."),
+            reply("No jobs are running right now."),
+        ],
+    );
+    let line = format!("1 agent is working: Vault secrets on {host}.");
+    assert_eq!(said(&obid, "anything running?")["text"], line.as_str());
+    let input = read(calls(&obid)[0].join("input"));
+    assert!(input.contains(&format!("Working now: {line}")), "{input}");
+    assert!(read(calls(&obid)[0].join("args")).contains("never say that nothing is running"));
+    // Other replies pass as they are, and so does this one once nothing runs.
+    assert_eq!(
+        said(&obid, "did anything fail?")["text"],
+        "No jobs failed; Vault secrets is still running."
+    );
+    assert_eq!(
+        call(&obid, "POST", &format!("/v1/jobs/{id}/stop"), None).status,
+        200
+    );
+    assert_eq!(
+        said(&obid, "anything running?")["text"],
+        "No jobs are running right now."
+    );
+    assert!(
+        read(calls(&obid)[2].join("input")).contains("Working now: No agent is working right now.")
+    );
+}
+
+/// #505: a conversation of 60 turns sends the brain turns 11 to 60 only.
+#[test]
+fn a_conversation_of_60_turns_sends_the_last_50() {
+    let folder = Folder::new("brain-505");
+    let obid = started(&folder);
+    let conversation = said(&obid, "turn 1")["conversation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for n in (3..60).step_by(2) {
+        let answer = call(
+            &obid,
+            "POST",
+            "/v1/plans",
+            Some(&json!({"said": format!("turn {n}"), "conversation": conversation})),
+        );
+        assert_eq!(answer.status, 200, "{}", answer.text);
+    }
+    let page = call(
+        &obid,
+        "GET",
+        &format!("/v1/conversation?id={conversation}&limit=500"),
+        None,
+    );
+    assert_eq!(page.body.as_array().unwrap().len(), 60);
+    said(&obid, "and now?");
+    let input = read(calls(&obid).last().unwrap().join("input"));
+    let told: Vec<&str> = input
+        .lines()
+        .filter(|l| l.starts_with("User: ") || l.starts_with("Oby: "))
+        .collect();
+    assert_eq!(told.len(), 50, "{input}");
+    assert_eq!(told[0], "User: turn 11");
+    assert_eq!(told[49], "Oby: Fine.");
+}
+
+/// The brain that may read its quoted file is boxed like a job: obid's own files (its token
+/// here) are hidden from it. Without a file to read it has no tool at all, and isn't boxed, so
+/// the same peek reads the token: the box is what hides it.
+#[test]
+fn a_brain_that_may_read_is_boxed() {
+    let folder = Folder::new("brain-boxed");
+    let obid = started(&folder);
+    let token = obid.home.join("api-token");
+    let peek = format!("PEEK {}", token.display());
+    queue(&obid, std::slice::from_ref(&peek));
+    assert_eq!(said(&obid, "anything to read?")["text"], "read");
+    running(&obid, "Vault secrets");
+    queue(&obid, &[peek]);
+    assert_eq!(said(&obid, "anything to read?")["text"], "hidden");
+    assert!(read(calls(&obid)[1].join("args")).contains("--allowedTools\nRead\n"));
+}
