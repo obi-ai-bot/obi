@@ -48,6 +48,10 @@ pub struct Exchange {
     /// Replies built and signed, waiting to be sent, oldest first. Never in the API's answer.
     #[serde(default)]
     pub outbox: Vec<Value>,
+    /// When obid took the question on to answer by itself (a model run), whatever the run ended
+    /// in: what the self-answer limits count, also after a restart. Never in the API's answer.
+    #[serde(default)]
+    pub self_answered: Option<i64>,
 }
 
 impl Exchange {
@@ -78,6 +82,7 @@ impl Exchange {
             updated: now,
             request,
             outbox: Vec::new(),
+            self_answered: None,
         }
     }
 

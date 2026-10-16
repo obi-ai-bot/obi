@@ -64,6 +64,45 @@ pub fn covering<'a>(
         .or_else(|| decisions.iter().filter(same).find(|d| d.repo == "*"))
 }
 
+/// The remembered decline that covers a question from an Obi of `from_owner` about `repos`
+/// (protocol.md section 11, step 5): for each repository, one for that repository (compared
+/// ignoring ASCII case) or one for every repository (`*`); for a question about none, one for `*`.
+/// Only a decline applies to a question: what lets the Obi answer one is a sharing rule. The
+/// decision named is the first repository's.
+pub fn covering_question<'a>(
+    decisions: &'a [Decision],
+    from_owner: &str,
+    repos: &[String],
+) -> Option<&'a Decision> {
+    let declines = |d: &&Decision| {
+        d.kind == "question" && d.from_owner == from_owner && d.decision == "decline"
+    };
+    let every = decisions.iter().filter(declines).find(|d| d.repo == "*");
+    if repos.is_empty() {
+        return every;
+    }
+    let mut first = None;
+    for repo in repos {
+        let found = decisions
+            .iter()
+            .filter(declines)
+            .find(|d| d.repo.eq_ignore_ascii_case(repo))
+            .or(every)?;
+        first.get_or_insert(found);
+    }
+    first
+}
+
+/// The repositories the owner said no to `from_owner`'s questions about, by a remembered decline:
+/// what an answer by the Obi never draws on.
+pub fn declined_repos(decisions: &[Decision], from_owner: &str) -> Vec<String> {
+    decisions
+        .iter()
+        .filter(|d| d.kind == "question" && d.from_owner == from_owner && d.decision == "decline")
+        .map(|d| d.repo.clone())
+        .collect()
+}
+
 /// Where the decisions are kept.
 pub struct Decisions {
     path: PathBuf,

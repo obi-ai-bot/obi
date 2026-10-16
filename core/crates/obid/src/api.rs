@@ -169,6 +169,19 @@ pub fn router(shared: Arc<Shared>) -> Router {
             "/v1/obid/decisions/{id}",
             axum::routing::delete(crate::sphere::routes::forget),
         )
+        .route("/v1/obid/sharing", get(crate::sphere::routes::sharing))
+        .route(
+            "/v1/obid/sharing/rules",
+            post(crate::sphere::routes::add_rule),
+        )
+        .route(
+            "/v1/obid/sharing/rules/{id}",
+            axum::routing::delete(crate::sphere::routes::forget_rule),
+        )
+        .route(
+            "/v1/obid/sharing/limits",
+            axum::routing::put(crate::sphere::routes::limits),
+        )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(shared.clone(), gate))

@@ -410,10 +410,21 @@ impl Owner {
     }
 }
 
-pub const OBI_SCOPES: &str = "send:review_request reply receive directory:read audit:read";
+pub const OBI_SCOPES: &str =
+    "send:review_request send:question reply receive directory:read audit:read";
 
 /// Makes A's key and card and joins it to the fake Sphere with its invitation: the membership.
 pub fn join_a(obid: &Obid, sphere: &FakeSphere, owner: &Owner) -> Value {
+    join_a_accepting(obid, sphere, owner, &["review_request"])
+}
+
+/// [`join_a`], with a card that accepts `accepts`.
+pub fn join_a_accepting(
+    obid: &Obid,
+    sphere: &FakeSphere,
+    owner: &Owner,
+    accepts: &[&str],
+) -> Value {
     let key = call(obid, "POST", "/v1/obid/sphere/key", None);
     assert_eq!(key.status, 200, "{}", key.text);
     let made = call(
@@ -423,7 +434,7 @@ pub fn join_a(obid: &Obid, sphere: &FakeSphere, owner: &Owner) -> Value {
         Some(
             &json!({"url": sphere.url, "sphere": SPHERE, "obiId": "obi-wellington",
                      "name": "Wellington's Obi", "ownerKey": owner.key.public_key(),
-                     "accepts": ["review_request"]}),
+                     "accepts": accepts}),
         ),
     );
     assert_eq!(made.status, 200, "{}", made.text);
@@ -454,9 +465,19 @@ pub struct TestObi {
 impl TestObi {
     /// Joins `id` (owner `owner`) to the fake Sphere: redeem, then a token.
     pub async fn join(sphere: &FakeSphere, id: &str, owner: &str) -> TestObi {
+        TestObi::join_accepting(sphere, id, owner, &["review_request"]).await
+    }
+
+    /// [`TestObi::join`], with a card that accepts `accepts`.
+    pub async fn join_accepting(
+        sphere: &FakeSphere,
+        id: &str,
+        owner: &str,
+        accepts: &[&str],
+    ) -> TestObi {
         let owner = Owner::new(owner);
         let key = Keypair::from_seed_string(&format!("obid sphere test obi {id}"));
-        let accepts = vec!["review_request".to_owned()];
+        let accepts: Vec<String> = accepts.iter().map(|a| (*a).to_owned()).collect();
         let (owner_key, key_id, public_key) =
             (owner.key.public_key(), key.key_id(), key.public_key());
         let issued_at = time::format(time::now());

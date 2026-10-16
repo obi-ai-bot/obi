@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+// A stand-in for Claude Code in obid's question tests (tests/sphere_questions.rs). obid runs it two
+// ways:
+//
+// - As the model that writes an answer to another Obi's question by itself (docs/runner-api.md,
+//   "obid only: questions from other Obis"): `-p --output-format json --json-schema …`, a fixed
+//   prompt on stdin, the question quoted in ./question.json and what the sharing rule allows in
+//   ./material.json. It answers `{"structured_output": {answerable, text, refs, choice}}` from the
+//   material alone. What the question says picks the case:
+//     need-owner   it can't answer: answerable false
+//     leak-case    it answers with a text that holds a possible secret (the publish gate's case)
+//     slow-case    it waits 6 seconds, then lists the material
+//     read-outside <path> …
+//                  it obeys, as a model a question took over would: it reads <path> (a file outside
+//                  its folder) and answers with what it read, or "could not read" when the system
+//                  refused it. Only the sandbox stands between it and the file: it is a process,
+//                  not Claude Code, so no permission prompt or --restricted holds it back.
+//     anything     it lists the material: "<title>: <state>; …", refs every item
+//   It fails (exit 3, nothing on stdout) when obid breaks its side: the question's words in the
+//   prompt, a flag beyond Read (or --allowedTools, which would let Read leave its folder), no
+//   --restricted or --permission-prompts none (Claude Code's own fence around its folder), a Claude
+//   Code, Anthropic or GitHub variable in its environment, no question file, or no sandbox (it can
+//   create a file next to its working folder).
+// - As a job's agent (stream-json): it ends the turn with "Nothing to do.".
+
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
+
+const CANARY = "OBI-E2E-DATA-CANARY";
+const argv = process.argv.slice(2);
+const valueOf = (name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
+const fail = (why) => {
+  process.stderr.write(`fake-answerer: ${why}\n`);
+  process.exit(3);
+};
+
+if (valueOf("--input-format") === "stream-json") {
+  const session = "00000000-0000-4000-8000-000000000007";
+  const emit = (line) => process.stdout.write(JSON.stringify(line) + "\n");
+  const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+  rl.on("line", (line) => {
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (message.type !== "user") return;
+    emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: [], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
+    emit({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: "Nothing to do.", session_id: session, total_cost_usd: 0 });
+    rl.close();
+  });
+} else {
+  let prompt = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => (prompt += chunk));
+  process.stdin.on("end", () => answer(prompt));
+}
+
+function answer(prompt) {
+  if (!argv.includes("-p") || valueOf("--output-format") !== "json" || !argv.includes("--json-schema")) fail("not run as the answer's model");
+  if (valueOf("--tools") !== "Read") fail(`tools ${valueOf("--tools")}, not Read`);
+  if (argv.some((a) => a.startsWith("--allowedTools") || a.startsWith("--allowed-tools"))) fail("--allowedTools lets Read leave the folder");
+  if (argv.includes("--dangerously-skip-permissions")) fail("permissions skipped");
+  if (!argv.includes("--restricted")) fail("not --restricted: Read isn't confined to its folder");
+  if (valueOf("--permission-prompts") !== "none") fail("a permission prompt could be answered");
+  if (!prompt.trim()) fail("the prompt is empty");
+  if (prompt.includes(CANARY)) fail("the question's words are in the prompt");
+  if (argv.join(" ").includes(CANARY)) fail("the question's words are in the arguments");
+  for (const name of Object.keys(process.env)) {
+    if (name === "CLAUDECODE" || name.startsWith("CLAUDE_CODE_") || name.startsWith("ANTHROPIC_") || name === "GH_TOKEN" || name === "GITHUB_TOKEN" || name === "OBID_API_TOKEN") fail(`${name} is in its environment`);
+  }
+  const probe = join(dirname(process.cwd()), `.answerer-sandbox-probe-${process.pid}`);
+  let wrote = false;
+  try {
+    writeFileSync(probe, "", { flag: "wx" });
+    wrote = true;
+  } catch {}
+  if (wrote) {
+    try {
+      unlinkSync(probe);
+    } catch {}
+    fail("no sandbox: it wrote next to its working folder");
+  }
+  if (!existsSync("question.json") || !existsSync("material.json")) fail("no quoted question or material in its folder");
+  const question = JSON.parse(readFileSync("question.json", "utf8"));
+  const material = JSON.parse(readFileSync("material.json", "utf8"));
+  const text = question?.question?.text ?? "";
+  const items = material?.items ?? [];
+  let out;
+  const outside = /read-outside (\S+)/.exec(text);
+  if (outside) {
+    let read;
+    try {
+      read = readFileSync(outside[1], "utf8").trim();
+    } catch {
+      read = "could not read";
+    }
+    out = { answerable: true, text: read, refs: [], choice: null };
+  } else if (text.includes("slow-case")) {
+    const said = items.map((i) => `${i.title ?? i.type}: ${i.state ?? i.result?.outcome ?? "?"}`).join("; ");
+    out = { answerable: true, text: said || "Nothing to tell.", refs: [], choice: null };
+    setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: out }) + "\n"), 6000);
+    return;
+  } else if (text.includes("need-owner")) {
+    out = { answerable: false, text: "", refs: [], choice: null };
+  } else if (text.includes("leak-case")) {
+    out = { answerable: true, text: `The key is ${"AKIA"}${"ABCDEFGHIJKLMNOP"}.`, refs: [], choice: null };
+  } else {
+    const said = items.map((i) => `${i.title ?? i.type}: ${i.state ?? i.result?.outcome ?? "?"}`).join("; ");
+    out = { answerable: true, text: said || "Nothing to tell.", refs: items.slice(0, 10).map((_, i) => i), choice: null };
+  }
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: out }) + "\n");
+}

@@ -23,15 +23,18 @@ use obi_protocol::{DirectoryKey, Keys, time};
 use serde_json::{Map, Value, json};
 use tokio::sync::{Notify, watch};
 
+use super::answering;
 use super::decisions::{self, Decision, Decisions};
 use super::exchange::{Exchange, Exchanges, Message};
 use super::inbox::{self, Inbox, Item};
 use super::membership::{Files, Membership};
+use super::sharing::{self, Rule, Sharing};
 use crate::api::ApiError;
 use crate::config::Config;
 use crate::events::Events;
 use crate::job::Job;
 use crate::jobs::{Jobs, ObiReview};
+use crate::sandbox::Sandbox;
 use crate::scan;
 
 /// How long a reply obid sends lives, at least (runner-api.md, "Expiry of what obid sends").
@@ -48,6 +51,8 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const OBID_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The scopes a delegation must grant for obid to follow and answer.
 const NEEDED_SCOPES: [&str; 2] = ["receive", "reply"];
+/// The most model runs answering questions by themselves at once, across every sender.
+const ANSWER_RUNS: usize = 2;
 /// The most dropped message ids obid remembers, to acknowledge them again without a second look.
 const DROPPED_MAX: usize = 10_000;
 
@@ -79,6 +84,13 @@ struct State {
     exchanges: HashMap<String, Exchange>,
     inbox: HashMap<String, Item>,
     decisions: Vec<Decision>,
+    /// The owner's sharing rules and the per-sender limits.
+    sharing: Sharing,
+    /// When each sender's owner's questions started an answer the Obi wrote by itself, within the
+    /// last hour: the self-answer limit (protocol.md section 11, "Rate limits").
+    self_answers: HashMap<String, Vec<i64>>,
+    /// The same, every sender's together: the overall hourly cap.
+    all_self_answers: Vec<i64>,
     /// Every envelope id obid has handled: the messages of its exchanges, and the ones it dropped.
     seen: HashSet<String>,
     dropped: Vec<String>,
@@ -104,6 +116,11 @@ pub struct Link {
     exchanges: Exchanges,
     inbox: Inbox,
     decisions: Decisions,
+    sharing: sharing::Kept,
+    /// What the model that answers a question by itself runs in: the job sandbox.
+    sandbox: Result<Sandbox, String>,
+    /// At most this many of those runs at once, whoever asked.
+    answering: tokio::sync::Semaphore,
     jobs: Arc<Jobs>,
     events: Events,
     state: Mutex<State>,
@@ -239,6 +256,10 @@ impl Link {
         let exchanges = Exchanges::open(&config.home)?;
         let inbox = Inbox::open(&config.home)?;
         let decisions = Decisions::open(&config.home);
+        let sharing = sharing::Kept::open(&config.home);
+        let sandbox = std::env::current_exe()
+            .map_err(|e| format!("obid can't find its own executable: {e}"))
+            .and_then(|obid| Sandbox::detect(&obid));
         let mut seen = HashSet::new();
         let mut by_id = HashMap::new();
         for exchange in exchanges.load_all() {
@@ -277,6 +298,9 @@ impl Link {
             exchanges: by_id,
             inbox: items,
             decisions: decisions.load(),
+            sharing: sharing.load(),
+            self_answers: HashMap::new(),
+            all_self_answers: Vec::new(),
             seen,
             dropped: Vec::new(),
         };
@@ -286,6 +310,9 @@ impl Link {
             exchanges,
             inbox,
             decisions,
+            sharing,
+            sandbox,
+            answering: tokio::sync::Semaphore::new(ANSWER_RUNS),
             jobs,
             events,
             state: Mutex::new(state),
@@ -343,8 +370,40 @@ impl Link {
     }
 
     /// After a restart: an accepted request whose job has ended without a reply gets its failed
-    /// result, and one whose job is gone too.
+    /// result, and one whose job is gone too. A question the Obi was answering by itself goes to
+    /// the owner: its run ended with obid.
     fn reconcile(self: &Arc<Self>) {
+        // What a run cut short left: its folder, with a copied login in it.
+        let _ = std::fs::remove_dir_all(self.config.home.join("answers"));
+        {
+            // The self-answer limits count the last hour across restarts: every run obid took
+            // on, whatever it ended in (an answer, the owner's inbox, `busy`).
+            let mut state = self.lock();
+            let since = time::now() - 3600;
+            let started: Vec<(String, i64)> = state
+                .exchanges
+                .values()
+                .filter_map(|e| {
+                    e.self_answered
+                        .filter(|at| *at > since)
+                        .map(|at| (e.peer_owner.clone().unwrap_or_default(), at))
+                })
+                .collect();
+            for (owner, at) in started {
+                state.self_answers.entry(owner).or_default().push(at);
+                state.all_self_answers.push(at);
+            }
+        }
+        let answering: Vec<String> = self
+            .lock()
+            .exchanges
+            .values()
+            .filter(|e| e.direction == "incoming" && e.state == "answering")
+            .map(|e| e.correlation_id.clone())
+            .collect();
+        for cid in answering {
+            self.to_owner(&cid);
+        }
         let waiting: Vec<(String, Option<String>)> = self
             .lock()
             .exchanges
@@ -543,6 +602,12 @@ impl Link {
         self.events.send("inbox", item.to_json());
     }
 
+    fn save_sharing(&self, sharing: &Sharing) {
+        if let Err(e) = self.sharing.save(sharing) {
+            tracing::error!("can't keep the sharing rules: {e}");
+        }
+    }
+
     fn save_decisions(&self, decisions: &[Decision]) {
         if let Err(e) = self.decisions.save(decisions) {
             tracing::error!("can't keep the remembered decisions: {e}");
@@ -658,9 +723,12 @@ impl Link {
         if accepts.is_empty() {
             return Err(invalid("accepts names at least one request type.".into()));
         }
-        if let Some(other) = accepts.iter().find(|a| *a != "review_request") {
+        if let Some(other) = accepts
+            .iter()
+            .find(|a| *a != "review_request" && *a != "question")
+        {
             return Err(invalid(format!(
-                "obid takes review_request only in this version, not {other}."
+                "obid takes review_request and question in this version, not {other}."
             )));
         }
         if obi_protocol::keys::key_id_of(owner_key).is_none() {
@@ -1100,7 +1168,8 @@ impl Link {
             verdict = self.verify(&delivery);
         }
         if let Err(rejection) = verdict {
-            self.drop_message(&id, &format!("{}: {}", rejection.code, rejection.message));
+            // Its code only: a schema's message may quote the message's text.
+            self.drop_message(&id, rejection.code);
             return;
         }
         let kind = delivery.envelope["type"].as_str().unwrap_or("");
@@ -1150,11 +1219,26 @@ impl Link {
             self.drop_message(&id, &format!("breaks the exchange rules: {problem}"));
             return;
         }
+        // An answer picking a choice its question doesn't have (protocol.md section 11, step 3).
+        let choices = exchange.request["body"]["choices"]
+            .as_array()
+            .map_or(0, Vec::len) as u64;
+        if envelope["type"] == "answer"
+            && envelope["body"]
+                .get("choice")
+                .is_some_and(|c| c.as_u64().is_none_or(|c| c >= choices))
+        {
+            drop(state);
+            self.drop_message(&id, "an answer with a choice its question doesn't have");
+            return;
+        }
         exchange.messages.push(Link::received(&delivery));
         match envelope["type"].as_str().unwrap_or("") {
             "accept" if exchange.state == "sent" => exchange.state = "accepted".into(),
             "decline" => exchange.state = "declined".into(),
-            "result" => {
+            // A result finishes a review or a handoff, an answer a question: either ends the
+            // exchange, and is its result.
+            "result" | "answer" => {
                 exchange.state = "done".into();
                 exchange.result = Some(envelope["body"].clone());
             }
@@ -1168,12 +1252,22 @@ impl Link {
     }
 
     /// A request (protocol.md section 11, steps 4 to 6): declined when the card doesn't accept its
-    /// type, decided by a remembered decision when one covers it, else put in the owner's inbox.
+    /// type, decided by a remembered decision when one covers it, else put in the owner's inbox
+    /// (declined `busy` when the sender's owner has as many waiting there as the limit allows). A
+    /// question goes on to [`Link::decide_question`].
     fn handle_request(self: &Arc<Self>, delivery: Delivery) {
         let envelope = delivery.envelope.clone();
         let id = envelope["id"].as_str().unwrap_or("").to_owned();
         let from = envelope["from"].as_str().unwrap_or("").to_owned();
         let kind = envelope["type"].as_str().unwrap_or("").to_owned();
+        let body = &envelope["body"];
+        // A question's repositories, its job references checked against obid's own jobs, before
+        // the Link's state is locked.
+        let (repos, referenced) = if kind == "question" {
+            self.question_repos(body)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let mut state = self.lock();
         if state.exchanges.contains_key(&id) {
             drop(state);
@@ -1200,12 +1294,12 @@ impl Link {
         );
         exchange.messages.push(Link::received(&delivery));
         state.seen.insert(id.clone());
-        let body = &envelope["body"];
         let repo = body["repo"].as_str();
         let now = time::now();
         let mut item = None;
         let mut decisions_changed = false;
-        if !accepts.contains(&kind) || kind != "review_request" {
+        let mut answer_by_itself = None;
+        if !accepts.contains(&kind) || !(kind == "review_request" || kind == "question") {
             exchange.state = "declined".into();
             let decline = self.reply_locked(
                 &state,
@@ -1214,6 +1308,12 @@ impl Link {
                 json!({"reason": "out_of_scope"}),
             );
             exchange.outbox.extend(decline);
+        } else if kind == "question" {
+            match self.decide_question(&mut state, &mut exchange, &repos, &referenced, now) {
+                Decided::Settled { decisions } => decisions_changed = decisions,
+                Decided::Inbox(made) => item = Some(made),
+                Decided::ByItself(rule) => answer_by_itself = Some(rule),
+            }
         } else if let Some(decision) =
             decisions::covering(&state.decisions, &kind, &owner, repo).cloned()
         {
@@ -1236,6 +1336,8 @@ impl Link {
                 );
                 exchange.outbox.extend(decline);
             }
+        } else if self.inbox_full(&state, &owner) {
+            self.decline_busy(&state, &mut exchange);
         } else {
             let made = inbox::review_request_item(
                 &exchange.correlation_id,
@@ -1260,6 +1362,234 @@ impl Link {
         }
         if let Some(item) = item {
             self.save_item(&item);
+        }
+        self.save_exchange(&exchange);
+        self.outbox.notify_one();
+        if let Some(rule) = answer_by_itself {
+            let link = self.clone();
+            let cid = exchange.correlation_id.clone();
+            tokio::spawn(async move {
+                link.answer_by_itself(cid, rule, repos, referenced).await;
+            });
+        }
+    }
+
+    /// The repositories a question is about (protocol.md 5.2), each once, compared ignoring ASCII
+    /// case, and the job references among them that are obid's own jobs. A job reference counts
+    /// only when the job is obid's own and runs in the repository it names (5.9): otherwise it is
+    /// something obid doesn't know, and names no repository.
+    fn question_repos(&self, body: &Value) -> (Vec<String>, Vec<String>) {
+        let mut repos: Vec<String> = Vec::new();
+        let mut referenced = Vec::new();
+        for r in body["about"].as_array().into_iter().flatten() {
+            let repo = r["repo"].as_str().unwrap_or("");
+            if r["kind"] == "job" {
+                let job = r["job"].as_str().unwrap_or("");
+                let ours = self
+                    .jobs
+                    .get(job)
+                    .is_some_and(|j| j.repo.eq_ignore_ascii_case(repo));
+                if !ours {
+                    continue;
+                }
+                referenced.push(job.to_owned());
+            }
+            if !repo.is_empty() && !repos.iter().any(|r| r.eq_ignore_ascii_case(repo)) {
+                repos.push(repo.to_owned());
+            }
+        }
+        (repos, referenced)
+    }
+
+    /// Whether the sender's `owner` has as many requests waiting in the inbox as the limit allows.
+    fn inbox_full(&self, state: &State, owner: &str) -> bool {
+        let waiting = state
+            .inbox
+            .values()
+            .filter(|i| {
+                i.kind == "obiRequest"
+                    && i.done.is_none()
+                    && i.obi.as_ref().is_some_and(|o| o["fromOwner"] == owner)
+            })
+            .count();
+        waiting >= state.sharing.limits.inbox_per_owner as usize
+    }
+
+    /// Declines with reason `busy`: nothing reaches the inbox.
+    fn decline_busy(&self, state: &State, exchange: &mut Exchange) {
+        exchange.state = "declined".into();
+        exchange.decided_by = None;
+        exchange.rule = None;
+        let decline = self.reply_locked(state, exchange, "decline", json!({"reason": "busy"}));
+        exchange.outbox.extend(decline);
+    }
+
+    /// A question (protocol.md section 11, step 5 and "Questions"): a remembered decline that
+    /// covers each repository it is about declines it; the same question open already is `busy`;
+    /// a sharing rule for the asker that covers it, with the self-answer limit not spent, lets the
+    /// Obi answer by itself; else it goes to the owner's inbox, or is `busy` when that is full.
+    fn decide_question(
+        &self,
+        state: &mut State,
+        exchange: &mut Exchange,
+        repos: &[String],
+        referenced: &[String],
+        now: i64,
+    ) -> Decided {
+        let owner = exchange.peer_owner.clone().unwrap_or_default();
+        if self.decline_remembered(state, exchange, repos, now) {
+            return Decided::Settled { decisions: true };
+        }
+        let body = &exchange.request["body"];
+        let asked_already = state.exchanges.values().any(|e| {
+            e.direction == "incoming"
+                && e.kind == "question"
+                && e.peer_owner.as_deref() == Some(owner.as_str())
+                && (e.state == "inbox" || e.state == "answering")
+                && e.request["body"]["text"] == body["text"]
+                && e.request["body"].get("about") == body.get("about")
+        });
+        if asked_already {
+            self.decline_busy(state, exchange);
+            return Decided::Settled { decisions: false };
+        }
+        if let Some(rule) = state.sharing.covering(&owner, repos).cloned() {
+            let limits = state.sharing.limits;
+            state.all_self_answers.retain(|t| *t > now - 3600);
+            let all = state.all_self_answers.len();
+            let started = state.self_answers.entry(owner.clone()).or_default();
+            started.retain(|t| *t > now - 3600);
+            if started.len() < limits.self_answers_per_hour as usize
+                && all < limits.self_answers_per_hour_total as usize
+            {
+                // It counts when obid takes it on, whatever the run ends in.
+                started.push(now);
+                state.all_self_answers.push(now);
+                exchange.self_answered = Some(now);
+                exchange.state = "answering".into();
+                exchange.decided_by = Some("sharing".into());
+                exchange.rule = Some(rule.id.clone());
+                return Decided::ByItself(rule);
+            }
+        }
+        match self.question_to_inbox(state, exchange, repos, referenced, now) {
+            Some(item) => Decided::Inbox(item),
+            None => Decided::Settled { decisions: false },
+        }
+    }
+
+    /// Declines the question with reason `owner_declined` when a remembered decline covers it,
+    /// repository by repository (`by_rule` its id, counted as a use): whether it did.
+    fn decline_remembered(
+        &self,
+        state: &mut State,
+        exchange: &mut Exchange,
+        repos: &[String],
+        now: i64,
+    ) -> bool {
+        let owner = exchange.peer_owner.clone().unwrap_or_default();
+        let Some(decision) = decisions::covering_question(&state.decisions, &owner, repos).cloned()
+        else {
+            return false;
+        };
+        exchange.decided_by = Some("rule".into());
+        exchange.rule = Some(decision.id.clone());
+        if let Some(d) = state.decisions.iter_mut().find(|d| d.id == decision.id) {
+            d.uses += 1;
+            d.last_used = Some(now);
+        }
+        exchange.state = "declined".into();
+        let decline = self.reply_locked(
+            state,
+            exchange,
+            "decline",
+            json!({"reason": "owner_declined", "by_rule": decision.id}),
+        );
+        exchange.outbox.extend(decline);
+        true
+    }
+
+    /// A question obid is answering by itself that a remembered decline now covers (the owner said
+    /// "Decline, and remember" while it waited or ran): declined as one that came in covered.
+    /// Whether it was. Takes the lock.
+    fn declined_meanwhile(&self, cid: &str, repos: &[String]) -> bool {
+        let (exchange, decisions) = {
+            let mut state = self.lock();
+            let Some(mut exchange) = state
+                .exchanges
+                .get(cid)
+                .filter(|e| e.state == "answering")
+                .cloned()
+            else {
+                return false;
+            };
+            let now = time::now();
+            if !self.decline_remembered(&mut state, &mut exchange, repos, now) {
+                return false;
+            }
+            exchange.updated = now;
+            state.exchanges.insert(cid.to_owned(), exchange.clone());
+            (exchange, state.decisions.clone())
+        };
+        self.save_decisions(&decisions);
+        self.save_exchange(&exchange);
+        self.outbox.notify_one();
+        true
+    }
+
+    /// Puts the question in the owner's inbox (`inbox`), or declines it `busy` when the asker's
+    /// owner has as many requests waiting there as the limit allows: the item, when one was made.
+    fn question_to_inbox(
+        &self,
+        state: &mut State,
+        exchange: &mut Exchange,
+        repos: &[String],
+        referenced: &[String],
+        now: i64,
+    ) -> Option<Item> {
+        let owner = exchange.peer_owner.clone().unwrap_or_default();
+        if self.inbox_full(state, &owner) {
+            self.decline_busy(state, exchange);
+            return None;
+        }
+        let made = inbox::question_item(exchange, repos, referenced, now);
+        exchange.state = "inbox".into();
+        exchange.decided_by = None;
+        exchange.rule = None;
+        exchange.inbox_item = Some(made.id.clone());
+        state.inbox.insert(made.id.clone(), made.clone());
+        Some(made)
+    }
+
+    /// A question the Obi was answering by itself, and couldn't: to the owner's inbox (or `busy`).
+    fn to_owner(&self, cid: &str) {
+        let Some(body) = self
+            .lock()
+            .exchanges
+            .get(cid)
+            .map(|e| e.request["body"].clone())
+        else {
+            return;
+        };
+        let (repos, referenced) = self.question_repos(&body);
+        let (exchange, item) = {
+            let mut state = self.lock();
+            let Some(mut exchange) = state
+                .exchanges
+                .get(cid)
+                .filter(|e| e.state == "answering")
+                .cloned()
+            else {
+                return;
+            };
+            let now = time::now();
+            let item = self.question_to_inbox(&mut state, &mut exchange, &repos, &referenced, now);
+            exchange.updated = now;
+            state.exchanges.insert(cid.to_owned(), exchange.clone());
+            (exchange, item)
+        };
+        if let Some(item) = &item {
+            self.save_item(item);
         }
         self.save_exchange(&exchange);
         self.outbox.notify_one();
@@ -1472,8 +1802,9 @@ impl Link {
         Some(exchange)
     }
 
-    /// Requests that expired: one waiting in the inbox is settled by itself, with no answer, and
-    /// declined with reason `expired`; one this Obi sent with no result is `expired`.
+    /// Requests that expired: one waiting in the inbox (or a question the Obi is still answering by
+    /// itself) is settled by itself, with no answer, and declined with reason `expired`; one this
+    /// Obi sent with no result or answer is `expired`.
     fn expire(&self) {
         let now = time::now();
         let mut changed = Vec::new();
@@ -1485,7 +1816,7 @@ impl Link {
                 .values()
                 .filter(|e| e.expires_at().is_some_and(|t| t <= now))
                 .filter(|e| match e.direction.as_str() {
-                    "incoming" => e.state == "inbox",
+                    "incoming" => e.state == "inbox" || e.state == "answering",
                     _ => e.state == "sent" || e.state == "accepted",
                 })
                 .map(|e| e.correlation_id.clone())
@@ -1593,6 +1924,192 @@ impl Link {
             exchange.publish_scan = Some(scan_json);
             exchange.state = "done".into();
             exchange.updated = time::now();
+            state.exchanges.insert(cid.clone(), exchange.clone());
+            exchange
+        };
+        self.save_exchange(&queued);
+        self.send_now(&cid).await;
+    }
+
+    /// The Obi answers a question by itself under `rule` (protocol.md section 11, "Questions"): a
+    /// model writes it from the rule's material only ([`answering`]), then the publish gate scans
+    /// it. Clean, the `answer` goes, `by: obi` with the rule in `by_rule`; a possible secret, or a
+    /// scanner that can't run, declines it `other` with no text. A model that says it can't
+    /// answer, or that fails, sends the question to the owner.
+    async fn answer_by_itself(
+        self: Arc<Self>,
+        cid: String,
+        rule: Rule,
+        repos: Vec<String>,
+        referenced: Vec<String>,
+    ) {
+        let Ok(_run) = self.answering.acquire().await else {
+            return;
+        };
+        // A remembered decline the owner made while it waited covers it now: no run.
+        if self.declined_meanwhile(&cid, &repos) {
+            return;
+        }
+        // Once a run may start: the question still waits for it, unexpired, and the rule is still
+        // there and still covers it (the owner may have changed it meanwhile). Else no run.
+        let snapshot = {
+            let state = self.lock();
+            let Some(e) = state.exchanges.get(&cid).filter(|e| {
+                e.state == "answering" && e.expires_at().is_none_or(|t| t > time::now())
+            }) else {
+                return;
+            };
+            let owner = e.peer_owner.clone().unwrap_or_default();
+            state
+                .sharing
+                .rules
+                .iter()
+                .find(|r| r.id == rule.id && r.covers(&owner, &repos))
+                .cloned()
+                .map(|rule| {
+                    let shared: Vec<Exchange> = state
+                        .exchanges
+                        .values()
+                        .filter(|x| x.direction == "incoming" && x.peer_owner == e.peer_owner)
+                        .cloned()
+                        .collect();
+                    let declined = decisions::declined_repos(&state.decisions, &owner);
+                    (e.request["body"].clone(), owner, shared, declined, rule)
+                })
+        };
+        let Some((question, owner, shared, declined, rule)) = snapshot else {
+            self.to_owner(&cid);
+            return;
+        };
+        let jobs = self.jobs.list(usize::MAX);
+        let shared: Vec<&Exchange> = shared.iter().collect();
+        let material = answering::material(
+            &rule,
+            &owner,
+            &repos,
+            &declined,
+            &referenced,
+            &jobs,
+            &shared,
+        );
+        let dir = self.config.home.join("answers").join(&cid);
+        let written = match answering::write(
+            &self.config,
+            &self.sandbox,
+            &dir,
+            &owner,
+            &question,
+            &material,
+        )
+        .await
+        {
+            Ok(Some(written)) => written,
+            Ok(None) => {
+                self.to_owner(&cid);
+                return;
+            }
+            Err(why) => {
+                // Why names checks, never the question's or the model's words.
+                tracing::warn!("sphere: exchange {cid}: obid couldn't answer by itself ({why})");
+                self.to_owner(&cid);
+                return;
+            }
+        };
+        let mut body = json!({"by": "obi", "text": written.text, "by_rule": rule.id});
+        if !written.refs.is_empty() {
+            body["refs"] = json!(written.refs);
+        }
+        if let Some(choice) = written.choice {
+            body["choice"] = json!(choice);
+        }
+        if !obi_protocol::schema::is_valid("actions/answer", &body) {
+            tracing::warn!("sphere: exchange {cid}: the answer obid wrote isn't the spec's");
+            self.to_owner(&cid);
+            return;
+        }
+        let scratch = self.config.home.join("tmp");
+        let _ = std::fs::create_dir_all(&scratch);
+        let verdict = scan::scan(&every_text(&body), &scratch).await;
+        let (scan_json, failure) = match &verdict {
+            scan::Verdict::Clean => (json!({"ran": true, "clean": true}), None),
+            scan::Verdict::Found(found) => {
+                let places: Vec<String> = found.iter().take(3).map(ToString::to_string).collect();
+                (
+                    json!({"ran": true, "clean": false}),
+                    Some(format!(
+                        "The publish gate found a possible secret in {}: no text was sent.",
+                        places.join(", ")
+                    )),
+                )
+            }
+            scan::Verdict::CouldNotRun(why) => (
+                json!({"ran": false, "clean": false}),
+                Some(format!(
+                    "The secret scan couldn't run ({why}): no text was sent."
+                )),
+            ),
+        };
+        let now = time::now();
+        let queued = {
+            let mut state = self.lock();
+            let Some(mut exchange) = state
+                .exchanges
+                .get(&cid)
+                .filter(|e| e.state == "answering" && e.expires_at().is_none_or(|t| t > now))
+                .cloned()
+            else {
+                return;
+            };
+            // A remembered decline made while the model ran covers it now: declined, and nothing
+            // the model wrote goes.
+            if self.decline_remembered(&mut state, &mut exchange, &repos, now) {
+                exchange.updated = now;
+                state.exchanges.insert(cid.clone(), exchange.clone());
+                let decisions = state.decisions.clone();
+                drop(state);
+                self.save_decisions(&decisions);
+                self.save_exchange(&exchange);
+                self.outbox.notify_one();
+                return;
+            }
+            // The rule may have gone while the model ran: then nothing it wrote goes.
+            let still = state
+                .sharing
+                .rules
+                .iter()
+                .any(|r| r.id == rule.id && r.covers(&owner, &repos));
+            let reply = match &failure {
+                _ if !still => None,
+                None => self.reply_locked(&state, &exchange, "answer", body.clone()),
+                Some(_) => {
+                    self.reply_locked(&state, &exchange, "decline", json!({"reason": "other"}))
+                }
+            };
+            let Some(reply) = reply else {
+                drop(state);
+                self.to_owner(&cid);
+                return;
+            };
+            exchange.outbox.push(reply);
+            match failure {
+                None => {
+                    exchange.result = Some(body);
+                    exchange.state = "done".into();
+                    if let Some(r) = state.sharing.rules.iter_mut().find(|r| r.id == rule.id) {
+                        r.uses += 1;
+                        r.last_used = Some(now);
+                    }
+                    // Kept under the lock, so an older copy never overwrites a newer one.
+                    self.save_sharing(&state.sharing);
+                }
+                Some(why) => {
+                    tracing::warn!("sphere: exchange {cid}: {why}");
+                    exchange.state = "declined".into();
+                    exchange.error = Some(why);
+                }
+            }
+            exchange.publish_scan = Some(scan_json);
+            exchange.updated = now;
             state.exchanges.insert(cid.clone(), exchange.clone());
             exchange
         };
@@ -1904,6 +2421,21 @@ impl Link {
             }
             _ => return Err(api(StatusCode::UNPROCESSABLE_ENTITY, one_of)),
         };
+        // A question's item, answered or declined: the words pass the publish gate first, with
+        // no lock held.
+        let question = self
+            .lock()
+            .inbox
+            .get(id)
+            .filter(|i| i.done.is_none() && i.obi.as_ref().is_some_and(|o| o["type"] == "question"))
+            .cloned();
+        if let Some(item) = question {
+            match given {
+                Given::Answer(words) => return self.answer_question(item, Some(words)).await,
+                Given::Done => return self.answer_question(item, None).await,
+                Given::Later(_) => {}
+            }
+        }
         let now = time::now();
         let (item, exchange, decisions) = {
             let mut state = self.lock();
@@ -1973,6 +2505,13 @@ impl Link {
                     "That request expired before the answer.",
                 ));
             }
+            // Only a review request is accepted here: a question is answered in words (above).
+            if exchange.kind != "review_request" {
+                return Err(api(
+                    StatusCode::CONFLICT,
+                    "That request isn't a review request.",
+                ));
+            }
             let chosen = answer.as_deref().unwrap_or(inbox::DECLINE);
             let accept = chosen == inbox::ACCEPT || chosen == inbox::ACCEPT_REMEMBER;
             let remember = chosen == inbox::ACCEPT_REMEMBER || chosen == inbox::DECLINE_REMEMBER;
@@ -2029,6 +2568,223 @@ impl Link {
         self.outbox.notify_one();
         Ok(item.to_json())
     }
+}
+
+impl Link {
+    /// `POST /v1/inbox/{id}/answer` on a question's item: `Decline` (or `{"done": true}`) and
+    /// `Decline, and remember for this repo` decline it, the second keeping a decline for each
+    /// repository it is about (`*` for one about none); any other words are the owner's answer,
+    /// `by: owner`, with `choice` when they are exactly one of the question's choices. The words
+    /// pass the publish gate first: a possible secret, or a scanner that can't run, is `422`,
+    /// nothing is sent, and the item stays open.
+    async fn answer_question(&self, item: Item, words: Option<String>) -> Result<Value, ApiError> {
+        let invalid = |m: String| api(StatusCode::UNPROCESSABLE_ENTITY, m);
+        let cid = item
+            .obi
+            .as_ref()
+            .and_then(|o| o["correlationId"].as_str())
+            .unwrap_or("")
+            .to_owned();
+        let declining = words
+            .as_deref()
+            .is_none_or(|w| inbox::QUESTION_OPTIONS.contains(&w));
+        let mut body = Value::Null;
+        if let Some(text) = words.as_deref().filter(|_| !declining) {
+            let asked = self
+                .lock()
+                .exchanges
+                .get(&cid)
+                .map(|e| e.request["body"].clone())
+                .unwrap_or(Value::Null);
+            body = json!({"by": "owner", "text": text});
+            if let Some(choice) = asked["choices"]
+                .as_array()
+                .and_then(|choices| choices.iter().position(|c| c == text))
+            {
+                body["choice"] = json!(choice);
+            }
+            // Scanned first; the schema's own messages would quote the words.
+            let scratch = self.config.home.join("tmp");
+            let _ = std::fs::create_dir_all(&scratch);
+            let verdict = scan::scan(&every_text(&body), &scratch).await;
+            match verdict {
+                scan::Verdict::Clean => {}
+                scan::Verdict::Found(_) => {
+                    return Err(invalid(
+                        "The secret scan found a possible secret in the answer: nothing was sent."
+                            .into(),
+                    ));
+                }
+                scan::Verdict::CouldNotRun(why) => {
+                    return Err(invalid(format!(
+                        "The secret scan couldn't run ({why}): nothing was sent."
+                    )));
+                }
+            }
+            if !obi_protocol::schema::is_valid("actions/answer", &body) {
+                return Err(invalid(
+                    "An answer is one line or more of text with no control or bidirectional characters but tab and line breaks: nothing was sent."
+                        .into(),
+                ));
+            }
+        }
+        let now = time::now();
+        let (item, exchange, decisions) = {
+            let mut state = self.lock();
+            if state.inbox.get(&item.id).is_none_or(|i| i.done.is_some()) {
+                return Err(api(StatusCode::CONFLICT, "That item is done already."));
+            }
+            let mut exchange = state
+                .exchanges
+                .get(&cid)
+                .cloned()
+                .filter(|e| e.state == "inbox")
+                .ok_or_else(|| api(StatusCode::CONFLICT, "That question was settled already."))?;
+            if exchange.expires_at().is_some_and(|t| t <= now) {
+                drop(state);
+                self.expire();
+                return Err(api(
+                    StatusCode::CONFLICT,
+                    "That question expired before the answer.",
+                ));
+            }
+            exchange.decided_by = Some("inbox".into());
+            let mut decisions = None;
+            if declining {
+                exchange.state = "declined".into();
+                let decline = self.reply_locked(
+                    &state,
+                    &exchange,
+                    "decline",
+                    json!({"reason": "owner_declined"}),
+                );
+                exchange.outbox.extend(decline);
+                if words.as_deref() == Some(inbox::DECLINE_REMEMBER) {
+                    let owner = exchange.peer_owner.clone().unwrap_or_default();
+                    let mut repos: Vec<String> = item
+                        .obi
+                        .as_ref()
+                        .and_then(|o| o["repos"].as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect();
+                    if repos.is_empty() {
+                        repos.push("*".into());
+                    }
+                    for repo in repos {
+                        state.decisions.retain(|d| {
+                            !(d.kind == "question"
+                                && d.from_owner == owner
+                                && d.repo.eq_ignore_ascii_case(&repo))
+                        });
+                        state.decisions.push(Decision {
+                            id: decisions::new_id(),
+                            kind: "question".into(),
+                            from_owner: owner.clone(),
+                            repo,
+                            decision: "decline".into(),
+                            created: now,
+                            inbox_item: item.id.clone(),
+                            uses: 0,
+                            last_used: None,
+                        });
+                    }
+                    decisions = Some(state.decisions.clone());
+                }
+            } else {
+                let Some(answer) = self.reply_locked(&state, &exchange, "answer", body.clone())
+                else {
+                    return Err(api(
+                        StatusCode::CONFLICT,
+                        "obid has no key or membership to sign the answer with.",
+                    ));
+                };
+                exchange.outbox.push(answer);
+                exchange.result = Some(body);
+                exchange.state = "done".into();
+            }
+            exchange.updated = now;
+            let mut item = item;
+            item.done = Some(now);
+            item.answer = words;
+            state.inbox.insert(item.id.clone(), item.clone());
+            state.exchanges.insert(cid, exchange.clone());
+            (item, exchange, decisions)
+        };
+        if let Some(decisions) = decisions {
+            self.save_decisions(&decisions);
+        }
+        self.save_item(&item);
+        self.save_exchange(&exchange);
+        self.outbox.notify_one();
+        Ok(item.to_json())
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Sharing rules and limits: GET /v1/obid/sharing, POST …/rules, DELETE …/rules/{id},
+    // PUT …/limits
+
+    /// `GET /v1/obid/sharing`.
+    pub fn sharing_json(&self) -> Value {
+        self.lock().sharing.to_json()
+    }
+
+    /// `POST /v1/obid/sharing/rules`: a new rule, kept after the others.
+    pub fn add_rule(&self, body: &[u8]) -> Result<Value, ApiError> {
+        let value: Value = serde_json::from_slice(body)
+            .map_err(|e| api(StatusCode::BAD_REQUEST, format!("The body isn't JSON: {e}")))?;
+        let rule = sharing::rule_from(&value, time::now())
+            .map_err(|why| api(StatusCode::UNPROCESSABLE_ENTITY, why))?;
+        {
+            let mut state = self.lock();
+            if state.sharing.rules.len() >= sharing::MAX_RULES {
+                return Err(api(
+                    StatusCode::CONFLICT,
+                    format!("obid keeps at most {} sharing rules.", sharing::MAX_RULES),
+                ));
+            }
+            state.sharing.rules.push(rule.clone());
+            // Kept under the lock, so an older copy never overwrites a newer one.
+            self.save_sharing(&state.sharing);
+        }
+        Ok(rule.to_json())
+    }
+
+    /// `DELETE /v1/obid/sharing/rules/{id}`: `false` for one obid doesn't have.
+    pub fn forget_rule(&self, id: &str) -> bool {
+        let mut state = self.lock();
+        let before = state.sharing.rules.len();
+        state.sharing.rules.retain(|r| r.id != id);
+        if state.sharing.rules.len() == before {
+            return false;
+        }
+        self.save_sharing(&state.sharing);
+        true
+    }
+
+    /// `PUT /v1/obid/sharing/limits`.
+    pub fn set_limits(&self, body: &[u8]) -> Result<Value, ApiError> {
+        let value: Value = serde_json::from_slice(body)
+            .map_err(|e| api(StatusCode::BAD_REQUEST, format!("The body isn't JSON: {e}")))?;
+        let limits = sharing::limits_from(&value)
+            .map_err(|why| api(StatusCode::UNPROCESSABLE_ENTITY, why))?;
+        let mut state = self.lock();
+        state.sharing.limits = limits;
+        self.save_sharing(&state.sharing);
+        Ok(limits.to_json())
+    }
+}
+
+/// What [`Link::decide_question`] decided.
+enum Decided {
+    /// Declined (`decisions`: a remembered decision was used).
+    Settled { decisions: bool },
+    /// In the owner's inbox: its item.
+    Inbox(Item),
+    /// The Obi answers it by itself, under this sharing rule.
+    ByItself(Rule),
 }
 
 /// A failed review result: no findings, no text.
