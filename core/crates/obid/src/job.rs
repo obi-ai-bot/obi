@@ -94,7 +94,28 @@ pub struct Job {
     pub started: Option<i64>,
     pub finished: Option<i64>,
     pub commits: Option<u64>,
+    /// The pull request's URL once published.
+    #[serde(default)]
+    pub published: Option<String>,
+    /// How many of `commits` the pull request has, or none before it's published.
+    #[serde(default)]
+    pub pushed: Option<u64>,
     pub publish_error: Option<String>,
+    /// What publishing is doing now, while it publishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_step: Option<crate::publish::Step>,
+    /// Everything obid sent out for the job, oldest first: ids only.
+    #[serde(default)]
+    pub outgoing: Vec<crate::publish::Outgoing>,
+    /// The published pull request as obid last read it from GitHub.
+    #[serde(default)]
+    pub pull_request: Option<crate::github::PullRequest>,
+    /// Why the last read of it failed, or none.
+    #[serde(default)]
+    pub pull_request_error: Option<String>,
+    /// Why no review ran, or none.
+    #[serde(default)]
+    pub review_error: Option<String>,
     pub summaries: Option<Vec<String>>,
     pub issue: Option<u64>,
     pub rounds: Option<u32>,
@@ -181,7 +202,14 @@ impl Job {
             started: None,
             finished: None,
             commits: None,
+            published: None,
+            pushed: None,
             publish_error: None,
+            publish_step: None,
+            outgoing: Vec::new(),
+            pull_request: None,
+            pull_request_error: None,
+            review_error: None,
             summaries: None,
             issue: None,
             rounds: None,
@@ -257,21 +285,81 @@ impl Job {
         }
     }
 
-    /// Done with commits it couldn't publish, failed or interrupted, and not dismissed.
+    /// Commits beyond its base that aren't on its pull request yet: all of them before it's
+    /// published, then the ones later rounds made (Engine/Jobs.swift, `unpublished`).
+    pub fn unpublished(&self) -> u64 {
+        let commits = self.commits.unwrap_or(0);
+        let on_it = if self.published.is_none() {
+            0
+        } else {
+            self.pushed.unwrap_or(commits)
+        };
+        commits.saturating_sub(on_it)
+    }
+
+    /// Whether its pull request, if it has one, is open as far as obid knows.
+    fn pull_request_open(&self) -> bool {
+        self.pull_request.as_ref().is_none_or(|pr| pr.is_open())
+    }
+
+    /// Done, with commits that aren't on its pull request yet: obid publishes it when it ends, and
+    /// offers Publish when that failed. Not once dismissed, never on a review or research job, and
+    /// never once its pull request was merged or closed.
+    pub fn can_publish(&self) -> bool {
+        self.status == Status::Done
+            && self.kind != "research"
+            && self.kind != "review"
+            && self.base.is_some()
+            && self.unpublished() > 0
+            && self.dismissed.is_none()
+            && self.pull_request_open()
+    }
+
+    /// Done with commits its pull request will never take: it was merged or closed before they
+    /// went out.
+    pub fn stranded(&self) -> bool {
+        self.status == Status::Done
+            && self.published.is_some()
+            && self.unpublished() > 0
+            && !self.pull_request_open()
+    }
+
+    /// The last commit obid pushed to the job's branch: its pull request's head, as obid left it.
+    pub fn pushed_head(&self) -> Option<&str> {
+        self.outgoing
+            .iter()
+            .rev()
+            .find(|o| o.action == "push" && o.branch.as_deref() == Some(self.branch.as_str()))
+            .map(|o| o.id.as_str())
+    }
+
+    /// It just published to `url`: an observation of another pull request no longer holds, and
+    /// nothing reviews it but a person until obid runs Oby's review.
+    pub fn was_published(&mut self, url: String) {
+        if self.published.as_deref() != Some(url.as_str()) {
+            self.pull_request = None;
+        }
+        self.pull_request_error = None;
+        self.published = Some(url);
+        self.publish_error = None;
+        self.review_error = Some(crate::publish::NOT_REVIEWED.into());
+    }
+
+    /// Waiting for Publish (its own publish failed), with commits its pull request won't take,
+    /// failed or interrupted, and not dismissed.
     pub fn needs_you(&self) -> bool {
         self.dismissed.is_none()
-            && (self.status == Status::Failed
-                || self.status == Status::Interrupted
-                || (self.status == Status::Done
-                    && self.publish_error.is_some()
-                    && self.commits.unwrap_or(0) > 0))
+            && (self.can_publish()
+                || self.stranded()
+                || self.status == Status::Failed
+                || self.status == Status::Interrupted)
     }
 
     /// The job as the runner API shows it.
     pub fn to_json(&self) -> Value {
         let date = |t: Option<i64>| t.map(obi_protocol::time::format);
         // `title` is the derived one, always a string, as the Swift runner sends it.
-        json!({
+        let mut value = json!({
             "id": self.id,
             "request": self.request,
             "agent": self.agent,
@@ -291,9 +379,8 @@ impl Job {
             "finished": date(self.finished),
             // Oby's review makes no commits of its own.
             "commits": if self.kind == "review" && self.status == Status::Done { Some(0) } else { self.commits },
-            // obid publishes nothing yet: no pull request, nothing pushed.
-            "published": null,
-            "pushed": null,
+            "published": self.published,
+            "pushed": self.pushed,
             "publishError": self.publish_error,
             "summaries": self.summaries,
             "issue": self.issue,
@@ -305,17 +392,17 @@ impl Job {
             "effort": self.effort,
             "complexity": null,
             "notes": self.notes,
-            "pullRequest": null,
-            "pullRequestError": null,
+            "pullRequest": self.pull_request.as_ref().map(crate::github::PullRequest::to_json),
+            "pullRequestError": self.pull_request_error,
             "dismissed": date(self.dismissed),
             "reviewing": null,
             "review": null,
-            "reviewError": null,
+            "reviewError": self.review_error,
             "reviewOf": null,
             "files": self.files,
             "lead": null,
             "claim": null,
-            "outgoing": [],
+            "outgoing": self.outgoing.iter().map(crate::publish::Outgoing::to_json).collect::<Vec<_>>(),
             "question": null,
             "limit": self.limit,
             "startCommit": self.start_commit,
@@ -343,26 +430,43 @@ impl Job {
             "obi": self.obi,
             "worktree": self.worktree,
             "conversation": self.conversation,
-        })
+        });
+        if let Some(step) = self.publish_step {
+            value["publishStep"] = json!(step.as_str());
+        }
+        value
     }
 
-    /// The stages the apps draw (Engine/Pipeline.swift), for what obid does: prepare, work, the
-    /// check, then publish, review and merge, which obid leaves to a person (it publishes nothing
-    /// yet and never merges).
+    /// The stages the apps draw (Engine/Pipeline.swift): prepare, work, the check, publish,
+    /// review, and the merge, which obid leaves to a person (runner-api.md, "obid only: what obid
+    /// leaves out"): the Merged stage is `done` only once GitHub says a person merged it.
     pub fn pipeline(&self) -> Value {
         let active = self.status.is_active();
         let stopped = matches!(
             self.status,
             Status::Failed | Status::Stopped | Status::Interrupted
         );
-        let phase =
-            self.phase
-                .unwrap_or(if self.status == Status::Queued || self.started.is_none() {
-                    Phase::Prepare
-                } else {
-                    Phase::Work
-                });
+        let phase = self.phase.unwrap_or(
+            if self.status == Status::Queued
+                || (self.started.is_none()
+                    && self.status != Status::Done
+                    && self.published.is_none())
+            {
+                Phase::Prepare
+            } else {
+                Phase::Work
+            },
+        );
         let working = active && phase == Phase::Work;
+        let failure = if self.summary.is_empty() {
+            let mut status = self.status.as_str().to_owned();
+            if let Some(first) = status.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            status
+        } else {
+            self.summary.clone()
+        };
         let mut stages: Vec<Value> = vec![
             json!({"id": "prepare", "title": "Prepare", "state": "upcoming", "detail": "Clone and worktree"}),
             json!({"id": "work", "title": "Work", "state": "upcoming",
@@ -374,77 +478,169 @@ impl Job {
                 json!({"id": "check", "title": "Check", "state": "upcoming", "detail": check}),
             );
         }
+        let merge_base = self
+            .pull_request
+            .as_ref()
+            .map(|pr| pr.base.as_str())
+            .or(self.base.as_deref())
+            .unwrap_or("dev");
         stages.push(json!({"id": "publish", "title": "Publish", "state": "upcoming", "detail": "Secret scan, push and pull request"}));
         stages.push(json!({"id": "review", "title": "Review", "state": "upcoming", "detail": "Waiting for review"}));
-        stages.push(json!({"id": "merged", "title": format!("Merged into {}", self.base.as_deref().unwrap_or("dev")), "state": "upcoming"}));
+        stages.push(json!({"id": "merged", "title": format!("Merged into {merge_base}"), "state": "upcoming"}));
         let id_of = |p: Phase| match p {
             Phase::Prepare => "prepare",
             Phase::Work => "work",
             Phase::Check => "check",
             Phase::Publish => "publish",
         };
+        // A stage's state, its detail when given, and its reason (none unless given).
+        fn set(
+            stages: &mut [Value],
+            id: &str,
+            state: &str,
+            detail: Option<&str>,
+            reason: Option<&str>,
+        ) {
+            if let Some(stage) = stages.iter_mut().find(|s| s["id"] == id) {
+                stage["state"] = json!(state);
+                if let Some(detail) = detail {
+                    stage["detail"] = json!(detail);
+                }
+                match reason {
+                    Some(reason) => stage["reason"] = json!(reason),
+                    None => {
+                        if let Some(object) = stage.as_object_mut() {
+                            object.remove("reason");
+                        }
+                    }
+                }
+            }
+        }
         let phase_id = id_of(phase);
         let phase_index = stages.iter().position(|s| s["id"] == phase_id).unwrap_or(1);
         for stage in stages.iter_mut().take(phase_index) {
             stage["state"] = json!("done");
         }
-        let set = |stages: &mut Vec<Value>, id: &str, state: &str| {
-            if let Some(stage) = stages.iter_mut().find(|s| s["id"] == id) {
-                stage["state"] = json!(state);
-            }
-        };
+        let can_publish = self.can_publish();
         if active {
-            set(&mut stages, phase_id, "current");
-            if phase == Phase::Prepare && !self.step.is_empty() {
-                stages[phase_index]["detail"] = json!(self.step);
+            let detail =
+                (phase == Phase::Prepare && !self.step.is_empty()).then_some(self.step.as_str());
+            set(&mut stages, phase_id, "current", detail, None);
+            if phase == Phase::Publish {
+                let detail = self
+                    .publish_step
+                    .map_or("Secret scan", crate::publish::Step::detail);
+                set(&mut stages, "publish", "current", Some(detail), None);
             }
         } else if stopped {
-            set(&mut stages, phase_id, "failed");
-            let reason = if self.summary.is_empty() {
-                let mut status = self.status.as_str().to_owned();
-                if let Some(first) = status.get_mut(0..1) {
-                    first.make_ascii_uppercase();
-                }
-                status
-            } else {
-                self.summary.clone()
-            };
-            stages[phase_index]["reason"] = json!(reason);
+            set(&mut stages, phase_id, "failed", None, Some(&failure));
             for stage in stages.iter_mut().skip(phase_index + 1) {
                 stage["state"] = json!("skipped");
             }
         } else {
             for id in ["prepare", "work", "check"] {
-                set(&mut stages, id, "done");
+                set(&mut stages, id, "done", None, None);
             }
-            if self.commits.unwrap_or(0) > 0
-                && self.kind != "review"
-                && self.kind != "research"
-                && self.dismissed.is_none()
-            {
-                if let Some(publish) = stages.iter_mut().find(|s| s["id"] == "publish") {
-                    publish["state"] = json!(if self.publish_error.is_some() {
-                        "failed"
-                    } else {
-                        "current"
-                    });
-                    publish["detail"] = json!("Ready to publish");
-                    if let Some(error) = &self.publish_error {
-                        publish["reason"] = json!(error);
-                    }
-                }
-            } else {
+            if can_publish {
+                let detail = self
+                    .publish_step
+                    .map_or("Ready to publish", crate::publish::Step::detail);
+                let state = if self.publish_error.is_some() {
+                    "failed"
+                } else {
+                    "current"
+                };
+                set(
+                    &mut stages,
+                    "publish",
+                    state,
+                    Some(detail),
+                    self.publish_error.as_deref(),
+                );
+            } else if self.published.is_none() {
                 for id in ["publish", "review", "merged"] {
-                    set(&mut stages, id, "skipped");
+                    set(&mut stages, id, "skipped", None, None);
                 }
             }
         }
+        // A pull request from an earlier round doesn't complete the current work, check or publish.
+        if self.published.is_some() && !active && !stopped && !can_publish {
+            set(
+                &mut stages,
+                "publish",
+                "done",
+                Some("Secret scan clean · pushed · pull request opened"),
+                None,
+            );
+            let decision = self
+                .pull_request
+                .as_ref()
+                .and_then(|pr| pr.review_decision.as_deref());
+            match self.pull_request.as_ref().map(|pr| pr.state.as_str()) {
+                Some("MERGED") => {
+                    let detail = match decision {
+                        Some("APPROVED") => "Approved",
+                        Some("CHANGES_REQUESTED") => "Review complete",
+                        _ => "Merged without review",
+                    };
+                    set(&mut stages, "review", "done", Some(detail), None);
+                    set(&mut stages, "merged", "done", None, None);
+                }
+                Some("CLOSED") => {
+                    set(
+                        &mut stages,
+                        "review",
+                        "failed",
+                        None,
+                        Some("Pull request closed without merging."),
+                    );
+                    set(&mut stages, "merged", "skipped", None, None);
+                }
+                _ => match decision {
+                    Some("APPROVED") => {
+                        set(&mut stages, "review", "done", Some("Approved"), None);
+                        set(
+                            &mut stages,
+                            "merged",
+                            "current",
+                            Some("Ready for you to merge"),
+                            None,
+                        );
+                    }
+                    Some("CHANGES_REQUESTED") => {
+                        set(
+                            &mut stages,
+                            "review",
+                            "failed",
+                            Some("Changes requested"),
+                            Some("The reviewer requested changes."),
+                        );
+                    }
+                    _ => {
+                        let detail = match (&self.review_error, &self.pull_request) {
+                            (Some(error), _) => format!("Waiting for review · {error}"),
+                            (None, None) => "Waiting for GitHub status".into(),
+                            (None, Some(_)) => "Waiting for review".into(),
+                        };
+                        set(&mut stages, "review", "current", Some(&detail), None);
+                    }
+                },
+            }
+        }
+        // The owner let it go: nothing is published, reviewed or merged. A pull request from an
+        // earlier round keeps its own progress; a failed publish keeps its reason.
         if self.dismissed.is_some()
             && !active
+            && (self.published.is_none() || stopped)
             && let Some(publish) = stages.iter().position(|s| s["id"] == "publish")
         {
             stages[publish]["state"] = json!("skipped");
             stages[publish]["detail"] = json!("Dismissed");
+            if (phase != Phase::Publish || !stopped)
+                && let Some(object) = stages[publish].as_object_mut()
+            {
+                object.remove("reason");
+            }
             for stage in stages.iter_mut().skip(publish + 1) {
                 stage["state"] = json!("skipped");
             }
@@ -621,5 +817,95 @@ mod tests {
         assert_eq!(failed["stages"][2]["state"], "failed");
         assert_eq!(failed["stages"][2]["reason"], "the check failed");
         assert_eq!(failed["number"], 3);
+    }
+
+    /// Engine/Pipeline.swift for a published job, with obid's own rule: the Merged stage is done
+    /// only once a person merged it (runner-api.md, "obid only: what obid leaves out").
+    #[test]
+    fn a_published_pipeline_follows_github_and_never_merges() {
+        let mut job = job();
+        job.kind = "fix".into();
+        job.pr = None;
+        job.base = Some("dev".into());
+        job.status = Status::Done;
+        job.started = Some(job.created);
+        job.commits = Some(1);
+        let state = |job: &Job, id: &str| -> (String, String) {
+            let stage = job.pipeline()["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == id)
+                .cloned()
+                .unwrap();
+            (
+                stage["state"].as_str().unwrap().to_owned(),
+                stage["detail"].as_str().unwrap_or("").to_owned(),
+            )
+        };
+        // Done with a commit it couldn't publish: Publish failed, with why.
+        job.publish_error = Some("Couldn't push".into());
+        assert!(job.can_publish() && job.needs_you());
+        assert_eq!(state(&job, "publish").0, "failed");
+        assert_eq!(job.pipeline()["stages"][2]["reason"], "Couldn't push");
+        // Published: Review waits, Merged is upcoming.
+        job.was_published("https://github.com/deskree-inc/oby/pull/42".into());
+        job.pushed = Some(1);
+        assert!(!job.can_publish() && !job.needs_you());
+        assert_eq!(
+            state(&job, "publish"),
+            (
+                "done".into(),
+                "Secret scan clean · pushed · pull request opened".into()
+            )
+        );
+        assert_eq!(state(&job, "review").0, "current");
+        assert_eq!(state(&job, "merged").0, "upcoming");
+        let pr = |state: &str, decision: Option<&str>| crate::github::PullRequest {
+            state: state.into(),
+            review_decision: decision.map(str::to_owned),
+            base: "dev".into(),
+            merged_at: (state == "MERGED").then_some(job.created),
+            checked_at: job.created,
+            head: None,
+        };
+        job.pull_request = Some(pr("OPEN", Some("APPROVED")));
+        assert_eq!(state(&job, "review"), ("done".into(), "Approved".into()));
+        assert_eq!(
+            state(&job, "merged"),
+            ("current".into(), "Ready for you to merge".into())
+        );
+        job.pull_request = Some(pr("OPEN", Some("CHANGES_REQUESTED")));
+        assert_eq!(
+            state(&job, "review"),
+            ("failed".into(), "Changes requested".into())
+        );
+        job.pull_request = Some(pr("MERGED", None));
+        assert_eq!(
+            state(&job, "review"),
+            ("done".into(), "Merged without review".into())
+        );
+        assert_eq!(state(&job, "merged").0, "done");
+        job.pull_request = Some(pr("CLOSED", None));
+        assert_eq!(state(&job, "review").0, "failed");
+        assert_eq!(state(&job, "merged").0, "skipped");
+        // A later round's commits the closed pull request won't take: stranded, and it needs you.
+        job.commits = Some(2);
+        assert!(job.stranded() && job.needs_you() && !job.can_publish());
+        // Its last push is its pull request's head.
+        job.outgoing.push(crate::publish::Outgoing::new(
+            "push",
+            &job.repo,
+            "abc",
+            Some("oby/other"),
+        ));
+        job.branch = "oby/fix-42".into();
+        job.outgoing.push(crate::publish::Outgoing::new(
+            "push",
+            &job.repo,
+            "def",
+            Some("oby/fix-42"),
+        ));
+        assert_eq!(job.pushed_head(), Some("def"));
     }
 }

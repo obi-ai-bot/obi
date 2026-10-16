@@ -533,28 +533,60 @@ pub async fn message(
     }
 }
 
-/// `GET` and `POST /v1/jobs/{id}/publish`: what publishing the job by hand would do, and doing it.
-/// obid publishes nothing for its owner yet (the branch keeps the commits: `publishError` says
-/// so), so there is never anything to publish by hand: `409`, saying why, and nothing goes out.
+/// `GET /v1/jobs/{id}/publish`: what publishing the job by hand would do, in obid's one sentence,
+/// and its base: for a job whose own publish failed. `409` when there's nothing to publish.
 pub async fn publish_action(
     State(shared): State<Arc<Shared>>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let job = shared
-        .jobs
-        .get(&id)
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, NO_JOB))?;
-    let why = if job.dismissed.is_some() {
-        "It was dismissed: there's nothing to publish.".to_owned()
-    } else if job.status != crate::job::Status::Done || job.commits.unwrap_or(0) == 0 {
-        "There's nothing to publish: it isn't done with commits.".to_owned()
-    } else {
-        format!(
-            "obid doesn't publish yet: the branch {} keeps the commits, for a person to push.",
-            job.branch
+    match shared.jobs.publish_action(&id) {
+        None => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+        Some(Err(why)) => Err(ApiError::new(StatusCode::CONFLICT, why)),
+        Some(Ok((action, base))) => Ok(json(
+            StatusCode::OK,
+            json!({"action": action, "base": base}),
+        )),
+    }
+}
+
+/// `POST /v1/jobs/{id}/publish`: publishes by hand, once a registered device approved obid's own
+/// sentence for it (crate::approval): `{"url"}`, `403` for an approval that doesn't hold, `409`
+/// when there's nothing to publish or publishing failed (the line says why, never a secret).
+/// Never a merge.
+pub async fn publish(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let value: Value = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "That isn't JSON."))?;
+    let approval: crate::approval::Approval = serde_json::from_value(value).map_err(|_| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "An approval is {\"device\", \"action\", \"signedAt\", \"signature\"}.",
         )
+    })?;
+    let action = match shared.jobs.publish_action(&id) {
+        None => return Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+        Some(Err(why)) => return Err(ApiError::new(StatusCode::CONFLICT, why)),
+        Some(Ok((action, _))) => action,
     };
-    Err(ApiError::new(StatusCode::CONFLICT, why))
+    let key = shared.devices.public_key(&approval.device);
+    shared
+        .jobs
+        .approvals()
+        .check(
+            &approval,
+            &id,
+            &action,
+            key.as_deref(),
+            obi_protocol::time::now(),
+        )
+        .map_err(|why| ApiError::new(StatusCode::FORBIDDEN, why))?;
+    match shared.jobs.publish_by_hand(&id, &action).await {
+        Ok(url) => Ok(json(StatusCode::OK, json!({"url": url}))),
+        Err(why) => Err(ApiError::new(StatusCode::CONFLICT, why)),
+    }
 }
 
 /// `POST /v1/jobs/{id}/permission`: `{"id", "decision": "allow" | "always" | "deny", "message"}`,
