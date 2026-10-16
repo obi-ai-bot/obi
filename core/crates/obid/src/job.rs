@@ -137,6 +137,9 @@ pub struct Job {
     /// Per-job bearer for `POST` and `GET /v1/agent/apple-check`; never sent to the API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apple_token: Option<String>,
+    /// Calls an agent made through the user's connected apps; names only, never secret values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connection_uses: Vec<crate::connections::ConnectionUse>,
     /// The owner's words (`POST /v1/jobs/{id}/messages`) the agent hasn't heard yet: its next
     /// turn's prompt. Never in the API's job (`notes` has them all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -203,6 +206,7 @@ impl Job {
             apple_check: None,
             apple_ran: None,
             apple_token: None,
+            connection_uses: Vec::new(),
             heard: Vec::new(),
             asked: false,
         }
@@ -328,7 +332,7 @@ impl Job {
             "waiting": self.waiting.as_ref().filter(|_| self.status == Status::Queued),
             "mode": self.mode.as_deref().unwrap_or("bypass"),
             "permission": self.permission,
-            "connectionUses": [],
+            "connectionUses": self.connection_uses,
             "pipeline": self.pipeline(),
             "title": self.short_title(),
             "mergeNeedsYou": false,

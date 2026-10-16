@@ -4,13 +4,14 @@ The Rust core's done-when includes "the ported API-level tests from `RunnerTests
 
 **API-level** means the test asks the runner through its HTTP API (`client.execute` on the router, or the API's own handlers), or checks what the API puts on the wire (a job's or account's JSON, the gate in front of every request). obid is checked the same way: the real binary, asked over HTTP (tests/*.rs), or a unit test of the same rule where the Swift test was one. Everything else is **Swift-internal**: it drives Swift types (Desk, the brain, the agent fakes, the stores), so it doesn't carry over; obid's own behaviour behind those is covered by its own tests.
 
-994 tests in all: **42 API-level and ported**, **33 API-level and not ported** (their endpoint or feature isn't in obid yet), **919 Swift-internal and dropped**.
+994 tests in all: **43 API-level and ported**, **32 API-level and not ported** (their endpoint or feature isn't in obid yet), **919 Swift-internal and dropped**.
 
 ## API-level, ported
 
 | Swift test | obid test | Note |
 |---|---|---|
 | ClaimTests.aClientMayClaimFilesAtDispatch | runner_api.rs `a_client_may_claim_files_at_dispatch`; plans_api.rs `plans_map_replies_questions_none_and_dispatched_jobs` | dispatch and plan paths are checked over HTTP |
+| ConnectionTests.agentsUseConnectedAppsWithoutEverSeeingTheLogin | plugins_api.rs `agents_use_connected_apps_without_ever_seeing_the_login` | connections, phone approval, private vault use, per-job MCP and API access, redaction and use records over HTTP |
 | AttachmentTests.plansRefuseAttachmentsOutsideTheAppsFolder | plans_api.rs `plans_refuse_attachments_outside_the_apps_folder` |  |
 | AppleCheckTests.ObyCheckAppleWaitsForTheMacAndPrintsTheCompilersErrorsAndFailingTests | runner_api.rs `oby_check_apple_waits_for_the_mac_and_prints_compilers_errors_and_failing_tests` | job-scoped check token, Mac queue/take, bundle, result and compiler/test report over HTTP |
 | ConversationTests.theConversationEndpointPagesTheThreadAndItsEventFollowsIt | plans_api.rs `plan_uses_recent_turns_and_conversation_paginates` | event stream, recent-first paging and unknown cursor behavior |
@@ -79,7 +80,6 @@ runner-api.md says obid serves the whole API. These tests stay unported until it
 
 | Swift test | Needs | Issue |
 |---|---|---|
-| ConnectionTests.agentsUseConnectedAppsWithoutEverSeeingTheLogin | `/v1/connections`, `/v1/me`, `/v1/agent/mcp/…` | #444 |
 | FailureTests.theAPIListsFailuresAndFixesThem | `/v1/failures…` | #445 |
 | GatewayTests.gatewayForwardsTheRunnersTokenToTheMacRunner | the LAN gateway | #446 |
 | GatewayTests.gatewayRouterRedactsSecretsInFiniteAndSSEResponses | the LAN gateway | #446 |

@@ -303,6 +303,12 @@ fn value_names_a_path(value: &Value) -> bool {
 /// (`crate::plugins::rules`). Every other MCP tool is refused (Engine/Jobs.swift's
 /// `Policy.tetrixTools`, made per plug-in: docs/ARCHITECTURE.md 5.1).
 pub fn fixed_denial(tool: &str, input: &Value, worktree: &Path, mcp: &[String]) -> Option<String> {
+    // The broker itself checks every upstream tool's read-only annotation and holds each login
+    // outside the job sandbox. Its tool calls are therefore the only non-plug-in MCP calls Oby
+    // accepts; the job-scoped broker token still limits them to this job.
+    if tool.starts_with("mcp__oby__") {
+        return None;
+    }
     if tool.starts_with("mcp__") || tool == "mcp" {
         return (!mcp.iter().any(|rule| rule == tool)).then(|| format!(
             "obid's agents use only the MCP tools of the plug-ins the owner enabled, and only the ones each allows. Say in your summary what you'd have done with {tool}."

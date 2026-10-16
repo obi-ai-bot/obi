@@ -176,6 +176,8 @@ pub struct Jobs {
     permissions: Mutex<permissions::Kept>,
     /// The plug-in host: context for the agent, and `agent-mcp` plug-ins' servers.
     plugins: std::sync::OnceLock<Arc<crate::plugins::Plugins>>,
+    /// The connected-app broker: job-scoped MCP config and use records.
+    connections: std::sync::OnceLock<Arc<crate::connections::Connections>>,
     /// Loopback endpoint given to agents for `oby-check apple`.
     api_url: Mutex<String>,
 }
@@ -226,6 +228,7 @@ impl Jobs {
             permission_hook: std::sync::OnceLock::new(),
             permissions: Mutex::new(kept),
             plugins: std::sync::OnceLock::new(),
+            connections: std::sync::OnceLock::new(),
             api_url: Mutex::new(api_url),
         }))
     }
@@ -238,6 +241,21 @@ impl Jobs {
     /// nothing). Without one, jobs run with no plug-in.
     pub fn use_plugins(&self, plugins: Arc<crate::plugins::Plugins>) {
         let _ = self.plugins.set(plugins);
+    }
+
+    pub fn use_connections(&self, connections: Arc<crate::connections::Connections>) {
+        let _ = self.connections.set(connections);
+    }
+
+    /// Opens this job's frozen connected-app snapshot. The returned token is safe to expose only
+    /// in the job's private MCP config.
+    fn connection_mcp(&self, id: &str) -> Option<(String, String)> {
+        self.connections.get()?.open_job(id)
+    }
+
+    /// A broker call belongs in the job report even after the call is over.
+    pub fn connection_used(&self, id: &str, use_record: crate::connections::ConnectionUse) {
+        self.update(id, |job| job.connection_uses.push(use_record));
     }
 
     /// The MCP servers of the ready `agent-mcp` plug-ins, for a `tool` agent of the owner's own
@@ -1243,6 +1261,9 @@ impl Jobs {
             let jobs = self.clone();
             tokio::spawn(async move {
                 jobs.work(&id, signal).await;
+                if let Some(connections) = jobs.connections.get() {
+                    connections.close_job(&id).await;
+                }
                 {
                     let mut state = jobs.lock();
                     state.workers.remove(&id);
@@ -2022,6 +2043,7 @@ impl Jobs {
         tool: Tool,
         flags: Vec<OsString>,
         account: &crate::config::Account,
+        broker: Option<&(String, String)>,
     ) -> Result<Launch, String> {
         let sandbox = self
             .sandbox
@@ -2046,6 +2068,11 @@ impl Jobs {
                     .into(),
             ));
             extra.push(("OBY_CHECK_TOKEN", token.into()));
+        }
+        if tool == Tool::Codex
+            && let Some((_, token)) = broker
+        {
+            extra.push(("OBY_MCP_TOKEN", token.into()));
         }
         match (&account.config_dir, tool) {
             (Some(dir), _) => {
@@ -2113,7 +2140,10 @@ impl Jobs {
                 argv.extend(flags);
                 argv
             }
-            Tool::Codex => codex::argv(bin),
+            Tool::Codex => codex::argv(
+                bin,
+                broker.map(|(url, token)| (url.as_str(), token.as_str())),
+            ),
             Tool::Cursor => acp::cursor::argv(bin),
         };
         Ok(Launch {
@@ -2476,7 +2506,7 @@ impl Jobs {
             OsString::from("--tools"),
             OsString::from(crate::policy::REVIEW_TOOLS.join(",")),
         ]);
-        let launch = self.launch(&job, &spec, tool, flags, &account)?;
+        let launch = self.launch(&job, &spec, tool, flags, &account, None)?;
         if *signal.borrow() != Signal::Run {
             return Ok(());
         }
@@ -2802,11 +2832,22 @@ impl Jobs {
             // one permission rule per tool each allows, each its own argument (last, since
             // --allowedTools takes every argument after it).
             let servers = self.agent_mcp(tool);
-            let mcp_rules = crate::plugins::rules(&servers);
-            if !servers.is_empty() {
+            let broker = if tool == Tool::Cursor {
+                None
+            } else {
+                self.connection_mcp(id)
+            };
+            let mut mcp_rules = crate::plugins::rules(&servers);
+            if broker.is_some() && tool != Tool::Cursor {
+                mcp_rules.push("mcp__oby__*".into());
+            }
+            if !servers.is_empty() || broker.is_some() && tool == Tool::Claude {
                 let file = spec.temp.join(MCP_CONFIG_FILE);
-                let text = serde_json::to_vec(&crate::plugins::claude_mcp_config(&servers))
-                    .map_err(|e| e.to_string())?;
+                let mut config = crate::plugins::claude_mcp_config(&servers);
+                if let Some((url, token)) = broker.as_ref().filter(|_| tool == Tool::Claude) {
+                    config["mcpServers"]["oby"] = json!({"type":"http","url":url,"headers":{"Authorization":format!("Bearer {token}")}});
+                }
+                let text = serde_json::to_vec(&config).map_err(|e| e.to_string())?;
                 let _ = std::fs::remove_file(&file);
                 crate::store::write_private(&file, &text)
                     .map_err(|e| format!("obid can't write the agent's MCP config: {e}"))?;
@@ -2816,7 +2857,7 @@ impl Jobs {
                     flags.extend(mcp_rules.iter().map(OsString::from));
                 }
             }
-            let launch = self.launch(&job, &spec, tool, flags, &account)?;
+            let launch = self.launch(&job, &spec, tool, flags, &account, broker.as_ref())?;
             if *signal.borrow() != Signal::Run {
                 return Ok(());
             }

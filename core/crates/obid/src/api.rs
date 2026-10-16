@@ -34,6 +34,8 @@ pub struct Shared {
     pub cleared: crate::clear::Cleared,
     /// The devices that may approve publishing (`POST /v1/devices`).
     pub devices: crate::devices::Devices,
+    /// Connected apps and their job-scoped MCP broker.
+    pub connections: Arc<crate::connections::Connections>,
     pub jobs: Arc<Jobs>,
     pub events: Events,
     /// The conversation shared by every device and plan request.
@@ -114,6 +116,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/stop-all", post(crate::routes::stop_all))
         .route("/v1/clear", post(crate::routes::clear))
         .route("/v1/devices", post(crate::routes::register_device))
+        .merge(crate::connections::router())
         .route("/v1/checks/next", get(crate::routes::next_check))
         .route("/v1/checks/{id}/bundle", get(crate::routes::check_bundle))
         .route("/v1/checks/{id}/result", post(crate::routes::check_result))
@@ -197,8 +200,17 @@ pub const NO_TOKEN: &str = "This runner answers only requests with its API token
 /// without the token is `401`, so they are `401` without it and `404` with it.
 async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -> Response {
     let agent_check = request.uri().path() == "/v1/agent/apple-check";
+    let agent_mcp = request
+        .uri()
+        .path()
+        .strip_prefix("/v1/agent/mcp/")
+        .filter(|id| !id.is_empty() && !id.contains('/'));
     let admitted = admit(request.uri(), request.headers(), &shared.token).or_else(|error| {
-        if !agent_check || !loopback_request(request.uri(), request.headers()) {
+        if (!agent_check && agent_mcp.is_none())
+            || (!loopback_request(request.uri(), request.headers())
+                && !agent_mcp
+                    .is_some_and(|_| agent_gateway_request(request.uri(), request.headers())))
+        {
             return Err(error);
         }
         let mut values = request.headers().get_all(header::AUTHORIZATION).iter();
@@ -206,7 +218,10 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
             (Some(value), None) => value.to_str().ok().and_then(bearer),
             _ => None,
         };
-        if given.is_some_and(|token| shared.jobs.is_apple_check_token(token)) {
+        if given.is_some_and(|token| {
+            (agent_check && shared.jobs.is_apple_check_token(token))
+                || agent_mcp.is_some_and(|id| shared.connections.allows(id, token))
+        }) {
             Ok(())
         } else {
             Err(error)
@@ -216,6 +231,23 @@ async fn gate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -
         Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
     }
+}
+
+/// On Linux, sandboxed agents reach the host through slirp4netns at 10.0.2.2. Admit that fixed
+/// host only for the job-token MCP route; normal app API requests still require a loopback Host.
+fn agent_gateway_request(uri: &axum::http::Uri, headers: &HeaderMap) -> bool {
+    if !cfg!(target_os = "linux") || uri.authority().is_some() {
+        return false;
+    }
+    let mut hosts = headers.get_all(header::HOST).iter();
+    let Some(host) = hosts.next().and_then(|h| h.to_str().ok()) else {
+        return false;
+    };
+    if hosts.next().is_some() {
+        return false;
+    }
+    let host = host.trim_matches(|c| c == ' ' || c == '\t');
+    host == "10.0.2.2" || host.strip_prefix("10.0.2.2:").is_some_and(is_port)
 }
 
 /// Throws the refusal, or lets the request through.

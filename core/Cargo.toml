@@ -33,6 +33,7 @@ axum = "0.8.9"
 # The API token obid makes on first start, and the host name `GET /v1/status` reports.
 getrandom = "0.4.3"
 hex = "0.4.3"
+libc = "0.2"
 gethostname = "1.1.0"
 # The Obi-to-Obi protocol (crates/obi-protocol): Ed25519, SHA-256, base64url, its JSON Schemas,
 # and ECMAScript number formatting for canonical JSON (RFC 8785).
@@ -42,7 +43,7 @@ base64 = "0.23.1"
 jsonschema = { version = "0.58.6", default-features = false }
 ryu-js = "1.0.3"
 # The devices' publishing keys (POST /v1/devices): P-256 public keys, X9.63.
-p256 = { version = "0.13.2", default-features = false, features = ["arithmetic"] }
+p256 = { version = "0.13.2", default-features = false, features = ["arithmetic", "ecdsa"] }
 # Ids for jobs and messages.
 uuid = { version = "1.28.0", features = ["v4"] }
 # Process groups for agents and checks: SIGTERM, then SIGKILL, to everything one started.
