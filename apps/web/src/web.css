@@ -23,3 +23,14 @@
 
 /* a form inside a menu (sign out) takes no room of its own */
 .row-menu form, .set-control form { display: contents; }
+
+/* the page asking for obid's token (SignIn.tsx), as obid's own sign-in form looks */
+.sign-in { width: min(380px, calc(100vw - 32px)); margin: 0 auto; padding-top: 30vh; color: var(--ink); }
+.sign-in h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; }
+.sign-in p { color: var(--text); margin: 0 0 20px; line-height: 1.45; }
+.sign-in code { color: var(--ink); }
+.sign-in form { display: flex; gap: 8px; }
+.sign-in input { flex: 1; min-width: 0; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--chip); color: inherit; font: inherit; }
+.sign-in input:focus { outline: none; border-color: var(--line-focus); }
+.sign-in button { padding: 9px 16px; border: 0; border-radius: 10px; background: var(--ink); color: var(--bg); font: inherit; font-weight: 600; cursor: pointer; }
+.sign-in .sign-in-problem { color: var(--danger); margin: 12px 0 0; }

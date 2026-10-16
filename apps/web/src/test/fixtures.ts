@@ -28,12 +28,25 @@ export const turn = (over: Partial<Turn> = {}): Turn => ({ id: 't1', who: 'user'
 
 export function state(over: Partial<Live> = {}): Live {
   return {
-    connection: 'live', problem: null, status: {
+    signedIn: true, connection: 'live', problem: null, status: {
       runner: { version: '0.2.0', host: 'lab', engine: 'obid' }, maxRunning: 6, running: 1, clearedAt: null, permissions: { mode: 'bypass' },
       models: { claude: { model: 'claude-opus-5-5' } },
       accounts: [{ id: 'stub', agent: 'claude', name: 'Stub', label: null, signedIn: true, fiveHour: null, sevenDay: null, fiveHourResets: null, sevenDayResets: null, running: 1 }],
     },
     jobs: {}, firstJobs: new Set(), seen: new Set(), inbox: [], turns: [], older: false, thinking: false, steps: [], waiting: null,
     answering: {}, clearedAt: null, ...over,
+  };
+}
+
+// The page's session storage, in memory
+export function storage(entries: Record<string, string> = {}): Storage {
+  const map = new Map(Object.entries(entries));
+  return {
+    get length() { return map.size; },
+    clear: () => map.clear(),
+    getItem: (k) => map.get(k) ?? null,
+    key: (i) => [...map.keys()][i] ?? null,
+    removeItem: (k) => { map.delete(k); },
+    setItem: (k, v) => { map.set(k, String(v)); },
   };
 }

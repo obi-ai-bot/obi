@@ -9,38 +9,44 @@ Oby with no Apple device (#492).
 npm ci
 npm run build       # into dist/, which obid serves at /app/
 npm run typecheck
-npm test            # vitest: the client, the event stream, jobs as tasks
+npm test            # vitest: the client, the event stream, jobs as tasks, what events own
 ```
 
 ## Opening it
 
 obid serves `dist/` on its own address (`web` in its configuration, this folder's `dist/` unless
-set), behind its API token: open `http://127.0.0.1:7777/app/` (or obid's `listen`), paste the token
-from `api-token` in obid's home, and the browser stays signed in for 30 days with a session cookie
-that isn't the token ("obid only: the web app" in runner-api.md). Settings › General signs it out.
+set): open `http://127.0.0.1:7777/app/` (or obid's `listen`) and paste the token from `api-token` in
+obid's home. The page keeps it in this tab's session storage and sends it as
+`Authorization: Bearer` on every call to obid, the event stream included; obid's API takes nothing
+else. The sign-in also opens a random page session (a cookie for `/app` only) so the page's own
+files stay behind the token; it opens nothing under `/v1` ("obid only: the web app" in
+runner-api.md). A new tab asks for the token again; Settings › General signs the tab out.
 
-`npm run dev` runs the same page with hot reload on port 5175, its `/v1` calls proxied to obid by
-Vite with the token read from obid's home (`OBID_HOME`, and `OBID_URL` when obid isn't on
-`127.0.0.1:7777`), so the page never holds it there either:
+`npm run dev` runs the same page with hot reload on port 5175 and passes `/v1` on to obid as it is
+(`OBID_URL`, `http://127.0.0.1:7777` unless set): the page asks for the token there too, and the
+dev server adds nothing, so it opens nothing to anyone without it.
 
 ```bash
-OBID_HOME=~/Library/Application\ Support/Oby/Runner npm run dev
+npm run dev
 ```
 
 ## What's in it
 
 From Sangam's renderer, with `tokens.css` and `app.css` as they were. The Electron window
-(`window.app`: the traffic lights, full screen, the cursor feed) is gone: Oby follows the page's
-pointer. Screens with no backend in obid yet stay hidden behind Settings › General › "Show screens
-still being built", and say so when shown: the Obysphere (#497) and its knowledge (#495),
-Connectors (#498) and many conversations (#493). Nothing shows made-up data.
+(`window.app`: the traffic lights, full screen, the cursor feed) is gone: the page sends Oby its
+own pointer instead, which `character/` follows once #499 lands (until then Oby watches the pointer
+only over its own frame). Screens with no backend in obid yet stay hidden behind Settings ›
+General › "Show screens still being built", and say so when shown: the Obysphere (#497) and its
+knowledge (#495), Connectors (#498) and many conversations (#493). Nothing shows made-up data.
 
 ```
-api.ts              the runner API's types and calls: status, jobs, the inbox, the conversation,
-                    plans, and the event stream's events
+api.ts              the runner API's types and calls, each with the token: status, jobs, the inbox,
+                    the conversation, plans, and the event stream, read as it comes (sseReader)
 live.ts             what obid has, kept live: the events first, then the status, jobs, inbox and
                     conversation, the events that came meanwhile applied over them; and what the
-                    page does (ask Oby, answer a decision, tell a job, stop, dismiss)
+                    page does (ask Oby, answer a decision, tell a job, stop, dismiss), where an
+                    answer only adds jobs it didn't know: the events own a job's state
+SignIn.tsx          the page asking for the token, when this tab holds none or obid refused it
 tasks.ts            jobs (and the inbox's decisions that belong to no job) as Home's tasks: kind of
                     work, running / needs you / done, new, archived
 chats.ts            the conversation with Oby, and where a job was started in it

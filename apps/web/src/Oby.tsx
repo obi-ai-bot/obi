@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 
 type Point = { x: number; y: number };
 
-// Oby in a small frame (character/oby.html, copied in as oby/ by the build). It
-// watches the page's pointer, and decides by itself when a still cursor is
-// worth a glance, or no longer. The frame stays hidden until Oby's first frame
+// Oby in a small frame (character/oby.html, copied in as oby/ by the build), on
+// this page's own origin, so every message goes to that origin only. The page
+// sends it the pointer (`look`) and clicks (`notice`) as Sangam's design does;
+// character/ follows them once #499 lands, and until then Oby watches the
+// pointer only over its own frame. The frame stays hidden until Oby's first frame
 // is drawn, so nothing the browser paints in it while it loads can flash; a
 // character/ that doesn't say so yet (#499 adds its ready event) shows once
 // its page has loaded.
@@ -18,7 +20,7 @@ export default function Oby({ paused = false, glance = false }: { paused?: boole
 
   useEffect(() => {
     const el = frame.current!;
-    const send = (msg: object) => el.contentWindow?.postMessage(msg, '*');
+    const send = (msg: object) => el.contentWindow?.postMessage(msg, location.origin);
     const look = (p: Point) => {
       const r = el.getBoundingClientRect();
       last.current = { x: p.x - r.left, y: p.y - r.top };
@@ -87,14 +89,14 @@ export default function Oby({ paused = false, glance = false }: { paused?: boole
   // a glance when the host asks (e.g. the pointer arriving on the chips): Oby
   // looks over, like at a click, then goes back to its own business
   useEffect(() => {
-    if (glance && last.current) frame.current!.contentWindow?.postMessage({ notice: last.current }, '*');
+    if (glance && last.current) frame.current!.contentWindow?.postMessage({ notice: last.current }, location.origin);
   }, [glance]);
 
   // stop drawing while it's out of sight: once it has faded out, at once when
   // back, and at once if the frame reloads while it's hidden
   useEffect(() => {
     const el = frame.current!;
-    const post = (p: boolean) => el.contentWindow?.postMessage({ pause: p }, '*');
+    const post = (p: boolean) => el.contentWindow?.postMessage({ pause: p }, location.origin);
     if (!paused) { post(false); return; }
     const t = setTimeout(() => post(true), 300);
     const reloaded = () => post(true);

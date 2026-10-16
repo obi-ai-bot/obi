@@ -1,11 +1,12 @@
 import { useSyncExternalStore } from 'react';
-import { ApiError, EVENT_NAMES, api, parseEvent, type Event, type InboxItem, type Job, type Question, type Status, type Step, type Turn } from './api';
+import { ApiError, api, keepToken, openEvents, parseEvent, sseReader, token, type Event, type InboxItem, type Job, type Question, type Status, type Step, type Turn } from './api';
 
 // What obid has, as this page knows it, kept live by its event stream (docs/runner-api.md,
 // "GET /v1/events"): the status, the jobs, the open inbox, the conversation, and the plan this
 // page is waiting on. One snapshot, replaced on every change; components read it with useLive().
 export type Connection = 'connecting' | 'live' | 'down';
 export type Live = {
+  signedIn: boolean;           // the page holds a token obid hasn't refused (SignIn.tsx asks otherwise)
   connection: Connection;
   problem: string | null;      // why it's down, or what last went wrong (a line to show)
   status: Status | null;
@@ -24,7 +25,7 @@ export type Live = {
 
 const PAGE = 100;
 let state: Live = {
-  connection: 'connecting', problem: null, status: null, jobs: {}, firstJobs: new Set(), seen: new Set(),
+  signedIn: !!token(), connection: 'connecting', problem: null, status: null, jobs: {}, firstJobs: new Set(), seen: new Set(),
   inbox: [], turns: [], older: false, thinking: false, steps: [], waiting: null, answering: {}, clearedAt: null,
 };
 const listeners = new Set<() => void>();
@@ -32,6 +33,8 @@ const set = (patch: Partial<Live>) => { state = { ...state, ...patch }; listener
 const subscribe = (l: () => void) => { listeners.add(l); return () => { listeners.delete(l); }; };
 export const useLive = () => useSyncExternalStore(subscribe, () => state);
 export const live = () => state;
+// What the page knows, replaced whole (tests start from a state of their own)
+export const load = (next: Live) => set(next);
 
 // "how long ago" labels move on while nothing changes
 setInterval(() => set({}), 30_000);
@@ -65,52 +68,82 @@ export function apply(s: Live, e: Event): Live {
 }
 const omit = <T,>(r: Record<string, T>, key: string) => { const { [key]: _, ...rest } = r; return rest; };
 
+// Jobs an answer named (a plan's, a message's, a stop's), added only when the page doesn't know
+// them yet: the event stream owns a job's state, and an answer's copy can be older than an event
+// that came first (a plan's "queued" after the job's own event said it failed).
+export function withNew(s: Live, jobs: Job[]): Live {
+  const added = jobs.filter((j) => !s.jobs[j.id]);
+  return added.length ? { ...s, jobs: { ...s.jobs, ...Object.fromEntries(added.map((j) => [j.id, j])) } } : s;
+}
+
+// What to show, fetched once the stream answered, with the events that came meanwhile applied
+// over it in the order they came.
+export type Snapshot = { status: Status; jobs: Job[]; inbox: InboxItem[]; turns: Turn[] };
+export function synced(s: Live, snap: Snapshot, meanwhile: Event[]): Live {
+  let next: Live = {
+    ...s, connection: 'live', problem: null, status: snap.status, clearedAt: snap.status.clearedAt,
+    firstJobs: s.status ? s.firstJobs : new Set(snap.jobs.map((j) => j.id)),
+    jobs: { ...s.jobs, ...Object.fromEntries(snap.jobs.map((j) => [j.id, j])) },
+    inbox: snap.inbox.filter(isOpen), turns: [...snap.turns].sort(byAt), older: snap.turns.length >= PAGE,
+  };
+  for (const e of meanwhile) next = apply(next, e);
+  return next;
+}
+
 // The stream first, then what to show once its response has arrived, with the events that came
 // meanwhile applied over it: the runner follows a connection before it answers, so nothing that
-// changes in between is lost.
-let source: EventSource | null = null;
+// changes in between is lost. The stream is a fetch, not an EventSource, so it can carry the
+// token; when it ends or fails, it starts again after a moment.
+let following: AbortController | null = null;
 let pending: Event[] | null = null;
 let retry = 0;
 
 export function connect() {
-  if (source) return;
+  if (following || !token()) {
+    if (!token()) set({ signedIn: false });
+    return;
+  }
+  const control = new AbortController();
+  following = control;
+  void follow(control);
+}
+
+async function follow(control: AbortController) {
   set({ connection: 'connecting' });
-  const es = new EventSource('/v1/events');
-  source = es;
-  for (const name of EVENT_NAMES) {
-    es.addEventListener(name, (m) => {
-      const e = parseEvent(name, (m as MessageEvent<string>).data);
+  try {
+    const response = await openEvents(control.signal);
+    if (response.status === 401) { signedOut(); return; }
+    if (!response.ok || !response.body) throw new ApiError(response.status, `Oby answered ${response.status}.`);
+    pending = [];
+    const read = sseReader((name, data) => {
+      const e = parseEvent(name, data);
       if (!e) return;
       if (pending) pending.push(e);
       else set(apply(state, e));
     });
+    void sync();
+    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      read(value);
+    }
+    throw new ApiError(0, 'Oby isn’t answering. Trying again…');
+  } catch (e) {
+    if (control.signal.aborted) return;
+    if (following === control) following = null;
+    set({ connection: 'down', problem: e instanceof ApiError ? e.message : 'Oby isn’t answering. Trying again…' });
+    setTimeout(connect, Math.min(30_000, 1000 * 2 ** retry++));
   }
-  es.onopen = () => { void sync(); };
-  es.onerror = () => {
-    // closed for good (an HTTP error, like a session that ended): start again after a moment;
-    // otherwise the browser is reconnecting by itself
-    if (es.readyState === EventSource.CLOSED) {
-      source = null;
-      set({ connection: 'down' });
-      void signedIn().then(() => setTimeout(connect, Math.min(30_000, 1000 * 2 ** retry++)));
-    } else set({ connection: 'connecting' });
-  };
 }
 
 async function sync() {
-  pending = [];
   try {
     const [status, jobs, inbox, turns] = await Promise.all([api.status(), api.jobs(PAGE), api.inbox(), api.conversation({ limit: PAGE })]);
-    const first = state.status ? state.firstJobs : new Set(jobs.map((j) => j.id));
-    let next: Live = {
-      ...state, connection: 'live', problem: null, status, firstJobs: first, clearedAt: status.clearedAt,
-      jobs: { ...state.jobs, ...Object.fromEntries(jobs.map((j) => [j.id, j])) },
-      inbox: inbox.filter(isOpen), turns: [...turns].sort(byAt), older: turns.length >= PAGE,
-    };
-    for (const e of pending) next = apply(next, e);
+    const meanwhile = pending ?? [];
     pending = null;
     retry = 0;
-    set(next);
+    set(synced(state, { status, jobs, inbox, turns }, meanwhile));
     void fetchMissing();
   } catch (e) {
     pending = null;
@@ -118,22 +151,25 @@ async function sync() {
   }
 }
 
-// The page's session ended (obid's token changed, or it signed out elsewhere): open the page
-// again, which is then obid's sign-in form. Not more than once a minute, should something else
-// answer 401.
-async function signedIn() {
-  try { await api.status(); } catch (e) { lost(e); }
+// The token obid refused (it changed, or the page signed out): forget it, stop following, and
+// ask for it again (SignIn.tsx)
+export function signedOut() {
+  keepToken(null);
+  following?.abort();
+  following = null;
+  pending = null;
+  set({ signedIn: false, connection: 'connecting', problem: null });
 }
 function lost(e: unknown) {
-  if (e instanceof ApiError && e.status === 401) {
-    const last = Number(sessionStorage.getItem('oby.reloaded') || 0);
-    if (Date.now() - last > 60_000) {
-      sessionStorage.setItem('oby.reloaded', String(Date.now()));
-      location.reload();
-      return;
-    }
-  }
+  if (e instanceof ApiError && e.status === 401) { signedOut(); return; }
   set({ connection: 'down', problem: e instanceof Error ? e.message : String(e) });
+}
+
+// The token the page was given, once obid has taken it: kept for this tab, and the page follows obid
+export function signedIn(value: string) {
+  keepToken(value);
+  set({ signedIn: true, problem: null });
+  connect();
 }
 
 // Jobs the inbox or the conversation names that aren't among the latest: fetched one by one
@@ -158,7 +194,10 @@ export function say(problem: string) {
   clearTimeout(clearing);
   clearing = window.setTimeout(() => { if (state.connection === 'live') set({ problem: null }); }, 6000);
 }
-const failed = (e: unknown) => say(e instanceof Error ? e.message : String(e));
+const failed = (e: unknown) => {
+  if (e instanceof ApiError && e.status === 401) signedOut();
+  else say(e instanceof Error ? e.message : String(e));
+};
 
 // --- What the page does
 
@@ -170,7 +209,7 @@ export async function ask(said: string, answer?: { question: string; option: str
   set({ thinking: true, steps: [], waiting: null });
   try {
     const a = await api.plan(words, answer);
-    if (a.jobs.length) set({ jobs: { ...state.jobs, ...Object.fromEntries(a.jobs.map((j) => [j.id, j])) } });
+    set(withNew(state, a.jobs));
     if (a.kind === 'question') set({ waiting: { said: a.said, question: a.question } });
     // the stream down meanwhile: the conversation as it is now
     if (state.connection !== 'live') set({ turns: (await api.conversation({ limit: PAGE })).sort(byAt) });
@@ -203,22 +242,19 @@ export async function tellJob(id: string, text: string) {
   const t = text.trim();
   if (!t) return;
   try {
-    const job = await api.message(id, t);
-    set({ jobs: { ...state.jobs, [job.id]: job } });
+    set(withNew(state, [await api.message(id, t)]));
   } catch (e) { failed(e); }
 }
 
 export async function stopJob(id: string) {
   try {
-    const job = await api.stop(id);
-    set({ jobs: { ...state.jobs, [job.id]: job } });
+    set(withNew(state, [await api.stop(id)]));
   } catch (e) { failed(e); }
 }
 
 export async function dismissJob(id: string) {
   try {
-    const job = await api.dismiss(id);
-    set({ jobs: { ...state.jobs, [job.id]: job } });
+    set(withNew(state, [await api.dismiss(id)]));
   } catch (e) { failed(e); }
 }
 
@@ -228,7 +264,8 @@ export async function answerItem(taskId: string, itemId: string, option: string)
   try {
     const body = option === 'Later' ? { later: new Date(Date.now() + 3600_000).toISOString().replace(/\.\d+Z$/, 'Z') } : { answer: option };
     const item = await api.answer(itemId, body);
-    set(apply(state, { kind: 'inbox', item }));
+    // settled, it leaves the inbox; put off, it's updated, unless an event settled it meanwhile
+    if (item.state === 'done' || state.inbox.some((i) => i.id === item.id)) set(apply(state, { kind: 'inbox', item }));
     if (option === 'Later') set({ answering: omit(state.answering, taskId) });
   } catch (e) {
     set({ answering: omit(state.answering, taskId) });

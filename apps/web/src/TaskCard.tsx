@@ -183,7 +183,9 @@ export function resultLine({ job: j }: Task) {
     <p className="tc-result">
       {[
         j.commits ? `${j.commits} commit${j.commits > 1 ? 's' : ''} on ${j.branch}` : null,
-        j.published ? <a key="pr" href={j.published} target="_blank" rel="noopener noreferrer">{prName(j.published)}</a> : null,
+        j.published ? (/^https:\/\//i.test(j.published)
+          ? <a key="pr" href={j.published} target="_blank" rel="noopener noreferrer">{prName(j.published)}</a>
+          : <span key="pr">{prName(j.published)}</span>) : null,
         took ? `Took ${took}` : null,
       ].filter(Boolean).flatMap((part, i) => (i ? [' · ', part] : [part]))}
     </p>

@@ -7,15 +7,16 @@ import { useLive, type Live } from './live';
 // stays behind Settings › General › "Show screens still being built".
 //
 // A message in a thread: who said it ('you', 'oby', or where a task came in from), what, and how
-// many minutes ago (none: not known, as for what you told a job's agent). jobs: the tasks it
-// started, shown as cards under it. details: Oby's longer answer under its short one.
-export type Message = { who: string; text: string; ago?: number; jobs?: string[]; details?: string };
+// many minutes ago (none: not known, as for what you told a job's agent). id: what it is in the
+// thread for good (a turn's id), as earlier ones come in above it. jobs: the tasks it started,
+// shown as cards under it. details: Oby's longer answer under its short one.
+export type Message = { id: string; who: string; text: string; ago?: number; jobs?: string[]; details?: string };
 export type Chat = { id: string; title: string; said: Message[]; typing: boolean; step?: string };
 export const CONVERSATION = 'oby';
 
 const minutesAgo = (iso: string, now: number) => Math.max(0, (now - Date.parse(iso)) / 60_000);
 export const toMessage = (t: Turn, now = Date.now()): Message => ({
-  who: t.who === 'user' ? 'you' : 'oby', text: t.text, ago: minutesAgo(t.at, now), jobs: t.jobs.length ? t.jobs : undefined,
+  id: t.id, who: t.who === 'user' ? 'you' : 'oby', text: t.text, ago: minutesAgo(t.at, now), jobs: t.jobs.length ? t.jobs : undefined,
   details: t.details ?? undefined,
 });
 

@@ -1,7 +1,9 @@
 // A typed client of the runner API (docs/runner-api.md), limited to what obid serves and this app
 // shows: the status, jobs, the conversation, plans, the inbox and the event stream. Every call
-// goes to the page's own origin: obid serves this page (/app/) and signs it in with its session
-// cookie, so the page never holds the API token (in dev, Vite's proxy adds it; vite.config.ts).
+// goes to the page's own origin (obid serves this page at /app/; in dev, Vite's proxy passes /v1
+// on) with `Authorization: Bearer <token>`: the API takes nothing else. The token is in the page's
+// session storage, which only this origin (this port on 127.0.0.1) reads, put there by obid's
+// sign-in form or the page's own (SignIn.tsx); no cookie ever reaches /v1.
 
 export type Agent = 'claude' | 'codex' | 'cursor';
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'stopped' | 'interrupted';
@@ -116,13 +118,33 @@ export class ApiError extends Error {
   }
 }
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+// Where the page keeps the token: the session storage obid's sign-in form writes too
+// (core/crates/obid/src/web.rs, SIGN_IN_SCRIPT)
+export const TOKEN_KEY = 'oby.token';
+export function token(): string | null {
+  try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; }
+}
+export function keepToken(value: string | null) {
+  try {
+    if (value) sessionStorage.setItem(TOKEN_KEY, value);
+    else sessionStorage.removeItem(TOKEN_KEY);
+  } catch { /* nowhere to keep it: the page asks again */ }
+}
+const authorization = (t = token()): Record<string, string> => (t ? { Authorization: `Bearer ${t}` } : {});
+
+async function call<T>(method: string, path: string, body?: unknown, with_ = token()): Promise<T> {
   let response: Response;
   try {
     response = await fetch(path, {
       method,
-      credentials: 'same-origin',
-      headers: body === undefined ? { Accept: 'application/json' } : { Accept: 'application/json', 'Content-Type': 'application/json' },
+      // the token, never a cookie: obid's page cookie is for its files under /app only
+      credentials: 'omit',
+      cache: 'no-store',
+      headers: {
+        Accept: 'application/json',
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...authorization(with_),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
@@ -147,6 +169,8 @@ const q = (params: Record<string, string | number | undefined>) => {
 
 export const api = {
   status: () => call<Status>('GET', '/v1/status'),
+  // whether `candidate` is obid's token: its status answers with it
+  check: (candidate: string) => call<Status>('GET', '/v1/status', undefined, candidate),
   jobs: (limit = 50) => call<Job[]>('GET', `/v1/jobs${q({ limit })}`),
   job: (id: string) => call<Job>('GET', `/v1/jobs/${encodeURIComponent(id)}`),
   stop: (id: string) => call<Job>('POST', `/v1/jobs/${encodeURIComponent(id)}/stop`),
@@ -159,6 +183,43 @@ export const api = {
   plan: (said: string, answer?: { question: string; option: string }) =>
     call<PlanAnswer>('POST', '/v1/plans', answer ? { said, answer } : { said }),
 };
+
+// The event stream (GET /v1/events), with the token in its header, which EventSource can't send:
+// its response, to read with readEvents.
+export function openEvents(signal: AbortSignal): Promise<Response> {
+  return fetch('/v1/events', {
+    credentials: 'omit', cache: 'no-store', signal,
+    headers: { Accept: 'text/event-stream', ...authorization() },
+  });
+}
+
+// Server-Sent Events, as the stream's text comes in a piece at a time: each event's name (`event:`)
+// and data (its `data:` lines, joined), to `onEvent`; comments (`: ping`) and other fields are
+// skipped. Lines end in \n, \r\n or \r; an event ends at an empty line.
+export function sseReader(onEvent: (name: string, data: string) => void) {
+  let buffer = '', name = '', data: string[] = [];
+  const line = (text: string) => {
+    if (text === '') {
+      if (data.length) onEvent(name || 'message', data.join('\n'));
+      name = ''; data = [];
+      return;
+    }
+    if (text.startsWith(':')) return;
+    const at = text.indexOf(':');
+    const field = at < 0 ? text : text.slice(0, at);
+    let value = at < 0 ? '' : text.slice(at + 1);
+    if (value.startsWith(' ')) value = value.slice(1);
+    if (field === 'event') name = value;
+    else if (field === 'data') data.push(value);
+  };
+  return (chunk: string) => {
+    buffer += chunk;
+    // a \r at the very end may be the first half of \r\n: wait for the next piece
+    const lines = buffer.split(/\r\n|\r(?!$)|\n/);
+    buffer = lines.pop() ?? '';
+    lines.forEach(line);
+  };
+}
 
 // One event from the stream, by its name and data, or null for one this app doesn't follow
 // (or that isn't the shape the API says).

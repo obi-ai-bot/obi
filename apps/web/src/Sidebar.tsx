@@ -9,7 +9,7 @@ import { usePreview } from './preview';
 import { OwnerAvatar } from './ObyFace';
 import { useScrollThumb } from './useScrollThumb';
 import { Menu } from './Menu';
-import { settingsPages } from './SettingsView';
+import { SignOut, settingsPages } from './SettingsView';
 import TaskMenu from './TaskMenu';
 import StatusDot from './StatusDot';
 import { TaskMark } from './TaskCard';
@@ -339,7 +339,7 @@ export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenCha
           {/* Settings opens on General, unless one of its pages is open already */}
           <button role="menuitem" onClick={() => { setAccountMenu(null); pick('settings'); if (!activeSetting) onOpenSetting('general'); }}>Settings</button>
           <hr />
-          <form method="post" action="sign-out"><button role="menuitem" type="submit">Sign out of this browser</button></form>
+          <SignOut role="menuitem">Sign out</SignOut>
         </Menu>
       )}
       {archiveMenu && (

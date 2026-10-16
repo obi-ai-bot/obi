@@ -1,7 +1,8 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import { BrandMark } from './brands';
 import { useScrollThumb } from './useScrollThumb';
-import { useLive } from './live';
+import { signedOut, useLive } from './live';
+import { keepToken } from './api';
 import { usePreview, setPreview } from './preview';
 import { AGENTS, ARCHIVE_AFTER, getArchiveAfter, onArchiveAfter, setArchiveAfter } from './tasks';
 import { fullness } from './Composer';
@@ -97,12 +98,22 @@ function General() {
     <Group i={2} footer="The Obysphere (#497), its knowledge (#495), Connectors (#498) and many conversations (#493) have no backend in obid yet. Shown, each says so and shows nothing made up.">
       <Row label="Show screens still being built"><Switch on={preview} onChange={setPreview} label="Show screens still being built" /></Row>
     </Group>
-    <Group i={3} footer="This browser stays signed in to obid for 30 days, or until obid's API token changes.">
-      <Row label="">
-        <form method="post" action="sign-out"><button className="set-button is-danger" type="submit">Sign Out of This Browser</button></form>
-      </Row>
+    <Group i={3} footer="This tab keeps obid's token until it closes, signs out, or obid's token changes. Other tabs ask for it again.">
+      <Row label=""><SignOut className="set-button is-danger">Sign Out of This Tab</SignOut></Row>
     </Group>
   </>;
+}
+
+// Signing out: the tab forgets the token, and obid ends the session that opened the page's files
+// (POST /app/sign-out), which shows its sign-in form. The dev server has no such session: the page
+// asks for the token itself.
+export function SignOut({ className, role, children }: { className?: string; role?: string; children: React.ReactNode }) {
+  if (import.meta.env.DEV) return <button className={className} role={role} type="button" onClick={signedOut}>{children}</button>;
+  return (
+    <form method="post" action="sign-out" onSubmit={() => keepToken(null)}>
+      <button className={className} role={role} type="submit">{children}</button>
+    </form>
+  );
 }
 
 // Runner: the obid this page belongs to, and how much it runs at once

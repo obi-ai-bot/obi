@@ -24,7 +24,7 @@ export const clock = (ago: number) => {
 
 // One entry in the thread: a message, or the decision the task needs from you
 // (Oby asking, so it sits on Oby's side).
-type Entry = Message | { who: 'oby'; ask: true; ago?: number; text?: undefined };
+type Entry = Message | { id: 'ask'; who: 'oby'; ask: true; ago?: number; text?: undefined };
 
 // A task's own thread, oldest first: what started it (your words in the conversation, or its
 // request), Oby's answer that started it with its card (or just its card, when it started
@@ -34,11 +34,11 @@ function threadOf(s: Live, t: Task): Message[] {
   const now = Date.now(), j = t.job;
   const start = startOf(s, t.id);
   const out: Message[] = [
-    start?.asked ? toMessage(start.asked, now) : { who: 'you', text: j.request, ago: j.created },
-    start ? toMessage(start.answer, now) : { who: 'oby', text: '', ago: j.created, jobs: [t.id] },
-    ...j.notes.map((text): Message => ({ who: 'you', text })),
+    start?.asked ? toMessage(start.asked, now) : { id: 'request', who: 'you', text: j.request, ago: j.created },
+    start ? toMessage(start.answer, now) : { id: 'started', who: 'oby', text: '', ago: j.created, jobs: [t.id] },
+    ...j.notes.map((text, i): Message => ({ id: `note-${i}`, who: 'you', text })),
   ];
-  if (t.status !== 'running' && j.summary) out.push({ who: 'oby', text: j.summary, ago: j.finished });
+  if (t.status !== 'running' && j.summary) out.push({ id: 'summary', who: 'oby', text: j.summary, ago: j.finished });
   return out;
 }
 
@@ -70,7 +70,7 @@ export default function ChatView({ id, kind = 'task', leaving, covered = false, 
   const before = task ? threadOf(live, task) : [];
   const thread: Entry[] = task ? [
     ...before,
-    ...(task.status === 'needs' && j!.ask ? [{ who: 'oby' as const, ask: true as const }] : []),
+    ...(task.status === 'needs' && j!.ask ? [{ id: 'ask' as const, who: 'oby' as const, ask: true as const }] : []),
   ] : chat.said;
   // Oby at work on an answer, and what it's on
   const typing = !task && chat.typing, step = !task ? chat.step : undefined;
@@ -152,7 +152,7 @@ export default function ChatView({ id, kind = 'task', leaving, covered = false, 
                 const end = parts.pop();
                 const ago = 'ask' in m ? undefined : m.ago;
                 return (
-                  <li key={i} className={`msg is-${side}${cont ? ' is-cont' : ''}${ago != null && ago < 1 ? ' is-new' : ''}`}>
+                  <li key={m.id} className={`msg is-${side}${cont ? ' is-cont' : ''}${ago != null && ago < 1 ? ' is-new' : ''}`}>
                     {side === 'oby' && !cont && <span className="msg-face"><Face live={working && i === head && !covered} /></span>}
                     {parts}
                     {last && ago != null && !(typing && i === thread.length - 1 && side === 'oby') ? (
@@ -167,7 +167,7 @@ export default function ChatView({ id, kind = 'task', leaving, covered = false, 
               // Oby at work: Oby itself, melting into bouncing dots, and under it what it's on now
               // (the turn's steps, from the event stream)
               typing && (
-                <li key={thread.length} className={`msg is-oby is-new${working ? ' is-cont' : ''}`}>
+                <li key="working" className={`msg is-oby is-new${working ? ' is-cont' : ''}`}>
                   {!working && <span className="msg-face"><Face live={!covered} /></span>}
                   {step && <p className="msg-step" role="status">{step}</p>}
                 </li>
