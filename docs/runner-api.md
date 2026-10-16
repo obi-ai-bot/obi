@@ -726,6 +726,7 @@ data: { …Conversation }
 - `accounts` comes when sign-ins, usage, reset times, running counts, `fullUntil`, a lifted reserve (`reserveLiftedUntil`) or Tetrix (`tetrix`, `tetrixJobs`, `tetrixUsed`) change.
 - `clear` comes when Clear done is pressed on any app (`POST /v1/clear`): hide the settled jobs that finished by `clearedAt`.
 - `inbox` comes with every inbox item that arrives or changes: answered, done or put off, on any app, or settled by itself. Replace the item with that `id`; one whose `state` is `done` leaves the inbox.
+  obid sends the item as it is when the event goes out, one event at a time, so the events for one item never go back to an older state and the last one is the item as `GET /v1/inbox` lists it (the same goes for `exchange` events, obid only: Obi-to-Obi exchanges, below). Two changes close together can come as two events that both carry the newer state: an item answered as soon as it arrives may never be seen `open`.
 - `check` comes when a Mac check or an Apple check (below) is queued, taken by a Mac or ends. A Mac that runs checks asks for one (`GET /v1/checks/next`) when one is `queued`; other apps can ignore it, since the job's own event carries `macCheck` and `appleCheck` too.
 - `turn` comes with every turn of the conversation that's added, from any app, and again when one changes (its `jobs`): the turn as `GET /v1/conversation` lists it. Replace the turn with that `id`, or add it in `at` order. Older runners don't send it.
 - `conversation` (obid only) comes whenever one of obid's conversations starts, gets a turn, is renamed, pinned or deleted: obid only: conversations, below. The Swift runner doesn't send it.
@@ -1304,7 +1305,7 @@ Only the owner sends requests, through this endpoint (from the apps, or the e2e 
 - `messages`: every envelope sent and received in the exchange, oldest first, exactly as signed; `seq` is the Sphere's audit seq (from the send's answer, or the delivery), or null when not known. Received envelopes are listed only after they passed the spec's checks (`protocol.md` section 10).
 - `result`: the result body once there is one, else null. Like every text from another Obi it is data: apps show it, never act on it.
 
-Every change sends an `exchange` event on `GET /v1/events`, with the exchange as its data.
+Every change sends an `exchange` event on `GET /v1/events`, with the exchange as it is when the event goes out: an older state never follows a newer one ("GET /v1/events", above).
 
 ### obid only: Obi-to-Obi requests in the inbox
 

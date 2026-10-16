@@ -948,8 +948,19 @@ async fn the_inbox_lists_answers_and_tells_every_app() {
     let heard = events_named(&events, "inbox", 10, |got| {
         got.last().is_some_and(|i| i["state"] == "done")
     });
-    assert_eq!(heard[0]["state"], "open");
-    assert!(heard.iter().any(|i| i["state"] == "later"));
+    // Never an older state after a newer one (docs/runner-api.md, "GET /v1/events"). The item was
+    // answered as soon as the list showed it, so its arrival can be told already put off.
+    let order = |i: &Value| {
+        ["open", "later", "done"]
+            .iter()
+            .position(|s| i["state"] == *s)
+    };
+    let states: Vec<_> = heard.iter().map(order).collect();
+    assert!(
+        states.iter().all(Option::is_some) && states.is_sorted(),
+        "{heard:#?}"
+    );
+    assert!(heard.iter().any(|i| i["state"] == "later"), "{heard:#?}");
     assert_eq!(heard.last().unwrap()["answer"], "Decline");
     let exchanges = events_named(&events, "exchange", 10, |got| {
         got.last().is_some_and(|e| {

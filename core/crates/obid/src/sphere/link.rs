@@ -111,6 +111,9 @@ pub struct Link {
     outbox: Notify,
     /// One send at a time, so each exchange's replies go in order.
     sending: tokio::sync::Mutex<()>,
+    /// One save of an item or exchange at a time, so what reaches the disk and the apps never goes
+    /// back to an older copy.
+    saving: Mutex<()>,
     /// One token exchange at a time.
     tokening: tokio::sync::Mutex<()>,
     /// One key, card or join call at a time.
@@ -288,6 +291,7 @@ impl Link {
             state: Mutex::new(state),
             outbox: Notify::new(),
             sending: tokio::sync::Mutex::new(()),
+            saving: Mutex::new(()),
             tokening: tokio::sync::Mutex::new(()),
             joining: tokio::sync::Mutex::new(()),
             following: AtomicBool::new(false),
@@ -516,14 +520,23 @@ impl Link {
         Ok(settled.to_json())
     }
 
+    /// Keeps the exchange and tells the apps, as it is now: a caller's copy can be older than what
+    /// another change has put there since (docs/runner-api.md, "GET /v1/events").
     fn save_exchange(&self, exchange: &Exchange) {
+        let _saving = self.saving.lock().unwrap_or_else(|e| e.into_inner());
+        let now = self.lock().exchanges.get(&exchange.correlation_id).cloned();
+        let exchange = now.as_ref().unwrap_or(exchange);
         if let Err(e) = self.exchanges.save(exchange) {
             tracing::error!("can't keep exchange {}: {e}", exchange.correlation_id);
         }
         self.events.send("exchange", exchange.to_json());
     }
 
+    /// Keeps the item and tells the apps, as it is now (as `save_exchange`).
     fn save_item(&self, item: &Item) {
+        let _saving = self.saving.lock().unwrap_or_else(|e| e.into_inner());
+        let now = self.lock().inbox.get(&item.id).cloned();
+        let item = now.as_ref().unwrap_or(item);
         if let Err(e) = self.inbox.save(item) {
             tracing::error!("can't keep inbox item {}: {e}", item.id);
         }
@@ -2143,5 +2156,74 @@ mod tests {
             object(b"[", &["to"]).err().unwrap().status,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    /// A save keeps and tells what is in memory now, never an older copy its caller still holds:
+    /// a request's arrival that saves after the owner already answered can't put the item back to
+    /// open, nor its exchange back to waiting, on the stream or on disk.
+    #[tokio::test]
+    async fn a_save_keeps_and_tells_what_is_there_now() {
+        let home = std::env::temp_dir().join(format!("obid-link-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let config = Config::parse(
+            &json!({"listen": "127.0.0.1:0", "home": home, "owner": "wellington"}).to_string(),
+        )
+        .unwrap();
+        let events = Events::new();
+        let jobs = Jobs::open(config.clone(), events.clone(), Err("no sandbox".into())).unwrap();
+        let (_stop, stopping) = watch::channel(false);
+        let link = Link::open(config, jobs, events.clone(), stopping).unwrap();
+        let mut heard = events.subscribe();
+
+        let request = json!({"id": "c-1", "correlation_id": "c-1", "type": "review_request",
+            "body": {"repo": "o/r"}});
+        let mut arrived = Exchange::new("incoming", request.clone(), "obi-ernesto".into(), None);
+        arrived.state = "inbox".into();
+        let item = inbox::review_request_item(
+            "c-1",
+            "obi-ernesto",
+            "ernesto",
+            &request["body"],
+            "2099-01-01T09:00:00Z",
+            time::now(),
+        );
+        let mut answered = item.clone();
+        answered.done = Some(time::now());
+        answered.answer = Some(inbox::DECLINE.into());
+        let mut declined = arrived.clone();
+        declined.state = "declined".into();
+        {
+            let mut state = link.lock();
+            state.inbox.insert(item.id.clone(), answered.clone());
+            state
+                .exchanges
+                .insert(declined.correlation_id.clone(), declined.clone());
+        }
+        // The answer saves first; the arrival, slower, saves its older copies after.
+        link.save_item(&answered);
+        link.save_exchange(&declined);
+        link.save_item(&item);
+        link.save_exchange(&arrived);
+
+        let mut told = Vec::new();
+        while let Ok(event) = heard.try_recv() {
+            told.push((event.name, event.data["state"].clone()));
+        }
+        assert_eq!(
+            told,
+            [
+                ("inbox", json!("done")),
+                ("exchange", json!("declined")),
+                ("inbox", json!("done")),
+                ("exchange", json!("declined")),
+            ]
+        );
+        let kept = Inbox::open(&home).unwrap().load_all();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].answer.as_deref(), Some(inbox::DECLINE));
+        let kept = Exchanges::open(&home).unwrap().load_all();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].state, "declined");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
