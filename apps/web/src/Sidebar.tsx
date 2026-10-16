@@ -1,10 +1,12 @@
-import { Fragment, useEffect, useState, useSyncExternalStore } from 'react';
-import { BookOpen, Check, ChevronDown, EllipsisVertical, Plus, type LucideIcon } from 'lucide-react';
+import { Fragment, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { BookOpen, Check, ChevronDown, EllipsisVertical, Plus, Search, type LucideIcon } from 'lucide-react';
 // the icon strip uses Phosphor: it has outline and filled versions of each icon
 import { ChatsCircleIcon, HouseIcon, UsersThreeIcon } from '@phosphor-icons/react';
-import { ARCHIVE_AFTER, archivedTasks, countOf, getArchiveAfter, onArchiveAfter, openOf, setArchiveAfter, tasksOf, tasksWith, typesOn, useTasks, ago, type Task } from './tasks';
-import { markSeen, useLive } from './live';
-import { useChat } from './chats';
+import { ARCHIVE_AFTER, archivedTasks, countOf, getArchiveAfter, getGroupBy, groupsOf, onArchiveAfter, onGroupBy, setArchiveAfter, setGroupBy, shownOf, useTasks, ago, type GroupBy } from './tasks';
+import { markSeen, renameConversation, useLive } from './live';
+import { aboutOf, listOf } from './chats';
+import type { Conversation } from './api';
+import ConvoMenu from './ConvoMenu';
 import { usePreview } from './preview';
 import { OwnerAvatar } from './ObyFace';
 import { useScrollThumb } from './useScrollThumb';
@@ -20,23 +22,28 @@ type StripIcon = (p: { size?: number; weight?: 'regular' | 'fill' }) => React.Re
 const TITLES: Record<Section, string> = {
   home: 'Home', conversations: 'Conversations', obysphere: 'Obysphere', settings: 'Settings',
 };
-// What each tab can start, first thing under its title
+// What each tab can start, first thing under its title; and which tabs can be searched
 const NEW_ACTION: Partial<Record<Section, { label: string; icon: LucideIcon }>> = {
   home: { label: 'New task', icon: Plus },
+  conversations: { label: 'New conversation', icon: Plus },
 };
+const SEARCHABLE: Section[] = ['conversations'];
+const minutesSince = (iso: string) => Math.max(0, (Date.now() - Date.parse(iso)) / 60_000);
 
-// The side panel, in two columns: icons on the far left pick a section (Home; with "Show screens
-// still being built", Conversations and the Obysphere; Settings from the account picture at the
-// foot), the column beside them shows it. It opens from the left and pushes the view over.
-export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenChat, onOpenTalk, onOpenArchive, onOpenSetting, onOpenKnowledge, activeTalk = false, activeSetting = null, activeKnowledge = false, active = null, width, onResize }: {
+// The side panel, in two columns: icons on the far left pick a section (Home, Conversations; with
+// "Show screens still being built", the Obysphere; Settings from the account picture at the
+// foot), the column beside them shows it. Search, on the tabs that have it, sits by the panel
+// icon. It opens from the left and pushes the view over.
+export default function Sidebar({ open, onNewChat, onNewConversation, onHome, onOpenTask, onOpenChat, onOpenTalk, onOpenArchive, onOpenSetting, onOpenKnowledge, activeTalk = null, activeSetting = null, activeKnowledge = false, active = null, width, onResize }: {
   open: boolean;
-  onNewChat: () => void;
+  onNewChat: () => void;  // New task: Home's message box, which starts a conversation
+  onNewConversation: () => void;  // New conversation: an empty one, started by its first words
   onHome: () => void;  // back to Home's own page, closing whatever is open over it
   onOpenTask: (id: string) => void;  // a task's page, on its own
   onOpenChat: (id: string) => void;  // a task's conversation, from its menu
-  onOpenTalk: () => void;  // the conversation with Oby
+  onOpenTalk: (id: string) => void;  // a conversation with Oby, from Conversations
   onOpenArchive: () => void;  // the archived tasks, as a page
-  activeTalk?: boolean;  // the conversation with Oby is showing: its row is highlighted
+  activeTalk?: string | null;  // the conversation with Oby that's showing: its row is highlighted
   activeSetting?: string | null;  // the Settings page that's showing: its row is highlighted
   onOpenKnowledge: () => void;  // the Obysphere's knowledge
   activeKnowledge?: boolean;
@@ -65,7 +72,6 @@ export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenCha
   };
   const store = useLive();
   const tasks = useTasks();
-  const chat = useChat();
   const preview = usePreview();
   const archiveAfter = useSyncExternalStore(onArchiveAfter, getArchiveAfter);
   // Home's dot turns orange while any task needs you, blue while one is new
@@ -74,13 +80,17 @@ export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenCha
   const [section, setSection] = useState<Section>('home');
   const sections: { id: Section; label: string; icon: StripIcon }[] = [
     { id: 'home', label: 'Home', icon: HouseIcon },
-    ...(preview ? [{ id: 'conversations' as const, label: 'Conversations', icon: ChatsCircleIcon }] : []),
+    // your conversations with Oby
+    { id: 'conversations', label: 'Conversations', icon: ChatsCircleIcon },
   ];
-  // the setting turned off while one of its sections shows: back to Home
-  useEffect(() => { if (!preview) setSection((s) => (s === 'conversations' || s === 'obysphere' ? 'home' : s)); }, [preview]);
+  // the setting turned off while its section shows: back to Home
+  useEffect(() => { if (!preview) setSection((s) => (s === 'obysphere' ? 'home' : s)); }, [preview]);
   const inSettings = section === 'settings';
   // a Settings page opened from elsewhere (the message box's usage gear): the panel follows
   useEffect(() => { if (activeSetting) setSection('settings'); }, [activeSetting]);
+  const [query, setQuery] = useState('');
+  const [searching, setSearching] = useState(false);
+  const searchInput = useRef<HTMLInputElement>(null);
   // groups the user folded away
   const [folded, setFolded] = useState<Set<string>>(new Set());
   // groups showing all their done tasks (Show more), not just the latest few
@@ -92,40 +102,35 @@ export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenCha
   const [archiveMenu, setArchiveMenu] = useState<DOMRect | null>(null);
   // the account menu (the picture at the icons' foot): which obid, Settings, signing out
   const [accountMenu, setAccountMenu] = useState<DOMRect | null>(null);
-  // Home's groups: by kind of work (the default) or by status; remembered
-  const [groupBy, setGroupBy] = useState<'type' | 'status'>(() => {
-    try { return localStorage.getItem('oby.groupBy') === 'status' ? 'status' : 'type'; } catch { return 'type'; }
-  });
-  const pickGroupBy = (by: 'type' | 'status') => {
-    setGroupBy(by); setArchiveMenu(null);
-    try { localStorage.setItem('oby.groupBy', by); } catch { /* not remembered, that's all */ }
-  };
+  // a conversation's menu, and renaming one in place, as a task's
+  const [convoMenu, setConvoMenu] = useState<{ id: string; at: DOMRect; atPointer?: boolean } | null>(null);
+  const menuConvo = convoMenu ? store.conversations.find((c) => c.id === convoMenu.id) : undefined;
+  const [renamingConvo, setRenamingConvo] = useState<string | null>(null);
+  // Home's groups: by kind of work (the default) or by status; remembered (tasks.ts)
+  const groupBy = useSyncExternalStore(onGroupBy, getGroupBy);
+  const pickGroupBy = (by: GroupBy) => { setGroupBy(by); setArchiveMenu(null); };
   // each group: its tasks, how many to show by its name (open ones for a kind
   // of work, all of them for a status), and how many need you
-  const groups = groupBy === 'type'
-    ? typesOn(store).map((t) => ({ id: t.id, label: t.label, tasks: tasksOf(store, t.id), count: openOf(store, t.id), countLabel: 'open', needs: countOf(store, 'needs', t.id) }))
-    : ([['needs', 'Needs you'], ['running', 'Running'], ['done', 'Completed']] as const).map(([id, label]) => {
-      const list = tasksWith(store, id);
-      return { id: `status:${id}`, label, tasks: list, count: list.length, countLabel: 'tasks', needs: id === 'needs' ? list.length : 0 };
-    }).filter((g) => g.tasks.length > 0);
+  const groups = groupsOf(store, groupBy);
   const pickArchive = (id: string) => { setArchiveAfter(id); setArchiveMenu(null); };
   // A group's done tasks: the latest few (3 in a kind of work, 5 in Done), then
-  // Show more for the rest; what's still open always shows in full. Done tasks
+  // Show more for the rest; what's still open always shows in full (shownOf). Done tasks
   // leave Home for the archive after a while (Archive completed, in Home's ⋮)
-  const shownOf = (g: { id: string; tasks: Task[] }) => {
-    const open = g.tasks.filter((t) => t.status !== 'done'), done = g.tasks.filter((t) => t.status === 'done');
-    const keep = g.id === 'status:done' ? 5 : 3;
-    return { rows: more.has(g.id) ? g.tasks : [...open, ...done.slice(0, keep)], hidden: Math.max(0, done.length - keep) };
-  };
   const toggleMore = (id: string) => setMore((m) => { const next = new Set(m); if (!next.delete(id)) next.add(id); return next; });
   const archivedCount = archivedTasks(store).length;
   const { list, onScroll, thumbProps } = useScrollThumb<HTMLDivElement>();
   const pick = (id: Section) => {
     // Home again, while it's showing: back to Home's own page (the dashboard)
     if (id === 'home' && section === 'home') onHome();
-    setSection(id);
+    setSection(id); setSearching(false); setQuery('');
     if (list.current) list.current.scrollTop = 0;
   };
+  const openSearch = () => {
+    if (searching) setQuery('');
+    setSearching(!searching);
+  };
+  // the search field takes focus as it opens
+  useEffect(() => { if (searching) searchInput.current?.focus(); }, [searching]);
   const newAction = NEW_ACTION[section];
   const host = store.status?.runner.host ?? 'obid';
 
@@ -135,22 +140,58 @@ export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenCha
     return next;
   });
 
-  // the conversation with Oby, as a row: its name, Oby's last words, when it last moved
-  const lastOby = [...chat.said].reverse().find((m) => m.who === 'oby' && m.text);
-  const lastAgo = chat.said.at(-1)?.ago;
-  const convoRow = (
-    <button
-      className={`connector task convo-row${activeTalk ? ' is-active' : ''}`}
-      aria-current={activeTalk || undefined}
-      onClick={onOpenTalk}
-    >
-      <span className="connector-text">
-        <span className="connector-name">{chat.title}</span>
-        <span className="connector-about">{chat.typing ? chat.step : lastOby?.text ?? 'Nothing said yet'}</span>
-      </span>
-      {(chat.typing || lastAgo != null) && <span className="sidebar-item-ago">{chat.typing ? 'now' : ago(lastAgo!)}</span>}
-    </button>
-  );
+  // your conversations with Oby (matching the search): pinned ones under Pinned, the rest under
+  // Recent (no headings while nothing's pinned)
+  const talks = listOf(store, query);
+  const convoRow = (c: Conversation) => {
+    const about = aboutOf(store, c);
+    const busy = store.thinking && store.asking === c.id;
+    return (
+      // a row with its own menu button, so the row itself isn't a <button>
+      <div
+        key={c.id}
+        role="button"
+        tabIndex={0}
+        className={`connector task convo-row${activeTalk === c.id ? ' is-active' : ''}${convoMenu?.id === c.id ? ' is-menu-open' : ''}`}
+        aria-current={activeTalk === c.id || undefined}
+        onClick={() => onOpenTalk(c.id)}
+        onKeyDown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) { e.preventDefault(); e.currentTarget.click(); } }}
+        // right-click: its menu, where the pointer is
+        onContextMenu={(e) => { e.preventDefault(); setConvoMenu({ id: c.id, at: new DOMRect(e.clientX, e.clientY, 0, 0), atPointer: true }); }}
+      >
+        <span className="connector-text">
+          {renamingConvo === c.id ? (
+            <input
+              className="sidebar-rename"
+              defaultValue={c.title}
+              maxLength={100}
+              autoFocus
+              onFocus={(e) => e.currentTarget.select()}
+              onClick={(e) => e.stopPropagation()}
+              onBlur={(e) => { void renameConversation(c.id, e.currentTarget.value); setRenamingConvo(null); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+                if (e.key === 'Escape') { e.stopPropagation(); e.currentTarget.value = c.title; setRenamingConvo(null); }
+              }}
+              aria-label="Conversation name"
+            />
+          ) : <span className="connector-name">{c.title}</span>}
+          {about && <span className="connector-about">{about}</span>}
+        </span>
+        {/* when it last moved; on hover, its ⋮ in the same spot */}
+        <span className="sidebar-item-ago">{busy ? 'now' : ago(minutesSince(c.lastActivity))}</span>
+        <button
+          className="sidebar-item-more"
+          aria-label={`More for ${c.title}`}
+          aria-haspopup="menu"
+          aria-expanded={convoMenu?.id === c.id}
+          onClick={(e) => { e.stopPropagation(); setConvoMenu(convoMenu?.id === c.id ? null : { id: c.id, at: e.currentTarget.getBoundingClientRect() }); }}
+        >
+          <EllipsisVertical size={14} strokeWidth={1.6} />
+        </button>
+      </div>
+    );
+  };
 
   return (
     <>
@@ -199,10 +240,34 @@ export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenCha
             </button>
           )}
         </div>
-        <div className="sidebar-top" />
+        {/* on the panel icon's row */}
+        <div className="sidebar-top">
+          {SEARCHABLE.includes(section) && (
+            <button className={`icon-button${searching ? ' is-on' : ''}`} aria-label="Search" aria-expanded={searching} onClick={openSearch}>
+              <Search size={17} strokeWidth={1.6} />
+            </button>
+          )}
+        </div>
         {/* everything under the title scrolls together; the title stays */}
         <div className="sidebar-scroll">
         <div ref={list} className="sidebar-list" onScroll={onScroll}>
+        {/* slides open under the title (a one-row grid going 0fr → 1fr) */}
+        <div className={`sidebar-search-wrap${searching ? ' is-open' : ''}`}>
+          <div>
+            <label className="sidebar-search">
+              <Search size={14} strokeWidth={1.6} />
+              <input
+                ref={searchInput}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setSearching(false); setQuery(''); } }}
+                placeholder="Search"
+                aria-label="Search"
+                tabIndex={searching ? 0 : -1}
+              />
+            </label>
+          </div>
+        </div>
 
         {/* the Obysphere: what its Obys share, and its members. Nothing yet (#497, #495) */}
         {section === 'obysphere' && (
@@ -217,24 +282,26 @@ export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenCha
           </>
         )}
         {newAction && (
-          <button className="sidebar-new" onClick={onNewChat}>
+          <button className="sidebar-new" onClick={section === 'conversations' ? onNewConversation : onNewChat}>
             <newAction.icon size={16} strokeWidth={1.6} />
             <span className="sidebar-new-label">{newAction.label}</span>
           </button>
         )}
 
-        {/* the conversation with Oby this page shows: obid keeps many (#493); their list comes next */}
+        {/* your conversations with Oby, newest first, ones still going included (#493) */}
         {section === 'conversations' && (
           <div className="sidebar-plain">
-            {convoRow}
-            <p className="sidebar-empty">obid keeps all your conversations; this page shows the latest. Their list comes next.</p>
+            {talks.pinned.length > 0 && <h3 className="sidebar-convo-head">Pinned</h3>}
+            {talks.pinned.map(convoRow)}
+            {talks.pinned.length > 0 && talks.recent.length > 0 && <h3 className="sidebar-convo-head">Recent</h3>}
+            {talks.recent.map(convoRow)}
+            {!talks.pinned.length && !talks.recent.length && <p className="sidebar-empty">{query.trim() ? `No conversations match “${query.trim()}”` : 'No conversations yet'}</p>}
           </div>
         )}
-        {/* Home: the conversation, then each kind of work folds open to its tasks
-            (running / needs you counted on the right) */}
+        {/* Home: each kind of work folds open to its tasks (running / needs you counted on the
+            right) */}
         {section === 'home' && (
           <div className="sidebar-plain">
-            {convoRow}
             {groups.map((t) => (
               <section key={t.id} className={`sidebar-group${folded.has(t.id) ? ' is-folded' : ''}`}>
                 <button className="sidebar-group-head" aria-expanded={!folded.has(t.id)} onClick={() => toggleGroup(t.id)}>
@@ -247,7 +314,7 @@ export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenCha
                 </button>
                 <div className="sidebar-group-body">
                   <div>
-                    {shownOf(t).rows.map((k) => (
+                    {shownOf(t, more.has(t.id)).rows.map((k) => (
                       // a row with its own menu button, so the row itself isn't a <button>
                       <div
                         key={k.id}
@@ -261,7 +328,10 @@ export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenCha
                         onContextMenu={(e) => { e.preventDefault(); setTaskMenu({ id: k.id, at: new DOMRect(e.clientX, e.clientY, 0, 0), atPointer: true }); }}
                       >
                         <TaskMark task={k} size={14} />
-                        <span className="sidebar-item-title">{k.title}</span>
+                        <span className="sidebar-item-title">
+                          {k.who && <span className="sidebar-item-who">{k.who}</span>}
+                          {k.title}
+                        </span>
                         {/* at the row's end, its state: new, needs you, working, queued or done;
                             on hover, its ⋮ in the same spot */}
                         <StatusDot task={k} />
@@ -276,9 +346,9 @@ export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenCha
                         </button>
                       </div>
                     ))}
-                    {shownOf(t).hidden > 0 && (
+                    {shownOf(t, false).hidden > 0 && (
                       <button className="sidebar-more" onClick={() => toggleMore(t.id)}>
-                        {more.has(t.id) ? 'Show less' : `Show ${shownOf(t).hidden} more`}
+                        {more.has(t.id) ? 'Show less' : `Show ${shownOf(t, false).hidden} more`}
                       </button>
                     )}
                   </div>
@@ -325,6 +395,16 @@ export default function Sidebar({ open, onNewChat, onHome, onOpenTask, onOpenCha
           onClose={() => setTaskMenu(null)}
           onViewDetails={() => { markSeen(menuTask.id); onOpenTask(menuTask.id); }}
           onOpenChat={() => onOpenChat(menuTask.id)}
+        />
+      )}
+      {/* a conversation's menu (ConvoMenu) */}
+      {convoMenu && menuConvo && (
+        <ConvoMenu
+          convo={menuConvo}
+          at={convoMenu.at}
+          align={convoMenu.atPointer ? 'left' : 'right'}
+          onClose={() => setConvoMenu(null)}
+          onRename={() => setRenamingConvo(menuConvo.id)}
         />
       )}
       {accountMenu && (

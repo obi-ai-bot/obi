@@ -1,5 +1,5 @@
 // A typed client of the runner API (docs/runner-api.md), limited to what obid serves and this app
-// shows: the status, jobs, the conversation, plans, the inbox, the event stream, and the plug-ins
+// shows: the status, jobs, the conversations, plans, the inbox, the event stream, and the plug-ins
 // and connections Settings › Connectors reads. Every call
 // goes to the page's own origin (obid serves this page at /app/; in dev, Vite's proxy passes /v1
 // on) with `Authorization: Bearer <token>`: the API takes nothing else. The token is in the page's
@@ -45,6 +45,10 @@ export type Job = {
   permission: { id: string; tool: string; title: string; detail: string; rule: string | null; always: string | null } | null;
   pipeline: { number: number; total: number; stages: Stage[] } | null;
   title: string;
+  // obid only: the conversation whose words started it, kept when that one is deleted (#493)
+  conversation?: string | null;
+  // obid only: on a review another Obi asked for, who asked ("obid only: Obi-to-Obi review jobs")
+  obi?: { correlationId: string; from: string; fromOwner: string; requestId: string } | null;
 };
 
 // "Inbox item"
@@ -65,12 +69,18 @@ export type InboxItem = {
   happened: string | null;
   recommended: number | null;
   why: string | null;
+  // obid only: on an `obiRequest`, the request's typed fields; this app reads who asked
+  obi?: { fromOwner?: string } | null;
 };
 
 // "GET /v1/conversation"
 // conversation: the one it's in (obid keeps many since #493, "obid only: conversations"); runners
 // from before send none
 export type Turn = { id: string; who: 'user' | 'oby'; text: string; at: string; jobs: string[]; details?: string | null; conversation?: string };
+
+// obid only: conversations, "A conversation", as GET /v1/conversations lists it and the
+// `conversation` event sends it
+export type Conversation = { id: string; title: string; pinned: boolean; created: string; lastActivity: string; cursor: string };
 
 // "Account" and "GET /v1/status", the keys this app reads
 export type Account = {
@@ -137,6 +147,7 @@ export type Event =
   | { kind: 'step'; step: Step }
   | { kind: 'accounts'; accounts: Account[] }
   | { kind: 'clear'; clearedAt: string }
+  | { kind: 'conversation'; conversation: Conversation }
   | { kind: 'conversationGone'; id: string };
 
 // {"error": "One line a person can read."} with its status
@@ -209,9 +220,16 @@ export const api = {
     call<InboxItem>('POST', `/v1/inbox/${encodeURIComponent(id)}/answer`, body),
   // one conversation's turns: `id`'s, or the one `before` is in, or with neither the latest
   conversation: (opts: { id?: string; before?: string; limit?: number } = {}) => call<Turn[]>('GET', `/v1/conversation${q(opts)}`),
-  // words to Oby, in `conversation` (left out: the latest)
-  plan: (said: string, answer?: { question: string; option: string }, conversation?: string) =>
-    call<PlanAnswer>('POST', '/v1/plans', { said, ...(answer ? { answer } : {}), ...(conversation ? { conversation } : {}) }),
+  // words to Oby: in a conversation, or starting a new one (neither: the latest)
+  plan: (said: string, answer?: { question: string; option: string }, where: { conversation: string } | { new: true } | Record<string, never> = {}) =>
+    call<PlanAnswer>('POST', '/v1/plans', { said, ...(answer ? { answer } : {}), ...where }),
+  // the conversations, a page from `after` (a conversation's cursor)
+  conversations: (opts: { after?: string; limit?: number } = {}) => call<Conversation[]>('GET', `/v1/conversations${q(opts)}`),
+  // renamed or pinned
+  editConversation: (id: string, change: { title?: string; pinned?: boolean }) =>
+    call<Conversation>('PATCH', `/v1/conversations/${encodeURIComponent(id)}`, change),
+  // forgotten, with its turns; the jobs it started stay
+  deleteConversation: (id: string) => call<null>('DELETE', `/v1/conversations/${encodeURIComponent(id)}`),
   // Settings › Connectors (#518), read only: obid's plug-ins, and the runner's connections
   plugins: () => call<Plugin[]>('GET', '/v1/obid/plugins'),
   connections: () => call<ConnectedApp[]>('GET', '/v1/connections'),
@@ -268,8 +286,11 @@ export function parseEvent(name: string, data: string): Event | null {
     case 'step': return typeof v.text === 'string' ? { kind: 'step', step: value as Step } : null;
     case 'accounts': return Array.isArray(value) ? { kind: 'accounts', accounts: value as Account[] } : null;
     case 'clear': return typeof v.clearedAt === 'string' ? { kind: 'clear', clearedAt: v.clearedAt } : null;
-    // of the conversation events, only one that was deleted or forgotten matters to this page
-    case 'conversation': return typeof v.id === 'string' && v.deleted === true ? { kind: 'conversationGone', id: v.id } : null;
+    // one that started, moved, was renamed or pinned; or one deleted or forgotten
+    case 'conversation':
+      if (typeof v.id !== 'string') return null;
+      if (v.deleted === true) return { kind: 'conversationGone', id: v.id };
+      return typeof v.title === 'string' && typeof v.lastActivity === 'string' ? { kind: 'conversation', conversation: value as Conversation } : null;
     default: return null;
   }
 }

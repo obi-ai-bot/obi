@@ -10,9 +10,9 @@ import Composer from './Composer';
 import ArchiveView from './ArchiveView';
 import SettingsView, { settingsLabel } from './SettingsView';
 import KnowledgeView, { knowledgeLabel } from './KnowledgeView';
-import { CONVERSATION, startOf, useChat } from './chats';
-import { ask, tellJob, useLive } from './live';
-import { countOf, firstTab, hasFresh, typeById, typesOn, useTasks, type Tab } from './tasks';
+import { NEW, startOf, startedIn, titleOf } from './chats';
+import { ask, newConversation, openConversation, tellJob, useLive } from './live';
+import { chipOf, countOf, firstTab, typeById, typesOn, useTasks, type Tab } from './tasks';
 
 // the line over the chips: what's running and what needs you; with neither,
 // Oby asking for something to do
@@ -38,8 +38,9 @@ function rubberBand(w: number) {
 }
 
 // Where you are, as the steps that got you there (the title bar's trail): a
-// kind of work's cards, a task's page, a task's own thread, the conversation
-// with Oby, the archive, Settings, an Obysphere's knowledge. Each
+// kind of work's cards, a task's page, a task's own thread, a conversation
+// with Oby (by its id, or NEW for one its first words will start), the archive,
+// Settings, an Obysphere's knowledge. Each
 // opens over the one before; the trail follows the way you came, not a fixed
 // hierarchy (a task from the side panel is just the task; from a chip, the kind
 // of work, then the task; from a conversation's card, the conversation, then
@@ -58,7 +59,6 @@ let made = 0;
 export default function Home() {
   const store = useLive();
   const tasks = useTasks();  // counts and dots follow tasks being added and opened
-  const chat = useChat();
   const running = countOf(store, 'running'), needsYou = countOf(store, 'needs');
   const types = typesOn(store);
 
@@ -109,16 +109,23 @@ export default function Home() {
   const [barMenu, setBarMenu] = useState<DOMRect | null>(null);
   useEffect(() => { setBarMenu(null); }, [top?.key]);
 
-  // a task's conversation: the conversation with Oby, when it was started there (the whole of
-  // it), else its own thread
-  const conversationOf = (id: string): Step => (startOf(store, id) ? { kind: 'talk', id: CONVERSATION } : { kind: 'thread', id });
+  // a task's conversation: the conversation with Oby it was started in, while that's still there
+  // (the whole of it), else its own thread
+  const conversationOf = (id: string): Step => {
+    const in_ = startedIn(store, id) ?? (startOf(store, id) ? store.shown : null);
+    return in_ ? { kind: 'talk', id: in_ } : { kind: 'thread', id };
+  };
   const openTask = (id: string) => push({ kind: 'task', id });
   const goToConversation = (id: string) => push(conversationOf(id));
-  // asked in Home's message box: to Oby (POST /v1/plans), in the conversation, open straight away
+  // asked in Home's message box: to Oby (POST /v1/plans), a new conversation ("new": true, #493),
+  // open straight away
   const askOby = (text: string) => {
-    void ask(text);
-    start({ kind: 'talk', id: CONVERSATION });
+    void ask(text, undefined, { new: true });
+    start({ kind: 'talk', id: NEW });
   };
+  // a conversation from the side panel; New conversation: an empty one, which its words start
+  const openTalk = (id: string) => { void openConversation(id); start({ kind: 'talk', id }); };
+  const startTalk = () => { newConversation(); start({ kind: 'talk', id: NEW }); };
   // said in a task page's message box: to its agent (POST /v1/jobs/{id}/messages), and its own
   // thread opens over the page, where what you said shows
   const tellFromTask = (id: string, text: string) => {
@@ -183,7 +190,7 @@ export default function Home() {
     if (l.kind === 'group') return typeById(l.id).label;
     if (l.kind === 'task') return tasks.find((k) => k.id === l.id)?.title ?? '';
     if (l.kind === 'thread') { const t = tasks.find((k) => k.id === l.id); return t ? `About ${t.title}` : ''; }
-    if (l.kind === 'talk') return chat.title;
+    if (l.kind === 'talk') return titleOf(store, l.id === NEW ? store.shown : l.id);
     if (l.kind === 'archive') return 'Archived';
     if (l.kind === 'settings') return settingsLabel(l.id);
     return knowledgeLabel;
@@ -201,14 +208,15 @@ export default function Home() {
         onHome={closeAll}
         onOpenTask={(id) => start({ kind: 'task', id })}
         onOpenChat={(id) => start({ kind: 'task', id }, conversationOf(id))}
-        onOpenTalk={() => start({ kind: 'talk', id: CONVERSATION })}
+        onOpenTalk={openTalk}
+        onNewConversation={startTalk}
         onOpenArchive={() => start({ kind: 'archive' })}
         onOpenSetting={(id) => start({ kind: 'settings', id })}
         activeSetting={top?.kind === 'settings' ? top.id : null}
         onOpenKnowledge={() => start({ kind: 'knowledge' })}
         activeKnowledge={top?.kind === 'knowledge'}
         active={rootTask}
-        activeTalk={top?.kind === 'talk'}
+        activeTalk={top?.kind === 'talk' ? store.shown : null}
         width={sidebarWidth}
         onResize={resizeSidebar}
       />
@@ -275,18 +283,21 @@ export default function Home() {
               even while the side panel groups by status */}
           {types.length > 0 && (
             <div className="chips" onPointerEnter={() => setOnChips(true)} onPointerLeave={() => setOnChips(false)}>
-                {types.map((c) => (
-                  <button key={c.id} className="chip" onClick={() => start({ kind: 'group', id: c.id, tab: firstTab(store, c.id) })}>
-                    {/* blue: holds a new task; orange: something in it needs you; both can show */}
-                    {(hasFresh(store, c.id) || countOf(store, 'needs', c.id) > 0) && (
-                      <span className="chip-dots">
-                        {hasFresh(store, c.id) && <span className="is-fresh" role="img" aria-label="New" />}
-                        {countOf(store, 'needs', c.id) > 0 && <span className="is-needs" role="img" aria-label="Needs you" />}
-                      </span>
-                    )}
-                    {c.label}
-                  </button>
-                ))}
+                {types.map((c) => {
+                  const dots = chipOf(store, c.id);
+                  return (
+                    <button key={c.id} className="chip" onClick={() => start({ kind: 'group', id: c.id, tab: firstTab(store, c.id) })}>
+                      {/* blue: holds a new task; orange: something in it needs you; both can show */}
+                      {(dots.fresh || dots.needs) && (
+                        <span className="chip-dots">
+                          {dots.fresh && <span className="is-fresh" role="img" aria-label="New" />}
+                          {dots.needs && <span className="is-needs" role="img" aria-label="Needs you" />}
+                        </span>
+                      )}
+                      {c.label}
+                    </button>
+                  );
+                })}
             </div>
           )}
         </section>
