@@ -17,7 +17,13 @@ struct TaskPageTests {
     }
 
     @Test func aCardSaysHowLongItsBeenGoingOrWhenItFinished() {
-        #expect(TaskFacts.duration(30) == "now" && TaskFacts.duration(18 * 60) == "18m" && TaskFacts.duration(65 * 60) == "1h 5m")
+        #expect(TaskFacts.duration(30) == "now")
+        #expect(TaskFacts.duration(18 * 60) == "18m")
+        #expect(TaskFacts.duration(65 * 60) == "1h 5m")
+        // An open task counts from when it started, as its page does, not from when it was queued.
+        var started = job(.running, created: 3600)
+        started.started = now - 5 * 60
+        #expect(TaskFacts.ago(started, now: now) == "5m")
         #expect(TaskFacts.ago(job(.running, created: 18 * 60), now: now) == "18m")
         #expect(TaskFacts.ago(job(.done, created: 7200, finished: 3600), now: now) == "1h 0m ago")
         #expect(TaskFacts.ago(job(.done, created: 7200, finished: 10), now: now) == "now")
@@ -39,12 +45,40 @@ struct TaskPageTests {
 
     /// The stage being worked on pulses only while the agent works: orange while the task needs
     /// you, a ring once the task is done (it waits on someone else).
+    /// The stage being worked on pulses only while the agent works: orange while the task needs
+    /// you, a ring while it's queued or done (it waits on something else).
     @Test func eachStageGetsItsMark() {
-        #expect(TaskFacts.mark(.current, needs: false, done: false) == .current)
-        #expect(TaskFacts.mark(.current, needs: true, done: false) == .needs)
-        #expect(TaskFacts.mark(.current, needs: false, done: true) == .upcoming)
-        #expect(TaskFacts.mark(.done, needs: true, done: true) == .done)
-        #expect(TaskFacts.mark(.failed, needs: false, done: true) == .failed && TaskFacts.mark(.skipped, needs: false, done: false) == .skipped)
+        #expect(TaskFacts.mark(.current, needs: false, working: true) == .current)
+        #expect(TaskFacts.mark(.current, needs: true, working: true) == .needs)
+        #expect(TaskFacts.mark(.current, needs: false, working: false) == .upcoming)
+        #expect(TaskFacts.mark(.done, needs: true, working: false) == .done)
+        #expect(TaskFacts.mark(.failed, needs: false, working: false) == .failed)
+        #expect(TaskFacts.mark(.skipped, needs: false, working: true) == .skipped)
+    }
+
+    /// A job waiting on Publish can be let go too; a running job can be stopped; one waiting for
+    /// its time can start now.
+    @Test func thePageOffersWhatTheJobCanStillDo() {
+        var publish = job(.done, finished: 60)
+        publish.commits = 2
+        #expect(publish.canPublish, "the fixture should wait on Publish")
+        #expect(TaskFacts.controls(publish).dismiss)
+        var failed = job(.failed, finished: 60)
+        failed.summary = "It broke."
+        #expect(TaskFacts.controls(failed).dismiss)
+        #expect(TaskFacts.controls(job(.running)) == TaskFacts.Controls(startNow: false, stop: true, dismiss: false))
+        #expect(TaskFacts.controls(job(.done, finished: 60)) == TaskFacts.Controls())
+    }
+
+    /// A published job that runs again keeps its pull request and commits in Result.
+    @Test func aPublishedJobRunningAgainKeepsItsResult() {
+        var again = job(.running)
+        #expect(!TaskFacts.hasResult(again))
+        again.published = "https://github.com/deskree-inc/tetrix-ee/pull/412"
+        #expect(TaskFacts.hasResult(again))
+        again.published = nil
+        again.commits = 1
+        #expect(TaskFacts.hasResult(again))
     }
 
     @Test func detailsListTheFactsInOrder() {

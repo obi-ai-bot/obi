@@ -39,11 +39,6 @@ struct JobView: View {
     var fileProposal: ((Int, Bool) async throws -> FileProposalResult)? = nil
     @State private var busy = false
     @State private var moving = false
-    @State private var moveAgent = ""
-    /// Nil: keep its account on the same tool, else the least busy with room.
-    @State private var moveAccount: String?
-    /// Nil: its model as it is.
-    @State private var moveModel: String?
     @State private var problem: String?
     /// The exact sentence Publish would carry out, shown before Touch ID approves it, or nil.
     @State private var action: String?
@@ -111,8 +106,8 @@ struct JobView: View {
                     }
                 }
             }
-            if moving {
-                movePanel
+            if moving, let onMove {
+                MovePanel(job: job, accounts: accounts, onMove: onMove, onClose: { moving = false; problem = nil })
             } else if job.isActive || onMove != nil {
                 HStack(spacing: 10) {
                     if job.waitsToStart, let onStartNow {
@@ -122,7 +117,7 @@ struct JobView: View {
                             .help("Start it now instead of waiting")
                     }
                     if onMove != nil {
-                        Button { moveAgent = job.agent; moveAccount = nil; moveModel = nil; problem = nil; moving = true } label: { pill("Move to…") }
+                        Button { problem = nil; moving = true } label: { pill("Move to…") }
                             .buttonStyle(.plain)
                             .disabled(busy)
                             .help("Move this job to another tool, account or model")
@@ -319,79 +314,6 @@ struct JobView: View {
         }
     }
 
-    /// Move to…: a tool, one of its accounts with its usage, and a model, then what the move will do.
-    private var movePanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Move to").font(.system(size: 14, weight: .semibold)).accessibilityAddTraits(.isHeader)
-            HStack(spacing: 6) {
-                ForEach(MoveChoice.tools, id: \.0) { tool in
-                    choice(tool.1, selected: moveAgent == tool.0) { moveAgent = tool.0; moveAccount = nil; moveModel = nil }
-                }
-            }
-            Text("Account").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.6))
-            choice(moveAgent == job.agent ? "Keep its account" : "Least busy with room", selected: moveAccount == nil) { moveAccount = nil }
-            ForEach(accounts.filter { $0.account.agent == moveAgent }, id: \.account.id) { state in
-                let usage = MoveChoice.usage(signedIn: state.signedIn, fiveHour: state.fiveHour, sevenDay: state.sevenDay)
-                choice("\(state.account.name) · \(usage)", selected: moveAccount == state.account.id,
-                       warn: MoveChoice.busy(fiveHour: state.fiveHour, sevenDay: state.sevenDay)) { moveAccount = state.account.id }
-                    .disabled(!state.signedIn)
-            }
-            Text("Oby never picks an account past 80% of its 5-hour or weekly limit; one you pick takes the job anyway.")
-                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
-            Text("Model").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.6))
-            HStack(spacing: 6) {
-                choice("As it is", selected: moveModel == nil) { moveModel = nil }
-                choice("Settings default", selected: moveModel == Moves.toolDefault) { moveModel = Moves.toolDefault }
-            }
-            HStack(spacing: 6) {
-                ForEach(Moves.models[moveAgent] ?? [], id: \.self) { model in
-                    choice(AgentModels.name(model), selected: moveModel == model) { moveModel = model }
-                }
-            }
-            Text(MoveChoice.effect(active: job.isActive, running: job.status == .running))
-                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.75))
-            if let problem {
-                Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(3)
-            }
-            HStack(spacing: 8) {
-                Button(action: move) {
-                    Text(busy ? "Moving…" : "Move").font(.system(size: 13, weight: .semibold)).foregroundStyle(.black)
-                        .padding(.horizontal, 14).frame(height: 30)
-                        .background(.white, in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .disabled(busy)
-                Button { moving = false; problem = nil } label: { pill("Not now") }
-                    .buttonStyle(.plain)
-                    .disabled(busy)
-            }
-        }
-        .padding(14)
-        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    private func choice(_ title: String, selected: Bool, warn: Bool = false, _ pick: @escaping () -> Void) -> some View {
-        Button(action: pick) {
-            Text(title).font(.system(size: 12, weight: selected ? .semibold : .regular))
-                .foregroundStyle(selected ? Color.black : warn ? Color.orange : Color.white)
-                .padding(.horizontal, 10).frame(height: 24)
-                .background(selected ? Color.white : Color.white.opacity(0.12), in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-
-    private func move() {
-        guard let onMove else { return }
-        let target = MoveTarget(agent: moveAgent, account: moveAccount, model: moveModel)
-        Task {
-            await run {
-                try await onMove(target)
-                moving = false
-            }
-        }
-    }
-
     private var dismissButton: some View {
         Button(action: dismiss) { pill("Dismiss") }
             .buttonStyle(.plain)
@@ -583,5 +505,110 @@ extension Desk {
     func answerPermission(_ id: String, _ decision: RunnerPermission.Decision, message: String?) throws {
         guard let permission = job(id)?.permission, let decision = PermissionDecision(rawValue: decision.rawValue) else { return }
         try answerPermission(id, permission.id, decision, message: message)
+    }
+}
+
+/// Move to…: a tool, one of its accounts with its usage, and a model, then what the move will do.
+/// The notch's job screen and the window's task page both open it.
+struct MovePanel: View {
+    let job: Job
+    /// The accounts where it runs, with their usage.
+    let accounts: [AccountState]
+    let onMove: (MoveTarget) async throws -> Void
+    let onClose: () -> Void
+    @State private var moveAgent: String
+    /// Nil: keep its account on the same tool, else the least busy with room.
+    @State private var moveAccount: String?
+    /// Nil: its model as it is.
+    @State private var moveModel: String?
+    @State private var busy = false
+    @State private var problem: String?
+
+    init(job: Job, accounts: [AccountState], onMove: @escaping (MoveTarget) async throws -> Void, onClose: @escaping () -> Void) {
+        self.job = job
+        self.accounts = accounts
+        self.onMove = onMove
+        self.onClose = onClose
+        _moveAgent = State(initialValue: job.agent)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Move to").font(.system(size: 14, weight: .semibold)).accessibilityAddTraits(.isHeader)
+            HStack(spacing: 6) {
+                ForEach(MoveChoice.tools, id: \.0) { tool in
+                    choice(tool.1, selected: moveAgent == tool.0) { moveAgent = tool.0; moveAccount = nil; moveModel = nil }
+                }
+            }
+            Text("Account").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.6))
+            choice(moveAgent == job.agent ? "Keep its account" : "Least busy with room", selected: moveAccount == nil) { moveAccount = nil }
+            ForEach(accounts.filter { $0.account.agent == moveAgent }, id: \.account.id) { state in
+                let usage = MoveChoice.usage(signedIn: state.signedIn, fiveHour: state.fiveHour, sevenDay: state.sevenDay)
+                choice("\(state.account.name) · \(usage)", selected: moveAccount == state.account.id,
+                       warn: MoveChoice.busy(fiveHour: state.fiveHour, sevenDay: state.sevenDay)) { moveAccount = state.account.id }
+                    .disabled(!state.signedIn)
+            }
+            Text("Oby never picks an account past 80% of its 5-hour or weekly limit; one you pick takes the job anyway.")
+                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
+            Text("Model").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.6))
+            HStack(spacing: 6) {
+                choice("As it is", selected: moveModel == nil) { moveModel = nil }
+                choice("Settings default", selected: moveModel == Moves.toolDefault) { moveModel = Moves.toolDefault }
+            }
+            HStack(spacing: 6) {
+                ForEach(Moves.models[moveAgent] ?? [], id: \.self) { model in
+                    choice(AgentModels.name(model), selected: moveModel == model) { moveModel = model }
+                }
+            }
+            Text(MoveChoice.effect(active: job.isActive, running: job.status == .running))
+                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.75))
+            if let problem {
+                Text(problem).font(.system(size: 12)).foregroundStyle(.red).lineLimit(3)
+            }
+            HStack(spacing: 8) {
+                Button(action: move) {
+                    Text(busy ? "Moving…" : "Move").font(.system(size: 13, weight: .semibold)).foregroundStyle(.black)
+                        .padding(.horizontal, 14).frame(height: 30)
+                        .background(.white, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(busy)
+                Button { problem = nil; onClose() } label: { pill("Not now") }
+                    .buttonStyle(.plain)
+                    .disabled(busy)
+            }
+        }
+        .padding(14)
+        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func choice(_ title: String, selected: Bool, warn: Bool = false, _ pick: @escaping () -> Void) -> some View {
+        Button(action: pick) {
+            Text(title).font(.system(size: 12, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Color.black : warn ? Color.orange : Color.white)
+                .padding(.horizontal, 10).frame(height: 24)
+                .background(selected ? Color.white : Color.white.opacity(0.12), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func move() {
+        let target = MoveTarget(agent: moveAgent, account: moveAccount, model: moveModel)
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                try await onMove(target)
+                problem = nil
+                onClose()
+            } catch { problem = error.localizedDescription }
+        }
+    }
+
+    private func pill(_ title: String) -> some View {
+        Text(title).font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 10).frame(height: 24)
+            .background(.white.opacity(0.12), in: Capsule())
     }
 }

@@ -235,7 +235,7 @@ struct AskCard: View {
         .onChange(of: busy) { if !busy { picked = nil } }
         .focusable(keyboardEnabled).focusEffectDisabled().focused($focused)
         .onChange(of: focusRequest) { if keyboardEnabled { focused = true } }
-        .onTapGesture { if keyboardEnabled { focused = true } }
+        .modifier(TapForKeys(enabled: keyboardEnabled) { focused = true })
         .onKeyPress(phases: .down) { press in
             guard keyboardEnabled, focused, press.modifiers.isEmpty else { return .ignored }
             let key = press.key == .return ? "return" : press.key == .escape ? "escape" : press.characters
@@ -338,4 +338,15 @@ private struct PlanText: View {
     }
 
     private func inline(_ text: String) -> AttributedString { Reading.markdown(text, code: Tokens.mono(12)) }
+}
+
+/// A click gives a card the keyboard, where it takes keys; else the click goes past it (a task's
+/// card opens its page).
+private struct TapForKeys: ViewModifier {
+    let enabled: Bool
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        if enabled { content.onTapGesture(perform: action) } else { content }
+    }
 }

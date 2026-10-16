@@ -37,6 +37,9 @@ struct ConversationPage: View {
                     .frame(maxWidth: Tokens.column).padding(.horizontal, Tokens.gutter).padding(.top, 8)
                     .transition(.opacity.combined(with: .offset(y: 12)))
             }
+            if model.state == .listening {
+                ListeningLine(voice: model.voice).frame(maxWidth: Tokens.column).padding(.horizontal, Tokens.gutter).padding(.top, 8)
+            }
             composer
                 .frame(maxWidth: Tokens.column).padding(.horizontal, Tokens.gutter)
                 .padding(.top, 8).padding(.bottom, Tokens.gutter)

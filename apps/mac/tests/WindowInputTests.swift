@@ -84,7 +84,7 @@ struct WindowInputTests {
                 let escape = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                                                            windowNumber: window.windowNumber, context: nil, characters: "\u{1b}",
                                                            charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
-                NSApp.sendEvent(escape)
+                window.sendEvent(escape)
                 try await Task.sleep(for: .milliseconds(400))
                 #expect(state.trail.isHome, "Esc didn't go back from \(start); first responder: \(String(describing: window.firstResponder))")
             }

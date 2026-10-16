@@ -17,7 +17,7 @@ nonisolated enum TaskFacts {
             let text = duration(now.timeIntervalSince(finished))
             return text == "now" ? text : "\(text) ago"
         }
-        return duration(now.timeIntervalSince(job.created))
+        return duration(now.timeIntervalSince(job.started ?? job.created))
     }
 
     /// "obi#412" from its pull request's address.
@@ -46,14 +46,34 @@ nonisolated enum TaskFacts {
     /// orange while the task needs you; once done, the stage still waiting on someone else is a ring.
     enum Mark: Equatable { case done, current, needs, upcoming, skipped, failed }
 
-    static func mark(_ stage: JobStage.State, needs: Bool, done: Bool) -> Mark {
+    /// `working`: its agent is at it (not queued, not finished).
+    static func mark(_ stage: JobStage.State, needs: Bool, working: Bool) -> Mark {
         switch stage {
         case .done: .done
         case .failed: .failed
         case .skipped: .skipped
         case .upcoming: .upcoming
-        case .current: needs ? .needs : done ? .upcoming : .current
+        case .current: needs ? .needs : working ? .current : .upcoming
         }
+    }
+
+    /// Whether the page has a Result: what the agent reported, what it left behind (also while a
+    /// published job runs again), or something to do about it.
+    static func hasResult(_ job: Job) -> Bool {
+        !job.summary.isEmpty || resultLine(job) != nil || job.commits != nil || job.published != nil || job.sentLines != nil
+            || job.pullRequestError != nil || job.canPublish || job.needsYou || job.dismissed != nil || job.report == true
+    }
+
+    /// What the page offers under its card.
+    struct Controls: Equatable {
+        var startNow = false
+        var stop = false
+        /// Let it go: whatever it needs you for, waiting on Publish included.
+        var dismiss = false
+    }
+
+    static func controls(_ job: Job) -> Controls {
+        Controls(startNow: job.waitsToStart, stop: job.isActive, dismiss: job.needsYou || job.canPublish)
     }
 
     /// The facts under Details, in order: a name, its value, and whether it reads as code.

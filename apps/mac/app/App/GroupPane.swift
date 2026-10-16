@@ -12,7 +12,7 @@ struct GroupPane: View {
     @State private var picked: WorkList.Tab?
 
     /// Archived (#280) isn't on the Mac yet: until it is, Clear done takes finished jobs off the list.
-    static let archivedLine = "Older ones will be in Archived, which isn't on the Mac yet. Until then, Clear done takes them off this list."
+    static let archivedLine = "Older ones will be in Archived, which isn't on the Mac yet. Until then, Clear done (in Home's ⋮) takes them off this list."
 
     private var tab: WorkList.Tab { picked ?? WorkList.firstTab(items) }
     private var ranked: [WorkList.Item<SidebarSections.JobRow>] { WorkList.ranked(items) }

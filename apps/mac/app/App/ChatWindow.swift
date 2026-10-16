@@ -244,6 +244,10 @@ private struct HomeView: View {
                 VStack(spacing: 0) {
                     stage
                         .opacity(away ? 0 : 1).scaleEffect(away && !reduceMotion ? 0.98 : 1)
+                    if model.state == .listening && !away {
+                        ListeningLine(voice: model.voice).frame(maxWidth: Tokens.homeBox - 2 * Tokens.gutter)
+                            .padding(.horizontal, Tokens.gutter).padding(.bottom, 8)
+                    }
                     box
                         .opacity(away ? 0 : 1).offset(y: away && !reduceMotion ? 12 : 0)
                 }
@@ -328,7 +332,7 @@ private struct HomeView: View {
             ConversationPage(model: model, composerFocusRequest: state.composerFocusRequest,
                              onOpenJob: { state.trail.push(.job(id: $0, local: $1)) }, onBack: back)
         case .job(let id, let local):
-            JobPane(model: model, id: id, local: local).takesKeys()
+            JobPane(model: model, id: id, local: local, onBack: back).takesKeys()
         case .group(let kind):
             GroupPane(model: model, kind: kind, items: work.filter { $0.type == kind },
                       onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })
@@ -413,6 +417,15 @@ private struct TitleBar: View {
                 .accessibilityLabel("Where you are")
             }
             Spacer(minLength: 16)
+            // An update is downloaded (apps/mac/app/Updater.swift): Restart installs it and relaunches,
+            // after this Mac's check if one runs.
+            if let pill = model.updater.pill {
+                Button(pill) { model.updater.install() }
+                    .buttonStyle(ChipButtonStyle())
+                    .disabled(model.updater.waiting)
+                    .help("Installs the update and relaunches Oby. While this Mac runs a check for the runner, it waits for the check to end.")
+                    .padding(.trailing, state.trail.isHome ? Tokens.gutter : 8)
+            }
             if case .job(let id, _) = state.trail.top, ConversationModel.started(id, in: model.thread) {
                 Button("Go to conversation") { state.trail.push(.talk) }
                     .buttonStyle(ChipButtonStyle())
@@ -438,6 +451,8 @@ private struct Crumb: View {
                 .foregroundStyle(here ? Tokens.text : hovering ? Tokens.ink : Tokens.muted)
                 .padding(.horizontal, 6).frame(height: 26)
                 .background(!here && hovering ? Tokens.hover : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                // An earlier step: at most 200 points, a shorter name only as wide as it is.
+                .frame(maxWidth: here ? nil : 200, alignment: .leading).fixedSize(horizontal: !here, vertical: false)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -648,6 +663,7 @@ private struct JobPane: View {
     let model: IslandModel
     let id: String
     let local: Bool
+    var onBack: (() -> Void)? = nil
     @State private var problem: String?
 
     private var desk: Desk { model.desk }
@@ -657,7 +673,8 @@ private struct JobPane: View {
     var body: some View {
         Group {
             if let job {
-                TaskPage(job: job, actions: TaskActions.of(job, local: local, model: model), tray: model.tray)
+                TaskPage(job: job, actions: TaskActions.of(job, local: local, model: model), tray: model.tray,
+                         publishNow: model.publishing == job.id, onPublishNow: { model.publishing = nil }, onBack: onBack)
             } else if let problem {
                 Text(problem).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.danger)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

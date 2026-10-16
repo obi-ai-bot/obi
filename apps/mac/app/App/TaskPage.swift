@@ -14,6 +14,8 @@ struct TaskActions {
     var mode: ((RunnerMode) async throws -> Void)?
     var startNow: (() async throws -> Void)?
     var useAnyway: ((String) async throws -> Void)?
+    /// Move to…; nil for Oby's own reviews, which pick their account themselves.
+    var move: ((MoveTarget) async throws -> Void)?
     /// Nil where this Mac can't publish (a runner's job, on a Mac without Touch ID).
     var publishing: JobView.Publishing?
     var readReport: (() async throws -> ResearchDocument)?
@@ -30,6 +32,7 @@ struct TaskActions {
                 permission: { try desk.answerPermission(job.id, $0, message: $1) },
                 mode: { try desk.changeMode(job.id, to: $0) },
                 startNow: { try desk.startNow(job.id) }, useAnyway: { _ = desk.liftReserve($0, true) },
+                move: job.reviewOf == nil ? { target in _ = try desk.move(job.id, to: target) } : nil,
                 publishing: JobView.Publishing(action: { Publish.action(for: job, base: job.base ?? "") },
                                                publish: { _ in _ = try await desk.publish(job.id, approve: Publish.touchID) }),
                 readReport: {
@@ -48,6 +51,10 @@ struct TaskActions {
             mode: { try await feed.setMode(job.id, $0) },
             startNow: { if feed.runner != nil { feed.apply(try await feed.about(job.id) { try await $0.startNow(job.id) }) } },
             useAnyway: { account in if let runner = feed.runner { _ = try await runner.liftReserve(account, true) } },
+            move: job.reviewOf == nil ? { target in
+                guard feed.runner != nil else { throw RunnerError(message: "The runner isn't set up.") }
+                feed.apply(try await feed.about(job.id) { try await $0.move(job.id, agent: target.agent, account: target.account, model: target.model) })
+            } : nil,
             publishing: feed.device.key.isAvailable
                 ? JobView.Publishing(action: { try await feed.publishAction(job.id) }, publish: { try await feed.publish(job.id, action: $0) })
                 : nil,
@@ -193,7 +200,13 @@ struct TaskCardView: View {
                 .padding(.top, 16)
             }
             if item.status == .done, let line = TaskFacts.resultLine(job) {
-                Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 12)
+                HStack(spacing: 8) {
+                    Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
+                    if let url = job.published.flatMap(URL.init(string:)) {
+                        Link("Open PR", destination: url).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.text)
+                    }
+                }
+                .padding(.top, 12)
             }
             if item.status != .done { StageBar(job: job, needs: item.status == .needs).padding(.top, 16) }
         }
@@ -202,6 +215,11 @@ struct TaskCardView: View {
         .background(hovering ? Tokens.chipHover : Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.cardRadius, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: Tokens.cardRadius, style: .continuous))
         .onTapGesture(perform: onOpen)
+        .overlay(alignment: .topTrailing) {
+            if hovering && job.isActive {
+                StopButton { model.stopChatJob(job.id, local: item.job.local) }.padding(.top, 14).padding(.trailing, 14)
+            }
+        }
         .onHover { hovering = $0 }
         .animation(Tokens.fade, value: hovering)
         .contextMenu {
@@ -210,7 +228,8 @@ struct TaskCardView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(job.heading), \(item.mark.rawValue)")
-        .accessibilityAction(named: "Open", onOpen)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { onOpen() }
     }
 
     private func meta(_ actions: TaskActions) -> String {
@@ -232,7 +251,7 @@ struct StageBar: View {
         HStack(spacing: 3) {
             ForEach(stages) { stage in
                 Group {
-                    if stage.state == .current && !needs && !reduceMotion {
+                    if stage.state == .current && !needs && job.status == .running && !reduceMotion {
                         PhaseAnimator([1.0, 0.35]) { level in Capsule().fill(Color.white.opacity(0.55)).opacity(level) }
                             animation: { _ in .easeInOut(duration: 0.8) }
                     } else {
@@ -265,6 +284,13 @@ struct TaskPage: View {
     let job: Job
     let actions: TaskActions
     let tray: Tray
+    /// The job's alert's Publish opened this page: the sentence shows, and Touch ID asks for it now.
+    var publishNow = false
+    /// Called as that starts, so it starts once.
+    var onPublishNow: () -> Void = {}
+    /// Esc in the box: back a page.
+    var onBack: (() -> Void)? = nil
+    @State private var moving = false
     @State private var busy = false
     @State private var problem: String?
     @State private var note = ""
@@ -273,6 +299,8 @@ struct TaskPage: View {
     /// The exact sentence Publish would carry out, shown before Touch ID approves it.
     @State private var action: String?
     @State private var report: ResearchDocument?
+    /// Why the words for the agent didn't go, over the box.
+    @State private var noteProblem: String?
     @State private var showingReport = false
 
     var body: some View {
@@ -288,7 +316,7 @@ struct TaskPage: View {
                     }
                     VStack(alignment: .leading, spacing: 0) {
                         if hasResult { section("Result", first: true) { result } }
-                        section("Stages", first: !hasResult) { StageList(job: job) }
+                        section("Stages · \(job.pipeline.label)", first: !hasResult) { StageList(job: job) }
                         section("Details") { details }
                         section("What you asked") {
                             Text(job.request).font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.text).lineSpacing(6)
@@ -304,7 +332,12 @@ struct TaskPage: View {
                     }
                     .padding(.horizontal, 18)
                     .background(Tokens.chip, in: RoundedRectangle(cornerRadius: Tokens.askRadius, style: .continuous))
-                    controls.padding(.top, 14)
+                    if moving, let move = actions.move {
+                        MovePanel(job: job, accounts: actions.accounts, onMove: move, onClose: { moving = false })
+                            .padding(.top, 14)
+                    } else {
+                        controls.padding(.top, 14)
+                    }
                     if let problem, action == nil {
                         Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger).padding(.top, 10)
                     }
@@ -315,13 +348,19 @@ struct TaskPage: View {
             }
             .scrollIndicators(.never)
             if let placeholder = TaskFacts.box(job) {
+                if let noteProblem {
+                    Text(noteProblem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger)
+                        .frame(maxWidth: Tokens.column, alignment: .leading).padding(.horizontal, Tokens.gutter + 12).padding(.top, 8)
+                }
                 MessageBox(text: $note, focused: $typing, tray: tray, placeholder: placeholder, label: "Tell \(job.agentName) about \(job.heading)",
-                           maximumHeight: height * 0.5, onSend: tell, onScreenshot: {}, onStop: { false }, attachments: false)
+                           maximumHeight: height * 0.5, onSend: tell, onScreenshot: {}, onStop: { false }, onEscape: onBack, attachments: false)
                     .disabled(busy)
                     .frame(maxWidth: Tokens.column).padding(.horizontal, Tokens.gutter).padding(.vertical, 12)
             }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        // Not a task tied to publishNow: starting clears it, which would cancel the publish.
+        .onChange(of: publishNow, initial: true) { if publishNow { publishFromAlert() } }
         .sheet(isPresented: $showingReport) {
             if let report { ReportView(report: report, onFile: actions.fileProposal).frame(minWidth: 560, minHeight: 520) }
         }
@@ -365,9 +404,7 @@ struct TaskPage: View {
         }
     }
 
-    private var hasResult: Bool {
-        !job.summary.isEmpty || TaskFacts.resultLine(job) != nil || job.canPublish || job.needsYou || job.dismissed != nil || job.report == true
-    }
+    private var hasResult: Bool { TaskFacts.hasResult(job) }
 
     /// What the agent reported, what it left behind, and Publish, Dismiss or Read report.
     @ViewBuilder private var result: some View {
@@ -379,13 +416,12 @@ struct TaskPage: View {
             Text(sent).font(Tokens.font(Tokens.textMd)).foregroundStyle(Tokens.text).padding(.top, 8).textSelection(.enabled)
         }
         if let line = TaskFacts.resultLine(job) {
-            HStack(spacing: 6) {
-                Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted)
-                if let url = job.published.flatMap(URL.init(string:)) {
-                    Link("Open pull request", destination: url).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.text)
-                }
-            }
-            .padding(.top, 8)
+            Text(line).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 8)
+        } else if let commits = job.commits, commits > 0 {
+            Text("\(commits) commit\(commits == 1 ? "" : "s") on \(job.branch)").font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 8)
+        }
+        if let url = job.published.flatMap(URL.init(string:)) {
+            Link("Open pull request", destination: url).font(Tokens.font(Tokens.textSm, .medium)).foregroundStyle(Tokens.text).padding(.top, 6)
         }
         if let error = job.pullRequestError { Text(error).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 6) }
         if job.dismissed != nil {
@@ -426,6 +462,18 @@ struct TaskPage: View {
         }
     }
 
+    /// The alert's Publish, as on the iPhone: the sentence shows, and Touch ID asks with it.
+    private func publishFromAlert() {
+        onPublishNow()
+        guard let publishing = actions.publishing, job.canPublish, !busy else { return }
+        run {
+            let sentence = try await publishing.action()
+            action = sentence
+            try await publishing.publish(sentence)
+            action = nil
+        }
+    }
+
     private func publish(_ sentence: String) {
         guard let publishing = actions.publishing else { return }
         run {
@@ -450,20 +498,30 @@ struct TaskPage: View {
     /// What the job can still do: start now when it waits for its time, use an account past its
     /// weekly reserve, stop, or let it go.
     @ViewBuilder private var controls: some View {
+        let offers = TaskFacts.controls(job)
         let reserved = job.waitsToStart && actions.useAnyway != nil
             ? Usage.liftable(job.waiting?.reserved, among: actions.accounts, id: \.account.id, usage: \.usage) : []
-        if job.isActive || (job.needsYou && !job.canPublish) || !reserved.isEmpty {
+        if offers != TaskFacts.Controls() || !reserved.isEmpty || actions.move != nil {
             CenteredFlow(spacing: 8, centred: false) {
-                if job.waitsToStart, let startNow = actions.startNow { PillButton(title: "Start now") { run(startNow) }.disabled(busy) }
-                ForEach(reserved, id: \.account.id) { state in
-                    PillButton(title: Usage.useAnyway(state.usage)) { run { try await actions.useAnyway?(state.account.id) } }
-                        .help(Usage.liftNote(state.usage)).disabled(busy)
+                if offers.startNow, let startNow = actions.startNow {
+                    PillButton(title: "Start now") { run(startNow) }.disabled(busy).help("Start it now instead of waiting")
                 }
-                if job.isActive { PillButton(title: "Stop job", danger: true, action: actions.stop).disabled(busy) }
-                if job.needsYou && !job.canPublish || job.canPublish {
+                ForEach(reserved, id: \.account.id) { state in
+                    PillButton(title: Usage.useAnyway(state.usage)) { run { try await actions.useAnyway?(state.account.id) } }.disabled(busy)
+                }
+                if actions.move != nil {
+                    PillButton(title: "Move to…") { problem = nil; moving = true }.disabled(busy)
+                        .help("Move this job to another tool, account or model")
+                }
+                if offers.stop { PillButton(title: "Stop job", danger: true, action: actions.stop).disabled(busy) }
+                if offers.dismiss {
                     PillButton(title: "Dismiss", quiet: true) { run(actions.dismiss) }.disabled(busy)
                         .help("Let this job go: it stays in the list, and stops needing you")
                 }
+            }
+            // What lifting a reserve does, and until when.
+            ForEach(reserved, id: \.account.id) { state in
+                Text(Usage.liftNote(state.usage)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.top, 6)
             }
         }
     }
@@ -498,9 +556,14 @@ struct TaskPage: View {
     private func tell() {
         let text = note.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (1...2000).contains(text.count), !busy else { return }
-        run {
-            try await actions.message(text)
-            note = ""
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                try await actions.message(text)
+                note = ""
+                noteProblem = nil
+            } catch { noteProblem = error.localizedDescription }
         }
     }
 
@@ -523,7 +586,7 @@ private struct StageList: View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(stages.enumerated()), id: \.element.id) { index, stage in
                 let last = index == stages.count - 1
-                let mark = TaskFacts.mark(stage.state, needs: job.needsYou || job.waitsForAnswer || job.waitsForPermission, done: !job.isActive)
+                let mark = TaskFacts.mark(stage.state, needs: job.needsYou || job.waitsForAnswer || job.waitsForPermission, working: job.status == .running)
                 HStack(alignment: .top, spacing: 12) {
                     VStack(spacing: 0) {
                         StageMark(mark: mark).frame(width: 16, height: 18)
