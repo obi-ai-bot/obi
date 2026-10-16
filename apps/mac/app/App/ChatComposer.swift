@@ -42,6 +42,8 @@ struct ChatComposer: View {
     let onSend: () -> Void
     let onScreenshot: () -> Void
     let onStop: () -> Bool
+    /// Esc with nothing to stop (the window's conversation goes back); the notch leaves it nil.
+    var onEscape: (() -> Void)? = nil
     @State private var width: CGFloat = 300
 
     private var lines: Int { ComposerMetrics.lines(text, width: width) }
@@ -63,7 +65,7 @@ struct ChatComposer: View {
                 .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
                 .padding(.bottom, ComposerMetrics.buttonInset)
                 .accessibilityLabel("Add attachment")
-                ComposerEditor(text: $text, focused: $focused, focusRequest: focusRequest, onSend: onSend, onStop: onStop)
+                ComposerEditor(text: $text, focused: $focused, focusRequest: focusRequest, onSend: onSend, onStop: onStop, onEscape: onEscape)
                     .frame(height: editorHeight)
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
                     .overlay(alignment: .topLeading) {
@@ -106,10 +108,13 @@ struct ComposerEditor: NSViewRepresentable {
     var lineHeight: CGFloat? = nil
     var textColor: NSColor = .white
     var label = "Message Oby"
+    /// Esc with nothing to stop: the window goes back a page. Nil leaves Esc to the text view.
+    var onEscape: (() -> Void)? = nil
 
     final class Editor: NSTextView {
         var send: () -> Void = {}
         var stop: () -> Bool = { false }
+        var escape: (() -> Void)?
         var wantsFocus: () -> Bool = { false }
         var focusWhenAttached = false
 
@@ -131,7 +136,10 @@ struct ComposerEditor: NSViewRepresentable {
         override func keyDown(with event: NSEvent) {
             // Let the input method finish composing before interpreting Return as Send.
             if event.keyCode == 36, !hasMarkedText(), !event.modifierFlags.contains(.shift) { send(); return }
-            if event.keyCode == 53, !hasMarkedText(), stop() { return }
+            if event.keyCode == 53, !hasMarkedText() {
+                if stop() { return }
+                if let escape { escape(); return }
+            }
             super.keyDown(with: event)
         }
     }
@@ -192,6 +200,7 @@ struct ComposerEditor: NSViewRepresentable {
         context.coordinator.parent = self
         editor.send = onSend
         editor.stop = onStop
+        editor.escape = onEscape
         editor.wantsFocus = { context.coordinator.parent.focused }
         if editor.string != text {
             editor.string = text

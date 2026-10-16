@@ -55,6 +55,8 @@ struct MessageBox: View {
     let onSend: () -> Void
     let onScreenshot: () -> Void
     let onStop: () -> Bool
+    /// Esc in the box with nothing to stop.
+    var onEscape: (() -> Void)? = nil
     @State private var width: CGFloat = 480
     @State private var hovering = false
 
@@ -95,7 +97,8 @@ struct MessageBox: View {
 
     private var editor: some View {
         ComposerEditor(text: $text, focused: $focused, focusRequest: focusRequest, onSend: onSend, onStop: onStop,
-                       lineHeight: BoxMetrics.lineHeight, textColor: NSColor(white: 1, alpha: 0.9), label: label)
+                       lineHeight: BoxMetrics.lineHeight, textColor: NSColor(white: 1, alpha: 0.9), label: label,
+                       onEscape: onEscape)
             .frame(height: textHeight)
             .overlay(alignment: .topLeading) {
                 if text.isEmpty {

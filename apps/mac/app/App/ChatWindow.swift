@@ -74,13 +74,15 @@ final class ChatWindow: NSObject, NSWindowDelegate {
     /// Where macOS put the traffic lights: the title bar is as tall as twice their middle, and its
     /// content starts just right of them. In full screen there are none.
     static func measureLights(_ window: NSWindow, into state: ChatState) {
-        guard let zoom = window.standardWindowButton(.zoomButton), let bar = zoom.superview,
-              let content = window.contentView else { return }
+        // In full screen the lights live in a toolbar window of their own (and hide): no measuring across it.
+        guard let zoom = window.standardWindowButton(.zoomButton), zoom.window === window, !zoom.isHidden,
+              !window.styleMask.contains(.fullScreen), let bar = zoom.superview, let content = window.contentView else {
+            state.chrome = WindowChrome(bar: Tokens.bar, afterLights: 12)
+            return
+        }
         let frame = content.convert(bar.convert(zoom.frame, to: nil), from: nil)
         let middle = content.isFlipped ? frame.midY : content.bounds.height - frame.midY
-        let fullScreen = window.styleMask.contains(.fullScreen)
-        state.chrome = WindowChrome(bar: max(Tokens.bar, (middle * 2).rounded()),
-                                    afterLights: fullScreen || zoom.isHidden ? 12 : (frame.maxX + 10).rounded())
+        state.chrome = WindowChrome(bar: min(64, max(Tokens.bar, (middle * 2).rounded())), afterLights: (frame.maxX + 10).rounded())
     }
 
     private func measureLights() { if let window { Self.measureLights(window, into: state) } }
@@ -125,6 +127,9 @@ final class ChatState {
     /// opened yet is new (#496), its row and its kind's chip with a blue dot.
     let since = Date.now
     var seen: Set<String> = []
+    /// The side panel's folded groups and those showing all their done tasks.
+    var folded: Set<String> = []
+    var more: Set<String> = []
 
     /// A job's page, or the conversation with Oby, from a fresh start.
     func open(job: (id: String, local: Bool)? = nil) {
@@ -204,14 +209,14 @@ struct ChatView: View {
     private var resizeHandle: some View {
         Color.clear.frame(width: 8).contentShape(Rectangle())
             .offset(x: 1)
-            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+            .pointerStyle(.columnResize)
             .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .onChanged { drag in dragWidth = PanelWidth.dragging(CGFloat(sidebarWidth) + drag.translation.width) }
                 .onEnded { drag in
                     let settled = PanelWidth.settled(CGFloat(sidebarWidth) + drag.translation.width)
                     withAnimation(reduceMotion ? nil : Tokens.settle) { dragWidth = nil; sidebarWidth = Double(settled) }
                 })
-            .onTapGesture(count: 2) { withAnimation(Tokens.settle) { sidebarWidth = Double(Tokens.sidebar) } }
+            .onTapGesture(count: 2) { withAnimation(reduceMotion ? nil : Tokens.settle) { sidebarWidth = Double(Tokens.sidebar) } }
             .accessibilityLabel("Resize side panel")
     }
 }
@@ -233,7 +238,8 @@ private struct HomeView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TitleBar(model: model, state: state, sidebarOpen: sidebarOpen)
+            // Over the pages: their scroll views reach up under the bar, and would take its clicks.
+            TitleBar(model: model, state: state, sidebarOpen: sidebarOpen).zIndex(1)
             ZStack {
                 VStack(spacing: 0) {
                     stage
@@ -257,6 +263,8 @@ private struct HomeView: View {
         .onChange(of: away || !state.visible, initial: true) { _, hidden in character?.pause(hidden) }
         .onChange(of: model.mood, initial: true) { _, mood in character?.mood = mood }
         .onChange(of: state.homeFocusRequest) { typing = true }
+        // A page over Home: the hidden box lets go of the keyboard, so nothing typed lands in it.
+        .onChange(of: away) { if away { typing = false } }
     }
 
     /// Oby, a little above the middle (as a face at eye level), what's going on under it, and the
@@ -297,6 +305,8 @@ private struct HomeView: View {
             .padding(.horizontal, Tokens.gutter).padding(.bottom, Tokens.gutter)
     }
 
+    private func back() { withAnimation(reduceMotion ? nil : Tokens.warm) { state.trail.back() } }
+
     /// Asked in Home's box: it goes to Oby, and the conversation opens on it.
     private func ask() {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -316,12 +326,13 @@ private struct HomeView: View {
         switch step {
         case .talk:
             ConversationColumn(model: model, composerFocusRequest: state.composerFocusRequest,
-                               onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })
+                               onOpenJob: { state.trail.push(.job(id: $0, local: $1)) }, onBack: back)
         case .job(let id, let local):
-            JobPane(model: model, id: id, local: local)
+            JobPane(model: model, id: id, local: local).takesKeys()
         case .group(let kind):
             GroupPane(model: model, kind: kind, items: work.filter { $0.type == kind },
                       onOpenJob: { state.trail.push(.job(id: $0, local: $1)) })
+                .takesKeys()
         }
     }
 }
@@ -337,6 +348,7 @@ private struct OnStage: View {
                 .webViewContentBackground(.hidden)
                 .opacity(character.ready ? 1 : 0)
                 .allowsHitTesting(false)
+                .accessibilityElement()
                 .accessibilityLabel("Oby")
         } else {
             ObyFace(size: 96)
@@ -470,6 +482,21 @@ enum WindowLabels {
     }
 }
 
+extension View {
+    /// A page over Home takes the keyboard as it opens (the box under it lets go), so Esc reaches
+    /// the window's back, whatever was clicked to open it.
+    func takesKeys() -> some View { modifier(TakesKeys()) }
+}
+
+private struct TakesKeys: ViewModifier {
+    @FocusState private var focused: Bool
+
+    func body(content: Content) -> some View {
+        content.focusable().focusEffectDisabled().focused($focused)
+            .onAppear { DispatchQueue.main.async { focused = true } }
+    }
+}
+
 /// One view a little above the middle: the room over it and under it split 1 to 1.6.
 struct EyeLevel: Layout {
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
@@ -533,6 +560,8 @@ private struct ConversationColumn: View {
     let model: IslandModel
     let composerFocusRequest: Int
     let onOpenJob: (_ job: String, _ local: Bool) -> Void
+    /// Esc with nothing to stop: back a page.
+    let onBack: () -> Void
     @State private var text = ""
     struct ReplyTarget {
         var title: String
@@ -558,7 +587,7 @@ private struct ConversationColumn: View {
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { columnHeight = $0 }
         // Escape cancels the turn Oby is thinking about.
-        .onExitCommand { if thinking { desk.cancel() } }
+        .onExitCommand { if thinking { desk.cancel() } else { onBack() } }
         .onAppear { typing = true; model.markChatRead() }
         .onChange(of: composerFocusRequest) { typing = true }
         .onChange(of: model.thread.last?.id) { if model.chatWindowVisible { model.markChatRead() } }
@@ -741,7 +770,7 @@ private struct ConversationColumn: View {
             ChatComposer(text: $text, focused: $typing, tray: model.tray,
                          maximumHeight: columnHeight * 0.5, focusRequest: composerFocusRequest,
                          onSend: send, onScreenshot: screenshot,
-                         onStop: { if thinking { desk.cancel(); return true }; return false })
+                         onStop: { if thinking { desk.cancel(); return true }; return false }, onEscape: onBack)
                 .disabled(sendingAnswer)
         }
     }

@@ -74,10 +74,10 @@ struct SidebarView: View {
     @State private var search = ""
     @State private var searching = false
     @FocusState private var searchFocused: Bool
-    /// Groups folded away; while searching, every group with a match opens.
-    @State private var folded: Set<String> = []
-    /// Groups showing all their done tasks (Show more), not just the latest few.
-    @State private var more: Set<String> = []
+    /// Groups folded away (while searching, every group with a match opens), and those showing
+    /// all their done tasks: the window's, so closing the panel keeps them.
+    private var folded: Set<String> { state.folded }
+    private var more: Set<String> { state.more }
 
     private var desk: Desk { model.desk }
     private var feed: RunnerFeed { model.feed }
@@ -139,12 +139,12 @@ struct SidebarView: View {
         .overlay(alignment: .topTrailing) {
             IconButton(symbol: "magnifyingglass", on: searching) {
                 withAnimation(Tokens.warm) { searching.toggle() }
-                if searching { searchFocused = true } else { search = "" }
+                if !searching { search = "" }
             }
             .accessibilityLabel("Search")
             .padding(.trailing, 10).padding(.top, (state.chrome.bar - 32) / 2)
         }
-        .background { WindowDragArea() }
+        .background(alignment: .top) { WindowDragArea().frame(height: state.chrome.bar) }
     }
 
     private var searchField: some View {
@@ -153,6 +153,7 @@ struct SidebarView: View {
             TextField("Search", text: $search).textFieldStyle(.plain).font(Tokens.font(Tokens.textMd))
                 .foregroundStyle(Tokens.ink).focused($searchFocused)
                 .onExitCommand { withAnimation(Tokens.warm) { searching = false }; search = "" }
+                .onAppear { DispatchQueue.main.async { searchFocused = true } }
         }
         .padding(.horizontal, 10).frame(height: 34)
         .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(searchFocused ? Tokens.lineFocus : Tokens.line) }
@@ -166,14 +167,14 @@ struct SidebarView: View {
         let shown = WorkList.shown(group, more: more.contains(group.id))
         return VStack(alignment: .leading, spacing: 1) {
             GroupHead(group: group, open: open) {
-                withAnimation(Tokens.warm) { _ = folded.formSymmetricDifference([group.id]) }
+                withAnimation(Tokens.warm) { state.folded.formSymmetricDifference([group.id]) }
             } onOpen: {
                 if let kind = group.type { state.trail.start(.group(kind)) }
             }
             if open {
                 ForEach(shown.rows) { TaskRow(item: $0, model: model, state: state) }
                 if shown.hidden > 0 {
-                    Button(more.contains(group.id) ? "Show less" : "Show \(shown.hidden) more") { more.formSymmetricDifference([group.id]) }
+                    Button(more.contains(group.id) ? "Show less" : "Show \(shown.hidden) more") { state.more.formSymmetricDifference([group.id]) }
                         .buttonStyle(PanelButtonStyle(color: Tokens.muted, font: Tokens.font(Tokens.textSm), height: 30))
                 }
                 Color.clear.frame(height: 12)
@@ -236,31 +237,32 @@ private struct TaskRow: View {
     private var done: Bool { item.status == .done }
 
     var body: some View {
-        HStack(spacing: 8) {
-            AgentMark(agent: job.agent, mono: true).font(Tokens.font(12, .semibold)).frame(width: 14)
-                .foregroundStyle(done ? Tokens.doneTitle : Tokens.muted)
-            Text(job.heading).font(Tokens.font(Tokens.textBase))
-                .foregroundStyle(hovering || picked ? .white : done ? Tokens.doneTitle : Tokens.openTitle)
-                .fadeOut()
-            Spacer(minLength: 4)
+        HStack(spacing: 0) {
+            Button(action: open) {
+                HStack(spacing: 8) {
+                    AgentMark(agent: job.agent).font(Tokens.font(12, .semibold)).frame(width: 14)
+                        .foregroundStyle(done ? Tokens.doneTitle : Tokens.muted)
+                    Text(job.heading).font(Tokens.font(Tokens.textBase))
+                        .foregroundStyle(hovering || picked ? .white : done ? Tokens.doneTitle : Tokens.openTitle)
+                        .fadeOut()
+                }
+                .padding(.leading, 10).frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(job.heading), \(item.mark.rawValue)")
             ZStack {
                 WorkMarkView(mark: item.mark).opacity(hovering ? 0 : 1)
                 if hovering { menu }
             }
-            .frame(width: 22)
+            .frame(width: 22).padding(.leading, 4).padding(.trailing, 5)
         }
-        .padding(.leading, 10).padding(.trailing, 5).frame(height: 34)
+        .frame(height: 34)
         .background(picked ? Tokens.active : hovering ? Tokens.hover : .clear, in: RoundedRectangle(cornerRadius: Tokens.rowRadius, style: .continuous))
-        .contentShape(Rectangle())
-        .onTapGesture { open() }
         .onHover { hovering = $0 }
         .animation(Tokens.fade, value: hovering)
         .help(local ? "On this Mac" : "On \(model.feed.name)")
         .contextMenu { actions }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityLabel("\(job.heading), \(item.mark.rawValue)")
-        .accessibilityAction { open() }
     }
 
     private func open() {
@@ -312,7 +314,7 @@ private struct IconStrip: View {
         .frame(width: Tokens.rail)
         .frame(maxHeight: .infinity)
         .overlay(alignment: .trailing) { Tokens.edge.frame(width: 1).padding(.top, state.chrome.bar) }
-        .background { WindowDragArea() }
+        .background(alignment: .top) { WindowDragArea().frame(height: state.chrome.bar) }
     }
 
     /// You: your name on this Mac, and who pays for the first account (the team), else this Mac.

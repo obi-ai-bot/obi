@@ -46,9 +46,22 @@ struct WindowScreens {
     }
 
     /// Opens the window on `state`, lets it settle, and saves what's on it as `name`.png.
+    /// The panel's settings live in the app's own defaults (the test host is the app): set for a
+    /// picture, then put back as they were.
+    func withPanel(open: Bool, _ work: () async throws -> Void) async throws {
+        let defaults = UserDefaults.standard, keys = ["ObySidebarOpen", "ObySidebarWidth"]
+        let before = keys.map { defaults.object(forKey: $0) }
+        defer { for (key, value) in zip(keys, before) { if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) } } }
+        defaults.set(open, forKey: "ObySidebarOpen")
+        defaults.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
+        try await work()
+    }
+
     func shoot(_ name: String, model: IslandModel, state: ChatState, sidebar: Bool = true) async throws {
-        UserDefaults.standard.set(sidebar, forKey: "ObySidebarOpen")
-        UserDefaults.standard.set(Double(Tokens.sidebar), forKey: "ObySidebarWidth")
+        try await withPanel(open: sidebar) { try await picture(name, model: model, state: state) }
+    }
+
+    private func picture(_ name: String, model: IslandModel, state: ChatState) async throws {
         // Oby itself, from the app's bundled character, once it has drawn.
         let character = ObyCharacter(query: "embed&size=1.23")
         let window = ChatWindow.make(ChatView(model: model, state: state, character: character, onOpenSettings: { _ in }))
