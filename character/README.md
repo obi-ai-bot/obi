@@ -16,6 +16,9 @@ character/
   package/                 builds the clean copy the Oby app ships (see below)
 ```
 
+`design/oby/` is Sangam's reference copy, as it came in with his desktop design
+(#491). The apps build from this folder.
+
 ## This copy vs. the package
 
 This folder is the working copy: the playground with sliders and every
@@ -59,12 +62,18 @@ oby.setState('thinking')            // what Oby does on its own until told other
 oby.play('Agree')                   // one expression now, then back to the state
 await oby.play('Laugh')             // resolves true when it finished, false if cut off
 oby.setState('idle', { now: true }) // switch without waiting for a play() to finish
+oby.setState('quiet', { finish: true }) // let what's playing end first (Loading skips to its dots running back into Oby)
 oby.pause(true)                     // stop drawing (e.g. window hidden); false resumes
+oby.look(x, y)                      // look at a point in the page's CSS px, even outside the frame
+oby.look(null)                      // let go: Oby looks around on its own
+oby.notice(x, y)                    // something happened there (a click): a glance, then back to its business
+oby.attend(true)                    // watch the pointer the whole time; false goes back to its own rhythm
+                                    // once you call look(), Oby ignores the pointer over its own frame
 oby.on('poke', ({ count }) => {})   // events, see below; returns an unsubscribe function
 
 oby.state      // 'thinking'
 oby.playing    // 'Thinking', or null between expressions
-oby.states     // ['idle', 'listening', 'thinking', 'working', 'quiet']
+oby.states     // ['idle', 'listening', 'thinking', 'working', 'loading', 'quiet']
 oby.expressions
 ```
 
@@ -97,6 +106,7 @@ there.
 | `listening` | Listening, over and over                              | none          |
 | `thinking`  | Thinking, over and over                               | none          |
 | `working`   | Working and Loading, taking turns                     | 0.3–0.8 s     |
+| `loading`   | Loading, over and over                                | none          |
 | `quiet`     | nothing; idles only                                   | none          |
 
 ### Expressions
@@ -138,13 +148,33 @@ After 6 seconds without a click, it forgets the count.
 
 | Event | Data | When |
 |---|---|---|
+| `ready` | `{}` | Oby's first frame is drawn: show its frame from here on (hidden until then, nothing can flash in it while it loads) |
 | `state` | `{ state }` | the state changed |
 | `expression` | `{ name }` | an expression started |
 | `end` | `{ name, completed }` | an expression ended; `completed` is false if it was cut off |
 | `poke` | `{ count }` | someone clicked Oby |
 
-Clicks play their own reactions (`Poked`, `Annoyed`, `Ignoring you`). They
-show up in `expression`/`end` and `oby.playing`, but you can't `play()` them.
+Oby doesn't stare at the pointer all the time: it watches it for a few
+seconds (2–4), then takes a break to look around or fidget (14–26), about an
+eighth of the time watching. `oby.attend(true)` holds its attention (it
+watches the whole time) until `oby.attend(false)`. The pointer coming close
+to its face, or a poke, catches its eye at once. A click (`oby.notice`) only
+draws a glance (about a second), then it goes back to what it was doing.
+After being paused (or on load) it starts with a full break.
+
+Ease the pointer slowly towards Oby's face and it backs away from it, as if
+the pointer had something icky on it: it keeps its distance, turns its head
+away and squints, still watching it. A quick swipe across its face is just
+followed.
+
+Clicks play their own reactions (`Poked`, `Annoyed`, `Ignoring you`). So
+does spinning the pointer round and round fast for about a second: `Dizzy`,
+spiral eyes and stars circling its head, then a head shake to snap out of it
+(at most once every 8 s). Whip the pointer side to side fast while it's
+following you and it squeezes its eyes shut and shakes its head clear
+(`Shaking it off`), then stops following you for a full break, every time.
+They show up in `expression`/`end` and `oby.playing`, but you can't `play()`
+them.
 
 A `play()` that's running while Oby is paused or hidden finishes only once
 it's drawing again, because its clock stops with it.
@@ -161,7 +191,10 @@ config.userContentController.add(self, name: "oby")  // before creating the web 
 webView.evaluateJavaScript("oby.setState('thinking')")
 ```
 
-`mac/main.swift` does all of this in about 150 lines.
+`mac/main.swift` does all of this in about 150 lines. The Oby app loads the
+page with SwiftUI's `WebPage` from its own `oby://` scheme instead
+(`apps/shared/Character.swift`), keeps the notch's frame hidden until `ready`,
+and plays `loading` while its brain thinks.
 
 **Web (iframe).** Add `?embed` to the URL to hide the controls and make the
 background transparent. Add `&size=1.4` to make Oby bigger in a small frame;
@@ -176,6 +209,8 @@ the default is `1`.
     oby.postMessage({ setState: 'listening' }, '*');      // { setState, now: true } switches at once
     oby.postMessage({ play: 'Agree' }, '*');
     oby.postMessage({ pause: true }, '*');
+    oby.postMessage({ look: { x: 300, y: -40 } }, '*');  // frame coordinates; outside is fine
+    oby.postMessage({ notice: { x: 60, y: 60 } }, '*');  // also { look: null } and { attend: true }
   });
   addEventListener('message', (e) => { if (e.data?.oby) console.log(e.data); }); // { oby: 'poke', count: 1 }
 </script>
@@ -195,8 +230,9 @@ Oby was tuned after it made a laptop run hot. Keep these when changing it:
 
 Its look comes from four sliders in the playground: size, roundness, width
 and height. They start from `LOOK` in `oby.html` (the size slider starts at
-56% to leave room for the controls). Values a viewer changes are saved in
-that browser's `localStorage` under `cube.*`, but not with `?embed`.
+56% to leave room for the controls). Depth follows height, so Oby is as deep
+as it is tall. Values a viewer changes are saved in that browser's
+`localStorage` under `cube.*`, but not with `?embed`.
 
 Drawing rules:
 
@@ -204,3 +240,31 @@ Drawing rules:
   make Oby look somewhere, move the whole eyes; never move or resize the dot.
 - Keep it one squishy, fluid form. Don't build it from separate boxes.
 - Props are flat ink drawn on top, with no outline of their own.
+- **Ears** are two small pointed fins grown out of the top (`EAR` in
+  `oby.html`; length and tip roundness are the Ear length / Ear tip sliders,
+  from `LOOK.earLen` / `LOOK.earTip`). Each ear tilts back, tilts out and
+  swivels on its own spring. Expressions pose them with `ears`, `earL` or
+  `earR`: `[back, out, turn]`, e.g. Confused keeps one up and flops the other
+  out. On top of that they prick up while watching you, pin back from an icky
+  pointer, trail the head, and one flicks now and then when idle. They never
+  tip forward over the face (that reads as a pig). `?noears` leaves them off.
+- The edge is a soft band about 1.5px wide, the same colour as the body: it
+  smooths the edges without MSAA (cheaper) and drives the Loading melt.
+- Shading stays faint: a soft light from the upper left and front darkens the
+  sides by at most 16% (`uShade`), the outline included, so it reads as solid
+  without hard edges.
+
+## Following the cursor outside the frame
+
+Inside its frame Oby follows the pointer by itself. A host can make it watch
+the cursor anywhere, for example across the whole screen, by passing the
+cursor's position relative to the frame's top-left corner to `oby.look(x, y)`
+(or `{ look: { x, y } }` by postMessage). Past the frame's edge the head
+keeps turning but eases off. When the cursor stops, Oby glances up at you
+once after 1.2 s, as if waiting, then back at the cursor; after 6 s still it
+looks around on its own until the cursor moves again. While it's watching the
+cursor in `idle`, it doesn't fidget (Yawn, Distracted…): starting to watch
+cuts a fidget short, and the next waits for its break. `oby.look(null)` lets
+go at once. The notch does this with the cursor's position on the screen
+(`IslandController.tick` in `apps/mac/app/Island.swift`), and Sangam's desktop
+design with the one its Electron app sends (`design/app/src/renderer/src/Oby.tsx`).
