@@ -21,6 +21,15 @@ export const NEW = 'new';
 let news = 0;
 export const newStep = () => `${NEW}:${++news}`;
 export const isNew = (id: string) => id === NEW || id.startsWith(`${NEW}:`);
+
+// Which conversation a conversation's page is for, as things change while it's on top: New
+// becomes the one its words started; one deleted (off the list, no longer shown) becomes New, so
+// the next words start one shown there; one the page shows but the list doesn't have yet (its
+// event still on the way) stays what it is.
+export function layerOf(own: string, shown: string | null, listed: boolean): string {
+  if (isNew(own)) return shown ?? own;
+  return !listed && own !== shown ? NEW : own;
+}
 export const NEW_TITLE = 'New conversation';
 
 // The list's order: pinned first, then by their latest turn, newest first (obid's own order, which
@@ -40,10 +49,8 @@ export function listOf(s: Live, query: string): { pinned: Conversation[]; recent
 // the page has every job since it started (it fetches the latest page of jobs), so it never says
 // fewer than there are.
 export function aboutOf(s: Live, c: Conversation): string | undefined {
-  const jobs = Object.values(s.jobs);
-  const oldest = jobs.reduce<string | null>((o, j) => (o === null || j.created < o ? j.created : o), null);
-  if (!s.allJobs && (oldest === null || c.created < oldest)) return undefined;
-  const n = jobs.filter((j) => j.conversation === c.id).length;
+  if (s.jobsSince && c.created < s.jobsSince) return undefined;
+  const n = Object.values(s.jobs).filter((j) => j.conversation === c.id).length;
   return n ? `Started ${n} task${n === 1 ? '' : 's'}` : undefined;
 }
 

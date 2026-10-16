@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseEvent, type Conversation } from '../api';
-import { aboutOf, isNew, listOf, newStep, ordered, startedIn } from '../chats';
+import { NEW, aboutOf, isNew, layerOf, listOf, newStep, ordered, startedIn } from '../chats';
 import { apply, ask, connect, deleteConversation, live, load, loadOlder, newConversation, openConversation, pinConversation, renameConversation, signedOut, synced } from '../live';
 import { job, state, storage, turn } from './fixtures';
 
@@ -309,13 +309,73 @@ describe('New', () => {
   });
 });
 
+describe('the page a conversation is on', () => {
+  it('New becomes the conversation its words started; a deleted one becomes New; one not yet listed stays itself', () => {
+    expect(layerOf(NEW, null, false)).toBe(NEW);
+    expect(layerOf(newStep(), C, false)).toBe(C);
+    // obid answered with C before its conversation event came (the stream down): no flip back to New
+    expect(layerOf(C, C, false)).toBe(C);
+    // deleted: off the list, nothing shown
+    expect(layerOf(A, null, false)).toBe(NEW);
+    expect(layerOf(A, A, true)).toBe(A);
+  });
+});
+
+describe('after a reconnect', () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  it('a conversation deleted while it was away leaves none of its turns behind', async () => {
+    vi.stubGlobal('sessionStorage', storage({ 'oby.token': 't' }));
+    load(state({ status: null, connection: 'connecting', conversations: [convo()], shown: A, picked: true, turns: [turn({ id: 'a1', conversation: A })] }));
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/v1/events') return new Response(new ReadableStream(), { status: 200 });
+      if (path === '/v1/status') return json(state().status);
+      if (path.startsWith(`/v1/conversation?id=${A}`)) return json({ error: 'No such conversation.' }, 404);
+      return json([]);
+    }));
+    connect();
+    for (let i = 0; i < 100 && live().connection !== 'live'; i++) await settle();
+    expect(live().shown).toBeNull();
+    expect(live().turns).toEqual([]);
+  });
+
+  it('the latest doesn’t replace one opened while it was already the one shown, once that one is deleted', () => {
+    let s = state({ shown: A, picked: false, turns: [turn({ conversation: A })], conversations: [convo()] });
+    s = apply(s, { kind: 'conversationGone', id: A });
+    expect(s.picked).toBe(true);
+    const after = synced(s, { status: state().status!, jobs: [], inbox: [], turns: [turn({ id: 'b1', conversation: B })], conversations: [convo({ id: B })] }, []);
+    expect(after.shown).toBeNull();
+  });
+
+  it('opening the one already shown counts as picking it', async () => {
+    vi.stubGlobal('sessionStorage', storage({ 'oby.token': 't' }));
+    load(state({ shown: A, picked: false, turns: [turn({ conversation: A })], conversations: [convo()] }));
+    await openConversation(A);
+    expect(live().picked).toBe(true);
+  });
+
+  it('opened, left for New, and opened again before it loaded: it shows', async () => {
+    vi.stubGlobal('sessionStorage', storage({ 'oby.token': 't' }));
+    load(state({ shown: A, conversations: [convo(), convo({ id: B })] }));
+    let reply!: () => void;
+    const replied = new Promise<void>((r) => { reply = r; });
+    vi.stubGlobal('fetch', vi.fn(async () => { await replied; return json([turn({ id: 'b1', conversation: B })]); }));
+    const first = openConversation(B);
+    newConversation();
+    const second = openConversation(B);
+    reply();
+    await Promise.all([first, second]);
+    expect(live().shown).toBe(B);
+    expect(live().turns.map((t) => t.id)).toEqual(['b1']);
+  });
+});
+
 describe('a conversation’s line in the list', () => {
   it('counts its tasks only when the page has every job since it started', () => {
-    // the oldest job the page has started at 08:00
-    const jobs = { j0: job({ id: 'j0', created: '2026-10-16T08:00:00Z' }), j1: job({ conversation: A, created: '2026-10-16T10:00:00Z' }) };
-    expect(aboutOf(state({ jobs, allJobs: false }), convo({ created: '2026-10-16T09:00:00Z' }))).toBe('Started 1 task');
-    expect(aboutOf(state({ jobs, allJobs: false }), convo({ created: '2026-10-15T09:00:00Z' }))).toBeUndefined();
-    expect(aboutOf(state({ jobs, allJobs: true }), convo({ created: '2026-10-15T09:00:00Z' }))).toBe('Started 1 task');
+    // the page fetched the latest page of jobs, from 08:00 on; an older one (j0) came in on its own
+    const jobs = { j0: job({ id: 'j0', created: '2026-10-10T08:00:00Z' }), j1: job({ conversation: A, created: '2026-10-16T10:00:00Z' }) };
+    expect(aboutOf(state({ jobs, jobsSince: '2026-10-16T08:00:00Z' }), convo({ created: '2026-10-16T09:00:00Z' }))).toBe('Started 1 task');
+    expect(aboutOf(state({ jobs, jobsSince: '2026-10-16T08:00:00Z' }), convo({ created: '2026-10-15T09:00:00Z' }))).toBeUndefined();
+    expect(aboutOf(state({ jobs, jobsSince: null }), convo({ created: '2026-10-15T09:00:00Z' }))).toBe('Started 1 task');
   });
 
   it('a rename keeps to obid’s rules: one line, control characters out, 100 characters, never half an emoji', async () => {

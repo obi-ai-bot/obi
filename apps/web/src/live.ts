@@ -23,7 +23,8 @@ export type Live = {
   picked: boolean;             // shown was picked (opened, New, or started by its words), not the
                                // latest the page found: a reconnect keeps it
   older: boolean;              // turns before the first one shown
-  allJobs: boolean;            // the page has every job (it fetched fewer than a page of them)
+  jobsSince: string | null;    // the page has every job created since then (the latest page of
+                               // them it fetched); null: every job there is
   thinking: boolean;           // a plan from this page is under way
   asking: string | null;       // the conversation that plan is in; null: one it's starting
   saying: string | null;       // the words of that plan, to know its first turn by
@@ -37,7 +38,7 @@ export type Live = {
 const PAGE = 100;
 let state: Live = {
   signedIn: !!token(), connection: 'connecting', problem: null, status: null, jobs: {}, firstJobs: new Set(), seen: new Set(),
-  inbox: [], conversations: [], turns: [], shown: null, picked: false, older: false, allJobs: true, thinking: false, asking: null,
+  inbox: [], conversations: [], turns: [], shown: null, picked: false, older: false, jobsSince: null, thinking: false, asking: null,
   saying: null, steps: [], waiting: null, answering: {}, clearedAt: null,
 };
 const listeners = new Set<() => void>();
@@ -84,7 +85,7 @@ export function apply(s: Live, e: Event): Live {
       // deleted (here or elsewhere) or forgotten: off the list; the one shown empties, and the
       // next words there start a new one
       const conversations = s.conversations.filter((c) => c.id !== e.id);
-      return e.id === s.shown ? { ...s, conversations, shown: null, turns: [], older: false } : { ...s, conversations };
+      return e.id === s.shown ? { ...s, conversations, shown: null, picked: true, turns: [], older: false } : { ...s, conversations };
     }
     case 'step':
       if (!s.thinking) return s;
@@ -114,7 +115,8 @@ export function synced(s: Live, snap: Snapshot, meanwhile: Event[]): Live {
     ...s, connection: 'live', problem: null, status: snap.status, clearedAt: snap.status.clearedAt,
     firstJobs: s.status ? s.firstJobs : new Set(snap.jobs.map((j) => j.id)),
     jobs: { ...s.jobs, ...Object.fromEntries(snap.jobs.map((j) => [j.id, j])) },
-    inbox: snap.inbox.filter(isOpen), conversations: ordered(snap.conversations), allJobs: snap.jobs.length < PAGE,
+    inbox: snap.inbox.filter(isOpen), conversations: ordered(snap.conversations),
+    jobsSince: snap.jobs.length < PAGE ? null : snap.jobs.reduce((o, j) => (j.created < o ? j.created : o), snap.jobs[0].created),
     // the one it picked stays, and so do its turns when the snapshot is of another (it moved
     // meanwhile); otherwise the latest
     ...(s.picked
@@ -215,7 +217,7 @@ export function signedOut() {
   retry = 0;
   set({ signedIn: false, connection: 'connecting', problem: null, status: null,
     jobs: {}, firstJobs: new Set(), seen: new Set(), inbox: [], conversations: [], turns: [], shown: null, picked: false, older: false,
-    allJobs: true, thinking: false, asking: null, saying: null, steps: [], waiting: null, answering: {}, clearedAt: null });
+    jobsSince: null, thinking: false, asking: null, saying: null, steps: [], waiting: null, answering: {}, clearedAt: null });
 }
 // The token the page was given, once obid has taken it: kept for this tab, and the page follows obid
 export function signedIn(value: string) {
@@ -261,7 +263,7 @@ async function shownTurns(control = following, session = authSession) {
     try { return await api.conversation({ id, limit: PAGE }); } catch (e) {
       if (!(e instanceof ApiError && e.status === 404)) throw e;
       if (session !== authSession || following !== control || control?.signal.aborted) return [];
-      if (state.shown === id) set({ shown: null, picked: true });
+      if (state.shown === id) set({ shown: null, picked: true, turns: [], older: false });
       return [];
     }
   }
@@ -334,7 +336,7 @@ export function answerQuestion(option: string) {
 // conversation has one), or on its way: nothing to do; one that failed to load loads again.
 let opening: string | null = null;
 export async function openConversation(id: string) {
-  if ((state.shown === id && state.turns.length) || opening === id) return;
+  if (state.shown === id && (state.turns.length || opening === id)) { if (!state.picked) set({ picked: true }); return; }
   const session = authSession;
   opening = id;
   set({ shown: id, picked: true, turns: state.shown === id ? state.turns : [], older: false });

@@ -8,7 +8,7 @@ import Composer, { typingIn } from './Composer';
 import Formatted from './Formatted';
 import { tokenize } from './textTokens';
 import { answerQuestion, ask, loadOlder, markSeen, openConversation, tellJob, useLive, type Live } from './live';
-import { NEW, isNew, startOf, toMessage, useChat, type Message } from './chats';
+import { isNew, layerOf, startOf, toMessage, useChat, type Message } from './chats';
 import { AGENTS, metaOf, useTasks, type Task } from './tasks';
 
 // how long the way out takes (the sink animation in app.css)
@@ -73,8 +73,9 @@ export default function ChatView({ id, kind = 'task', leaving, covered = false, 
   const listed = live.conversations.some((c) => c.id === own);
   useEffect(() => {
     if (kind !== 'oby' || covered || leaving) return;
-    if (isNew(own)) { if (live.shown) setOwn(live.shown); } else if (!listed) setOwn(NEW);
-    else void openConversation(own);
+    const next = layerOf(own, live.shown, listed);
+    if (next !== own) setOwn(next);
+    else if (!isNew(own) && listed) void openConversation(own);
   }, [kind, own, covered, leaving, listed, live.shown]);
   const mine = kind === 'oby' && (isNew(own) || live.shown === own);
   // Oby's question back, when it asked it in this conversation

@@ -34,7 +34,7 @@ export function state(over: Partial<Live> = {}): Live {
       accounts: [{ id: 'stub', agent: 'claude', name: 'Stub', label: null, signedIn: true, fiveHour: null, sevenDay: null, fiveHourResets: null, sevenDayResets: null, running: 1 }],
     },
     jobs: {}, firstJobs: new Set(), seen: new Set(), inbox: [], conversations: [], turns: [], shown: null, older: false, thinking: false,
-    asking: null, saying: null, picked: false, allJobs: true, steps: [], waiting: null,
+    asking: null, saying: null, picked: false, jobsSince: null, steps: [], waiting: null,
     answering: {}, clearedAt: null, ...over,
   };
 }
