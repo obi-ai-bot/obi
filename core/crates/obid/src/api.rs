@@ -36,8 +36,8 @@ pub struct Shared {
     pub devices: crate::devices::Devices,
     pub jobs: Arc<Jobs>,
     pub events: Events,
-    /// The conversation shared by every device and plan request.
-    pub conversation: crate::conversation::Conversation,
+    /// The conversations, shared by every device and plan request (#493).
+    pub conversations: crate::conversation::Conversations,
     /// Its Sphere: membership, exchanges, the inbox and decisions.
     pub link: Arc<crate::sphere::Link>,
     /// The plug-in host (`GET` and `PUT /v1/obid/plugins`).
@@ -127,6 +127,11 @@ pub fn router(shared: Arc<Shared>) -> Router {
         )
         .route("/v1/events", get(crate::routes::events))
         .route("/v1/conversation", get(crate::conversation::get))
+        .route("/v1/conversations", get(crate::conversation::list))
+        .route(
+            "/v1/conversations/{id}",
+            axum::routing::patch(crate::conversation::update).delete(crate::conversation::remove),
+        )
         .route("/v1/plans", post(crate::brain::plan))
         .route("/v1/inbox", get(crate::sphere::routes::inbox))
         .route("/v1/inbox/{id}/answer", post(crate::sphere::routes::answer))

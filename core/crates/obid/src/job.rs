@@ -115,6 +115,10 @@ pub struct Job {
     /// The job's worktree, an absolute path, once it exists.
     pub worktree: Option<String>,
     pub obi: Option<ObiRef>,
+    /// The conversation whose plan started it, or none (#493). It keeps the id when that
+    /// conversation is deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
     /// What an Obi-to-Obi review job made: the result body for its exchange
     /// (runner-api.md, "obid only: Obi-to-Obi review jobs", step 7). Never in the API's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -196,6 +200,7 @@ impl Job {
             dismissed: None,
             worktree: None,
             obi: None,
+            conversation: None,
             review_result: None,
             obi_request: None,
             permission: None,
@@ -337,6 +342,7 @@ impl Job {
             "report": false,
             "obi": self.obi,
             "worktree": self.worktree,
+            "conversation": self.conversation,
         })
     }
 
@@ -549,11 +555,12 @@ mod tests {
             "startWhen",
             "waiting",
             "permission",
+            "conversation",
         ] {
             assert_eq!(object.get(key), Some(&Value::Null), "{key}");
         }
-        // The Swift runner's 65 keys, and obid's two.
-        assert_eq!(object.len(), 67);
+        // The Swift runner's 65 keys, and obid's three.
+        assert_eq!(object.len(), 68);
         assert_eq!(value["report"], false);
         assert_eq!(value["cloudNeedsYou"], false);
         assert_eq!(value["mode"], "bypass");

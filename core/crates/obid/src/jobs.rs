@@ -73,6 +73,8 @@ pub struct NewJob {
     pub files: Option<Vec<String>>,
     pub attachments: Option<Vec<String>>,
     pub mode: Option<String>,
+    /// The conversation whose plan started it (#493).
+    pub conversation: Option<String>,
 }
 
 /// A review another Obi asked for, once the owner or a remembered decision accepted it.
@@ -1113,6 +1115,7 @@ impl Jobs {
         job.model = new.model.map(|m| m.trim().to_owned());
         job.files = files;
         job.attachments = new.attachments;
+        job.conversation = new.conversation;
         job.mode = Some(
             new.mode
                 .unwrap_or_else(|| self.default_mode().as_str().to_owned()),

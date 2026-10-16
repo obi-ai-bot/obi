@@ -31,9 +31,11 @@ fn plan_uses_recent_turns_and_conversation_paginates() {
         })),
     );
     assert_eq!(answer.status, 200, "{}", answer.text);
+    let conversation = answer.body["conversation"].clone();
+    assert!(conversation.is_string(), "{}", answer.text);
     assert_eq!(
         answer.body,
-        json!({"kind":"reply","text":"Fine.","jobs":[],"drafts":[]})
+        json!({"kind":"reply","text":"Fine.","jobs":[],"drafts":[],"conversation":conversation})
     );
     let prompt = std::fs::read_to_string(folder.0.join("env-home/plan-input")).unwrap();
     assert!(prompt.contains("User: how is the inbox job going?"));
@@ -108,9 +110,11 @@ fn plans_map_replies_questions_none_and_dispatched_jobs() {
 
     let reply = post("a normal reply");
     assert_eq!(reply.status, 200, "{}", reply.text);
+    let conversation = reply.body["conversation"].clone();
+    assert!(conversation.is_string(), "{}", reply.text);
     assert_eq!(
         reply.body,
-        json!({"kind":"reply","text":"Fine.","jobs":[],"drafts":[]})
+        json!({"kind":"reply","text":"Fine.","jobs":[],"drafts":[],"conversation":conversation})
     );
     let question = post("question-case");
     assert_eq!(question.status, 200, "{}", question.text);
@@ -119,7 +123,10 @@ fn plans_map_replies_questions_none_and_dispatched_jobs() {
     assert_eq!(question.body["question"]["text"], "Which repository?");
     assert_eq!(question.body["jobs"], json!([]));
     let none = post("none-case");
-    assert_eq!(none.body, json!({"kind":"none","jobs":[],"drafts":[]}));
+    assert_eq!(
+        none.body,
+        json!({"kind":"none","jobs":[],"drafts":[],"conversation":conversation})
+    );
 
     let dispatch = post("fix oby #176 and #198");
     assert_eq!(dispatch.status, 200, "{}", dispatch.text);
@@ -177,5 +184,9 @@ fn conversation_turns_are_kept_between_runner_restarts() {
     assert_eq!(turns.body.as_array().unwrap().len(), 2);
     assert_eq!(turns.body[0]["text"], "hello");
     assert_eq!(turns.body[1]["text"], "Fine.");
-    assert!(home.join("conversation.json").is_file());
+    let conversation = answer.body["conversation"].as_str().unwrap();
+    assert!(
+        home.join(format!("conversations/{conversation}.json"))
+            .is_file()
+    );
 }
