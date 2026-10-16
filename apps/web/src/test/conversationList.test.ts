@@ -309,6 +309,23 @@ describe('New', () => {
   });
 });
 
+describe('words to a conversation deleted before the page heard of it', () => {
+  it('obid keeps none of them (404): it comes off the list, the page says so, and the next words start a new one', async () => {
+    vi.stubGlobal('sessionStorage', storage({ 'oby.token': 't' }));
+    load(state({ conversations: [convo(), convo({ id: B, lastActivity: '2026-10-16T08:00:00Z' })], shown: A, picked: true, turns: [turn({ conversation: A })] }));
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'There’s no conversation with that id.' }, 404)));
+    await ask('and the vault one?');
+    expect(live().shown).toBeNull();
+    expect(live().turns).toEqual([]);
+    expect(live().conversations.map((c) => c.id)).toEqual([B]);
+    expect(live().problem).toBe('That conversation was deleted, so your words weren’t sent. Send them again to start a new one.');
+    const fetch = vi.fn(async (path: string) => (path === '/v1/plans' ? json({ kind: 'none', jobs: [], drafts: [], conversation: C }) : json([])));
+    vi.stubGlobal('fetch', fetch);
+    await ask('and the vault one?');
+    expect(body(fetch.mock.calls[0])).toEqual({ said: 'and the vault one?', new: true });
+  });
+});
+
 describe('the page a conversation is on', () => {
   it('New becomes the conversation its words started; a deleted one becomes New; one not yet listed stays itself', () => {
     expect(layerOf(NEW, null, false)).toBe(NEW);

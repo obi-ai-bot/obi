@@ -315,9 +315,12 @@ export async function ask(said: string, answer?: { question: string; option: str
     }
   } catch (e) {
     if (session !== authSession) return;
-    // the conversation it was in is gone: the next words start a new one
-    if (e instanceof ApiError && e.status === 404 && target && state.shown === target) set({ shown: null, turns: [], older: false });
-    failed(e);
+    // the conversation it was in was deleted before the page heard of it: obid kept none of the
+    // words. It's off the list, the page says so, and the next words start a new one.
+    if (e instanceof ApiError && e.status === 404 && target) {
+      set(apply(state, { kind: 'conversationGone', id: target }));
+      say('That conversation was deleted, so your words weren’t sent. Send them again to start a new one.');
+    } else failed(e);
   } finally {
     if (session === authSession) set({ thinking: false, asking: null, saying: null, steps: [] });
   }
