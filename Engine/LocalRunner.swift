@@ -1,5 +1,10 @@
 import Foundation
 import Synchronization
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 #if canImport(Security)
 import Security
 #endif
@@ -12,7 +17,8 @@ import Security
 /// the keychain item is one the user is asked about. The app reads it there and sends it as
 /// `Authorization: Bearer`. The runner answers only on `127.0.0.1`, and only requests whose `Host`
 /// is a loopback name: a web page the user opens can't have their browser reach it through a name
-/// that resolves to 127.0.0.1 (DNS rebinding).
+/// that resolves to 127.0.0.1 (DNS rebinding). obid instead keeps api-token in its sandbox-hidden
+/// home; the app can read that owner-only file when obid uses the same This Mac home.
 nonisolated enum LocalRunner {
     static let port = 7777
     /// Where the Mac app follows the runner on this Mac.
@@ -53,9 +59,37 @@ nonisolated enum LocalRunner {
         #endif
     }
 
+    /// The credential for This Mac. obid uses the same home as the Swift runner and keeps its
+    /// token in api-token; the Swift runner continues to use its keychain item. After a 401,
+    /// excluding that credential lets a stale file fall back to the running Swift runner.
+    static func token(home: URL = home, fallback: any LocalTokenStore = keychain, excluding refused: String? = nil) -> String? {
+        if let token = obidToken(in: home), token != refused { return token }
+        guard let token = token(from: fallback), token != refused else { return nil }
+        return token
+    }
+
+    /// A bounded read of a regular, owner-only file. O_NOFOLLOW and fstat check the file we
+    /// actually opened; O_NONBLOCK keeps a FIFO at that name from hanging the app.
+    static func obidToken(in home: URL) -> String? {
+        let path = home.appending(path: "api-token").path
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        guard fd >= 0 else { return nil }
+        let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? file.close() }
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              info.st_uid == getuid(), info.st_mode & 0o077 == 0,
+              let data = try? file.read(upToCount: 4097), data.count <= 4096 else { return nil }
+        var bytes = Array(data)
+        while bytes.last == 10 || bytes.last == 13 { bytes.removeLast() }
+        guard bytes.count >= 32, bytes.allSatisfy({ (33...126).contains($0) }) else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     /// The token as `store` has it, or nil when there's none yet (the runner hasn't started) or
     /// what's there isn't one.
-    static func token(from store: any LocalTokenStore = keychain) -> String? {
+    static func token(from store: any LocalTokenStore) -> String? {
         guard let kept = try? store.read() else { return nil }
         let token = kept.trimmingCharacters(in: .whitespacesAndNewlines)
         return isToken(token) ? token : nil

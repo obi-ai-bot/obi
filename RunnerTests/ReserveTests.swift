@@ -96,7 +96,8 @@ final class ReserveTests {
         let claude = try accounts.add(agent: "claude", name: "Deskree", payer: "Deskree")
         accounts.setLabel("Max", for: claude.id)
         accounts.setLabel("Plus", for: codex.id)
-        accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.99, sevenDayResets: resets), for: codex.id)
+        // Desk uses the wall clock: keep this live routing fixture reserved in any week.
+        accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.99, sevenDayResets: Date.now.addingTimeInterval(3600)), for: codex.id)
         let desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
         desk.repos = ["deskree-inc/oby"]
         desk.prepare = { $0 }
@@ -116,7 +117,8 @@ final class ReserveTests {
         accounts.setLabel("Max", for: "default")
         let codex = try accounts.add(agent: "codex", name: "Deskree", payer: "Deskree")
         accounts.setLabel("Plus", for: codex.id)
-        accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.99, sevenDayResets: resets), for: codex.id)
+        // Desk uses the wall clock: keep this live routing fixture reserved in any week.
+        accounts.record(.usage(fiveHour: 0.1, sevenDay: 0.99, sevenDayResets: Date.now.addingTimeInterval(3600)), for: codex.id)
         let desk = Desk(accounts: accounts, store: JobStore(url: folder.appending(path: "oby.sqlite")))
         desk.repos = ["deskree-inc/oby"]
         desk.prepare = { $0 }

@@ -2,15 +2,15 @@
 //! code (apps/shared/Runner.swift and what it needs: apps/shared/Decisions.swift, apps/shared/JobList.swift,
 //! apps/shared/Elapsed.swift, apps/shared/DeviceKey.swift and Engine/, compiled as the Oby target compiles
 //! them) and follows a running obid as apps/mac/app/RunnerFeed.swift follows the runner on this Mac
-//! (Settings › Runner › This Mac, #283): the token through `LocalRunner.token(from:)`, `GET
+//! (Settings › Runner › This Mac, #283): the token through `LocalRunner.token(home:fallback:)`, `GET
 //! /v1/events`, then status, the jobs, the inbox (open and done), the conversation and a job by
 //! id, read into the app's types; Clear done; and Stop all from the island on a job that started
 //! while it followed. macOS only: the app is a Mac app, and swiftc comes with Xcode.
 //!
 //! The app's own `LocalRunner.url` is `http://127.0.0.1:7777`: to follow obid, the app needs obid
-//! listening there (`"listen": "127.0.0.1:7777"`) and obid's token in its keychain item
-//! (`com.deskree.oby.runner`, `token`). This test gives the client obid's address and token
-//! instead, so it never touches the keychain or a port another runner may hold.
+//! listening there (`"listen": "127.0.0.1:7777"`) with its home set to `LocalRunner.home`.
+//! This test gives the client an isolated obid home and address, so it reads the private token
+//! file without touching the keychain or a port another runner may hold.
 
 #![cfg(target_os = "macos")]
 
@@ -169,7 +169,7 @@ fn the_mac_app_follows_obid_and_lists_its_jobs() {
     std::fs::write(obid.home.join("pairing"), "").unwrap();
     let mut child = Command::new(&client)
         .env("OBID_URL", format!("http://127.0.0.1:{}", obid.port))
-        .env("OBID_TOKEN", TOKEN)
+        .env("OBID_HOME", &obid.home)
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
@@ -265,19 +265,36 @@ fn the_mac_app_follows_obid_and_lists_its_jobs() {
     );
 }
 
-/// The app takes only a token that is one of a Mac runner's (Engine/LocalRunner.swift, `isToken`:
-/// 64 hex characters). obid's own token (`home/api-token`) is one; a token of another shape put in
-/// that file, which obid accepts, is one the Mac app refuses.
+/// File discovery accepts obid's visible ASCII tokens, including a non-hex owner token,
+/// but refuses malformed credentials without making an HTTP request or printing their value.
 #[test]
-fn the_mac_app_takes_only_a_64_hex_token() {
+fn the_mac_app_discovers_only_usable_private_file_tokens() {
+    use std::os::unix::fs::PermissionsExt;
     let client = client();
-    let output = Command::new(&client)
-        .env("OBID_URL", "http://127.0.0.1:9")
-        .env("OBID_TOKEN", "x".repeat(40))
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "token refused\n");
+    let folder = Folder::new("mac-app-file-token");
+    let path = folder.0.join("api-token");
+    for (text, accepted) in [
+        ("x".repeat(40), true),
+        ("x".repeat(31), false),
+        (format!("{} ", "x".repeat(40)), false),
+    ] {
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let output = Command::new(&client)
+            .env("OBID_HOME", &folder.0)
+            .env("OBID_TOKEN_ONLY", "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), accepted, "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            if accepted {
+                "token read\n"
+            } else {
+                "token refused\n"
+            }
+        );
+    }
 }
 
 fn gethostname() -> String {
